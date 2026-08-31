@@ -67,13 +67,14 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
+from functools import reduce
 from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
 import SimpleITK as sitk
 import torch
-from konfai.metric.measure import IMPACTReg
+from konfai.metric.measure import ImpactFeatureModel, IMPACTReg
 from konfai.network import network
 from konfai.utils.config import Choices, Range
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
@@ -362,12 +363,11 @@ def _no_texpr_fuser():
 class _ImpactCore(IMPACTReg):
     """One IMPACT feature model, exposed as a FireANTs ``forward(moved, fixed)``.
 
-    Reuses ``IMPACTReg._compute`` / ``preprocessing`` verbatim (the stats-normalised feature extraction
-    (the model wants per-image ``[min, mean, max, std]``) and the per-layer weighted distance), so the
-    metric is exactly KonfAI's, not a re-derivation. Only KonfAI's config-binding ``__init__`` and its
-    ``Attribute``-based geometry are replaced: FireANTs passes raw tensors at the current pyramid scale, so
-    the intensity statistics are computed from those tensors directly. ``pca`` (absent from KonfAI's torch
-    ``IMPACTReg``) is added here as a per-layer feature-space reduction matching itk-impact.
+    Reuses KonfAI's ``ImpactFeatureModel`` verbatim (the stats-normalised feature extraction (the model
+    wants per-image ``[min, mean, max, std]``) and the per-layer weighted distance) and ``IMPACTReg``'s
+    PCA reduction, so the metric is exactly KonfAI's, not a re-derivation. Only KonfAI's config-binding
+    ``__init__`` and its ``Attribute``-based geometry are replaced: FireANTs passes raw tensors at the
+    current pyramid scale, so the intensity statistics are computed from those tensors directly.
     """
 
     def __init__(self, ref: str, in_channels: int, weights: list[float], distance: str, pca: int) -> None:
@@ -375,19 +375,15 @@ class _ImpactCore(IMPACTReg):
 
         torch.nn.Module.__init__(self)  # bypass IMPACTReg.__init__ (KONFAI_CONFIG_PATH / apply_config binding)
         self.name = "Reg"
-        self.in_channels = int(in_channels)
-        self.weights = [float(w) for w in weights]
-        self.nb_layer = len(self.weights)
         self.loss = _DISTANCES[distance]()
-        self.pca = int(pca)  # PCA lives in KonfAI's IMPACTReg._compute (same behaviour as itk-impact)
-        self.dim = DIM
-        self.shape = None  # score the whole (downsampled) tensor: no ModelPatch tiling
+        self.pca = int(pca)
         if _is_local_ref(ref):  # otherwise a "repo:path" HF reference
-            self.model_path = ref
+            model_path = ref
         else:
             repo, filename = ref.split(":", 1)
-            self.model_path = hf_hub_download(repo, filename, repo_type="model")  # nosec B615
-        self.model = None  # lazy-loaded on the first forward, like IMPACTReg
+            model_path = hf_hub_download(repo, filename, repo_type="model")  # nosec B615
+        # shape=None: the whole (downsampled) tensor is scored, no ModelPatch tiling.
+        self.model = ImpactFeatureModel(model_path, int(in_channels), [float(w) for w in weights], None, DIM)
 
     def preprocessing(self, tensor: torch.Tensor, attribute: list) -> list[torch.Tensor]:
         """KonfAI's preprocessing, with the intensity statistics FLATTENED for a single image.
@@ -413,21 +409,23 @@ class _ImpactCore(IMPACTReg):
             "ImageStd": float(detached.std()),
         }
 
-    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
-        if self.model is None:
-            self.model = torch.jit.load(self.model_path)  # nosec B614
-        self.model.to(moved.device).eval()
-        # FireANTs' masked mode carries the mask as one extra trailing channel on BOTH images (see
-        # ``apply_mask_to_image``). The feature model wants the image alone, so split the mask off and
-        # hand it to KonfAI's masked feature loss (nearest-resampled onto every feature layer): the
-        # metric is then evaluated inside the fixed mask, which is what an elastix/ITK mask means too.
-        mask: torch.Tensor | None = None
-        if moved.shape[1] == self.in_channels + 1 and fixed.shape[1] == self.in_channels + 1:
-            mask = (fixed[:, -1:] > 0.5).to(torch.uint8)
-            moved, fixed = moved[:, :-1], fixed[:, :-1]
+    def forward(  # type: ignore[override]
+        self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         with _no_texpr_fuser():
-            loss, true_nb = self._compute(moved, [self._stats(moved)], fixed, [self._stats(fixed)], mask)
-        return loss / max(true_nb, 1)
+            losses, counts = zip(
+                *self.model.slice_losses(
+                    moved,
+                    [self._stats(moved)],
+                    fixed,
+                    [self._stats(fixed)],
+                    mask,
+                    self.loss,
+                    project=self._pca_project if self.pca > 0 else None,
+                ),
+                strict=True,
+            )
+        return reduce(torch.add, losses) / max(sum(counts), 1)
 
 
 class ImpactFeatureLoss(torch.nn.Module):
@@ -436,13 +434,20 @@ class ImpactFeatureLoss(torch.nn.Module):
     ``forward(moved, fixed)`` sums each model's ``layers_weight * IMPACT(model)``. A model's per-layer
     weights come from its ``layers_mask`` bitmask; its input channel count is read from the registry
     (``models.json`` ``numberofchannels``) so it never has to be configured by hand.
+
+    ``masked`` mirrors the engine's own decision to run FireANTs' masked mode: the images then carry
+    the mask as one extra trailing channel (``apply_mask_to_image``), which nothing about the tensors
+    themselves announces. The feature models want the image alone, so the channel is split off once
+    and handed to KonfAI's masked feature loss (nearest-resampled onto every feature layer): the
+    metric is evaluated inside the fixed mask, which is what an elastix/ITK mask means too.
     """
 
-    def __init__(self, specs: list["ModelSpec"]) -> None:
+    def __init__(self, specs: list["ModelSpec"], masked: bool = False) -> None:
         super().__init__()
         registry = load_models_registry()
         self._cores = torch.nn.ModuleList()
         self._model_weights: list[float] = []
+        self._masked = masked
         for spec in specs:
             in_channels = int(registry.get(spec.ref.split(":", 1)[-1], {}).get("numberofchannels", 1))
             weights = [1.0 if char == "1" else 0.0 for char in spec.layers_mask]
@@ -450,9 +455,13 @@ class ImpactFeatureLoss(torch.nn.Module):
             self._model_weights.append(float(spec.layers_weight))
 
     def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
+        mask: torch.Tensor | None = None
+        if self._masked:
+            mask = (fixed[:, -1:] > 0.5).to(torch.uint8)
+            moved, fixed = moved[:, :-1], fixed[:, :-1]
         total: torch.Tensor | None = None
         for weight, core in zip(self._model_weights, self._cores, strict=True):
-            term = weight * core(moved, fixed)
+            term = weight * core(moved, fixed, mask)
             total = term if total is None else total + term
         return total
 
@@ -734,10 +743,10 @@ class FireANTsEngine:
                     f"Unknown deformable_method '{self._deformable_method}' (expected 'syn', 'greedy' or 'none')."
                 )
             # "impact" swaps the analytic metric for a KonfAI IMPACT feature loss on the deformable stage
-            # (the linear pre-align keeps its own affine_metric); masks do not restrict the IMPACT metric.
+            # (the linear pre-align keeps its own affine_metric); the fixed mask restricts it too.
             if self._deformable_metric == "impact":
                 loss_type: str = "custom"
-                custom_loss: torch.nn.Module | None = ImpactFeatureLoss(self._impact_specs)
+                custom_loss: torch.nn.Module | None = ImpactFeatureLoss(self._impact_specs, masked=masked)
             else:
                 loss_type, custom_loss = deformable_loss, None
             reg = Deformable(

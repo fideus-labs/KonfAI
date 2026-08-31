@@ -49,7 +49,7 @@ from konfai.data.transform import (
     Transform,
     TransformInverse,
 )
-from konfai.predictor import Mean, OutSameAsGroupDataset, Reduction, _FinalizeStage
+from konfai.predictor import Mean, OutputDataset, Reduction, _FinalizeStage
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import PatchError
 
@@ -234,7 +234,7 @@ def test_stream_rescale_nearest_is_byte_identical_to_the_whole_volume_inverse(se
         lambda window, target, source: resample.stream_region_inverse(
             "case",
             window,
-            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            RegionContext(tuple(source), tuple(target), tuple(in_shape)),
             Attribute(attribute),
         ),
         in_shape,
@@ -264,7 +264,7 @@ def test_stream_rescale_linear_matches_the_whole_volume_inverse_to_float_roundin
         lambda window, target, source: resample.stream_region_inverse(
             "case",
             window,
-            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            RegionContext(tuple(source), tuple(target), tuple(in_shape)),
             Attribute(attribute),
         ),
         in_shape,
@@ -318,7 +318,7 @@ def test_stream_window_is_bounded_by_the_pull_span() -> None:
         lambda window, target, source: resample.stream_region_inverse(
             "case",
             window,
-            RegionContext(tuple(source), tuple(target), tuple(in_shape), tuple(out_shape)),
+            RegionContext(tuple(source), tuple(target), tuple(in_shape)),
             Attribute(attribute),
         ),
         in_shape,
@@ -404,8 +404,8 @@ def _output_dataset(
     final: list[Transform] | None = None,
     file_format: str = "h5",
     nb_data_augmentation: int = 1,
-) -> OutSameAsGroupDataset:
-    ds = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
+) -> OutputDataset:
+    ds = OutputDataset.__new__(OutputDataset)
     ds.nb_data_augmentation = nb_data_augmentation
     ds.reduction = reduction if reduction is not None else Mean()
     ds.before_reduction_transforms = before or []
@@ -554,7 +554,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
         def get_dataset_from_index(group_dest: str, index: int):
             return DummyManager()
 
-    output_dataset = OutSameAsGroupDataset(
+    output_dataset = OutputDataset(
         same_as_group="src:dest",
         dataset_filename=f"{tmp_path}/output.h5:h5",
         group="out",
@@ -642,9 +642,9 @@ def test_the_stream_worth_gate_prices_the_config_budget_not_the_machine(monkeypa
 
     monkeypatch.delenv("KONFAI_STREAM_WORTH_THRESHOLD", raising=False)
 
-    from konfai.predictor import OutSameAsGroupDataset
+    from konfai.predictor import OutputDataset
 
-    writer = OutSameAsGroupDataset.__new__(OutSameAsGroupDataset)
+    writer = OutputDataset.__new__(OutputDataset)
     writer.group_dest = "CT"
     writer.nb_data_augmentation = 1
     layer = torch.zeros(2, 1, dtype=torch.float32)

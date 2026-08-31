@@ -38,78 +38,54 @@ from konfai.utils.errors import ConfigError
 # wide_resnet101_2: https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth
 
 
+def _conv(
+    in_channels: int,
+    out_channels: int,
+    kernel_size: int,
+    stride: int,
+    activation: str,
+    dim: int,
+    alias: list[list[str]],
+) -> blocks.ConvBlock:
+    """One conv + BatchNorm (+ activation) of a torchvision residual block; ``padding`` keeps the extent."""
+    config = blocks.BlockConfig(
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=kernel_size // 2,
+        bias=False,
+        activation=activation,
+        norm_mode=blocks.NormMode.BATCH.name,
+    )
+    return blocks.ConvBlock(in_channels, out_channels, [config], dim=dim, alias=alias)
+
+
 class AbstractResBlock(network.ModuleArgsDict, ABC):
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__()
 
-
-class ResBlock(AbstractResBlock):
-    def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
-        super().__init__(in_channels, out_channels, downsample, dim)
-        # As in torchvision BasicBlock: project the shortcut whenever the block is strided OR
-        # changes channel count, otherwise the residual Add receives mismatched tensors.
+    def _add_shortcut(self, in_channels: int, out_channels: int, downsample: bool, dim: int) -> None:
+        # As in torchvision: project the shortcut whenever the block is strided OR changes channel
+        # count, otherwise the residual Add receives mismatched tensors. Called where torchvision
+        # places ``downsample``: pretrained weights pair by execution order.
         if downsample or in_channels != out_channels:
             self.add_module(
                 "Shortcut",
-                blocks.ConvBlock(
-                    in_channels,
-                    out_channels,
-                    [
-                        blocks.BlockConfig(
-                            kernel_size=1,
-                            stride=2 if downsample else 1,
-                            padding=0,
-                            bias=False,
-                            activation="None",
-                            norm_mode=blocks.NormMode.BATCH.name,
-                        )
-                    ],
-                    dim=dim,
-                    alias=[["0"], ["1"], []],
-                ),
+                _conv(in_channels, out_channels, 1, 2 if downsample else 1, "None", dim, [["0"], ["1"], []]),
                 in_branch=[1],
                 out_branch=[1],
                 alias=["downsample"],
             )
 
+
+class ResBlock(AbstractResBlock):
+    def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
+        super().__init__(in_channels, out_channels, downsample, dim)
+        self._add_shortcut(in_channels, out_channels, downsample, dim)
+        stride = 2 if downsample else 1
         self.add_module(
-            "ConvBlock_0",
-            blocks.ConvBlock(
-                in_channels,
-                out_channels,
-                [
-                    blocks.BlockConfig(
-                        kernel_size=3,
-                        stride=2 if downsample else 1,
-                        padding=1,
-                        bias=False,
-                        activation="ReLU",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    )
-                ],
-                dim=dim,
-                alias=[["conv1"], ["bn1"], []],
-            ),
+            "ConvBlock_0", _conv(in_channels, out_channels, 3, stride, "ReLU", dim, [["conv1"], ["bn1"], []])
         )
-        self.add_module(
-            "ConvBlock_1",
-            blocks.ConvBlock(
-                out_channels,
-                out_channels,
-                [
-                    blocks.BlockConfig(
-                        kernel_size=3,
-                        stride=1,
-                        padding=1,
-                        bias=False,
-                        activation="None",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    )
-                ],
-                dim=dim,
-                alias=[["conv2"], ["bn2"], []],
-            ),
-        )
+        self.add_module("ConvBlock_1", _conv(out_channels, out_channels, 3, 1, "None", dim, [["conv2"], ["bn2"], []]))
         self.add_module("Residual", blocks.Add(), in_branch=[0, 1])
         self.add_module("ReLU", torch.nn.ReLU())
 
@@ -117,90 +93,13 @@ class ResBlock(AbstractResBlock):
 class ResBottleneckBlock(AbstractResBlock):
     def __init__(self, in_channels: int, out_channels: int, downsample: bool, dim: int):
         super().__init__(in_channels, out_channels, downsample, dim)
-        self.add_module(
-            "ConvBlock_0",
-            blocks.ConvBlock(
-                in_channels,
-                out_channels // 4,
-                [
-                    blocks.BlockConfig(
-                        kernel_size=1,
-                        stride=1,
-                        padding=0,
-                        bias=False,
-                        activation="ReLU",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    )
-                ],
-                dim=dim,
-                alias=[["conv1"], ["bn1"], []],
-            ),
-        )
-        self.add_module(
-            "ConvBlock_1",
-            blocks.ConvBlock(
-                out_channels // 4,
-                out_channels // 4,
-                [
-                    blocks.BlockConfig(
-                        kernel_size=3,
-                        stride=2 if downsample else 1,
-                        padding=1,
-                        bias=False,
-                        activation="ReLU",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    )
-                ],
-                dim=dim,
-                alias=[["conv2"], ["bn2"], []],
-            ),
-        )
-        self.add_module(
-            "ConvBlock_2",
-            blocks.ConvBlock(
-                out_channels // 4,
-                out_channels,
-                [
-                    blocks.BlockConfig(
-                        kernel_size=1,
-                        stride=1,
-                        padding=0,
-                        bias=False,
-                        # No activation on conv3/bn3 before the residual add (torchvision
-                        # Bottleneck); a ReLU here diverges from the pretrained architecture.
-                        activation="None",
-                        norm_mode=blocks.NormMode.BATCH.name,
-                    )
-                ],
-                dim=dim,
-                alias=[["conv3"], ["bn3"], []],
-            ),
-        )
-
-        if downsample or in_channels != out_channels:
-            self.add_module(
-                "Shortcut",
-                blocks.ConvBlock(
-                    in_channels,
-                    out_channels,
-                    [
-                        blocks.BlockConfig(
-                            kernel_size=1,
-                            stride=2 if downsample else 1,
-                            padding=0,
-                            bias=False,
-                            activation="None",
-                            norm_mode=blocks.NormMode.BATCH.name,
-                        )
-                    ],
-                    dim=dim,
-                    alias=[["0"], ["1"], []],
-                ),
-                in_branch=[1],
-                out_branch=[1],
-                alias=["downsample"],
-            )
-
+        width = out_channels // 4
+        stride = 2 if downsample else 1
+        self.add_module("ConvBlock_0", _conv(in_channels, width, 1, 1, "ReLU", dim, [["conv1"], ["bn1"], []]))
+        self.add_module("ConvBlock_1", _conv(width, width, 3, stride, "ReLU", dim, [["conv2"], ["bn2"], []]))
+        # No activation on conv3/bn3 before the residual add (torchvision Bottleneck).
+        self.add_module("ConvBlock_2", _conv(width, out_channels, 1, 1, "None", dim, [["conv3"], ["bn3"], []]))
+        self._add_shortcut(in_channels, out_channels, downsample, dim)
         self.add_module("Residual", blocks.Add(), in_branch=[0, 1])
         self.add_module("ReLU", torch.nn.ReLU())
 

@@ -27,8 +27,6 @@ transient when there is one, a fixed factor when the OOM left no number) re-plan
 restarts. When everything fits (the common case) nothing here runs at all.
 """
 
-from collections.abc import Callable
-
 import torch
 
 #: Fraction of the free VRAM a step may claim; the reserve absorbs allocator fragmentation and
@@ -39,32 +37,47 @@ VRAM_BUDGET_SAFETY_FRACTION = 0.8
 _OOM_SHRINK_STEP = 0.8
 
 
-def measure_transient_bytes(run: Callable[[], None], device: torch.device | int) -> int | None:
-    """Measure the transient VRAM one ``run()`` peaks above the resident set, or ``None`` on OOM.
-
-    The caller provides the run (a forward for prediction, forward+backward for training) so this
-    stays model-agnostic; an out-of-memory run is reported as ``None`` (a valid "does not fit"
-    measurement), with the partial allocations released. ``max_memory_allocated`` is a running
-    high-water mark, so a stale peak can only over-estimate the transient, never under.
-    """
-    torch.cuda.synchronize(device)
-    torch.cuda.reset_peak_memory_stats(device)
-    resident = torch.cuda.memory_allocated(device)
-    try:
-        run()
-    except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        return None
-    torch.cuda.synchronize(device)
-    return int(torch.cuda.max_memory_allocated(device) - resident)
-
-
 def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = VRAM_BUDGET_SAFETY_FRACTION) -> float:
     """The VRAM a step's transient may claim: free memory under the safety margin, minus what must
     stay resident alongside the step (accumulators and the streamed assembly window for prediction;
     nothing extra for training, whose resident set is already allocated when ``free_bytes`` is read).
     """
     return free_bytes * margin - resident_bytes
+
+
+def transient_at_oom(device: int | None) -> int | None:
+    """The failed step's transient (CUDA peak over resident), ``None`` off CUDA or when unreadable."""
+    if device is None:
+        return None
+    try:
+        transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
+    except Exception:  # nosec B110 - an unreadable measurement falls back to the fixed shrink step
+        return None
+    return transient if transient > 0 else None
+
+
+def reset_peak(device: int | None) -> None:
+    """Drop the failed attempt's high-water mark, so the rerun measures its own steps: the mark
+    only rises, and the full-extent attempt's would overstate every later transient."""
+    if device is None:
+        return
+    try:
+        torch.cuda.reset_peak_memory_stats(device)
+    except Exception:  # nosec B110 - stale stats only cost precision, never correctness
+        pass
+
+
+def usable_after_oom(device: int | None) -> float:
+    """The VRAM the next attempt's step may claim, read once the failed state is freed; ``0.0``
+    (which refuses the restart) off CUDA or when unreadable."""
+    if device is None:
+        return 0.0
+    try:
+        torch.cuda.empty_cache()
+        free, _ = torch.cuda.mem_get_info(device)
+    except Exception:  # nosec B110
+        return 0.0
+    return usable_vram(free)
 
 
 def next_patch_candidate(

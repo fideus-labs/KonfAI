@@ -32,6 +32,7 @@ import pytest
 from konfai.data.data_manager import DataPrediction, Group, GroupTransform, PredictionSubset, Subset
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 
@@ -39,11 +40,7 @@ CASES = [f"CASE_{index:03d}" for index in range(8)]
 
 
 def _attributes() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray([1.0, 1.0, 1.0])
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry()
 
 
 def _root(tmp_path: Path, file_format: str) -> Dataset:

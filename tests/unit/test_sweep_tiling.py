@@ -33,7 +33,6 @@ from konfai.data.patching import (
     _SWEEP_ELEMENT_BYTES,
     DatasetManager,
     DatasetPatch,
-    _chunk_hull_voxels,
     _cubic_tile,
     _pull_block_voxels,
     _sweep_pipeline_depth,
@@ -42,7 +41,9 @@ from konfai.data.patching import (
 )
 from konfai.data.transform import OneHot, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset, _store_chunks
+from konfai.utils.dataset import chunk_hull_voxels as _chunk_hull_voxels
 from konfai.utils.errors import DatasetManagerError
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
@@ -50,11 +51,7 @@ SPACING = (1.0, 1.0, 1.0)  # (x, y, z) SimpleITK order
 
 
 def _attributes(direction: np.ndarray | None = None) -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray(list(SPACING))
-    attribute["Direction"] = (np.eye(3) if direction is None else direction).astype(np.float64).reshape(-1)
-    return attribute
+    return geometry(spacing=SPACING, direction=direction)
 
 
 #: The landing, and the height rule these tests pin, chosen so the two decompositions are far apart:
@@ -91,16 +88,7 @@ def _sweep_plans(manager: DatasetManager):
 
 
 def _manager(source: Dataset, transforms: list) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=DatasetPatch([4, 5, 4]),
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name="CASE_000", patch=DatasetPatch([4, 5, 4]))
 
 
 # ---------------------------------------------------------------- the block itself
@@ -148,7 +136,7 @@ def test_sweep_targets_advance_on_the_innermost_axis_first() -> None:
 
 def test_a_chain_with_nothing_to_price_keeps_the_slab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No plans, no pull maps, no reason to change what the height rule already decided."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", ROWS)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", ROWS)
     source, _volume = _sheared_fixture(tmp_path)
     manager = _manager(source, [])
     assert manager._sweep_tile(list(LANDING), 1) == [ROWS, *LANDING[1:]]
@@ -157,7 +145,7 @@ def test_a_chain_with_nothing_to_price_keeps_the_slab(tmp_path: Path, monkeypatc
 def test_a_sheared_resample_takes_the_cube_and_reads_less_for_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", ROWS)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", ROWS)
     source, _volume = _sheared_fixture(tmp_path)
     resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
     manager = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])
@@ -176,7 +164,7 @@ def test_an_axis_aligned_chain_prices_the_two_the_same_and_keeps_the_slab(
 ) -> None:
     """A resample onto an UNROTATED grid pulls a box per axis: the cube buys nothing, so the sweep
     stays on the shape it has always used."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", ROWS)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", ROWS)
     rng = np.random.default_rng(0)
     source = Dataset(tmp_path / "src", "h5")
     source.write("CT", "CASE_000", (rng.random((1, *LANDING)) * 100).astype(np.float32), _attributes())
@@ -303,7 +291,7 @@ def test_a_budget_no_region_fits_refuses_with_both_figures(tmp_path: Path) -> No
 
 def test_a_tiled_sweep_lands_the_undecomposed_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The claim the decomposition is allowed to change nothing about."""
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", ROWS)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", ROWS)
     source, volume = _sheared_fixture(tmp_path)
     resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
     reference = resample("CASE_000", torch.from_numpy(volume), _attributes()).numpy()
@@ -356,7 +344,7 @@ def test_the_device_ceiling_prices_what_a_region_pulls_and_holds(
     given a region the device could not hold, and where no host budget was declared nothing else
     bounded it.
     """
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", ROWS)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", ROWS)
     source, _volume = _sheared_fixture(tmp_path)
     resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
     manager = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])

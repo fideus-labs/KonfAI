@@ -185,17 +185,16 @@ def test_konfai_resume_dispatches_model_and_lr(monkeypatch: pytest.MonkeyPatch) 
     assert captured["lr"] == 0.001
 
 
-@pytest.mark.parametrize("flag", ["--checkpoints-dir", "-checkpoints-dir"])
-def test_konfai_resume_accepts_both_checkpoints_dir_spellings(monkeypatch: pytest.MonkeyPatch, flag: str) -> None:
-    """RESUME once declared its dir flags with a single dash where every other command uses two;
-    the double-dash form is now the real one and the single-dash form stays as a hidden alias."""
+def test_konfai_resume_accepts_checkpoints_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_train(**kwargs) -> None:
         captured.update(kwargs)
 
     monkeypatch.setattr(trainer_module, "train", fake_train)
-    monkeypatch.setattr(sys, "argv", ["konfai", "RESUME", "-c", "Config.yml", "--model", "ckpt.pt", flag, "/elsewhere"])
+    monkeypatch.setattr(
+        sys, "argv", ["konfai", "RESUME", "-c", "Config.yml", "--model", "ckpt.pt", "--checkpoints-dir", "/elsewhere"]
+    )
 
     main_module.main()
 

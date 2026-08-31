@@ -116,7 +116,8 @@ def _launch(
     lock's exit restores to the caller's. ``ranks`` sizes the lock and stays the caller's own
     expression: the entry points do not all derive it from ``gpu``/``cpu`` the same way.
     """
-    from konfai.utils.runtime import execute_distributed_object, restart_startup_clock
+    from konfai.utils.clock import restart_startup_clock
+    from konfai.utils.runtime import execute_distributed_object
 
     with _one_workflow_at_a_time(ranks):
         with restart_startup_clock().phase("build"):  # this call's own clock, not the previous workflow's
@@ -145,16 +146,24 @@ def _yaml_safe(value: object, where: str) -> object:
     )
 
 
+def _public_module(cls: type, default_modules: tuple[str, ...]) -> str:
+    """The module a config names ``cls`` by: the shipped package that re-exports it, else its own."""
+    return next(
+        (m for m in default_modules if cls.__module__ == m or cls.__module__.startswith(m + ".")), cls.__module__
+    )
+
+
 def _classpath(stage: object, default_modules: tuple[str, ...]) -> str:
     """The name the config tree references ``stage`` by: bare for a shipped class, qualified else."""
     cls = type(stage)
-    return cls.__name__ if cls.__module__ in default_modules else f"{cls.__module__}:{cls.__name__}"
+    module = _public_module(cls, default_modules)
+    return cls.__name__ if module in default_modules else f"{module}:{cls.__name__}"
 
 
 def _qualified_spelling(stage: object, name: str, default_modules: tuple[str, ...]) -> str:
     """A repeated bare name's second spelling: module-qualified, resolved as the binder resolves it."""
     if not isinstance(stage, Mapping):
-        return f"{type(stage).__module__}:{type(stage).__name__}"
+        return f"{_public_module(type(stage), default_modules)}:{type(stage).__name__}"
     for module in default_modules:
         if hasattr(importlib.import_module(module), name):
             return f"{module}:{name}"

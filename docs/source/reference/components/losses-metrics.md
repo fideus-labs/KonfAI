@@ -1,7 +1,7 @@
 # Losses & metrics
 
 Losses and metrics are both **criteria**: subclasses of
-`konfai.metric.measure.Criterion` in `konfai/metric/measure.py`. You attach them
+`konfai.metric.measure.Criterion` in `konfai/metric/measure/`. You attach them
 to a **named model output** and one or more **target dataset groups**, under
 `outputs_criterions:` (training) or `metrics:` (evaluation). Bare names resolve
 inside `konfai.metric.measure`; you can also point at any library, e.g.
@@ -98,7 +98,7 @@ groups act as a mask.
 | --- | --- | --- | --- |
 | `TRE` | `(Tensor, dict)` metric | Target Registration Error between predicted/target landmark coordinates. |: |
 | `GradientImages` | `Tensor` loss | Image-gradient smoothness loss (2D/3D auto); regulariser, or gradient-difference if a target is given. |: |
-| `MutualInformationLoss` | `Tensor` loss | Parzen-window Gaussian mutual information (returns `−MI`). Subclasses `nn.Module` directly. | `num_bins=23, sigma_ratio=0.5` |
+| `MutualInformationLoss` | `Tensor` loss | Parzen-window Gaussian mutual information (returns `−MI`). | `num_bins=23, sigma_ratio=0.5` |
 | `KLDivergence` | `Tensor` loss | VAE KL term. **Rewires the graph** on init, inserting a `LatentDistribution` block; computes closed-form KL from `mu`/`log_std`. | `shape` (**required**), `dim=100, mu=0, std=1` |
 
 ## Uncertainty / bookkeeping

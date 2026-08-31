@@ -38,6 +38,7 @@ from pathlib import Path
 import torch
 
 import konfai.trainer as trainer_module
+import konfai.utils.vram as vram_module
 from konfai.trainer import build_train
 
 ATTEMPTS = []
@@ -54,8 +55,8 @@ def install_auto_patch_probes() -> None:
         return original_run(self)
 
     trainer_module._Trainer.run = run_with_forced_oom
-    trainer_module.Trainer._transient_at_oom = lambda self, device: None
-    trainer_module.Trainer._usable_vram_after_oom = lambda self, device: 1.0
+    vram_module.transient_at_oom = lambda device: None
+    vram_module.usable_after_oom = lambda device: 1.0
 
 
 def main() -> None:

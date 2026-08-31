@@ -144,7 +144,7 @@ Example:
 outputs_dataset:
   Head:Tanh:
     OutputDataset:
-      name_class: OutSameAsGroupDataset
+      name_class: OutputDataset
       group: sCT
       reduction: Mean
 ```

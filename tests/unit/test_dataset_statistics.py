@@ -87,8 +87,8 @@ def _assert_close_to_numpy(new: dict[str, Any], volume: np.ndarray) -> None:
 def small_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
     """Blocks of about a thousand elements, folded in pieces of about a hundred: several of each per
     volume, so both grains of the fold are exercised."""
-    monkeypatch.setattr(dataset_module, "_STATISTICS_CHUNK_ELEMENTS", 1000)
-    monkeypatch.setattr(dataset_module, "_STATISTICS_UPDATE_ELEMENTS", 100)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1000)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 100)
 
 
 def _former_h5_walk(path: Path, group: str, name: str) -> Iterator[np.ndarray]:
@@ -322,7 +322,7 @@ def test_the_fold_reads_an_unbounded_store_whole_once(
 
 
 def test_a_block_is_folded_in_pieces_along_its_first_spatial_axis(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dataset_module, "_STATISTICS_UPDATE_ELEMENTS", 500)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 500)
     block = _volume((2, 37, 12, 10))
     pieces = list(_update_pieces(block))
     assert [piece.shape for piece in pieces] == [(2, 2, 12, 10)] * 18 + [(2, 1, 12, 10)]  # 500 // 240 rows each
@@ -339,7 +339,7 @@ def test_a_block_is_folded_in_pieces_along_its_first_spatial_axis(monkeypatch: p
 def budgeted_scan(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Pieces of about a hundred elements, so a block of the small volumes below snaps to whole rows
     rather than to the one piece the whole volume is; and the published budget put back after."""
-    monkeypatch.setattr(dataset_module, "_STATISTICS_UPDATE_ELEMENTS", 100)
+    monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_UPDATE_ELEMENTS", 100)
     yield
     set_per_rank_budget(None)
 

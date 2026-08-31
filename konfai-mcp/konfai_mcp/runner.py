@@ -228,7 +228,7 @@ def _apply_single_process_patches() -> None:
     Only safe in a throwaway child; never call in a real training run.
     """
     import konfai.trainer as konfai_trainer
-    import konfai.utils.runtime as konfai_runtime
+    import konfai.utils.runtime.distributed as konfai_runtime
 
     konfai_runtime.setup_gpu = lambda world_size, rank=None, process_group=True: (0, 0)  # type: ignore[assignment,misc]
     konfai_runtime.mp.spawn = (  # type: ignore[assignment]

@@ -27,16 +27,13 @@ import torch
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
 
 
 def _source(tmp_path: Path) -> Dataset:
@@ -48,15 +45,8 @@ def _source(tmp_path: Path) -> Dataset:
 
 
 def _manager(source: Dataset, transforms: list[Transform], patch_size: list[int] | None = None) -> DatasetManager:
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=DatasetPatch(patch_size if patch_size is not None else [4, 5, 4]),
-        transforms=transforms,
-        data_augmentations_list=[],
+    return manager(
+        source, transforms, name="CASE_000", patch=DatasetPatch(patch_size if patch_size is not None else [4, 5, 4])
     )
 
 
@@ -119,9 +109,8 @@ def test_multi_slab_sweep_writes_the_same_cache_as_the_whole_volume_load(
 ) -> None:
     """Three slabs instead of one: slab targets at non-zero offsets, the header written on the first
     slab only, and a region stage composed across slab boundaries."""
-    from konfai.data import patching as patching_module
 
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 4)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 4)
     source = _source(tmp_path)
     classic = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "cache_classic"))]
     swept = [Permute("2|1|0"), Clip(0.0, 50.0), Save(str(tmp_path / "cache_swept"))]
@@ -139,10 +128,9 @@ def test_multi_slab_sweep_writes_the_same_cache_as_the_whole_volume_load(
 
 def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failure after the first slab is written must remove the partial entry, not publish it."""
-    from konfai.data import patching as patching_module
     from konfai.utils import dataset as dataset_module
 
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 4)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 4)
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Save(str(tmp_path / "cache"))])
     reference = _whole_volume_patches(manager, [Clip(0.0, 50.0)])

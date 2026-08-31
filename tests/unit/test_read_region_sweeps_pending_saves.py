@@ -29,10 +29,10 @@ optimisation of memory, never of meaning.
 import numpy as np
 import pytest
 import torch
-from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Save, Standardize
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.ome_zarr import write_ome_zarr
+from oracle_support import manager
 
 
 def _source(tmp_path):
@@ -44,16 +44,7 @@ def _source(tmp_path):
 
 
 def _manager(tmp_path, transforms):
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=Dataset(tmp_path / "src", "omezarr"),
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(Dataset(tmp_path / "src", "omezarr"), transforms, name="CASE_000")
 
 
 def test_a_region_read_through_an_unwritten_save_matches_the_whole_volume(tmp_path):

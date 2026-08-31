@@ -29,9 +29,9 @@ from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
-from konfai.data.patching import SweepClock
 from konfai.network.network import build_configured_criterions
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
+from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import ConfigError, EvaluatorError
@@ -150,27 +150,20 @@ class Statistics:
 
     @staticmethod
     def get_statistic(values: list[float]) -> dict[str, float]:
-        """
-        Compute statistical aggregates for a list of metric values.
-
-        Args:
-            values (list of float): Values to summarize.
-
-        Returns:
-            dict[str, float]: A dictionary containing:
-                - max, min, std
-                - 25th, 50th, and 75th percentiles
-                - mean and count
-        """
+        """Max, min, std, quartiles, mean and count of the non-NaN ``values``: all NaN when there is none."""
+        array = np.asarray(values, dtype=float)
+        count = int(np.count_nonzero(~np.isnan(array)))
+        if count == 0:
+            return dict.fromkeys(("max", "min", "std", "25pc", "50pc", "75pc", "mean"), np.nan) | {"count": 0.0}
         return {
-            "max": float(np.nanmax(values)) if np.any(~np.isnan(values)) else np.nan,
-            "min": float(np.nanmin(values)) if np.any(~np.isnan(values)) else np.nan,
-            "std": float(np.nanstd(values)) if np.any(~np.isnan(values)) else np.nan,
-            "25pc": float(np.nanpercentile(values, 25)) if np.any(~np.isnan(values)) else np.nan,
-            "50pc": float(np.nanpercentile(values, 50)) if np.any(~np.isnan(values)) else np.nan,
-            "75pc": float(np.nanpercentile(values, 75)) if np.any(~np.isnan(values)) else np.nan,
-            "mean": float(np.nanmean(values)) if np.any(~np.isnan(values)) else np.nan,
-            "count": float(np.count_nonzero(~np.isnan(values))),
+            "max": float(np.nanmax(array)),
+            "min": float(np.nanmin(array)),
+            "std": float(np.nanstd(array)),
+            "25pc": float(np.nanpercentile(array, 25)),
+            "50pc": float(np.nanpercentile(array, 50)),
+            "75pc": float(np.nanpercentile(array, 75)),
+            "mean": float(np.nanmean(array)),
+            "count": float(count),
         }
 
     @staticmethod

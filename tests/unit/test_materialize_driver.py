@@ -28,16 +28,13 @@ from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
+from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
 
 
 def _image_attributes() -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray([10.0, 20.0, 30.0])
-    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
-    attributes["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
 
 
 def _source(tmp_path: Path) -> Dataset:
@@ -51,16 +48,7 @@ def _source(tmp_path: Path) -> Dataset:
 def _manager(source: Dataset, transforms: list[Transform]) -> DatasetManager:
     # No patch declared: this is exactly the TRANSFORM case, where get_data would cut one
     # whole-volume patch and read back what materialize just wrote.
-    return DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=source,
-        patch=None,
-        transforms=transforms,
-        data_augmentations_list=[],
-    )
+    return manager(source, transforms, name="CASE_000")
 
 
 def test_streamed_branch_writes_without_holding_the_volume(tmp_path: Path) -> None:

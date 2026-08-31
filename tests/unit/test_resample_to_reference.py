@@ -39,6 +39,7 @@ from konfai.data.sampling import source_window
 from konfai.data.transform import LocalityKind, Reduce, Resample, Write
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ConfigError, TransformError
+from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
 import SimpleITK as sitk
@@ -54,11 +55,7 @@ _FILL = -777.0
 
 
 def _attributes(origin: list[float], spacing: list[float], direction: np.ndarray | None = None) -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(origin)
-    attributes["Spacing"] = np.asarray(spacing)
-    attributes["Direction"] = (np.eye(3) if direction is None else direction).reshape(-1)
-    return attributes
+    return geometry(origin, spacing, direction)
 
 
 def _volume(shape: tuple[int, ...], seed: int = 0) -> np.ndarray:

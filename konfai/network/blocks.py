@@ -18,21 +18,14 @@
 
 import ast
 import importlib
-import warnings
 from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
 import torch
 
-try:
-    import SimpleITK as sitk
-except ImportError:
-    sitk = None  # type: ignore[assignment]
-
 from konfai.network import network
 from konfai.utils.config import config
-from konfai.utils.ITK import _require_simpleitk
 
 
 class NormMode(Enum):
@@ -736,80 +729,12 @@ class Concat(torch.nn.Module):
         return torch.cat(tensor, dim=1)
 
 
-# ---------------------------------------------------------------------------
-# Debug-only blocks
-#
-# These pass the tensor through unchanged (or stop the graph) and exist only to
-# inspect intermediate activations while developing a model. They are inert
-# unless explicitly wired into a graph via `add_module`, have side effects
-# (stdout / disk / raising), and must NOT be left in a production model.
-# ---------------------------------------------------------------------------
-class Print(torch.nn.Module):
-    """Debug block: print the tensor shape and pass it through unchanged."""
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        print(tensor.shape)
-        return tensor
-
-
-class Write(torch.nn.Module):
-    """Debug block: write the first channel of the first sample to disk as a volume.
-
-    The destination path is explicit (no silent hardcoded location) and each
-    call warns, since writing to disk inside a forward pass is a development-only
-    side effect.
-    """
-
-    def __init__(self, path: str = "./Data.mha") -> None:
-        super().__init__()
-        self.path = path
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        warnings.warn(
-            f"Debug `Write` block is writing a volume to '{self.path}' during forward; "
-            "remove it from production models.",
-            stacklevel=2,
-        )
-        _require_simpleitk()
-        sitk.WriteImage(sitk.GetImageFromArray(tensor.clone()[0][0].cpu().numpy()), self.path)
-        return tensor
-
-
-class Exit(torch.nn.Module):
-    """Debug block: stop the forward pass by raising, to halt at a chosen point."""
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        raise RuntimeError("The debug Exit block was executed.")
-
-
 class Detach(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor.detach()
-
-
-class Negative(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return -tensor
-
-
-class GetShape(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return torch.tensor(tensor.shape)
 
 
 class ArgMax(torch.nn.Module):
@@ -844,15 +769,6 @@ class NormalNoise(torch.nn.Module):
             return torch.randn(self.dim).to(tensor.device)
         else:
             return torch.randn_like(tensor).to(tensor.device)
-
-
-class Const(torch.nn.Module):
-    def __init__(self, shape: list[int], std: float) -> None:
-        super().__init__()
-        self.noise = torch.nn.parameter.Parameter(torch.randn(shape) * std)
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return self.noise.to(tensor.device)
 
 
 class Subset(torch.nn.Module):

@@ -529,7 +529,7 @@ def test_konfai_inference_raises_clear_error_inside_daemon_workers(monkeypatch: 
     class DaemonProcess:
         daemon = True
 
-    monkeypatch.setattr("konfai.data.transform.current_process", lambda: DaemonProcess())
+    monkeypatch.setattr("konfai.data.transform.inference.current_process", lambda: DaemonProcess())
 
     with pytest.raises(RuntimeError, match=r"Dataset\.num_workers: 0"):
         transform("CASE_000", torch.zeros(1, 4, 4), Attribute())
@@ -923,7 +923,7 @@ def test_string_encoded_parameters_are_refused_with_their_spelling() -> None:
 def test_konfai_inference_hands_the_nested_run_this_ranks_device_only(tmp_path: Path, monkeypatch) -> None:
     """Under --gpu 0 1 each rank runs on its own device; the nested prediction it spawns per case
     must run there too, not on every device the launch was given (a two-GPU prediction per rank)."""
-    import konfai.data.transform as transform_module
+    import konfai.data.transform.inference as transform_module
 
     pytest.importorskip("SimpleITK")
     launched: dict[str, list[int]] = {}
@@ -945,9 +945,9 @@ def test_konfai_inference_hands_the_nested_run_this_ranks_device_only(tmp_path: 
 
     monkeypatch.setattr(transform_module, "get_context", lambda _method: _Context())
     monkeypatch.setattr(transform_module, "cuda_visible_devices", lambda: [4, 7])
-    monkeypatch.setattr(transform_module.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(transform_module.torch.cuda, "empty_cache", lambda: None)
-    monkeypatch.setattr(transform_module.torch.cuda, "current_device", lambda: 1)  # local rank 1
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)  # local rank 1
     monkeypatch.setattr(KonfAIInference, "_reassemble_output", staticmethod(lambda _dir: torch.zeros(1, 2, 2, 2)))
     attributes = Attribute()
     attributes["Origin"] = np.zeros(3)
@@ -971,7 +971,6 @@ def test_a_streamed_mask_refuses_a_mask_off_the_stage_input_grid(tmp_path: Path)
         source=(slice(0, 2), slice(0, 8), slice(0, 8)),
         target=(slice(0, 2), slice(0, 8), slice(0, 8)),
         source_shape=(8, 8, 8),
-        target_shape=(8, 8, 8),
     )
     mask = Mask(path="MASK")
     mask.set_datasets([store])
@@ -1003,7 +1002,6 @@ def test_a_streamed_mask_declares_the_windows_of_the_mask_it_will_read(tmp_path:
             source=(slice(z, z + 2), slice(0, 8), slice(0, 8)),
             target=(slice(z, z + 2), slice(0, 8), slice(0, 8)),
             source_shape=(8, 8, 8),
-            target_shape=(8, 8, 8),
         )
         for z in (0, 2)
     ]
@@ -1034,7 +1032,6 @@ def test_a_streamed_mha_mask_is_read_by_region_and_never_held_whole(tmp_path: Pa
         source=(slice(1, 4), slice(0, 8), slice(0, 8)),
         target=(slice(1, 4), slice(0, 8), slice(0, 8)),
         source_shape=(8, 8, 8),
-        target_shape=(8, 8, 8),
     )
     out = stage.stream_region("CASE", torch.ones(1, 3, 8, 8), context, Attribute())
     np.testing.assert_array_equal(out[0, :, 0, 0].numpy(), [-1, 1, 1])  # rows 1..3 of the mask: 0, 1, 1

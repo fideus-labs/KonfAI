@@ -66,6 +66,7 @@ from oracle_support import (
     builtin_transforms,
     cases_of,
     kind_of,
+    manager,
     stage_cases,
     streamable_cases,
 )
@@ -91,16 +92,7 @@ def _manager(dataset: Dataset, case: StageCase) -> DatasetManager:
     # What a run does before it builds a manager (Data.prepare): a stage that reads a SECOND entry --
     # a mask, a field, a reference grid: is handed the roots to find it in.
     case.transform.set_datasets([dataset])
-    return DatasetManager(
-        index=0,
-        group_src=case.group,
-        group_dest=case.group,
-        name=CASE_NAME,
-        dataset=dataset,
-        patch=DatasetPatch(list(_PATCH_SIZE)),
-        transforms=[case.transform],
-        data_augmentations_list=[],
-    )
+    return manager(dataset, [case.transform], group=case.group, patch=DatasetPatch(list(_PATCH_SIZE)))
 
 
 def test_every_builtin_transform_is_covered() -> None:

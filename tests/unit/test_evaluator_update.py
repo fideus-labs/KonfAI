@@ -25,9 +25,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 from konfai.data.data_manager import BatchDataItem
-from konfai.data.patching import DatasetPatch, SweepClock
+from konfai.data.patching import DatasetPatch
 from konfai.evaluator import Evaluator, Statistics
 from konfai.metric.measure import MAE, MSE, SSIM
+from konfai.utils.clock import SweepClock
 
 
 def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], streamed: bool = False) -> Evaluator:

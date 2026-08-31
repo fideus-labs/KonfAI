@@ -26,7 +26,6 @@ import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
-import konfai.data.patching as patching_module
 import konfai.data.transform as transform_module
 import numpy as np
 import pytest
@@ -59,16 +58,13 @@ from konfai.data.transform import (
 from konfai.utils.budget import BUDGET_SHARES, budget_share
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import ReductionError, TransformError
+from oracle_support import geometry
 
 CASES = 4  # even on purpose: an even cases is where a lower-median would show
 
 
 def _attributes(spacing: tuple[float, float, float] = (1.0, 1.0, 2.0)) -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.asarray([0.0, 0.0, 0.0])
-    attribute["Spacing"] = np.asarray(list(spacing))
-    attribute["Direction"] = np.eye(3, dtype=np.float64).reshape(-1)
-    return attribute
+    return geometry(spacing=spacing)
 
 
 def _cohort(
@@ -1005,13 +1001,13 @@ def test_a_host_chain_gets_a_meter_and_a_kernel_without_one_gets_none(monkeypatc
     """A host chain has no allocator counter, and the kernel's resident peak is the meter it does
     have. A kernel that offers no reset gets no meter at all, rather than a run-long peak read as
     if it were one region's."""
-    monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: True)
-    monkeypatch.setattr(patching_module, "resident_bytes", lambda: 1_000_000)
-    monkeypatch.setattr(patching_module, "peak_resident_bytes", lambda: 1_500_000)
+    monkeypatch.setattr("konfai.data.patching.budget.reset_resident_peak", lambda: True)
+    monkeypatch.setattr("konfai.data.patching.budget.resident_bytes", lambda: 1_000_000)
+    monkeypatch.setattr("konfai.data.patching.budget.peak_resident_bytes", lambda: 1_500_000)
     meter = open_held_meter(None)
     assert meter is not None and meter.held() == 500_000
 
-    monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: False)
+    monkeypatch.setattr("konfai.data.patching.budget.reset_resident_peak", lambda: False)
     assert open_held_meter(None) is None
 
 
@@ -1050,6 +1046,7 @@ def test_a_host_meter_does_not_charge_the_scope_for_the_chunk_cache_it_filled(mo
     region after it to 78 % of the height that would have fit. What the cache gained during the
     scope is subtracted; what the scope held on its own is what it is charged.
     """
+    from konfai.data.patching import budget as patching_module
     from konfai.utils import ome_zarr
 
     cache = ome_zarr._DecodedChunkCache(1 << 30)

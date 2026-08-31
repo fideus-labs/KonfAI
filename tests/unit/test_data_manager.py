@@ -46,9 +46,11 @@ from konfai.data.data_manager import (
 )
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, TensorCast, Transform, TransformLoader
+from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.runtime import State, restart_startup_clock
+from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
+from oracle_support import geometry
 from torch.utils.data._utils.pin_memory import pin_memory as torch_pin_memory
 
 # --------------------------------------------------------------------------------------
@@ -205,7 +207,7 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
         assert k == len(population)
         return list(reversed(population))
 
-    monkeypatch.setattr("konfai.data.data_manager.random.sample", fake_sample)
+    monkeypatch.setattr("konfai.data.data_manager.sources.random.sample", fake_sample)
 
     data = DataTrain(augmentations=None, validation="0:2")
     names = {"CASE_010", "CASE_002", "CASE_001", "CASE_005", "CASE_003"}
@@ -297,7 +299,6 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
     tail: same names, same indices, one draw per case. Validation without the draws is rebuilt
     (2 cases x 2 groups more), never cut with them."""
     pytest.importorskip("SimpleITK")
-    from konfai.data import data_manager as data_manager_module
     from konfai.data.augmentation import Prob
 
     names = [f"CASE_{index:03d}" for index in range(10)]
@@ -312,7 +313,7 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
             constructed.append((name, index))
             super().__init__(index, group_src, group_dest, name, *args, **kwargs)
 
-    monkeypatch.setattr(data_manager_module, "DatasetManager", CountingManager)
+    monkeypatch.setattr("konfai.data.data_manager.sources.DatasetManager", CountingManager)
     monkeypatch.delenv("KONFAI_config_file")  # the draw binds its own defaults
     monkeypatch.setenv("KONFAI_ROOT", "Trainer")
     augmentations = DataAugmentationsList(nb=1, data_augmentations={"Flip": Prob(1)})
@@ -365,11 +366,7 @@ def test_cache_worker_count_never_drops_below_one() -> None:
 
 
 def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    attributes = Attribute()
-    attributes["Origin"] = np.asarray(origin, dtype=np.float64)
-    attributes["Spacing"] = np.asarray(spacing, dtype=np.float64)
-    attributes["Direction"] = np.eye(len(origin), dtype=np.float64).reshape(-1)
-    return attributes
+    return geometry(origin, spacing)
 
 
 def test_streaming_tensorcast_persists_source_dtype_for_inverse(streaming_dataset_stub) -> None:
@@ -1207,7 +1204,7 @@ def test_prediction_subset_accepts_windows_style_case_list_paths(monkeypatch: py
     subset = PredictionSubset([windows_file])
 
     monkeypatch.setattr(
-        "konfai.data.data_manager.os.path.exists",
+        "konfai.data.data_manager.sources.os.path.exists",
         lambda path: path == windows_file,
     )
     monkeypatch.setattr(

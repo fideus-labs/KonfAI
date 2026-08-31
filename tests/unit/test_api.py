@@ -281,7 +281,7 @@ def test_std_of_a_single_case_is_zero() -> None:
 
 
 def test_magnitude_is_the_channel_norm_and_pointwise() -> None:
-    from konfai.data.patching import LocalityKind
+    from konfai.data.transform import LocalityKind
     from konfai.utils.dataset import Attribute
 
     field = torch.tensor([[[3.0]], [[4.0]]])

@@ -30,6 +30,7 @@ seed, which is how the oracle varies rank and geometry without varying anything 
 
 import inspect
 import types
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from konfai.data import augmentation as augmentation_module
 from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.augmentation import Flip as FlipAugmentation
+from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import (
     Argmax,
     Canonical,
@@ -375,6 +377,43 @@ def _coarse_field(geometry: Geometry) -> np.ndarray:
     )
 
 
+def manager(
+    dataset: Dataset,
+    transforms: list[Transform],
+    group: str = "CT",
+    name: str = CASE_NAME,
+    patch: DatasetPatch | None = None,
+    index: int = 0,
+) -> DatasetManager:
+    """One case's manager over ``dataset``: the same group in and out, no augmentation."""
+    return DatasetManager(
+        index=index,
+        group_src=group,
+        group_dest=group,
+        name=name,
+        dataset=dataset,
+        patch=patch,
+        transforms=transforms,
+        data_augmentations_list=[],
+    )
+
+
+def geometry(
+    origin: Sequence[float] = (0.0, 0.0, 0.0),
+    spacing: Sequence[float] = (1.0, 1.0, 1.0),
+    direction: np.ndarray | Sequence[float] | None = None,
+) -> Attribute:
+    """The stored geometry of a volume: ``(x, y, z)`` origin and spacing, a flattened direction
+    (identity when not given)."""
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(origin, dtype=np.float64)
+    attribute["Spacing"] = np.asarray(spacing, dtype=np.float64)
+    attribute["Direction"] = (
+        (np.eye(len(origin)) if direction is None else np.asarray(direction)).astype(np.float64).reshape(-1)
+    )
+    return attribute
+
+
 def attributes(geometry: Geometry, group: str) -> Attribute:
     """The metadata a group is stored with, and so what a declaration about it is handed."""
     attribute = Attribute()
@@ -579,7 +618,7 @@ def builtin_transforms() -> list[type[Transform]]:
         for _, cls in inspect.getmembers(transform_module, inspect.isclass)
         if not isinstance(cls, types.GenericAlias)
         and issubclass(cls, Transform)
-        and cls.__module__ == transform_module.__name__
+        and cls.__module__.startswith(transform_module.__name__)
         and not inspect.isabstract(cls)
     ]
 

@@ -58,7 +58,7 @@ Predictor:
   outputs_dataset:
     Model:
       OutputDataset:
-        name_class: OutSameAsGroupDataset
+        name_class: OutputDataset
         same_as_group: Labels:Labels
         dataset_filename: Dataset:mha
         group: Prediction

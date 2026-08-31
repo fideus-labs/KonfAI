@@ -23,10 +23,9 @@ primitive itself runs on a real CUDA device when one is present.
 
 import numpy as np
 import pytest
-import torch
 from konfai.predictor import Mean, Predictor, Reduction
 from konfai.utils.utils import concretize_patch_size
-from konfai.utils.vram import measure_transient_bytes, next_patch_candidate, usable_vram
+from konfai.utils.vram import next_patch_candidate, usable_vram
 
 
 def _linear_probe(bytes_per_voxel: float):
@@ -163,7 +162,7 @@ class _Data:
         return self._worst
 
 
-def _predictor(out_channels, nb_augmentation, reduction, margined, candidate=None):
+def _predictor(out_channels, nb_augmentation, reduction, candidate=None):
     predictor = Predictor.__new__(Predictor)
     predictor._vram_patch_template = [0, 0, 0]
     predictor._vram_patch_candidate = candidate
@@ -173,7 +172,6 @@ def _predictor(out_channels, nb_augmentation, reduction, margined, candidate=Non
     predictor.combine = Mean()
     predictor.path_to_models = ["model.pt"]
     predictor.outputs_dataset = {"Head.Tanh": _Writer(nb_augmentation, reduction)}
-    predictor._usable_vram_after_oom = lambda device: margined
     return predictor
 
 
@@ -185,68 +183,23 @@ class TestPredictorShrinkBudget:
         # reserve = (3+1)ch x 100^3 x 2B x 2aug = 1.6e7 -> usable 1e6 of the 1.7e7 margined budget;
         # measured 8e6 -> exact isotropic step (1/8)^(1/3) halves each axis. Without the reserve the
         # measurement would claim a fit and only the fixed 0.8 step would apply.
-        predictor = _predictor(3, nb_augmentation=2, reduction=Mean(), margined=1.7e7)
-        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+        predictor = _predictor(3, nb_augmentation=2, reduction=Mean())
+        assert predictor._shrunken_patch(8_000_000, usable=1.7e7) == [50, 50, 50]
 
     def test_a_streaming_writer_reserves_only_its_window(self):
         # Single augmentation + voxel-local reduction -> window = candidate_z x cross-section:
         # reserve 8e5 -> usable 3.2e6, measured 6.4e6 -> per-axis (1/2)^(1/3). A volume reserve
         # (8e6) would not fit the 4e6 budget and would have fallen back to [8, 85, 85].
-        predictor = _predictor(3, nb_augmentation=1, reduction=Mean(), margined=4e6, candidate=[10, 100, 100])
-        assert predictor._shrunken_patch(6_400_000, device=None) == [7, 79, 79]
+        predictor = _predictor(3, nb_augmentation=1, reduction=Mean(), candidate=[10, 100, 100])
+        assert predictor._shrunken_patch(6_400_000, usable=4e6) == [7, 79, 79]
 
     def test_an_unfittable_reserve_falls_back_to_the_forward_alone(self):
         # The non-streamable volume reserve (1.6e7) exceeds the whole budget (1e6): the writer will
         # blend on the CPU, and the patch is still sized for the forward instead of refusing.
-        predictor = _predictor(3, nb_augmentation=2, reduction=_SpatialReduction(), margined=1e6)
-        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
+        predictor = _predictor(3, nb_augmentation=2, reduction=_SpatialReduction())
+        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]
 
     def test_unpriceable_channels_skip_the_reserve(self):
-        predictor = _predictor(None, nb_augmentation=2, reduction=Mean(), margined=1e6)
+        predictor = _predictor(None, nb_augmentation=2, reduction=Mean())
         assert predictor._accumulation_reserve([100, 100, 100], [100, 100, 100]) is None
-        assert predictor._shrunken_patch(8_000_000, device=None) == [50, 50, 50]
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-class TestMeasurementOnGpu:
-    def test_transient_reflects_a_forward_and_scales_with_the_patch(self):
-        device = torch.device("cuda:0")
-        net = torch.nn.Sequential(
-            torch.nn.Conv3d(1, 8, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv3d(8, 1, 3, padding=1)
-        ).to(device)
-
-        def run_at(size):
-            def run():
-                with torch.inference_mode():
-                    net(torch.zeros(1, 1, *size, device=device))
-
-            return run
-
-        small = measure_transient_bytes(run_at([16, 16, 16]), device)
-        large = measure_transient_bytes(run_at([48, 48, 48]), device)
-        assert small is not None and large is not None
-        assert small > 0
-        # 27x the voxels must cost markedly more: the measurement really tracks the activations.
-        assert large > small * 4
-
-    def test_the_restart_loop_sizes_a_real_model_into_the_budget(self):
-        device = torch.device("cuda:0")
-        net = torch.nn.Sequential(
-            torch.nn.Conv3d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv3d(16, 1, 3, padding=1)
-        ).to(device)
-
-        def probe(patch_size):
-            def run():
-                with torch.inference_mode():
-                    net(torch.zeros(1, 1, *patch_size, device=device))
-
-            return measure_transient_bytes(run, device)
-
-        whole = probe([96, 96, 96])
-        assert whole is not None
-        usable = whole // 2  # the whole volume does NOT fit -> the loop must shrink and still fit
-        sized = run_until_fits([0, 0, 0], [96, 96, 96], probe, usable)
-        assert sized is not None
-        assert all(p < 96 for p in sized)
-        measured = probe(sized)
-        assert measured is not None and measured <= usable
+        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]

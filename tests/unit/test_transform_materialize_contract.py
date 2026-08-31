@@ -36,12 +36,20 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 import torch
-from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Write
 from konfai.utils.dataset import Dataset
-from oracle_support import CASE_NAME, FIXED_GEOMETRY, StageCase, attributes, build_case, streamable_cases, volumes
+from oracle_support import (
+    CASE_NAME,
+    FIXED_GEOMETRY,
+    StageCase,
+    attributes,
+    build_case,
+    manager,
+    streamable_cases,
+    volumes,
+)
 
 
 @pytest.fixture(scope="session")
@@ -87,16 +95,7 @@ def _cases() -> list[StageCase]:
 
 def _manager(dataset: Dataset, case: StageCase, out: Path, fmt: str) -> DatasetManager:
     case.transform.set_datasets([dataset])
-    return DatasetManager(
-        index=0,
-        group_src=case.group,
-        group_dest=case.group,
-        name=CASE_NAME,
-        dataset=dataset,
-        patch=None,
-        transforms=[case.transform, Write(f"{out}:{fmt}")],
-        data_augmentations_list=[],
-    )
+    return manager(dataset, [case.transform, Write(f"{out}:{fmt}")], group=case.group)
 
 
 @pytest.mark.parametrize("fmt", ["mha", "omezarr"])
@@ -125,7 +124,7 @@ def _check(
     case, dev: torch.device, fmt: str, dataset: Dataset, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Two-row slabs, so the sweep really is several slabs and every seam is exercised.
-    monkeypatch.setattr(patching_module, "SWEEP_SLAB_ROWS", 2)
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 2)
     whole = _manager(dataset, case, tmp_path / "Whole", fmt)
     verdict = CaseMaterializer(whole).materialize(prefer_whole=True, fallback_budget_bytes=1 << 30, device=dev)
     assert verdict is not Verdict.STREAM

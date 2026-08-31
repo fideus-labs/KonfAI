@@ -4,7 +4,7 @@ See the {doc}`../../examples/visual-gallery` for reproducible visual examples of
 spatial, intensity, noise, and CutOUT augmentations.
 
 Augmentations are **random, train-time** data augmentations in
-`konfai/data/augmentation.py` (base class `DataAugmentation`). Unlike transforms,
+`konfai/data/augmentation/` (base class `DataAugmentation`). Unlike transforms,
 they are sampled per case and applied only during training:
 
 ```yaml

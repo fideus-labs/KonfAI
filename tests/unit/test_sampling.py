@@ -167,6 +167,7 @@ def test_the_host_resampler_and_the_walk_agree_on_an_integer_payload():
             assert int((apart > 0).sum()) <= apart.numel() // 500, f"{label}/{mode}: the seam is not a seam"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("oblique", [False, True], ids=["axis-aligned", "oblique"])
 def test_the_whole_grid_matches_simpleitk(oblique: bool):
     device = torch.device("cpu")
@@ -181,7 +182,9 @@ def test_the_whole_grid_matches_simpleitk(oblique: bool):
 
 
 @pytest.mark.parametrize("device", DEVICES, ids=DEVICE_IDS)
-@pytest.mark.parametrize("rows", [3, 7, SIZE[0]], ids=["slab-3", "slab-7", "whole"])
+@pytest.mark.parametrize(
+    "rows", [pytest.param(3, marks=pytest.mark.slow), 7, SIZE[0]], ids=["slab-3", "slab-7", "whole"]
+)
 def test_the_streamed_slabs_agree_with_the_whole_volume(device: torch.device, rows: int):
     """A slab and the whole volume put every sample in the same place, to a stated bound.
 
