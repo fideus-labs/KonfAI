@@ -16,6 +16,61 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## v1.8.2 (2026-08-31)
+
+The streaming engine now prices its reads on the block the store actually decodes, a dataset root
+can sit on object storage, and the nine largest modules are packages, one module per responsibility
+(`data/transform`, `data/patching`, `data/data_manager`, `data/augmentation`, `utils/dataset`,
+`utils/runtime`, `network/network`, `metric/measure`, `predictor`). Every public name is re-exported
+from its package, so published configs and `konfai.*` imports keep resolving, and the split changes
+no value.
+
+### ✨ Features
+
+- **transform**: a stored displacement field streams: a region reads the window it needs off the
+  store instead of decoding every voxel of every member, and the plan prices those reads
+- **evaluator**: a halo metric's patches stream under the memory budget
+- **predictor**: PREDICTION warns at checkpoint load when an input group is preprocessed unlike
+  training (`check_training_transforms`), for a checkpoint whose resolved config is within reach
+- **patching**: a sweep that cannot hold its read-ahead gives the read-ahead up and runs serial
+  before refusing, and a channel-folding chain streams its write
+- **data**: a dataset root reads from object storage (any fsspec-routed scheme), and remote
+  OME-Zarr roots keep working under ngff-zarr 0.44 and later
+- **network**: a graph lays itself out channels-last on request
+
+### 🐛 Bug Fixes
+
+- **budget**: the plan prices reads on the block the store decodes (zarr and HDF5 chunks, a
+  memmap's band), charges what the process already holds, and prices the device's region ceiling
+  like every other block; a sweep is cut on the store's own blocks
+- **geometry**: a displacement is bounded by where it reaches, so a warp's read window always
+  includes the identity
+- **impact-reg**: a FireANTs/elastix mask restricts the IMPACT feature metric instead of feeding
+  it, MIND receives the four statistics it was traced against, and the masked state is an explicit
+  contract between the engine and the loss, never inferred from channel widths
+- **runtime**: gloo pins to the loopback on a single-node world, and each platform is asked only
+  for what it has
+- **omezarr**: a stepped selection the chunked read cannot serve is refused with the reason, and a
+  store's chunks are keyed by one spelling of its path
+- **predictor**: the blend gets a window on every patch axis
+- **data**: `pin_memory` reaches the batch it is meant to pin
+- **api**: `evaluate` scores the stored values when it declares no chain
+
+### ⚡ Performance
+
+- **transform**: a sweep overlaps its read, its chain and its write, and the resampler is handed
+  its grid, one cast and one copy
+- **trainer**: fewer DDP syncs, a fused EMA, a threaded checkpoint, and the optimizer step fuses
+  where the graph runs on CUDA
+- **metric**: Dice comes from one confusion matrix, SSIM runs in torch
+- **predictor**: an ensemble folds in place
+- **config**: a run resolves against one tree and each case is built once
+
+### ♻️ Refactoring
+
+- the nine monolithic modules split into packages; `konfai.predictor.Median`, the
+  `Dataset.<Backend>` aliases and `OutSameAsGroupDataset` keep resolving for published configs
+
 ## v1.8.1 (2026-08-19)
 
 TRANSFORM, the dataset-preparation workflow, is the bulk of this release: the plan reads no voxel,
