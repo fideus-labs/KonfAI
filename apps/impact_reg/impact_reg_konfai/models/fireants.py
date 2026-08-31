@@ -389,6 +389,20 @@ class _ImpactCore(IMPACTReg):
             self.model_path = hf_hub_download(repo, filename, repo_type="model")  # nosec B615
         self.model = None  # lazy-loaded on the first forward, like IMPACTReg
 
+    def preprocessing(self, tensor: torch.Tensor, attribute: list) -> list[torch.Tensor]:
+        """KonfAI's preprocessing, with the intensity statistics FLATTENED for a single image.
+
+        ``IMPACTReg.preprocessing`` emits ``stats`` as ``[B, 4]``. The MIND TorchScript model branches on
+        ``stats.numel() == 4`` and then indexes ``stats[0]`` expecting a SCALAR minimum, so a ``[1, 4]``
+        tensor makes it subtract a 4-vector from the volume ("size of tensor a (32) must match the size
+        of tensor b (4)"). The C++ itk-impact metric passes the four values flat, which is what the model
+        was traced against; FireANTs always registers one pair at a time, so flatten that case here.
+        """
+        prepared = super().preprocessing(tensor, attribute)
+        if prepared[2].shape[0] == 1:
+            prepared[2] = prepared[2].reshape(-1)
+        return prepared
+
     @staticmethod
     def _stats(tensor: torch.Tensor) -> dict:
         detached = tensor.detach()
@@ -403,8 +417,16 @@ class _ImpactCore(IMPACTReg):
         if self.model is None:
             self.model = torch.jit.load(self.model_path)  # nosec B614
         self.model.to(moved.device).eval()
+        # FireANTs' masked mode carries the mask as one extra trailing channel on BOTH images (see
+        # ``apply_mask_to_image``). The feature model wants the image alone, so split the mask off and
+        # hand it to KonfAI's masked feature loss (nearest-resampled onto every feature layer): the
+        # metric is then evaluated inside the fixed mask, which is what an elastix/ITK mask means too.
+        mask: torch.Tensor | None = None
+        if moved.shape[1] == self.in_channels + 1 and fixed.shape[1] == self.in_channels + 1:
+            mask = (fixed[:, -1:] > 0.5).to(torch.uint8)
+            moved, fixed = moved[:, :-1], fixed[:, :-1]
         with _no_texpr_fuser():
-            loss, true_nb = self._compute(moved, [self._stats(moved)], fixed, [self._stats(fixed)], None)
+            loss, true_nb = self._compute(moved, [self._stats(moved)], fixed, [self._stats(fixed)], mask)
         return loss / max(true_nb, 1)
 
 
@@ -433,6 +455,25 @@ class ImpactFeatureLoss(torch.nn.Module):
             term = weight * core(moved, fixed)
             total = term if total is None else total + term
         return total
+
+
+def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
+    """A FireANTs ``Image`` of ``mask`` carrying ``image``'s geometry.
+
+    The mask is defined on the image's grid, but its header can differ by float rounding once it has
+    crossed KonfAI's Attribute round-trip; FireANTs' ``concatenate`` then rejects it with a spurious
+    "different physical spaces" (surfacing as a ``TypeError`` in its ``check_and_raise_cond``). Reusing
+    the image's spacing/origin/direction makes the two spaces identical by construction.
+    """
+    from fireants.io import Image
+
+    return Image(
+        mask,
+        device=device,
+        spacing=image.GetSpacing(),
+        origin=image.GetOrigin(),
+        direction=image.GetDirection(),
+    )
 
 
 class FireANTsEngine:
@@ -605,8 +646,14 @@ class FireANTsEngine:
         use_moving_mask = self._is_partial_mask(moving_mask)
         masked = use_fixed_mask or use_moving_mask
         if masked:
-            fmask = Image(fixed_mask, device=device) if use_fixed_mask else generate_image_mask_allones(fixed_img)
-            mmask = Image(moving_mask, device=device) if use_moving_mask else generate_image_mask_allones(moving_img)
+            fmask = (
+                _mask_on_grid(fixed_mask, fixed, device) if use_fixed_mask else generate_image_mask_allones(fixed_img)
+            )
+            mmask = (
+                _mask_on_grid(moving_mask, moving, device)
+                if use_moving_mask
+                else generate_image_mask_allones(moving_img)
+            )
             fixed_img = apply_mask_to_image(fixed_img, fmask)
             moving_img = apply_mask_to_image(moving_img, mmask)
 
@@ -766,9 +813,7 @@ class FireANTsRegistration(torch.nn.Module):
                 moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
                 fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
                 moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-                dvf_np = self._engine.register(
-                    fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img
-                )
+                dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
                 combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)
 

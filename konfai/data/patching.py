@@ -93,8 +93,23 @@ _STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 # VOLUME it allows is what DatasetManager._sweep_tile then shapes into the block actually read.
 SWEEP_SLAB_ROWS = 64
 
+
 # "not looked up yet", where None is itself an answer (a store with no read granularity to state).
-_UNRESOLVED = object()
+# A class with a by-name ``__reduce__`` rather than a bare ``object()``: the manager is pickled into
+# every DataLoader worker (spawn), and a plain ``object()`` unpickles as a NEW instance, so the
+# ``is _UNRESOLVED`` test failed in the worker and the sentinel itself got indexed
+# (``'object' object is not subscriptable`` in ``_sweep_rows``).
+class _Unresolved:
+    __slots__ = ()
+
+    def __reduce__(self) -> str:
+        return "_UNRESOLVED"
+
+    def __repr__(self) -> str:
+        return "_UNRESOLVED"
+
+
+_UNRESOLVED = _Unresolved()
 
 # The bytes each element travels as through a sweep (float32). What a sweep holds in those elements
 # is _sweep_resident_regions, and DatasetManager.sweep_block_bytes prices it.
