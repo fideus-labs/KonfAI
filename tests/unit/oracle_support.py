@@ -151,6 +151,8 @@ class Geometry:
     field_extents: tuple[int, ...]
     field_spacing: tuple[float, ...]
     field_origin: tuple[float, ...]
+    coarse_field_extents: tuple[int, ...]
+    coarse_field_spacing: tuple[float, ...]
     #: The foreground box the "Boxed" group is stored with: [start, after] margins per spatial axis.
     box: np.ndarray
     #: The rigid map stored beside the case, as (centre, angles, translation) in world units.
@@ -181,6 +183,9 @@ def _rotation(rank: int, angles: tuple[float, ...]) -> np.ndarray:
 #: sampler and never the boundary, which is the half that differs between the two paths. The field
 #: is COARSER than either, which is how one is actually solved: it is in world units, so it is read
 #: where it is asked rather than resampled to match anything first.
+#: World units the coarse field displaces by, reversing sign between adjacent nodes.
+_COARSE_FIELD_BOUND = 9.0
+
 FIXED_GEOMETRY = Geometry(
     extents=(9, 10, 11),
     spacing=(1.5, 1.5, 2.0),
@@ -193,6 +198,10 @@ FIXED_GEOMETRY = Geometry(
     field_extents=(4, 5, 5),
     field_spacing=(3.0, 2.4, 4.0),
     field_origin=(-4.0, 4.0, 10.0),
+    coarse_field_extents=(3, 3, 3),
+    # Two cells that COVER the case from the field origin one source voxel before it: the swing
+    # stays a full amplitude per cell, and no target region falls outside the lattice.
+    coarse_field_spacing=(9.0, 8.2, 9.8),
     # Both margins differ on every axis: a box symmetric anywhere is one a wrong sign or a reversed
     # axis order would still land on. (9, 10, 11) is cropped to (6, 6, 6), which still carries a
     # patch grid to disagree over.
@@ -228,6 +237,14 @@ def seeded_geometry(seed: int, rank: int) -> Geometry:
     )
     field_origin = tuple(float(value - spacing[index]) for index, value in enumerate(origin))
 
+    # Three nodes an axis, spaced so the two cells COVER the case from the field origin one source
+    # voxel before it: with the sign reversing between nodes, the interpolated displacement still
+    # swings the full amplitude across one cell, and no target region falls outside the lattice.
+    coarse_field_spacing = tuple(
+        float((world[index] + 2.0 * spacing[index]) / 2.0 * rng.uniform(1.0, 1.1)) for index in range(rank)
+    )
+    coarse_field_extents = (3,) * rank
+
     permutation = rng.permutation(rank)
     while np.array_equal(permutation, np.arange(rank)):
         permutation = rng.permutation(rank)
@@ -243,6 +260,8 @@ def seeded_geometry(seed: int, rank: int) -> Geometry:
         field_extents=field_extents,
         field_spacing=field_spacing,
         field_origin=field_origin,
+        coarse_field_extents=coarse_field_extents,
+        coarse_field_spacing=coarse_field_spacing,
         box=np.asarray([[int(rng.integers(1, 4)), int(rng.integers(1, 4))] for _ in range(rank)]),
         stored_map=(
             tuple(float(value + 0.5 * world[index]) for index, value in enumerate(origin)),
@@ -310,6 +329,13 @@ def volumes(geometry: Geometry, dtype: np.dtype = np.dtype(np.float32)) -> dict[
         # A displacement field, component-first in physical (x, y, z), each component a different
         # function so a reversed axis order cannot pass unnoticed.
         "Field": _field(geometry),
+        # A SECOND field, coarse against the case and violent between its nodes: the first is
+        # gentle (two world units at most) and a window sized from the values read over a
+        # region's own box is exact for it. Whether it stays exact where the interpolation at a
+        # region's FACE blends nodes the box does not contain is a different question, and this
+        # is the field that asks it. Sized after a real case: an ExaSPIM registration field is
+        # four times coarser than the volume it moves.
+        "CoarseField": _coarse_field(geometry),
     }
 
 
@@ -330,11 +356,38 @@ def _field(geometry: Geometry) -> np.ndarray:
     return np.stack(components).astype(np.float32)
 
 
+def _coarse_field(geometry: Geometry) -> np.ndarray:
+    """A displacement field whose sign REVERSES from one node to the next, at several world units.
+
+    The steepest thing a lattice can carry: the interpolated displacement swings the full amplitude
+    across one cell, so a region's face cuts through the middle of that swing. A field read over a
+    region's own box bounds every displacement INSIDE it, which is what
+    ``Resample.measured_region_source`` relies on; this asks whether the bound still holds at the
+    faces, where the interpolator blends nodes from outside the box.
+    """
+    extents = geometry.coarse_field_extents
+    parity = (-1.0) ** sum(
+        np.arange(extent).reshape([-1 if axis == index else 1 for axis in range(geometry.rank)])
+        for index, extent in enumerate(extents)
+    )
+    return np.stack([weight * _COARSE_FIELD_BOUND * parity for weight in (1.0, -0.7, 0.4)[: geometry.rank]]).astype(
+        np.float32
+    )
+
+
 def attributes(geometry: Geometry, group: str) -> Attribute:
     """The metadata a group is stored with, and so what a declaration about it is handed."""
     attribute = Attribute()
-    origins = {"Reference": geometry.reference_origin, "Field": geometry.field_origin}
-    spacings = {"Reference": geometry.reference_spacing, "Field": geometry.field_spacing}
+    origins = {
+        "Reference": geometry.reference_origin,
+        "Field": geometry.field_origin,
+        "CoarseField": geometry.field_origin,
+    }
+    spacings = {
+        "Reference": geometry.reference_spacing,
+        "Field": geometry.field_spacing,
+        "CoarseField": geometry.coarse_field_spacing,
+    }
     directions = {"Oblique": geometry.oblique, "Permuting": geometry.permuting}
     attribute["Origin"] = np.asarray(origins.get(group, geometry.origin))
     attribute["Spacing"] = np.asarray(spacings.get(group, geometry.spacing))
@@ -469,6 +522,14 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
             # resampler), ~ulp on the device (grid_sample's normalised coordinates): the atol says so.
             StageCase(
                 Resample(reference=CASE_NAME, reference_group="Reference", field_group="Field"),
+                atol=REGRID_ATOL,
+            ),
+            # The same stage against a field that is COARSE and STEEP. A region sizes its source
+            # window from the field values inside its own box, which bounds every displacement the
+            # box contains; at the box's FACES the interpolator blends nodes from outside it, and a
+            # field that reverses sign between adjacent nodes is what makes the two differ.
+            StageCase(
+                Resample(reference=CASE_NAME, reference_group="Reference", field_group="CoarseField"),
                 atol=REGRID_ATOL,
             ),
             StageCase(Resample(transforms={"transform": True}), atol=REGRID_ATOL, sweep=stored_map),

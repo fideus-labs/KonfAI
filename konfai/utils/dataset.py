@@ -336,7 +336,10 @@ class Attribute(dict[str, Any]):
             return str(super().__getitem__(f"{key}_{i - 1}"))
         if key in super().keys():
             return str(super().__getitem__(key))
-        raise NameError(f"{key} not in cache_attribute")
+        raise DatasetManagerError(
+            f"'{key}' is not in the case's attributes.",
+            "A stage reads a statistic an earlier one records: check the chain's order.",
+        )
 
     def __setitem__(self, key: str, value: Any) -> None:
         result = _attribute_text(value)
@@ -351,7 +354,10 @@ class Attribute(dict[str, Any]):
             return super().pop(f"{key}_{i - 1}")
         if key in super().keys():
             return super().pop(key)
-        raise NameError(f"{key} not in cache_attribute")
+        raise DatasetManagerError(
+            f"'{key}' is not in the case's attributes.",
+            "A stage reads a statistic an earlier one records: check the chain's order.",
+        )
 
     @staticmethod
     def _parse_array(text: str) -> np.ndarray:
@@ -390,6 +396,18 @@ _STATISTICS_CHUNK_ELEMENTS = 8_000_000
 #: Blocks a scan holds at its peak: the map of the one being read, its copy, and the copy the fold has
 #: not released yet, a generator reading the next while its caller still names the last. Measured at
 #: 95.6 MiB of resident set for a 30.5 MiB block over a 78 MiB case.
+#:
+#: The scan itself keeps its side of the bargain: 95.4 / 96.0 / 67.1 / 34.4 MiB held over 512 / 128 /
+#: 64 / 32 MiB declared, so it is under the budget at 128 and above (where :data:`_STATISTICS_CHUNK_
+#: ELEMENTS` caps it) and about 1.1x over at 64 and 32. What a GLOBAL_STAT ROUTE holds is more: 183
+#: MiB over the floor at 128 MiB declared, against the 154 the plan announces (regions 104 + engine
+#: 32 + cache 18), so 1.19x. The scan frees (RSS falls back between the phases) and the sweep then
+#: peaks on top of a residue.
+#:
+#: Not chased further here, and the reason is the instrument: ``VmHWM`` is a high-water mark of the
+#: WHOLE resident set, so it cannot be compared with the ``RssAnon``/``RssFile`` split, which is
+#: instantaneous -- and it is anonymous memory alone that an OOM kill weighs. Attributing this needs
+#: a sampler for peak anonymous bytes across the phases, not another reading of the mark.
 _STATISTICS_BLOCKS_IN_FLIGHT = 3
 #: The bytes a scanned element is priced at when the source's own size is not known: what everything
 #: else the budget sizes prices an element at. A block is the store's OWN dtype, never a cast copy,
@@ -775,7 +793,10 @@ def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
         # continues on the CPU). This keeps every transform usable regardless of the volume's device.
         data = data.detach().cpu().numpy()
     if not is_an_image(attributes):
-        raise NameError("Data is not an image")
+        raise DatasetManagerError(
+            "The entry is not an image.",
+            "This reader serves volumes; a transform or a point set is read by its own backend.",
+        )
     if data.dtype == np.float16:
         # ITK has no half-float pixel type (GetImageFromArray rejects float16), so widen to float32 --
         # exact and lossless. The streamed .mha writer widens the same way, so both write identical bytes.
@@ -2285,7 +2306,10 @@ class Dataset:
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             path = self._resolve_data_path(name)
             if path is None:
-                raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
+                raise DatasetManagerError(
+                    f"'{name}' is not in '{self.filename}'.",
+                    "Check the case name and the group it is looked up under.",
+                )
             attributes = Attribute()
             if path.endswith(".itk.txt"):
                 datas = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
@@ -2326,7 +2350,10 @@ class Dataset:
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             path = self._resolve_data_path(name)
             if path is None:
-                raise NameError(f"Data '{name}' not found in dataset '{self.filename}'.")
+                raise DatasetManagerError(
+                    f"'{name}' is not in '{self.filename}'.",
+                    "Check the case name and the group it is looked up under.",
+                )
 
             if path.endswith(".npy"):
                 data = np.load(path, mmap_mode="r")[slices]
@@ -2560,7 +2587,10 @@ class Dataset:
                     _recover_orphaned_backup(Path(candidate))
                     if os.path.isdir(candidate):  # recovered here, or published by whoever won the race
                         return candidate
-            raise NameError(f"OME-Zarr group '{name}' not found in '{self.filename}'.")
+            raise DatasetManagerError(
+                f"The OME-Zarr group '{name}' is not in '{self.filename}'.",
+                "Check the group name against the store's own arrays.",
+            )
 
         def _listed_as(self, name: str) -> str | None:
             """Where ``name``'s store sits when the directory spells its suffix in another case,
@@ -2736,7 +2766,7 @@ class Dataset:
             try:
                 self._path(f"{group}/{name}" if name else group)
                 return True
-            except NameError:
+            except DatasetManagerError:
                 return False
 
         def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
@@ -2899,9 +2929,21 @@ class Dataset:
                     return candidate
             return f"{self.filename}{name}.h5"
 
+        def _read_path(self, name: str) -> str:
+            """The entry's file for a READ: a missing entry is the structured refusal, never a
+            synthesized path sitk.ReadTransform turns into its own RuntimeError. ``is_exist`` keeps
+            ``_path``, whose answer for a missing entry is a path that does not exist."""
+            path = self._path(name)
+            if not os.path.exists(path):
+                raise DatasetManagerError(
+                    f"The entry '{name}' is not in '{self.filename}'.",
+                    "Check the groups_src spelling and that the case carries every group it names.",
+                )
+            return path
+
         def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
             header = None
-            if h5py.is_hdf5(self._path(name)):
+            if h5py.is_hdf5(self._read_path(name)):
                 with self._field_file(name) as file:
                     header = self._field_header(file)
                     if header is not None:
@@ -2912,7 +2954,7 @@ class Dataset:
                         # file keeps ITK's double, the pipeline does not.
                         shape, attributes = header
                         return self._field_region(file, shape[1:], (slice(None),) * 4), attributes
-            transform = sitk.ReadTransform(self._path(name))
+            transform = sitk.ReadTransform(self._read_path(name))
             attributes = Attribute()
             if "DisplacementFieldTransform" in transform.GetName():  # a field in a text transform file
                 field = sitk.DisplacementFieldTransform(transform).GetDisplacementField()
@@ -2934,7 +2976,7 @@ class Dataset:
         def _field_file(self, name: str) -> Iterator[Any]:
             """The entry's HDF5 file off the process's read pool: opened once per file, held while
             a region is read, replaced by the pool when the file is rewritten."""
-            path = self._path(name)
+            path = self._read_path(name)
             with _get_h5_file_lock(path):
                 yield _h5_read_pool.get(path).file
 
@@ -3003,7 +3045,7 @@ class Dataset:
         def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
             """A region of a displacement entry, decoded from the parameters it maps to alone: the
             header and the region come off one pooled handle, so a region read opens nothing."""
-            if h5py.is_hdf5(self._path(name)):
+            if h5py.is_hdf5(self._read_path(name)):
                 with self._field_file(name) as file:
                     header = self._field_header(file)
                     if header is not None and len(slices) == 4:
@@ -3409,18 +3451,32 @@ class Dataset:
         ``action`` receives the backend and the entry's coordinates INSIDE that file: a directory
         dataset stores one case per file, addressed by ``name``, with the entry keyed by the group
         path's last component, so the coordinates are ``("", group)`` there and ``(groups, name)``
-        on a single-file dataset. Raises ``NameError`` when the dataset or the entry is missing.
+        on a single-file dataset. Raises ``DatasetManagerError`` when the dataset or the entry is missing.
         """
         if not self.exists_on_disk():
-            raise NameError(f"Dataset {self.filename} not found")
+            raise DatasetManagerError(
+                f"The dataset '{self.filename}' does not exist.",
+                "Check 'dataset_filenames' and the path it names.",
+            )
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
                 path = self._case_path(sub_directory, name)
                 if path is not None:
                     with self._file(path, True) as file:
                         return action(file, "", groups.split("/")[-1])
-            raise NameError(f"Dataset entry '{groups}/{name}' not found in {self.filename}.")
+            raise DatasetManagerError(
+                f"The entry '{groups}/{name}' is not in '{self.filename}'.",
+                "Check the groups_src spelling and that the case carries every group it names.",
+            )
         with self._file(self.filename, True) as file:
+            # A wildcard group is expanded by get_names, as is_dataset_exist resolves it; is_exist
+            # would take the '*' literally.
+            exists = name in file.get_names(groups) if "*" in groups else file.is_exist(groups, name)
+            if not exists:
+                raise DatasetManagerError(
+                    f"The entry '{groups}/{name}' is not in '{self.filename}'.",
+                    "Check the groups_src spelling and that the case carries every group it names.",
+                )
             return action(file, groups, name)
 
     def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
@@ -3441,7 +3497,7 @@ class Dataset:
     def plan_region_reads(self, groups: str, name: str, windows: Sequence[tuple[slice, ...]]) -> None:
         """Declare the region reads about to happen on ``(groups, name)``, in order. A backend that
         can use it does; the rest ignore it, and so does a caller that declares nothing."""
-        with contextlib.suppress(NameError):
+        with contextlib.suppress(DatasetManagerError):
             self._resolve_entry(groups, name, lambda file, _group, entry: file.plan_region_reads(entry, windows))
 
     def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
@@ -3531,7 +3587,7 @@ class Dataset:
         """
         try:
             return self._resolve_entry(groups, name, lambda file, _, entry: file.bounded_region_reads(entry))
-        except NameError:
+        except DatasetManagerError:
             return False
 
     def read_data_statistics(
@@ -3550,7 +3606,10 @@ class Dataset:
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:
         if not self.exists_on_disk():
-            raise NameError(f"Dataset {self.filename} not found")
+            raise DatasetManagerError(
+                f"The dataset '{self.filename}' does not exist.",
+                "Check 'dataset_filenames' and the path it names.",
+            )
         data, attribute = self.read_data(group, name)
         return data_to_transform(data, attribute, name)
 

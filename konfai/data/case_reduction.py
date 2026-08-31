@@ -106,7 +106,8 @@ class ReductionPlan:
     working_multiple: float = 0.0
     #: Volumes-worth the MEMBER CHAIN allocates beside the region it is producing
     #: (``DatasetManager.working_multiple()``, the largest ``Transform.working_multiple`` on the
-    #: chain: ``Resample`` declares 3.0 for its sampling grid). Distinct from ``working_multiple``,
+    #: chain: ``Resample`` declares 6.5 for its sampling grid, plus what the case's own field costs
+    #: through ``case_working_multiple``). Distinct from ``working_multiple``,
     #: which is the OPERATOR's: a fold is a chain replay per member and then an accumulate, and
     #: pricing only the second half under-states a resampling cohort by the first. Charged ONCE
     #: whatever the cohort's size, because ``_fold`` accumulates the members one after another, so

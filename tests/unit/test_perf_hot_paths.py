@@ -106,6 +106,9 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
         def get_infos(self, groups, name):
             return [4, 5, 6], Attribute({"Spacing": "1.0 1.0 1.0"})
 
+        def is_exist(self, groups, name):
+            return True
+
     monkeypatch.setattr(dataset_module.Dataset, "File", _FakeFile)
 
     first = ds.get_infos("g", "n")

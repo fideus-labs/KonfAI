@@ -67,9 +67,6 @@ _NEEDS_MORE_THAN_A_PAYLOAD = {
     "HistogramMatching": "a reference dataset to match the histogram against",
     "KonfAIInference": "a model to run",
     "Resample": "a reference dataset to resample onto",
-    # torch.softmax has no integer kernel, and a store serves int16. A chain that softmaxes a
-    # stored integer volume fails on the tensor, with torch's message and not KonfAI's.
-    "Softmax": "a floating-point input",
 }
 
 

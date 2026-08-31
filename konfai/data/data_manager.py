@@ -164,7 +164,7 @@ def _check_patch_transform_invertible(
     attribute, so at prediction the finalize inverse, which seeds every patch from the CASE attribute
     and pops the statistic: has nothing to pop. Nor could it: the reassembled volume was normalised
     patch by patch with different coefficients, so a single case-level inverse cannot un-apply it. Refuse
-    here, at config time, rather than fail deep in the inverse with a bare ``NameError``.
+    here, at config time, rather than fail deep in the inverse with a lookup error.
 
     A case-level ``transforms`` entry that derives the SAME statistic rescues it: run once on the whole
     volume it caches that statistic on the case attribute (``Standardize(lazy=True)`` caches Mean/Std and
