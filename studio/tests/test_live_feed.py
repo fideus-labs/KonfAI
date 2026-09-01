@@ -63,9 +63,8 @@ def feed_events(session: Path, monkeypatch: pytest.MonkeyPatch, root: Path) -> l
                     break
 
         try:
-            # wait_for, not asyncio.timeout: the package supports 3.10 and the latter is 3.11+.
             await asyncio.wait_for(drain(), timeout=2)
-        except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             pass
         finally:
             await stream.aclose()
@@ -657,7 +656,7 @@ def test_a_status_change_re_announces_the_job_without_wiping_its_console(
 
         try:
             await asyncio.wait_for(drain(), timeout=3)
-        except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             pass
         finally:
             await stream.aclose()

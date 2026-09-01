@@ -8,7 +8,7 @@ dynamic = ["version", "dependencies"]
 description = "Standalone KonfAI Apps package with local and remote app execution"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }

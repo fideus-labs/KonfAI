@@ -38,7 +38,7 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
 )
 from konfai.utils.errors import TransformError  # noqa: E402
 from konfai.utils.ITK import read_displacement_field  # noqa: E402
-from konfai.utils.ome_zarr import _zarr_v3_available, is_displacement_field, write_ome_zarr  # noqa: E402
+from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr  # noqa: E402
 
 
 def _write_displacement_field(field: "sitk.Image", dest: Path) -> None:
@@ -58,13 +58,6 @@ def _write_displacement_field(field: "sitk.Image", dest: Path) -> None:
     else:
         sitk.WriteImage(field, str(dest))
 
-
-# The OME-Zarr side of these tests writes an RFC-5 field, a zarr v3 store that zarr 2.x
-# (Python 3.10) cannot write.
-pytestmark = pytest.mark.skipif(
-    not _zarr_v3_available(),
-    reason="NGFF RFC-5 displacement fields need a zarr v3 store (zarr>=3, Python>=3.11)",
-)
 
 SPACING = (1.5, 1.5, 2.0)
 ORIGIN = (7.0, -3.0, 10.0)

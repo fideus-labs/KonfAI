@@ -113,13 +113,13 @@ def test_a_stepped_selection_falls_back_instead_of_returning_a_wrong_window(tmp_
 def test_the_konfai_sidecar_is_read_once_and_not_once_per_region(tmp_path: Path) -> None:
     """It is metadata, and a streamed run asks for it once per region: re-opening the store each
     time is a read it never needed."""
-    from konfai.utils.ome_zarr import _konfai_attributes, clear_ome_zarr_cache
+    from konfai.utils.ome_zarr import _multiscales, clear_ome_zarr_cache
 
     store = _big_endian_store(tmp_path / "big_endian.ome.zarr", _volume())
     clear_ome_zarr_cache()
     for row in range(4):
         read_ome_zarr_data_slice(store, (slice(None), slice(row, row + 1), slice(None), slice(None)))
-    assert _konfai_attributes.cache_info() == (3, 1, 8, 1), "one read of the sidecar, three regions"
+    assert _multiscales.cache_info().misses == 1, "one parse of the store, however many regions"
 
 
 def test_info_publishes_the_shape_the_reader_indexes(tmp_path: Path) -> None:

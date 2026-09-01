@@ -12,7 +12,7 @@ cloned KonfAI checkout.**
 
 ## Prerequisites
 
-- **Python 3.10 or later**: the minimum version declared in `pyproject.toml`
+- **Python 3.11 or later**: the minimum version declared in `pyproject.toml`
 - **Pixi**: install once with:
 
   ```bash
@@ -140,7 +140,7 @@ pixi run test -- tests/unit/test_config.py -v
 ### What CI runs
 
 The GitHub Actions workflow in `.github/workflows/konfai_ci.yml` runs `pytest`
-across Python `3.10` to `3.13` on Linux, macOS, and Windows.
+across Python `3.11` to `3.13` on Linux, macOS, and Windows.
 
 ### The konfai-apps test suite
 

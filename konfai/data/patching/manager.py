@@ -1352,16 +1352,16 @@ class DatasetManager:
         window the landing has no extent for."""
         return [int(extent) for extent in plans[0].in_shape] if plans else [int(extent) for extent in spatial]
 
-    def region_reads(self, rows: int, a: int = 0) -> tuple[int, int] | None:
-        """What a decomposition into ``rows``-row regions costs this chain in source voxels:
-        ``(excess, total)``. ``None`` when the chain cannot stream.
+    def region_reads(self, rows: int, a: int = 0) -> "BlockReads | None":
+        """What a decomposition into ``rows``-row regions costs this chain in source voxels.
+        ``None`` when the chain cannot stream.
 
-        ``excess`` is what the widest region's read materialises ABOVE the window it asked for --
-        a chunked store decodes whole blocks, so a window is served by the block-aligned hull that
-        covers it. Zero on a store that serves exactly what it is asked for, which is what makes
-        this safe to charge on top of a price already counting the window.
-
-        ``total`` is what all the regions read together, the figure a caller compares heights on.
+        The same aggregates the sweep sizes against (:class:`BlockReads`): ``widest_pull``, the
+        source window one region materialises -- which for a chain that resamples is not the region
+        and is what a fold must hold while it produces one; ``widest_excess``, what the store
+        decodes above that window, a chunked one serving a window by the block-aligned hull that
+        covers it; and ``total``, what all the regions read together, the figure a caller compares
+        heights on.
 
         Closed form, from the chain's own pull maps and the store's metadata: no voxel is read.
         """
@@ -1371,8 +1371,7 @@ class DatasetManager:
         segment = segments[-1]
         spatial = [int(extent) for extent in segment.landing]
         tile = [max(1, min(int(rows), spatial[0])), *spatial[1:]]
-        reads = self.block_reads(spatial, tile, segment.plans)
-        return (reads.widest_excess, reads.total)
+        return self.block_reads(spatial, tile, segment.plans)
 
     def _grid_rows(self, cap: int) -> list[int]:
         """The heights that land on the store's block grid, up to ``cap``.

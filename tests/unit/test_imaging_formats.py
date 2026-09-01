@@ -312,22 +312,6 @@ class TestOmeZarrRequireZarr:
             with pytest.raises(DatasetManagerError, match="zarr is required"):
                 ome_zarr._require_zarr()
 
-    def test_displacement_field_raises_without_zarr_v3(self, tmp_path: Path) -> None:
-        """An RFC-5 field is an NGFF >= 0.5 store, which only zarr v3 can write. The check must fire
-        before ngff-zarr is handed the version, so what surfaces on zarr 2.x names the requirement
-        instead of the ValueError ngff-zarr raises from inside its writer."""
-        pytest.importorskip("zarr")
-        from konfai.utils import ome_zarr
-
-        field = np.zeros((3, 2, 3, 4), dtype=np.float32)
-        with patch.object(ome_zarr, "_zarr_v3_available", lambda: False):
-            with pytest.raises(DatasetManagerError, match="zarr v3"):
-                ome_zarr.write_ome_zarr(tmp_path / "DVF.ome.zarr", field, displacement_field=True)
-
-        # The guard is specific to RFC-5: an ordinary image is a 0.4 store and stays writable.
-        ome_zarr.write_ome_zarr(tmp_path / "Image.ome.zarr", field)
-        assert (tmp_path / "Image.ome.zarr").is_dir()
-
 
 class TestDatasetImagingBackends:
     def test_ome_zarr_dataset_round_trip_and_patch_read(self, tmp_path: Path) -> None:

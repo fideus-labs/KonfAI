@@ -516,8 +516,6 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     try:
         import zarr
 
-        from konfai.utils.ome_zarr import _zarr_v3_available
-
         # A THIRD of the share: a pipelined sweep runs three of these at once, the decode of the
         # region being read, the assembly of the one before it, the encode of the one being written.
         # Measured with the chain off the reading thread: 24 cores, ExaSPIM 513x1331x1776 through a stored affine, two runs per point,
@@ -531,7 +529,7 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
         # costs the reader its own throughput (read busy 4.4-4.6 s at 8, 5.1-5.2 s at 24). A share
         # of a few cores keeps them all, up to four: a third of it is one chunk in flight, and on a
         # remote root that is the whole of the read's parallelism.
-        if _zarr_v3_available():  # 2.x has no config object, and no async reader to share the cores with
+        if hasattr(zarr, "config"):  # 2.x has no config object, and no async reader to share the cores with
             zarr.config.set({"async.concurrency": max(min(cores, 4), cores // 3)})
     except ImportError:
         pass

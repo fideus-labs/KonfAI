@@ -35,7 +35,6 @@ pytest.importorskip("ngff_zarr")
 
 import zarr
 from konfai.utils.ome_zarr import (
-    _zarr_v3_available,
     clear_ome_zarr_cache,
     create_ome_zarr_store,
     get_ome_zarr_info,
@@ -159,10 +158,6 @@ def test_creating_a_store_writes_no_pixel_bytes(tmp_path: Path) -> None:
     assert written < metadata_only, f"{written} bytes written for an untouched store"
 
 
-@pytest.mark.skipif(
-    not _zarr_v3_available(),
-    reason="NGFF RFC-5 displacement fields need a zarr v3 store (zarr>=3, Python>=3.11)",
-)
 def test_a_streamed_displacement_field_says_that_it_is_one(tmp_path: Path) -> None:
     """A field written region by region must be as self-describing as one written whole.
 
@@ -187,3 +182,20 @@ def test_a_store_is_not_a_field_unless_it_was_asked_to_be(tmp_path: Path) -> Non
 
     clear_ome_zarr_cache()
     assert not is_displacement_field(tmp_path / "image.ome.zarr")
+
+
+def test_stores_keep_the_byte_shuffled_blosc_compressor(tmp_path: Path) -> None:
+    """The zarrista writer's default is zstd-0; measured on a CT-like uint16 volume that costs
+    +19 % of disk and ~+11 % on the streamed read against the byte-shuffled lz4 every 1.8.2 store
+    carries, so the v2 compressor is pinned, and an appended level takes level 0's own."""
+    from konfai.utils.ome_zarr import append_ome_zarr_levels, write_ome_zarr
+
+    volume = np.arange(1 * 16 * 16 * 16, dtype=np.uint16).reshape(1, 16, 16, 16)
+    store = tmp_path / "v.ome.zarr"
+    write_ome_zarr(store, volume, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0])
+    append_ome_zarr_levels(store, [4])
+    group = zarr.open_group(str(store), mode="r")
+    for key in ("scale0/image", "scale1/image"):
+        compressor = group[key].metadata.to_dict().get("compressor")
+        assert compressor is not None and compressor["id"] == "blosc", (key, compressor)
+        assert compressor["cname"] == "lz4" and compressor["shuffle"] == 1, (key, compressor)

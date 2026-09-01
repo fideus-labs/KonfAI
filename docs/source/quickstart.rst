@@ -17,7 +17,7 @@ first, so it is the shortest path to seeing KonfAI work.
 Install
 -------
 
-You need Python 3.10 or newer. A GPU makes it faster, and every command below
+You need Python 3.11 or newer. A GPU makes it faster, and every command below
 works with ``--cpu 1`` instead of ``--gpu 0``.
 
 .. code-block:: bash

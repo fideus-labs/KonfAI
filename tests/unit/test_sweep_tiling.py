@@ -430,10 +430,10 @@ def test_a_region_read_is_charged_only_for_what_the_block_grid_adds(
     a region under one stored block decodes the block anyway and simply wastes more of it."""
     source, _volume = _sheared_fixture(tmp_path)
     manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
-    assert manager.region_reads(6)[0] == 0, "a store with no block grid adds nothing"
+    assert manager.region_reads(6).widest_excess == 0, "a store with no block grid adds nothing"
 
     _chunked(monkeypatch, (16, 128, 128))
     manager._read_granularity = patching_module._UNRESOLVED
-    assert manager.region_reads(16)[0] < manager.region_reads(4)[0], (
+    assert manager.region_reads(16).widest_excess < manager.region_reads(4).widest_excess, (
         "a region under one stored block wastes more of the block it decodes, not less"
     )

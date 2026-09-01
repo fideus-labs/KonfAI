@@ -20,6 +20,7 @@ What matters here is not that the median is right, it is that it is right while 
 never assembled, that a cases which does not agree on its grid is refused before anything is read,
 and that a chain continues after the reduction."""
 
+import dataclasses
 import itertools
 import time
 import weakref
@@ -845,6 +846,40 @@ def test_the_plan_prices_what_a_member_chain_holds_beside_its_region(tmp_path: P
         "a chain holding three volumes-worth per member region must price above one that holds none:"
         " the plan is what the region sizing is derived from, so a peak it under-states is not a bound"
     )
+
+
+def test_the_plan_prices_the_source_window_a_member_pulls(tmp_path: Path) -> None:
+    """A member's region is not its source: a chain that resamples reaches a box around it, and the
+    fold holds that box while it produces the region.
+
+    The fold priced the landed regions, the operator and the output, and charged nothing for the
+    pull -- so the sizing rested on a figure the run walked straight past. Measured on the bench's
+    own ``Mean +resample x5`` at a 256 MiB budget: the plan printed 127.63 MiB and the run peaked at
+    1332 MiB; charged, the same row peaks at 754 MiB for a plan of 115 MiB, and the run that cannot
+    fit is refused instead of overshooting.
+    """
+    resampled = _run(
+        tmp_path / "resampled", [Resample(spacing=[1.0, 1.0, 2.0])], Reduce(operator="Mean", output="t"), []
+    )[0]
+    plan = resampled.plan()
+    assert plan.pull_bytes > 0, "a resampling member pulls a source window, and one is resident"
+    assert plan.peak_bytes - dataclasses.replace(plan, pull_bytes=0).peak_bytes >= plan.pull_bytes, (
+        "the peak the sizing is derived from must carry the window, or it is not a bound"
+    )
+
+
+def test_a_budget_no_region_fits_is_refused_rather_than_cut_to_one_row(tmp_path: Path) -> None:
+    """Below one row there is nothing to cut, and no whole-volume path to fall back to: the sizing
+    stops at one row and the plan reports a peak above the budget, which is what the workflow
+    refuses on. Sizing it to something that does not fit and running anyway is what a linear
+    extrapolation through one height used to do."""
+    resampled = _run(tmp_path / "tight", [Resample(spacing=[1.0, 1.0, 2.0])], Reduce(operator="Mean", output="t"), [])[
+        0
+    ]
+    resampled.fit_budget(4096)
+
+    assert resampled.slab_rows == 1, "one row is the floor, and the plan then says it does not fit"
+    assert resampled.plan().peak_bytes > 4096, "the peak must exceed the budget for the refusal to fire"
 
 
 def test_a_generous_budget_stops_at_the_plateau_and_never_below_the_slab_floor(tmp_path: Path) -> None:

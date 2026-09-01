@@ -29,7 +29,6 @@ from __future__ import annotations
 import importlib
 import inspect
 import os
-import types
 from typing import Any
 
 from konfai_mcp.classpaths import public_module
@@ -115,10 +114,6 @@ def _list_subclasses(module_path: str, base_name: str) -> list[dict[str, Any]]:
     base = getattr(module, base_name)
     components: list[dict[str, Any]] = []
     for name, obj in inspect.getmembers(module, inspect.isclass):
-        # A subscripted builtin generic (konfai.data.geometry.SpatialStages) passes isclass on
-        # Python 3.10 but is not a class there, and issubclass refuses it.
-        if isinstance(obj, types.GenericAlias):
-            continue
         if obj is base or not issubclass(obj, base):
             continue
         if inspect.isabstract(obj) or name.startswith("_"):

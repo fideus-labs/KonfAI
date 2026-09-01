@@ -1730,10 +1730,10 @@ _SNAPSHOT_REPORT = """\
   CT -> C (Clip -> Expand -> Brightness -> Write <tmp>/out_c:h5): EXPAND 3 case(s) -> 9 cop(ies): 5 STREAM (shared read pass), 1 STREAM (own pass), 0 WHOLE-VOLUME, 3 SKIP (copy already written)
     (1 cop(ies)) own pass: the only copy of this case still to write; a shared pass with one member is its own sweep.
   CT -> D (Clip -> Reduce -> Write <tmp>/out_d:h5): REDUCE 3 case(s) -> 1 output 'atlas': REDUCE
-    4.5 resident region(s) of 4 row(s) = 0.00 GiB  (incremental accumulator)
-    reads: 1 of 3 member(s) sit on nii.gz, which decodes the whole volume behind every region read: 2 decodes per member (one per region), 2 in all
+    4.5 resident region(s) of 3 row(s) = 0.00 GiB  (incremental accumulator)
+    reads: 1 of 3 member(s) sit on nii.gz, which decodes the whole volume behind every region read: 3 decodes per member (one per region), 3 in all
     put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first
-    peak ~= 72.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
+    peak ~= 66.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
     cases: CASE_000, CASE_001, CASE_002
   CT -> E (Clip -> Standardize -> Reduce -> Write <tmp>/out_e:h5): REDUCE 3 case(s) -> 1 output 'atlas': REFUSED
     case 'CASE_000': stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.

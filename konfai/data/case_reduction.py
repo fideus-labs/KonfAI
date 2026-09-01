@@ -113,6 +113,12 @@ class ReductionPlan:
     #: whatever the cohort's size, because ``_fold`` accumulates the members one after another, so
     #: only one chain is ever replaying.
     chain_multiple: float = 0.0
+    #: The source window ONE member's region pulls (:attr:`~konfai.data.patching.BlockReads`
+    #: ``widest_pull``). For a chain that resamples, a region's source is not the region -- a
+    #: rotated or scaled map reaches a box around it -- and the chain holds that box while it
+    #: produces the region. Charged ONCE, like the reads below: the members are folded in turn, so
+    #: one chain is pulling at a time. Zero for a chain whose region is its own source.
+    pull_bytes: int = 0
     #: What ONE member's region makes the store decode ABOVE the window it asked for
     #: (:meth:`~konfai.data.patching.DatasetManager.region_reads`). A chunked backend decodes whole
     #: blocks, so below one stored block this is the SAME figure at every height: it is charged flat
@@ -180,15 +186,15 @@ class ReductionPlan:
         # one region holds, so the peak is the same whether there are one or two passes.
         member_bytes = self._region_bytes(self.source_channels or self.channels)
         members = self.buffered_regions * member_bytes
-        # The chain replaying a member holds its own buffers beside the region it lands, and it is
-        # the members' own width it holds them at. Once: the members are accumulated in turn.
-        # Plus what the store decodes to serve ONE member's region: the chain's buffers are built
-        # over the window it asked for, the decode materialises the blocks that window falls in, and
-        # the two are resident together. One read is in flight at a time (the members accumulate in
-        # turn), so it is charged once.
+        # Beside the buffered regions, the one replaying chain holds three things at once: the
+        # source window it pulled, its own working buffers, and what the store decoded above that
+        # window. The buffers are built over the larger of the window and the region it lands, the
+        # sweep prices its blocks the same way, and all three are charged once because the members
+        # are folded in turn -- one chain pulls, allocates and decodes at a time.
         return int(
             members * (1 + self.working_multiple)
-            + self.chain_multiple * member_bytes
+            + self.chain_multiple * max(member_bytes, self.pull_bytes)
+            + self.pull_bytes
             + self.region_bytes
             + self.read_bytes
         )
@@ -359,14 +365,6 @@ class CaseReduction:
         if not budget_bytes or budget_bytes <= 0:
             return
         plan = self.plan()
-        # What the store decodes does NOT fall with the height: below one stored block the same
-        # blocks are decoded whatever the region asks for, and the fold simply asks more often. It
-        # is taken off the allowance whole, never divided by the rows -- dividing it is what made a
-        # small budget cut the regions, decode the same bytes twice as often, and hold MORE.
-        flat = plan.read_bytes
-        row_bytes = (plan.peak_bytes - flat) / max(1, plan.slab_rows)
-        if row_bytes <= 0:
-            return
         # Past the plateau a taller region reads no less and holds more, so that is the ceiling
         # when the caller names none; a chain that cannot price one falls back to the output height.
         ceiling = int(cap) if cap is not None else self._plateau_rows(plan)
@@ -377,8 +375,41 @@ class CaseReduction:
         allowance = budget_share("regions", budget_bytes) or 0.0
         if self.keeps_folds(plan):
             allowance -= self._folded_output_bytes(plan)
-        allowance -= flat
-        self.slab_rows = max(1, min(ceiling, int(max(row_bytes, allowance) / row_bytes)))
+        self.slab_rows = self._tallest_affordable(ceiling, allowance)
+
+    def _tallest_affordable(self, ceiling: int, allowance: float) -> int:
+        """The tallest region up to ``ceiling`` whose PRICED plan fits ``allowance``.
+
+        Bisected on the price itself rather than extrapolated from one height, because none of what
+        a region costs scales with its rows: a chain's source window is not its region (a halo is a
+        constant, a rotated map's box grows with the diagonal), and what a chunked store decodes
+        does not fall with the height at all -- below one stored block the same blocks are decoded
+        whatever the region asks for. A straight line through one sample sized a fold at 2.6x the
+        budget it printed.
+
+        One row when nothing fits: the plan then reports a peak above the budget and the workflow
+        refuses, which is the only honest answer, there being no whole-volume path to fall back to.
+        """
+        ceiling = max(1, int(ceiling))
+        if self._priced_peak(ceiling) <= allowance:
+            return ceiling
+        low, high = 1, ceiling
+        while low < high:
+            middle = (low + high + 1) // 2
+            if self._priced_peak(middle) <= allowance:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def _priced_peak(self, rows: int) -> int:
+        """What the plan prices at ``rows``, leaving the height the sizing is working from alone."""
+        held = self.slab_rows
+        try:
+            self.slab_rows = rows
+            return self.plan().peak_bytes
+        finally:
+            self.slab_rows = held
 
     def keeps_folds(self, plan: ReductionPlan) -> bool:
         """Whether the stat pass hands its folds to the write pass instead of re-folding them.
@@ -528,6 +559,7 @@ class CaseReduction:
 
     def plan(self) -> ReductionPlan:
         reference = self.reference
+        pull_bytes, read_bytes = self._member_read_bytes(int(reference.base_shape[0]))
         return ReductionPlan(
             output=self.reduce.output,
             cases=[manager.name for manager in self.managers],
@@ -542,24 +574,30 @@ class CaseReduction:
             working_multiple=float(self.operator.working_multiple_for(len(self.managers))),
             # The worst member's, because the fold is paced by whichever chain holds the most.
             chain_multiple=max((float(manager.working_multiple()) for manager in self.managers), default=0.0),
-            read_bytes=self._member_read_bytes(int(reference.base_shape[0])),
+            pull_bytes=pull_bytes,
+            read_bytes=read_bytes,
             stat_pass=self._needs_stat_pass(),
             unbounded=self._unbounded_members(),
             refusal=self._first_refusal(),
         )
 
-    def _member_read_bytes(self, channels: int) -> int:
-        """What the widest member's region makes its store decode, at the current height.
+    def _member_read_bytes(self, channels: int) -> tuple[int, int]:
+        """What one member's region costs its store at the current height, in bytes: the source
+        window it pulls, and what the store decodes above that window.
 
-        The fold is paced by whichever member decodes the most, and one read is in flight at a
-        time. ``None`` from a manager (a chain that cannot answer) contributes nothing: the peak
-        then says what it did before, which is what the run-time probe is there to correct.
+        The fold is paced by whichever member costs the most, and one read is in flight at a time,
+        so both are the widest member's and both are charged once. ``None`` from a manager (a chain
+        that cannot answer) contributes nothing: the peak then says what it did before, which is
+        what the run-time probe is there to correct.
         """
         from konfai.data.patching import _SWEEP_ELEMENT_BYTES
 
         reads = [manager.region_reads(self.slab_rows) for manager in self.managers]
-        widest = max((excess for read in reads if read is not None for excess, _total in [read]), default=0)
-        return int(widest * max(1, channels) * _SWEEP_ELEMENT_BYTES)
+        present = [read for read in reads if read is not None]
+        element = max(1, channels) * _SWEEP_ELEMENT_BYTES
+        pull = max((read.widest_pull for read in present), default=0)
+        excess = max((read.widest_excess for read in present), default=0)
+        return int(pull * element), int(excess * element)
 
     # --------------------------------------------------------------- execution
 

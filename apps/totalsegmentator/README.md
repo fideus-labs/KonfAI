@@ -1,6 +1,6 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/totalsegmentator-konfai.svg?color=blue)](https://pypi.org/project/totalsegmentator-konfai/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml)
 [![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_apps_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_apps_ci.yml)
 [![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://www.arxiv.org/abs/2508.09823)

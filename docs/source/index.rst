@@ -24,7 +24,7 @@ KonfAI
            <div class="kf-herometa">
              <span><b>pip</b> install "konfai[imaging]"</span>
              <span><b>Apache-2.0</b></span>
-             <span><b>Python</b> 3.10+</span>
+             <span><b>Python</b> 3.11+</span>
            </div>
          </div>
 

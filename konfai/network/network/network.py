@@ -24,14 +24,8 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import nullcontext
 from functools import partial
-from typing import Any
+from typing import Any, Self
 
-from konfai.utils.dataset import Attribute
-
-try:
-    from typing import Self  # type: ignore[attr-defined]  # Python ≥ 3.11
-except ImportError:
-    from typing_extensions import Self  # Python ≤ 3.10
 import torch
 from torch._jit_internal import _copy_to_script_wrapper
 from torch.utils.checkpoint import checkpoint
@@ -39,10 +33,18 @@ from torch.utils.checkpoint import checkpoint
 from konfai import konfai_root
 from konfai.data.data_manager import BatchSample
 from konfai.data.patching import Accumulator, ModelPatch
-from konfai.network.network.base import NetState, PatchIndexed
+from konfai.network.network.base import (
+    NetState,
+    PatchIndexed,
+    accumulator_owner,
+    is_accumulated,
+    mark_accumulated,
+    strip_accumulated,
+)
 from konfai.network.network.loaders import LRSchedulersLoader, OptimizerLoader, TargetCriterionsLoader
 from konfai.network.network.measure import Measure
 from konfai.utils.clock import SweepClock
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State, get_device, get_gpu_memory
 
@@ -366,7 +368,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                                 ),
                             ):
                                 for ob in self._modulesArgs[name].out_branch:
-                                    if ob in module._modulesArgs[k.split(".")[0].replace(";accu;", "")].out_branch:
+                                    if ob in module._modulesArgs[strip_accumulated(k.split(".")[0])].out_branch:
                                         tmp.append(ob)
                                         branchs[ob] = out
                                 yield name + "." + k, out
@@ -880,7 +882,7 @@ class Network(ModuleArgsDict, ABC):
             buffer = []
             for i, patch_input in enumerate(patch_iterator):
                 for name, output_layer in super().named_forward(*patch_input, attributes=attributes):
-                    yield f";accu;{name}", output_layer
+                    yield mark_accumulated(name), output_layer
                     buffer.append((name.split(".")[0], output_layer))
                     if len(buffer) == 2:
                         if buffer[0][0] != buffer[1][0]:
@@ -923,7 +925,7 @@ class Network(ModuleArgsDict, ABC):
         it = 0
         debug = "KONFAI_DEBUG" in os.environ
         for name_tmp, output_layer in self.named_forward(*inputs, attributes=attributes):
-            name = name_tmp.replace(";accu;", "")
+            name = strip_accumulated(name_tmp)
             if debug:
                 if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
                     os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
@@ -937,13 +939,9 @@ class Network(ModuleArgsDict, ABC):
                     )
             it += 1
             if name in layers_name or name_tmp in layers_name:
-                if ";accu;" in name_tmp:
+                if is_accumulated(name_tmp):
                     if name not in output_layer_patch_indexed:
-                        network_name = (
-                            name_tmp.split(".;accu;")[-2].split(".")[-1]
-                            if ".;accu;" in name_tmp
-                            else name_tmp.split(";accu;")[-2].split(".")[-1]
-                        )
+                        network_name = accumulator_owner(name_tmp)
                         module = self
                         network = None
                         if network_name == "":
@@ -976,7 +974,7 @@ class Network(ModuleArgsDict, ABC):
                             yield name_tmp, output_layer, None
 
                 if name in layers_name:
-                    if ";accu;" in name_tmp:
+                    if is_accumulated(name_tmp):
                         yield name, output_layer, output_layer_patch_indexed[name]
                         output_layer_patch_indexed[name].index += 1
                         if output_layer_patch_indexed[name].is_full():

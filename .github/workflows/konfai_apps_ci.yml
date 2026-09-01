@@ -41,7 +41,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -70,9 +70,6 @@ jobs:
         run: |
           pip install -e ./konfai-apps
 
-      - name: Pin gloo to the loopback interface on macOS
-        if: runner.os == 'macOS'
-        run: echo "GLOO_SOCKET_IFNAME=lo0" >> "$GITHUB_ENV"
       - name: Run apps tests
         run: |
           python -m pytest -q konfai-apps/tests

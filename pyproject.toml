@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "A declarative execution engine for reproducible medical-imaging workflows"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
@@ -22,7 +22,6 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -58,7 +57,7 @@ itk = ["SimpleITK>=2.0"]
 hdf5 = ["h5py"]
 monitoring = ["nvidia-ml-py"]
 tensorboard = ["tensorboard"]
-imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr", "ngff-zarr>=0.38", "dask"]
+imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr>=3", "ngff-zarr>=0.45", "dask"]
 vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
@@ -66,7 +65,7 @@ ssim = ["scikit-image"]
 fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
-omezarr = ["zarr", "ngff-zarr>=0.38", "dask"]
+omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
 # Reading a dataset root from S3: s3fs is the fsspec implementation, aiohttp the transport
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
@@ -91,8 +90,8 @@ dev = [
   "SimpleITK>=2.0",
   "h5py",
   "pydicom",
-  "zarr",
-  "ngff-zarr>=0.38",
+  "zarr>=3",
+  "ngff-zarr>=0.45",
   "dask",
   "scikit-image",
   "onnx",
@@ -143,7 +142,7 @@ platforms = ["linux-64", "osx-arm64", "win-64"]
 konfai = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
-python = ">=3.10,<3.14"
+python = ">=3.11,<3.14"
 pip = "*"
 
 [tool.pixi.environments]
@@ -170,8 +169,8 @@ h5py = "*"
 tensorboard = "*"
 nvidia-ml-py = "*"
 pydicom = "*"
-zarr = "*"
-ngff-zarr = ">=0.38"
+zarr = ">=3"
+ngff-zarr = ">=0.45"
 dask = "*"
 scikit-image = "*"
 
@@ -191,7 +190,7 @@ check = { depends-on = ["lint", "format-check", "test", "test-apps"], descriptio
 # Feature: lint
 # ---------------------------------------------------------------------------
 [tool.pixi.feature.lint.dependencies]
-python = ">=3.10,<3.14"
+python = ">=3.11,<3.14"
 
 [tool.pixi.feature.lint.pypi-dependencies]
 ruff = "==0.15.2"
@@ -205,7 +204,7 @@ pre-commit-run = { cmd = "pre-commit run --all-files", description = "Run pre-co
 # Feature: docs
 # ---------------------------------------------------------------------------
 [tool.pixi.feature.docs.dependencies]
-python = ">=3.10,<3.14"
+python = ">=3.11,<3.14"
 
 [tool.pixi.feature.docs.pypi-dependencies]
 sphinx = ">=7.0"
@@ -255,7 +254,7 @@ check_untyped_defs = true
 # No `python_version`: mypy analyses as the interpreter it runs on, which is the only version whose
 # stubs are installed. Pinning it to the floor of `requires-python` makes mypy refuse to parse
 # NumPy's stubs (they use `type` statements) and a parse error inside a dependency stops the whole
-# analysis. Syntax newer than 3.10 is caught by ruff instead, which infers its target from
+# analysis. Syntax newer than 3.11 is caught by ruff instead, which infers its target from
 # `requires-python` (rule set `UP`).
 
 # ---------------------------------------------------------------------------

@@ -219,9 +219,6 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
     per group, so a caller's OME-Zarr moving registers against the ``.mha`` field every published
     preset declares."""
     ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
-    if not ome_zarr._zarr_v3_available():
-        pytest.skip("writing an OME-Zarr moving needs zarr 3")
-
     volume = np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)
     moving = tmp_path / "moving.ome.zarr"
     ome_zarr.write_ome_zarr(moving, volume[None], spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
