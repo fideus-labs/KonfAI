@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -62,7 +62,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
     def _isoformat(self, timestamp: float | None) -> str | None:
         if timestamp is None:
             return None
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
 
     def session_name(self) -> str:
         return self.workspace_layout.current_session or "default"

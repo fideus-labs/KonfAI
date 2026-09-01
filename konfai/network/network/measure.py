@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from konfai.metric.schedulers import Scheduler
+from konfai.network.network.base import strip_accumulated
 from konfai.network.network.loaders import CriterionsAttr, TargetCriterionsLoader
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
@@ -194,7 +195,7 @@ class Measure:
             modules.append(i)
 
         for output_group in self.outputs_criterions.keys():
-            if output_group.replace(";accu;", "") not in modules:
+            if strip_accumulated(output_group) not in modules:
                 raise MeasureError(
                     f"The output group '{output_group}' defined in 'outputs_criterions' "
                     "does not correspond to any module in the model.",

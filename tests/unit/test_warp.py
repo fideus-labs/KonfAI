@@ -29,17 +29,9 @@ from konfai.data.patching import DatasetManager
 from konfai.data.transform import LocalityKind, Resample, Save
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
-from konfai.utils.ome_zarr import _zarr_v3_available
 from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
-
-# A field records its bound in an RFC-5 store, which is zarr v3 (NGFF >= 0.5): and zarr 2.x, the
-# newest release for Python 3.10, cannot write one. Everything else here reads an h5 field.
-_needs_rfc5 = pytest.mark.skipif(
-    not _zarr_v3_available(),
-    reason="a displacement field's bound is recorded in a zarr v3 store (zarr>=3, Python>=3.11)",
-)
 
 SPACING = (2.0, 1.0, 1.0)  # (x, y, z) SimpleITK order
 

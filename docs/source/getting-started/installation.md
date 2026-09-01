@@ -1,6 +1,6 @@
 # Installation
 
-KonfAI needs **Python 3.10 or newer**. This is the line most people want:
+KonfAI needs **Python 3.11 or newer**. This is the line most people want:
 
 ```bash
 python -m pip install "konfai[imaging]"

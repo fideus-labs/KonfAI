@@ -46,6 +46,40 @@ class PatchIndexed:
         return len(self.patch.get_patch_slices(0)) == self.index
 
 
+#: A patched forward yields every layer twice over: once per patch, and once assembled. The two are
+#: told apart by a marker inside the layer's NAME, because the name is what a checkpoint key and an
+#: ``outputs_criterions`` key are written against -- it cannot move out of the string without moving
+#: both. The marker stays in band; the reading of it does not, and lives in the four helpers below.
+_ACCUMULATED = ";accu;"
+
+
+def mark_accumulated(name: str) -> str:
+    """``name`` as a patched forward yields it, for a layer an accumulator is assembling."""
+    return f"{_ACCUMULATED}{name}"
+
+
+def is_accumulated(name: str) -> bool:
+    """Whether ``name`` names a patch of a layer rather than the assembled layer."""
+    return _ACCUMULATED in name
+
+
+def strip_accumulated(name: str) -> str:
+    """``name`` as the model declares it, with any marker taken out."""
+    return name.replace(_ACCUMULATED, "")
+
+
+def accumulator_owner(name: str) -> str:
+    """The module whose accumulator assembles ``name``: the last segment of the path before the
+    INNERMOST marker, empty for the network itself.
+
+    Innermost because a nested network marks the names it yields and its parent prefixes its own
+    path onto them, so a layer of a sub-network carries a marker per level and the accumulator is
+    the one closest to the layer.
+    """
+    head = name.rsplit(_ACCUMULATED, 2)[-2] if is_accumulated(name) else ""
+    return head.rstrip(".").rsplit(".", 1)[-1]
+
+
 def batched_step(
     optimizer_class: type[torch.optim.Optimizer], parameters: list[torch.nn.parameter.Parameter]
 ) -> Callable[..., torch.optim.Optimizer]:

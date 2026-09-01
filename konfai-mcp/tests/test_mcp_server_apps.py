@@ -859,8 +859,8 @@ def test_app_execution_tool_schemas_reach_the_client(
         properties = schemas[name].get("properties", {})
         missing = required_params - set(properties)
         assert not missing, f"{name} lost parameters on the wire: {missing}"
-        # pydantic places a union param's description inside anyOf on some versions (the 3.10 leg):
-        # documented means present anywhere in the property's subtree.
+        # pydantic places a union param's description inside anyOf on some versions: documented
+        # means present anywhere in the property's subtree.
         undocumented = [p for p in required_params if '"description"' not in json.dumps(properties[p])]
         assert not undocumented, f"{name} has undocumented parameters: {undocumented}"
 

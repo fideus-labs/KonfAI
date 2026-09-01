@@ -29,7 +29,6 @@ seed, which is how the oracle varies rank and geometry without varying anything 
 """
 
 import inspect
-import types
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -613,11 +612,8 @@ def builtin_transforms() -> list[type[Transform]]:
     """Every concrete transform class KonfAI ships."""
     return [
         cls
-        # A subscripted builtin generic (SpatialStages) passes isclass on Python 3.10 but is not a
-        # class there, and issubclass refuses it.
         for _, cls in inspect.getmembers(transform_module, inspect.isclass)
-        if not isinstance(cls, types.GenericAlias)
-        and issubclass(cls, Transform)
+        if issubclass(cls, Transform)
         and cls.__module__.startswith(transform_module.__name__)
         and not inspect.isabstract(cls)
     ]
@@ -748,8 +744,7 @@ def builtin_augmentations() -> list[type[DataAugmentation]]:
     return [
         cls
         for _, cls in inspect.getmembers(augmentation_module, inspect.isclass)
-        if not isinstance(cls, types.GenericAlias)
-        and issubclass(cls, DataAugmentation)
+        if issubclass(cls, DataAugmentation)
         and cls.__module__ == augmentation_module.__name__
         and not inspect.isabstract(cls)
     ]

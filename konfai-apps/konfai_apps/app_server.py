@@ -570,7 +570,7 @@ async def sse_log_stream(job: Job):
         while True:
             try:
                 line = await asyncio.wait_for(job.log_q.get(), timeout=SSE_HEARTBEAT_S)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Keep the connection alive during quiet periods without signalling
                 # completion. Stop only once the job itself has terminated (guards
                 # against a completion marker dropped from a saturated queue).

@@ -35,7 +35,7 @@ class Save(Transform):
     where the levels are derived once the last region has landed.
 
     ``downsample_method`` names how the coarse levels are derived, and its default is
-    ``ITKWASM_BIN_SHRINK`` (block averaging), NOT ngff-zarr's own ``ITKWASM_GAUSSIAN``. Measured on a
+    ``DASK_BIN_SHRINK`` (block averaging), NOT ngff-zarr's own ``ITKWASM_GAUSSIAN``. Measured on a
     real volume, the Gaussian holds a 0.9998 correlation while crushing peak intensity by 20 %.
     """
 

@@ -8,7 +8,7 @@ dynamic = ["version", "dependencies"]
 description = "Fast and lightweight TotalSegmentator CLI powered by the KonfAI framework."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
