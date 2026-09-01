@@ -177,7 +177,7 @@ Conventional Commits only took hold at `v1.5.9`, and rendering further back emit
 - **The YAML model builder is the trusted/untrusted boundary**: only registry types, and module names contain no `.`.
 - **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel. Core must never import
   `konfai_apps` **at module level**. Known exception: `data/transform/inference.py` `KonfAIInference.infer_entry` does a
-  lazy, guarded import: a layering inversion pending an owner decision (see `REFACTORING.md` §C); do not add more.
+  lazy, guarded import: a layering inversion pending an owner decision; do not add more.
 - **The pretrained bridge fills every target tensor or raises**; never report a partial load as success.
 - **The config write is atomic** (temp + `os.replace`); a reader must never see a truncated config and bind all-defaults.
 
