@@ -88,6 +88,12 @@ class CriterionResult(NamedTuple):
                 "The reported value is a single number: reduce it, or report a (values, labels) "
                 "pair for a per-label metric.",
             )
+        if isinstance(value, LabelledValues) and (value.values.ndim != 1 or value.values.numel() != len(value.labels)):
+            # A misshaped pair passes here but explodes far away, in the materialized() zip.
+            raise MeasureError(
+                f"'{criterion}' reported {tuple(value.values.shape)} values for {len(value.labels)} labels.",
+                "A per-label metric reports a 1-D tensor holding exactly one value per label.",
+            )
         if not isinstance(value, float | torch.Tensor | dict | LabelledValues) or (
             map_ is not None and not isinstance(map_, torch.Tensor)
         ):

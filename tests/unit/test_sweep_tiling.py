@@ -437,3 +437,28 @@ def test_a_region_read_is_charged_only_for_what_the_block_grid_adds(
     assert manager.region_reads(16).widest_excess < manager.region_reads(4).widest_excess, (
         "a region under one stored block wastes more of the block it decodes, not less"
     )
+
+
+def test_entry_granularity_is_keyed_by_pyramid_level(tmp_path: Path) -> None:
+    """Two handles on one store at different levels must not share a memoized grain.
+
+    OmeZarrFile.read_granularity answers level-specific chunk metadata; a key of
+    (filename, group, entry) alone handed level 1 the grain memoized for level 0,
+    and the sizing then priced the wrong block.
+    """
+    from types import SimpleNamespace
+
+    source, _volume = _sheared_fixture(tmp_path)
+    holder = _manager(source, [])
+
+    def stub(level: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            filename=tmp_path / "pyramid",
+            file_format="omezarr",
+            level=level,
+            is_dataset_exist=lambda group, entry: True,
+            read_granularity=lambda group, entry, _level=level: (1, 8 * (_level + 1), 8, 8),
+        )
+
+    assert holder._entry_granularity(stub(0), "CT", "CASE_000") == (8, 8, 8)
+    assert holder._entry_granularity(stub(1), "CT", "CASE_000") == (16, 8, 8)

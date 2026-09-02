@@ -100,6 +100,7 @@ def main() -> None:
 
     scratch = Path(tempfile.mkdtemp(prefix="konfai_bench_"))
     print(f"[bench] scratch: {scratch}")
+    sampler = None
     try:
         print(f"[bench] synthesizing ~{args.gib:g} GiB volume ...", flush=True)
         store, shape = synthesize(scratch, args.gib)
@@ -139,6 +140,8 @@ def main() -> None:
             f"| {args.gib:g} GiB volume | budget {args.budget:g} GiB | peak {peak / 2**30:.2f} GiB | {elapsed:.1f} s |"
         )
     finally:
+        if sampler is not None and sampler.is_alive():
+            sampler.stop()
         # A failed large-volume run must not leave its synthetic input and output on disk.
         if not args.keep:
             import shutil

@@ -1381,7 +1381,7 @@ class DatasetManager:
         # knob tests and callers already reset; the memo below is for the other segment sources.
         if dataset is self.dataset and group == self.group_src:
             return self.read_granularity()
-        key = (str(dataset.filename), group, entry)
+        key = (str(dataset.filename), dataset.file_format, getattr(dataset, "level", None), group, entry)
         if key not in self._granularities:
             # A cache this run has still to write has no metadata to ask. That answer is not
             # memoized: once the upstream sweep publishes the cache, a re-planned downstream

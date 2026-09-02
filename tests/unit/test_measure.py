@@ -1180,3 +1180,17 @@ def test_psnr_and_ssim_share_the_ct_dynamic_range_default() -> None:
     from konfai.metric.measure import PSNR
 
     assert PSNR()._dynamic_range == SSIM()._dynamic_range == 4095.0
+
+
+def test_criterion_result_refuses_a_misshaped_labelled_pair() -> None:
+    """A (values, labels) pair whose tensor is not one value per label would only explode far
+    away, in the materialized() zip: refused at the boundary instead, naming the criterion."""
+    from konfai.network.network.measure import CriterionResult, LabelledValues
+
+    loss = torch.tensor(0.5)
+    with pytest.raises(MeasureError, match="values for 2 labels"):
+        CriterionResult.of((loss, LabelledValues(torch.tensor([[0.1, 0.2]]), ["a", "b"])), "Dice")
+    with pytest.raises(MeasureError, match="values for 2 labels"):
+        CriterionResult.of((loss, LabelledValues(torch.tensor(0.1), ["a", "b"])), "Dice")
+    ok = CriterionResult.of((loss, LabelledValues(torch.tensor([0.1, 0.2]), ["a", "b"])), "Dice")
+    assert ok.value.labels == ["a", "b"]
