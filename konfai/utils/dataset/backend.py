@@ -32,6 +32,22 @@ from konfai.utils.errors import DatasetManagerError
 if TYPE_CHECKING:
     from konfai.utils.dataset.abstract import AbstractFile
 
+#: The backend each format token dispatches to; every token not named here is a plain-file
+#: extension SitkFile serves. THE token-to-class table: a new backend registers here and declares
+#: its facts on the class (see ``AbstractFile``), and nothing else needs a format-name branch.
+BACKENDS: dict[str, type[AbstractFile]] = {
+    "h5": H5File,
+    "omezarr": OmeZarrFile,
+    "dicom": DicomFile,
+    "itktransform": ItkTransformFile,
+}
+
+
+def backend_for(file_format: str) -> type[AbstractFile]:
+    """The backend class serving ``file_format``: where ``File.__enter__`` and ``Dataset`` read
+    the per-backend facts from."""
+    return BACKENDS.get(file_format, SitkFile)
+
 
 class File:
     def __init__(
@@ -52,22 +68,16 @@ class File:
         self.downsample_method = downsample_method
 
     def __enter__(self) -> AbstractFile:
-        if self.file_format == "omezarr":
-            self.file = OmeZarrFile(self.filename, self.read, self.level, self.scale_factors, self.downsample_method)
-        elif uri.is_uri(self.filename):
+        backend = backend_for(self.file_format)
+        if uri.is_uri(self.filename) and not backend.reads_remote:
             # OME-Zarr addresses a store; every other backend opens a path.
             raise DatasetManagerError(
                 f"'{self.filename}' is a remote root, which only ':omezarr' can read.",
                 "Declare the root as ':omezarr', or copy the dataset locally first.",
             )
-        elif self.file_format == "h5":
-            self.file = H5File(self.filename, self.read)
-        elif self.file_format == "dicom":
-            self.file = DicomFile(self.filename, self.read)
-        elif self.file_format == "itktransform":
-            self.file = ItkTransformFile(self.filename + "/", self.read)
-        else:
-            self.file = SitkFile(self.filename + "/", self.read, self.file_format)
+        self.file = backend.open(
+            self.filename, self.read, self.file_format, self.level, self.scale_factors, self.downsample_method
+        )
         self.file.__enter__()
         return self.file
 

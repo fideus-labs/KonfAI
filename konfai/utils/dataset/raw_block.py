@@ -31,7 +31,7 @@ try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
-from konfai.utils.dataset.attribute import Attribute, _attribute_text
+from konfai.utils.dataset.attribute import Attribute, _attribute_text, region_geometry
 from konfai.utils.dataset.stream import _MHA_ELEMENT_TYPES, _NIFTI_DATATYPES
 
 #: NumPy dtype of each element type the raw-block route reads (the inverses of the writers' tables).
@@ -240,20 +240,30 @@ def _pixel_block_region(block: _PixelBlock, path: str, normalized: tuple[slice, 
     return np.array(region, dtype=block.dtype.newbyteorder("="), order="C")
 
 
-def _pixel_block_attributes(block: _PixelBlock, index_xyz: list[int] | None) -> Attribute:
-    """The attributes ITK's route records: the header's keys, then the geometry, the origin being
-    the region's (at ``index_xyz``) as ITK's extract computes it, then the region's origin again as
-    the module computes it. ``None`` is the whole volume's record, as ``file_to_data`` returns it."""
+def _pixel_block_attributes(block: _PixelBlock, spatial_slices: tuple[slice, ...] | None) -> Attribute:
+    """The attributes ITK's route records for the region ``spatial_slices`` keeps (``None`` is the
+    whole volume's record, as ``file_to_data`` returns it).
+
+    A unit-step region carries the record ITK's extract leaves: the region's origin as ITK computes
+    it, then the region's origin again as :func:`region_geometry` computes it. A stepped region
+    starts from the volume's record (what the ITK route reads, since ITK cannot extract a step) and
+    appends the region's shifted origin and step-scaled spacing, so the two routes stay
+    key-for-key identical.
+    """
     attributes = Attribute(block.metadata)
-    if index_xyz is None:
+    stepped = spatial_slices is not None and any(item.step != 1 for item in spatial_slices)
+    if spatial_slices is None or stepped:
         attributes["Origin"] = block.geometry_text["Origin"]
     else:
+        index_xyz = [item.start for item in reversed(spatial_slices)]
         attributes["Origin"] = np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz))
     attributes["Spacing"] = block.geometry_text["Spacing"]
     attributes["Direction"] = block.geometry_text["Direction"]
-    if index_xyz is not None:
-        direction = block.direction.reshape(len(block.spacing), len(block.spacing))
-        attributes["Origin"] = block.origin + direction @ (np.asarray(index_xyz, dtype=np.float64) * block.spacing)
+    if spatial_slices is not None:
+        origin, spacing = region_geometry(block.origin, block.spacing, block.direction, spatial_slices)
+        attributes["Origin"] = origin
+        if stepped:
+            attributes["Spacing"] = spacing
     return attributes
 
 

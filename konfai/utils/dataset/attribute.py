@@ -64,6 +64,27 @@ def _attribute_text(value: Any) -> str:
         return str(value).replace("\n", "")
 
 
+def region_geometry(
+    origin: np.ndarray,
+    spacing: np.ndarray,
+    direction: np.ndarray,
+    spatial_slices: tuple[slice, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """The geometry record of the samples a normalized spatial slice keeps: the first sample's
+    world position as the origin, the spacing scaled by the step.
+
+    THE region-geometry update, shared by every backend so a stepped read carries the same record
+    whatever format the volume is stored in. ``spatial_slices`` arrive array-ordered (``(Z)YX``,
+    ``slice.indices``-normalized); geometry is ``(x, y, z)``.
+    """
+    origin = np.asarray(origin, dtype=np.float64)
+    spacing = np.asarray(spacing, dtype=np.float64)
+    matrix = np.asarray(direction, dtype=np.float64).reshape(len(spacing), len(spacing))
+    start_xyz = np.asarray([item.start for item in reversed(spatial_slices)], dtype=np.float64)
+    step_xyz = np.asarray([item.step for item in reversed(spatial_slices)], dtype=np.float64)
+    return origin + matrix @ (start_xyz * spacing), spacing * step_xyz
+
+
 class Attribute(dict[str, Any]):
     """Metadata container storing repeated values with a stack-like naming scheme.
 
@@ -137,14 +158,33 @@ class Attribute(dict[str, Any]):
         """
         return np.fromstring(text[1:-1].replace(",", " "), sep=" ", dtype=np.double)
 
+    @staticmethod
+    def _parsed_array(key: str, text: str) -> np.ndarray:
+        """:meth:`_parse_array`, refusing by name what does not parse back as a flat array.
+
+        The sidecar stores any value as its print, so a >= 2-D array is accepted at write and its
+        nested print fails only here, far from the writer: ``np.fromstring`` used to surface it as
+        an anonymous ``ValueError`` deep in numpy. (``Crop`` deliberately records its 2-D ``box``
+        and reads it back through its own parser, never this door, which is why the write door
+        cannot refuse the rank outright.)
+        """
+        try:
+            return Attribute._parse_array(text)
+        except ValueError:
+            raise DatasetManagerError(
+                f"'{key}' does not parse back as a flat array: it holds '{text}'.",
+                "Only flat scalars and 1-D arrays round-trip through the sidecar:"
+                " flatten the value where it is recorded.",
+            ) from None
+
     def get_np_array(self, key: str) -> np.ndarray:
-        return Attribute._parse_array(self[key])
+        return Attribute._parsed_array(key, self[key])
 
     def get_tensor(self, key: str) -> torch.Tensor:
         return torch.tensor(self.get_np_array(key)).to(torch.float32)
 
     def pop_np_array(self, key: str) -> np.ndarray:
-        return Attribute._parse_array(self.pop(key))
+        return Attribute._parsed_array(key, self.pop(key))
 
     def pop_tensor(self, key: str) -> torch.Tensor:
         return torch.tensor(self.pop_np_array(key))

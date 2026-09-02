@@ -36,8 +36,11 @@ from konfai.utils.dataset.attribute import get_infos as get_infos
 from konfai.utils.dataset.attribute import image_to_data as image_to_data
 from konfai.utils.dataset.attribute import is_an_image as is_an_image
 from konfai.utils.dataset.attribute import ome_zarr_attributes as ome_zarr_attributes
+from konfai.utils.dataset.attribute import region_geometry as region_geometry
 from konfai.utils.dataset.attribute import sitk as sitk
+from konfai.utils.dataset.backend import BACKENDS as BACKENDS
 from konfai.utils.dataset.backend import File as File
+from konfai.utils.dataset.backend import backend_for as backend_for
 from konfai.utils.dataset.core import Dataset as Dataset
 from konfai.utils.dataset.core import _is_listed_name as _is_listed_name
 from konfai.utils.dataset.dicom_file import DicomFile as DicomFile
@@ -59,6 +62,7 @@ from konfai.utils.dataset.landmarks import read_landmarks as read_landmarks
 from konfai.utils.dataset.landmarks import write_landmarks as write_landmarks
 from konfai.utils.dataset.ome_zarr_file import OmeZarrFile as OmeZarrFile
 from konfai.utils.dataset.ome_zarr_file import _divisor_tile as _divisor_tile
+from konfai.utils.dataset.ome_zarr_file import _forget_resolved_paths as _forget_resolved_paths
 from konfai.utils.dataset.ome_zarr_file import _OmeZarrDataStream as _OmeZarrDataStream
 from konfai.utils.dataset.ome_zarr_file import _store_chunks as _store_chunks
 from konfai.utils.dataset.raw_block import _MHA_DTYPES as _MHA_DTYPES
@@ -115,11 +119,13 @@ from konfai.utils.dataset.stream import _NiftiDataStream as _NiftiDataStream
 from konfai.utils.dataset.stream import _RawBlockStream as _RawBlockStream
 
 __all__ = [
+    "BACKENDS",
     "DISPLACEMENT_FIELD_ATTRIBUTE",
     "Attribute",
     "DataStream",
     "Dataset",
     "as_channel_first",
+    "backend_for",
     "chunk_hull_voxels",
     "data_to_image",
     "data_to_transform",
@@ -130,6 +136,7 @@ __all__ = [
     "is_staging_entry",
     "ome_zarr_attributes",
     "read_landmarks",
+    "region_geometry",
     "release_read_handles",
     "write_landmarks",
 ]

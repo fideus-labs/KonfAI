@@ -40,6 +40,7 @@ from konfai.utils.dataset.attribute import (
     displacement_field_to_data,
     image_to_data,
     ome_zarr_attributes,
+    region_geometry,
 )
 from konfai.utils.dataset.staging import _recover_orphaned_backup, _replaced_name, _retire_dead_debris
 from konfai.utils.dataset.stream import DataStream
@@ -85,6 +86,18 @@ def _divisor_tile(extent: int, cap: int) -> int:
         return max(1, extent)
     divisor = next((candidate for candidate in range(cap, 0, -1) if extent % candidate == 0), 1)
     return divisor if divisor * 4 >= cap else extent
+
+
+#: Where each entry's store was resolved on disk, keyed by ``(root, entry)``: the store-suffix
+#: probes are one ``fs.info`` round-trip each on a remote root, per patch without this. A write
+#: through this backend forgets the memo (it may change the suffix the entry resolves under); a
+#: store REPLACED at the same path keeps its resolution, so no other invalidation is owed.
+_resolved_store_paths: dict[tuple[str, str], str] = {}
+
+
+def _forget_resolved_paths() -> None:
+    """Drop the entry-path memo: what a write must call, being the one thing that moves a store."""
+    _resolved_store_paths.clear()
 
 
 class _OmeZarrDataStream(DataStream):
@@ -144,6 +157,7 @@ class _OmeZarrDataStream(DataStream):
         # points at a component that is no longer there. This path alone: the sources a cohort is
         # still reading are not what changed.
         clear_ome_zarr_cache(self._final_path)
+        _forget_resolved_paths()
 
 
 class OmeZarrFile(AbstractFile):
@@ -157,6 +171,16 @@ class OmeZarrFile(AbstractFile):
     pyramid instead of a single level. Reading indexes a pyramid BY POSITION, so a producer that
     writes one and a consumer that asks for ``@1`` are two halves of the same contract.
     """
+
+    concurrent_write_safe = False  # a store shares metadata across its arrays
+    reads_remote = True  # a store is addressed by key, so fsspec serves a URI root
+    writes_pyramid = True  # the one format with levels
+    lists_case_entries = True  # a case is a directory of stores this backend enumerates
+
+    @classmethod
+    def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
+        del file_format, attributes
+        return True  # zarr chunks materialise as regions land
 
     def __init__(
         self,
@@ -180,11 +204,20 @@ class OmeZarrFile(AbstractFile):
 
     def _path(self, name: str, *, writing: bool = False) -> str:
         """Where entry ``name``'s store sits: text, because a remote one is a URI and ``Path``
-        eats the second slash of one."""
+        eats the second slash of one. Resolved once per ``(root, entry)``: each suffix probe is a
+        round-trip on a remote root, and the store's location cannot change mid-run."""
         base = uri.join(self.filename, name)
         if writing:
             uri.refuse_write(self.filename)
             return f"{base}.ome.zarr"
+        memo_key = (self.filename, name)
+        resolved = _resolved_store_paths.get(memo_key)
+        if resolved is not None:
+            return resolved
+        _resolved_store_paths[memo_key] = resolved = self._resolve_path(name, base)
+        return resolved
+
+    def _resolve_path(self, name: str, base: str) -> str:
         # Every spelling is_store_name accepts, or a root whose first case names one of the
         # others is detected as omezarr at setup and then fails to resolve.
         candidates = [f"{base}{form}" for form in STORE_FORMS] + [base]
@@ -245,12 +278,14 @@ class OmeZarrFile(AbstractFile):
         attributes = self._attributes(metadata)
         shape = metadata["shape"]
         normalized = tuple(slice(*item.indices(size)) for item, size in zip(slices, shape, strict=True))
-        spacing = attributes.get_np_array("Spacing")
-        direction = attributes.get_np_array("Direction").reshape(len(spacing), len(spacing))
-        start_xyz = np.asarray([item.start for item in reversed(normalized[1:])], dtype=np.float64)
-        step_xyz = np.asarray([item.step for item in reversed(normalized[1:])], dtype=np.float64)
-        attributes["Origin"] = attributes.get_np_array("Origin") + direction @ (start_xyz * spacing)
-        attributes["Spacing"] = spacing * step_xyz
+        origin, spacing = region_geometry(
+            attributes.get_np_array("Origin"),
+            attributes.get_np_array("Spacing"),
+            attributes.get_np_array("Direction"),
+            normalized[1:],
+        )
+        attributes["Origin"] = origin
+        attributes["Spacing"] = spacing
         return data, attributes
 
     def bounded_region_reads(self, name: str) -> bool:
@@ -326,6 +361,7 @@ class OmeZarrFile(AbstractFile):
         shutil.rmtree(replaced, ignore_errors=True)
         # The reader memoises decoded chunks by path, and this path now holds another store.
         clear_ome_zarr_cache(final)
+        _forget_resolved_paths()
         with contextlib.suppress(Exception):
             _retire_dead_debris(final)  # housekeeping past the publish: it cannot fail the write
 
@@ -362,6 +398,19 @@ class OmeZarrFile(AbstractFile):
         # order is what keeps publication atomic: a reader never sees a store whose level 0 is
         # complete but whose coarser levels are not.
         return _OmeZarrDataStream(array, store_path, final_path, self.scale_factors, self.downsample_method)
+
+    @classmethod
+    def open(
+        cls,
+        filename: str,
+        read: bool,
+        file_format: str,
+        level: int = 0,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> OmeZarrFile:
+        del file_format
+        return cls(filename, read, level, scale_factors, downsample_method)
 
     def get_names(self, group: str) -> list[str]:
         return self.get_group()

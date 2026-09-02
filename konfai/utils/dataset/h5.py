@@ -38,6 +38,7 @@ try:
 except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai import current_date
+from konfai.utils.budget import budget_share
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import Attribute, _encode_transform_leaves, image_to_data
 from konfai.utils.dataset.staging import _REPLACED_MARKER, _orphaned_backup_names, _replaced_name, is_staging_entry
@@ -234,6 +235,15 @@ class _H5DataStream(DataStream):
 
 
 class H5File(AbstractFile):
+    single_store = True  # one .h5 file holds every case
+    concurrent_write_safe = False  # entries share the file's handles and metadata
+    case_file_suffix = ".h5"  # what a case file carries when a directory keeps one per case
+
+    @classmethod
+    def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
+        del file_format, attributes
+        return True  # a dataset written by regions, chunked or contiguous
+
     # Read-side HDF5 chunk cache, per opened dataset. The library default (1 MB) holds barely one
     # medical-imaging chunk, so overlapping patch reads on a chunked (compressed) store
     # re-decompress the same chunks once per patch. KonfAI writes its own h5 contiguous
@@ -241,6 +251,17 @@ class H5File(AbstractFile):
     # nslots per the h5py guidance: a prime, well above the chunks the cache can hold.
     _READ_CHUNK_CACHE_BYTES = 128 * 1024 * 1024
     _READ_CHUNK_CACHE_SLOTS = 100003
+
+    @staticmethod
+    def _read_chunk_cache_bytes() -> int:
+        """What one pooled handle's HDF5 chunk cache may hold: the cache share of the declared
+        per-rank budget divided across the pool's handles, so the pool at capacity stays inside
+        the one share every decoded-block cache draws from; the fixed default when no budget was
+        declared."""
+        share = budget_share("cache")
+        if share is None:
+            return H5File._READ_CHUNK_CACHE_BYTES
+        return max(1, int(share) // _H5ReadPool._MAX)
 
     def __init__(self, filename: str, read: bool) -> None:
         if h5py is None:
@@ -267,7 +288,7 @@ class H5File(AbstractFile):
             if self.read:
                 pooled = _h5_read_pool.get(
                     self.filename,
-                    rdcc_nbytes=self._READ_CHUNK_CACHE_BYTES,
+                    rdcc_nbytes=self._read_chunk_cache_bytes(),
                     rdcc_nslots=self._READ_CHUNK_CACHE_SLOTS,
                 )
                 self.h5, self._sidecars = pooled.file, pooled.sidecars
@@ -306,7 +327,7 @@ class H5File(AbstractFile):
         return Attribute(sidecar)
 
     def file_to_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
-        dataset = self._get_dataset(groups, name)
+        dataset = self._require_dataset(groups, name)
         data = np.zeros(dataset.shape, dataset.dtype)
         dataset.read_direct(data)
         return data, self._sidecar(dataset)
@@ -318,7 +339,7 @@ class H5File(AbstractFile):
         return True
 
     def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-        dataset = self._get_dataset(groups, name)
+        dataset = self._require_dataset(groups, name)
         data = np.asarray(dataset[slices])
         return data, self._sidecar(dataset)
 
@@ -472,7 +493,20 @@ class H5File(AbstractFile):
     def get_group(self) -> list[str]:
         return list(self.h5.keys()) if self.h5 is not None else []
 
-    def _get_dataset(self, groups: str, name: str, h5_group: h5py.Group = None) -> h5py.Dataset:
+    def _require_dataset(self, groups: str, name: str) -> h5py.Dataset:
+        """The entry, or the designed refusal: an absent group resolved ``None`` and every reader
+        dereferenced it, an anonymous ``AttributeError`` deep in numpy where the sibling backends
+        name the entry."""
+        dataset = self._get_dataset(groups, name)
+        if dataset is None:
+            entry = f"{groups}/{name}" if groups else name
+            raise DatasetManagerError(
+                f"'{entry}' is not in '{self.filename}'.",
+                "Check the case name and the group it is looked up under.",
+            )
+        return dataset
+
+    def _get_dataset(self, groups: str, name: str, h5_group: h5py.Group = None) -> h5py.Dataset | None:
         if h5_group is None:
             h5_group = self.h5
         if groups != "":
@@ -498,5 +532,5 @@ class H5File(AbstractFile):
         return result
 
     def get_infos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
-        dataset = self._get_dataset(groups, name)
+        dataset = self._require_dataset(groups, name)
         return dataset.shape, self._sidecar(dataset)

@@ -36,6 +36,9 @@ from konfai.utils.errors import DatasetManagerError
 class DicomFile(AbstractFile):
     """DICOM series backend with header-only metadata and slice-level reads."""
 
+    concurrent_write_safe = False  # a series shares its directory and info memo across entries
+    lists_case_entries = True  # a case is a directory of series this backend enumerates
+
     def __init__(self, filename: str, read: bool) -> None:
         self.filename = filename if filename.endswith("/") else f"{filename}/"
         self.read = read
@@ -71,6 +74,14 @@ class DicomFile(AbstractFile):
     def bounded_region_reads(self, name: str) -> bool:
         del name
         return True  # one file per slice: a region decodes the slices it covers and nothing else
+
+    def read_granularity(self, name: str) -> tuple[int, ...] | None:
+        from konfai.utils.dicom import get_dicom_info
+
+        # One file per z step, decoded as a whole plane: a window narrower than a plane costs the
+        # plane, exactly the band a memmapped volume declares.
+        shape = get_dicom_info(self._path(name))["shape"]
+        return (1, 1, int(shape[2]), int(shape[3]))
 
     def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice

@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Sequence
 from datetime import datetime
 from functools import cache
@@ -56,6 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from konfai.utils.budget import budget_share
 from konfai.utils.errors import DatasetManagerError
 
 # Zero-padded slice filenames produced by :func:`write_dicom_series` (e.g. ``000001.dcm``).
@@ -374,6 +377,111 @@ def _decode_slices(datasets: list[DicomDataset], window: tuple[slice, slice], ap
     return volume
 
 
+#: What the plane cache may hold when no budget is declared; a declared budget gives it the cache
+#: share instead (:data:`~konfai.utils.budget.BUDGET_SHARES`), so one declaration is divided once.
+_PLANE_CACHE_DEFAULT_BYTES = 256 << 20
+
+#: Large data elements are left in the file until accessed: a plane read needs the pixels and the
+#: rescale tags, not every private element parsed into memory.
+_DCMREAD_DEFER_BYTES = 4096
+
+
+def _plane_cache_capacity() -> int:
+    """What the decoded-plane cache may hold: its share of the declared per-rank budget, the
+    default when none was declared."""
+    share = budget_share("cache")
+    return int(share) if share is not None else _PLANE_CACHE_DEFAULT_BYTES
+
+
+class _DecodedPlaneCache:
+    """Decoded DICOM slice planes with their rescale tags, evicted LRU under a byte cap.
+
+    A series stores one file per plane, and every region read touching a z index decodes that
+    file's whole plane: overlapping regions of a sweep would parse and decode the same file once
+    per region (the same cliff the OME-Zarr route caps with its decoded-chunk cache). Keyed by
+    ``(path, mtime_ns, size)``, so a rewritten slice is a new entry and never served stale."""
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[tuple[str, int, int], tuple[np.ndarray, float, float]] = OrderedDict()
+        self._bytes = 0
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple[str, int, int]) -> tuple[np.ndarray, float, float] | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self._entries.move_to_end(key)
+            return entry
+
+    def put(self, key: tuple[str, int, int], plane: np.ndarray, slope: float, intercept: float) -> None:
+        capacity = _plane_cache_capacity()
+        if plane.nbytes > capacity:
+            return
+        with self._lock:
+            if key in self._entries:
+                return
+            self._entries[key] = (plane, slope, intercept)
+            self._bytes += plane.nbytes
+            while self._bytes > capacity and self._entries:
+                self._bytes -= self._entries.popitem(last=False)[1][0].nbytes
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._bytes = 0
+
+
+_plane_cache = _DecodedPlaneCache()
+
+
+def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
+    """One slice file's whole decoded plane and its rescale tags, parsed and decoded once per file
+    per pass: the cache is what keeps an overlapping sweep from decoding it once per region."""
+    stamp = os.stat(path)
+    key = (str(path), stamp.st_mtime_ns, stamp.st_size)
+    cached = _plane_cache.get(key)
+    if cached is not None:
+        return cached
+    ds = pydicom.dcmread(str(path), defer_size=_DCMREAD_DEFER_BYTES)
+    plane = ds.pixel_array
+    plane.flags.writeable = False  # shared across every region that hits the cache
+    slope = float(getattr(ds, "RescaleSlope", 1.0))
+    intercept = float(getattr(ds, "RescaleIntercept", 0.0))
+    _plane_cache.put(key, plane, slope, intercept)
+    return plane, slope, intercept
+
+
+def _decode_cached_planes(files: list[Path], window: tuple[slice, slice], apply_rescale: bool) -> np.ndarray:
+    """:func:`_decode_slices` off the plane cache: the same values, the same refusals, each plane
+    parsed and decoded at most once per pass instead of once per touching region."""
+    volume: np.ndarray | None = None
+    expected_shape: tuple[int, ...] | None = None
+    for i, path in enumerate(files):
+        try:
+            plane, slope, intercept = _decoded_plane(path)
+        except Exception as exc:
+            raise DatasetManagerError(
+                f"Cannot read pixel data from DICOM slice {i}.",
+                f"Transfer syntax or compression may be unsupported: {exc}",
+            ) from exc
+        if expected_shape is None:
+            expected_shape = plane.shape
+        elif plane.shape != expected_shape:
+            raise DatasetManagerError(
+                f"Inconsistent slice shape at index {i}: expected {expected_shape}, got {plane.shape}.",
+                "All slices in a series must have the same rows and columns.",
+            )
+        arr = plane[window].astype(np.float32)
+        if apply_rescale:
+            arr = arr * slope + intercept
+        if volume is None:
+            volume = np.empty((len(files), *arr.shape), dtype=np.float32)
+        volume[i] = arr
+    if volume is None:
+        raise DatasetManagerError("Series contains no readable slices.")
+    return volume
+
+
 @cache
 def get_dicom_info(
     directory: str | Path,
@@ -434,17 +542,16 @@ def read_dicom_series_slice(
         raise DatasetManagerError("DICOM stores scalar data and supports only channel 0.")
 
     _require_pydicom()
+    from konfai.utils.dataset.attribute import region_geometry
+
     # ``sorted_files`` is in slice order already: the selection is read in that order, not sorted again.
     z_indices = range(*normalized[1].indices(shape[1]))
-    datasets = [pydicom.dcmread(str(info["sorted_files"][index])) for index in z_indices]
-    volume = _decode_slices(datasets, (normalized[2], normalized[3]), apply_rescale)[np.newaxis][normalized[0]]
+    volume = _decode_cached_planes(
+        [info["sorted_files"][index] for index in z_indices], (normalized[2], normalized[3]), apply_rescale
+    )[np.newaxis][normalized[0]]
 
-    direction_matrix = np.asarray(info["direction"], dtype=np.float64).reshape(3, 3)
-    start_xyz = np.asarray([normalized[3].start, normalized[2].start, normalized[1].start], dtype=np.float64)
-    spacing = np.asarray(info["spacing"], dtype=np.float64)
-    origin = np.asarray(info["origin"], dtype=np.float64) + direction_matrix @ (start_xyz * spacing)
-    step_xyz = np.asarray([normalized[3].step, normalized[2].step, normalized[1].step], dtype=np.float64)
-    return volume, origin, spacing * step_xyz, np.asarray(info["direction"], dtype=np.float64)
+    origin, spacing = region_geometry(info["origin"], info["spacing"], info["direction"], normalized[1:])
+    return volume, origin, spacing, np.asarray(info["direction"], dtype=np.float64)
 
 
 def _encode_pixels(data: np.ndarray) -> tuple[np.ndarray, float, float]:
@@ -498,6 +605,7 @@ def write_dicom_series(
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
     get_dicom_info.cache_clear()  # what this directory holds is about to change
+    _plane_cache.clear()
     # Remove only slices previously written by this function (its zero-padded NNNNNN.dcm
     # naming), never unrelated DICOM files that may share the directory.
     for existing in root.glob("*.dcm"):
