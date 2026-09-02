@@ -234,7 +234,7 @@ def _run_init(args: dict[str, Any]) -> None:
     config_path = Path(args.get(config_key) or args.get("config") or default_name)
     if not config_path.exists():
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(f"{root}:\n", encoding="utf-8")
+        config_path.write_text(f"{root}: {{}}\n", encoding="utf-8")
     args[config_key] = config_path
     builder = getattr(importlib.import_module(module_name), builder_name)
     accepted = inspect.signature(builder).parameters
