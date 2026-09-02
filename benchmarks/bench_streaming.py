@@ -53,16 +53,17 @@ class PeakSampler(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True)
         self._process = psutil.Process()
-        self._stop = threading.Event()
+        # Not `_stop`: threading.Thread.join() calls its own internal `_stop()` method.
+        self._stop_event = threading.Event()
         self.peak = 0
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             self.peak = max(self.peak, _tree_rss(self._process))
             time.sleep(0.05)
 
     def stop(self) -> int:
-        self._stop.set()
+        self._stop_event.set()
         self.join()
         return self.peak
 
@@ -78,9 +79,7 @@ def synthesize(root: Path, gib: float) -> tuple[Path, list[int]]:
     store = root / "Dataset.h5"
     rng = np.random.default_rng(0)
     with h5py.File(store, "w") as file:
-        dataset = file.create_dataset(
-            "CT/CASE_000", shape=(1, *shape), dtype=np.float32, chunks=(1, 64, side, side)
-        )
+        dataset = file.create_dataset("CT/CASE_000", shape=(1, *shape), dtype=np.float32, chunks=(1, 64, side, side))
         dataset.attrs["Origin"] = "[0. 0. 0.]"
         dataset.attrs["Spacing"] = "[1. 1. 1.]"
         dataset.attrs["Direction"] = "[1. 0. 0. 0. 1. 0. 0. 0. 1.]"
@@ -101,48 +100,50 @@ def main() -> None:
 
     scratch = Path(tempfile.mkdtemp(prefix="konfai_bench_"))
     print(f"[bench] scratch: {scratch}")
-    print(f"[bench] synthesizing ~{args.gib:g} GiB volume ...", flush=True)
-    store, shape = synthesize(scratch, args.gib)
+    try:
+        print(f"[bench] synthesizing ~{args.gib:g} GiB volume ...", flush=True)
+        store, shape = synthesize(scratch, args.gib)
 
-    from konfai.data.transform import Normalize, Write
+        from konfai.data.transform import Normalize, Write
 
-    sampler = PeakSampler()
-    sampler.start()
-    start = time.perf_counter()
-    result = konfai.transform(
-        "BENCH",
-        f"{store}:h5",
-        {"CT": {"CT": [Normalize(min_value=-1, max_value=1), Write(dataset=f"{scratch / 'Out'}:h5")]}},
-        memory_budget=f"{args.budget}gib",
-        transforms_dir=scratch / "Transforms",
-        quiet=True,
-    )
-    elapsed = time.perf_counter() - start
-    peak = sampler.stop()
+        sampler = PeakSampler()
+        sampler.start()
+        start = time.perf_counter()
+        result = konfai.transform(
+            "BENCH",
+            f"{store}:h5",
+            {"CT": {"CT": [Normalize(min_value=-1, max_value=1), Write(dataset=f"{scratch / 'Out'}:h5")]}},
+            memory_budget=f"{args.budget}gib",
+            transforms_dir=scratch / "Transforms",
+            quiet=True,
+        )
+        elapsed = time.perf_counter() - start
+        peak = sampler.stop()
 
-    del result
-    report = {
-        "volume_gib": round(args.gib, 2),
-        "declared_budget_gib": round(args.budget, 2),
-        "peak_tree_rss_gib": round(peak / 2**30, 2),
-        "wall_s": round(elapsed, 1),
-        "shape_zyx": shape,
-        "versions": {
-            "konfai": getattr(konfai, "__version__", "dev"),
-            "numpy": np.__version__,
-            "python": platform.python_version(),
-        },
-        "host": platform.node(),
-    }
-    print(json.dumps(report, indent=2))
-    print(
-        f"| {args.gib:g} GiB volume | budget {args.budget:g} GiB "
-        f"| peak {peak / 2**30:.2f} GiB | {elapsed:.1f} s |"
-    )
-    if not args.keep:
-        import shutil
+        del result
+        report = {
+            "volume_gib": round(args.gib, 2),
+            "declared_budget_gib": round(args.budget, 2),
+            "peak_tree_rss_gib": round(peak / 2**30, 2),
+            "wall_s": round(elapsed, 1),
+            "shape_zyx": shape,
+            "versions": {
+                "konfai": getattr(konfai, "__version__", "dev"),
+                "numpy": np.__version__,
+                "python": platform.python_version(),
+            },
+            "host": platform.node(),
+        }
+        print(json.dumps(report, indent=2))
+        print(
+            f"| {args.gib:g} GiB volume | budget {args.budget:g} GiB | peak {peak / 2**30:.2f} GiB | {elapsed:.1f} s |"
+        )
+    finally:
+        # A failed large-volume run must not leave its synthetic input and output on disk.
+        if not args.keep:
+            import shutil
 
-        shutil.rmtree(scratch, ignore_errors=True)
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 if __name__ == "__main__":

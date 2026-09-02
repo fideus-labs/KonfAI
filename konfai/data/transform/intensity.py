@@ -401,7 +401,7 @@ class Standardize(TransformInverse):
         return tensor[mask == 1]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if self.mask is not None and "StatisticsSeeded" in cache_attribute:
+        if self.mask is not None and (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute:
             # A streamed region: the mask cannot be indexed against it, and a bare 'Mean' seed may
             # be an unmasked stage's. The case's masked statistic is scanned from the stores once
             # (memoised) and every region applies the same per-voxel affine map.

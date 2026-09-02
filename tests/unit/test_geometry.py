@@ -284,6 +284,17 @@ class TestSignedPermutation:
         for refused in (averaging, superposing, degenerate):
             assert signed_permutation(refused, SIGNED_PERMUTATION_ATOL_FLOAT64) is None
 
+    def test_a_near_axis_rotation_is_refused(self):
+        from konfai.data.geometry import SIGNED_PERMUTATION_ATOL_FLOAT64, signed_permutation
+
+        # Off-axis terms around 5e-6 sit above atol but under np.allclose's default rtol of 1e-5
+        # against the unit targets: with rtol left on this oblique matrix passed as a permutation.
+        theta = 5e-6
+        matrix = np.asarray(
+            [[np.cos(theta), -np.sin(theta), 0.0], [np.sin(theta), np.cos(theta), 0.0], [0.0, 0.0, 1.0]]
+        )
+        assert signed_permutation(matrix, SIGNED_PERMUTATION_ATOL_FLOAT64) is None
+
     def test_a_float32_quarter_turn_is_admitted_at_its_own_tolerance(self):
         import torch
         from konfai.data.geometry import SIGNED_PERMUTATION_ATOL_FLOAT32, signed_permutation

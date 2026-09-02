@@ -377,6 +377,25 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
 
 
+def test_apply_config_binds_a_bare_tensor_parameter_as_a_value(write_config) -> None:
+    # A bare (or Optional) ``torch.Tensor`` annotation is a value, not a nested config object:
+    # without the tensor dispatch it fell through to _bind_config_object, which dropped the
+    # configured value (Optional) or tried to instantiate Tensor from the config subtree.
+    import torch
+
+    write_config("Root:\n  weight:\n    - 1.0\n    - 2.0\n    - 3.0\n")
+
+    class Root:
+        def __init__(self, weight: torch.Tensor = None, bias: torch.Tensor | None = None) -> None:
+            self.weight = weight
+            self.bias = bias
+
+    root = apply_config("Root")(Root)()
+
+    assert isinstance(root.weight, torch.Tensor) and root.weight.tolist() == [1.0, 2.0, 3.0]
+    assert root.bias is None  # unconfigured Optional stays None
+
+
 def test_apply_config_refuses_a_nested_block_where_a_value_is_expected(write_config) -> None:
     """A mapping where the annotation says ``str`` is a parse error, not a stringified mapping.
 

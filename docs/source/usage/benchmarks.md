@@ -13,16 +13,19 @@ the same footing.
   machine.
 - Host memory is the peak resident set of the whole process tree (`psutil`),
   sampled at 50 ms, so DataLoader workers and spawned ranks count.
-- Device memory is `torch.cuda.max_memory_allocated()` plus the NVML process
-  figure when available.
+- Device memory is `torch.cuda.max_memory_allocated()`, with the NVML
+  per-process figure reported beside it when available; the two overlap and are
+  never summed.
 - Every report line carries the konfai/torch/SimpleITK versions, CPU model,
   GPU model, and the input's shape, dtype and checksum.
 
 ## The streaming claim
 
-{doc}`../concepts/streaming` states that a case never has to fit in RAM: a
-16 GiB uncompressed volume is transformed with peak host memory bounded by the
-declared `memory_budget`, not by the volume. Reproduce it with one command from
+{doc}`../concepts/streaming` states that a streamable case never has to fit in
+RAM: a 16 GiB uncompressed volume is transformed with peak host memory bounded
+by the declared `memory_budget`, not by the volume. A chain that cannot stream
+falls back to the whole volume, which TRANSFORM sizes against the same budget
+and refuses when it does not fit. Reproduce the claim with one command from
 a checkout (needs the `imaging` extra and free disk for the synthetic volume):
 
 ```bash

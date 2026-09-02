@@ -404,11 +404,13 @@ def signed_permutation(matrix: object, atol: float) -> AxisRemap | None:
     n = int(linear.shape[0])
     magnitude = np.abs(linear)
     unit = np.ones(n)
-    if not np.allclose(magnitude.sum(axis=0), unit, atol=atol):
+    # rtol=0: the default 1e-5 relative slack against unit targets would swamp atol and let a
+    # near-axis rotation with off-axis terms around 5e-6 pass as a permutation.
+    if not np.allclose(magnitude.sum(axis=0), unit, rtol=0.0, atol=atol):
         return None
-    if not np.allclose(magnitude.max(axis=0), unit, atol=atol):
+    if not np.allclose(magnitude.max(axis=0), unit, rtol=0.0, atol=atol):
         return None
-    if not np.allclose(magnitude.sum(axis=1), unit, atol=atol):
+    if not np.allclose(magnitude.sum(axis=1), unit, rtol=0.0, atol=atol):
         return None
     remap: AxisRemap = []
     for column in reversed(range(n)):

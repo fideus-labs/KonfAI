@@ -127,8 +127,10 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     epochs_rerun = EPOCHS_TOTAL - epoch_end
     assert max(new_epochs) == EPOCHS_TOTAL - 1
     assert max(new_its) == it_end + epochs_rerun * its_per_epoch
-    # One checkpoint per training iteration (it_validation: 1) plus the final exit save.
-    assert len(new_checkpoints) == epochs_rerun * its_per_epoch + 1
+    # One checkpoint per training iteration (it_validation: 1). The exit no longer writes a
+    # duplicate of the last scored save: an exit save happens only when iterations advanced
+    # past it (a crash), and it is then named crash_*.pt.
+    assert len(new_checkpoints) == epochs_rerun * its_per_epoch
 
     # The optimizer state itself round-tripped: AdamW step counters equal the total
     # number of iterations across both runs (not just the resumed run's own count).

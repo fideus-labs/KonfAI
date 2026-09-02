@@ -678,6 +678,39 @@ def test_elastix_streams_each_region_of_a_copy() -> None:
         torch.testing.assert_close(region, whole[(slice(None), *target)], rtol=0, atol=1e-5)
 
 
+def test_elastix_streams_each_region_of_an_oblique_copy() -> None:
+    """An oblique Direction mixes the world displacement components on an index axis, so the pull
+    reach comes from the inverse affine's rows: a 45-degree grid combines two components into
+    sqrt(2) times the per-axis bound, and a reach from the spacing alone under-pulls the block
+    (border padding then made a streamed region differ from the whole-volume warp by 0.63 here)."""
+    from konfai.data.geometry import DisplacementStage
+    from konfai.data.transform import RegionContext
+
+    torch.manual_seed(2)
+    draw = Elastix(grid_spacing=8, max_displacement=4)
+    shape = [24, 24, 24]
+    cos, sin = float(np.cos(np.pi / 4)), float(np.sin(np.pi / 4))
+    attribute = Attribute()
+    attribute["Origin"] = np.zeros(3)
+    attribute["Spacing"] = np.ones(3)
+    attribute["Direction"] = np.asarray([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]).reshape(-1)
+    draw._state_init(0, [list(shape)], [attribute])
+    stage, grid = draw.draws[0][0]
+    # The worst-case draw: every control value at the +bound, so d = (+4, +4, +4) at every voxel
+    # and the combined index reach along the rotated axes is realized, not merely possible.
+    draw.draws[0][0] = (DisplacementStage(stage.grid, np.full_like(stage.values, 4.0), stage.order), grid)
+    volume = torch.rand(1, *shape)
+    whole = draw._compute("case", 0, 0, volume)
+    for target in [
+        (slice(8, 14), slice(8, 14), slice(8, 14)),
+        (slice(0, 24), slice(6, 10), slice(14, 24)),
+    ]:
+        source = tuple(draw._stream_region_source(0, 0, target, list(shape)))
+        block = volume[(slice(None), *source)]
+        region = draw._stream_region("case", 0, 0, block, RegionContext(source, target, tuple(shape)))
+        torch.testing.assert_close(region, whole[(slice(None), *target)], rtol=0, atol=1e-5)
+
+
 def test_an_augmentation_group_is_handed_the_case_not_a_clone_of_it(tmp_path: Path) -> None:
     """The copies of a case start as the case tensor itself: a draw that selects a copy hands
     back a tensor of its own, one that does not leaves the case's, and nothing is cloned for

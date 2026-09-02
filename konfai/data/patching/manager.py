@@ -1383,13 +1383,13 @@ class DatasetManager:
             return self.read_granularity()
         key = (str(dataset.filename), group, entry)
         if key not in self._granularities:
-            granularity = None
-            # A cache this run has still to write has no metadata to ask; its chunks will be the
-            # very tile being sized, so its reads align by construction and None is its honest grain.
-            if dataset.is_dataset_exist(group, entry):
-                stored = dataset.read_granularity(group, entry)
-                granularity = None if stored is None else tuple(stored[1:])
-            self._granularities[key] = granularity
+            # A cache this run has still to write has no metadata to ask. That answer is not
+            # memoized: once the upstream sweep publishes the cache, a re-planned downstream
+            # segment must price its reads on the stored chunks, not on a stale exact-read grain.
+            if not dataset.is_dataset_exist(group, entry):
+                return None
+            stored = dataset.read_granularity(group, entry)
+            self._granularities[key] = None if stored is None else tuple(stored[1:])
         return self._granularities[key]
 
     def _get_streamed_data(

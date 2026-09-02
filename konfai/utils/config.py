@@ -735,6 +735,13 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
         value = config.get_value(param.name, param.default)
         return None if value is None else _convert_union_sequence_value(value, get_args(annotation), param.name)
 
+    tensor = _tensor_type()
+    if tensor is not None and annotation is tensor:
+        # A bare (or Optional) Tensor parameter is a value, not a nested config object: bind the
+        # YAML scalar/list through torch.tensor, as the union path does.
+        value = config.get_value(param.name, param.default)
+        return None if value is None else _convert_union_sequence_value(value, (tensor,), param.name)
+
     if annotation in _CONFIG_PRIMITIVE_TYPES or annotation is Any:
         return _bind_primitive(config, param, annotation, section_key)
 

@@ -63,7 +63,8 @@ class CriterionResult(NamedTuple):
     @classmethod
     def of(cls, raw: CriterionOutput, criterion: str = "criterion") -> "CriterionResult":
         if isinstance(raw, torch.Tensor):
-            return cls(raw, raw.detach(), None)
+            # Funnel through the tuple path so the bare-loss value passes the same shape check.
+            raw = (raw, raw.detach())
         if not isinstance(raw, tuple) or not 2 <= len(raw) <= 3 or not isinstance(raw[0], torch.Tensor):
             raise MeasureError(
                 f"'{criterion}' returned {type(raw).__name__} instead of a criterion result.",
@@ -80,6 +81,13 @@ class CriterionResult(NamedTuple):
         elif isinstance(value, tuple) and not isinstance(value, LabelledValues):
             if len(value) == 2 and isinstance(value[0], torch.Tensor) and isinstance(value[1], list):
                 value = LabelledValues(value[0], value[1])
+        if isinstance(value, torch.Tensor) and value.numel() != 1:
+            # A multi-element plain value would silently shift the deferred per-device readout.
+            raise MeasureError(
+                f"'{criterion}' reported a tensor of {value.numel()} elements.",
+                "The reported value is a single number: reduce it, or report a (values, labels) "
+                "pair for a per-label metric.",
+            )
         if not isinstance(value, float | torch.Tensor | dict | LabelledValues) or (
             map_ is not None and not isinstance(map_, torch.Tensor)
         ):

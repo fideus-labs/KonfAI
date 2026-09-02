@@ -616,7 +616,11 @@ class Network(ModuleArgsDict, ABC):
         children: each owns its optimizer/state and is saved under its own ``network_states`` key."""
         if destination is None:
             destination = OrderedDict()
+            destination._metadata = OrderedDict()  # type: ignore[attr-defined]
         local_metadata = {"version": self._version}
+        if hasattr(destination, "_metadata"):
+            # As torch.nn.Module.state_dict records it: version-aware modules read it back at load.
+            destination._metadata[prefix[:-1]] = local_metadata  # type: ignore[attr-defined]
         self._save_to_state_dict(destination, prefix, keep_vars)
         for name, module in self._modules.items():
             if module is not None:
@@ -634,9 +638,9 @@ class Network(ModuleArgsDict, ABC):
         error_msgs: list[str] = []
 
         metadata = getattr(state_dict, "_metadata", None)
+        # A plain copy: as a KEY the metadata would be collected as an unexpected key by the
+        # strict per-module load; the closure below reads the local variable.
         state_dict = state_dict.copy()
-        if metadata is not None:
-            state_dict["_metadata"] = metadata
 
         def load(module: torch.nn.Module, prefix=""):
             local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
@@ -754,17 +758,26 @@ class Network(ModuleArgsDict, ABC):
             modules_name = self.get_mapping()
             model_state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
 
+            def remap(path: str) -> str:
+                # Segment-aligned: alias 'layer1' must not claim a module 'layer10', and only the
+                # leading prefix is rewritten, never a later occurrence of the same substring. Of
+                # the matches the longest wins: a nested alias 'p.a1' beats its parent 'p'.
+                candidates = [(a, b) for a, b in modules_name.items() if path == a or path.startswith(a + ".")]
+                if not candidates:
+                    return path
+                a, b = max(candidates, key=lambda item: len(item[0]))
+                return b + path[len(a) :]
+
             for alias in model_state_dict_tmp.keys():
                 prefix = ".".join(alias.split(".")[:-1])
-                # Segment-aligned: alias 'layer1' must not claim a module 'layer10', and only the
-                # leading prefix is rewritten, never a later occurrence of the same substring.
-                alias_list = [(a, b) for a, b in modules_name.items() if prefix == a or prefix.startswith(a + ".")]
-
-                if len(alias_list):
-                    a, b = alias_list[0]
-                    model_state_dict[b + alias[len(a) :]] = model_state_dict_tmp[alias]
-                else:
-                    model_state_dict[alias] = model_state_dict_tmp[alias]
+                model_state_dict[remap(prefix) + alias[len(prefix) :]] = model_state_dict_tmp[alias]
+            source_metadata = getattr(model_state_dict_tmp, "_metadata", None)
+            if source_metadata is not None:
+                # Keys are module paths: remapped like the tensors so version-aware modules
+                # (_load_from_state_dict) find their entry.
+                model_state_dict._metadata = OrderedDict(  # type: ignore[attr-defined]
+                    (remap(path), meta) for path, meta in source_metadata.items()
+                )
             self.load_state_dict(model_state_dict)
         elif self.pretrained_source is not None and not ema:
             # A fresh TRAIN carries no checkpoint entry: the declared reference seeds the graph the

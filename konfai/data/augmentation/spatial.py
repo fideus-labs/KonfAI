@@ -577,13 +577,16 @@ class Elastix(DataAugmentation):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        # |displacement| <= max_displacement in world units by convexity: in voxels that is the
-        # bound over the axis's spacing, plus one voxel for the far interpolation tap.
+        # |displacement| <= max_displacement per world component by convexity. An index axis
+        # combines the components through its row of the inverse affine (an oblique direction
+        # mixes them), so its reach is that row's L1 norm times the bound (which reduces to
+        # 1/spacing on an axis-aligned grid), plus one voxel for the far interpolation tap.
         _stage, grid = self.draws[index][a]
         rank = len(source_spatial_shape)
+        row_reach_xyz = np.abs(grid.world_to_index.matrix).sum(axis=1)
         pull: list[slice] = []
         for k, (part, extent) in enumerate(zip(target_slices, source_spatial_shape, strict=True)):
-            reach = int(np.ceil(self.max_displacement / float(grid.spacing_xyz[rank - 1 - k]))) + 1
+            reach = int(np.ceil(self.max_displacement * float(row_reach_xyz[rank - 1 - k]))) + 1
             start = max(0, part.start - reach)
             stop = min(extent, part.stop + reach)
             pull.append(slice(start, max(stop, start + 1)))
