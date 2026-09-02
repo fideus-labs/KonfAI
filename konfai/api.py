@@ -452,7 +452,9 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
     scratch copy instead (removed at exit, like :func:`_materialized_config`'s).
     """
     if isinstance(config, Mapping):
-        return dict(config)
+        # Through _yaml_safe so the documented sweep idiom (np.float64 learning rates from
+        # np.logspace, Path values) fails as a named refusal here, not a raw ruamel error at dump.
+        return _yaml_safe(dict(config), "config")  # type: ignore[return-value]
     source = Path(config)
     scratch = Path(tempfile.mkdtemp(prefix="konfai_config_"))
     atexit.register(shutil.rmtree, scratch, ignore_errors=True)
@@ -463,7 +465,7 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
 
 
 def predict(
-    models: Sequence[Path | str],
+    models: Path | str | Sequence[Path | str],
     config: Mapping[str, object] | Path | str,
     *,
     gpu: Sequence[int] | None = None,
@@ -479,6 +481,10 @@ def predict(
     """
     from konfai.predictor import build_predict
 
+    # A bare str IS a Sequence[str]: without this, "best.pt" expands per character into
+    # [Path('b'), Path('e'), ...] and fails far downstream as missing models.
+    if isinstance(models, (str, Path)):
+        models = [models]
     return _launch(
         len(gpu or []) or cpu,
         lambda: build_predict(
