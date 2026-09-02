@@ -18,7 +18,9 @@
 
 import os
 import shutil
+import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -136,6 +138,17 @@ def subprocess_env() -> dict[str, str]:
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(REPO_ROOT) if not pythonpath else f"{REPO_ROOT}{os.pathsep}{pythonpath}"
     return env
+
+
+def run_workflow(
+    cmd: Sequence[str], cwd: Path, timeout: float = 600, check: bool = True, **kwargs
+) -> subprocess.CompletedProcess:
+    """Run one child workflow with the shared environment and a hang guard.
+
+    The children traverse ``run_distributed_app``/``mp.spawn``, where a deadlock would otherwise
+    hold the CI job to the runner limit; the timeout turns it into a failure with a traceback.
+    """
+    return subprocess.run(list(cmd), cwd=cwd, env=subprocess_env(), check=check, timeout=timeout, **kwargs)
 
 
 def konfai_cli_command() -> list[str]:

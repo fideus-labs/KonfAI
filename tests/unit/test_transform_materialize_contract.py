@@ -34,7 +34,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import SimpleITK as sitk
 import torch
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager
@@ -50,6 +49,9 @@ from oracle_support import (
     streamable_cases,
     volumes,
 )
+
+pytest.importorskip("SimpleITK")
+import SimpleITK as sitk
 
 
 @pytest.fixture(scope="session")

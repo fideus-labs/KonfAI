@@ -26,11 +26,15 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
 
       - name: Install core package
+        # The CPU torch index: the default PyPI torch wheel bundles the multi-GB CUDA stack this
+        # CPU-only runner never uses.
         run: |
           python -m pip install -U pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Install standalone apps package
         run: |
@@ -42,11 +46,21 @@ jobs:
 
       - name: Run konfai tests
         run: |
-          pytest -q tests
+          pytest -q -n auto --dist loadfile tests
 
       - name: Run konfai-apps tests
         run: |
           python -m pytest -q konfai-apps/tests
+
+      - name: Install app bundles
+        run: |
+          for app in apps/*/; do pip install -e "./$app"; done
+
+      - name: Run app bundle tests
+        # These are the five PyPI-published bundles of the build matrix below. impact_reg's
+        # integration test gates itself (KONFAI_IMPACTREG_REPO + fireants + CUDA) and skips here.
+        run: |
+          for app in apps/*/; do python -m pytest -q "${app}tests"; done
 
       - name: Run konfai-mcp tests
         run: |
@@ -115,6 +129,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
 
       - name: Set up Node
         if: matrix.name == 'konfai-studio'
@@ -135,6 +151,18 @@ jobs:
           python -m pip install build setuptools-scm
           cd "${{ matrix.pkg }}"
           python -m build ${{ matrix.build_args }}
+
+      - name: Verify the studio wheel ships the built front
+        # web/ is non-Python payload swept in by package-data at build time: a setuptools or glob
+        # regression would publish a wheel whose UI is an empty directory, and nothing else fails.
+        if: matrix.name == 'konfai-studio'
+        run: |
+          python -c "
+          import glob, sys, zipfile
+          names = zipfile.ZipFile(glob.glob('studio/dist/*.whl')[0]).namelist()
+          ok = 'konfai_studio/web/index.html' in names and any(n.startswith('konfai_studio/web/assets/') for n in names)
+          sys.exit(0 if ok else 'the studio wheel is missing konfai_studio/web/index.html or assets/')
+          "
 
       - name: Upload dist
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -163,6 +191,10 @@ jobs:
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist
+          # A transient failure can publish some of the nine packages and not others; every file
+          # here was built from the same tag in the same run, so skipping duplicates makes a
+          # re-run of this job complete the remaining packages instead of failing on the uploaded ones.
+          skip-existing: true
 
   github_release:
     needs: publish

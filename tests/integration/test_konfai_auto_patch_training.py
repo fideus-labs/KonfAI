@@ -18,12 +18,11 @@
 must shrink the free axes through the rank rendezvous, re-plan the grid, restart the run, and
 train to completion (checkpoints produced)."""
 
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from harness import prepare_experiment_dir, replace_once, subprocess_env
+from harness import prepare_experiment_dir, replace_once, run_workflow
 
 pytestmark = pytest.mark.integration
 
@@ -100,9 +99,4 @@ def test_auto_patch_training_restarts_and_completes(tmp_path: Path) -> None:
 
     runner_path = experiment_dir / "run_auto_patch_training.py"
     runner_path.write_text(RUNNER_SOURCE.replace("__TRAIN_NAME__", TRAIN_NAME), encoding="utf-8")
-    subprocess.run(
-        [sys.executable, str(runner_path)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
+    run_workflow([sys.executable, str(runner_path)], experiment_dir)

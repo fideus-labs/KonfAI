@@ -25,6 +25,10 @@ are different code (``write_ome_zarr`` against ``create_ome_zarr_store`` +
 
 import numpy as np
 import pytest
+
+pytest.importorskip("zarr")
+pytest.importorskip("ngff_zarr")
+
 import zarr
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError

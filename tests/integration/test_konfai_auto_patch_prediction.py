@@ -19,13 +19,12 @@ shrink the free axes, re-plan the grid, restart, and produce a prediction byte-i
 whole-volume run. The model is pointwise (1x1 conv) and the overlap 0, so patched == whole holds
 exactly and any grid/mapping/accumulation mistake shows up as a voxel difference."""
 
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
-from harness import prepare_experiment_dir, replace_once, subprocess_env
+from harness import prepare_experiment_dir, replace_once, run_workflow
 
 pytestmark = pytest.mark.integration
 
@@ -123,12 +122,7 @@ def auto_patch_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str,
 
     runner_path = experiment_dir / "run_auto_patch_prediction.py"
     runner_path.write_text(RUNNER_SOURCE.replace("__TRAIN_NAME__", TRAIN_NAME), encoding="utf-8")
-    subprocess.run(
-        [sys.executable, str(runner_path)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
+    run_workflow([sys.executable, str(runner_path)], experiment_dir)
     return {
         "dataset_dir": paths["dataset_dir"],
         "reference": experiment_dir / "Predictions_reference",

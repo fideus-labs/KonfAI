@@ -28,13 +28,12 @@ end to end). The TTA variants exercise the slab-synchronized cross-copy reduce: 
 streams (each copy's window reduced slab by slab), while a slab-axis flip must refuse and complete
 whole-volume. Every variant is compared voxel for voxel against its own kill-switch reference."""
 
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
-from harness import TTA_AUGMENTATIONS_BLOCK, prepare_experiment_dir, replace_once, subprocess_env
+from harness import TTA_AUGMENTATIONS_BLOCK, prepare_experiment_dir, replace_once, run_workflow
 
 pytestmark = pytest.mark.integration
 
@@ -220,12 +219,7 @@ def streamed_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
 
     runner_path = experiment_dir / "run_streamed_prediction.py"
     runner_path.write_text(RUNNER_SOURCE.replace("__TRAIN_NAME__", TRAIN_NAME), encoding="utf-8")
-    subprocess.run(
-        [sys.executable, str(runner_path)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
+    run_workflow([sys.executable, str(runner_path)], experiment_dir)
     return {
         "dataset_dir": paths["dataset_dir"],
         "experiment_dir": experiment_dir,

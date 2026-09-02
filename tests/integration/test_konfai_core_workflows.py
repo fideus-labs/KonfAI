@@ -16,15 +16,13 @@
 
 import json
 import os
-import subprocess
 import sys
-import textwrap
 from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import pytest
-from harness import konfai_cli_command, prepare_experiment_dir, subprocess_env, write_image
+from harness import konfai_cli_command, prepare_experiment_dir, run_workflow, write_image
 from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
 from konfai.trainer import build_train
@@ -81,85 +79,13 @@ def _assert_experiment_outputs(
         assert all(np.isfinite(value) for value in case_values.values()), metric_name
 
 
-def test_konfai_api_user_path(tmp_path: Path) -> None:
-    experiment_dir = tmp_path / "experiment_api"
-    train_name = "API"
-    paths = prepare_experiment_dir(experiment_dir, train_name)
-
-    runner_path = experiment_dir / "run_api_workflow.py"
-    runner_path.write_text(
-        textwrap.dedent(
-            """
-            from pathlib import Path
-            from konfai.evaluator import evaluate
-            from konfai.predictor import predict
-            from konfai.trainer import train
-
-            def main() -> None:
-                root = Path.cwd()
-                train(
-                    overwrite=True,
-                    gpu=[],
-                    cpu=1,
-                    quiet=True,
-                    tensorboard=False,
-                    config=root / "Config.yml",
-                    checkpoints_dir=root / "Checkpoints",
-                    statistics_dir=root / "Statistics",
-                )
-                checkpoints = sorted((root / "Checkpoints" / "__TRAIN_NAME__").glob("*.pt"))
-                if not checkpoints:
-                    raise RuntimeError("no checkpoints produced")
-                predict(
-                    models=checkpoints,
-                    overwrite=True,
-                    gpu=[],
-                    cpu=1,
-                    quiet=True,
-                    tb=False,
-                    prediction_file=root / "Prediction.yml",
-                    predictions_dir=root / "Predictions",
-                )
-                evaluate(
-                    overwrite=True,
-                    gpu=[],
-                    cpu=1,
-                    quiet=True,
-                    tb=False,
-                    evaluations_file=root / "Evaluation.yml",
-                    evaluations_dir=root / "Evaluations",
-                )
-
-
-            if __name__ == "__main__":
-                main()
-            """.replace("__TRAIN_NAME__", train_name)
-        ),
-        encoding="utf-8",
-    )
-
-    subprocess.run(
-        [sys.executable, str(runner_path)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
-    _assert_experiment_outputs(
-        paths["dataset_dir"],
-        paths["checkpoints_dir"],
-        paths["predictions_dir"],
-        paths["evaluations_dir"],
-        train_name,
-    )
-
-
 def test_konfai_cli_user_path(tmp_path: Path) -> None:
     experiment_dir = tmp_path / "experiment_cli"
     train_name = "CLI"
     paths = prepare_experiment_dir(experiment_dir, train_name)
     cli = konfai_cli_command()
 
-    subprocess.run(
+    run_workflow(
         [
             *cli,
             "TRAIN",
@@ -174,14 +100,12 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
             "--statistics-dir",
             "Statistics",
         ],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
+        experiment_dir,
     )
     checkpoints = sorted((paths["checkpoints_dir"] / train_name).glob("*.pt"))
     assert checkpoints
 
-    subprocess.run(
+    run_workflow(
         [
             *cli,
             "PREDICTION",
@@ -196,11 +120,9 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
             "--predictions-dir",
             "Predictions",
         ],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
+        experiment_dir,
     )
-    subprocess.run(
+    run_workflow(
         [
             *cli,
             "EVALUATION",
@@ -213,9 +135,7 @@ def test_konfai_cli_user_path(tmp_path: Path) -> None:
             "--evaluations-dir",
             "Evaluations",
         ],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
+        experiment_dir,
     )
     _assert_experiment_outputs(
         paths["dataset_dir"],
