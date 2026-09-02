@@ -22,6 +22,7 @@ import functools
 import inspect
 import logging
 import os
+import sys
 import time
 import types
 import typing
@@ -35,7 +36,6 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import ruamel.yaml
-import torch
 
 from konfai.utils.errors import ConfigError
 
@@ -239,16 +239,19 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     _ledgers.append(ledger)
     if shared is not None:
         _shared_trees.append(shared)
+    unknown: list[str] = []
     try:
         yield
     finally:
         _ledgers.remove(ledger)
+        unknown = ledger.unknown(root)
         if shared is not None:
             _shared_trees.remove(shared)
-            # Written whatever ended the block: what the contexts bound is on disk, as when each
-            # context wrote its own level.
-            shared.flush()
-    if unknown := ledger.unknown(root):
+            # Written whatever ended the block, EXCEPT when the block is about to refuse the config:
+            # a refused run must leave the user's file exactly as it was.
+            if not (refuse and unknown):
+                shared.flush()
+    if unknown:
         _report(
             refuse,
             f"Unknown key(s) in the {root} configuration: nothing reads them.",
@@ -285,23 +288,26 @@ class Config:
 
     def __enter__(self):
         if not self.filename.exists():
-            mode = os.environ.get("KONFAI_CONFIG_MODE", "Done")
-            if mode in {"default", "interactive", "Import"}:
+            if os.environ.get("KONFAI_CONFIG_MODE") == "Import":
                 self.filename.parent.mkdir(parents=True, exist_ok=True)
                 self.filename.touch()
             else:
                 raise ConfigError(
                     f"Config file '{self.filename.resolve()}' does not exist.",
-                    f"Active config mode: KONFAI_CONFIG_MODE={mode}.",
-                    "Run `konfai TRAINING -c Config.yml` to generate a default config, "
-                    "or set KONFAI_CONFIG_MODE=default.",
+                    "Generate a resolved default with `konfai <COMMAND> --init` "
+                    "(e.g. `konfai TRAIN --init -c Config.yml`), or point -c at an existing file.",
                 )
 
         self._shared = _shared_tree(self.filename)
         self.data = self._shared.tree if self._shared is not None else _load_tree(self.filename)
         self.config = self.data
 
-        for key in self.keys:
+        for index, key in enumerate(self.keys):
+            if self.config is not None and not isinstance(self.config, collections.abc.Mapping):
+                raise ConfigError(
+                    f"'{'.'.join(self.keys[:index])}' holds the value '{self.config}' where a block is expected.",
+                    f"Nest '{key}:' under it as a mapping, or remove the value.",
+                )
             if self.config is None or key not in self.config:
                 self.config = {key: {}}
 
@@ -328,47 +334,12 @@ class Config:
         _write_tree(self.filename, data)
 
     @staticmethod
-    def _get_input(name: str, default: str) -> str:
-        try:
-            options = ",".join(default.split(":")[1:]) if ":" in default else ""
-            return input(f"{name} [{options}]: ")
-        except (EOFError, KeyboardInterrupt):
-            # Interactive editing is optional; when stdin is unavailable we
-            # degrade to default materialization instead of aborting the run.
-            os.environ["KONFAI_CONFIG_MODE"] = "default"
-        return default.split("|")[1] if len(default.split("|")) > 1 else default
-
-    @staticmethod
-    def _get_input_default(
-        name: str,
-        default: str | None,
-        is_list: bool = False,
-    ) -> list[str | None] | str | None:
-        # ``default|value`` is KonfAI's marker for "materialize this default if
-        # the user/config did not provide a concrete value".
-        if isinstance(default, str) and (
-            default == "default" or (len(default.split("|")) > 1 and default.split("|")[0] == "default")
-        ):
-            if os.environ["KONFAI_CONFIG_MODE"] == "interactive":
-                if is_list:
-                    list_tmp: list[str | None] = []
-                    key_tmp = "OK"
-                    while key_tmp != "!" and key_tmp != " " and os.environ["KONFAI_CONFIG_MODE"] == "interactive":
-                        key_tmp = Config._get_input(name, default)
-                        if key_tmp != "!" and key_tmp != " ":
-                            if key_tmp == "":
-                                key_tmp = default.split("|")[1] if len(default.split("|")) > 1 else default
-                            list_tmp.append(key_tmp)
-                    return list_tmp
-                else:
-                    value = Config._get_input(name, default)
-                    if value == "":
-                        return default.split("|")[1] if len(default.split("|")) > 1 else default
-                    else:
-                        return value
-            else:
-                default = default.split("|")[1] if len(default.split("|")) > 1 else default
-        return [default] if is_list else default
+    def _default_value(default):
+        """Resolve the ``default|value`` marker ("materialize this when the config holds nothing")."""
+        if isinstance(default, str) and default.split("|")[0] == "default":
+            parts = default.split("|")
+            return parts[1] if len(parts) > 1 else default
+        return default
 
     def get_value(self, name, default) -> object:
         if not isinstance(self.config, collections.abc.MutableMapping):
@@ -376,45 +347,29 @@ class Config:
         for ledger in _ledgers:
             ledger.read(tuple(self.keys), name)
 
-        if name in self.config and self.config[name] is not None:
-            value = self.config[name]
+        if name in self.config:
+            # An explicit null (`name:` empty or `name: null`) is the disabled spelling, exactly like
+            # the string "None": substituting the default here would silently reactivate the very
+            # thing the line was written to suppress.
+            value = self.config[name] if self.config[name] is not None else "None"
             value_config = value
         else:
-            value = Config._get_input_default(
-                name,
-                default if default != inspect._empty else None,
-            )
+            value = Config._default_value(default if default != inspect._empty else None)
 
             value_config = value
             if isinstance(value_config, tuple):
                 value_config = list(value)
 
             if isinstance(value_config, list):
-                list_tmp = []
-                for key in value_config:
-                    res = Config._get_input_default(name, key, is_list=True)
-                    if isinstance(res, list):
-                        list_tmp.extend(res)
-                    else:
-                        list_tmp.append(str(res))
-
-                value = list_tmp
-                value_config = list_tmp
+                value = value_config = [Config._default_value(key) for key in value_config]
 
             if isinstance(value, dict):
-                key_tmp = []
-
                 value_config = {}
                 dict_value = {}
                 for key in value:
-                    res = Config._get_input_default(name, key, is_list=True)
-                    if isinstance(res, list):
-                        key_tmp.extend(res)
-                    else:
-                        key_tmp.append(str(res))
-                for key in key_tmp:
-                    if key in value:
-                        value_tmp = value[key]
+                    resolved = str(Config._default_value(key))
+                    if resolved in value:
+                        value_tmp = value[resolved]
                     else:
                         value_tmp = next(v for k, v in value.items() if "default" in k)
 
@@ -422,8 +377,8 @@ class Config:
                     # so a None placeholder is correct; primitive entries have no such pass, so they
                     # must be persisted here or the write-back collapses the whole dict to ``{}``
                     # (empty on the next run, silently dropping the defaults).
-                    value_config[key] = value_tmp if isinstance(value_tmp, int | float | str | bool) else None
-                    dict_value[key] = value_tmp
+                    value_config[resolved] = value_tmp if isinstance(value_tmp, int | float | str | bool) else None
+                    dict_value[resolved] = value_tmp
                 value = dict_value
         self.config[name] = _recordable(value_config) if value_config is not None else "None"
         if value == "None":
@@ -458,8 +413,20 @@ _CONFIG_PRIMITIVE_TYPES = {
     str,
     bool,
     float,
-    torch.Tensor,
 }
+
+
+def _tensor_type() -> type | None:
+    """``torch.Tensor`` when torch is already imported, else None.
+
+    torch is never imported here: an annotation can only mention Tensor if its declaring module
+    already paid the import, and keeping config.py torch-free keeps the light-import contract of
+    ``konfai/__init__`` honest for consumers like the Slicer-facing konfai-apps helpers (measured:
+    634 of this module's 676 ms import was torch).
+    """
+    return getattr(sys.modules.get("torch"), "Tensor", None)
+
+
 _CONFIG_SUPPORTED_TYPES_MESSAGE = (
     "Config: The config only supports types : config(Object), int, str, "
     "bool, float, list[int], list[str], list[bool], list[float], "
@@ -514,9 +481,9 @@ def _resolve_annotation(function, annotation):
                 "int": int,
                 "list": list,
                 "str": str,
-                "torch": torch,
                 "tuple": tuple,
                 "typing": typing,
+                **({"torch": sys.modules["torch"]} if "torch" in sys.modules else {}),
             },
         )
     except Exception:
@@ -585,10 +552,10 @@ def _convert_union_sequence_value(
                 continue
             if not isinstance(candidate_type, type):
                 continue
-            current_value = (
-                torch.tensor(value) if candidate_type == torch.Tensor and not isinstance(value, torch.Tensor) else value
-            )
-            converted = current_value if candidate_type == torch.Tensor else candidate_type(current_value)
+            if candidate_type is _tensor_type():
+                converted = value if isinstance(value, candidate_type) else sys.modules["torch"].tensor(value)
+            else:
+                converted = candidate_type(value)
             break
         except Exception as exc:
             last_error = exc
@@ -646,6 +613,14 @@ def _parse_bool(value: object) -> bool:
 def _bind_primitive(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
     value = config.get_value(param.name, param.default)
     if annotation in {int, float, bool, str} and value is not None:
+        if isinstance(value, Mapping | list | tuple):
+            # `str` never fails to coerce, so without this a nested block or list binds as its
+            # Python repr and fails far downstream, on whatever that text then selects.
+            shape = "a nested block" if isinstance(value, Mapping) else "a list"
+            raise ConfigError(
+                f"Parameter '{section_key}.{param.name}' was given {shape}, but it takes a {annotation.__name__}.",
+                f"Write it as a single value ('{param.name}: <{annotation.__name__}>').",
+            )
         try:
             value = _parse_bool(value) if annotation is bool else annotation(value)
         except (ValueError, TypeError) as exc:
@@ -673,7 +648,7 @@ def _bind_path(config: Config, param: inspect.Parameter) -> Path | None:
     return path
 
 
-def _bind_sequence(config: Config, param: inspect.Parameter, annotation) -> object:
+def _bind_sequence(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
     values: Any = config.get_value(param.name, param.default)
     if values is None:
         return None
@@ -681,15 +656,41 @@ def _bind_sequence(config: Config, param: inspect.Parameter, annotation) -> obje
     elem_type = args_annotation[0] if args_annotation else Any
     if get_origin(elem_type) in {Union, types.UnionType}:
         return [_convert_union_sequence_value(value, get_args(elem_type), param.name) for value in values]
-    if elem_type in {int, str, bool, float, torch.Tensor, Any}:
+    if elem_type is Any or elem_type is _tensor_type():
         return values
-    raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
+    if isinstance(elem_type, type) and elem_type in {int, str, bool, float}:
+        if not isinstance(values, list | tuple):
+            raise ConfigError(
+                f"Parameter '{section_key}.{param.name}' expects a list of {elem_type.__name__}, got '{values}'.",
+                f"Spell it as a YAML list ('{param.name}: [a, b]' or one '- item' per line).",
+            )
+        converted = []
+        for index, value in enumerate(values):
+            if value is None or isinstance(value, Mapping | list | tuple):
+                raise ConfigError(
+                    f"Element {index} of '{section_key}.{param.name}' is not a {elem_type.__name__}: '{value}'."
+                )
+            try:
+                converted.append(_parse_bool(value) if elem_type is bool else elem_type(value))
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(
+                    f"Element {index} of '{section_key}.{param.name}' is not a {elem_type.__name__}: '{value}'."
+                ) from exc
+        return converted
+    raise ConfigError(
+        f"Parameter '{section_key}.{param.name}' is annotated {annotation}, which the config cannot bind.",
+        _CONFIG_SUPPORTED_TYPES_MESSAGE,
+    )
 
 
 def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
     key_type, value_type = get_args(annotation)
     if key_type is not str:
-        raise ConfigError(_CONFIG_SUPPORTED_TYPES_MESSAGE)
+        raise ConfigError(
+            f"Parameter '{section_key}.{param.name}' is annotated {annotation}, which the config cannot bind"
+            " (dict keys must be str).",
+            _CONFIG_SUPPORTED_TYPES_MESSAGE,
+        )
     values: Any = config.get_value(param.name, param.default)
     if values is None or value_type in {int, str, bool, float, Any}:
         return values
@@ -699,7 +700,7 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
             for value in values
         }
     except Exception as exc:
-        raise ConfigError(f"{values} {exc}") from exc
+        raise ConfigError(f"Failed to build an entry of '{section_key}.{param.name}': {exc}") from exc
 
 
 def _bind_config_object(config: Config, param: inspect.Parameter, annotation, is_optional: bool, section_key: str):
@@ -742,7 +743,7 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
 
     origin = get_origin(annotation)
     if origin in {list, tuple, Sequence, collections.abc.Sequence}:
-        return _bind_sequence(config, param, annotation)
+        return _bind_sequence(config, param, annotation, section_key)
     if origin is dict:
         return _bind_dict(config, param, annotation, section_key)
 
@@ -780,7 +781,15 @@ def apply_config(konfai_args: str | None = None):
                 try:
                     with Config(key_tmp) as config:
                         if not isinstance(config.config, collections.abc.Mapping):
-                            return None
+                            if config.config in (None, "None"):
+                                return None
+                            # `optimizer: AdamW` where a block is expected would otherwise bind the
+                            # whole object to None and the run would proceed without it, silently.
+                            raise ConfigError(
+                                f"'{key_tmp}' holds the value '{config.config}' where a block is expected.",
+                                f"Nest its settings under '{key_tmp.rsplit('.', 1)[-1]}:' as a mapping"
+                                " (or write 'None' to disable it).",
+                            )
                         for ledger in _ledgers:  # a parameter the caller supplies itself is a read one
                             ledger.read(tuple(config.keys), *without)
 

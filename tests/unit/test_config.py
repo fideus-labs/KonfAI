@@ -57,31 +57,27 @@ def test_config_missing_file_raises_clear_error_without_prompt(
         with Config("Trainer"):
             pass
 
-    # The error must name the file, the mode, and hint at the fix.
+    # The error must name the file and hint at the real fix (a command that exists).
     msg = str(exc_info.value)
     assert "missing.yml" in msg
     assert "does not exist" in msg
-    assert "KONFAI_CONFIG_MODE=Done" in msg
-    assert "konfai TRAINING" in msg
+    assert "--init" in msg
 
 
-def test_config_default_mode_materializes_missing_file(
+def test_config_missing_file_refuses_whatever_the_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Generation is `konfai <CMD> --init` (which creates the file first); no mode materializes one."""
     config_path = tmp_path / "generated.yml"
     monkeypatch.setenv("KONFAI_config_file", str(config_path))
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "default")
     monkeypatch.setattr("builtins.input", _fail_input)
 
-    with Config("Trainer") as config_obj:
-        value = config_obj.get_value("train_name", "default|SMOKE")
-
-    assert config_path.exists()
-    assert value == "SMOKE"
-    content = config_path.read_text(encoding="utf-8")
-    assert "Trainer:" in content
-    assert "train_name: SMOKE" in content
+    with pytest.raises(ConfigError):
+        with Config("Trainer"):
+            pass
+    assert not config_path.exists()
 
 
 def test_config_missing_env_var_raises(
@@ -710,6 +706,74 @@ def test_union_with_literal_member_does_not_crash() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Shape refusals: wrong-shaped YAML fails at the key that caused it, never silently
+# --------------------------------------------------------------------------------------
+
+
+class _Engine:
+    def __init__(self, rate: float = 0.5) -> None:
+        self.rate = rate
+
+
+class _ShapeRoot:
+    def __init__(self, name: str = "run", sizes: list[int] = [1, 2], engine: "_Engine | None" = None) -> None:
+        self.name, self.sizes, self.engine = name, sizes, engine
+
+
+def test_a_scalar_where_an_object_block_is_expected_refuses(write_config) -> None:
+    # `Engine: AdamW` instead of a block once bound the object to None: the run then proceeded
+    # without it (an optimizer that never steps), silently.
+    write_config("Root:\n  Engine: AdamW\n")
+    with pytest.raises(ConfigError, match="where a block is expected"):
+        apply_config("Root.Engine")(_Engine)()
+
+
+def test_an_explicit_none_at_an_object_key_still_binds_none(write_config) -> None:
+    write_config("Root:\n  Engine: None\n")
+    assert apply_config("Root.Engine")(_Engine)() is None
+    write_config("Root:\n  Engine: null\n")
+    assert apply_config("Root.Engine")(_Engine)() is None
+
+
+def test_a_scalar_at_an_intermediate_level_refuses_with_the_path(write_config) -> None:
+    write_config("Root: 5\n")
+    with pytest.raises(ConfigError, match="'Root' holds the value '5'"):
+        apply_config("Root.Engine")(_Engine)()
+
+
+def test_a_block_under_a_str_parameter_refuses_instead_of_binding_its_repr(write_config) -> None:
+    write_config("Root:\n  name:\n    foo: bar\n")
+    with pytest.raises(ConfigError, match="nested block"):
+        apply_config("Root")(_ShapeRoot)()
+
+
+def test_a_list_under_a_str_parameter_refuses_instead_of_binding_its_repr(write_config) -> None:
+    write_config("Root:\n  name: [a, b]\n")
+    with pytest.raises(ConfigError, match="takes a str"):
+        apply_config("Root")(_ShapeRoot)()
+
+
+def test_list_elements_are_coerced_to_the_declared_type(write_config) -> None:
+    write_config("Root:\n  sizes: ['3', '4']\n")
+    assert apply_config("Root")(_ShapeRoot)().sizes == [3, 4]
+
+
+def test_a_wrong_shaped_list_element_refuses_with_its_index(write_config) -> None:
+    write_config("Root:\n  sizes: [3, {a: 1}]\n")
+    with pytest.raises(ConfigError, match="Element 1"):
+        apply_config("Root")(_ShapeRoot)()
+
+
+def test_an_explicit_null_binds_none_instead_of_reactivating_the_default(write_config) -> None:
+    # `name: null` (or an empty value) is the disabled spelling: materializing the default here
+    # silently reactivated the very thing the line was written to suppress.
+    config_path = write_config("Root:\n  name: null\n  sizes: [1]\n")
+    root = apply_config("Root")(_ShapeRoot)()
+    assert root.name is None
+    assert "name: None" in config_path.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------------------
 # strict_config: a key nothing reads is refused, whoever would have read it
 # --------------------------------------------------------------------------------------
 
@@ -942,11 +1006,20 @@ def test_a_strict_block_reads_once_writes_once_and_the_bytes_a_write_per_context
     )
 
 
-def test_a_strict_block_that_refuses_still_leaves_what_it_bound_on_disk(write_config) -> None:
-    """A context wrote its level before the block could report an unknown key; the block writes
-    the same resolved file before it reports."""
+def test_a_strict_block_that_refuses_leaves_the_file_untouched(write_config) -> None:
+    """A refused config is the user's to fix: the resolved tree is dropped with the refusal, so the
+    file still reads exactly as they wrote it (the typo'd key included)."""
     config_path = write_config("Root:\n  kep: 2\n")
+    before = config_path.read_text(encoding="utf-8")
     with pytest.raises(ConfigError, match="Unknown key"), strict_config("Root"):
+        apply_config("Root")(_StrictRoot)()
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_a_warning_strict_block_still_writes_the_resolved_file(write_config) -> None:
+    """refuse=False (TRAIN/PREDICTION/EVALUATION): the run proceeds, so the resolved file is kept."""
+    config_path = write_config("Root:\n  kep: 2\n")
+    with pytest.warns(UserWarning, match="Unknown key"), strict_config("Root", refuse=False):
         apply_config("Root")(_StrictRoot)()
     written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
     assert written["Root"] == {"kep": 2, "depth": 1, "kept": 0, "Nested": {"width": 2}}
@@ -962,11 +1035,13 @@ def test_a_strict_block_does_not_create_a_file_a_context_refused(tmp_path: Path,
 
 
 def test_a_strict_block_writes_the_file_a_context_materialized(tmp_path: Path, monkeypatch) -> None:
+    """An existing empty file (what `--init` creates) resolves to the full default block on disk."""
     config_path = tmp_path / "generated.yml"
+    config_path.touch()
     monkeypatch.setenv("KONFAI_config_file", str(config_path))
-    monkeypatch.setenv("KONFAI_CONFIG_MODE", "default")
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     monkeypatch.setattr("builtins.input", _fail_input)
-    with strict_config("Root"):
+    with strict_config("Root", refuse=False):
         root = apply_config("Root")(_StrictRoot)()
     assert root.kept == 0
     written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
