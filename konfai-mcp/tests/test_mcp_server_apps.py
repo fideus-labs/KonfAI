@@ -82,11 +82,12 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     assert payload["checkpoints_available"] == ["tiny.pt"]
     assert payload["patch_size"] == [1, 64, 64]
     assert payload["task"] == "synthesis"
-    # The bundle ships a Config.yml, so it is finetunable (via import_app + run_resume).
+    # The bundle ships a Config.yml, so it is finetunable and offers fine_tune_app.
     assert payload["finetunable"] is True
     # An inference-capable app routes forward to the run/tune tools instead of dead-ending.
     assert payload["next_actions"][0] == "run_app_infer"
-    assert "import_app" in payload["next_actions"]  # the modify/fine-tune path stays offered
+    assert "fine_tune_app" in payload["next_actions"]
+    assert "import_app" in payload["next_actions"]  # the modify-then-run path stays offered
     assert "run_app_evaluate" not in payload["next_actions"]
 
 
@@ -489,6 +490,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             "run_app_evaluate",
             "run_app_uncertainty",
             "run_app_pipeline",
+            "fine_tune_app",
             "package_app_from_session",
         )
         import asyncio
@@ -502,11 +504,12 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
         assert callable(runner.run_app_api)
         assert callable(runner.run_app_action_api)
+        assert callable(runner.run_finetune_api)
 
         assert "solve_task" in index["prompts"]
         solve = server.prompt_solve_task("segment the liver", "one CT group")
         content = solve[0]["content"]
-        for tool in ("run_app_infer", "run_resume", "import_app", "design_config_strategy"):
+        for tool in ("run_app_infer", "fine_tune_app", "import_app", "design_config_strategy"):
             assert tool in content
 
         app_dir = _write_local_app(tmp_path)
@@ -566,13 +569,14 @@ def _dummy_inputs(tmp_path: Path) -> list[list[str]]:
 
 
 def test_describe_app_inference_only_is_not_finetunable(tmp_path: Path) -> None:
-    """An app with no train Config.yml must report finetunable=False (a fine-tune would dead-end)."""
+    """An app with no train Config.yml must not advertise fine_tune_app (it would dead-end)."""
     app_dir = _write_local_app(tmp_path)
     (app_dir / "Config.yml").unlink()
 
     payload = _service(tmp_path).describe_app(str(app_dir))
 
     assert payload["finetunable"] is False
+    assert "fine_tune_app" not in payload["next_actions"]
     # Inference routing is unaffected.
     assert payload["next_actions"][0] == "run_app_infer"
 
@@ -696,6 +700,73 @@ def test_prepare_pipeline_spec_and_overrides(tmp_path: Path) -> None:
     assert "pipeline_TinyLocalApp__iterations_300" in tuned["output"]
 
 
+def test_prepare_finetune_gates_local_app(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="allow_untrusted_code=True"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset))
+
+    spec = service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, epochs=3)
+    assert spec["kind"] == "finetune"
+    assert spec["target"] == "konfai_mcp.runner:run_finetune_api"
+    assert spec["kwargs"]["dataset"] == str(dataset.resolve())
+    assert spec["kwargs"]["epochs"] == 3
+    assert "finetune_TinyLocalApp" in spec["output"]
+
+
+def test_prepare_finetune_rejects_remote_and_bad_dataset(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    service = _service(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+
+    with pytest.raises(ValueError, match="remote app server"):
+        service.prepare_finetune(ref="localhost:8000:MyApp", dataset=str(dataset), allow_untrusted_code=True)
+
+    with pytest.raises(ValueError, match="dataset must be an existing directory"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(tmp_path / "missing"), allow_untrusted_code=True)
+
+    with pytest.raises(ValueError, match="epochs must be a positive integer"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), epochs=0, allow_untrusted_code=True)
+
+
+def test_prepare_finetune_bakes_set_parameters(tmp_path: Path) -> None:
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+
+    spec = _service(tmp_path).prepare_finetune(
+        ref=str(app_dir),
+        dataset=str(dataset),
+        allow_untrusted_code=True,
+        config_overrides=["iterations=300"],
+    )
+    # The overrides reach the runner (so they bake into the training config) ...
+    assert spec["kwargs"]["config_overrides"] == ["iterations=300"]
+    # ... and the default output dir is param-legible, so the leaderboard metrics_path names the trial.
+    assert "finetune_TinyLocalApp__iterations_300" in spec["output"]
+
+
+def test_prepare_finetune_carries_the_batch_size_as_a_training_knob(tmp_path: Path) -> None:
+    """batch_size is a first-class training knob like epochs, NOT an app tunable: routed through
+    set_parameters it was refused ('batch_size' is no model parameter) and the job died at launch."""
+    app_dir = _write_local_app(tmp_path)
+    dataset = tmp_path / "Dataset"
+    dataset.mkdir()
+    service = _service(tmp_path)
+
+    spec = service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, batch_size=4)
+    assert spec["kwargs"]["batch_size"] == 4
+    # The knob still labels the trial's output dir, so the leaderboard names what produced the score.
+    assert "finetune_TinyLocalApp__batch_size_4" in spec["output"]
+
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        service.prepare_finetune(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, batch_size=0)
+
+
 def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The tool -> prepare_* -> job-registry wiring: kind, runner target, devices, manifest and the
     tuned parameters that gate the refine loop (the launch itself is stubbed: no subprocess)."""
@@ -747,6 +818,14 @@ def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.M
         assert payload["kind"] == "infer"
         assert payload["output"] == captured["kwargs"]["output"]  # type: ignore[index]
         assert payload["set_parameters"] == ["iterations=300"]
+
+        dataset = tmp_path / "Dataset"
+        dataset.mkdir(exist_ok=True)
+        tuned = server.fine_tune_app(ref=str(app_dir), dataset=str(dataset), allow_untrusted_code=True, epochs=2, cpu=1)
+        assert captured["kind"] == "finetune"
+        assert captured["target"] == "konfai_mcp.runner:run_finetune_api"
+        assert captured["kwargs"]["epochs"] == 2  # type: ignore[index]
+        assert tuned["kind"] == "finetune"
     finally:
         sys.modules.pop("konfai_mcp.server", None)
 
@@ -773,6 +852,7 @@ def test_app_execution_tool_schemas_reach_the_client(
         "run_app_evaluate": {"ref", "inputs", "gt"},
         "run_app_uncertainty": {"ref", "inputs"},
         "run_app_pipeline": {"ref", "inputs", "gt"},
+        "fine_tune_app": {"ref", "dataset", "output"},
     }
     for name, required_params in expected.items():
         assert name in schemas, f"{name} is not exposed to the client"

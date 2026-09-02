@@ -59,6 +59,7 @@ def test_job_payload_next_actions_are_registered_tools(
         "evaluation",
         "transform",
         "infer",
+        "finetune",
         "evaluate",
         "uncertainty",
         "pipeline",

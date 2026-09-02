@@ -34,7 +34,7 @@ This is the tool order verified by the segmentation and synthesis end-to-end tes
 the discovery steps only when the dataset and task are already understood.
 
 **Route first (cheapest fit wins)**
-0. `list_apps` → `describe_app` → `run_app_infer`: when the user wants a RESULT, check whether a published app already solves it BEFORE authoring and training from scratch. `run_app_infer` / `run_app_evaluate` / `run_app_uncertainty` / `run_app_pipeline` run the app AS PUBLISHED (no config editing). `import_app` is the modify-or-fine-tune path: it copies the app into the session so it runs as a normal experiment (`run_prediction`, or `run_resume` with `weights_only=True` to fine-tune from its weights on the user's dataset). `run_resume` (without `weights_only`) continues an interrupted session training.
+0. `list_apps` → `describe_app` → `run_app_infer`: when the user wants a RESULT, check whether a published app already solves it BEFORE authoring and training from scratch. `run_app_infer` / `run_app_evaluate` / `run_app_uncertainty` / `run_app_pipeline` run the app AS PUBLISHED (no config editing), and `fine_tune_app` is the one-call path to adapt it to the user's dataset. `import_app` is the full-control tier: it copies the app into the session so it runs as a normal experiment (`run_prediction`, or `run_resume` with `weights_only=True` to fine-tune with custom losses or config surgery). `run_resume` (without `weights_only`) continues an interrupted session training.
 
 **Discover (dataset-driven)**
 1. `browse_dataset` → `inspect_dataset`: choose the real dataset root, see groups + sampled stats (`include_stats=False` for a fast structural peek; `groups=[...]` when you need intensity ranges for normalization).

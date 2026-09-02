@@ -30,7 +30,7 @@ _FOLLOW_RUN = (
     "read the log, give the cause in one line and the fix."
 )
 _FOLLOW_READ = "Report it in two lines, then the next step."
-_LAUNCHES = ("run_",)
+_LAUNCHES = ("run_", "fine_tune_")
 # Stages reached before `initialize_session` has made a workspace: nothing there can be summarised yet.
 _BEFORE_WORKSPACE = {"dataset_inspection", "action_selection", "app_selection"}
 # One ceiling for the whole chain: the assistant's own block, the derived fill-in, and the bar. Past

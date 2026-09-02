@@ -525,6 +525,11 @@ class JobRegistry:
                 elif job.kind == "infer" and job.set_parameters:
                     # Already tuning inference parameters: help close the loop toward a score.
                     next_actions.extend(["run_app_evaluate", "run_app_pipeline", "compare_runs"])
+                elif job.kind == "finetune":
+                    # A fine-tune produces a bundle but keeps its training metrics out of it, so there is
+                    # nothing to rank yet: use the bundle, then evaluate it; that evaluation lands where
+                    # leaderboard/compare_runs can rank this fine-tune against other training trials.
+                    next_actions.extend(["run_app_infer", "run_app_evaluate"])
             else:
                 # A finished workflow job is a step, not the end: point at the step that actually follows it
                 # (a trained model is worth nothing until it has predicted, a prediction until it is scored),
