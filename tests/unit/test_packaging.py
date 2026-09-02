@@ -258,6 +258,9 @@ def test_wheel_ships_model_zoo_and_catalog(built_wheel: Path) -> None:
     missing_yaml = sorted(expected_yaml - names)
     assert not missing_yaml, f"catalog .yml files missing from the wheel: {missing_yaml}"
 
+    # PEP 561: without the marker every downstream type checker treats konfai as untyped.
+    assert "konfai/py.typed" in names, "py.typed missing from the wheel"
+
     forbidden_top_level = {"apps", "konfai-apps", "konfai_apps", "konfai-mcp", "konfai_mcp"}
     leaked = sorted(n for n in names if n.split("/", 1)[0] in forbidden_top_level)
     assert not leaked, f"sibling package leaked into the wheel: {leaked[:5]}"

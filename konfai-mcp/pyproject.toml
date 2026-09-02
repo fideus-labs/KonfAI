@@ -33,3 +33,6 @@ local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
 include = ["konfai_mcp*"]
+
+[tool.setuptools.package-data]
+"konfai_mcp" = ["py.typed"]

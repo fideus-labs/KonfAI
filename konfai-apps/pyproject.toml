@@ -31,3 +31,6 @@ local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
 include = ["konfai_apps*"]
+
+[tool.setuptools.package-data]
+"konfai_apps" = ["py.typed"]
