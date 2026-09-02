@@ -24,4 +24,5 @@ The guides:
 - :doc:`python-workflows`
 - :doc:`large-images`
 - :doc:`custom-models`
+- :doc:`benchmarks`
 - :doc:`docker`

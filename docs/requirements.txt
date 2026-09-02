@@ -1,9 +1,6 @@
 sphinx>=7.0
 shibuya
 myst-parser
-nbsphinx
-ipython
-ipykernel
 sphinx-autodoc-typehints
 sphinx-copybutton
 sphinx-togglebutton

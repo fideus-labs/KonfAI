@@ -4,7 +4,9 @@
 region is read straight from the file, and the result is written slab by slab as
 it completes. Neither the input nor the output is ever held whole. A 16 GiB
 uncompressed volume trains at a peak of **0.46 GiB of host RAM**, stable across
-epochs, with VRAM equal to one batch.
+epochs, with VRAM equal to one batch. The bounded-memory claim is reproducible
+with one command, `python benchmarks/bench_streaming.py --gib 16 --budget 1`:
+see {doc}`../usage/benchmarks`.
 
 That is not only a memory story. Running published models through KonfAI, on the
 same weights and the same card, against their reference implementations:
@@ -22,7 +24,8 @@ tables, including small and medium cases, are in the
 [MRSegmentator](https://github.com/fideus-labs/KonfAI/tree/main/apps/mrsegmentator)
 and
 [TotalSegmentator](https://github.com/fideus-labs/KonfAI/tree/main/apps/totalsegmentator)
-app pages.
+app pages; the measurement protocol behind every number is
+{doc}`../usage/benchmarks`.
 
 Nothing in YAML asks for any of it. KonfAI reads your preprocessing chain, works
 out whether a patch's answer can be computed from a bounded region of the file,

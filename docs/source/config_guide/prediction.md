@@ -38,6 +38,10 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml \
 When multiple checkpoints are provided, the predictor combines them using the
 `combine` strategy from the YAML, usually `Mean` or `Median`.
 
+A rerun resumes: a case whose every configured output is already on disk is
+skipped (the run prints how many), so a mid-cohort failure pays only the
+missing cases. `-y`/`--overwrite` recomputes everything.
+
 ## Top-level fields
 
 | Field | Type | Default in code | Required | Effect |

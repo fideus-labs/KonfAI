@@ -271,14 +271,14 @@ class Config:
     Context manager for reading and updating a subtree of the active YAML
     config.
 
+    Inside a :func:`strict_config` block the context reads the block's in-memory tree and folds
+    what it set back into it on exit; outside one it loads and writes the file itself.
+
     Parameters
     ----------
     key : str
         Dot-separated path pointing to the configuration subtree to inspect or
         materialize.
-
-    Inside a :func:`strict_config` block the context reads the block's in-memory tree and folds
-    what it set back into it on exit; outside one it loads and writes the file itself.
     """
 
     def __init__(self, key: str) -> None:

@@ -110,6 +110,52 @@ reusable pieces are the vocabulary:
 - **Tensor ops** (leaf modules): `Add`, `Multiply`, `Concat`, `Detach`,
   `ArgMax`, `Select`, `View`, `Permute`, `NormalNoise`, and more.
 
+## Start from MONAI, torchvision or nnU-Net weights (`pretrained_from`)
+
+A fresh TRAIN can seed its model from a checkpoint trained in another
+framework, from config alone. `Model.pretrained_from` builds the reference
+network, loads the checkpoint into it, and transfers the weights into the
+KonfAI graph by forward-execution order (no key map): the bridge fills **every**
+target tensor or raises, so a partial transfer is never reported as success.
+
+```yaml
+Trainer:
+  Model:
+    classpath: default|PlainConvUNet.yml
+    pretrained_from:
+      checkpoint: ./nnunet_fold0.pt        # raw state_dict, or a dict with a 'state_dict' entry;
+                                           # an https:// URL is accepted (weights-only load)
+      builder: monai.networks.nets:UNet    # classpath of the reference class
+      args: {spatial_dims: 3, in_channels: 1, out_channels: 2, channels: [32, 64], strides: [2]}
+      input_shape: [96, 96, 96]            # optional; else derived from the model's own
+                                           # patch size or downsampling factors
+```
+
+The seed runs only on a fresh TRAIN: a RESUME or PREDICTION checkpoint always
+wins, and PREDICTION never builds (or needs) the reference. A multi-input graph
+or a free-axis patch size cannot derive a synthetic input on its own:
+`input_shape` is the escape hatch, and the failure is a `ConfigError` naming
+`Model.pretrained_from`. The transfer itself is
+`konfai.utils.pretrained.transfer_weights_by_execution_order` (see the API
+reference).
+
+## Fine-tuning across a different head (`allow_head_resize`)
+
+By default a checkpoint load **refuses shape mismatches**: the strict load
+raises, naming the tensor and both shapes. To fine-tune across a head whose
+shape changed (a different label count, say), opt in with
+`Model.allow_head_resize: true`: the load then warm-starts the overlapping
+slice of each mismatched tensor and logs a warning per resized tensor. The
+loader propagates the opt-in to every nested network and can only enable it,
+never disable a model class's own constructor opt-in.
+
+```yaml
+Trainer:
+  Model:
+    classpath: segmentation.UNet.UNet
+    allow_head_resize: true
+```
+
 ## Next steps
 
 - {doc}`../../concepts/model-graph`: named outputs, `outputs_criterions`, patching

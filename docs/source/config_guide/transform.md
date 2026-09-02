@@ -306,7 +306,7 @@ Under `Dataset:`:
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list of `path[:format]` | `["./Dataset:mha"]` | Where cases are read. |
-| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, the OME-Zarr decoded-chunk cache included (a third of it, printed in the plan's header), not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. |
+| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, the OME-Zarr decoded-chunk cache included (a third of it, printed in the plan's header), not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. A declared budget below 256 MiB warns: the process floor alone exceeds it (declare at least 512 MiB, or `auto`). |
 | `subset` | string / list / null | `null` | Restricts which cases run: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
 | `groups_src` | mapping |: | The chains, keyed by source group then destination group. |
 
@@ -370,7 +370,10 @@ plan says how many regions that is, and `memory_budget` sizes and refuses agains
 it. `Concat` puts the cases side by side: the output
 carries `N × C` channels. A custom operator must declare `voxel_local = True`: one that reads across space cannot stream and is refused outright. It should
 also declare `working_multiple` if it allocates over the buffer it is handed,
-or the plan promises a working set the run exceeds.
+or the plan promises a working set the run exceeds. The full operator contract
+(`voxel_local` and its corruption trap, `incremental`, `working_multiple_for`,
+`output_channels`), with a code skeleton, is in
+{doc}`../reference/api/extension-points`.
 
 ```{warning}
 `Mean` and `Median` are for intensities. Both answer with values that were in no

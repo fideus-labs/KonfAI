@@ -6,7 +6,7 @@ KonfAI needs **Python 3.11 or newer**. This is the line most people want:
 python -m pip install "konfai[imaging]"
 ```
 
-`konfai` on its own brings PyTorch, NumPy, `ruamel.yaml`, `huggingface_hub` and
+`konfai` on its own brings PyTorch, NumPy, `ruamel.yaml`, `psutil` and
 the engine, but **no image reader**, so it cannot open a `.mha`. The `[imaging]`
 extra adds SimpleITK, h5py, pydicom, zarr and ngff-zarr, which covers all four
 storage backends at once. You do not need `[dicom]` or `[omezarr]` on top of it.
@@ -60,8 +60,9 @@ python -m pip install konfai-apps
 
 It gives you the `konfai-apps` and `konfai-apps-server` commands, plus the
 Python API under `konfai_apps`. Check them with `konfai-apps --help` and
-`konfai-apps-server --help`; `konfai-cluster --help` comes with the `cluster`
-extra.
+`konfai-apps-server --help`. `konfai-cluster` ships with the core `konfai`
+package itself; the `cluster` extra only adds `submitit`, which actual SLURM
+submission needs.
 
 Installing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
 `apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a
@@ -129,7 +130,9 @@ first, then KonfAI. For containers, see {doc}`../usage/docker`.
   `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"`
   and `echo "$CUDA_VISIBLE_DEVICES"`.
 - **`konfai-apps-server` not found**: `pip install konfai-apps`.
-- **`konfai-cluster` not found**: `pip install "konfai[cluster]"`.
+- **`konfai-cluster` not found**: the command ships with `konfai` itself, so
+  "not found" means the environment mismatch of the first bullet. Install
+  `konfai[cluster]` only when submission fails on a missing `submitit`.
 
 Next: {doc}`../quickstart` runs a real train, predict and evaluate loop in about
 seven minutes. {doc}`../reference/cli` lists every command and flag.

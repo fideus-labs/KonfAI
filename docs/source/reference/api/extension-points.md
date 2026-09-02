@@ -112,11 +112,29 @@ The safe default is to declare nothing:
 A transform that overrides only `__call__` therefore takes the whole-volume path.
 The case is loaded, your `__call__` sees the tensor it always would, and patches
 are cut from the result. Custom transforms never have to know streaming exists.
+That is the whole tier-0 contract: `__call__`, plus `transform_shape()` when the
+spatial shape changes.
 
-To opt in, override `patch_locality(cache_attribute)` and return a
-`PatchLocality`. Augmentations override `_patch_locality(index, a,
-cache_attribute)`: an augmentation declares per case *and* per copy, because the
-halo of a geometric draw is that draw's own.
+To opt in to streaming (tier 1), set the `locality` class attribute to a
+`LocalityKind` (plus the `halo` attribute for a bounded neighbourhood):
+
+```python
+class Threshold(Transform):
+    locality = LocalityKind.POINTWISE
+
+    def __call__(self, name, tensor, cache_attribute):
+        return (tensor > 0.5).to(tensor.dtype)
+```
+
+The base `patch_locality` answers from the attribute. Override the method
+`patch_locality(cache_attribute)` itself (tier 2) only when the answer depends
+on the case (read off the header) or carries `stat_keys` or a `reason`; the
+other tier-2 methods (`stream_region_source`, `stream_region`,
+`plan_region_reads`, `stream_slab`, `write_stream_cache_attribute`) are owed
+only where the table below says so. Augmentations declare the same way
+(`_patch_locality(index, a, cache_attribute)` as the method form): an
+augmentation declares per case *and* per copy, because the halo of a geometric
+draw is that draw's own.
 
 | Declared kind | Meaning | What you must also implement |
 | --- | --- | --- |
@@ -324,6 +342,133 @@ Runtime contracts, each base class names exactly what you must implement:
 | `konfai.data.transform.TransformInverse` | the above, plus `inverse(name, tensor, cache_attribute)` |: |
 | `konfai.data.augmentation.DataAugmentation` | three: `_state_init(index, shapes, caches_attribute)`, `_compute(name, index, a, tensor)`, `_inverse(index, a, tensor)` |: |
 
+## A storage backend
+
+An imaging format is one class plus one registry entry. Subclass
+`konfai.utils.dataset.AbstractFile`, declare the backend's facts as class
+attributes, and register the format token in
+`konfai.utils.dataset.BACKENDS`; `backend_for(file_format)` then dispatches to
+it and nothing else needs a format branch. A token that is also a file suffix
+(like `h5`) additionally belongs in `SUPPORTED_EXTENSIONS`
+(`konfai.utils.utils`); a token no file on disk ever carries (`:itktransform`
+writes `<group>.h5`) goes in `SUPPORTED_BACKEND_FORMATS` instead, because only
+extensions are probed on disk.
+
+```python
+# chunked_backend.py
+from konfai.utils.dataset import AbstractFile, Attribute, BACKENDS
+from konfai.utils.errors import DatasetManagerError
+
+
+class ChunkedFile(AbstractFile):
+    """One case per store, decoded in blocks."""
+
+    single_store = False          # True: one store holds every case (like one .h5 file)
+    concurrent_write_safe = False # entries share handles/metadata, so writes stay serial
+    case_file_suffix = None      # what a case carries implicitly on disk (H5File: ".h5")
+    reads_remote = False          # True: the backend opens URI roots (OME-Zarr does)
+    writes_pyramid = False        # True: a written store can hold multiscale levels
+    lists_case_entries = False    # True: a case is a directory the backend enumerates
+
+    def __init__(self, filename: str, read: bool) -> None:
+        try:
+            import mychunklib  # noqa: F401
+        except ImportError as e:
+            raise DatasetManagerError(
+                "mychunklib is required to read '.blk' stores.",
+                "Install it with: pip install mychunklib",
+            ) from e
+        ...
+
+    def __enter__(self): ...
+    def __exit__(self, exc_type, value, traceback): ...
+    def file_to_data(self, group, name): ...                  # whole entry + Attribute
+    def file_to_data_slice(self, group, name, slices): ...    # one region
+    def data_to_file(self, name, data, attributes=None): ...  # whole write
+
+    def read_granularity(self, name):
+        # The stored block a region read is served in, as a C[Z]YX shape.
+        return (1, 64, 64, 64)
+
+
+BACKENDS["blk"] = ChunkedFile
+```
+
+Two of the contract's methods matter more than they look:
+
+- **`read_granularity(name)`**: the block a region read is actually served in.
+  A chunked store decodes whole blocks, so a window costs the block-aligned
+  hull covering it; a memory-mapped one is served band by band (`SitkFile`
+  answers `(1, 1, Y, X)` for a `.mha`: one step along the outermost axis a
+  window spans, every axis below it whole, because those are the pages the
+  read touches). The streaming sweep is priced and cut on this grid, so the
+  grain need not be isotropic and need not come from a compressor. A backend
+  that stays silent (`None`) is priced at what its reads ask for, which is
+  right only when a read costs exactly that.
+- **`bounded_region_reads(name)`**: whether a region read decodes only the
+  region. The base answers `False`, which is the safe direction: a wrong
+  `False` costs speed (the plan prefers one ordered whole read), never
+  correctness.
+
+Import-guard the heavy library and raise a `DatasetManagerError` naming the
+install, at the point of use, never a bare `ImportError` at import time: a bare
+install must still import `konfai.utils.dataset`. Declare
+`can_stream(file_format, attributes)` `True` (and implement
+`open_data_stream`) only when the backend serves incremental region writes;
+the default routes writes whole through `data_to_file`.
+
+## A reduction operator
+
+A reduction folds N tensors into one, and one vocabulary serves two engines:
+the predictor folds one case's copies (ensemble, TTA), and the TRANSFORM
+`Reduce` stage folds N cases into one. Subclass `konfai.data.reduction.Reduction`
+and reference it by classpath wherever a `reduction` is configured.
+
+```python
+# my_reduction.py
+import torch
+
+from konfai.data.reduction import Reduction
+
+
+class TrimmedMean(Reduction):
+    """Mean of the members left after dropping each voxel's min and max."""
+
+    voxel_local = True     # every output voxel reads only the SAME voxel of each member
+    incremental = False    # __call__ needs all members at once
+    working_multiple = 4.0 # the stacked float copy plus the reduction buffers
+
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        stack = torch.stack([tensor.float() for tensor in tensors])
+        trimmed = stack.sum(dim=0) - stack.amax(dim=0) - stack.amin(dim=0)
+        return trimmed / (len(tensors) - 2)
+```
+
+The list is the fold axis: one tensor per member (a model of an ensemble, a
+case of a cohort), each in the `[1, K, C, *spatial]` layout both engines hand
+over. The declarations:
+
+- **`voxel_local`**: declare `True` only if every output voxel depends on the
+  same voxel of each input. **The streamed gates trust this flag and check
+  nothing else: a wrong `True` corrupts a streamed output** (each region is
+  reduced with its own members only), while a wrong `False` merely costs the
+  whole-volume path. The TRANSFORM `Reduce` stage refuses a non-`voxel_local`
+  operator outright.
+- **`incremental`**: `True` when the operator can fold members one at a time;
+  then override the `start` / `accumulate` / `finalize` protocol and the
+  working set stays two regions whatever N is. `Mean` and `Std` do; `Median`
+  cannot.
+- **`working_multiple`** and **`working_multiple_for(cases)`**: the
+  buffers-worth the operator allocates on top of what it is handed; the plan
+  multiplies it into the peak it sizes regions against. The attribute is the
+  worst case; an operator whose route depends on the member count overrides
+  the method (`Median` selects the middle through element-wise min/max
+  networks up to five members and sorts the stack past that, so it answers
+  per count).
+- **`output_channels(channels, cases)`**: override when the fold changes the
+  channel count (`Concat` returns `channels * cases`; the default returns
+  `channels`).
+
 ## Quick contract table
 
 | Extension point | Recommended base class | Typical YAML entry point |
@@ -332,6 +477,8 @@ Runtime contracts, each base class names exactly what you must implement:
 | Custom transform | `konfai.data.transform.Transform` or `TransformInverse` | `groups_dest.<group>.transforms` |
 | Custom augmentation | `konfai.data.augmentation.DataAugmentation` | `Dataset.augmentations.*.data_augmentations` |
 | Custom loss / metric | `konfai.metric.measure.Criterion` family | `outputs_criterions.*.targets_criterions.*.criterions_loader` |
+| Storage backend | `konfai.utils.dataset.AbstractFile` (plus a `BACKENDS` entry) | the `:format` token in a group's `path` |
+| Reduction operator | `konfai.data.reduction.Reduction` | `reduction` (predictor ensemble/TTA, TRANSFORM `Reduce`) |
 
 For a practical, contract-oriented guide with code snippets, see
 {doc}`../../usage/custom-models`.

@@ -169,8 +169,10 @@ From the dataset code, `validation` may be:
 
 - `None`
 - a float such as `0.2`
-- a slice string such as `0:10`
+- a slice string such as `0:10` (a negative end counts from the end,
+  Python-style: `0:-2`)
 - a path to a text file listing case names
+- a `~path.txt` exclusion file
 - a list of indices
 - a list of case names
 - a list mixing case names and case-list files

@@ -85,13 +85,14 @@ When in doubt:
 
 - `None`
 - a float ratio
-- a `start:stop` slice string
-- a path to a text file
+- a `start:stop` slice string (a negative stop counts from the end)
+- a path to a text file (`~path.txt` excludes instead)
 - an explicit list of indices
 - an explicit list of case names
 - a list mixing case names and text-file paths
 
-If the split looks wrong, check which form your config is actually using.
+`subset` accepts the same spellings: one grammar. If the split looks wrong,
+check which form your config is actually using.
 
 ## Runtime problems
 

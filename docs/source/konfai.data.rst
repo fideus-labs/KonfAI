@@ -122,11 +122,6 @@ konfai.data.transform package
    :show-inheritance:
    :undoc-members:
 
-.. automodule:: konfai.data.transform.inference
-   :members:
-   :show-inheritance:
-   :undoc-members:
-
 .. automodule:: konfai.data.transform.io
    :members:
    :show-inheritance:

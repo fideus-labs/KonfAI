@@ -31,6 +31,10 @@ automatically:
 konfai TRAIN -y --gpu 0 --config Config.yml -tb
 ```
 
+TensorBoard is optional: without the `tensorboard` extra the run trains
+normally with a no-op writer and one warning naming
+`pip install konfai[tensorboard]`; only the scalar logs are lost.
+
 Resume from an existing checkpoint with `RESUME`. Checkpoints are named after the
 moment they were written, so substitute the one training produced: `--model`
 takes exactly one:
@@ -39,6 +43,14 @@ takes exactly one:
 konfai RESUME -y --config Config.yml \
   --model Checkpoints/SEG_BASELINE/2026_08_03_02_36_00.pt
 ```
+
+A run is reproducible by default: the seed every preparation draw comes from
+(the train/validation split first) is recorded in
+`Statistics/<train_name>/Seed.txt`, and RESUME of an unseeded run reads it
+back, so resuming never re-splits the cohort. Set `manual_seed` only to pick
+the seed yourself. A save on an exceptional exit is named `crash_<date>.pt` and
+sits outside the `save_checkpoint_mode` pruning: never a contender for best,
+and yours to delete.
 
 You can also change the output directories:
 
@@ -55,7 +67,7 @@ konfai TRAIN -y --config Config.yml \
 | `Model` | mapping | `ModelLoader()` | Yes | Selects and configures the model graph. |
 | `Dataset` | mapping | `DataTrain()` | Yes | Defines training data loading, transforms, augmentation, and patching. |
 | `train_name` | string | `TRAIN_01` | No | Names the run and its output folders. |
-| `manual_seed` | int or null | `None` | No | Sets the random seed when provided. |
+| `manual_seed` | int or null | `None` | No | Picks the seed. `None` still runs seeded: a fresh TRAIN draws one, records it in `Statistics/<train_name>/Seed.txt`, and RESUME reads it back. |
 | `epochs` | int | `100` | No | Number of training epochs. |
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
 | `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |

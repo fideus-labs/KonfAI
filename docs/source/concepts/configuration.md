@@ -10,7 +10,9 @@ Reading a config **mutates it**: loading a run resolves every default and
 rewrites the YAML file in place, so the file on disk becomes the fully-resolved
 record of the experiment. One consequence: a `None` value round-trips as the
 literal string `"None"`: it is written back as `"None"` and reparsed to
-`None` on the next read.
+`None` on the next read. An explicit `name: null` (or an empty `name:`) also
+binds `None`: null is the disabled spelling and is never replaced by the
+default.
 ```
 
 KonfAI is fundamentally a **configuration-driven object builder**.
@@ -141,20 +143,33 @@ construction.
 
 ## Config modes
 
-`KONFAI_CONFIG_MODE` selects how KonfAI reacts to a missing file or missing keys:
+`KONFAI_CONFIG_MODE` selects how KonfAI reacts to a missing file:
 
 | Mode | Behavior |
 | --- | --- |
-| `Done` | Normal run mode. The config file must already exist; values are read and the visited subtree is written back. A missing file raises `ConfigError`. |
-| `default` | Materialize defaults non-interactively. Missing files or keys are created from each field's `default\|...` value (or its Python default), and the file is written. |
-| `interactive` | Like `default`, but prompt on stdin for each `default\|...` field so a config can be generated interactively. Falls back to `default` when stdin is unavailable. |
+| `Done` | Normal run mode. The config file must already exist; values are read and the visited subtree is written back. A missing file raises `ConfigError` naming `konfai <COMMAND> --init` as the way to generate one. |
 | `Import` | Skip config binding entirely. The decorated object is called with the arguments it was given, without reading the YAML: used when importing or constructing classes outside the config-driven flow. |
-| `remove` | Delete the config file on context exit instead of writing it back: used for throwaway configs, for example in tests. |
 
 An *unknown* value behaves like `Done`. An **unset** `KONFAI_CONFIG_MODE` is
 different: `apply_config` binds nothing at all (as under `Import`), and using
 `Config` directly raises `KeyError` on exit. Tests that build configurable objects
 directly must therefore set **both** variables explicitly.
+
+**Generating a config is a CLI verb, not a mode**: `konfai <COMMAND> --init`
+creates the file when missing (seeded with its root key), binds the workflow
+once so every default resolves into it, and exits without running. The former
+generation modes (`default`, `interactive`, `remove`) are gone.
+
+Two binding rules worth knowing:
+
+- **An explicit null stays null.** `name:` (empty) or `name: null` binds
+  `None`, the disabled spelling, exactly like the string `"None"`. The default
+  is not substituted: that would silently reactivate the very thing the line
+  was written to suppress.
+- **A wrong-shaped value is refused, by dotted path.** A key given a nested
+  block or a list where its parameter takes a scalar raises `ConfigError`
+  naming the path (`Parameter 'Trainer.Dataset.batch_size' was given a nested
+  block, but it takes a int.`) instead of binding something silently.
 
 ## `classpath`
 
@@ -187,8 +202,9 @@ directory. It is usually the least ambiguous option.
 The `default|...` prefix is an important KonfAI convention. Its behavior is
 inferred directly from `konfai.utils.config.Config._get_input_default()`.
 
-It is used to express a fallback value that can still be overridden by config or
-interactive generation. Examples from the codebase include:
+It is used to express a fallback value that can still be overridden by the
+config, and it is what `--init` materialises into a generated file. Examples
+from the codebase include:
 
 - `train_name: str = "default|TRAIN_01"`
 - `classpath: str = "default|segmentation.UNet.UNet"`

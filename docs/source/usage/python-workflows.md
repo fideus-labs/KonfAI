@@ -43,6 +43,20 @@ in place. Two stages of the same class in one chain spell the second one module-
 `konfai.plan_transform(...)` takes the same arguments and returns the `TransformPlan` without
 running anything: plan first is the same reflex in Python as on the CLI.
 
+```{note}
+**Migration note for Python callers of `Network`.** `Network.state_dict()` now
+honors the torch signature and returns the torch-native flat dict (still
+skipping nested `Network`s); the KonfAI aggregate that checkpoints are built
+from is `network_states()`. Checkpoint **files on disk are unchanged**: nothing
+saved by an earlier version needs converting, and RESUME/PREDICTION read them
+as before. Only code that builds or unpacks checkpoint dicts in Python must
+switch from `state_dict()` to `network_states()`. The KonfAI traversals moved
+with it: `graph_parameters(pretrained=...)` replaces the old `parameters(pretrained)`
+override, and `graph_apply()` the custom `apply()`; torch's native
+`parameters()` / `named_parameters()` / `apply()` are back to their own
+semantics.
+```
+
 ## Which spelling fits which workflow
 
 | Workflow | Its config is… | The Python spelling |

@@ -208,7 +208,10 @@ pip install -r docs/requirements.txt
 make -C docs html
 ```
 
-The output lands in `docs/_build/html/`.
+`docs/requirements.txt` is the single source for the docs toolchain: it is what
+ReadTheDocs and the CI docs job install, and the `[dev]` extra carries the same
+list. The `make` route writes to `docs/build/html/`; the live-reload task
+(`dev-docs`) serves from `docs/_build/html/`.
 
 ### Documentation style
 

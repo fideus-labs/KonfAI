@@ -105,16 +105,15 @@ dev = [
   "mypy",
   "build",
   "types-requests",
+  # The docs toolchain: keep in sync with docs/requirements.txt (the RTD list).
   "sphinx>=7.0",
   "shibuya",
   "myst-parser",
-  "nbsphinx",
-  "ipython",
-  "ipykernel",
   "sphinx-autodoc-typehints",
   "sphinx-copybutton",
   "sphinx-togglebutton",
-  "sphinx-tabs"
+  "sphinx-tabs",
+  "sphinxcontrib-mermaid"
 ]
 
 [tool.setuptools_scm]
