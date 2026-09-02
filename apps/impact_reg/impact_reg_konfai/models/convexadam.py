@@ -235,7 +235,7 @@ class ConvexAdamEngine:
         self._model_paths = self._download_models(models)
         # Built lazily and cached: constructing an itk.ModelConfiguration loads the TorchScript model
         # from disk in C++, so build the list once and reuse it across both stages and every case.
-        self._configurations: "list[itk.ModelConfiguration] | None" = None
+        self._configurations: list[itk.ModelConfiguration] | None = None
         self._voxel_sizes = voxel_sizes
         self._overlap = overlap
         self._layers_masks = layers_masks
@@ -290,7 +290,9 @@ class ConvexAdamEngine:
                     list(layers_mask),
                     self._mixed_precision,
                 )
-                for path, voxel_size, layers_mask in zip(self._model_paths, self._voxel_sizes, self._layers_masks)
+                for path, voxel_size, layers_mask in zip(
+                    self._model_paths, self._voxel_sizes, self._layers_masks, strict=True
+                )
             ]
         return self._configurations
 
@@ -410,7 +412,7 @@ class ConvexAdamEngine:
         coarse-only app, ``['fine']`` a fine-only app (zero warm-start), and ``['coarse', 'fine']`` chains both
         (the composite). Returns None when no deformable stage runs (e.g. a linear-only chain).
         """
-        field: "itk.Image | None" = None
+        field: itk.Image | None = None
         for stage in self._stages:
             if stage == "coarse":
                 field = self._coarse(fixed, moving, device)

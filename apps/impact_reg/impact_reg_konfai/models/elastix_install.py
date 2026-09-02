@@ -258,17 +258,17 @@ def try_elastix(install_path: Path) -> None:
         if e.stderr:
             msg += "Error output:\n"
             msg += e.stderr.strip()
-        raise NameError(msg)
+        raise NameError(msg) from e
 
     except OSError as e:
         msg = (
             "Elastix could not be started.\n\n"
             "This is usually caused by missing shared libraries "
             "(e.g. LibTorch or CUDA runtime).\n\n"
-            f"System error:\n{str(e)}"
+            f"System error:\n{e!s}"
         )
 
-        raise NameError(msg)
+        raise NameError(msg) from e
 
 
 def main() -> None:

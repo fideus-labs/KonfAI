@@ -1182,9 +1182,11 @@ class DatasetManager:
                             Attribute(reference.base_attributes),
                             Attribute(evolved) if index == 0 else None,
                         )
-                    for member in members:
+                    for position, member in enumerate(members):
                         with SWEEP_CLOCK.phase("chain"):
-                            member_tensor = tensor.clone() if len(members) > 1 else tensor
+                            # The clone protects the shared block from a member's in-place tail; the
+                            # LAST member is the last reader, so its clone would protect nothing.
+                            member_tensor = tensor if position == len(members) - 1 else tensor.clone()
                             scope = Attribute(region_attribute)
                             # Dispatched exactly as the stages before the marker are, so a tail stage
                             # reading a companion volume (Mask) or drawing from the voxel's place

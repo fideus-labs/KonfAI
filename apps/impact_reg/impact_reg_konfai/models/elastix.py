@@ -61,7 +61,7 @@ def registry_choices() -> list[str]:
 
 def _num(x: object) -> str:
     """Format a number the elastix way: no trailing '.0' (6.0 -> '6', 0.2 -> '0.2')."""
-    return "%g" % float(x)
+    return f"{float(x):g}"
 
 
 @dataclass
@@ -220,7 +220,7 @@ def generate_impact_parameter_map(template_text: str, resolutions: dict, registr
         models = _sorted_specs(r.models)
         entries = [registry[_model_key(m.ref)] for m in models]
 
-        def row(stem: str, values: list[str]) -> None:
+        def row(stem: str, values: list[str], k: int = k) -> None:
             impact.append(f"(Impact{stem}{k} " + " ".join(values) + ")")
 
         # From the registry ONLY the 3 truly model-fixed props (Dimension, NumberOfChannels, PatchSize = the
@@ -228,7 +228,7 @@ def generate_impact_parameter_map(template_text: str, resolutions: dict, registr
         row("ModelsPath", [f'"{_model_key(m.ref)}"' for m in models])
         row("Dimension", [e["dimension"] for e in entries])
         row("NumberOfChannels", [e["numberofchannels"] for e in entries])
-        row("PatchSize", [_patch_size(mode_clean, e, m.layers_mask) for e, m in zip(entries, models)])
+        row("PatchSize", [_patch_size(mode_clean, e, m.layers_mask) for e, m in zip(entries, models, strict=True)])
         row("VoxelSize", [" ".join(_num(v) for v in m.voxel_size) for m in models])
         row("LayersMask", [f'"{m.layers_mask}"' for m in models])
         row("SubsetFeatures", [str(m.subset_features) for m in models])

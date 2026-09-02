@@ -34,10 +34,10 @@ import SimpleITK as sitk
 import torch
 import tqdm
 from huggingface_hub import hf_hub_download
-from .elastix_install import get_elastix_bin, install_elastix_impact, try_elastix
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
 from .elastix import _is_local_ref, _model_key, _sorted_specs, generate_impact_parameter_map, load_models_registry
+from .elastix_install import get_elastix_bin, install_elastix_impact, try_elastix
 
 # Elastix + IMPACT binary is cached once here (heavy: binary + LibTorch) and reused across runs.
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
