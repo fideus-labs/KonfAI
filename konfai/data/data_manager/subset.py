@@ -18,6 +18,7 @@
 """Which cases a run reads."""
 
 import os
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -70,21 +71,29 @@ class Subset:
             return {i for i, name in enumerate(names) if name in selected_names}, False
         if self._is_slice_selector(subset):
             start, _, end = subset.partition(":")
-            r = np.clip(
-                np.asarray([int(start), int(end)]),
-                0,
-                size,
-            )
+            # Negative bounds count from the end, Python-slice style: '0:-2' keeps all but the last two.
+            bounds = [int(bound) + size if int(bound) < 0 else int(bound) for bound in (start, end)]
+            r = np.clip(np.asarray(bounds), 0, size)
             return set(range(int(r[0]), int(r[1]))), False
         if subset in name_to_index:
             return {name_to_index[subset]}, False
         return set(), False
 
-    def _get_index(self, subset: str | int, names: list[str]) -> list[int]:
-        index, is_exclusion = self._resolve_selector(subset, names)
-        if is_exclusion:
-            return [i for i in range(len(names)) if i not in index]
-        return sorted(index)
+    def _resolve_selectors(self, selectors: Sequence[str | int], names: list[str]) -> list[int]:
+        """The positions ``selectors`` keep in ``names``: inclusions united, exclusions subtracted,
+        and a list of only exclusions defined against the full list."""
+        include_index: set[int] = set()
+        exclude_index: set[int] = set()
+        has_include = False
+        for selector in selectors:
+            resolved_index, is_exclusion = self._resolve_selector(selector, names)
+            if is_exclusion:
+                exclude_index.update(resolved_index)
+            else:
+                include_index.update(resolved_index)
+                has_include = True
+        index_set = include_index if has_include else set(range(len(names)))
+        return sorted(index_set.difference(exclude_index))
 
     @staticmethod
     def _excludes(selector: str | int) -> bool:
@@ -117,42 +126,18 @@ class Subset:
 
     def __call__(self, names: list[str], infos: dict[str, tuple[list[int], Attribute]]) -> set[str]:
         names = sorted(names)
-        size = len(names)
 
         if self.subset is None:
-            index = list(range(0, size))
+            index = list(range(0, len(names)))
         elif isinstance(self.subset, list):
-            if len(self.subset) == 0:
-                index = []
-            else:
-                include_index: set[int] = set()
-                exclude_index: set[int] = set()
-                has_include = False
-                for s in self.subset:
-                    resolved_index, is_exclusion = self._resolve_selector(s, names)
-                    if is_exclusion:
-                        exclude_index.update(resolved_index)
-                    else:
-                        include_index.update(resolved_index)
-                        has_include = True
-                index_set = include_index if has_include else set(range(size))
-                index = sorted(index_set.difference(exclude_index))
+            # An empty list selects nothing: only a list of ONLY exclusions reads as "everything but".
+            index = self._resolve_selectors(self.subset, names) if self.subset else []
         else:
-            index = self._get_index(self.subset, names)
+            index = self._resolve_selectors([self.subset], names)
         return {names[i] for i in index}
 
     def __str__(self):
         return f"Subset : {self.subset} shuffle : {self.shuffle} shuffle_window : {self.shuffle_window}"
-
-
-class TrainSubset(Subset):
-    def __init__(
-        self,
-        subset: str | list[int] | list[str] | None = None,
-        shuffle: bool = True,
-        shuffle_window: int | None = None,
-    ) -> None:
-        super().__init__(subset, shuffle, shuffle_window)
 
 
 class PredictionSubset(Subset):

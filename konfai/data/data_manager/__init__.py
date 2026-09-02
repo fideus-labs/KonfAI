@@ -46,7 +46,6 @@ from konfai.data.data_manager.sources import DataTrain as DataTrain
 from konfai.data.data_manager.sources import DataTransform as DataTransform
 from konfai.data.data_manager.subset import PredictionSubset as PredictionSubset
 from konfai.data.data_manager.subset import Subset as Subset
-from konfai.data.data_manager.subset import TrainSubset as TrainSubset
 
 __all__ = [
     "BatchDataItem",
@@ -69,7 +68,6 @@ __all__ = [
     "PredictionSubset",
     "Sample",
     "Subset",
-    "TrainSubset",
     "WindowedCaseSampler",
     "collate_konfai",
 ]

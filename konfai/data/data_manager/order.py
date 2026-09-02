@@ -17,7 +17,7 @@
 
 """The order patches are read in, and the sampler that walks it per rank."""
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -26,6 +26,23 @@ from torch.utils.data import Sampler
 
 if TYPE_CHECKING:
     from konfai.data.patching import DatasetPatch
+
+
+def _balanced_case_partitions(case_loads: Mapping[int, int], bins: int) -> list[list[int]]:
+    """Whole cases dealt into ``bins``, greedy least-loaded by patch count, largest first.
+
+    A case is never split (a rank's writes and a worker's buffer both hold whole cases), so an
+    equal COUNT of cases leaves the patch loads as uneven as the cases are: give the next case to
+    whoever holds the fewest patches so far. Deterministic: the sort is stable, so equal loads keep
+    ``case_loads``'s own order, and ties on load go to the first bin.
+    """
+    loads = [0] * bins
+    partitions: list[list[int]] = [[] for _ in range(bins)]
+    for case in sorted(case_loads, key=lambda case: -case_loads[case]):
+        bin_index = min(range(bins), key=lambda bin_index: loads[bin_index])
+        partitions[bin_index].append(case)
+        loads[bin_index] += case_loads[case]
+    return partitions
 
 
 def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -153,19 +170,14 @@ class WindowedCaseSampler(Sampler[int]):
     def _partitions(self) -> list[list[int]]:
         """The cases each worker walks, balanced by the patches they hold.
 
-        A worker is handed whole cases, because a case is what its buffer keeps resident. Handing out
-        an equal COUNT of them leaves the patch counts as uneven as the cases are, and it is patches
-        that are walked: the workers then run out at different times, and the batches of whoever is
-        left shift onto the workers that finished: a case landing on two of them, each reading the
-        volume. Give the next case to whoever holds the fewest patches so far, largest first.
+        A worker is handed whole cases, because a case is what its buffer keeps resident. It is
+        patches that are walked, so an uneven deal runs the workers out at different times, and the
+        batches of whoever is left shift onto the workers that finished: a case landing on two of
+        them, each reading the volume.
         """
-        loads = [0] * self.num_workers
-        partitions: list[list[int]] = [[] for _ in range(self.num_workers)]
-        for case in sorted(self.case_entries, key=lambda case: -len(self.case_entries[case])):
-            worker = min(range(self.num_workers), key=lambda worker: loads[worker])
-            partitions[worker].append(case)
-            loads[worker] += len(self.case_entries[case])
-        return partitions
+        return _balanced_case_partitions(
+            {case: len(entries) for case, entries in self.case_entries.items()}, self.num_workers
+        )
 
     def _windowed_order(self) -> list[int]:
         generator = torch.Generator().manual_seed(int(torch.randint(0, 2**31 - 1, (1,)).item()))

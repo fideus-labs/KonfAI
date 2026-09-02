@@ -33,9 +33,9 @@ from torch.utils.data import DataLoader
 from konfai import konfai_state
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chains
-from konfai.data.data_manager.order import WindowedCaseSampler, _interleaved_case_entries
+from konfai.data.data_manager.order import WindowedCaseSampler, _balanced_case_partitions, _interleaved_case_entries
 from konfai.data.data_manager.samples import _CACHE_ELEMENT_BYTES, DatasetIter, collate_konfai
-from konfai.data.data_manager.subset import PredictionSubset, Subset, TrainSubset
+from konfai.data.data_manager.subset import PredictionSubset, Subset
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import (
     Expand,
@@ -405,21 +405,6 @@ class Data(DataSources):
                         return True
         return False
 
-    @staticmethod
-    def _read_names_from_file(filename: str) -> list[str]:
-        with open(filename) as f:
-            return [name.strip() for name in f if name.strip()]
-
-    @classmethod
-    def _resolve_name_selectors(cls, selectors: list[str]) -> set[str]:
-        resolved_names: set[str] = set()
-        for selector in selectors:
-            if os.path.exists(selector):
-                resolved_names.update(cls._read_names_from_file(selector))
-            else:
-                resolved_names.add(selector)
-        return resolved_names
-
     @abstractmethod
     def __init__(
         self,
@@ -484,6 +469,7 @@ class Data(DataSources):
             buffer_size=self._buffer_size,
             use_cache=use_cache,
             batch_size=self.batch_size,
+            single_pass=self._reads_each_case_once,
         )
         resolved_num_workers = self._num_workers
         if self.requires_single_process_loading:
@@ -748,6 +734,38 @@ class Data(DataSources):
         last = next(reversed(managers.values()), [])
         return [[manager.get_size(a) for a in range(nb_augmentation)] for manager in last]
 
+    @staticmethod
+    def _check_cross_group_patch_counts(managers: dict[str, list[DatasetManager]], nb_augmentation: int) -> None:
+        """Refuse destination groups whose grids disagree, before a single patch is read.
+
+        The mapping is counted on ONE group (``_patch_counts``) and every group is then read with
+        the same patch index: a group with more patches never has its tail enumerated, one with
+        fewer raises an IndexError deep in a loader worker.
+        """
+        grouped = list(managers.items())
+        if len(grouped) < 2:
+            return
+        reference_group, reference_managers = grouped[0]
+        for group, group_managers in grouped[1:]:
+            for reference, manager in zip(reference_managers, group_managers, strict=True):
+                for a in range(nb_augmentation):
+                    if reference.get_size(a) == manager.get_size(a):
+                        continue
+                    chains = {
+                        name: ", ".join(type(stage).__name__ for stage in m.transforms) or "no transforms"
+                        for name, m in ((reference_group, reference), (group, manager))
+                    }
+                    raise DatasetManagerError(
+                        f"Case '{reference.name}': destination groups '{reference_group}' and '{group}' disagree"
+                        f" on the patch grid of copy {a}: {reference.get_size(a)} patches over shape"
+                        f" {reference.shapes[a]} vs {manager.get_size(a)} over {manager.shapes[a]}.",
+                        f"'{reference_group}' folds its case through [{chains[reference_group]}],"
+                        f" '{group}' through [{chains[group]}].",
+                        "Every destination group is read with the same patch index, so their grids must"
+                        " agree: align the chains (the stage that changes the shape on one group must"
+                        " change it identically on the other) or the stored resolutions.",
+                    )
+
     def _case_entry_counts(self, managers: dict[str, list[DatasetManager]]) -> list[int]:
         """Per case, its ``(copy, patch)`` entries over the training draws: what the float split shares out."""
         nb_augmentation = self._get_nb_augmentation(self._get_data_augmentations(True))
@@ -758,7 +776,8 @@ class Data(DataSources):
         subset_names: list[str],
         case_entry_counts: list[int] | None = None,
     ) -> list[int]:
-        index: list[int] = []
+        if self.validation is None:
+            return []
         if isinstance(self.validation, float):
             if self.validation <= 0 or self.validation >= 1:
                 raise DatasetManagerError(
@@ -773,47 +792,24 @@ class Data(DataSources):
             for dataset_index, count in enumerate(case_entry_counts):
                 cumulative += count
                 if cumulative > threshold:
-                    index = list(range(dataset_index, len(subset_names)))
-                    break
-        elif isinstance(self.validation, str):
-            if ":" in self.validation:
-                index = list(range(int(self.validation.split(":")[0]), int(self.validation.split(":")[1])))
-            elif os.path.exists(self.validation):
-                validation_names = []
-                with open(self.validation) as f:
-                    for name in f:
-                        validation_names.append(name.strip())
-                index = [i for i, n in enumerate(subset_names) if n in validation_names]
-            else:
-                raise DatasetManagerError(
-                    f"Invalid string value for 'validation': '{self.validation}'",
-                    "Expected one of the following formats:",
-                    "\t• A slice string like '0:10'",
-                    "\t• A path to a text file listing validation sample names (e.g., './val.txt')",
-                    "\t• A list of text files listing validation sample names",
-                    "\t• A float between 0 and 1 (e.g., 0.2)",
-                    "\t• A list of sample names or indices",
-                    "The provided value is neither a valid slice nor a readable file.",
-                    "Please fix your 'validation' setting in the configuration.",
-                )
-        elif isinstance(self.validation, list):
-            if len(self.validation) == 0:
-                index = []
-            elif all(isinstance(item, int) for item in self.validation):
-                index = cast(list[int], self.validation)
-            elif all(isinstance(item, str) for item in self.validation):
-                validation_name_set = self._resolve_name_selectors(cast(list[str], self.validation))
-                index = [i for i, n in enumerate(subset_names) if n in validation_name_set]
-            else:
-                element_types = sorted({type(item).__name__ for item in self.validation})
-                raise DatasetManagerError(
-                    f"Invalid list type for 'validation': elements of type {element_types} are not supported.",
-                    "Supported list element types are:",
-                    "\t• int  → list of indices (e.g., [0, 1, 2])",
-                    "\t• str  → list of sample names or file paths",
-                    f"Received list: {self.validation}",
-                )
-        return index
+                    return list(range(dataset_index, len(subset_names)))
+            return []
+        if isinstance(self.validation, list) and all(isinstance(item, int) for item in self.validation):
+            return cast(list[int], self.validation)
+        selectors = self.validation if isinstance(self.validation, list) else [self.validation]
+        unsupported = sorted({type(item).__name__ for item in selectors if not isinstance(item, str | int)})
+        if unsupported:
+            raise DatasetManagerError(
+                f"Invalid list type for 'validation': elements of type {unsupported} are not supported.",
+                "Supported list element types are:",
+                "\t• int  → list of indices (e.g., [0, 1, 2])",
+                "\t• str  → list of sample names, file paths, slices ('0:10') or '~' exclusions",
+                f"Received list: {self.validation}",
+            )
+        # One selector grammar for 'subset:' and 'validation:': names, case-list files, slices
+        # (negative ends included) and '~' exclusions all resolve through the subset's machinery,
+        # against the RUN-ORDER names, so a slice keeps its positional meaning.
+        return self.subset._resolve_selectors(cast("list[str | int]", selectors), subset_names)
 
     def _split_train_validation_names(
         self,
@@ -843,6 +839,8 @@ class Data(DataSources):
                 f"Dataset size: {dataset_size}",
                 f"Validation setting: {self.validation}",
                 "Please increase the validation size, increase the dataset, or disable validation.",
+                "'validation' accepts the same selector spellings as 'subset': a float share, indices,"
+                " case names, case-list files, slices like '0:10', and '~' exclusions.",
             )
 
         return train_names, validation_names
@@ -860,6 +858,7 @@ class Data(DataSources):
         if managers is None:
             managers = self._build_managers(names, dataset_name, self.patch, data_augmentations_list, index_offset)
         nb_augmentation = self._get_nb_augmentation(data_augmentations_list)
+        self._check_cross_group_patch_counts(managers, nb_augmentation)
         mapping: list[tuple[int, int, int]] = []
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
         # along the slab axis for the streamed write to hold a bounded window (see
@@ -886,12 +885,14 @@ class Data(DataSources):
             mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
             for entry in mapping:
                 mapping_by_index.setdefault(entry[0], []).append(entry)
-            unique_index = np.asarray(sorted(mapping_by_index))
-            for shard in np.array_split(unique_index, world_size):
-                shard_mapping: list[tuple[int, int, int]] = []
-                for dataset_index in shard.tolist():
-                    shard_mapping.extend(mapping_by_index[int(dataset_index)])
-                mappings.append(shard_mapping)
+            # Balanced by patch LOAD, not case count: an equal-count contiguous split lands a
+            # [1000, 10, 10, 10]-patch cohort as 1010 against 20 on two ranks, and every rank waits
+            # for the slowest at the end-of-run barrier. Deterministic (sorted cases, stable greedy),
+            # so a restart shards identically; within a shard each case keeps its entries in mapping
+            # order, walked in ascending case order.
+            case_loads = {case: len(mapping_by_index[case]) for case in sorted(mapping_by_index)}
+            for shard in _balanced_case_partitions(case_loads, world_size):
+                mappings.append([entry for case in sorted(shard) for entry in mapping_by_index[case]])
         else:
             size = len(mapping)
             for rank in range(world_size):
@@ -1008,7 +1009,7 @@ class DataTrain(Data):
         inline_augmentations: bool = False,
         patch: DatasetPatch | None = DatasetPatch(),
         memory_budget: str | float | None = None,
-        subset: TrainSubset = TrainSubset(),
+        subset: Subset = Subset(),
         batch_size: int = 1,
         validation: float | str | list[int] | list[str] | None = 0.2,
         validation_augmentations: bool = True,
