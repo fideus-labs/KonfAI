@@ -25,14 +25,39 @@ from itertools import chain
 import numpy as np
 import torch
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 
 from konfai.data.patching import ModelPatch
 from konfai.metric.measure.adversarial import Gram
-from konfai.metric.measure.base import CriterionWithAttribute
+from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import MeasureError
 from konfai.utils.utils import get_module
+
+
+def _hf_hub_download(criterion: str):
+    """The ``hf_hub_download`` callable, imported at the call site: huggingface_hub is only needed
+    by the IMPACT criteria, never by the rest of the metric package."""
+    return _require_optional("huggingface_hub", criterion=criterion, extra="all").hf_hub_download
+
+
+def _sniffed_mask(targets: tuple[torch.Tensor, ...], candidate: torch.Tensor) -> torch.Tensor | None:
+    """The uint8-mask convention, checked: a target sniffed as a mask must be a {0, 1} map and a
+    tensor of its own, never the scored target itself (an 8-bit intensity target would otherwise be
+    consumed as a mask in silence)."""
+    if candidate.dtype != torch.uint8:
+        return None
+    if candidate is targets[0]:
+        raise MeasureError(
+            "The only target is uint8, so it would be read as both the scored target and its mask.",
+            "Pass the image target first and the {0, 1} uint8 mask last, or cast the image off uint8.",
+        )
+    if bool(torch.any(candidate > 1)):
+        raise MeasureError(
+            "A uint8 target is read as a foreground mask, but it holds values above 1.",
+            "IMPACT masks are {0, 1} uint8 maps; cast an 8-bit intensity target to another dtype.",
+        )
+    return candidate
 
 
 def _check_feature_model(model_path: str, in_channels: int, shape: list[int], nb_layer: int) -> None:
@@ -124,13 +149,17 @@ def _masked_feature_loss(
     return loss, true_nb
 
 
-def _feature_loss_mean(slices: Iterable[tuple[torch.Tensor, int]]) -> tuple[torch.Tensor, float]:
-    """The slice losses summed and divided by the number of scored patches, with the scalar to report.
-    No scored patch (a mask with no foreground) would divide by zero: the loss is then its zero seed,
-    returned as-is, and the scalar is NaN."""
+def _feature_loss_mean(slices: Iterable[tuple[torch.Tensor, int]]) -> tuple[torch.Tensor, float | torch.Tensor]:
+    """The slice losses summed and divided by the number of scored patches, with the value to report
+    as a detached 0-d tensor read off its device lazily (``Measure._materialize``). No scored patch
+    (a mask with no foreground) would divide by zero: the loss is then its zero seed, returned
+    as-is, and the value is NaN."""
     losses, counts = zip(*slices, strict=True)
     loss, true_nb = reduce(torch.add, losses), sum(counts)
-    return (loss / true_nb if true_nb else loss), np.nan if true_nb == 0 else loss.item() / true_nb
+    if true_nb == 0:
+        return loss, np.nan
+    loss = loss / true_nb
+    return loss, loss.detach()
 
 
 def _denormalized(tensor: torch.Tensor, attributes: list[Attribute]) -> torch.Tensor:
@@ -183,7 +212,8 @@ class ImpactFeatureModel:
     ) -> "ImpactFeatureModel":
         """The model ``filename`` of the HuggingFace ``repo_id``, probed once on the CPU. ``shape`` is the
         tile, its length the dimension; an entry ``<= 0`` scores the whole tensor instead."""
-        model_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        download = _hf_hub_download("IMPACT")
+        model_path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
         tile = shape if all(s > 0 for s in shape) else None
         _check_feature_model(model_path, in_channels, tile or [224] * len(shape), len(weights))
         return cls(model_path, in_channels, weights, tile, len(shape), denormalize)
@@ -280,10 +310,10 @@ class IMPACTReg(CriterionWithAttribute):
             projected_target.append(self._pca_transform(target_feature[b : b + 1], basis))
         return torch.cat(projected_output), torch.cat(projected_target)
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
-    ) -> tuple[torch.Tensor, float]:
-        mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
+    ) -> tuple[torch.Tensor, float | torch.Tensor]:
+        mask = _sniffed_mask(targets, targets[-1])
         # The prediction and the target share the same intensity space, so a single target attribute
         # (single-group target such as ``CT``) is reused to normalize both output and target; a second
         # attribute set is honored when the target is multi-group.
@@ -323,12 +353,12 @@ class IMPACTSynth(CriterionWithAttribute):
         self.content_loss = torch.nn.MSELoss()
         self.style_loss = Gram()
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
-    ) -> tuple[torch.Tensor, float]:
+    ) -> tuple[torch.Tensor, float | torch.Tensor]:
         if len(targets) < 2:
             raise ValueError("At least two target tensors are required.")
-        mask = targets[2] if len(targets) == 3 and targets[2].dtype == torch.uint8 else None
+        mask = _sniffed_mask(targets, targets[2]) if len(targets) == 3 else None
         return _feature_loss_mean(
             chain(
                 self.content.slice_losses(output, attributes[0], targets[0], attributes[1], mask, self.content_loss),
@@ -358,13 +388,14 @@ class SAM_Perceptual(CriterionWithAttribute):
             repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
         else:
             repo_id, filename = "VBoussot/ImpactSynth", model_name
-        model_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        download = _hf_hub_download("SAM_Perceptual")
+        model_path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
         self.model = ImpactFeatureModel(model_path, 3, [1.0] * 4 if weights is None else weights, [512, 512], 2)
 
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
-    ) -> tuple[torch.Tensor, float]:
-        mask = targets[-1] if targets[-1].dtype == torch.uint8 else None
+    ) -> tuple[torch.Tensor, float | torch.Tensor]:
+        mask = _sniffed_mask(targets, targets[-1])
         # ``targets[0]`` is the reference (e.g. CT), normalized with its own stats; the same stats
         # normalize the prediction since both live in the same intensity space.
         return _feature_loss_mean(

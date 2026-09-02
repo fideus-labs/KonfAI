@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
 from konfai.network.network import build_configured_criterions
+from konfai.network.network.measure import CriterionResult
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config, strict_config
@@ -400,21 +401,20 @@ class Evaluator(DistributedObject):
                 ]
                 name = batch_sample[output_group].name[0]
                 for metric in self.metrics[output_group][target_group]:
-                    with self._clock.phase(metric.get_name()), torch.no_grad():
+                    metric_name: str = metric.get_name()
+                    with self._clock.phase(metric_name), torch.no_grad():
                         if getattr(metric, "accepts_attributes", False):
                             loss = metric(output_tensor, *targets, attributes=target_attribute)
                         else:
                             loss = metric(output_tensor, *targets)
-                    if isinstance(loss, tuple):
-                        true_loss = loss[1]
-                        if len(loss) == 3 and metric.dataset:
-                            with self._clock.phase("map"):
-                                self._write_map(metric, output_group, name, loss[2])
-                    else:
-                        true_loss = loss.item()
+                    outcome = CriterionResult.of(loss, metric_name)
+                    true_loss = outcome.materialized()
+                    if outcome.map is not None and getattr(metric, "dataset", None):
+                        with self._clock.phase("map"):
+                            self._write_map(metric, output_group, name, outcome.map)
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
-                    base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+                    base_key = f"{output_group}:{target_group}:{metric_name}"
                     Evaluator._record_value(result, statistics, base_key, true_loss, direction)
         if len(self.metrics) > 0:
             statistics.add(result, name)
@@ -584,8 +584,7 @@ class Evaluator(DistributedObject):
             return
         result: dict[str, float] = {}
         for (output_group, target_group, _index), (metric, states) in self._pending.items():
-            loss = metric.combine_metric(states)
-            true_loss = loss[1] if isinstance(loss, tuple) else float(loss.item())
+            true_loss = CriterionResult.of(metric.combine_metric(states), metric.get_name()).materialized()
             direction = "max" if getattr(metric, "maximize", False) else "min"
             base_key = f"{output_group}:{target_group}:{metric.get_name()}"
             Evaluator._record_value(result, statistics, base_key, true_loss, direction)

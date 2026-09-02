@@ -16,8 +16,10 @@ to the training loss; `is_loss: false` detaches it and only logs it. In an
 `Evaluation.yml`, every criterion is a metric.
 
 The return *shape* controls **logging**: a criterion may return a bare `Tensor`,
-or a tuple `(tensor, scalar_or_dict)`. The tuple form is what lets `Dice`, `TRE`,
-etc. log clean per-label values while still driving the gradient with the tensor.
+or a tuple `(tensor, value)` where the value is a float, a 0-d tensor read back
+lazily, a per-label dict, or a `(values, labels)` pair (also read back lazily).
+The tuple form is what lets `Dice`, `TRE`, etc. log clean per-label values while
+still driving the gradient with the tensor.
 ```
 
 So most pixelwise criteria are **dual-use**: the same class is a training loss or
@@ -78,7 +80,7 @@ groups act as a mask.
 | --- | --- | --- | --- |
 | `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). | `labels=None` (None → all present labels) |
 | `CrossEntropyLoss` | `Tensor` loss | Wraps `nn.CrossEntropyLoss` (squeezes the target channel). | `weight=None, reduction="mean"` |
-| `FocalLoss` | `Tensor` loss | Multi-class focal loss. Note: `alpha` is a per-label weight list indexed by label id. | `gamma=2.0, alpha=[0.5,2.0,0.5,0.5,1], reduction="mean"` |
+| `FocalLoss` | `Tensor` loss | Multi-class focal loss. `alpha` is an optional per-label weight list indexed by label id; `None` weights every class equally, and a list shorter than the class count is refused. | `gamma=2.0, alpha=None, reduction="mean"` |
 | `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. |: |
 | `DiceSaveMap` | 3-tuple | Dice + voxelwise error map (for a save-map consumer). | `labels=None, dataset=None, group=None` |
 
@@ -88,7 +90,6 @@ groups act as a mask.
 | --- | --- | --- |
 | `BCE` | `BCEWithLogitsLoss` against a constant real/fake target. | `target=0` |
 | `PatchGanLoss` | LSGAN-style MSE against a constant target. | `target=0` |
-| `WGP` | `mean((output−1)²)` WGAN-style penalty. |: |
 | `Gram` | Gram-matrix (style) loss. |: |
 | `PerceptualLoss` | Feature-space perceptual loss over a pretrained KonfAI `Network` (custom multi-model forward; requires a real `path_model` checkpoint). | `model_loader`, `path_model`, `modules`, `shape` |
 
@@ -98,17 +99,16 @@ groups act as a mask.
 | --- | --- | --- | --- |
 | `TRE` | `(Tensor, dict)` metric | Target Registration Error between predicted/target landmark coordinates. |: |
 | `GradientImages` | `Tensor` loss | Image-gradient smoothness loss (2D/3D auto); regulariser, or gradient-difference if a target is given. |: |
-| `MutualInformationLoss` | `Tensor` loss | Parzen-window Gaussian mutual information (returns `−MI`). | `num_bins=23, sigma_ratio=0.5` |
+| `monai.losses:GlobalMutualInformationLoss` | `Tensor` loss | Parzen-window mutual information, by classpath (needs MONAI installed). | see MONAI |
 | `KLDivergence` | `Tensor` loss | VAE KL term. **Rewires the graph** on init, inserting a `LatentDistribution` block; computes closed-form KL from `mu`/`log_std`. | `shape` (**required**), `dim=100, mu=0, std=1` |
 
 ## Uncertainty / bookkeeping
 
 | Name | Role | Purpose | Key args |
 | --- | --- | --- | --- |
-| `Variance` | `(Tensor, float)` metric | Channel-wise variance mean (ensemble/uncertainty). | `name="Variance"` |
-| `Mean` | `(Tensor, float)` metric | Mean of the output tensor. | `name="Mean"` |
-| `TripletLoss` | `Tensor` loss | `nn.TripletMarginLoss` over a 3-tuple output. |: |
-| `L1LossRepresentation` | `Tensor` loss | L1 between two representations + variance-collapse regulariser. |: |
+| `Variance` | `(Tensor, value)` metric | Channel-wise variance mean (ensemble/uncertainty). | `name="Variance"` |
+| `Mean` | `(Tensor, value)` metric | Mean of the output tensor. | `name="Mean"` |
+| `torch:nn:TripletMarginLoss` | `Tensor` loss | Triplet margin loss, by classpath. | see PyTorch |
 
 ## IMPACT feature-based criteria
 
@@ -130,13 +130,13 @@ Imported lazily; a missing package raises a `MeasureError` with an install hint.
 
 | Name | Extra | Purpose | Key args |
 | --- | --- | --- | --- |
-| `SSIM` | `konfai[ssim]` (scikit-image) | Masked structural similarity. Default `dynamic_range → 4024`. | `dynamic_range=None` |
+| `SSIM` | `konfai[ssim]` (scikit-image) | Masked structural similarity. Default `dynamic_range → 4095`. | `dynamic_range=None` |
 | `LPIPS` | `konfai[lpips]` | Learned perceptual similarity (AlexNet by default), tiled over patches. | `model="alex"` |
-| `FID` | `konfai[fid]` (scipy + torchvision) | Fréchet Inception Distance (InceptionV3). |: |
+| `torchmetrics.image.fid:FrechetInceptionDistance` | `torchmetrics` | Fréchet Inception Distance, by classpath. FID is defined over dataset-level feature distributions, so compute it over the whole prediction set, never per case. | see torchmetrics |
 
 None of these pins a device. The `IMPACT*` sanity check probes its TorchScript
-extractor on the CPU and discards the result; `LPIPS` and `FID` follow the device
-of the tensor they are given: the rank's GPU under DDP, or the CPU. `SAM_Perceptual`
+extractor on the CPU and discards the result; `LPIPS` follows the device
+of the tensor it is given: the rank's GPU under DDP, or the CPU. `SAM_Perceptual`
 runs no sanity check at all.
 
 ## Next steps

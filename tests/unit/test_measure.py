@@ -21,7 +21,17 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from konfai.metric.measure import SSIM, Dice, FocalLoss, KLDivergence, PerceptualLoss, Variance, _require_optional
+from konfai.metric.measure import (
+    SSIM,
+    CriterionResult,
+    Dice,
+    FocalLoss,
+    KLDivergence,
+    LabelledValues,
+    PerceptualLoss,
+    Variance,
+    _require_optional,
+)
 from konfai.network.network import CriterionsAttr
 from konfai.utils.errors import MeasureError
 
@@ -31,6 +41,20 @@ def _one_hot(target: torch.Tensor, nb_channels: int) -> torch.Tensor:
     for label in range(nb_channels):
         output[0, label] = (target[0, 0] == label).float()
     return output
+
+
+def _per_label(value) -> dict:
+    """A criterion's per-label report as a dict: the soft Dice route reports a LabelledValues pair
+    read lazily; the hard route (and combine_metric) reports a plain dict."""
+    if isinstance(value, LabelledValues):
+        return dict(zip(value.labels, value.values.tolist(), strict=True))
+    return value
+
+
+def _scores(criterion, *args):
+    """(loss, per-label dict) of one forward, whatever pair shape the route reports."""
+    loss, value = criterion(*args)[:2]
+    return loss, _per_label(value)
 
 
 class TestFocalLoss:
@@ -124,7 +148,7 @@ class TestDice:
         target[0, 0, 1, :] = 2
         output = _one_hot(target, 4)
 
-        loss, per_label = Dice(labels=[1, 2, 3])(output, target)
+        loss, per_label = _scores(Dice(labels=[1, 2, 3]), output, target)
 
         # Labels 1 and 2 are perfectly predicted (Dice = 1), label 3 is absent:
         # mean Dice = (1 + 1) / 2 = 1, hence loss = 1 - 1 = 0.
@@ -138,7 +162,7 @@ class TestDice:
         target[0, 0, 0, :] = 1
         output = _one_hot(target, 6)
 
-        loss, per_label = Dice(labels=[5])(output, target)
+        loss, per_label = _scores(Dice(labels=[5]), output, target)
 
         assert loss.item() == 0.0
         assert np.isnan(per_label[5])
@@ -150,7 +174,7 @@ class TestDice:
         output = torch.zeros(1, 1, 4, 4, dtype=torch.uint8)
         output[0, 0, 0, :2] = 1  # 2 of them predicted
 
-        loss, per_label = Dice(labels=None)(output, target)
+        loss, per_label = _scores(Dice(labels=None), output, target)
 
         # Dice(label 1) = 2 * 2 / (2 + 4) = 2/3; the background Dice (24/26)
         # must not enter the average.
@@ -164,7 +188,7 @@ class TestDice:
         target[0, 0, 1, :] = 2
         output = _one_hot(target, 3)
 
-        loss, per_label = Dice(labels=None)(output, target)
+        loss, per_label = _scores(Dice(labels=None), output, target)
 
         assert set(per_label) == {1, 2}
         assert loss.item() == pytest.approx(0.0, abs=1e-6)
@@ -178,7 +202,7 @@ class TestDice:
         output[0, 0] = 1 - output[0, 1]
         mask = torch.ones(1, 1, 2, 2)
 
-        loss, per_label = Dice(labels=[1])(output, target, mask)
+        loss, per_label = _scores(Dice(labels=[1]), output, target, mask)
 
         # Soft Dice(label 1) = 2 * (0.9 + 0.9) / ((0.9 + 0.9 + 0.1 + 0.1) + 2) = 0.9.
         assert per_label[1] == pytest.approx(0.9, abs=1e-5)
@@ -193,7 +217,7 @@ class TestDice:
         mask = torch.zeros(1, 1, 2, 2)
         mask[0, 0, :, 0] = 1  # first column only
 
-        _, per_label = Dice(labels=[1])(output, target, mask)
+        _, per_label = _scores(Dice(labels=[1]), output, target, mask)
 
         # Inside the mask: prediction {(0,0),(1,0)}, target {(0,0)} ->
         # Dice = 2 * 1 / (2 + 1) = 2/3.
@@ -225,12 +249,13 @@ def _dice_per_label_oracle(labels, output, target, mask=None):
 
 
 def _assert_same_scores(got, expected, abs_tol):
-    assert set(got[1]) == set(expected[1])
+    got_labels = _per_label(got[1])
+    assert set(got_labels) == set(expected[1])
     for label, value in expected[1].items():
         if np.isnan(value):
-            assert np.isnan(got[1][label])
+            assert np.isnan(got_labels[label])
         else:
-            assert got[1][label] == pytest.approx(value, abs=abs_tol)
+            assert got_labels[label] == pytest.approx(value, abs=abs_tol)
     assert got[0].item() == pytest.approx(expected[0].item(), abs=abs_tol)
 
 
@@ -330,9 +355,9 @@ class TestDiceConfusionMatrix:
         output = torch.softmax(torch.randn(1, 3, 4, 4), dim=1)
         target = torch.zeros(1, 1, 4, 4, dtype=torch.int64)
 
-        loss, per_label = Dice()(output, target)
+        loss, per_label = _scores(Dice(), output, target)
         assert loss.item() == 0.0 and per_label == {}
-        assert np.isnan(Dice(labels=[1, 2])(output, target)[1][2])
+        assert np.isnan(_per_label(Dice(labels=[1, 2])(output, target)[1])[2])
 
     def test_streamed_sums_carry_the_predicted_mass_of_a_label_the_patch_reference_lacks(self):
         # labels=None: a patch predicting label 2 where its reference has none must still count
@@ -347,8 +372,8 @@ class TestDiceConfusionMatrix:
         states.append(metric.partial_metric(output[..., 2:, :], target[..., 2:, :]))
         combined = metric.combine_metric(states)
 
-        assert whole[1][2] == pytest.approx(2 * 8 / (16 + 8), abs=1e-6)
-        assert combined[1][2] == pytest.approx(whole[1][2], abs=1e-9)
+        assert _per_label(whole[1])[2] == pytest.approx(2 * 8 / (16 + 8), abs=1e-6)
+        assert combined[1][2] == pytest.approx(_per_label(whole[1])[2], abs=1e-9)
         assert set(combined[1]) == {2}  # a label no reference holds is not reported
 
     @pytest.mark.parametrize("soft", [False, True])
@@ -434,7 +459,7 @@ class TestSaveMaps:
 
         _, value, map_ = MAESaveMap()(output, target, mask)
 
-        assert np.isnan(value)
+        assert np.isnan(float(value))
         assert torch.equal(map_, torch.zeros(1, 1, 4, 4))
 
     def test_dice_map_of_uint8_labels_does_not_wrap(self):
@@ -623,7 +648,7 @@ class TestVariance:
 
         assert not torch.isnan(variance)
         assert variance.item() == pytest.approx(0.0)
-        assert value == pytest.approx(0.0)
+        assert float(value) == pytest.approx(0.0)
 
     def test_multi_channel_uses_unbiased_variance(self):
         """With several samples the unbiased (N-1) variance is averaged."""
@@ -633,7 +658,16 @@ class TestVariance:
 
         # Unbiased var of [1, 3] = ((1-2)^2 + (3-2)^2) / (2 - 1) = 2.0.
         assert variance.item() == pytest.approx(2.0)
-        assert value == pytest.approx(2.0)
+        assert float(value) == pytest.approx(2.0)
+
+    def test_value_is_a_detached_tensor_read_lazily(self):
+        """The reported value defers its host readout: a 0-d detached tensor, never an eager
+        ``.item()`` that drains the CUDA queue mid-forward."""
+        output = torch.tensor([1.0, 3.0], requires_grad=True).reshape(1, 2, 1, 1)
+
+        _, value = Variance()(output)
+
+        assert isinstance(value, torch.Tensor) and not value.requires_grad
 
 
 def test_perceptual_loss_forward_unpacks_targets() -> None:
@@ -739,17 +773,6 @@ def test_accuracy_reports_per_batch_not_a_lifetime_running_fraction() -> None:
 
     assert all_correct.item() == pytest.approx(1.0)
     assert all_wrong.item() == pytest.approx(0.0)  # not blended with the previous batch
-
-
-def test_fid_preprocess_images_runs() -> None:
-    # FID.preprocess_images must use torchvision.transforms.functional: torch.nn.functional has no
-    # resize / normalize(mean, std), so calling them there means the metric cannot execute.
-    pytest.importorskip("torchvision")
-    from konfai.metric.measure import FID
-
-    out = FID.preprocess_images(torch.zeros(2, 1, 64, 64))
-
-    assert out.shape == (2, 3, 299, 299)
 
 
 def test_lpips_preprocessing_follows_input_device() -> None:
@@ -878,17 +901,6 @@ def test_accepts_init_flag_lives_on_the_criterion_not_the_attr() -> None:
     assert getattr(CriterionsAttr(), "accepts_init", False) is False
 
 
-def test_fid_builds_on_cpu_and_follows_the_input_device():
-    # A hardcoded .cuda() at construction crashes CPU-only hosts; the model must be built on the
-    # CPU and moved to the evaluated tensor's device in forward.
-    pytest.importorskip("torchvision")
-    pytest.importorskip("scipy")
-    from konfai.metric.measure import FID
-
-    metric = FID()
-    assert next(metric.inception_model.parameters()).device.type == "cpu"
-
-
 class TestSSIMFromHaloPatches:
     """SSIM is reducible from patches read with the window's radius of halo, each scoring the map
     voxels centred in its own grid slot: the streamed sum equals the whole-volume sum to float64
@@ -955,3 +967,216 @@ class TestSSIMFromHaloPatches:
 
         assert metric.combine_metric(states)[1] == pytest.approx(metric(x, y, mask)[1], rel=1e-12)
         assert np.isnan(metric.combine_metric([metric.partial_metric(x, y, torch.zeros_like(mask))])[1])
+
+
+class TestCriterionResult:
+    """The one normalizer of every shape a criterion may return (the boundary a bare numpy float
+    once slipped through, crashing the training-time consumer)."""
+
+    def test_a_bare_tensor_is_the_loss_and_its_detached_value(self):
+        loss = torch.tensor(0.5, requires_grad=True) * 2
+        result = CriterionResult.of(loss)
+
+        assert result.loss is loss and result.map is None
+        assert isinstance(result.value, torch.Tensor) and not result.value.requires_grad
+
+    def test_numpy_and_integer_values_are_coerced_to_floats(self):
+        assert CriterionResult.of((torch.tensor(0.0), np.float64(3.0))).value == 3.0
+        assert CriterionResult.of((torch.tensor(0.0), 3)).value == 3.0
+        assert isinstance(CriterionResult.of((torch.tensor(0.0), np.float64(3.0))).value, float)
+
+    def test_a_values_labels_pair_normalizes_to_labelled_values(self):
+        result = CriterionResult.of((torch.tensor(0.0), (torch.tensor([1.0, float("nan")]), [1, 2])))
+
+        assert isinstance(result.value, LabelledValues)
+        assert result.materialized()[1] == 1.0 and np.isnan(result.materialized()[2])
+
+    def test_a_three_tuple_carries_the_map(self):
+        map_ = torch.zeros(1, 1, 2, 2)
+        result = CriterionResult.of((torch.tensor(0.0), 0.5, map_))
+
+        assert result.map is map_ and result.materialized() == 0.5
+
+    def test_a_non_tensor_return_is_refused_naming_the_criterion(self):
+        with pytest.raises(MeasureError, match="FID"):
+            CriterionResult.of(np.float64(3.0), "FID")
+        with pytest.raises(MeasureError, match="MyLoss"):
+            CriterionResult.of((torch.tensor(0.0), object()), "MyLoss")
+
+    def test_an_external_bare_tensor_criterion_flows_through_the_measure_record(self):
+        # torch:nn:* / monai.losses:* classpath criteria return bare Tensors: the record must keep
+        # accepting them, deferring the readout to the batched materialize.
+        from konfai.network.network import Measure
+
+        record = Measure.Loss("L1Loss", "out", "target", 0, True, False)
+        expected = torch.nn.L1Loss()(torch.full((2, 3), 2.0), torch.zeros(2, 3))
+        record.add(1.0, expected)
+        assert record.recorded == 1 and record._unread  # deferred, not yet read
+
+        measure = object.__new__(Measure)
+        measure._loss = {0: {"out:target:L1Loss": record}}
+        measure._materialize()
+
+        assert record.values_mean(1) == pytest.approx(float(expected))
+
+    def test_a_labelled_metric_materializes_to_the_nan_mean_of_its_labels(self):
+        from konfai.network.network import Measure
+
+        record = Measure.Loss("Dice", "out", "target", 0, False, False)
+        record.add(1.0, (torch.tensor(0.25), LabelledValues(torch.tensor([0.5, float("nan"), 1.0]), [1, 2, 3])))
+
+        measure = object.__new__(Measure)
+        measure._loss = {0: {"out:target:Dice": record}}
+        measure._materialize()
+
+        assert record.values_mean(1) == pytest.approx(0.75)  # the NaN label is skipped
+
+
+class TestMaskedLossDeferredValues:
+    """The MaskedLoss family reports detached 0-d tensors, and its masked elementwise path runs
+    batched: no per-item host sync before backward is enqueued."""
+
+    def test_unmasked_value_is_the_detached_loss(self):
+        from konfai.metric.measure import MAE
+
+        loss, value = MAE()(torch.rand(2, 1, 4, 4), torch.rand(2, 1, 4, 4))
+
+        assert isinstance(value, torch.Tensor) and not value.requires_grad
+        assert float(value) == pytest.approx(loss.item())
+
+    @pytest.mark.parametrize("metric_name", ["MAE", "MSE", "ME", "PSNR"])
+    @pytest.mark.parametrize("reduction", ["mean", "sum"])
+    def test_batched_masked_path_matches_the_per_item_loop(self, metric_name, reduction):
+        import konfai.metric.measure as measure
+
+        torch.manual_seed(3)
+        cls = getattr(measure, metric_name)
+        metric = cls() if metric_name in ("ME", "PSNR") else cls(reduction)
+        output = torch.rand(3, 2, 5, 6) * 100
+        target = output + torch.randn(3, 2, 5, 6) * 10
+        mask = (torch.rand(3, 1, 5, 6) > 0.4).to(torch.uint8)
+        mask[1] = 0  # one empty item: skipped, exactly as the loop skipped it
+
+        loss, value = metric(output, target, mask)
+
+        expected = []
+        for b in range(3):
+            keep = mask[b : b + 1] == 1
+            if not bool(keep.any()):
+                continue
+            expected.append(
+                metric.loss(
+                    torch.masked_select(output[b : b + 1].float(), keep),
+                    torch.masked_select(target[b : b + 1].float(), keep),
+                )
+            )
+        assert float(value) == pytest.approx(loss.item(), rel=1e-6)
+        assert loss.item() == pytest.approx(torch.stack(expected).mean().item(), rel=1e-5)
+
+    def test_an_all_empty_mask_reports_nan_and_a_finite_zero_loss(self):
+        from konfai.metric.measure import MAE
+
+        output = torch.rand(2, 1, 4, 4, requires_grad=True)
+        loss, value = MAE()(output, torch.rand(2, 1, 4, 4), torch.zeros(2, 1, 4, 4, dtype=torch.uint8))
+
+        assert loss.item() == 0.0
+        assert np.isnan(float(value))
+        assert torch.isfinite(torch.autograd.grad(loss, output)[0]).all()  # empty items never NaN the graph
+
+    def test_an_empty_item_keeps_the_gradient_finite(self):
+        from konfai.metric.measure import MSE
+
+        output = torch.rand(2, 1, 3, 3, requires_grad=True)
+        mask = torch.zeros(2, 1, 3, 3, dtype=torch.uint8)
+        mask[0] = 1
+        loss, _ = MSE()(output, torch.rand(2, 1, 3, 3), mask)
+
+        assert torch.isfinite(torch.autograd.grad(loss, output)[0]).all()
+
+
+class TestLPIPSBatch:
+    class _StubLpips(torch.nn.Module):
+        """One distance per batch sample, [B, 1, 1, 1]: the shape the lpips package returns."""
+
+        def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            distance = (a - b).abs().reshape(a.shape[0], -1).mean(1)
+            return distance.reshape(-1, 1, 1, 1)
+
+    def test_every_batch_item_is_scored(self):
+        # Sample 0 identical, sample 1 not: the old `.flatten()[0]` reported 0 and silently
+        # discarded every sample past the first; the mean scores them all.
+        from konfai.data.patching import ModelPatch
+        from konfai.metric.measure import LPIPS
+
+        torch.manual_seed(0)
+        x = torch.rand(2, 1, 1, 16, 16)
+        x[0, 0, 0, 0, 0], x[0, 0, 0, 0, 1] = 0.0, 1.0  # both extremes in sample 0: one shared range
+        y = x.clone()
+        y[1] = (x[1] + 0.3).clamp(0.0, 1.0)
+
+        value = LPIPS._loss(self._StubLpips(), ModelPatch([1, 16, 16]), x, y)
+
+        nx, ny = LPIPS.preprocessing(LPIPS.normalize(x)[:, :, 0]), LPIPS.preprocessing(LPIPS.normalize(y)[:, :, 0])
+        expected = self._StubLpips()(nx, ny).mean()
+        assert float(value) == pytest.approx(float(expected))
+        assert float(value) > 0.0  # not just the first (identical) sample
+
+
+class TestFocalLossAlpha:
+    def test_default_alpha_is_uniform_for_any_class_count(self):
+        # The old default was a 5-class weight vector from a past experiment: silently misweighted
+        # below 5 classes, indexed out of range above.
+        torch.manual_seed(1)
+        output = torch.randn(1, 7, 4, 4)
+        target = torch.randint(0, 7, (1, 1, 4, 4)).float()
+
+        loss = FocalLoss()(output, target)
+
+        log_pt = F.log_softmax(output, dim=1).gather(1, target.long())
+        pt = torch.exp(log_pt)
+        expected = (-((1 - pt) ** 2.0) * log_pt).mean()
+        assert loss.item() == pytest.approx(expected.item())
+
+    def test_more_classes_than_alpha_weights_are_refused(self):
+        with pytest.raises(MeasureError, match="alpha"):
+            FocalLoss(alpha=[0.5, 2.0])(torch.randn(1, 3, 4, 4), torch.randint(0, 2, (1, 1, 4, 4)).float())
+
+    def test_a_given_alpha_lives_in_a_buffer(self):
+        focal = FocalLoss(alpha=[1.0, 1.0, 2.0])
+        assert "alpha" in dict(focal.named_buffers())
+
+
+class TestImpactMaskSniffing:
+    def test_a_non_binary_uint8_target_is_refused(self):
+        from konfai.metric.measure.impact import _sniffed_mask
+
+        image = torch.rand(1, 1, 4, 4)
+        eight_bit = (torch.rand(1, 1, 4, 4) * 255).to(torch.uint8)
+
+        with pytest.raises(MeasureError, match="values above 1"):
+            _sniffed_mask((image, eight_bit), eight_bit)
+
+    def test_a_binary_uint8_target_is_the_mask(self):
+        from konfai.metric.measure.impact import _sniffed_mask
+
+        image = torch.rand(1, 1, 4, 4)
+        mask = (torch.rand(1, 1, 4, 4) > 0.5).to(torch.uint8)
+
+        assert _sniffed_mask((image, mask), mask) is mask
+        assert _sniffed_mask((image, image), image) is None  # not uint8: no mask
+
+    def test_the_scored_target_itself_cannot_be_the_mask(self):
+        from konfai.metric.measure.impact import _sniffed_mask
+
+        only = (torch.rand(1, 1, 4, 4) > 0.5).to(torch.uint8)
+
+        with pytest.raises(MeasureError, match="both the scored target and its mask"):
+            _sniffed_mask((only,), only)
+
+
+def test_psnr_and_ssim_share_the_ct_dynamic_range_default() -> None:
+    # 4095 (12-bit CT, -1024..3071) for both: two different defaults quietly scored the standard
+    # synthesis pair against two different ranges.
+    from konfai.metric.measure import PSNR
+
+    assert PSNR()._dynamic_range == SSIM()._dynamic_range == 4095.0

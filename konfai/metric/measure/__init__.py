@@ -17,14 +17,16 @@
 
 """Criterion and metric implementations used by KonfAI workflows: a bare name in a config resolves here."""
 
-from konfai.metric.measure.adversarial import FID as FID
-from konfai.metric.measure.adversarial import WGP as WGP
 from konfai.metric.measure.adversarial import Gram as Gram
 from konfai.metric.measure.adversarial import PatchGanLoss as PatchGanLoss
 from konfai.metric.measure.adversarial import PerceptualLoss as PerceptualLoss
 from konfai.metric.measure.base import Criterion as Criterion
+from konfai.metric.measure.base import CriterionOutput as CriterionOutput
+from konfai.metric.measure.base import CriterionResult as CriterionResult
+from konfai.metric.measure.base import CriterionValue as CriterionValue
 from konfai.metric.measure.base import CriterionWithAttribute as CriterionWithAttribute
 from konfai.metric.measure.base import CriterionWithInit as CriterionWithInit
+from konfai.metric.measure.base import LabelledValues as LabelledValues
 from konfai.metric.measure.base import MaskedLoss as MaskedLoss
 from konfai.metric.measure.base import _require_optional as _require_optional
 from konfai.metric.measure.base import models_register as models_register
@@ -51,11 +53,8 @@ from konfai.metric.measure.regression import CrossEntropyLoss as CrossEntropyLos
 from konfai.metric.measure.regression import FocalLoss as FocalLoss
 from konfai.metric.measure.regression import GradientImages as GradientImages
 from konfai.metric.measure.regression import KLDivergence as KLDivergence
-from konfai.metric.measure.regression import L1LossRepresentation as L1LossRepresentation
 from konfai.metric.measure.regression import MAESaveMap as MAESaveMap
 from konfai.metric.measure.regression import Mean as Mean
-from konfai.metric.measure.regression import MutualInformationLoss as MutualInformationLoss
-from konfai.metric.measure.regression import TripletLoss as TripletLoss
 from konfai.metric.measure.regression import Variance as Variance
 from konfai.metric.measure.segmentation import Dice as Dice
 from konfai.metric.measure.segmentation import DiceSaveMap as DiceSaveMap
@@ -63,7 +62,6 @@ from konfai.metric.measure.segmentation import LabelSums as LabelSums
 
 __all__ = [
     "BCE",
-    "FID",
     "LPIPS",
     "MAE",
     "ME",
@@ -71,9 +69,11 @@ __all__ = [
     "PSNR",
     "SSIM",
     "TRE",
-    "WGP",
     "Accuracy",
     "Criterion",
+    "CriterionOutput",
+    "CriterionResult",
+    "CriterionValue",
     "CriterionWithAttribute",
     "CriterionWithInit",
     "CrossEntropyLoss",
@@ -86,16 +86,14 @@ __all__ = [
     "IMPACTSynth",
     "ImpactFeatureModel",
     "KLDivergence",
-    "L1LossRepresentation",
     "LabelSums",
+    "LabelledValues",
     "MAESaveMap",
     "MaskedLoss",
     "Mean",
-    "MutualInformationLoss",
     "PatchGanLoss",
     "PerceptualLoss",
     "SAM_Perceptual",
-    "TripletLoss",
     "Variance",
     "models_register",
 ]

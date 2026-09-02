@@ -24,14 +24,16 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
 
 from konfai.data.patching import ModelPatch
-from konfai.metric.measure.base import Criterion, CriterionWithInit, MaskedLoss, _require_optional
+from konfai.metric.measure.base import Criterion, CriterionWithInit, LabelledValues, MaskedLoss, _require_optional
 from konfai.metric.measure.segmentation import Dice
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
 from konfai.utils.errors import MeasureError
+
+#: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share.
+CT_DYNAMIC_RANGE = 4095.0
 
 
 class MSE(MaskedLoss):
@@ -44,8 +46,11 @@ class MSE(MaskedLoss):
         self._reduction = reduction
         self.reducible = reduction in ("mean", "sum")
 
-    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
-        return float((x - y).pow(2).sum().item())
+    def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
+        return (output - target).pow(2) if self.reducible else None
+
+    def _value(self, total: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
+        return total / count if self._reduction == "mean" else total
 
     def _finish(self, total: float, count: int) -> float:
         return total / count if self._reduction == "mean" else total
@@ -61,8 +66,11 @@ class MAE(MaskedLoss):
         self._reduction = reduction
         self.reducible = reduction in ("mean", "sum")
 
-    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
-        return float((x - y).abs().sum().item())
+    def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
+        return (output - target).abs() if self.reducible else None
+
+    def _value(self, total: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
+        return total / count if self._reduction == "mean" else total
 
     def _finish(self, total: float, count: int) -> float:
         return total / count if self._reduction == "mean" else total
@@ -78,8 +86,11 @@ class ME(MaskedLoss):
     def __init__(self) -> None:
         super().__init__(ME._loss, False)
 
-    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
-        return float((x - y).sum().item())
+    def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
+        return output - target
+
+    def _value(self, total: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
+        return total / count
 
     def _finish(self, total: float, count: int) -> float:
         return total / count
@@ -122,26 +133,32 @@ class MAESaveMap(MAE):
         evaluation write it region by region instead of needing the whole case."""
         return self._difference(output, *targets)[0].to(output.dtype).cpu()
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
+    def forward(
+        self, output: torch.Tensor, *targets: torch.Tensor
+    ) -> tuple[torch.Tensor, float | torch.Tensor, torch.Tensor]:
         difference, mask = self._difference(output, *targets)
         if mask is None:
             loss = self._reduce(difference, self._reduction)
-            return loss, loss.detach().item(), difference.to(output.dtype).cpu()
+            return loss, loss.detach(), difference.to(output.dtype).cpu()
+        map_ = difference.to(output.dtype).cpu()
+        if self.reducible:
+            # The difference is already zero outside the mask, so the batched masked forward
+            # reads the exact bits MAE reads: the scalar and the map agree by construction.
+            loss, value = self._masked_forward(difference, mask)
+            return loss, value, map_
         # Per batch item over its masked voxels, averaged over the items that have any: the
         # structure of MaskedLoss.forward, read off the one difference buffer.
+        scored = torch.any(mask.reshape(mask.shape[0], -1), dim=1).tolist()
         loss = output.new_tensor(0.0)
-        true_nb = 0
         for batch in range(output.shape[0]):
-            mask_b = mask[batch, ...]
-            if not torch.any(mask_b):
+            if not scored[batch]:
                 continue
-            loss = loss + self._reduce(torch.masked_select(difference[batch, ...], mask_b), self._reduction)
-            true_nb += 1
-        map_ = difference.to(output.dtype).cpu()
+            loss = loss + self._reduce(torch.masked_select(difference[batch, ...], mask[batch, ...]), self._reduction)
+        true_nb = sum(scored)
         if true_nb == 0:
             return loss, np.nan, map_
         loss = loss / true_nb
-        return loss, loss.detach().item(), map_
+        return loss, loss.detach(), map_
 
     def get_name(self) -> str:
         return "MAE"
@@ -158,12 +175,15 @@ class PSNR(MaskedLoss):
         return psnr
 
     def __init__(self, dynamic_range: float | None = None) -> None:
-        dynamic_range = dynamic_range if dynamic_range else 1024 + 3071
+        dynamic_range = CT_DYNAMIC_RANGE if dynamic_range is None else dynamic_range
         super().__init__(partial(PSNR._loss, dynamic_range), False)
         self._dynamic_range = float(dynamic_range)
 
-    def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
-        return float((x - y).pow(2).sum().item())
+    def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
+        return (output - target).pow(2)
+
+    def _value(self, total: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
+        return 10 * torch.log10(self._dynamic_range**2 / (total / count))
 
     def _finish(self, total: float, count: int) -> float:
         # The log is a function of the RUNNING mean, applied once at the end, never per patch.
@@ -195,7 +215,7 @@ class SSIM(MaskedLoss):
     slab_bytes = 8 << 20
 
     def __init__(self, dynamic_range: float | None = None) -> None:
-        dynamic_range = dynamic_range if dynamic_range else 1024 + 3000
+        dynamic_range = CT_DYNAMIC_RANGE if dynamic_range is None else dynamic_range
         super().__init__(partial(SSIM._loss, dynamic_range), True)
         self._dynamic_range = float(dynamic_range)
 
@@ -349,37 +369,33 @@ class LPIPS(MaskedLoss):
         return tensor.repeat((1, 3, 1, 1))
 
     @staticmethod
-    def _loss(loss_fn_alex, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def _loss(loss_fn_alex, dataset_patch: ModelPatch, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # Follow the input's device (the DDP rank's GPU, or CPU) instead of a hardcoded device 0.
         loss_fn_alex = loss_fn_alex.to(x.device)
-        dataset_patch = ModelPatch([1, 320, 320])
         dataset_patch.load(x.shape[2:])
 
-        patch_iterator = dataset_patch.disassemble(LPIPS.normalize(x), LPIPS.normalize(y))
-        loss = 0
-        with tqdm(
-            iterable=enumerate(patch_iterator),
-            leave=False,
-            total=dataset_patch.get_size(0),
-        ) as batch_iter:
-            for _, patch_input in batch_iter:
-                real, fake = LPIPS.preprocessing(patch_input[0]), LPIPS.preprocessing(patch_input[1])
-                loss += loss_fn_alex(real, fake).flatten()[0]
+        loss = x.new_tensor(0.0)
+        for patch_input in dataset_patch.disassemble(LPIPS.normalize(x), LPIPS.normalize(y)):
+            real, fake = LPIPS.preprocessing(patch_input[0]), LPIPS.preprocessing(patch_input[1])
+            # One distance per batch sample: the mean scores them all, where ``.flatten()[0]``
+            # silently kept only the first.
+            loss = loss + loss_fn_alex(real, fake).mean()
         return loss / dataset_patch.get_size(0)
 
     def __init__(self, model: str = "alex") -> None:
         lpips = _require_optional("lpips", criterion="LPIPS", extra="lpips")
 
-        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model)), True)
+        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model), ModelPatch([1, 320, 320])), True)
 
 
 class TRE(Criterion):
     def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor):
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, LabelledValues]:
         loss = torch.linalg.norm(output - targets[0], dim=2)
-        return loss.mean(), {f"Landmarks_{i}": v.item() for i, v in enumerate(loss.mean(0))}
+        per_landmark = loss.mean(0).detach()
+        return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
 
 
 class GradientImages(Criterion):
@@ -476,37 +492,20 @@ class Accuracy(Criterion):
         return (predicted == targets[0]).float().mean()
 
 
-class TripletLoss(Criterion):
-    def __init__(self) -> None:
-        super().__init__()
-        self.triplet_loss = torch.nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-7)
-
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        return self.triplet_loss(output[0], output[1], output[2])
-
-
-class L1LossRepresentation(Criterion):
-    def __init__(self) -> None:
-        super().__init__()
-        self.loss = torch.nn.L1Loss()
-
-    def _variance(self, features: torch.Tensor) -> torch.Tensor:
-        return torch.mean(torch.clamp(1 - torch.var(features, dim=0), min=0))
-
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        return self.loss(output[0], output[1]) + self._variance(output[0]) + self._variance(output[1])
-
-
 class FocalLoss(Criterion):
     def __init__(
         self,
         gamma: float = 2.0,
-        alpha: list[float] = [0.5, 2.0, 0.5, 0.5, 1],
+        alpha: list[float] | None = None,
         reduction: str = "mean",
     ):
         super().__init__()
-        raw_alpha = torch.tensor(alpha, dtype=torch.float32)
-        self.alpha = raw_alpha / raw_alpha.sum() * len(raw_alpha)
+        alpha_tensor = None
+        if alpha is not None:
+            raw_alpha = torch.tensor(alpha, dtype=torch.float32)
+            alpha_tensor = raw_alpha / raw_alpha.sum() * len(raw_alpha)
+        # A buffer, so ``criterion.to(device)`` moves it once instead of a per-call upload.
+        self.register_buffer("alpha", alpha_tensor)
         self.gamma = gamma
         self.reduction = reduction
 
@@ -519,60 +518,22 @@ class FocalLoss(Criterion):
         logpt = logpt.gather(1, target)
         pt = pt.gather(1, target)
 
-        # alpha[target] is already [B, 1, *spatial] (matching pt/logpt); do not add an axis.
-        at = self.alpha.to(target.device)[target]
-        loss = -at * ((1 - pt) ** self.gamma) * logpt
+        loss = -((1 - pt) ** self.gamma) * logpt
+        alpha = self._buffers["alpha"]
+        if alpha is not None:
+            if output.shape[1] > alpha.numel():
+                raise MeasureError(
+                    f"FocalLoss got {output.shape[1]} output classes for {alpha.numel()} alpha weights.",
+                    "Give `alpha:` one weight per class, or omit it to weight every class equally.",
+                )
+            # alpha[target] is already [B, 1, *spatial] (matching pt/logpt); do not add an axis.
+            loss = alpha.to(target.device)[target] * loss
 
         if self.reduction == "mean":
             return loss.mean()
         elif self.reduction == "sum":
             return loss.sum()
         return loss
-
-
-class MutualInformationLoss(Criterion):
-    def __init__(
-        self,
-        num_bins: int = 23,
-        sigma_ratio: float = 0.5,
-        smooth_nr: float = 1e-7,
-        smooth_dr: float = 1e-7,
-    ) -> None:
-        super().__init__()
-        bin_centers = torch.linspace(0.0, 1.0, num_bins)
-        sigma = torch.mean(bin_centers[1:] - bin_centers[:-1]) * sigma_ratio
-        self.num_bins = num_bins
-        self.preterm = 1 / (2 * sigma**2)
-        self.bin_centers = bin_centers[None, None, ...]
-        self.smooth_nr = float(smooth_nr)
-        self.smooth_dr = float(smooth_dr)
-
-    def parzen_windowing(
-        self, pred: torch.Tensor, target: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        pred_weight, pred_probability = self.parzen_windowing_gaussian(pred)
-        target_weight, target_probability = self.parzen_windowing_gaussian(target)
-        return pred_weight, pred_probability, target_weight, target_probability
-
-    def parzen_windowing_gaussian(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        img = torch.clamp(img, 0, 1)
-        img = img.reshape(img.shape[0], -1, 1)  # (batch, num_sample, 1)
-        weight = torch.exp(
-            -self.preterm.to(img) * (img - self.bin_centers.to(img)) ** 2
-        )  # (batch, num_sample, num_bin)
-        weight = weight / torch.sum(weight, dim=-1, keepdim=True)  # (batch, num_sample, num_bin)
-        probability = torch.mean(weight, dim=-2, keepdim=True)  # (batch, 1, num_bin)
-        return weight, probability
-
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        wa, pa, wb, pb = self.parzen_windowing(output, targets[0])  # (batch, num_sample, num_bin), (batch, 1, num_bin)
-        pab = torch.bmm(wa.permute(0, 2, 1), wb.to(wa)).div(wa.shape[1])  # (batch, num_bins, num_bins)
-        papb = torch.bmm(pa.permute(0, 2, 1), pb.to(pa))  # (batch, num_bins, num_bins)
-        mi = torch.sum(
-            pab * torch.log((pab + self.smooth_nr) / (papb + self.smooth_dr) + self.smooth_dr),
-            dim=(1, 2),
-        )  # (batch)
-        return torch.mean(mi).neg()  # average over the batch and channel ndims
 
 
 class CrossEntropyLoss(Criterion):
@@ -592,13 +553,13 @@ class Variance(Criterion):
     def get_name(self):
         return self.name
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         output = output.float()
         if output.shape[1] > 1:
             variance = output.var(1).mean()
         else:
             variance = torch.zeros((), device=output.device, dtype=output.dtype)
-        return variance, variance.item()
+        return variance, variance.detach()
 
 
 class Mean(Criterion):
@@ -609,6 +570,6 @@ class Mean(Criterion):
     def get_name(self):
         return self.name
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         loss = output.float().mean()
-        return loss, loss.item()
+        return loss, loss.detach()

@@ -45,12 +45,7 @@ def _colocate_loaded_modules(model: torch.nn.Module) -> None:
     if target is None:
         return
     for sub in model.modules():
-        # ModuleArgsDict overrides parameters()/buffers() without a ``recurse`` kwarg, so use the
-        # base nn.Module methods to read each module's own (non-recursive) tensors.
-        own = [
-            *torch.nn.Module.parameters(sub, recurse=False),
-            *torch.nn.Module.buffers(sub, recurse=False),
-        ]
+        own = [*sub.parameters(recurse=False), *sub.buffers(recurse=False)]
         if own and all(t.device.type == "cpu" for t in own):
             sub.to(target)
 

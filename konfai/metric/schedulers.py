@@ -72,12 +72,11 @@ class Warmup(torch.optim.lr_scheduler.LambdaLR):
         optimizer: torch.optim.Optimizer,
         warmup_steps: int = 10,
         last_epoch=-1,
-        verbose="deprecated",
     ):
-        super().__init__(optimizer, partial(Warmup.warmup, warmup_steps), last_epoch, verbose)
+        super().__init__(optimizer, partial(Warmup.warmup, warmup_steps), last_epoch)
 
 
-class PolyLRScheduler(torch.optim.lr_scheduler._LRScheduler):
+class PolyLRScheduler(torch.optim.lr_scheduler.LRScheduler):
     def __init__(
         self,
         optimizer,
