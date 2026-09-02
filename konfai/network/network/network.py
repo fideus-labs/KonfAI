@@ -18,6 +18,7 @@
 """The routed module graph and the Network built on it."""
 
 import inspect
+import logging
 import os
 from abc import ABC
 from collections import OrderedDict
@@ -27,7 +28,6 @@ from functools import partial
 from typing import Any, Self
 
 import torch
-from torch._jit_internal import _copy_to_script_wrapper
 from torch.utils.checkpoint import checkpoint
 
 from konfai import konfai_root
@@ -47,6 +47,8 @@ from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State, get_device, get_gpu_memory
+
+_log = logging.getLogger(__name__)
 
 
 def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
@@ -208,15 +210,12 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             raise ValueError(f"Module '{key}' is None or missing in self._modules")
         return module
 
-    @_copy_to_script_wrapper
     def keys(self) -> Iterable[str]:
         return self._modules.keys()
 
-    @_copy_to_script_wrapper
     def items(self) -> Iterable[tuple[str, torch.nn.Module | None]]:
         return self._modules.items()
 
-    @_copy_to_script_wrapper
     def values(self) -> Iterable[torch.nn.Module | None]:
         return self._modules.values()
 
@@ -250,6 +249,13 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     count = dict.fromkeys(set(module.get_mapping().values()), 0)
                     if len(count):
                         for k, v in module.get_mapping().items():
+                            if count[v] >= len(module_args.alias):
+                                raise ConfigError(
+                                    f"Module '{name}' declares {len(module_args.alias)} alias(es) but its graph "
+                                    f"maps at least {count[v] + 1} entries onto '{v}'.",
+                                    "Alias lists are positional: one alias per mapped occurrence. Extend the "
+                                    "'alias' list of add_module to cover every occurrence.",
+                                )
                             alias_name = module_args.alias[count[v]]
                             if k == "":
                                 results.update({alias_name: name + "." + v})
@@ -397,23 +403,23 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             pass
         return _v
 
-    def named_parameters(
-        self, pretrained: bool = False, recurse=False
-    ) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
+    def graph_parameters(self, pretrained: bool = False) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
+        """The routed graph's trainable parameters, named by dotted module path.
+
+        Unlike ``named_parameters`` (torch semantics, untouched), this walk honours the graph
+        metadata: a module gated off by ``training=False`` is skipped, and ``pretrained=True``
+        keeps only the modules declared ``pretrained=False``.
+        """
         for name, module_args in self._modulesArgs.items():
             module = self[name]
             if isinstance(module, ModuleArgsDict):
-                for k, v in module.named_parameters(pretrained=pretrained):
+                for k, v in module.graph_parameters(pretrained=pretrained):
                     yield name + "." + k, v
             elif isinstance(module, torch.nn.Module):
                 if not pretrained or not module_args.pretrained:
                     if module_args.training is None or module_args.training:
                         for k, v in module.named_parameters():
                             yield name + "." + k, v
-
-    def parameters(self, pretrained: bool = False):
-        for _, v in self.named_parameters(pretrained=pretrained):
-            yield v
 
     def named_module_args_dict(self) -> Iterator[tuple[str, Self, ModuleArgs]]:
         for name, module in self._modules.items():
@@ -491,7 +497,7 @@ class Network(ModuleArgsDict, ABC):
     def _apply_network(
         self,
         name_function: Callable[[Self], str],
-        networks: list[str],
+        networks: dict[str, "Network"],
         key: str,
         function: Callable,
         *args,
@@ -505,18 +511,29 @@ class Network(ModuleArgsDict, ABC):
         results: dict[str, object] = {}
         for module in self.values():
             if isinstance(module, Network):
-                if name_function(module) not in networks:
-                    networks.append(name_function(module))
-                    for k, v in module._apply_network(
-                        name_function,
-                        networks,
-                        key + "." + name_function(module),
-                        function,
-                        *args,
-                        root=root,
-                        **kwargs,
-                    ).items():
-                        results.update({name_function(self) + "." + k: v})
+                name = name_function(module)
+                known = networks.get(name)
+                if known is module:
+                    # The same object under several module names (a GAN's shared discriminator)
+                    # is visited once.
+                    continue
+                if known is not None:
+                    raise ConfigError(
+                        f"Two distinct networks share the name '{name}' in the graph of '{name_function(root)}'.",
+                        "The name is the checkpoint key: a collision cannot be saved or resumed "
+                        "correctly. Give one of them its own name with set_name().",
+                    )
+                networks[name] = module
+                for k, v in module._apply_network(
+                    name_function,
+                    networks,
+                    key + "." + name,
+                    function,
+                    *args,
+                    root=root,
+                    **kwargs,
+                ).items():
+                    results.update({name_function(self) + "." + k: v})
         param_names = {param.name for param in inspect.signature(function).parameters.values()}
         if "key" in param_names:
             function = partial(function, key=key)
@@ -531,7 +548,7 @@ class Network(ModuleArgsDict, ABC):
             def new_function(self: Self, *args, **kwargs) -> dict[str, object]:
                 return self._apply_network(
                     lambda network: network.get_name(),
-                    [],
+                    {},
                     self.get_name(),
                     function,
                     *args,
@@ -553,6 +570,7 @@ class Network(ModuleArgsDict, ABC):
         init_type: str = "normal",
         init_gain: float = 0.02,
         dim: int = 3,
+        allow_head_resize: bool = False,
     ) -> None:
         super().__init__()
         self.name = self.__class__.__name__
@@ -561,7 +579,7 @@ class Network(ModuleArgsDict, ABC):
         self.optimizer: torch.optim.Optimizer | None = None
 
         self.lr_schedulers_loader = schedulers
-        self.schedulers: dict[torch.optim.lr_scheduler._LRScheduler, int] = {}
+        self.schedulers: dict[torch.optim.lr_scheduler.LRScheduler, int] = {}
 
         self.outputs_criterions_loader = outputs_criterions
         self.measure: Measure | None = None
@@ -572,21 +590,34 @@ class Network(ModuleArgsDict, ABC):
         self.init_type = init_type
         self.init_gain = init_gain
         self.dim = dim
+        #: Opt-in: a checkpoint head whose out-channels mismatch may be re-initialised and
+        #: overlap-copied instead of failing the load (transfer to a different label set).
+        self.allow_head_resize = allow_head_resize
         self._it = 0
         self._nb_lr_update = 0
         self.outputsGroup: list[OutputsGroup] = []
 
     @_function_network()
-    def state_dict(self) -> dict[str, OrderedDict]:
-        destination: OrderedDict[str, Any] = OrderedDict()
+    def network_states(self) -> OrderedDict:
+        """Per-network flat state, keyed by ``get_name()`` (dotted for nested networks): the
+        checkpoint's ``Model`` entry. The decorated call returns ``dict[str, OrderedDict]``."""
+        return self.state_dict()
+
+    def state_dict(  # type: ignore[override]
+        self, *, destination: OrderedDict | None = None, prefix: str = "", keep_vars: bool = False
+    ) -> OrderedDict:
+        """This network's own flat state under the torch signature, skipping nested ``Network``
+        children: each owns its optimizer/state and is saved under its own ``network_states`` key."""
+        if destination is None:
+            destination = OrderedDict()
         local_metadata = {"version": self._version}
-        self._save_to_state_dict(destination, "", False)
+        self._save_to_state_dict(destination, prefix, keep_vars)
         for name, module in self._modules.items():
             if module is not None:
                 if not isinstance(module, Network):
-                    module.state_dict(destination=destination, prefix="" + name + ".", keep_vars=False)
+                    module.state_dict(destination=destination, prefix=prefix + name + ".", keep_vars=keep_vars)
         for hook in self._state_dict_hooks.values():
-            hook_result = hook(self, destination, "", local_metadata)
+            hook_result = hook(self, destination, prefix, local_metadata)
             if hook_result is not None:
                 destination = hook_result
         return destination
@@ -623,10 +654,15 @@ class Network(ModuleArgsDict, ABC):
                             current_size = child.weight.shape[0]
                             last_size = state_dict[weight_key].shape[0]
 
-                            if current_size != last_size:
-                                print(
-                                    f"Warning: The size of '{prefix + name}' has changed from {last_size}"
-                                    f" to {current_size}. Please check for potential impacts"
+                            # Opt-in only: without allow_head_resize the mismatch falls through to the
+                            # strict load below and raises, naming the tensor and both shapes.
+                            if current_size != last_size and self.allow_head_resize:
+                                _log.warning(
+                                    "The size of '%s' has changed from %s to %s: re-initialised and "
+                                    "overlap-copied (allow_head_resize).",
+                                    prefix + name,
+                                    last_size,
+                                    current_size,
                                 )
                                 ModuleArgsDict.init_func(child, self.init_type, self.init_gain)
 
@@ -666,13 +702,13 @@ class Network(ModuleArgsDict, ABC):
                 f"Error(s) in loading state_dict for {self.__class__.__name__}:\n\t{formatted_errors}",
             )
 
-    def apply(self, fn: Callable[[torch.nn.Module], None]) -> None:
+    def graph_apply(self, fn: Callable[[torch.nn.Module], None]) -> None:
         """
-        Apply ``fn`` to each non-KonfAI child module and finally to ``self``.
+        Apply ``fn`` to each non-``Network`` child module and finally to ``self``.
 
-        This overrides ``torch.nn.Module.apply`` so the recursive traversal can
-        skip nested ``Network`` instances and keep KonfAI's graph semantics
-        intact.
+        Nested ``Network`` instances are skipped: each owns its own state (init, load), so a
+        fan-out over the graph applies ``fn`` per network, never twice through a parent.
+        ``torch.nn.Module.apply`` keeps its native signature and full recursion.
         """
         for module in self.children():
             if not isinstance(module, Network):
@@ -693,7 +729,7 @@ class Network(ModuleArgsDict, ABC):
         # `key` here, so a nested network resumes its own state instead of silently missing the bare-name key.
         state_key = key if key is not None else self.get_name()
         if init:
-            self.apply(
+            self.graph_apply(
                 partial(
                     ModuleArgsDict.init_func,
                     init_type=self.init_type,
@@ -714,16 +750,13 @@ class Network(ModuleArgsDict, ABC):
 
             for alias in model_state_dict_tmp.keys():
                 prefix = ".".join(alias.split(".")[:-1])
-                alias_list = [
-                    (".".join(prefix.split(".")[: len(i.split("."))]), v)
-                    for i, v in modules_name.items()
-                    if prefix.startswith(i)
-                ]
+                # Segment-aligned: alias 'layer1' must not claim a module 'layer10', and only the
+                # leading prefix is rewritten, never a later occurrence of the same substring.
+                alias_list = [(a, b) for a, b in modules_name.items() if prefix == a or prefix.startswith(a + ".")]
 
                 if len(alias_list):
-                    for a, b in alias_list:
-                        model_state_dict[alias.replace(a, b)] = model_state_dict_tmp[alias]
-                        break
+                    a, b = alias_list[0]
+                    model_state_dict[b + alias[len(a) :]] = model_state_dict_tmp[alias]
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
@@ -859,7 +892,9 @@ class Network(ModuleArgsDict, ABC):
             if self.measure is not None:
                 self.measure.scaler = self.scaler
             if self.optimizerLoader:
-                self.optimizer = self.optimizerLoader.get_optimizer(key, self.parameters(False))
+                self.optimizer = self.optimizerLoader.get_optimizer(
+                    key, (parameter for _, parameter in self.graph_parameters())
+                )
                 self.optimizer.zero_grad()
 
             if self.lr_schedulers_loader and self.optimizer:

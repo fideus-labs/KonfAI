@@ -38,8 +38,18 @@ from konfai.utils.utils import get_module
 class ModelLoader:
     """Instantiate the root model graph declared in the active configuration."""
 
-    def __init__(self, classpath: str = "default|segmentation.UNet.UNet") -> None:
+    def __init__(self, classpath: str = "default|segmentation.UNet.UNet", allow_head_resize: bool = False) -> None:
         self.classpath = classpath
+        self.allow_head_resize = allow_head_resize
+
+    def _apply_options(self, model: Network) -> Network:
+        # The loader can only ENABLE the head resize: a model class that opted in through its own
+        # constructor keeps it when the config default (False) says nothing.
+        if self.allow_head_resize:
+            for module in model.modules():
+                if isinstance(module, Network):
+                    module.allow_head_resize = True
+        return model
 
     def _yaml_path(self) -> Path | None:
         raw_path = self.classpath.split("|", maxsplit=1)[-1]
@@ -110,7 +120,7 @@ class ModelLoader:
                 )
 
             model = apply_config(f"{konfai_args}.{name}")(builder)(konfai_without=konfai_without if not train else [])
-            return model
+            return self._apply_options(model)
 
         classpath = self.classpath
         # A config that references a built-in model by the absolute path konfai.models.<kind>.<file>:<Class>
@@ -139,7 +149,7 @@ class ModelLoader:
             )
             model.set_name(name)
 
-        return model
+        return self._apply_options(model)
 
 
 class Model:

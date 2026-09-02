@@ -40,12 +40,10 @@ from konfai.data.patching import (
     SlabAligner,
     SlabRegionStream,
     StreamingAccumulator,
-    _halo_radii,
-    _HaloPull,
-    _RemapPull,
     blend_axes,
     blend_overlap,
 )
+from konfai.data.patching.stage import _halo_radii, _HaloPull, _RemapPull
 from konfai.data.reduction import Mean, Median, Reduction
 from konfai.data.transform import (
     LocalityKind,

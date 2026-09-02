@@ -516,8 +516,9 @@ def predict(
     """
     Build and execute the configured prediction workflow.
 
-    This compatibility wrapper preserves the historical CLI-facing API while
-    delegating the pure build step to :func:`build_predict`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
+    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
+    The pure build step is :func:`build_predict`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_predict(

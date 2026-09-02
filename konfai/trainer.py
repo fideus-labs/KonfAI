@@ -661,11 +661,11 @@ class _Trainer:
             "epoch": self.epoch,
             "it": self.it,
             "loss": checkpoint_loss,
-            "Model": self.model.module.state_dict(),
+            "Model": self.model.module.network_states(),
         }
 
         if self.model_ema is not None:
-            save_dict["Model_EMA"] = self.model_ema.module.state_dict()
+            save_dict["Model_EMA"] = self.model_ema.module.network_states()
             save_dict["Model_EMA_n_averaged"] = int(self.model_ema.n_averaged)
 
         save_dict.update(
@@ -1234,8 +1234,9 @@ def train(
     """
     Build and execute the configured training workflow.
 
-    This compatibility wrapper preserves the historical CLI-facing API while
-    delegating the pure build step to :func:`build_train`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
+    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
+    The pure build step is :func:`build_train`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_train(
@@ -1246,7 +1247,3 @@ def train(
         statistics_dir=statistics_dir,
         lr=lr,
     )
-
-
-if __name__ == "__main__":
-    train(State.TRAIN, False, None)

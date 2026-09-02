@@ -34,8 +34,8 @@ def seeded_input(*shape: int, seed: int = 0) -> torch.Tensor:
 
 
 def flat_state_dict(net: Network) -> dict[str, torch.Tensor]:
-    """The network's own tensors (``Network.state_dict`` nests them under the network name)."""
-    return net.state_dict()[net.get_name()]
+    """The network's own tensors (``Network.network_states`` nests them under the network name)."""
+    return net.network_states()[net.get_name()]
 
 
 def terminal_output_paths(net: Network) -> list[str]:
