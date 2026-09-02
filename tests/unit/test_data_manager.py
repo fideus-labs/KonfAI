@@ -43,9 +43,9 @@ from konfai.data.data_manager import (
     PredictionSubset,
     Subset,
     WindowedCaseSampler,
-    _cache_worker_count,
     collate_konfai,
 )
+from konfai.data.data_manager.samples import _cache_worker_count
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, TensorCast, Transform, TransformLoader
 from konfai.utils.clock import restart_startup_clock

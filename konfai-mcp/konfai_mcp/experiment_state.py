@@ -101,8 +101,8 @@ STAGE_FOCUS: dict[str, str] = {
 # are candidates, not a script.
 STAGE_ACTIONS: dict[str, list[str]] = {
     "dataset_inspection": ["inspect_dataset", "browse_dataset", "design_config_strategy", "initialize_session"],
-    "action_selection": ["list_apps", "fine_tune_app", "design_config_strategy", "run_train"],
-    "app_selection": ["describe_app", "run_app_infer", "fine_tune_app", "list_app_parameters"],
+    "action_selection": ["list_apps", "import_app", "design_config_strategy", "run_train"],
+    "app_selection": ["describe_app", "run_app_infer", "import_app", "list_app_parameters"],
     "configuration": ["validate_config_semantics", "review_config_semantics", "run_train", "write_workflow_config"],
     "running": ["wait_for_job", "read_live_metrics", "get_job_status", "cancel_job"],
     "failed": ["read_job_log", "validate_config_semantics", "get_job_status"],
@@ -252,7 +252,6 @@ FAILED_STATUS = frozenset({"error", "killed", "cancelled"})
 # A finished job of this kind leaves the experiment at this stage: the successor step, not "done".
 _JOB_KIND_STAGE: dict[str, str] = {
     "train": "checkpoint_selection",
-    "finetune": "checkpoint_selection",
     "prediction": "prediction",
     "infer": "prediction",
     "evaluation": "evaluation",

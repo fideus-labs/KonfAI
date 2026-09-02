@@ -477,17 +477,17 @@ def _config_overrides(set_parameters: dict[str, Any] | None) -> list[str] | None
 
 
 def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
-    """Launch an app job (inference, evaluation, uncertainty, pipeline, fine-tune) from an AppService
+    """Launch an app job (inference, evaluation, uncertainty, pipeline) from an AppService
     spec via the shared job registry.
 
     Unlike workflow jobs, an app job has no session YAML: it auto-creates the session workspace,
     tracks the run under the spec's kind, and carries its own runner target and kwargs.
     """
-    kind = cast(JobKind, spec.get("kind", "infer"))  # an app kind: infer / evaluate / uncertainty / pipeline / finetune
+    kind = cast(JobKind, spec.get("kind", "infer"))  # an app kind: infer / evaluate / uncertainty / pipeline
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
     WORKSPACE_LAYOUT.jobs_dir().mkdir(parents=True, exist_ok=True)
     kwargs = dict(spec["kwargs"])
-    # config_overrides live directly in kwargs (infer / finetune) or nested under extra (pipeline). Recording
+    # config_overrides live directly in kwargs (infer) or nested under extra (pipeline). Recording
     # them links this trial's tuned parameters to the score it produces and gates the refine next_actions.
     set_parameters = kwargs.get("config_overrides") or (kwargs.get("extra") or {}).get("config_overrides")
     job = JOB_REGISTRY.launch(
@@ -1567,74 +1567,6 @@ def run_app_pipeline(
             uncertainty=uncertainty,
             gpu=gpu,
             cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))
-def fine_tune_app(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    dataset: Annotated[str, Field(description="KonfAI-style dataset directory to fine-tune on (must exist).")],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Destination for the produced app bundle (default: a unique dir under the session workspace AppBundles/)."
-        ),
-    ] = None,
-    name: Annotated[str, Field(description="Run name of the fine-tune training (default 'Finetune').")] = "Finetune",
-    epochs: Annotated[int, Field(description="Number of training epochs (must be > 0; default 10).")] = 10,
-    it_validation: Annotated[
-        int, Field(description="Iterations between validation/checkpoint steps (KonfAI it_validation; default 1000).")
-    ] = 1000,
-    models: Annotated[
-        list[str] | None,
-        Field(description="Which app checkpoints to fine-tune (default: the app's first advertised checkpoint)."),
-    ] = None,
-    lr: Annotated[
-        float | None, Field(description="Learning-rate override; omit to keep the app config's value.")
-    ] = None,
-    batch_size: Annotated[
-        int | None,
-        Field(
-            description="Training batch-size override (written to Trainer.Dataset.batch_size); "
-            "omit to keep the app config's value."
-        ),
-    ] = None,
-    set_parameters: Annotated[
-        dict[str, Any] | None,
-        Field(
-            description="NAME->VALUE overrides baked into the training config before fine-tuning. A bare NAME "
-            "is a model parameter (see list_app_parameters, e.g. {'iterations': 300}); any other config key "
-            "needs its full dotted path from the config root (e.g. {'Trainer.Dataset.num_workers': 2}). "
-            "For batch size, prefer the batch_size parameter."
-        ),
-    ] = None,
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    config_file: Annotated[
-        str, Field(description="Which train config of the app to use (default 'Config.yml').")
-    ] = "Config.yml",
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Fine-tune a published KonfAI app on the user's dataset and produce a resolvable app bundle."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_finetune(
-            ref=ref,
-            dataset=dataset,
-            output=output,
-            name=name,
-            epochs=epochs,
-            it_validation=it_validation,
-            models=models,
-            lr=lr,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            gpu=gpu,
-            cpu=cpu,
-            config_file=config_file,
             allow_untrusted_code=allow_untrusted_code,
             force_update=force_update,
         )

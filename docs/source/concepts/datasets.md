@@ -179,11 +179,11 @@ Three semantics are worth remembering:
 
 - `subset: None` keeps the full dataset;
 - `validation: None` disables the split;
-- `~` exclusion applies to `subset` but **not** to `validation`.
+- `subset` and `validation` accept the same selector spellings (slices, names,
+  files, `~` exclusion): one grammar, implemented by `Subset`.
 
 The `subset` object is applied before validation splitting and can exclude or
-include items. The exact logic is implemented by `TrainSubset` and
-`PredictionSubset`.
+include items.
 
 ## Caching, augmentation, and patching
 

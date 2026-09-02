@@ -44,11 +44,10 @@ everything, `[dev]` adds the test, lint and docs tooling.
 | `smp` | `segmentation-models-pytorch` | the SMP model bridge, **required by `examples/Synthesis`** |
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `ssim` | `scikit-image` | the `SSIM` metric |
-| `fid` | `scipy`, `torchvision` | the `FID` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../reference/python-api` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
-| `all` | everything above | one shot |
+| `all` | everything above, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |
 | `dev` | pytest, ruff, mypy, sphinx, … | working on KonfAI itself |
 
 ## Running packaged apps

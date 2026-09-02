@@ -201,7 +201,7 @@ def _cubic_tile(spatial: list[int], voxels: int, align: int) -> list[int]:
     """The block of at most ``voxels`` closest to a cube inside ``spatial``, aligned to ``align``.
 
     ``align`` keeps a block a whole number of store chunks wide, so a region write never becomes a
-    read-modify-write (:func:`konfai.utils.dataset._store_chunks`); an axis shorter than one step is
+    read-modify-write (:func:`konfai.utils.dataset.ome_zarr_file._store_chunks`); an axis shorter than one step is
     taken whole. Why a cube: :meth:`DatasetManager._sweep_tile`.
     """
     tile = [max(1, int(extent)) for extent in spatial]

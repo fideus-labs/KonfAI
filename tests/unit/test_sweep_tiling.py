@@ -27,12 +27,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data import patching as patching_module
 from konfai.data.materialize import CaseMaterializer, Verdict
-from konfai.data.patching import (
-    _SWEEP_ELEMENT_BYTES,
-    DatasetManager,
-    DatasetPatch,
+from konfai.data.patching import DatasetManager, DatasetPatch
+from konfai.data.patching import budget as budget_module
+from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
+from konfai.data.patching.sweep import (
     _cubic_tile,
     _pull_block_voxels,
     _sweep_pipeline_depth,
@@ -40,8 +39,9 @@ from konfai.data.patching import (
     _sweep_targets,
 )
 from konfai.data.transform import OneHot, Resample, Save
-from konfai.utils.dataset import Attribute, Dataset, _store_chunks
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.dataset import chunk_hull_voxels as _chunk_hull_voxels
+from konfai.utils.dataset.ome_zarr_file import _store_chunks
 from konfai.utils.errors import DatasetManagerError
 from oracle_support import geometry, manager
 
@@ -403,7 +403,7 @@ def test_a_region_under_one_stored_block_is_priced_at_the_block_it_decodes(
     ungranular = _priced(manager, (), 4)
 
     _chunked(monkeypatch, (16, 128, 128))
-    manager._read_granularity = patching_module._UNRESOLVED
+    manager._read_granularity = budget_module._UNRESOLVED
     assert _priced(manager, (), 4) > ungranular, "the block it decodes is charged"
     # Halving the rows does not halve the price: both cut inside one stored block, and that block is
     # decoded whole either way.
@@ -416,7 +416,7 @@ def test_the_sizing_lands_on_the_store_grid_when_a_block_fits(tmp_path: Path, mo
     source, _volume = _sheared_fixture(tmp_path)
     manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
     _chunked(monkeypatch, (16, 128, 128))
-    manager._read_granularity = patching_module._UNRESOLVED
+    manager._read_granularity = budget_module._UNRESOLVED
     manager.set_memory_budget(float(_priced(manager, (), 20)))
 
     assert manager._sweep_tile(list(LANDING), 1)[0] % 16 == 0
@@ -433,7 +433,7 @@ def test_a_region_read_is_charged_only_for_what_the_block_grid_adds(
     assert manager.region_reads(6).widest_excess == 0, "a store with no block grid adds nothing"
 
     _chunked(monkeypatch, (16, 128, 128))
-    manager._read_granularity = patching_module._UNRESOLVED
+    manager._read_granularity = budget_module._UNRESOLVED
     assert manager.region_reads(16).widest_excess < manager.region_reads(4).widest_excess, (
         "a region under one stored block wastes more of the block it decodes, not less"
     )

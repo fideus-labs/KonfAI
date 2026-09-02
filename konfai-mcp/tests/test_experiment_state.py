@@ -308,7 +308,7 @@ def test_stage_derivation_is_total() -> None:
     """Every derived stage is one the focus and action tables know about."""
     from konfai_mcp.experiment_state import Facts
 
-    for kind in ("train", "prediction", "evaluation", "infer", "finetune", "pipeline", "uncertainty", ""):
+    for kind in ("train", "prediction", "evaluation", "infer", "pipeline", "uncertainty", ""):
         for status in ("queued", "running", "done", "error", "killed", ""):
             facts = Facts(job_kind=kind, job_status=status, checkpoints=["a"], predictions=["b"], metrics=["c"])
             assert derive_stage(facts) in STAGES

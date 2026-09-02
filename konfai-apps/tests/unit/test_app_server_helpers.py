@@ -736,9 +736,7 @@ def test_save_directory_volume_bounds_extracted_bytes_not_compressed(tmp_path: P
     upload = _make_zip_bomb_upload(64 * 1024 * 1024)  # ~64MB extracted, a few KB compressed
 
     with pytest.raises(HTTPException) as exc:
-        app_server.save_uploads(
-            [upload], tmp_path / "inputs", max_file_bytes=1024 * 1024, max_total_bytes=1024 * 1024
-        )
+        app_server.save_uploads([upload], tmp_path / "inputs", max_file_bytes=1024 * 1024, max_total_bytes=1024 * 1024)
     assert exc.value.status_code == 413
     # Nothing left behind: the partial extraction directory is removed on failure.
     assert not (tmp_path / "inputs" / "store").exists()

@@ -65,7 +65,6 @@ _SELF_BOUNDED = {(Resample, "Oblique")}
 #: own payload as a covered one, and five stages were being skipped without anyone choosing it.
 _NEEDS_MORE_THAN_A_PAYLOAD = {
     "HistogramMatching": "a reference dataset to match the histogram against",
-    "KonfAIInference": "a model to run",
     "Resample": "a reference dataset to resample onto",
 }
 

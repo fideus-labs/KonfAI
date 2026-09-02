@@ -27,10 +27,11 @@ from typing import Any
 
 import numpy as np
 import pytest
-from konfai.utils import dataset as dataset_module
 from konfai.utils.budget import set_per_rank_budget
-from konfai.utils.dataset import (
-    Dataset,
+from konfai.utils.dataset import Dataset
+from konfai.utils.dataset import h5 as h5_module
+from konfai.utils.dataset import statistics as statistics_module
+from konfai.utils.dataset.statistics import (
     _finalize_running_statistics,
     _statistics_chunk_length,
     _update_pieces,
@@ -93,10 +94,10 @@ def small_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _former_h5_walk(path: Path, group: str, name: str) -> Iterator[np.ndarray]:
     """Chunks along axis 1 (axis 0 for a vector), the dataset held open across them."""
-    with dataset_module._open_h5(str(path), "r") as file:  # the pool's handle is unlocked: agree with it
+    with h5_module._open_h5(str(path), "r") as file:  # the pool's handle is unlocked: agree with it
         dataset = file[group][name]
         axis = 1 if dataset.ndim > 1 else 0
-        length = _statistics_chunk_length(dataset.shape, axis, dataset_module._STATISTICS_CHUNK_ELEMENTS)
+        length = _statistics_chunk_length(dataset.shape, axis, statistics_module._STATISTICS_CHUNK_ELEMENTS)
         for start in range(0, dataset.shape[axis], length):
             slices = [slice(None)] * dataset.ndim
             slices[axis] = slice(start, min(dataset.shape[axis], start + length))
@@ -140,7 +141,7 @@ def _former_image_slab_walk(directory: Path, name: str, group: str, extension: s
     reader.SetFileName(path)
     reader.ReadImageInformation()
     shape = [reader.GetNumberOfComponents(), *reversed(reader.GetSize())]
-    length = _statistics_chunk_length(shape, 1, dataset_module._STATISTICS_CHUNK_ELEMENTS)
+    length = _statistics_chunk_length(shape, 1, statistics_module._STATISTICS_CHUNK_ELEMENTS)
     file = Dataset.SitkFile(f"{directory / name}/", True, extension)
     for start in range(0, shape[1], length):
         slices = [slice(None)] * len(shape)
@@ -217,7 +218,7 @@ def test_a_npy_folds_within_ulps_of_its_former_whole_pass(tmp_path: Path, small_
 def _former_zarr_walk(directory: Path, name: str, group: str) -> Iterator[np.ndarray]:
     file = Dataset.OmeZarrFile(f"{directory / name}/", True)
     shape, _ = file.get_infos("", group)
-    length = _statistics_chunk_length(shape, 1, dataset_module._STATISTICS_CHUNK_ELEMENTS)
+    length = _statistics_chunk_length(shape, 1, statistics_module._STATISTICS_CHUNK_ELEMENTS)
     for start in range(0, shape[1], length):
         slices = [slice(None)] * len(shape)
         slices[1] = slice(start, min(shape[1], start + length))
@@ -418,11 +419,11 @@ def test_a_scan_of_a_float64_source_reads_blocks_the_budget_holds(
     dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
     assert dataset.read_data_slice("CT", "P0", (slice(0, 1),) * 4)[0].dtype == np.float64
 
-    budget = dataset_module._STATISTICS_BLOCKS_IN_FLIGHT * 8 * 8 * 40 * 40  # three eight-row float64 blocks
+    budget = statistics_module._STATISTICS_BLOCKS_IN_FLIGHT * 8 * 8 * 40 * 40  # three eight-row float64 blocks
     set_per_rank_budget(budget)
     blocks = _scan_blocks(dataset, monkeypatch)
     got = dataset.read_data_statistics("CT", "P0")
 
-    held = max(int(np.prod(shape)) for shape in blocks) * 8 * dataset_module._STATISTICS_BLOCKS_IN_FLIGHT
+    held = max(int(np.prod(shape)) for shape in blocks) * 8 * statistics_module._STATISTICS_BLOCKS_IN_FLIGHT
     assert held <= budget, f"{held} B held against a {budget} B budget"
     _assert_close_to_numpy(got, volume)

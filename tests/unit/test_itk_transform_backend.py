@@ -30,6 +30,7 @@ sitk = pytest.importorskip("SimpleITK")
 pytest.importorskip("h5py")
 
 from konfai.utils.dataset import Attribute, Dataset  # noqa: E402
+from konfai.utils.dataset import h5 as h5_module  # noqa: E402
 from konfai.utils.errors import DatasetManagerError  # noqa: E402
 from oracle_support import geometry  # noqa: E402
 
@@ -215,12 +216,11 @@ def test_without_h5py_the_backend_names_the_extra_to_install(tmp_path: Path, mon
 
 def test_a_region_read_opens_the_file_once_for_the_process(tmp_path: Path, monkeypatch) -> None:
     """The header and the region come off one pooled handle: past the first region, no open at all."""
-    from konfai.utils import dataset as dataset_module
 
     dataset = Dataset(tmp_path / "out", "itktransform")
     dataset.write("Transform", "P000", _field(6), _attributes())
     opens = {"count": 0}
-    real = dataset_module._open_h5
+    real = h5_module._open_h5
 
     def counting(*args, **kwargs):
         opens["count"] += 1

@@ -42,11 +42,12 @@ from konfai.data.patching import (
     AugmentedStage,
     DatasetManager,
     SweepSegment,
+)
+from konfai.data.patching.stage import _ReadStagePlan, _stage_name
+from konfai.data.patching.sweep import (
     _PendingSweep,
     _pull_block_voxels,
-    _ReadStagePlan,
     _stage_failures_explained,
-    _stage_name,
     _sweep_targets,
     _SweepMember,
 )

@@ -63,12 +63,3 @@ def test_evaluate_and_pipeline_incite_ranking_and_reexport(tmp_path: Path) -> No
         assert "leaderboard" in actions
         assert "compare_runs" in actions
         assert "export_app" in actions
-
-
-def test_finetune_points_at_use_then_evaluate_not_empty_leaderboard(tmp_path: Path) -> None:
-    """A fine-tune keeps its training metrics out of the bundle, so it points at use+score, not a leaderboard
-    that would have nothing to rank yet."""
-    actions = _next_actions(_done_job(tmp_path, "finetune"))
-    assert "run_app_infer" in actions
-    assert "run_app_evaluate" in actions
-    assert "leaderboard" not in actions

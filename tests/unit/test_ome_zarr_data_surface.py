@@ -37,7 +37,8 @@ from konfai.data import (
     write_ome_zarr,
 )
 from konfai.data.transform import Transform
-from konfai.utils.dataset import Attribute, Dataset, _store_chunks
+from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset.ome_zarr_file import _store_chunks
 from konfai.utils.errors import DatasetManagerError
 from oracle_support import geometry
 
@@ -324,9 +325,9 @@ def test_forgetting_one_store_leaves_the_others_alone() -> None:
 def test_a_sweep_declares_the_regions_it_will_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The sweep folds every block's pull map before it reads the first, so it can say what is
     coming; a store that caches decoded blocks is the one thing that can use it."""
-    from konfai.data import patching as patching_module
     from konfai.data.materialize import CaseMaterializer
     from konfai.data.patching import DatasetManager, DatasetPatch
+    from konfai.data.patching import sweep as sweep_module
     from konfai.data.transform import Clip, Save
 
     monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
@@ -351,7 +352,7 @@ def test_a_sweep_declares_the_regions_it_will_read(tmp_path: Path, monkeypatch: 
 
     assert declared, "the sweep declared nothing"
     windows = declared[0]
-    assert len(windows) == len(list(patching_module._sweep_targets([12, 8, 6], [3, 8, 6])))
+    assert len(windows) == len(list(sweep_module._sweep_targets([12, 8, 6], [3, 8, 6])))
     assert all(len(window) == 4 for window in windows), "a window covers the channel axis too"
 
 

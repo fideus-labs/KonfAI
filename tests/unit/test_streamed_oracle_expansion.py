@@ -28,8 +28,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 from konfai.data.augmentation import CutOUT, DataAugmentation, Elastix, Noise, Rotate, Scale
 from konfai.data.augmentation import Flip as FlipDraw
+from konfai.data.augmentation import Foreign as ForeignDraw
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import Clip, Expand, Mask, Transform, Write
@@ -75,11 +77,12 @@ def _draws() -> dict[str, Draw]:
     Built per call, because a draw caches the parameters it drew for a case."""
     return {
         "Noise": Draw(lambda: Noise(1.0), Regime.SHARED),
-        "CutOUT": Draw(lambda: CutOUT(1.0, 0.5, 0.0), Regime.SHARED),
+        "CutOUT": Draw(lambda: CutOUT(0.5, 0.0), Regime.SHARED),
         "Flip": Draw(lambda: FlipDraw(f_prob=[1.0, 1.0, 1.0]), Regime.SOLO),
         "QuarterRotate": Draw(lambda: Rotate(is_quarter=True), Regime.SOLO),
         "Rotate": Draw(lambda: Rotate(a_min=10.0, a_max=10.0), Regime.SOLO, AUGMENTATION_ATOL),
         "Scale": Draw(lambda: Scale(), Regime.SOLO, AUGMENTATION_ATOL),
+        "Elastix": Draw(lambda: Elastix(grid_spacing=8, max_displacement=2), Regime.SOLO, AUGMENTATION_ATOL),
     }
 
 
@@ -171,12 +174,13 @@ def test_a_transform_after_the_marker_reads_its_companion_where_the_block_sits(r
 
 
 def test_a_copy_that_cannot_stream_is_refused_under_a_budget_its_whole_volume_exceeds(tmp_path: Path) -> None:
-    """``Elastix`` solves its field over the whole volume, so its copies take the whole-volume path.
+    """A ``Foreign`` draw says nothing about where its output reads from, so its copies take the
+    whole-volume path.
 
     That path is priced, not free: under a budget the assembled case does not fit, the copies must
     be refused with the working set named, and nothing written. Given room, the same copies land."""
     dataset = build_case(tmp_path / "case", GEOMETRIES[MAIN])
-    draw = Elastix()
+    draw = ForeignDraw(torch.nn.Sigmoid(), "torch.nn:Sigmoid")
     draw.load(1.0)
     refused = _expanded(dataset, draw, 2, tmp_path / "refused")
     with pytest.raises(PatchError, match="exceeds the per-rank budget"):

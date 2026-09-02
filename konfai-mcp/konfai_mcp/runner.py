@@ -411,54 +411,6 @@ def run_app_action_api(
         getattr(KonfAIApp(ref, download=True, force_update=force_update), action)(**call)
 
 
-def run_finetune_api(
-    *,
-    ref: str,
-    dataset: str,
-    output: str,
-    name: str = "Finetune",
-    epochs: int = 10,
-    it_validation: int = 1000,
-    models: list[str] | None = None,
-    lr: float | None = None,
-    batch_size: int | None = None,
-    config_overrides: list[str] | None = None,
-    gpu: list[int] | None = None,
-    cpu: int | None = None,
-    config_file: str = "Config.yml",
-    force_update: bool = False,
-    quiet: bool = False,
-    cwd: str | None = None,
-) -> None:
-    """Child entrypoint that fine-tunes a KonfAI app on the user's dataset, producing a bundle.
-
-    Resolving the app imports its Python code and pip-installs its requirements (gated in the parent
-    tool). Local and HuggingFace apps only.
-    """
-    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
-        _ensure_local_imports()
-        from konfai_apps.app import KonfAIApp
-
-        app = KonfAIApp(ref, download=True, force_update=force_update)
-        common: dict[str, Any] = {
-            "dataset": Path(dataset).resolve(),
-            "output": Path(output).resolve(),
-            "name": name,
-            "epochs": epochs,
-            "it_validation": it_validation,
-            "models": models or [],
-            "lr": lr,
-            "batch_size": batch_size,
-            "config_file": config_file,
-            "quiet": quiet,
-        }
-        if gpu is not None:
-            common["gpu"] = gpu
-        if cpu is not None:
-            common["cpu"] = cpu
-        app.fine_tune(**common, config_overrides=config_overrides)
-
-
 def app_parameters_api(*, ref: str, force_update: bool = False) -> dict[str, Any]:
     """Child entrypoint that reads an app's tunable parameters (``{values, constraints}``).
 

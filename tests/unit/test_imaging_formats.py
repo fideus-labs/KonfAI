@@ -42,7 +42,7 @@ def test_flatten_transforms_recurses_into_nested_composites() -> None:
     nested (``GetNthTransform`` returns it as-is), so a single-level walk would hand that composite to
     the per-leaf type switch, which rejects it: the recursion is what keeps a nested chain storable."""
     sitk = pytest.importorskip("SimpleITK")
-    from konfai.utils.dataset import _flatten_transforms
+    from konfai.utils.dataset.attribute import _flatten_transforms
 
     inner = sitk.CompositeTransform([sitk.Euler3DTransform(), sitk.AffineTransform(3)])
     outer = sitk.CompositeTransform(3)

@@ -30,8 +30,8 @@ from konfai.metric.measure import (
     LabelledValues,
     PerceptualLoss,
     Variance,
-    _require_optional,
 )
+from konfai.metric.measure.base import _require_optional
 from konfai.network.network import CriterionsAttr
 from konfai.utils.errors import MeasureError
 
@@ -829,7 +829,7 @@ class TestMaskedFeatureLoss:
 
     @staticmethod
     def _run(weights, mask=None, patch_shape=None, project=None, x=None, y=None):
-        from konfai.metric.measure import _masked_feature_loss
+        from konfai.metric.measure.impact import _masked_feature_loss
 
         torch.manual_seed(0)
         x = torch.rand(1, 1, 32, 32) if x is None else x
@@ -881,7 +881,7 @@ class TestMaskedFeatureLoss:
             def forward(self, x, nb_layer, stats=None):
                 return [x, torch.full_like(x, torch.nan)]
 
-        from konfai.metric.measure import _masked_feature_loss
+        from konfai.metric.measure.impact import _masked_feature_loss
 
         x, y = torch.rand(1, 1, 8, 8), torch.rand(1, 1, 8, 8)
         triple = lambda t: [t, torch.tensor([2]), torch.tensor([[0.0, 0.5, 1.0, 0.2]])]  # noqa: E731

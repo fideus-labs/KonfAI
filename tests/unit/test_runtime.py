@@ -992,3 +992,23 @@ def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatc
 
     assert budget_module.per_rank_budget_bytes() == 96 << 20
     assert ome_zarr._chunk_cache().capacity == ome_zarr.chunk_cache_capacity()
+
+
+def test_run_distributed_app_refuses_a_kwarg_the_entrypoint_does_not_declare() -> None:
+    """A kwarg outside the signature and the cluster set must refuse, not vanish: the silent drop
+    is what forced main.py's --plan short-circuit."""
+
+    class Sentinel(Exception):
+        pass
+
+    @rt_dist.run_distributed_app
+    def build(gpu: list[int] | None = None, cpu: int | None = None) -> None:
+        raise Sentinel
+
+    with pytest.raises(ConfigError, match="plan"):
+        build(plan=True)
+
+    # The tolerated names pass the gate and reach the build: the cluster set is read from the raw
+    # kwargs and 'command' is the CLI dispatch discriminator only TRAIN/RESUME declares.
+    with pytest.raises(Sentinel):
+        build(command="PREDICTION")

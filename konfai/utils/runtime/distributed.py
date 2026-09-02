@@ -225,6 +225,16 @@ def run_distributed_app(
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> None:
         params = sig.parameters
+        # A kwarg the entrypoint does not declare must refuse, not vanish: silently dropping one
+        # already forced the --plan short-circuit in main.py. Tolerated beside the signature: the
+        # cluster kwargs (read from the raw kwargs below) and 'command', the CLI's subcommand
+        # discriminator, which only the TRAIN/RESUME entrypoint declares.
+        unknown = set(kwargs) - set(params) - {"name", "memory", "num_nodes", "time_limit", "command"}
+        if unknown:
+            raise ConfigError(
+                f"{func.__name__}() does not accept {sorted(unknown)}.",
+                f"It accepts {sorted(params)}; a cluster submission adds name/memory/num_nodes/time_limit.",
+            )
         kwargs_fun = {k: v for k, v in kwargs.items() if k in params}
 
         bound = sig.bind_partial(*args, **kwargs_fun)

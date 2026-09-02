@@ -29,7 +29,8 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import Brightness, DataAugmentationsList, Flip, Permute
-from konfai.data.data_manager import DatasetIter, _interleaved_case_entries
+from konfai.data.data_manager import DatasetIter
+from konfai.data.data_manager.order import _interleaved_case_entries
 from konfai.data.patching import DatasetPatch, Gaussian, SlabAligner
 from konfai.data.transform import Flip as FlipTransform
 from konfai.data.transform import InferenceStack, LocalityKind, Sum

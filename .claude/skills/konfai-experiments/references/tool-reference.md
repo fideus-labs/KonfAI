@@ -2,7 +2,7 @@
 
 > GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py`: do not edit by hand.
 
-62 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
+61 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
 
 ## Tools
 
@@ -36,7 +36,7 @@ Use when you want to remove the current session workspace. This deletes the work
 
 ### `describe_app`
 
-Use to read one app's manifest so you can decide whether it matches the user's task: the app's free-text description is the primary signal, with the input/output modality confirming the fit. This resolves a single app and returns its app.json: display name, description, input and output modality (with volume types), inference/evaluation/uncertainty capabilities, checkpoints, and segmentation terminology. It is metadata-only and SAFE: it does not import the app's model code and does not pip-install its requirements (those happen only later, behind an explicit trust gate). Outputs: display_name, description, inputs, outputs, capabilities, checkpoints, terminology, next_actions. Next: run_app_infer / list_app_parameters / import_app / fine_tune_app when it fits (next_actions reflect the app's capabilities), or design_config_strategy if no app fits the task.
+Use to read one app's manifest so you can decide whether it matches the user's task: the app's free-text description is the primary signal, with the input/output modality confirming the fit. This resolves a single app and returns its app.json: display name, description, input and output modality (with volume types), inference/evaluation/uncertainty capabilities, checkpoints, and segmentation terminology. It is metadata-only and SAFE: it does not import the app's model code and does not pip-install its requirements (those happen only later, behind an explicit trust gate). Outputs: display_name, description, inputs, outputs, capabilities, checkpoints, terminology, next_actions. Next: run_app_infer / list_app_parameters / import_app when it fits (next_actions reflect the app's capabilities), or design_config_strategy if no app fits the task.
 
 ### `describe_config_schema`
 
@@ -70,10 +70,6 @@ Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters)
 
 Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in one payload. It does not rerun anything. Caveat: resolved_config is read from the LIVE session config, which may have been rewritten since the run: the launch-time truth is config_snapshots. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
 
-### `fine_tune_app`
-
-Use to TRAIN by starting from a published app instead of a blank slate: fine-tune an existing app's checkpoint(s) on the user's dataset, WITHOUT authoring or editing a config. This is the middle option between run_app_infer (use as-is, no training) and design_config_strategy (author a config and train from scratch); it is also the safer alternative to import_app + run_resume(weights_only=True), which needs the copied Config.yml to be edited by hand. It launches a tracked training job and writes a resolvable app bundle (config + code + fine-tuned checkpoint) to the output directory, which you can then run with run_app_infer. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only. It does not author a config or adapt the dataset layout for you. Training knobs are first-class parameters (epochs, it_validation, lr, batch_size); set_parameters is for the app's MODEL tunables (bare names) or any config key by its full dotted path. Outputs: a job payload (status, resources, next_actions) plus the bundle output path. Next: wait_for_job, then run_app_infer on the produced bundle (then run_app_evaluate to score and rank this fine-tune against other training trials via leaderboard / compare_runs).
-
 ### `generate_folds`
 
 Use to SPLIT a dataset into K cross-validation folds: writes one case-list file per fold into the session workspace and returns the exact subset stanzas to paste into the configs. KonfAI's Dataset.subset accepts a case-list file ('folds/fold_0.txt' keeps those cases) and its '~file' negation (trains on every OTHER fold). Outputs: folds {fold_i: {cases, file, train_subset, eval_subset}}, how_to_use, next_actions. Next: write per-fold configs (distinct train_name each), then run_batch.
@@ -88,7 +84,7 @@ Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE na
 
 ### `import_app`
 
-Use to RUN a published KonfAI app as a NORMAL experiment in this session: the single path to use a local or HuggingFace app. It copies the app's config(s), custom code, and .pt checkpoints into the session root and pip-installs its requirements, so predict / fine-tune / evaluate then go through the ordinary run_prediction / run_resume / run_evaluation tools (no app-specific wrapper, no extra sub-folder). The copied checkpoints are returned so run_prediction can pass them as models, and run_resume(weights_only=True) warm-starts a fine-tune from them. TRUST GATE: copying+running the app's Python code and installing its requirements is the trust boundary, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only: a remote server keeps its code remote and cannot be imported (drive a remote app with konfai-apps directly). Outputs: imported_to, files, checkpoints, configs, next_actions. Next: run_prediction (pass checkpoints as models) / run_resume (fine-tune) / run_evaluation.
+Use to RUN a published KonfAI app as a NORMAL experiment in this session. Prefer run_app_* when the app is used exactly as published; import_app is the tier for everything else: editing the config, fine-tuning (run_resume with weights_only=True), or wiring the app into a larger experiment. It copies the app's config(s), custom code, and .pt checkpoints into the session root and pip-installs its requirements, so predict / fine-tune / evaluate then go through the ordinary run_prediction / run_resume / run_evaluation tools (no app-specific wrapper, no extra sub-folder). The copied checkpoints are returned so run_prediction can pass them as models, and run_resume(weights_only=True) warm-starts a fine-tune from them. TRUST GATE: copying+running the app's Python code and installing its requirements is the trust boundary, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only: a remote server keeps its code remote and cannot be imported (drive a remote app with konfai-apps directly). Outputs: imported_to, files, checkpoints, configs, next_actions. Next: run_prediction (pass checkpoints as models) / run_resume (fine-tune) / run_evaluation.
 
 ### `import_experiment`
 
@@ -128,7 +124,7 @@ Use when you need the current job registry state. This lists jobs for the curren
 
 ### `package_app_from_session`
 
-Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle: the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app_infer / import_app can consume. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app_infer on the produced bundle.
+Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app_infer / import_app can consume. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app_infer on the produced bundle.
 
 ### `plan_transform`
 
@@ -212,7 +208,7 @@ Use after prediction config review/validation and when a checkpoint exists. This
 
 ### `run_resume`
 
-Use to RESUME an interrupted or crashed training run from a checkpoint: model, optimizer, scheduler, and epoch/iteration counters are restored (KonfAI's RESUME command). Set weights_only=True instead to WARM-START a fine-tune from an imported app: load only the checkpoint's model weights and restart epoch/optimizer from scratch; prefer fine_tune_app when the app is used as published, since it needs no config editing. This launches a resumed training job from the current session Config.yml. It does not pick between runs: by default it resumes from the newest checkpoint of the configured run (falling back to the newest in the session), avoiding cross-run contamination. It trains up to the LIVE config's epochs: if the run already completed them, raise epochs in Config.yml first or the resume finishes immediately without adding checkpoints. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: wait_for_job or read_live_metrics.
+Use to RESUME an interrupted or crashed training run from a checkpoint: model, optimizer, scheduler, and epoch/iteration counters are restored (KonfAI's RESUME command). Set weights_only=True instead to WARM-START a fine-tune from an imported app: load only the checkpoint's model weights and restart epoch/optimizer from scratch (import_app + run_resume(weights_only=True) is THE fine-tune path for published apps). This launches a resumed training job from the current session Config.yml. It does not pick between runs: by default it resumes from the newest checkpoint of the configured run (falling back to the newest in the session), avoiding cross-run contamination. It trains up to the LIVE config's epochs: if the run already completed them, raise epochs in Config.yml first or the resume finishes immediately without adding checkpoints. Outputs: job payload with resources and next_actions; or, when a prerequisite is missing (dataset path, checkpoint), a blocker payload {ok, blocked, error, missing_paths, next_actions} with no job_id/status. Next: wait_for_job or read_live_metrics.
 
 ### `run_train`
 
@@ -220,7 +216,7 @@ Use after train config review and validation succeed. This launches a training j
 
 ### `run_transform`
 
-Use to apply a transform chain to a dataset with NO model: read, transform, write. Read plan_transform first: this writes a dataset, and the plan is what says how much and how. This launches a transform job from the session Transform.yml and returns structured job resources. The run replans, stores the plan, and refuses outright when a case can neither stream nor fit memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass overwrite to recompute. Outputs: job payload with resources and next_actions; or a blocker payload when a prerequisite is missing. Next: wait_for_job then inspect_dataset on what it wrote.
+Use to batch-process a dataset with a transform chain: read, transform, write. Read plan_transform first: this writes a dataset, and the plan is what says how much and how. This launches a transform job from the session Transform.yml and returns structured job resources. Pass gpu to run the chain on a GPU (the resample and intensity stages move with it; every write still lands on the host). The run replans, stores the plan, and refuses outright when a case can neither stream nor fit memory_budget. A case whose output already exists is skipped, so an interrupted run resumes; pass overwrite to recompute. Outputs: job payload with resources and next_actions; or a blocker payload when a prerequisite is missing. Next: wait_for_job then inspect_dataset on what it wrote.
 
 ### `set_live_tunables`
 

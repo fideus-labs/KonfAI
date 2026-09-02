@@ -234,7 +234,11 @@ def test_masked_tta_compiler_reads_the_config():
                 },
                 "augmentations": {"DA0": {"nb": 2, "data_augmentations": {"Flip": {"f_prob": [0, 0.5, 0.5]}}}},
             },
-            "outputs_dataset": {"H": {"OutputDataset": {"before_reduction_transforms": {"Mask": {"path": "MASK", "value_outside": -1024}}}}},
+            "outputs_dataset": {
+                "H": {
+                    "OutputDataset": {"before_reduction_transforms": {"Mask": {"path": "MASK", "value_outside": -1024}}}
+                }
+            },
         }
     }
     passes = _tta_passes(config, "Predictor")
@@ -243,7 +247,10 @@ def test_masked_tta_compiler_reads_the_config():
     assert set(aux) == {"MASK"} and [op for op, _ in aux["MASK"]["ops"]] == ["resample", "dilate"]
     assert _mask_specs(config, "Predictor") == [{"group": "MASK", "value_outside": -1024.0}]
 
-    fold = {"preprocessing": [{"op": "resample", "inverse": True}], "postprocessing": [{"op": "cast", "dtype": "int16"}]}
+    fold = {
+        "preprocessing": [{"op": "resample", "inverse": True}],
+        "postprocessing": [{"op": "cast", "dtype": "int16"}],
+    }
     program = _assemble_masked_tta_program(
         [{"id": f"CV_{i}", "manifest": fold} for i in range(5)],
         passes,

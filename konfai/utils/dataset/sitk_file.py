@@ -25,10 +25,10 @@ import glob
 import os
 import re
 import warnings
+import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
 from pathlib import Path
 
 import numpy as np
-from lxml import etree  # nosec B410
 
 try:
     import SimpleITK as sitk
@@ -292,7 +292,7 @@ class SitkFile(AbstractFile):
             data = read_landmarks(Path(path))
         elif path.endswith(".xml"):
             with open(path, "rb") as xml_file:
-                root = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
+                root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
             node = root
             while len(node):
                 node = node[-1]
@@ -400,18 +400,17 @@ class SitkFile(AbstractFile):
         elif "path" in attributes:
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
-                    root = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
+                    root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
                     xml_file.close()
             else:
-                root = etree.Element(name)
+                root = ET.Element(name)
             node = root
             path = attributes["path"].split(":")
 
             for node_name in path:
                 node_tmp = node.find(node_name)
                 if node_tmp is None:
-                    node_tmp = etree.SubElement(node, node_name)
-                    node.append(node_tmp)
+                    node_tmp = ET.SubElement(node, node_name)
                 node = node_tmp
             if attributes is not None:
                 for attribute_tmp in attributes.keys():
@@ -421,7 +420,10 @@ class SitkFile(AbstractFile):
             if data.size > 0:
                 node.text = ", ".join(map(str, data.flatten()))
             with open(f"{self.filename}{name}.xml", "wb") as f:
-                f.write(etree.tostring(root, pretty_print=True, encoding="utf-8"))
+                # ``ET.indent`` replaces whitespace-only text/tails, so a re-read file re-indents
+                # cleanly instead of accumulating blank lines.
+                ET.indent(root)
+                f.write(ET.tostring(root, encoding="utf-8"))
                 f.close()
         else:
             np.save(f"{self.filename}{name}.npy", data)

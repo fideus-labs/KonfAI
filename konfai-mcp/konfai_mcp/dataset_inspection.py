@@ -472,7 +472,7 @@ class DatasetInspectionMixin:
             # as is, fine-tune a close one, or train from scratch. Only when nothing was found does the next
             # step remain "locate the dataset".
             payload["next_actions"] = (
-                ["list_apps", "run_app_infer", "fine_tune_app", "run_train", "design_config_strategy"]
+                ["list_apps", "run_app_infer", "import_app", "run_train", "design_config_strategy"]
                 if payload["groups"]
                 else ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
             )

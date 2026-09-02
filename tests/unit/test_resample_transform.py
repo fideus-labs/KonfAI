@@ -29,13 +29,8 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.geometry import DisplacementStage, Grid
-from konfai.data.transform import (
-    LocalityKind,
-    RegionContext,
-    Resample,
-    _optional_image_filler,
-    _SitkInput,
-)
+from konfai.data.transform import LocalityKind, RegionContext, Resample
+from konfai.data.transform.resample import _optional_image_filler, _SitkInput
 from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute
 from konfai.utils.errors import TransformError
 
@@ -757,7 +752,7 @@ def test_a_diagonal_stored_map_resamples_separably_within_the_routes_it_replaces
     blend, and nothing at all on a nearest pick, where every route copies the same voxel.
     """
     from konfai.data.sampling import gather, source_index
-    from konfai.data.transform import _resample_with_sitk
+    from konfai.data.transform.resample import _resample_with_sitk
 
     image = _image(oblique=False)
     counts = (_phantom() * 4.0).astype(np.int16)

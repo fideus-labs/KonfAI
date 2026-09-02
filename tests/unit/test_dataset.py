@@ -26,7 +26,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.utils.dataset import Attribute, Dataset, _get_h5_file_lock, get_infos, image_to_data
+from konfai.utils.dataset import Attribute, Dataset, get_infos, image_to_data
+from konfai.utils.dataset import raw_block as raw_block_module
+from konfai.utils.dataset.h5 import _get_h5_file_lock
 from konfai.utils.errors import DatasetManagerError
 
 sitk = pytest.importorskip("SimpleITK")
@@ -153,7 +155,7 @@ def test_h5_read_chunk_cache_takes_its_slice_of_the_declared_budget() -> None:
     capacity now stays inside the same cache share every other decoded-block cache draws from."""
     pytest.importorskip("h5py")
     from konfai.utils.budget import BUDGET_SHARES, set_per_rank_budget
-    from konfai.utils.dataset import _H5ReadPool
+    from konfai.utils.dataset.h5 import _H5ReadPool
 
     try:
         set_per_rank_budget(256 << 20)
@@ -470,7 +472,7 @@ def test_init_keeps_token_for_plain_file_dataset(tmp_path: Path) -> None:
 def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
     # A chunk spans every other axis whole, the channels included, and is accumulated in float64. Cut
     # on a plane alone, a 122-channel volume holds 122 times the budget: 7 GiB where 0.06 was meant.
-    from konfai.utils.dataset import _STATISTICS_CHUNK_ELEMENTS, _statistics_chunk_length
+    from konfai.utils.dataset.statistics import _STATISTICS_CHUNK_ELEMENTS, _statistics_chunk_length
 
     for channels in (1, 4, 122):
         shape = [channels, 400, 512, 512]
@@ -481,7 +483,7 @@ def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
 
 
 def test_a_statistics_chunk_reaches_further_on_a_thin_volume() -> None:
-    from konfai.utils.dataset import _statistics_chunk_length
+    from konfai.utils.dataset.statistics import _statistics_chunk_length
 
     thin, wide = [1, 400, 64, 64], [1, 400, 512, 512]
     assert _statistics_chunk_length(thin, 1, budget=1 << 20) > _statistics_chunk_length(wide, 1, budget=1 << 20)
@@ -664,7 +666,7 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
     it on the way back would hand it the store as it is now and launder a stale view into a fresh-looking
     one, so the write that arrived meanwhile would stay invisible for the rest of the process."""
     pytest.importorskip("h5py")
-    from konfai.utils.dataset import _h5_read_pool
+    from konfai.utils.dataset.h5 import _h5_read_pool
 
     root = str(tmp_path / "ds") + "/"
     Path(root).mkdir()
@@ -850,7 +852,7 @@ def _block_image(data: np.ndarray, direction: np.ndarray) -> "sitk.Image":
 
 def _write_block_fixture(root: Path, kind: str) -> tuple[Path, np.ndarray]:
     """One file of ``kind`` under ``root``, and the channel-first array it holds."""
-    from konfai.utils.dataset import _MhaDataStream, _NiftiDataStream
+    from konfai.utils.dataset.stream import _MhaDataStream, _NiftiDataStream
 
     rng = np.random.default_rng(len(kind))
     scalar = (rng.normal(size=(1, 12, 14, 16)) * 100).astype(np.float32)
@@ -937,10 +939,9 @@ def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
     tmp_path: Path, monkeypatch, kind: str, corner: bool
 ) -> None:
     """Same bytes, same dtype, same attribute record (keys, order, text) as ITK's streaming reader."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, kind)
-    assert dataset_module._pixel_block(str(path)) is not None
+    assert raw_block_module._pixel_block(str(path)) is not None
     assert Dataset.SitkFile._supports_region_read(str(path))
     region = _block_region(data, corner)
     backend = _block_backend(path)
@@ -993,10 +994,9 @@ def test_every_patch_of_a_grid_records_what_itk_records(tmp_path: Path, monkeypa
 @pytest.mark.parametrize("kind", _BLOCK_LEFT_TO_ITK)
 def test_a_file_the_block_route_declines_is_still_read_by_itk(tmp_path: Path, kind: str) -> None:
     """Compressed, detached, rescaled, or another format: the block route steps aside, ITK answers."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, kind)
-    assert dataset_module._pixel_block(str(path)) is None
+    assert raw_block_module._pixel_block(str(path)) is None
     region = _block_region(data)
     got, attributes = _block_backend(path).file_to_data_slice("", path.name.split(".", 1)[0], region)
 
@@ -1066,7 +1066,6 @@ def test_a_stepped_region_carries_the_same_geometry_record_whatever_the_backend(
 def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path, monkeypatch) -> None:
     """ITK reads the header once per file, not once per region; a file rewritten under the same
     name gets a record of its own."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, "scalar.mha")
     reads = {"header": 0}
@@ -1077,7 +1076,7 @@ def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path,
         return real(self)
 
     monkeypatch.setattr(sitk.ImageFileReader, "ReadImageInformation", counting)
-    dataset_module._pixel_block_at.cache_clear()
+    raw_block_module._pixel_block_at.cache_clear()
     backend = _block_backend(path)
     for plane in range(10):
         region = (slice(None), slice(plane, plane + 1), slice(None), slice(None))

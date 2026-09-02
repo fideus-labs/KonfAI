@@ -49,13 +49,8 @@ from konfai.data.patching import (
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.budget import budget_share, format_bytes
-from konfai.utils.dataset import (
-    Attribute,
-    Dataset,
-    DataStream,
-    _finalize_running_statistics,
-    _update_running_statistics,
-)
+from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
 from konfai.utils.errors import ReductionError
 
 #: Geometry keys compared between cases under ``grid: strict``. Direction is in because a flipped
@@ -234,7 +229,7 @@ class ReductionPlan:
 class _RunningStatistics:
     """Min/Max/Mean/Std accumulated over regions, so the volume is never resident.
 
-    The store-scan recurrence (:func:`konfai.utils.dataset._update_running_statistics`) is the one
+    The store-scan recurrence (:func:`konfai.utils.dataset.statistics._update_running_statistics`) is the one
     Welford kernel; this feeds it blocks and writes the keys in KonfAI's own spelling.
     """
 
@@ -596,7 +591,7 @@ class CaseReduction:
         that cannot answer) contributes nothing: the peak then says what it did before, which is
         what the run-time probe is there to correct.
         """
-        from konfai.data.patching import _SWEEP_ELEMENT_BYTES
+        from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
 
         reads = [manager.region_reads(self.slab_rows) for manager in self.managers]
         present = [read for read in reads if read is not None]

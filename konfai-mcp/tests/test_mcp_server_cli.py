@@ -148,9 +148,7 @@ def test_parser_reads_stateless_http_from_environment(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize("transport", ["stdio", "sse"])
-def test_cli_rejects_stateless_http_on_session_transports(
-    monkeypatch: pytest.MonkeyPatch, transport: str
-) -> None:
+def test_cli_rejects_stateless_http_on_session_transports(monkeypatch: pytest.MonkeyPatch, transport: str) -> None:
     monkeypatch.delenv("KONFAI_MCP_TRANSPORT", raising=False)
     monkeypatch.delenv("KONFAI_MCP_STATELESS_HTTP", raising=False)
     with pytest.raises(SystemExit):

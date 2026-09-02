@@ -36,10 +36,7 @@ dependencies = [
   "tqdm",
   "numpy",
   "ruamel.yaml",
-  "psutil",
-  "lxml",
-  "requests",
-  "huggingface_hub"
+  "psutil"
 ]
 
 [project.urls]
@@ -62,7 +59,6 @@ vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
 ssim = ["scikit-image"]
-fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
 omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
@@ -78,13 +74,15 @@ all = [
   "konfai[vtk]",
   "konfai[lpips]",
   "konfai[ssim]",
-  "konfai[fid]",
   "konfai[cluster]",
   "konfai[dicom]",
   "konfai[omezarr]",
   "konfai[s3]",
   "konfai[export]",
-  "konfai[smp]"
+  "konfai[smp]",
+  # The IMPACT criteria download their feature extractors from the Hub; imported lazily,
+  # and their refusal names this extra.
+  "huggingface_hub"
 ]
 dev = [
   "SimpleITK>=2.0",

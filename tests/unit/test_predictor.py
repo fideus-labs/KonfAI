@@ -32,7 +32,9 @@ import pytest
 import torch
 from konfai.data.augmentation import Flip
 from konfai.data.patching import Accumulator, blend_axes
-from konfai.predictor import PREDICTION_CLOCK, OutputDataset, _AsyncWriter, _Predictor
+from konfai.predictor import PREDICTION_CLOCK, OutputDataset
+from konfai.predictor.loop import _Predictor
+from konfai.predictor.output import _AsyncWriter
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
 from konfai.utils.utils import get_patch_slices_from_shape

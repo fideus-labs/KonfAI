@@ -31,7 +31,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.case_reduction import CaseReduction
-from konfai.data.data_manager import _check_patch_transform_locality
+from konfai.data.data_manager.groups import _check_patch_transform_locality
 from konfai.data.geometry import AffineMap, Grid, TransformBound
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager, DatasetPatch

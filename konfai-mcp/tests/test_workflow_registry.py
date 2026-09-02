@@ -31,7 +31,7 @@ from konfai_mcp.workflows import (
 
 
 def test_literal_aliases_match_the_table() -> None:
-    # A job kind is either a workflow kind or a konfai-apps kind (run_app_* / fine_tune_app), never else.
+    # A job kind is either a workflow kind or a konfai-apps kind (run_app_*), never else.
     assert set(get_args(WorkflowKind)) == set(WORKFLOW_SPECS)
     assert set(get_args(JobKind)) == set(JOB_KINDS)
     assert set(JOB_KINDS) == set(WORKFLOW_SPECS) | set(APP_JOB_KINDS)

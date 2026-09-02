@@ -88,10 +88,11 @@ def import_without_simpleitk(name, *args, **kwargs):
 
 builtins.__import__ = import_without_simpleitk
 import konfai.data.transform
+import konfai.utils.ITK
 
 assert konfai.data.transform.sitk is None
 try:
-    konfai.data.transform._require_simpleitk()
+    konfai.utils.ITK._require_simpleitk()
 except Exception as exc:
     assert "pip install konfai[itk]" in str(exc), str(exc)
 else:

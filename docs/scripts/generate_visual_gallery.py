@@ -186,7 +186,7 @@ def main() -> None:
     noise.load(0.55)
     noise.state_init(0, [list(augmentation_source.shape[1:])], [Attribute()])
     noisy = noise("IMAGE", 0, [augmentation_source.clone()])[0]
-    cutout = apply_augmentation(CutOUT(c_prob=1, cutout_size=0.34, value=-1), augmentation_source, seed=13)
+    cutout = apply_augmentation(CutOUT(cutout_size=0.34, value=-1), augmentation_source, seed=13)
     save_images(
         [
             ("source", medical_image(augmentation_source, (-1, 1))),

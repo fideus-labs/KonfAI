@@ -69,12 +69,12 @@ from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache
 from konfai.utils.runtime import (
     DistributedObject,
     State,
-    _materialized_config,
     configure_workflow_environment,
     get_device,
     record,
     run_distributed_app,
 )
+from konfai.utils.runtime.environment import _materialized_config
 
 _PROBE_ENTRY = "__konfai_plan_probe__"
 

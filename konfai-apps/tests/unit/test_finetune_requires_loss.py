@@ -26,10 +26,14 @@ from konfai.utils.errors import AppRepositoryError
 from konfai_apps.app import _finetune_target_has_loss
 
 _WITH_LOSS = {
-    "outputs_criterions": {"Head:Tanh": {"targets_criterions": {"CT": {"criterions_loader": {"MAE": {"is_loss": True}}}}}}
+    "outputs_criterions": {
+        "Head:Tanh": {"targets_criterions": {"CT": {"criterions_loader": {"MAE": {"is_loss": True}}}}}
+    }
 }
 _METRIC_ONLY = {
-    "outputs_criterions": {"Head:Tanh": {"targets_criterions": {"CT": {"criterions_loader": {"MAE": {"is_loss": False}}}}}}
+    "outputs_criterions": {
+        "Head:Tanh": {"targets_criterions": {"CT": {"criterions_loader": {"MAE": {"is_loss": False}}}}}
+    }
 }
 
 
@@ -57,7 +61,11 @@ def test_has_loss_rejects_engine_placeholder() -> None:
     # The registration-engine default expands to a placeholder key that names no concrete loss.
     placeholder = {
         "outputs_criterions": {
-            "default": {"targets_criterions": {"Labels": {"criterions_loader": {"default|torch:nn:CrossEntropyLoss|Dice|NCC": {}}}}}
+            "default": {
+                "targets_criterions": {
+                    "Labels": {"criterions_loader": {"default|torch:nn:CrossEntropyLoss|Dice|NCC": {}}}
+                }
+            }
         }
     }
     assert _finetune_target_has_loss({"classpath": "Reg", "Reg": placeholder}) is False
@@ -106,7 +114,9 @@ def _drive_fine_tune(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_bod
     return trained
 
 
-_LOSSLESS = "Trainer:\n  train_name: PLACEHOLDER\n  Model:\n    classpath: Net\n    Net:\n      outputs_criterions: None\n"
+_LOSSLESS = (
+    "Trainer:\n  train_name: PLACEHOLDER\n  Model:\n    classpath: Net\n    Net:\n      outputs_criterions: None\n"
+)
 _WITH_LOSS_CONFIG = (
     "Trainer:\n  train_name: PLACEHOLDER\n  Model:\n    classpath: Net\n    Net:\n"
     "      outputs_criterions:\n        Head:\n          targets_criterions:\n"

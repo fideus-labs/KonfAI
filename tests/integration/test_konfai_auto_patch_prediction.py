@@ -39,6 +39,7 @@ from pathlib import Path
 import torch
 
 import konfai.predictor as predictor_module
+import konfai.predictor.loop as predictor_loop
 import konfai.utils.vram as vram_module
 from konfai.predictor import build_predict, predict
 from konfai.trainer import train
@@ -48,7 +49,7 @@ ATTEMPTS = []
 
 def install_auto_patch_probes() -> None:
     """Force the first attempt to OOM and stub the CUDA readings (this is a CPU-only run)."""
-    original_run = predictor_module._Predictor.run
+    original_run = predictor_loop._Predictor.run
 
     def run_with_forced_oom(self):
         ATTEMPTS.append(list(self.dataset.get_patch_config()[0]))
@@ -56,7 +57,7 @@ def install_auto_patch_probes() -> None:
             raise torch.cuda.OutOfMemoryError("forced OOM: pretend the full-slice forward does not fit")
         return original_run(self)
 
-    predictor_module._Predictor.run = run_with_forced_oom
+    predictor_loop._Predictor.run = run_with_forced_oom
     vram_module.transient_at_oom = lambda device: None
     vram_module.usable_after_oom = lambda device: 1.0
 

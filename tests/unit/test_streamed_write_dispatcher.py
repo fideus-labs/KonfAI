@@ -32,7 +32,8 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.data_manager import DatasetIter
-from konfai.data.patching import SlabRegionStream, _halo_radii
+from konfai.data.patching import SlabRegionStream
+from konfai.data.patching.stage import _halo_radii
 from konfai.data.transform import (
     Canonical,
     Dilate,
@@ -49,7 +50,8 @@ from konfai.data.transform import (
     Transform,
     TransformInverse,
 )
-from konfai.predictor import Mean, OutputDataset, Reduction, _FinalizeStage
+from konfai.predictor import Mean, OutputDataset, Reduction
+from konfai.predictor.output import _FinalizeStage
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import PatchError
 

@@ -76,8 +76,8 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "use an app as-is, else fine-tune one, else train from scratch.",
             "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> run_app_infer / run_app_pipeline "
             "(runs the app as published); import_app copies it into the session when it must be MODIFIED first",
-            "fine_tune": "fine_tune_app (weights-only warm start on the user's dataset -> runnable bundle), or "
-            "import_app -> run_resume(weights_only=True) when the training config must be edited first",
+            "fine_tune": "import_app -> run_resume(weights_only=True): a weights-only warm start on the user's "
+            "dataset; package_app_from_session then turns the result into a runnable bundle",
             "resume": "run_resume (true RESUME of an interrupted session training: optimizer/epoch restored)",
             "package": "package_app_from_session / export_app (turn a trained session or tuned app into a bundle)",
         },

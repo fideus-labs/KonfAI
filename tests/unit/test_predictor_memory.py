@@ -23,15 +23,9 @@ import tqdm
 from konfai.data.data_manager import BatchDataItem, DatasetIter
 from konfai.data.transform import TransformInverse
 from konfai.network.network import Network
-from konfai.predictor import (
-    PREDICTION_CLOCK,
-    Mean,
-    ModelComposite,
-    OutputDataset,
-    _colocate_loaded_modules,
-    _prediction_report,
-    _Predictor,
-)
+from konfai.predictor import PREDICTION_CLOCK, Mean, ModelComposite, OutputDataset
+from konfai.predictor.ensemble import _colocate_loaded_modules
+from konfai.predictor.loop import _prediction_report, _Predictor
 from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
 

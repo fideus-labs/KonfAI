@@ -288,8 +288,7 @@ class AppService:
 
         # Route by what the app can actually do instead of dead-ending on describe/design. The run_app_*
         # tools run the app AS PUBLISHED; import_app is offered beside them for the case where the app has
-        # to be modified first. fine_tune_app is only offered when the app ships a train config to
-        # warm-start from, so an inference-only bundle never routes the agent to a tool it cannot use.
+        # to be modified first, and fine-tuning goes through import_app + run_resume(weights_only).
         source = _source_of(info)
         next_actions: list[str] = []
         if not inference:
@@ -304,8 +303,6 @@ class AppService:
                 next_actions.append("run_app_evaluate")
             if uncertainty:
                 next_actions.append("run_app_uncertainty")
-            if finetunable:
-                next_actions.append("fine_tune_app")
 
         payload: dict[str, Any] = {
             "ref": ref,
@@ -804,77 +801,6 @@ class AppService:
             extra=extra,
         )
 
-    def prepare_finetune(
-        self,
-        ref: str,
-        dataset: str,
-        output: str | None = None,
-        name: str = "Finetune",
-        epochs: int = 10,
-        it_validation: int = 1000,
-        models: list[str] | None = None,
-        lr: float | None = None,
-        batch_size: int | None = None,
-        config_overrides: list[str] | None = None,
-        gpu: list[int] | None = None,
-        cpu: int | None = None,
-        config_file: str = "Config.yml",
-        allow_untrusted_code: bool = False,
-        force_update: bool = False,
-    ) -> dict[str, Any]:
-        """Validate a fine-tune request and build the job spec for ``runner.run_finetune_api``.
-
-        Fine-tuning starts training from an existing app's checkpoint(s) on the user's dataset and
-        produces a resolvable app bundle in ``output``. Same trust gate as inference: resolving the app
-        imports its code and pip-installs its requirements.
-        """
-        dataset_path = Path(dataset).expanduser().resolve()
-        if not dataset_path.is_dir():
-            raise ValueError(f"dataset must be an existing directory: {dataset}")
-        if epochs <= 0:
-            raise ValueError("epochs must be a positive integer.")
-        if batch_size is not None and batch_size <= 0:
-            raise ValueError("batch_size must be a positive integer.")
-        self._require_local_app(ref, "Fine-tuning", allow_untrusted_code)
-
-        if cpu is not None and gpu is None:
-            gpu = []
-
-        # First-class knobs join the label the same way --set overrides do, so two fine-tunes differing
-        # only by batch size still read apart on the leaderboard.
-        labelled_params = ([f"batch_size={batch_size}"] if batch_size is not None else []) + (config_overrides or [])
-        label = self.workspace_layout.sanitize_name(
-            f"finetune_{self._app_label(ref)}{self._param_label_suffix(labelled_params)}"
-        )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppBundles", label)
-        )
-
-        kwargs: dict[str, Any] = {
-            "ref": ref,
-            "dataset": str(dataset_path),
-            "output": resolved_output,
-            "name": name,
-            "epochs": epochs,
-            "it_validation": it_validation,
-            "models": models or [],
-            "lr": lr,
-            "batch_size": batch_size,
-            "config_overrides": config_overrides,
-            "gpu": gpu,
-            "cpu": cpu,
-            "config_file": config_file,
-            "force_update": force_update,
-        }
-        return {
-            "kind": "finetune",
-            "run_name": label,
-            "target": "konfai_mcp.runner:run_finetune_api",
-            "command": ["konfai_mcp.runner:run_finetune_api", ref, "->", resolved_output],
-            "kwargs": kwargs,
-            "output": resolved_output,
-        }
-
     #: packaging ------------------------------------------------------------------------------
 
     def package_from_session(
@@ -964,7 +890,7 @@ class AppService:
         if any(Path(path).name == "Config.yml" for path in resolved_configs):
             result["warnings"] = [
                 "Config.yml is copied from the session as-is: make sure it describes the SAME architecture "
-                "as the packaged checkpoints (fine_tune_app will train with it)."
+                "as the packaged checkpoints (a fine-tune via import_app + run_resume will train with it)."
             ]
         if onnx:
             # The ONNX export instantiates and traces the packaged model: it imports the bundle's
@@ -1015,8 +941,9 @@ class AppService:
 
     def _resolve_package_configs(self, configs: list[str] | None) -> list[str]:
         if configs is None:
-            # Bundle BOTH the prediction config (to run) and the train config (so fine_tune_app can warm-start
-            # from the bundle) when present: a Prediction.yml-only bundle cannot be fine-tuned.
+            # Bundle BOTH the prediction config (to run) and the train config (so a fine-tune via
+            # import_app + run_resume can warm-start from the bundle) when present: a
+            # Prediction.yml-only bundle cannot be fine-tuned.
             prediction = self.workspace_layout.config_path("prediction")
             train = self.workspace_layout.config_path("train")
             configs = [str(path) for path in (prediction, train) if path.exists()]
