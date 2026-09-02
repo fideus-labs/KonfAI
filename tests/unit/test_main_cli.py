@@ -286,3 +286,35 @@ def test_predict_evaluate_expose_tensorboard_param():
         params = inspect.signature(fn).parameters
         assert "tensorboard" in params, f"{fn.__name__} must accept 'tensorboard'"
         assert "tb" not in params, f"{fn.__name__} must not use the old 'tb' name"
+
+
+@pytest.mark.parametrize(
+    ("kind", "member"),
+    [
+        ("transforms", "Resample"),
+        ("augmentations", "Flip"),
+        ("criteria", "Dice"),
+        ("reductions", "Median"),
+        ("models", "default|UNet.yml"),
+        ("blocks", "Conv"),
+    ],
+)
+def test_konfai_list_prints_each_component_family(
+    monkeypatch: pytest.MonkeyPatch, capsys, kind: str, member: str
+) -> None:
+    """`konfai list <kind>` prints one aligned `name  doc` line per component, no run machinery."""
+    monkeypatch.setattr(sys, "argv", ["konfai", "list", kind])
+
+    main_module.main()
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert any(line.split()[0] == member for line in lines)
+
+
+def test_konfai_list_refuses_an_unknown_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["konfai", "list", "optimizers"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main()
+
+    assert exc_info.value.code == 2  # an argparse choices error, before anything heavy loads

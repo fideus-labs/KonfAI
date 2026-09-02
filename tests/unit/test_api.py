@@ -294,9 +294,32 @@ def test_magnitude_is_the_channel_norm_and_pointwise() -> None:
 
 
 def test_a_config_tree_must_hold_the_workflow_root() -> None:
-    from konfai.utils.runtime import _materialized_config
+    from konfai.utils.runtime.environment import _materialized_config
 
     with pytest.raises(ConfigError, match="Transformer"):
         _materialized_config({"Trainer": {}}, "Transformer")
     path = _materialized_config({"Transformer": {"name": "X"}}, "Transformer")
     assert path.is_file()
+
+
+# ---------------------------------------------------------------------------- component discovery
+
+
+def test_list_components_names_the_config_vocabulary() -> None:
+    """The catalog answers with the exact spelling a YAML config references each component by."""
+    transforms = {component.name: component for component in api.list_components("transforms")}
+    assert transforms["Resample"].config_reference == "Resample" and transforms["Resample"].doc
+
+    assert {"Dice", "MAE"} <= {component.name for component in api.list_components("criteria")}
+    assert "Median" in {component.name for component in api.list_components("reductions")}
+    assert "Flip" in {component.name for component in api.list_components("augmentations")}
+    assert "Conv" in {component.name for component in api.list_components("blocks")}
+
+    models = {component.config_reference for component in api.list_components("models")}
+    assert "default|UNet.yml" in models  # the declarative catalog
+    assert "segmentation.UNet.UNet" in models  # the Python catalog, in Model.classpath spelling
+
+
+def test_list_components_refuses_an_unknown_kind() -> None:
+    with pytest.raises(ConfigError, match="component kind"):
+        api.list_components("optimizers")

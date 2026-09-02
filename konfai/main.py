@@ -198,6 +198,27 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+#: The component families `konfai list` prints, spelled as the CLI takes them.
+_LIST_KINDS = ("transforms", "augmentations", "criteria", "reductions", "models", "blocks")
+
+
+def _add_list(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "list", help="List the components a YAML config can reference (name and one-line doc)."
+    )
+    parser.add_argument("kind", choices=_LIST_KINDS, help="Component family to list.")
+
+
+def _run_list(kind: str) -> None:
+    # Lazy: the catalog imports the component families (torch included), which --help must not pay for.
+    from konfai.utils.catalog import list_components
+
+    components = list_components(kind)
+    width = max((len(component.config_reference) for component in components), default=0)
+    for component in components:
+        print(f"{component.config_reference:<{width}}  {component.doc or ''}".rstrip())
+
+
 # Command -> (implementation module, entrypoint, the kwarg the config path travels under).
 # Imports stay lazy and by name: the heavy modules load only for the command that runs.
 _COMMANDS: dict[str, tuple[str, str, str]] = {
@@ -262,6 +283,10 @@ def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
 
 
 def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
+    if args["command"] == "list":
+        # Before the workflow machinery: `list` declares only its kind, none of the run flags.
+        _run_list(args["kind"])
+        return
     if args["command"] not in _COMMANDS:
         # Exhaustive on purpose: a fallback would silently launch the trainer for any command it
         # does not know: a new workflow would train a UNet instead of failing.
@@ -297,6 +322,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
     _add_predict(subparsers)
     _add_evaluate(subparsers)
     _add_transform(subparsers)
+    _add_list(subparsers)
     parser.add_argument("--version", action=_VersionAction, help="Print KonfAI version and exit.")
     _dispatch(parser, vars(parser.parse_args()))
 

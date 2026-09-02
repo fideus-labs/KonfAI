@@ -25,7 +25,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import nullcontext
 from functools import partial
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import torch
 from torch.utils.checkpoint import checkpoint
@@ -47,6 +47,9 @@ from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State, get_device, get_gpu_memory
+
+if TYPE_CHECKING:
+    from konfai.utils.pretrained import PretrainedFrom
 
 _log = logging.getLogger(__name__)
 
@@ -358,7 +361,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         out = checkpoint(
                             module,
                             *[branchs[i] for i in self._modulesArgs[name].in_branch],
-                            use_reentrant=True,
+                            use_reentrant=False,
                         )
                         for ob in self._modulesArgs[name].out_branch:
                             branchs[ob] = out
@@ -593,6 +596,9 @@ class Network(ModuleArgsDict, ABC):
         #: Opt-in: a checkpoint head whose out-channels mismatch may be re-initialised and
         #: overlap-copied instead of failing the load (transfer to a different label set).
         self.allow_head_resize = allow_head_resize
+        #: Set on the root by ModelLoader when ``Model.pretrained_from`` is declared: a fresh
+        #: (checkpoint-less) load seeds the initialised graph from the external reference.
+        self.pretrained_source: PretrainedFrom | None = None
         self._it = 0
         self._nb_lr_update = 0
         self.outputsGroup: list[OutputsGroup] = []
@@ -760,6 +766,11 @@ class Network(ModuleArgsDict, ABC):
                 else:
                     model_state_dict[alias] = model_state_dict_tmp[alias]
             self.load_state_dict(model_state_dict)
+        elif self.pretrained_source is not None and not ema:
+            # A fresh TRAIN carries no checkpoint entry: the declared reference seeds the graph the
+            # init above just randomised. The EMA copy is deepcopied from the seeded model and must
+            # not pay the transfer again; a checkpoint's own weights take the branch above instead.
+            self.pretrained_source.seed(self)
         if f"{state_key}_optimizer_state_dict" in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict[f"{state_key}_optimizer_state_dict"])
         if f"{state_key}_it" in state_dict:

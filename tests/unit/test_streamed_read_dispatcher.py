@@ -38,6 +38,7 @@ from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.augmentation import Flip as FlipAugmentation
 from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager, DatasetPatch
+from konfai.data.patching import sweep as sweep_module
 from konfai.data.transform import (
     Canonical,
     Clip,
@@ -385,7 +386,7 @@ def _one_row_budget(manager: DatasetManager) -> float:
     production rule rather than restated here."""
     segment = (manager.sweep_segments(0) or [])[-1]
     tile = manager._sweep_shape(segment.landing, segment.plans, 1)
-    depth = patching._sweep_pipeline_depth()
+    depth = sweep_module._sweep_pipeline_depth()
     return float(manager.sweep_block_bytes(segment.landing, segment.channels, segment.plans, tile, depth))
 
 
@@ -443,13 +444,20 @@ def test_global_stat_after_float_cast_still_streams_and_matches(build_streaming_
 
 
 def test_clip_percentile_and_mask_bounds_fall_back_to_whole_volume(build_streaming_manager) -> None:
-    # A percentile bound needs the whole histogram and a mask reads a second full volume: both
-    # genuinely require the whole volume, so the contract declares WHOLE_VOLUME and streaming is off.
+    # A percentile bound needs the whole histogram, mask or not: WHOLE_VOLUME, streaming off. A
+    # mask with fixed bounds is never read (POINTWISE); masked 'min'/'max' bounds seed themselves
+    # from the masked disk scan (GLOBAL_STAT, see test_masked_statistics.py).
     assert (
         Clip(min_value="percentile:1", max_value="percentile:99").patch_locality(Attribute()).kind
         is LocalityKind.WHOLE_VOLUME
     )
-    assert Clip(mask="SEG").patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
+    assert Clip(min_value="percentile:1", max_value=99.0, mask="SEG").patch_locality(Attribute()).kind is (
+        LocalityKind.WHOLE_VOLUME
+    )
+    assert Clip(mask="SEG").patch_locality(Attribute()).kind is LocalityKind.POINTWISE
+    assert Clip(min_value="min", max_value="max", mask="SEG").patch_locality(Attribute()).kind is (
+        LocalityKind.GLOBAL_STAT
+    )
     volume = np.arange(1 * 8 * 8, dtype=np.float32).reshape(1, 8, 8)
     manager = build_streaming_manager(volume, [Clip(min_value="percentile:1", max_value="percentile:99")], [4, 4])
     assert not manager.can_stream_patch(0)

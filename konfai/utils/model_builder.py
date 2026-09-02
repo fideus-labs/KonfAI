@@ -185,6 +185,16 @@ def list_registered_modules() -> list[str]:
     return sorted(_MODULE_REGISTRY)
 
 
+def registered_module_types() -> dict[str, ModuleFactory]:
+    """The builder's module registry (a YAML ``type:`` entry per name), as a copy."""
+    return dict(_MODULE_REGISTRY)
+
+
+def registered_object_types() -> dict[str, ObjectFactory]:
+    """The builder's object registry (a YAML ``$object`` entry per name), as a copy."""
+    return dict(_OBJECT_REGISTRY)
+
+
 def _lookup_reference(path: str, parameters: dict[str, Any]) -> Any:
     value: Any = parameters
     for part in path.split("."):

@@ -56,6 +56,7 @@ from konfai.utils.errors import ConfigError
 
 if TYPE_CHECKING:
     from konfai.transformer import TransformPlan
+    from konfai.utils.catalog import Component
     from konfai.utils.runtime import DistributedObject
 
 _T = TypeVar("_T")
@@ -227,6 +228,19 @@ def _stage_sequence(stages: object, where: str) -> Sequence[object]:
         f"'{where}' is a {type(stages).__name__}; a chain is a sequence of stages.",
         "Pass the stages in application order: [Clip(min_value=0), Write(dataset='./Out:mha')].",
     )
+
+
+def list_components(kind: str) -> "list[Component]":
+    """Enumerate the shipped components of one kind, spelled as a YAML config references them.
+
+    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``model`` or
+    ``block`` (plural spellings accepted): the vocabulary the config trees above are written in.
+    Records carry ``name``, ``config_reference``, ``module`` and the one-line ``doc``. The catalog
+    imports the component families (torch included), hence the lazy import.
+    """
+    from konfai.utils.catalog import list_components as _list_components
+
+    return _list_components(kind)
 
 
 def _dataset_filenames(datasets: str | Path | Sequence[str | Path]) -> list[str]:
