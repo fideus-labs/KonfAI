@@ -22,7 +22,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from konfai.data.transform.base import LocalityKind, PatchLocality, Transform
+from konfai.data.transform.base import LocalityKind, Transform
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.utils import split_path_spec
 
@@ -34,11 +34,10 @@ class _MemberSpread(Transform):
     working_multiple = 2.0
     _spread: Callable[[torch.Tensor, int], torch.Tensor]
 
+    locality = LocalityKind.POINTWISE
+
     def __init__(self) -> None:
         super().__init__()
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # The member axis stays in both branches: var/std drop it and unsqueeze re-adds it.
@@ -59,15 +58,14 @@ class SegmentationDisagreement(Transform):
     # What it holds beyond its input and its output: the pairwise comparison over the model axis: measured 9.33 on the CUDA allocator.
     working_multiple = 24.5
 
+    # Per-voxel majority disagreement across the members. The global torch.unique only widens the
+    # label set with labels absent at a given voxel, which contribute zero counts there and never
+    # change that voxel's majority, so the result is decided voxel by voxel.
+    locality = LocalityKind.POINTWISE
+
     def __init__(self, ignore_background: bool = False) -> None:
         super().__init__()
         self.ignore_background = ignore_background
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Per-voxel majority disagreement across the members. The global torch.unique only widens the
-        # label set with labels absent at a given voxel, which contribute zero counts there and never
-        # change that voxel's majority, so the result is decided voxel by voxel.
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # tensors shape: [N, ...] with N segmentations and integer labels per voxel
@@ -103,12 +101,11 @@ class Percentage(Transform):
     # What it holds beyond its input and its output: the quantile's own copy: measured 1.00 on the CUDA allocator.
     working_multiple = 1.0
 
+    locality = LocalityKind.POINTWISE
+
     def __init__(self, baseline: float) -> None:
         super().__init__()
         self.baseline = baseline
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensors / self.baseline * 100.0
@@ -126,11 +123,10 @@ class Magnitude(Transform):
     # Measured at 1.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 1.0
 
+    locality = LocalityKind.POINTWISE
+
     def __init__(self) -> None:
         super().__init__()
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.linalg.norm(tensors.float(), dim=0, keepdim=True)
@@ -184,11 +180,10 @@ class InferenceStack(Transform):
         self._stack_sinks: dict[str, DataStream] = {}
         self._stack_buffers: dict[str, list[np.ndarray]] = {}
 
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # The member reduction is per-voxel; the per-member stack write is the side effect that needs
-        # the slab's place in the volume, which is exactly what SLAB declares (whole-volume on the
-        # read side, streamed region by region on the write side via ``stream_slab``).
-        return PatchLocality(LocalityKind.SLAB)
+    # The member reduction is per-voxel; the per-member stack write is the side effect that needs
+    # the slab's place in the volume, which is exactly what SLAB declares (whole-volume on the
+    # read side, streamed region by region on the write side via ``stream_slab``).
+    locality = LocalityKind.SLAB
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         if self.mode == "Seg":

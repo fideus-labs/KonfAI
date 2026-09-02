@@ -371,6 +371,96 @@ class Grid:
         )
 
 
+# ---------------------------------------------------------------------------------- index remaps
+# A signed permutation of the axes is the one map that is an exact index remap: values only change
+# place, so an ORIENTATION stage's bijection promise (and everything preserves_statistics lets a
+# later stage trust) rests on the predicate below. It is written once, here, because two copies of
+# it (a draw's quarter turn, a header's reorientation) is exactly where a silent divergence starts.
+
+#: Whether a matrix entry stands for exactly 0 or +/-1, by the matrix's provenance. Two tolerances,
+#: because the matrices come at two precisions: a draw's quarter-turn affine is composed from
+#: float32 cosines, so an entry lands within ~1e-7 of the value it stands for; a header
+#: reorientation is a float64 product of orthonormal matrices and lands within a few double ulps.
+#: One shared 1e-6 would remap a float64 direction whose obliqueness is real, not rounding.
+SIGNED_PERMUTATION_ATOL_FLOAT32 = 1e-6
+SIGNED_PERMUTATION_ATOL_FLOAT64 = 1e-9
+
+#: Per output SPATIAL axis in array order: ``(source_axis, mirrored)`` — which source axis it reads,
+#: and whether it reads it backwards.
+AxisRemap = list[tuple[int, bool]]
+
+
+def signed_permutation(matrix: object, atol: float) -> AxisRemap | None:
+    """The exact index remap ``matrix`` is, or ``None`` where it must be sampled.
+
+    ``matrix`` maps an output coordinate onto the input it comes from, in physical ``(x, y, z)``
+    order: it is a signed permutation exactly when every column holds a single +/-1 and every row
+    carries unit weight. The three tests together admit exactly those: unit column sums alone also
+    pass an axis-averaging matrix, unit peaks alone a superposing one, and columns alone a
+    rank-deficient one that reads the same axis twice. The answer is in array order, where physical
+    axis ``k`` is array axis ``n - 1 - k``.
+    """
+    linear = np.asarray(matrix, dtype=np.float64)
+    n = int(linear.shape[0])
+    magnitude = np.abs(linear)
+    unit = np.ones(n)
+    if not np.allclose(magnitude.sum(axis=0), unit, atol=atol):
+        return None
+    if not np.allclose(magnitude.max(axis=0), unit, atol=atol):
+        return None
+    if not np.allclose(magnitude.sum(axis=1), unit, atol=atol):
+        return None
+    remap: AxisRemap = []
+    for column in reversed(range(n)):
+        row = int(magnitude[:, column].argmax())
+        remap.append((n - 1 - row, bool(linear[row, column] < 0)))
+    return remap
+
+
+def remap_shape(shape: list[int], remap: AxisRemap) -> list[int]:
+    """The spatial extents a remap lands on: output axis ``k`` carries the extent of the axis it
+    reads. What a permutation preserves is the volume, not which axis holds an extent."""
+    return [int(shape[source]) for source, _ in remap]
+
+
+def remap_region(target_slices: tuple[slice, ...], source_shape: list[int], remap: AxisRemap) -> list[slice]:
+    """The source region a target region reads under a remap.
+
+    Output axis ``k``'s slice lands on the source axis it reads; a MIRRORED axis reads the mirror
+    region ``[n - stop, n - start)`` of it, because a flip restricted to a contiguous region is that
+    region reversed. The remap covers every axis exactly once, so every source axis is assigned.
+    """
+    source_slices: list[slice] = [slice(0, int(extent)) for extent in source_shape]
+    for target, (source, mirrored) in zip(target_slices, remap, strict=True):
+        extent = int(source_shape[source])
+        source_slices[source] = (
+            slice(extent - target.stop, extent - target.start) if mirrored else slice(target.start, target.stop)
+        )
+    return source_slices
+
+
+def invert_remap(remap: AxisRemap) -> AxisRemap:
+    """The remap undoing ``remap``: source axis ``s`` reads back the output axis that carried it,
+    mirrored exactly where the forward read was."""
+    inverted: AxisRemap = [(0, False)] * len(remap)
+    for axis, (source, mirrored) in enumerate(remap):
+        inverted[source] = (axis, mirrored)
+    return inverted
+
+
+def apply_remap(tensor: torch.Tensor, remap: AxisRemap) -> torch.Tensor:
+    """The remap, materialised on a tensor whose trailing axes are the spatial ones.
+
+    Leading axes (channel, and anything before it) are left in place. ``flip`` materialises the
+    permuted view even for an empty mirror list, so the result never aliases the tensor it was
+    read from: a remapped copy may be handed on while the source tensor lives its own life.
+    """
+    offset = tensor.dim() - len(remap)
+    dims = list(range(offset)) + [offset + source for source, _ in remap]
+    flips = [offset + axis for axis, (_, mirrored) in enumerate(remap) if mirrored]
+    return tensor.permute(dims).flip(flips)
+
+
 @dataclass(frozen=True)
 class TransformBound:
     """What a stored transform is guaranteed to do: an exact affine part and a bounded interval.

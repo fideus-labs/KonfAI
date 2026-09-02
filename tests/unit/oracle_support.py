@@ -672,8 +672,17 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
         "Contrast": [AugmentationCase(augmentation_module.Contrast(0.5), LocalityKind.POINTWISE, True)],
         # The box is normalised to the volume; a region keeps its part of it. A wide box so it lands
         # in more than one patch of the fixture.
-        "CutOUT": [AugmentationCase(augmentation_module.CutOUT(1.0, 0.5, 0.0), LocalityKind.POINTWISE, True)],
-        "Elastix": [AugmentationCase(augmentation_module.Elastix(), LocalityKind.WHOLE_VOLUME, False)],
+        "CutOUT": [AugmentationCase(augmentation_module.CutOUT(0.5, 0.0), LocalityKind.POINTWISE, True)],
+        # A lattice draw with a bounded reach (|d| <= max_displacement by convexity): each region
+        # pulls its own widened box and the warp resamples it, so the copies stream as a REGRID.
+        "Elastix": [
+            AugmentationCase(
+                augmentation_module.Elastix(grid_spacing=8, max_displacement=2),
+                LocalityKind.REGRID,
+                True,
+                atol=AUGMENTATION_ATOL,
+            )
+        ],
         "Flip": [
             AugmentationCase(FlipAugmentation(f_prob=[1.0, 1.0, 1.0]), LocalityKind.ORIENTATION, True),
             # A displacement field's flipped components are negated, which is not a bijection on values.

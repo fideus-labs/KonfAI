@@ -47,10 +47,9 @@ class Mask(Transform):
         #: Cases whose stored mask was checked against the chain input's extent (once per case).
         self._aligned: set[str] = set()
 
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # POINTWISE on the promise that the mask sits on the stage's input grid; a declaration may
-        # not do I/O, so the extent is checked at the point of use (stream_region), per case.
-        return PatchLocality(LocalityKind.POINTWISE)
+    # POINTWISE on the promise that the mask sits on the stage's input grid; a declaration may
+    # not do I/O, so the extent is checked at the point of use (stream_region), per case.
+    locality = LocalityKind.POINTWISE
 
     def _apply(self, tensor: torch.Tensor, mask: torch.Tensor | np.ndarray) -> torch.Tensor:
         # Index on the tensor's own device so the mask works whether the volume is on CPU or GPU
@@ -264,9 +263,8 @@ class MergeLabels(Transform):
     # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 3.75
 
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Merges the leading model axis per voxel; spatial support is a single voxel.
-        return PatchLocality(LocalityKind.POINTWISE)
+    # Merges the leading model axis per voxel; spatial support is a single voxel.
+    locality = LocalityKind.POINTWISE
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -340,12 +338,11 @@ class FlatLabel(Transform):
     # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 1.0
 
+    locality = LocalityKind.POINTWISE
+
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
         self.labels = labels
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Filled through the mask, not through the indices of what it selects: see Clip.
@@ -365,6 +362,8 @@ class SelectLabel(Transform):
     # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 1.0
 
+    locality = LocalityKind.POINTWISE
+
     def __init__(self, labels: list[str]) -> None:
         super().__init__()
         try:
@@ -374,9 +373,6 @@ class SelectLabel(Transform):
                 f"'SelectLabel' cannot read labels={list(labels)!r}.",
                 'labels is a list of "(old,new)" strings: labels: ["(1,2)", "(3,1)"].',
             ) from None
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         data = torch.zeros_like(tensor)
@@ -394,9 +390,8 @@ class OneHot(TransformInverse):
         super().__init__(inverse)
         self.num_classes = num_classes
 
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # Expands each voxel's scalar label into a one-hot channel vector (spatially pointwise).
-        return PatchLocality(LocalityKind.POINTWISE)
+    # Expands each voxel's scalar label into a one-hot channel vector (spatially pointwise).
+    locality = LocalityKind.POINTWISE
 
     def output_channels(self, channels: int) -> int:
         return self.num_classes * channels

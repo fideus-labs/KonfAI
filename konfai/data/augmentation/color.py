@@ -21,20 +21,19 @@ import numpy as np
 import torch
 
 from konfai.data.augmentation.base import DataAugmentation, _axis_rotation_matrix, _scale_matrix, _translate_matrix
-from konfai.data.transform import LocalityKind, PatchLocality
+from konfai.data.transform import LocalityKind
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import AugmentationError
 
 
 class ColorTransform(DataAugmentation):
+    # The draw is a colour matrix applied to each voxel on its own: no neighbour, no coordinate,
+    # no extent. Whatever region a voxel is read in, it comes out the same.
+    locality = LocalityKind.POINTWISE
+
     def __init__(self, groups: list[str] | None = None) -> None:
         super().__init__(groups)
         self.matrix: dict[int, list[torch.Tensor]] = {}
-
-    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # The draw is a colour matrix applied to each voxel on its own: no neighbour, no coordinate,
-        # no extent. Whatever region a voxel is read in, it comes out the same.
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         matrix = self.matrix[index][a]

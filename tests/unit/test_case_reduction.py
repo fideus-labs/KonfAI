@@ -27,7 +27,7 @@ import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
-import konfai.data.transform as transform_module
+import konfai.data.transform.resample as resample_module
 import numpy as np
 import pytest
 import torch
@@ -927,7 +927,7 @@ def test_a_field_resample_prices_the_field_window_its_case_actually_holds(tmp_pa
     # is read as float64 and the plan counts a volume at four bytes), materialised THREE times over
     # while ITK is handed it. The general walk this case also takes is NOT added: it slabs itself
     # against the declared budget.
-    expected = warp.working_multiple + 3.0 * 2.0 * transform_module._FIELD_WINDOW_COPIES
+    expected = warp.working_multiple + 3.0 * 2.0 * resample_module._FIELD_WINDOW_COPIES
     assert warp.case_working_multiple("CASE_000") == pytest.approx(expected)
     # A case this stage has never met answers the class's figure rather than guessing at a grid.
     assert warp.case_working_multiple("NEVER_SEEN") == warp.working_multiple

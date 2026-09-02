@@ -184,6 +184,15 @@ class DataAugmentationsList:
 
 
 class DataAugmentation(NeedDevice, ABC):
+    #: Tier-1 declaration, exactly as :attr:`konfai.data.transform.Transform.locality`: the one
+    #: :class:`LocalityKind` every draw of this class makes, when it is unconditional. The base
+    #: ``_patch_locality`` answers from it; ``None`` (the default) keeps the fail-safe
+    #: ``WHOLE_VOLUME``. A declaration that depends on the draw overrides the method instead.
+    locality: LocalityKind | None = None
+
+    #: Tier-1 companion to a ``HALO`` :attr:`locality`: per-spatial-axis radius in array order.
+    halo: tuple[int, ...] = ()
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         # A draw is a chain stage too: record its constructor arguments as given, so konfai.api can
         # write the config tree back from live objects (see Transform.__init_subclass__).
@@ -274,6 +283,8 @@ class DataAugmentation(NeedDevice, ABC):
         return self._patch_locality(index, self._slot(index, a), cache_attribute)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        if self.locality is not None:
+            return PatchLocality(self.locality, halo=self.halo)
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def stream_region_source(

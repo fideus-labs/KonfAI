@@ -781,7 +781,7 @@ def test_streaming_still_seeds_a_global_stat_behind_a_reorientation(patch_manage
 @pytest.mark.parametrize(
     ("transform", "kind"),
     [
-        (Standardize(mask="MASK"), LocalityKind.WHOLE_VOLUME),
+        (Clip(min_value="percentile:1", max_value="percentile:99"), LocalityKind.WHOLE_VOLUME),
         (Gradient(), LocalityKind.HALO),
         (Dilate(dilate=2), LocalityKind.HALO),
         (Flip(), LocalityKind.ORIENTATION),

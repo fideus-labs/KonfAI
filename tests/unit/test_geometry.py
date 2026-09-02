@@ -263,3 +263,84 @@ class TestDisplacementStageBound:
         np.testing.assert_array_equal(bound.high_xyz, np.zeros(3))
         # The envelope is still there for whoever wants one number, and it is the old sup |v|.
         np.testing.assert_array_equal(stage.bound_xyz, np.abs(values).reshape(3, -1).max(axis=1))
+
+
+class TestSignedPermutation:
+    """The one predicate and the one region rule every orientation stage shares."""
+
+    def test_the_predicate_admits_exactly_the_signed_permutations(self):
+        from konfai.data.geometry import SIGNED_PERMUTATION_ATOL_FLOAT64, signed_permutation
+
+        # x<->z swap with x mirrored: output phys x reads input z, output z reads -input x.
+        matrix = np.asarray([[0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+        # Array order (z, y, x): output z reads x mirrored... derived below against apply_remap.
+        remap = signed_permutation(matrix, SIGNED_PERMUTATION_ATOL_FLOAT64)
+        assert remap is not None and sorted(source for source, _ in remap) == [0, 1, 2]
+        # Unit column sums alone pass an averaging matrix; unit peaks alone a superposing one; a
+        # rank-deficient matrix reading one axis twice passes both column tests. All three refuse.
+        averaging = np.linalg.inv(np.asarray([[0.5, 0.25, 0.25], [0.25, 0.5, 0.25], [0.25, 0.25, 0.5]]))
+        superposing = np.linalg.inv(np.asarray([[1.0, 0.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+        degenerate = np.asarray([[1.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]])
+        for refused in (averaging, superposing, degenerate):
+            assert signed_permutation(refused, SIGNED_PERMUTATION_ATOL_FLOAT64) is None
+
+    def test_a_float32_quarter_turn_is_admitted_at_its_own_tolerance(self):
+        import torch
+        from konfai.data.geometry import SIGNED_PERMUTATION_ATOL_FLOAT32, signed_permutation
+
+        # The float32 provenance the looser constant exists for: a quarter-turn matrix composed
+        # from float32 cosines lands within ~1e-7 of the 0/+-1 entries it stands for, and must
+        # still be read as the exact remap it is.
+        angles = torch.deg2rad(torch.tensor([90.0, 270.0, 180.0]))
+        cos, sin = torch.cos(angles), torch.sin(angles)
+        matrix = torch.tensor([[cos[0], -sin[0], 0.0], [sin[0], cos[0], 0.0], [0.0, 0.0, 1.0]], dtype=torch.float32)
+        assert not torch.equal(matrix, torch.round(matrix))  # the entries really are off the lattice
+        assert signed_permutation(matrix, SIGNED_PERMUTATION_ATOL_FLOAT32) is not None
+
+    def test_remap_region_is_the_index_image_of_apply_remap(self):
+        import itertools
+
+        import torch
+        from konfai.data.geometry import (
+            SIGNED_PERMUTATION_ATOL_FLOAT64,
+            apply_remap,
+            invert_remap,
+            remap_region,
+            remap_shape,
+            signed_permutation,
+        )
+
+        rng = np.random.default_rng(3)
+        volume = torch.from_numpy(rng.standard_normal((2, 5, 6, 7)).astype(np.float32))
+        axes = np.eye(3)
+        for order in itertools.permutations(range(3)):
+            for signs in itertools.product((1.0, -1.0), repeat=3):
+                matrix = np.stack([axes[axis] * sign for axis, sign in zip(order, signs, strict=True)], axis=1)
+                remap = signed_permutation(matrix, SIGNED_PERMUTATION_ATOL_FLOAT64)
+                assert remap is not None
+                out = apply_remap(volume, remap)
+                assert list(out.shape[1:]) == remap_shape([5, 6, 7], remap)
+                # The region contract: reading the remapped source region and remapping IT
+                # reproduces the target patch exactly, mirrors included ([n - stop, n - start)).
+                target = tuple(slice(1, extent - 1) for extent in out.shape[1:])
+                source = remap_region(target, [5, 6, 7], remap)
+                torch.testing.assert_close(
+                    apply_remap(volume[(slice(None), *source)], remap),
+                    out[(slice(None), *target)],
+                    rtol=0,
+                    atol=0,
+                )
+                # The inverse remap undoes the forward, extents and values alike.
+                back = apply_remap(out, invert_remap(remap))
+                torch.testing.assert_close(back, volume, rtol=0, atol=0)
+
+    def test_apply_remap_materialises_the_copy(self):
+        import torch
+        from konfai.data.geometry import apply_remap
+
+        volume = torch.arange(8.0).reshape(1, 2, 4)
+        # Even the identity remap with no mirror is a copy: a remapped copy may be handed on while
+        # the source tensor lives its own life.
+        out = apply_remap(volume, [(0, False), (1, False)])
+        assert out.data_ptr() != volume.data_ptr()
+        torch.testing.assert_close(out, volume, rtol=0, atol=0)
