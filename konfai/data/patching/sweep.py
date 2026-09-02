@@ -312,7 +312,8 @@ def _sweep_resident_regions(depth: int) -> tuple[int, int]:
 
 
 class SweepSegment(NamedTuple):
-    """One segment the streamed route sweeps: where it reads from, what it lands, how it pulls."""
+    """One segment the streamed route sweeps: where it reads from, what it lands, how it pulls,
+    and the stages that run on it (the pricing is keyed to them, never to the whole chain)."""
 
     dataset: Dataset
     group: str
@@ -320,6 +321,7 @@ class SweepSegment(NamedTuple):
     source_shape: list[int]
     landing: list[int]
     plans: tuple["_ReadStagePlan", ...]
+    stages: tuple[Stage, ...] = ()
 
     @property
     def channels(self) -> int:
