@@ -80,10 +80,15 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         "--cpu",
         type=_positive_int,
         default=None,
-        help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
+        help="Number of CPU worker processes when no --gpu is given; the run stays on CPU unless --gpu is passed.",
     )
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
     parser.add_argument("-tb", "--tensorboard", action="store_true", help="Launch TensorBoard.")
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create the config file if missing, resolve every default into it, and exit without running.",
+    )
 
 
 def _add_dir_argument(parser: argparse.ArgumentParser, name: str, help_text: str) -> None:
@@ -183,6 +188,11 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
         " takes back what the probe created (the entry, and the store when it did not exist). The"
         " plan is printed even with -q.",
     )
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create the config file if missing, resolve every default into it, and exit without running.",
+    )
     _add_dir_argument(
         parser, "transforms", "Directory where run logs are written; --plan prints and writes nothing there"
     )
@@ -197,6 +207,44 @@ _COMMANDS: dict[str, tuple[str, str, str]] = {
     str(State.EVALUATION): ("konfai.evaluator", "evaluate", "evaluations_file"),
     str(State.TRANSFORM): ("konfai.transformer", "transform", "transform_file"),
 }
+
+# Command -> (default config filename, root key, pure build function beside the entrypoint).
+_INIT_TARGETS: dict[str, tuple[str, str, str]] = {
+    str(State.TRAIN): ("Config.yml", "Trainer", "build_train"),
+    str(State.RESUME): ("Config.yml", "Trainer", "build_train"),
+    str(State.PREDICTION): ("Prediction.yml", "Predictor", "build_predict"),
+    str(State.EVALUATION): ("Evaluation.yml", "Evaluator", "build_evaluate"),
+    str(State.TRANSFORM): ("Transform.yml", "Transformer", "build_transform"),
+}
+
+
+def _run_init(args: dict[str, Any]) -> None:
+    """``--init``: bind the workflow once so every default resolves and lands in the file, then exit.
+
+    The file is created seeded with its root key when missing (an empty tree would be refused as
+    holding no root). The build itself never runs anything; a build error after partial binding
+    still leaves what resolved on disk (the strict block flushes on exceptional exit too).
+    """
+    import inspect
+    from pathlib import Path
+
+    command = args["command"]
+    module_name, _, config_key = _COMMANDS[command]
+    default_name, root, builder_name = _INIT_TARGETS[command]
+    config_path = Path(args.get(config_key) or args.get("config") or default_name)
+    if not config_path.exists():
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(f"{root}:\n", encoding="utf-8")
+    args[config_key] = config_path
+    builder = getattr(importlib.import_module(module_name), builder_name)
+    accepted = inspect.signature(builder).parameters
+    try:
+        builder(**{name: value for name, value in args.items() if name in accepted})
+    except Exception as error:
+        print(f"[KonfAI] Wrote what resolved before the error to '{config_path}'.")
+        print(f"[KonfAI] {error}")
+        sys.exit(1)
+    print(f"[KonfAI] Resolved default configuration written to '{config_path}'.")
 
 
 def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
@@ -224,11 +272,15 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         del args["config"]  # the entrypoint's own default config filename applies
     elif config_key != "config":
         args[config_key] = args.pop("config")
+    if args.pop("init", False):
+        # --init must SHORT-CIRCUIT for the same reason --plan does just below.
+        _run_init(args)
+        return
     if args.pop("plan", False):
         # --plan must SHORT-CIRCUIT here: the distributed wrapper filters kwargs by the entrypoint's
         # signature, so a 'plan' passed through would be silently dropped and the run would proceed
         # as if the flag had never been given.
-        if "resubmit" in args:
+        if "num_nodes" in args:
             parser.error("--plan is a dry run on this machine and submits nothing: use `konfai TRANSFORM --plan`.")
         # plan_transform declares the TRANSFORM flags and nothing else; the command name is not one.
         del args["command"]
@@ -252,7 +304,7 @@ def _run(parser: argparse.ArgumentParser) -> None:
 def main():
     """Entry point for the ``konfai`` command-line interface."""
     parser = argparse.ArgumentParser(
-        prog="konfAI", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
+        prog="konfai", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
     )
     _run(parser)
 
@@ -260,7 +312,7 @@ def main():
 def cluster():
     """Entry point for the ``konfai-cluster`` CLI: the standard commands plus SLURM job arguments."""
     parser = argparse.ArgumentParser(
-        prog="konfAI", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
+        prog="konfai-cluster", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
     )
     cluster_args = parser.add_argument_group("Cluster manager arguments")
     cluster_args.add_argument("--name", type=str, help="Task name", required=True)
@@ -273,9 +325,8 @@ def cluster():
         default=1440,
         help="Job time limit in minute",
     )
-    cluster_args.add_argument(
-        "--resubmit",
-        action="store_true",
-        help="Automatically resubmit job just before timout",
-    )
     _run(parser)
+
+
+if __name__ == "__main__":
+    main()

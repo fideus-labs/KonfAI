@@ -47,7 +47,6 @@ class ClusterKwargs(TypedDict):
     memory: int
     num_nodes: int
     time_limit: int
-    resubmit: bool
 
 
 def description(model, model_ema=None, show_memory: bool = True, train: bool = True) -> str:

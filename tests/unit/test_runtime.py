@@ -155,11 +155,11 @@ def test_execute_distributed_object_sets_shared_master_port_without_forcing_laun
     assert spawn_calls["nprocs"] == 2
 
 
-def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
+def test_cluster_kwargs_route_the_run_through_submitit_instead_of_spawning(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    submitted = []
 
     class DummyContext:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -178,8 +178,8 @@ def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
         def update_parameters(self, *_args, **_kwargs) -> None:
             pass
 
-        def submit(self, *_args, **_kwargs) -> None:
-            pass
+        def submit(self, *args, **_kwargs) -> None:
+            submitted.append(args)
 
     class DummyDistributed(DistributedObject):
         def __init__(self) -> None:
@@ -195,10 +195,10 @@ def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
     monkeypatch.setattr("konfai.utils.runtime.distributed.TensorBoard", DummyContext)
     monkeypatch.setitem(sys.modules, "submitit", SimpleNamespace(AutoExecutor=DummyExecutor))
 
-    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 1, "time_limit": 60, "resubmit": True}
+    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 1, "time_limit": 60}
     execute_distributed_object(DummyDistributed(), gpu=[0], cpu=1, quiet=True, cluster_kwargs=cluster_kwargs)
 
-    assert "--resubmit is not implemented" in capsys.readouterr().out
+    assert len(submitted) == 1
 
 
 def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(

@@ -244,7 +244,6 @@ the optional `cluster` extra.
 | `--num-nodes` | `1` | Nodes to request. |
 | `--memory` | `16` | Memory per node, in GB. |
 | `--time-limit` | `1440` | Wall-clock limit, in minutes. |
-| `--resubmit` | off | Accepted, but **not implemented**: the run warns and does not requeue. |
 
 Otherwise `konfai-cluster` takes the same subcommands and arguments as `konfai`.
 **The cluster options come before the subcommand**: they sit on the top-level
