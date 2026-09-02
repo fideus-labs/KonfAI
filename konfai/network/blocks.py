@@ -688,7 +688,12 @@ class Add(torch.nn.Module):
         super().__init__()
 
     def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
-        return torch.sum(torch.stack(tensor), dim=0)
+        # Sequential fold: same left-to-right sum as a stacked reduction, without materializing
+        # a contiguous copy of every input, and it exports as ONNX Add nodes.
+        output = tensor[0]
+        for other in tensor[1:]:
+            output = output + other
+        return output
 
 
 class Multiply(torch.nn.Module):
@@ -909,7 +914,6 @@ class MultiHeadSelfAttention(torch.nn.Module):
             raise ValueError(f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads}).")
         self.num_heads = num_heads
         self.head_dim = hidden_size // num_heads
-        self.scale = self.head_dim**-0.5
         self.qkv = torch.nn.Linear(hidden_size, hidden_size * 3, bias=qkv_bias)
         self.out_proj = torch.nn.Linear(hidden_size, hidden_size)
 
@@ -917,8 +921,9 @@ class MultiHeadSelfAttention(torch.nn.Module):
         batch, tokens, hidden = tensor.shape
         qkv = self.qkv(tensor).reshape(batch, tokens, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         query, key, value = qkv[0], qkv[1], qkv[2]
-        attention = ((query @ key.transpose(-2, -1)) * self.scale).softmax(dim=-1)
-        output = (attention @ value).permute(0, 2, 1, 3).reshape(batch, tokens, hidden)
+        # SDPA's default scale is head_dim ** -0.5, the scale this block always used.
+        output = torch.nn.functional.scaled_dot_product_attention(query, key, value)
+        output = output.permute(0, 2, 1, 3).reshape(batch, tokens, hidden)
         return self.out_proj(output)
 
     def extra_repr(self) -> str:
