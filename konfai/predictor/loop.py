@@ -38,6 +38,7 @@ from konfai.utils.clock import SweepClock
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
+    NullSummaryWriter,
     description,
 )
 
@@ -140,10 +141,16 @@ class _Predictor:
         )
         if self._has_runtime_measures or len(self.data_log):
             if SummaryWriter is None:
-                raise ImportError(
-                    "TensorBoard is required for prediction logging. Install it with: pip install konfai[tensorboard]"
-                )
-            self.tb = SummaryWriter(log_dir=predict_path / "Metric")
+                # A missing logger must never refuse the run: the predictions are still written,
+                # only the curves and images are lost. One line says so; the extra keeps them.
+                if self.global_rank == 0:
+                    print(
+                        "[KonfAI] TensorBoard is not installed: no curves or images will be logged"
+                        " (pip install konfai[tensorboard] to keep them)."
+                    )
+                self.tb = NullSummaryWriter()
+            else:
+                self.tb = SummaryWriter(log_dir=predict_path / "Metric")
         else:
             self.tb = None
 
@@ -285,19 +292,6 @@ class _Predictor:
                 sync=False,
             )
 
-        images_log = []
-        if len(self.data_log):
-            for name, data_type in self.data_log.items():
-                if name in batch_sample:
-                    data_type[0](
-                        self.tb,
-                        f"Prediction/{name}",
-                        batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
-                        self.it,
-                    )
-                else:
-                    images_log.append(name.replace(":", "."))
-
         for name, network in self.model_composite.module.get_networks().items():
             if network.measure is not None:
                 self.tb.add_scalars(
@@ -310,14 +304,33 @@ class _Predictor:
                     {k.replace(":", "."): v[1] for k, v in measures[name][1].items()},
                     self.it,
                 )
-            if len(images_log):
-                for name, layer, _ in self.model_composite.module.get_layers(
-                    [v.tensor for v in batch_sample.values() if v.is_input],
-                    images_log,
-                ):
-                    self.data_log[name][0](
-                        self.tb,
-                        f"Prediction/{name}",
-                        layer[: self.data_log[name][1]].detach().cpu().numpy(),
-                        self.it,
-                    )
+
+        # Images are a progress peek, not a per-batch record, and a module-layer target re-runs a
+        # full forward (get_layers): both throttle to the status cadence.
+        if not len(self.data_log) or self.it % _DESCRIPTION_EVERY != 0:
+            return
+        images_log = []
+        for name, data_type in self.data_log.items():
+            if name in batch_sample:
+                data_type[0](
+                    self.tb,
+                    f"Prediction/{name}",
+                    batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
+                    self.it,
+                )
+            else:
+                images_log.append(name.replace(":", "."))
+        if len(images_log):
+            # get_layers is model-scoped, not per-network: run it once per model, or a multi-network
+            # model (a GAN's generator + discriminator) repeats the forward extraction and writes
+            # each image event once per network.
+            for layer_name, layer, _ in self.model_composite.module.get_layers(
+                [v.tensor for v in batch_sample.values() if v.is_input],
+                images_log,
+            ):
+                self.data_log[layer_name][0](
+                    self.tb,
+                    f"Prediction/{layer_name}",
+                    layer[: self.data_log[layer_name][1]].detach().cpu().numpy(),
+                    self.it,
+                )

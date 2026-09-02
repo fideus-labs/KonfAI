@@ -30,9 +30,10 @@ try:
 except ImportError:
     _PYNVML_AVAILABLE = False
 
-# ``requests`` (remote-server helpers only) and ``torch`` (device-name lookup only) are imported lazily
-# at their point of use so that ``import konfai`` stays light: CLI paths that never touch a GPU
-# (``--help``/``--version``, light apps helpers) avoid the ~1s torch import.
+# ``torch`` (device-name lookup only) is imported lazily at its point of use so that
+# ``import konfai`` stays light: CLI paths that never touch a GPU (``--help``/``--version``,
+# light apps helpers) avoid the ~1s torch import. The remote-server helpers speak plain HTTP
+# over the stdlib (urllib), so they cost no dependency at all.
 from konfai.utils.errors import KonfAIError
 
 try:
@@ -104,14 +105,17 @@ class RemoteServer:
         return f"http://{self.host}:{self.port}"
 
     def get_json(self, path: str, timeout_s: float, params: list[tuple[str, int]] | None = None) -> dict:
-        """The JSON body of ``GET <base url>/<path>``; a failed status raises."""
-        import requests
+        """The JSON body of ``GET <base url>/<path>``; a failed status raises (``HTTPError``)."""
+        import json
+        from urllib.parse import urlencode
+        from urllib.request import Request, urlopen
 
-        response = requests.get(
-            f"{self.get_url()}/{path}", params=params, headers=self.get_headers(), timeout=timeout_s
-        )
-        response.raise_for_status()
-        return response.json()
+        url = f"{self.get_url()}/{path}"
+        if params:
+            url += "?" + urlencode(params)
+        # The scheme is this class's own constant (get_url), never caller input: no file:// reach.
+        with urlopen(Request(url, headers=self.get_headers()), timeout=timeout_s) as response:  # nosec B310
+            return json.loads(response.read().decode("utf-8"))
 
 
 def cuda_visible_devices() -> list[int]:
@@ -250,11 +254,8 @@ _KONFAI_DEPS: dict[str, str] = {
     "psutil": "psutil",
     "tensorboard": "tensorboard",
     "SimpleITK": "SimpleITK",
-    "lxml": "lxml",  # often used as lxml.etree
     "h5py": "h5py",
     "nvidia-ml-py": "pynvml",  # IMPORTANT: pip != import
-    "requests": "requests",
-    "huggingface_hub": "huggingface_hub",
 }
 
 
@@ -282,31 +283,36 @@ def check_server(remote_server: RemoteServer, timeout_s: float = 2.0) -> tuple[b
     tuple[bool, str]
         A boolean success flag and a human-readable status message.
     """
-    import requests
+    import json
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
 
     try:
-        r = requests.get(
-            f"{remote_server.get_url()}/health",
-            headers=remote_server.get_headers(),
-            timeout=timeout_s,
-        )
+        request = Request(f"{remote_server.get_url()}/health", headers=remote_server.get_headers())
+        # The scheme comes from RemoteServer.get_url (its own constant), never caller input.
+        with urlopen(request, timeout=timeout_s) as response:  # nosec B310
+            if response.status != 200:
+                return False, f"HTTP {response.status}"
+            data = json.loads(response.read().decode("utf-8"))
 
-        if r.status_code == 401:
-            return False, "Unauthorized (invalid or missing token)"
-        if r.status_code == 403:
-            return False, "Forbidden"
-        if r.status_code != 200:
-            return False, f"HTTP {r.status_code}"
-
-        data = r.json()
         if data.get("status") != "ok":
             return False, f"Unexpected response: {data}"
 
         return True, "OK"
 
-    except requests.exceptions.ConnectionError:
-        return False, "Connection refused"
-    except requests.exceptions.Timeout:
+    except HTTPError as error:
+        if error.code == 401:
+            return False, "Unauthorized (invalid or missing token)"
+        if error.code == 403:
+            return False, "Forbidden"
+        return False, f"HTTP {error.code}"
+    except URLError as error:
+        if isinstance(error.reason, TimeoutError):
+            return False, "Timeout"
+        if isinstance(error.reason, ConnectionRefusedError):
+            return False, "Connection refused"
+        return False, str(error.reason)
+    except TimeoutError:
         return False, "Timeout"
     except Exception as e:
         return False, str(e)

@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
 from konfai.network.network import build_configured_criterions
+from konfai.network.network.measure import CriterionResult
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config, strict_config
@@ -134,6 +135,12 @@ class Statistics:
         # Per-metric optimisation direction ("max"/"min"), declared by each criterion's `maximize`
         # property, so downstream ranking (the MCP leaderboard) reads it instead of guessing from names.
         self.directions: dict[str, str] = {}
+        self._incremental_path: Path | None = None
+
+    def open_incremental(self, path: Path) -> None:
+        """Append every case recorded from now on to ``path``, one JSON object per line, as it
+        completes: what a crash keeps, and what a rerun reads back to skip the already-scored."""
+        self._incremental_path = path
 
     def add(self, values: dict[str, float], name_dataset: str) -> None:
         """
@@ -147,6 +154,35 @@ class Statistics:
             if name_dataset not in self.measures:
                 self.measures[name_dataset] = {}
             self.measures[name_dataset][name] = value
+        if self._incremental_path is not None and values:
+            recorded = {name: float(value) if np.isfinite(value) else None for name, value in values.items()}
+            with open(self._incremental_path, "a") as file:
+                file.write(json.dumps({"name": name_dataset, "values": recorded}, allow_nan=False) + "\n")
+
+    @staticmethod
+    def load_incremental(paths: list[Path]) -> dict[str, dict[str, float]]:
+        """The cases the given JSONL files hold, last row per name winning; a truncated tail line
+        (a kill mid-append) is dropped, never an error. ``null`` reads back as the NaN it stood for.
+        """
+        rows: dict[str, dict[str, float]] = {}
+        for path in paths:
+            try:
+                lines = path.read_text().splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or not isinstance(row.get("values"), dict):
+                    continue
+                rows[str(row["name"])] = {
+                    key: (float("nan") if value is None else value) for key, value in row["values"].items()
+                }
+        return rows
 
     @staticmethod
     def get_statistic(values: list[float]) -> dict[str, float]:
@@ -313,6 +349,9 @@ class Evaluator(DistributedObject):
         self._pending: dict[tuple[str, str, int], tuple] = {}
         self._pending_name: str | None = None
         self._last_result: dict[str, float] = {}
+        #: Cases a previous, interrupted run already scored (read back from the per-rank case
+        #: files): their batches are skipped, and their rows still reach the final aggregate.
+        self._scored_names: set[str] = set()
         # Per-voxel error maps under the patched path: one region-write sink per (metric, case),
         # opened at the case's first patch, closed when the case flushes. Disjoint unpadded patches
         # mean every voxel is written exactly once: the streamed map equals the whole-volume one.
@@ -360,7 +399,11 @@ class Evaluator(DistributedObject):
             world_size (int): Number of processes in the distributed evaluation setup.
 
         """
-        if self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
+        # An interrupted run (case rows on disk, no aggregate yet) resumes: the scored cases are
+        # read back and skipped, so no prompt and no clearing. A COMPLETED run keeps the usual
+        # overwrite confirmation; --overwrite clears everything, case rows included.
+        resumable = os.environ.get("KONFAI_OVERWRITE") != "True" and self._is_resumable()
+        if not resumable and self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
             confirm_overwrite_or_raise(self.metric_path, "metric", EvaluatorError)
             if self.metric_path.exists():
                 # This directory holds the rank-0 evaluation log this process already has open:
@@ -374,6 +417,17 @@ class Evaluator(DistributedObject):
         )
 
         self.dataloader, _, _ = self.dataset.get_data(world_size)
+
+    def _incremental_case_files(self, statistics: Statistics) -> list[Path]:
+        """Every rank's case file for this split, this run's and an interrupted predecessor's alike."""
+        return sorted(self.metric_path.glob(f"{statistics.filename.stem}.cases.*.jsonl"))
+
+    def _is_resumable(self) -> bool:
+        """Whether an interrupted run left case rows without their aggregate for some split."""
+        return any(
+            self._incremental_case_files(statistics) and not statistics.filename.exists()
+            for statistics in (self.statistics_train, self.statistics_validation)
+        )
 
     def update(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
         """
@@ -389,6 +443,10 @@ class Evaluator(DistributedObject):
         """
         if self._streamed:
             return self._update_streamed(batch_sample, statistics)
+        if self._scored_names and len(self.metrics):
+            name = batch_sample[next(iter(self.metrics))].name[0]
+            if name in self._scored_names:
+                return statistics.measures.get(name, {})
         result: dict[str, float] = {}
         moved = self._groups_on(batch_sample)
         for output_group in self.metrics:
@@ -400,21 +458,20 @@ class Evaluator(DistributedObject):
                 ]
                 name = batch_sample[output_group].name[0]
                 for metric in self.metrics[output_group][target_group]:
-                    with self._clock.phase(metric.get_name()), torch.no_grad():
+                    metric_name: str = metric.get_name()
+                    with self._clock.phase(metric_name), torch.no_grad():
                         if getattr(metric, "accepts_attributes", False):
                             loss = metric(output_tensor, *targets, attributes=target_attribute)
                         else:
                             loss = metric(output_tensor, *targets)
-                    if isinstance(loss, tuple):
-                        true_loss = loss[1]
-                        if len(loss) == 3 and metric.dataset:
-                            with self._clock.phase("map"):
-                                self._write_map(metric, output_group, name, loss[2])
-                    else:
-                        true_loss = loss.item()
+                    outcome = CriterionResult.of(loss, metric_name)
+                    true_loss = outcome.materialized()
+                    if outcome.map is not None and getattr(metric, "dataset", None):
+                        with self._clock.phase("map"):
+                            self._write_map(metric, output_group, name, outcome.map)
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
-                    base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+                    base_key = f"{output_group}:{target_group}:{metric_name}"
                     Evaluator._record_value(result, statistics, base_key, true_loss, direction)
         if len(self.metrics) > 0:
             statistics.add(result, name)
@@ -490,6 +547,8 @@ class Evaluator(DistributedObject):
         end of the split closes the last one.
         """
         name = batch_sample[next(iter(self.metrics))].name[0]
+        if name in self._scored_names:
+            return self._last_result
         if self._pending_name is not None and name != self._pending_name:
             with self._clock.phase("flush"):
                 self._flush_pending(statistics)
@@ -584,8 +643,7 @@ class Evaluator(DistributedObject):
             return
         result: dict[str, float] = {}
         for (output_group, target_group, _index), (metric, states) in self._pending.items():
-            loss = metric.combine_metric(states)
-            true_loss = loss[1] if isinstance(loss, tuple) else float(loss.item())
+            true_loss = CriterionResult.of(metric.combine_metric(states), metric.get_name()).materialized()
             direction = "max" if getattr(metric, "maximize", False) else "min"
             base_key = f"{output_group}:{target_group}:{metric.get_name()}"
             Evaluator._record_value(result, statistics, base_key, true_loss, direction)
@@ -644,6 +702,20 @@ class Evaluator(DistributedObject):
 
         self._iter_dataset = dataloader.dataset
         self._clock = SweepClock()
+        # Per-case persistence: what an interrupted run already scored is read back and skipped,
+        # and every case scored from here on is appended to this rank's own case file as it
+        # completes, so a crash at case N-1 of N keeps N-1 cases. The aggregate below is built from
+        # the union.
+        scored = Statistics.load_incremental(self._incremental_case_files(statistics))
+        self._scored_names = set(scored)
+        if scored:
+            statistics.measures.update(scored)
+            if global_rank == 0:
+                print(
+                    f"[KonfAI] evaluation {label}: {len(scored)} case(s) already scored ->"
+                    " skipped (--overwrite recomputes)."
+                )
+        statistics.open_incremental(self.metric_path / f"{statistics.filename.stem}.cases.rank{global_rank}.jsonl")
         try:
             with (
                 self._clock.phase("split"),
@@ -699,8 +771,8 @@ class Evaluator(DistributedObject):
 
 
 def build_evaluate(
-    evaluations_file: Path | str | dict = Path("./Evaluation.yml").resolve(),
-    evaluations_dir: Path | str = Path("./Evaluations").resolve(),
+    evaluations_file: Path | str | dict = Path("./Evaluation.yml"),
+    evaluations_dir: Path | str = Path("./Evaluations"),
 ) -> DistributedObject:
     """
     Build and return the configured evaluation workflow without executing it.
@@ -731,18 +803,19 @@ def build_evaluate(
 @run_distributed_app
 def evaluate(
     overwrite: bool = False,
-    gpu: list[int] | None = cuda_visible_devices(),
+    gpu: list[int] | None = None,
     cpu: int = 1,
     quiet: bool = False,
     tensorboard: bool = False,
-    evaluations_file: Path | str | dict = Path("./Evaluation.yml").resolve(),
-    evaluations_dir: Path | str = Path("./Evaluations").resolve(),
+    evaluations_file: Path | str | dict = Path("./Evaluation.yml"),
+    evaluations_dir: Path | str = Path("./Evaluations"),
 ) -> DistributedObject:
     """
     Build and execute the configured evaluation workflow.
 
-    This compatibility wrapper preserves the historical CLI-facing API while
-    delegating the pure build step to :func:`build_evaluate`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
+    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
+    The pure build step is :func:`build_evaluate`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_evaluate(

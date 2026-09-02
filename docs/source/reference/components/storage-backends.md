@@ -352,3 +352,5 @@ multi-dimensional does not survive a read. Geometry is safe because `Origin` and
 - {doc}`../../concepts/datasets`: grouped dataset layout, selectors, patching
 - {doc}`../../concepts/streaming`: locality declarations, planner rules, and fallbacks
 - {doc}`transforms`: transform capabilities and streamability
+- {doc}`../api/extension-points`: adding your own backend (the `AbstractFile`
+  declarations and the `BACKENDS` registry)

@@ -679,14 +679,14 @@ class FireANTsEngine:
         # refinement at full resolution, where each patch sees only local anatomy, so a per-patch
         # rigid has no global meaning and neighbouring patches would each estimate a different one
         # and tear the blended field at the seams.
-        affine_matrix: "torch.Tensor | None"
+        affine_matrix: torch.Tensor | None
         if self._linear_method == "none":
             affine_matrix = None  # the deformable stage builds its own identity init
         else:
             # The rigid's starting translation mirrors ANTs' ``-r [fixed,moving,N]``: "cof" is the
             # centre of FRAME (N=0), "com" the centre of MASS (N=1). "cof" aligns the image frames,
             # not the subjects, so a subject sitting off its frame centre starts the chain misplaced.
-            init_translation: "str | torch.Tensor" = "cof"
+            init_translation: str | torch.Tensor = "cof"
             if self._moments_init == "com":
                 init_translation = self._center_of_mass_translation(
                     fixed,

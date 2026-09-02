@@ -8,7 +8,7 @@ KonfAI ships six command-line entrypoints, across four packages:
 | Command | Package | Purpose |
 | --- | --- | --- |
 | `konfai` | `konfai` | run a YAML workflow: train, predict, evaluate, transform |
-| `konfai-cluster` | `konfai` (`cluster` extra) | submit those workflows to SLURM |
+| `konfai-cluster` | `konfai` (submission needs the `cluster` extra) | submit those workflows to SLURM |
 | `konfai-apps` | `konfai-apps` | run a packaged App |
 | `konfai-apps-server` | `konfai-apps` | serve Apps over HTTP |
 | `konfai-mcp` | `konfai-mcp` | expose KonfAI to an LLM agent |
@@ -29,6 +29,7 @@ Use `konfai` when you are still designing a workflow directly from YAML.
 | `PREDICTION` | Run inference using one or more checkpoints. |
 | `EVALUATION` | Compute metrics on saved outputs. |
 | `TRANSFORM` | Prepare a dataset: apply a transform chain and write the result. |
+| `list` | Print the components a YAML config can reference (see below). |
 
 ### Common options
 
@@ -41,9 +42,10 @@ meanings noted below, and has **no** `-tb`.
 | `-c`, `--config` | YAML file to use. |
 | `-y`, `--overwrite` | Overwrite existing outputs without prompting. Under `TRANSFORM`: recompute cases whose output exists, without it such a case is skipped, and nothing prompts. |
 | `--gpu` | One or more GPU ids. |
-| `--cpu` | Number of CPU workers when not using GPUs. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
+| `--cpu` | Number of CPU worker processes when no `--gpu` is given; the run stays on CPU unless `--gpu` is passed. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
 | `-q`, `--quiet` | Reduce console output. |
 | `-tb`, `--tensorboard` | Launch TensorBoard. Not accepted by `TRANSFORM`. |
+| `--init` | Create the config file if missing, resolve every default into it, and exit without running. |
 
 ### Default config file per command
 
@@ -59,6 +61,27 @@ current directory**:
 
 Reading a config rewrites it on disk: after a run your YAML holds the resolved
 defaults. See {doc}`../concepts/configuration`.
+
+### Generating a config: `--init`
+
+`konfai <COMMAND> --init` is how a config file is generated: it creates the
+command's config file when missing (seeded with its root key), binds the
+workflow once so every default resolves into the file, and exits without
+running anything. `-c` picks the filename. A binding error after partial
+resolution still leaves what resolved on disk, plus the error naming the key.
+
+```bash
+konfai TRAIN --init -c Config.yml
+```
+
+### `konfai list`
+
+`konfai list {transforms,augmentations,criteria,reductions,models,blocks}`
+prints one component family: the exact spelling a YAML config references, and
+each component's one-line doc. `konfai list models` covers both the Python
+catalog (`segmentation.UNet.UNet`) and the declarative catalog
+(`default|UNet.yml`). `list` takes none of the run flags and loads no torch for
+`--help`.
 
 ### Command-specific options
 
@@ -108,7 +131,10 @@ defaults. See {doc}`../concepts/configuration`.
 The default is **CPU**: `--gpu` defaults to an empty list, so pass `--gpu 0` to
 use a card. An id that is not among the visible CUDA devices is a usage error
 (exit code 2), checked once the command is dispatched so that `--help` never
-loads torch. `--cpu` must be greater than 0.
+loads torch. `--cpu` must be greater than 0. Unless `-q` is passed, every run
+prints one startup line naming the resolved devices (`[KonfAI] Running on
+cuda:0`, or `[KonfAI] Running on CPU (4 workers)`), so a silent CPU fallback on
+a GPU machine is visible.
 `--version` works on the root parser, `konfai --version`, not on a subcommand.
 
 ## `konfai-apps`
@@ -235,8 +261,9 @@ Important options:
 ## `konfai-cluster`
 
 Cluster-oriented wrapper around the low-level `konfai` commands: it takes the
-same workflow arguments and submits them to SLURM through `submitit`. Depends on
-the optional `cluster` extra.
+same workflow arguments and submits them to SLURM through `submitit`. The
+command ships with the core package; submitting needs `submitit`, which the
+`cluster` extra installs.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -244,7 +271,6 @@ the optional `cluster` extra.
 | `--num-nodes` | `1` | Nodes to request. |
 | `--memory` | `16` | Memory per node, in GB. |
 | `--time-limit` | `1440` | Wall-clock limit, in minutes. |
-| `--resubmit` | off | Accepted, but **not implemented**: the run warns and does not requeue. |
 
 Otherwise `konfai-cluster` takes the same subcommands and arguments as `konfai`.
 **The cluster options come before the subcommand**: they sit on the top-level

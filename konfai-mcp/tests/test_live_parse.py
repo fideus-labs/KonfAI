@@ -86,3 +86,28 @@ def test_process_memory_not_confused_with_gpu_memory() -> None:
 def test_blank_and_unrelated_lines_return_none() -> None:
     assert parse_live_metric_line("") is None
     assert parse_live_metric_line("[konfai-mcp] job started") is None
+
+
+def test_core_host_stat_emitters_parse_as_host_stats() -> None:
+    """parse_host_stats matches the literal f-strings core emits (environment.get_memory_info /
+    get_cpu_info / gpu_info). A harmless rewording in core would pass every suite while silently
+    blanking Studio's RAM/GPU charts, so the real emitter output is fed through the parser here."""
+    from konfai.utils.runtime import environment
+
+    line = f"Caching Train: {environment.get_memory_info()} | {environment.get_cpu_info()}: 5% 3/60"
+    stats = parse_host_stats(line)
+    assert {"memory_gb", "memory_percent", "cpu_percent"} <= set(stats)
+    assert stats["memory_gb"] > 0
+
+    # gpu_info reads NVML, which the konfai runtime initialises before emitting; without a usable
+    # GPU the RAM/CPU contract above still holds.
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        gpu_line = environment.gpu_info()
+    except Exception:
+        gpu_line = ""
+    if gpu_line:
+        gpu_stats = parse_host_stats(f"Training : Loss (x : 0.1) {gpu_line} | {environment.get_memory_info()}: 1/10")
+        assert {"memory_gpu_gb", "memory_gpu_percent"} <= set(gpu_stats)

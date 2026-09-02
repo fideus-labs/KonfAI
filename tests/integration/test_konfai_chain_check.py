@@ -18,12 +18,11 @@
 chain it applies to a model input is not that one. The unit suite pins the comparison; this pins the
 wiring: the check runs on the checkpoint TRAIN actually wrote, and its lines reach the run's log."""
 
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from harness import prepare_experiment_dir, replace_once, subprocess_env
+from harness import prepare_experiment_dir, replace_once, run_workflow
 
 pytestmark = pytest.mark.integration
 
@@ -91,12 +90,7 @@ def test_prediction_warns_in_its_log_when_a_model_input_drifts_from_training(tmp
     )
     (experiment_dir / "run_chain_check.py").write_text(RUNNER_SOURCE, encoding="utf-8")
 
-    subprocess.run(
-        [sys.executable, "run_chain_check.py"],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
+    run_workflow([sys.executable, "run_chain_check.py"], experiment_dir)
 
     matching = (experiment_dir / "Predictions_Matching" / TRAIN_NAME / "log_0.txt").read_text(encoding="utf-8")
     mismatched = (experiment_dir / "Predictions_Mismatched" / TRAIN_NAME / "log_0.txt").read_text(encoding="utf-8")

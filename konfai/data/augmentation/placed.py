@@ -27,7 +27,7 @@ try:
 except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.data.augmentation.base import DataAugmentation, _hashed_normal_field, _require_simpleitk
-from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
+from konfai.data.transform import LocalityKind, RegionContext
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import AugmentationError
 
@@ -39,8 +39,7 @@ class PlacedDraw(DataAugmentation):
     spatial extent (``full``), which the whole volume passes as zeros and its own shape.
     """
 
-    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
+    locality = LocalityKind.POINTWISE
 
     @abstractmethod
     def _apply(
@@ -121,16 +120,28 @@ class Noise(PlacedDraw):
 
 
 class CutOUT(PlacedDraw):
+    """Cut a box out of the copy and fill it with ``value``.
+
+    ``cutout_size`` is the box's edge as a FRACTION of the volume's extent per axis, in (0, 1]:
+    the box is placed in normalised coordinates, so a 0.34 box cuts about ``0.34**rank`` of the
+    volume. An integer count of voxels is not a size this draw takes: through the YAML binder it
+    once bound silently and erased the whole copy.
+    """
+
     def __init__(
         self,
-        c_prob: float,
-        cutout_size: int,
+        cutout_size: float,
         value: float,
         groups: list[str] | None = None,
     ) -> None:
         super().__init__(groups)
-        self.c_prob = c_prob
-        self.cutout_size = cutout_size
+        if not 0.0 < float(cutout_size) <= 1.0:
+            raise AugmentationError(
+                f"'CutOUT' was given cutout_size={cutout_size!r}, which is not in (0, 1].",
+                "cutout_size is the box's edge as a fraction of the volume's extent per axis:"
+                " cutout_size: 0.34 cuts about a third of each axis.",
+            )
+        self.cutout_size = float(cutout_size)
         self.centers: dict[int, list[torch.Tensor]] = {}
         self.value = value
 

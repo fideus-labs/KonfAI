@@ -47,8 +47,8 @@ konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION
 
 <p align="center">
   <picture>
-    <source media="(max-width: 640px)" srcset="docs/source/_static/readme/execution-flow-mobile.svg" width="720" height="1330" />
-    <img src="docs/source/_static/readme/execution-flow.svg" alt="KonfAI reads medical data regionally, executes transforms and PyTorch graphs patch by patch, reconstructs outputs, and delivers medical datasets, Apps, HTTP services, Slicer workflows, and agent-operated experiments." width="1100" height="458" />
+    <source media="(max-width: 640px)" srcset="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow-mobile.svg" width="720" height="1330" />
+    <img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow.svg" alt="KonfAI reads medical data regionally, executes transforms and PyTorch graphs patch by patch, reconstructs outputs, and delivers medical datasets, Apps, HTTP services, Slicer workflows, and agent-operated experiments." width="1100" height="458" />
   </picture>
 </p>
 
@@ -76,7 +76,7 @@ registration, and synthesis:
 - **Running a published model?** → the one-command App install ([Real workloads](#real-workloads-one-app-contract)).
 - **Adapting an experiment?** → the [Quickstart](#quickstart-first-smoke-run) (train → predict → evaluate).
 - **Building an App?** → [`konfai-apps`](https://konfai.readthedocs.io/en/latest/usage/apps.html).
-- **Contributing?** → [`AGENTS.md`](AGENTS.md).
+- **Contributing?** → [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md).
 
 ## Why KonfAI?
 
@@ -126,7 +126,11 @@ registration systems, not reduced demonstration networks:
 These figures retain each bundle's stated case, ensemble and hardware
 conditions; they are evidence of executable scale, not a cross-task
 leaderboard. The per-app time and RAM ratios come from each bundle's own
-small/medium/large benchmark table (see the bundle READMEs under `apps/`). The bundles share the same App contract across local directories,
+small/medium/large benchmark table (see the bundle READMEs under
+[`apps/`](https://github.com/fideus-labs/KonfAI/tree/main/apps)); the shared
+measurement protocol and the runnable harness are in
+[`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks).
+The bundles share the same App contract across local directories,
 Hugging Face and HTTP, with SlicerKonfAI for general Apps and SlicerImpactReg
 for dedicated registration.
 
@@ -215,7 +219,7 @@ The shipped `epochs: 5` is demo-sized: it walks the complete path in a few
 minutes and is not meant to produce a useful checkpoint; raise it to 100+ for a
 real run. To do all of the above in one go, including predict, evaluate and a
 plot of the result, run every cell of
-[`examples/Segmentation/Segmentation_demo.ipynb`](examples/Segmentation/Segmentation_demo.ipynb).
+[`examples/Segmentation/Segmentation_demo.ipynb`](https://github.com/fideus-labs/KonfAI/blob/main/examples/Segmentation/Segmentation_demo.ipynb).
 
 The full walkthrough (predict, evaluate, what to inspect, common first issues,
 notebook entry points) lives in the
@@ -242,7 +246,10 @@ A chain streams when every step declares the region it needs: the exact patch
 (`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`Resample`),
 or a whole-volume statistic read once from disk (`Normalize`). On the stream
 path, a 16 GiB uncompressed `.mha` trains at patch 64³ under an 8 GiB memory cap
-with a peak resident set of 0.46 GiB.
+with a peak resident set of 0.46 GiB. Reproduce the bounded-memory claim with
+`python benchmarks/bench_streaming.py --gib 16 --budget 1` (the tracked
+[`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks)
+harness pins the protocol).
 
 `konfai TRANSFORM` decides that per case *before* it writes a byte: STREAM or
 LOAD, WHOLE-VOLUME naming the stage that refused to stream, REDUCE or REFUSED
@@ -358,8 +365,11 @@ Contributions are welcome: improve examples, clarify docs, add tests, or extend
 models / transforms / apps. See the
 [developer guide](https://konfai.readthedocs.io/en/latest/development.html).
 
-**AI coding agents:** start with [`AGENTS.md`](AGENTS.md), the canonical
-reference for conventions, commands, and repository rules.
+**AI coding agents:** start with [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md), the canonical
+reference for conventions, commands, and repository rules. The docs site also
+publishes [llms.txt](https://konfai.readthedocs.io/en/latest/llms.txt) and
+[llms-full.txt](https://konfai.readthedocs.io/en/latest/llms-full.txt): the
+quickstart, config guides and component catalog in one agent-ingestible file.
 
 ---
 
@@ -374,4 +384,4 @@ reference for conventions, commands, and repository rules.
 }
 ```
 
-Licensed under [Apache-2.0](LICENSE).
+Licensed under [Apache-2.0](https://github.com/fideus-labs/KonfAI/blob/main/LICENSE).

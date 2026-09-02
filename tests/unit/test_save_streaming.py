@@ -27,6 +27,7 @@ import torch
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Permute, Save, Standardize, Transform
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import stream as stream_module
 from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
@@ -128,7 +129,6 @@ def test_multi_slab_sweep_writes_the_same_cache_as_the_whole_volume_load(
 
 def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failure after the first slab is written must remove the partial entry, not publish it."""
-    from konfai.utils import dataset as dataset_module
 
     monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 4)
     source = _source(tmp_path)
@@ -136,7 +136,7 @@ def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeyp
     reference = _whole_volume_patches(manager, [Clip(0.0, 50.0)])
 
     calls = 0
-    real_write = dataset_module._MhaDataStream.write_slice
+    real_write = stream_module._MhaDataStream.write_slice
 
     def failing_after_first(self, slices, data):
         nonlocal calls
@@ -145,10 +145,10 @@ def test_failed_multi_slab_sweep_leaves_no_partial_cache(tmp_path: Path, monkeyp
             raise OSError("disk full")
         real_write(self, slices, data)
 
-    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", failing_after_first)
+    monkeypatch.setattr(stream_module._MhaDataStream, "write_slice", failing_after_first)
     with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
         patch = manager.get_data(0, 0, [], True)
-    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", real_write)
+    monkeypatch.setattr(stream_module._MhaDataStream, "write_slice", real_write)
 
     assert calls > 1
     assert torch.equal(patch, reference[0])
@@ -215,7 +215,6 @@ def test_unstreamable_destination_keeps_the_whole_volume_path(tmp_path: Path) ->
 
 
 def test_failed_sweep_falls_back_to_the_whole_volume_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from konfai.utils import dataset as dataset_module
 
     source = _source(tmp_path)
     transforms = [Clip(0.0, 50.0), Save(str(tmp_path / "cache"))]
@@ -225,7 +224,7 @@ def test_failed_sweep_falls_back_to_the_whole_volume_path(tmp_path: Path, monkey
     def broken_write(self, slices, data):
         raise OSError("disk full")
 
-    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", broken_write)
+    monkeypatch.setattr(stream_module._MhaDataStream, "write_slice", broken_write)
     with pytest.warns(UserWarning, match="Falling back to the whole-volume path"):
         patch = manager.get_data(0, 0, [], True)
     monkeypatch.undo()
@@ -248,7 +247,6 @@ def test_an_interrupted_sweep_aborts_its_stream_and_does_not_fall_back(
     """Ctrl-C in the middle of a slab is not a sweep failure: the partial entry is removed and the
     interrupt propagates. Treated as one, it would be warned away, and the whole-volume fallback
     would then run the whole case the user just asked to stop."""
-    from konfai.utils import dataset as dataset_module
 
     source = _source(tmp_path)
     manager = _manager(source, [Clip(0.0, 50.0), Save(str(tmp_path / "cache"))])
@@ -256,7 +254,7 @@ def test_an_interrupted_sweep_aborts_its_stream_and_does_not_fall_back(
     def interrupted_write(self, slices, data):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(dataset_module._MhaDataStream, "write_slice", interrupted_write)
+    monkeypatch.setattr(stream_module._MhaDataStream, "write_slice", interrupted_write)
     with pytest.raises(KeyboardInterrupt):
         manager.get_data(0, 0, [], True)
     monkeypatch.undo()

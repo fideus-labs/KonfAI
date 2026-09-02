@@ -45,6 +45,18 @@ from konfai import (
 from konfai.utils.errors import ConfigError
 
 
+class NullSummaryWriter:
+    """Stands in for TensorBoard's ``SummaryWriter`` when the extra is absent: every ``add_*`` and
+    ``close`` call is absorbed, so the workflow still produces its outputs; only the curves are lost.
+    """
+
+    def __getattr__(self, name: str):
+        def _absorb(*args, **kwargs) -> None:
+            return None
+
+        return _absorb
+
+
 def _log_signal_format(array: np.ndarray) -> dict[str, np.ndarray]:
     return {str(i): channel for i, channel in enumerate(array)}
 

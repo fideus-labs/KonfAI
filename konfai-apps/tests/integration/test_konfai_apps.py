@@ -245,7 +245,7 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
         model.Projection.weight.fill_(1.0)
         model.Projection.bias.zero_()
 
-    checkpoint = {"Model": model.state_dict()}
+    checkpoint = {"Model": model.network_states()}
     torch.save(checkpoint, app_dir / "tiny_0.pt")
     torch.save(checkpoint, app_dir / "tiny_1.pt")
 
@@ -369,7 +369,7 @@ def _write_local_finetune_app(app_dir: Path) -> None:
         "epoch": _PRETRAINED_EPOCH,
         "it": _PRETRAINED_IT,
         "loss": 0.0,
-        "Model": model.state_dict(),
+        "Model": model.network_states(),
     }
     torch.save(checkpoint, app_dir / "tiny_0.pt")
     torch.save(checkpoint, app_dir / "tiny_1.pt")

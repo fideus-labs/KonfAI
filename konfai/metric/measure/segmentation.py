@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from konfai.metric.measure.base import Criterion, MaskedLoss
+from konfai.metric.measure.base import Criterion, CriterionOutput, LabelledValues, MaskedLoss
 from konfai.utils.errors import MeasureError
 
 #: Per-label sums of one (output, reference) pair, what every Dice is computed from and the state a
@@ -193,7 +193,7 @@ class Dice(Criterion):
     @staticmethod
     def _soft_loss(
         labels: list[int] | None, output: torch.Tensor, target: torch.Tensor
-    ) -> tuple[torch.Tensor, dict[int, float]]:
+    ) -> tuple[torch.Tensor, dict[int, float] | LabelledValues]:
         """The differentiable soft Dice over a probability map's channels, one per label the
         reference holds, every label in one expression: their channels gathered in one slice, the
         reference one comparison against the label vector on an axis of its own, and each sum one
@@ -208,8 +208,10 @@ class Dice(Criterion):
         where the loop peaked at one channel (6 -> 180 MiB), and ``_soft_sums`` is the frugal route.
 
         The reference's own mass is the voxel count ``_reference_counts`` already holds, the exact
-        integer the metric route's ``_score`` divides by. The readouts come back in one
-        ``.tolist()``: a ``.item()`` per label drained the CUDA queue mid-loss, twice per label.
+        integer the metric route's ``_score`` divides by. The per-label dices leave as a
+        ``LabelledValues`` read off the device lazily (``Measure._materialize``), never a
+        ``.tolist()`` in the forward: a ``.item()`` per label once drained the CUDA queue mid-loss,
+        twice per label.
         """
         labels, reference = Dice._reference_counts(target, labels)
         held = [label for label, count in zip(labels, reference, strict=True) if count]
@@ -230,14 +232,14 @@ class Dice(Criterion):
         intersection = (probabilities * on_reference).sum(summed)
         reference_mass = torch.tensor(held_counts, dtype=torch.float32, device=output.device)
         dices = (2.0 * intersection + 1e-6) / (probabilities.sum(summed) + reference_mass + 1e-6)
-        values = iter(dices.tolist())
-        result = {label: next(values) if count else np.nan for label, count in zip(labels, reference, strict=True)}
-        return 1 - dices.mean(), result
+        values = dices.new_full((len(labels),), float("nan"))
+        values[[index for index, count in enumerate(reference) if count]] = dices.detach()
+        return 1 - dices.mean(), LabelledValues(values, list(labels))
 
     @staticmethod
     def _loss(
         labels: list[int] | None, output: torch.Tensor, *targets: torch.Tensor
-    ) -> tuple[torch.Tensor, dict[int, float]]:
+    ) -> tuple[torch.Tensor, dict[int, float] | LabelledValues]:
         target = Dice.on_grid(output, targets[0])
         if output.shape[1] > 1:
             return Dice._soft_loss(labels, output, target)
@@ -263,7 +265,7 @@ class Dice(Criterion):
         mask = mask == 1
         return output * mask, targets[0] * mask
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, dict[int, float]]:
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
         return self.loss(*self._masked(output, targets))
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
@@ -316,7 +318,7 @@ class DiceSaveMap(Dice):
         evaluation write it region by region instead of needing the whole case."""
         return self._map(*self._masked(output, targets))
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor):  # type: ignore[override]
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
         output, target = self._masked(output, targets)
         loss, true_loss = self.loss(output, target)
         return loss, true_loss, self._map(output, target)

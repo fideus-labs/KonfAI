@@ -16,6 +16,138 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## v1.8.3 (2026-09-02)
+
+### Features
+
+- `konfai <COMMAND> --init` generates a resolved default config: the file is created when
+  missing (seeded with its root key), every default is bound into it, and the command exits
+  without running. The former `KONFAI_CONFIG_MODE` generation modes
+  (`default`, `interactive`, `remove`) are gone; `Done` and `Import` remain.
+- `konfai list {transforms,augmentations,criteria,reductions,models,blocks}` prints each
+  component family as the exact YAML spelling plus a one-line doc; the same catalog is
+  `konfai.list_components(kind)` in Python.
+- `Model.pretrained_from` config entry: a fresh TRAIN seeds its model from another framework's
+  checkpoint (MONAI, torchvision, nnU-Net) by building the reference from `builder` + `args`,
+  loading `checkpoint` into it, and transferring weights in forward-execution order. The
+  transfer fills every target tensor or raises.
+- `Model.allow_head_resize` (default false): checkpoint loads now refuse shape mismatches with
+  an error naming the tensor and both shapes; the opt-in warm-starts the overlapping slice for
+  fine-tuning across a different head.
+- Tracked `benchmarks/` harness behind the documented performance claims: `bench_streaming.py`
+  reproduces the bounded-memory claim in one command, `bench_hotpaths.py` pins the framework
+  hot paths; docs gained a "Benchmarks and protocol" page and the site publishes `llms.txt` /
+  `llms-full.txt`.
+- Transform authoring is a tiered contract: tier 0 is `__call__` alone (whole volume, nothing
+  breaks), tier 1 is the `locality` class attribute (plus `halo`), tier 2 the streaming-aware
+  method overrides; 25 method overrides collapsed into declarations.
+- Storage backends are declarative: `AbstractFile` carries the per-backend facts as class
+  attributes (`single_store`, `concurrent_write_safe`, `case_file_suffix`, `reads_remote`,
+  `writes_pyramid`, `lists_case_entries`, `can_stream`) and `BACKENDS` is the one
+  token-to-class registry; a new format is one module plus one entry.
+- DICOM series stream first-class: `read_granularity` answers the plane, a budget-capped
+  decoded-plane cache serves region reads, and a region no longer pays one full `dcmread` per
+  touched slice.
+- Elastix-based transforms stream: fields are held as the control lattice only and evaluated
+  per region; masked `Standardize`/`Clip` are `GLOBAL_STAT` via masked dataset statistics.
+- konfai-mcp: `fine_tune_app` restored as the one-call tier next to
+  `import_app` + `run_resume(weights_only=True)`, proven by an end-to-end fine-tune test.
+
+### Fixed
+
+- Config binder: wrong-shaped YAML (a nested block or list where a scalar is taken) is refused
+  with the dotted path instead of silently bound; an explicit `name: null` binds `None`, the
+  disabled spelling, instead of reactivating the default.
+- RESUME never re-splits: the seed every preparation draw comes from is recorded in
+  `Statistics/<train_name>/Seed.txt` and read back on RESUME, so unseeded runs are reproducible
+  by default.
+- Evaluation persists per case (JSONL beside the metric JSON) and prediction skips cases whose
+  outputs already exist (printed count, `--overwrite` recomputes), so both workflows resume
+  after a mid-cohort failure.
+- Honest exits: no checkpoint junk on restart/no-progress exits, crash saves are named
+  `crash_*.pt` and never contend for best; TensorBoard is optional (no-op writer plus one
+  warning naming the extra); one startup line names the resolved devices; no CUDA probe at
+  import.
+- Network/torch protocol: `state_dict()` honors the torch signature and returns the flat
+  torch-native dict (checkpoint files on disk unchanged); `network_states()` is the KonfAI
+  aggregate; `graph_parameters()` / `graph_apply()` carry the KonfAI traversals and torch's
+  native `parameters`/`named_parameters`/`apply` are back; EMA pairs both sides with the same
+  native traversal.
+- Two distinct nested networks sharing a name are refused (the name is the checkpoint key);
+  a shared object under several module names is visited once.
+- Alias-based weight remapping is segment-aligned (`layer1` no longer claims `layer10.*`) and
+  an alias shortfall raises a `ConfigError` naming the module.
+- Criterion results are one typed contract (`CriterionResult`): losses, `(value, labels)`
+  pairs and maps normalize through it, a non-tensor return is refused naming the criterion;
+  mid-forward host syncs removed from the masked-loss family, Dice and TRE (deferred one-batch
+  readout); FID, TripletLoss, MutualInformationLoss, L1LossRepresentation and WGP deleted in
+  favor of classpath routes (torchmetrics/MONAI/torch); LPIPS scores every batch item instead
+  of the first; FocalLoss `alpha=None` means uniform; PSNR and SSIM share the CT dynamic-range
+  default 4095.
+- Models: residual `Add` is a sequential fold (no stacked copy, ONNX `Add` nodes), attention
+  uses `scaled_dot_product_attention`, the YAML registry gained the modern atoms (SiLU, Mish,
+  ConstantPad, PixelShuffle, ...), GeneratorV3's head wiring fixed (it could never forward),
+  `Gan()` no longer shares import-time default subnetworks.
+- Data manager: destination groups with disagreeing patch counts are refused at `prepare()`
+  naming case, groups and chains; one-pass DDP shards are balanced by patch load; the
+  batch-size-1 evaluation path collates a view instead of a copy; `subset` and `validation`
+  share one selector grammar (`~` exclusion, negative slice ends, mixed lists).
+- Patching/reduction: sweep pricing keyed to the segment it prices; the REDUCE route probes
+  the run's first fold and replays the stat pass's regions.
+- API: `predict` model lists normalized, unspellable sweep trees refused.
+- `konfai.data.transform.inference` moved to `konfai_apps.transforms`; the bare stage name
+  `KonfAIInference` still resolves through the loader when konfai-apps is installed and
+  refuses with the install hint otherwise.
+- CutOUT `cutout_size` is a fraction of the extent per axis in `(0, 1]` (was an int voxel
+  size); `c_prob` deleted.
+- A declared `memory_budget` below 256 MiB warns: the stack cannot honor less.
+
+### Performance
+
+- Residual junctions no longer materialize an N-tensor stack; attention runs through SDPA
+  (measured max abs diff 7.15e-7 against the MONAI ViT parity pin).
+- One-pass workflows batch a singleton as a view; deferred criterion values transfer once per
+  device per step.
+- Remote datasets pay no per-patch path-resolution round trips; H5 read-chunk caches and the
+  DICOM plane cache take their slice of the declared budget.
+
+### Build, CI, dependencies
+
+- `lxml`, `requests` and `huggingface_hub` are no longer hard dependencies (stdlib XML and
+  urllib; `huggingface_hub` moved to the `all` extra for the IMPACT criteria); the orphaned
+  `fid` extra is gone; konfai-apps declares its own `requests` + `huggingface_hub`.
+- One dev-dependency list, one mypy config, `py.typed` everywhere.
+- CI: suites run under pytest-xdist with pip caching and CPU torch wheels on Linux; the five
+  `apps/*` bundle suites run in CI; publish uploads recover from partial runs
+  (`skip-existing`); the studio wheel's built front is verified.
+- konfai-mcp pins `konfai==` / `konfai-apps==` at its scm version like konfai-apps does.
+- New docs job builds the Sphinx site with `-W` on every docs/core change; docs deps unified
+  on `docs/requirements.txt`.
+
+### Breaking / migration notes
+
+- **Python callers of `Network` checkpoints**: `Network.state_dict()` now returns the
+  torch-native flat dict; build/unpack KonfAI checkpoints through `network_states()`.
+  Checkpoint files on disk are unchanged; RESUME/PREDICTION read them as before.
+  `parameters(pretrained)` / custom `apply()` are now `graph_parameters(pretrained=...)` /
+  `graph_apply()`.
+- **Checkpoint loads refuse shape mismatches by default**: set `Model.allow_head_resize: true`
+  to restore the warm-start overlap copy.
+- **`CutOUT.cutout_size`** is now a fraction in `(0, 1]` per axis; `c_prob` is gone.
+- **Deleted criteria**: `FID`, `TripletLoss`, `MutualInformationLoss`, `L1LossRepresentation`,
+  `WGP`. Classpath replacements: `torchmetrics.image.fid:FrechetInceptionDistance`,
+  `torch:nn:TripletMarginLoss`, `monai.losses:GlobalMutualInformationLoss`.
+- **SSIM's default `dynamic_range` moved 4024 to 4095** (the shared CT constant): default-config
+  SSIM numbers shift on the order of 1e-3.
+- **`Dice` (soft route) and `TRE` return `(loss, LabelledValues)`** instead of `(loss, dict)`:
+  an out-of-tree caller reading `[1]` as a dict must materialize it.
+- **Config generation modes removed**: `KONFAI_CONFIG_MODE=default|interactive|remove` no
+  longer exist; use `konfai <COMMAND> --init`.
+- **`validation: <int>`** now selects that position (matching `subset:`) instead of refusing.
+- **`TrainSubset` deleted**: it was an identity subclass; spell `Subset`.
+- **`konfai` package private re-exports removed**: the nine package `__init__`s no longer
+  re-export single-underscore names; import from the defining submodule.
+
 ## v1.8.2 (2026-08-31)
 
 The streaming engine now prices its reads on the block the store actually decodes, a dataset root

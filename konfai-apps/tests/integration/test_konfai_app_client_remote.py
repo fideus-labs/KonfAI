@@ -117,7 +117,7 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     model = module.TinySynthNet()
-    torch.save({"Model": model.state_dict()}, app_dir / "tiny.pt")
+    torch.save({"Model": model.network_states()}, app_dir / "tiny.pt")
 
 
 def _subprocess_env(bin_dir: Path, token: str) -> dict[str, str]:

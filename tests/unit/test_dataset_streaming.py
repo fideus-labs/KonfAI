@@ -29,10 +29,8 @@ import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import DataAugmentationsList
-from konfai.data.data_manager import (
-    DatasetIter,
-    Group,
-    GroupTransform,
+from konfai.data.data_manager import DatasetIter, Group, GroupTransform
+from konfai.data.data_manager.groups import (
     _check_patch_transform_invertible,
     _check_patch_transform_locality,
     _check_patch_transform_shape,
@@ -43,7 +41,6 @@ from konfai.data.transform import (
     Dilate,
     Flip,
     Gradient,
-    KonfAIInference,
     LocalityKind,
     Mask,
     Normalize,
@@ -784,8 +781,7 @@ def test_streaming_still_seeds_a_global_stat_behind_a_reorientation(patch_manage
 @pytest.mark.parametrize(
     ("transform", "kind"),
     [
-        (Standardize(mask="MASK"), LocalityKind.WHOLE_VOLUME),
-        (KonfAIInference(), LocalityKind.WHOLE_VOLUME),
+        (Clip(min_value="percentile:1", max_value="percentile:99"), LocalityKind.WHOLE_VOLUME),
         (Gradient(), LocalityKind.HALO),
         (Dilate(dilate=2), LocalityKind.HALO),
         (Flip(), LocalityKind.ORIENTATION),

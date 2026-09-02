@@ -24,7 +24,14 @@ import torch
 import torch.nn.functional as F
 
 from konfai.data.geometry import (
+    SIGNED_PERMUTATION_ATOL_FLOAT64,
+    AxisRemap,
     Grid,
+    apply_remap,
+    invert_remap,
+    remap_region,
+    remap_shape,
+    signed_permutation,
 )
 from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse
 from konfai.utils.dataset import Attribute, Dataset
@@ -42,6 +49,8 @@ class Padding(TransformInverse):
 
     # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
+
+    locality = LocalityKind.REGRID
 
     def __init__(self, padding: list[int] = [0, 0, 0, 0, 0, 0], mode: str = "constant", inverse: bool = True) -> None:
         super().__init__(inverse)
@@ -75,9 +84,6 @@ class Padding(TransformInverse):
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [extent + before + after for extent, (before, after) in zip(shape, self._pairs(len(shape)), strict=True)]
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.REGRID)
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -328,6 +334,8 @@ class Permute(TransformInverse):
     # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
 
+    locality = LocalityKind.ORIENTATION
+
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
         super().__init__(inverse)
         try:
@@ -338,11 +346,13 @@ class Permute(TransformInverse):
                 "dims is the new spatial axis order as a '|'-separated string: dims: \"1|0|2\" (not a list).",
             ) from None
 
-    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        return [shape[it - 1] for it in self.dims[1:]]
+    def _remap(self) -> AxisRemap:
+        # Output spatial axis k reads input axis ``self.dims[k + 1] - 1`` (self.dims is
+        # channel-inclusive), never mirrored.
+        return [(d - 1, False) for d in self.dims[1:]]
 
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.ORIENTATION)
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        return remap_shape(shape, self._remap())
 
     def stream_region_source(
         self,
@@ -351,19 +361,10 @@ class Permute(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # Output spatial axis k comes from input axis ``self.dims[k + 1] - 1`` (self.dims is
-        # channel-inclusive). Placing each target slice at its source axis yields the source region
-        # whose permutation reproduces the target patch exactly.
-        source_slices = [slice(0, n) for n in source_spatial_shape]
-        for k, sl in enumerate(target_slices):
-            source_slices[self.dims[k + 1] - 1] = slice(sl.start, sl.stop)
-        return source_slices
+        return remap_region(target_slices, source_spatial_shape, self._remap())
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        result = list(shape)
-        for k, d in enumerate(self.dims[1:]):
-            result[d - 1] = shape[k]
-        return result
+        return remap_shape(shape, invert_remap(self._remap()))
 
     def stream_region_target(
         self,
@@ -372,9 +373,9 @@ class Permute(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # Input axis k carries output axis ``dims[k + 1] - 1``: a written region pulls, per input axis,
-        # the slice of the output axis it came from.
-        return [slice(target_slices[d - 1].start, target_slices[d - 1].stop) for d in self.dims[1:]]
+        # The write mirror pulls through the inverse remap: input axis k carries the output axis
+        # that read it.
+        return remap_region(target_slices, source_spatial_shape, invert_remap(self._remap()))
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.permute(tuple(self.dims))
@@ -387,13 +388,12 @@ class Flip(TransformInverse):
     # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
 
+    locality = LocalityKind.ORIENTATION
+
     def __init__(self, dims: str = "1|0|2", inverse: bool = True) -> None:
         super().__init__(inverse)
 
         self.dims = [int(d) + 1 for d in str(dims).split("|")]
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.ORIENTATION)
 
     def stream_region_source(
         self,
@@ -402,16 +402,9 @@ class Flip(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # A flipped spatial axis reads the mirror region ``[n - stop, n - start)``; applying the flip
-        # to that sub-region reproduces the target patch. Non-flipped axes read the identity region.
-        source_slices: list[slice] = []
-        for k, sl in enumerate(target_slices):
-            n = source_spatial_shape[k]
-            if (k + 1) in self.dims:
-                source_slices.append(slice(n - sl.stop, n - sl.start))
-            else:
-                source_slices.append(slice(sl.start, sl.stop))
-        return source_slices
+        # A mirror moves no axis: the remap is the identity permutation, mirrored on the flipped axes.
+        remap: AxisRemap = [(k, (k + 1) in self.dims) for k in range(len(target_slices))]
+        return remap_region(target_slices, source_spatial_shape, remap)
 
     def stream_region_target(
         self,
@@ -444,10 +437,6 @@ class Canonical(TransformInverse):
     onto the reoriented shape.
     """
 
-    # An orthonormal direction's entries are exactly 0 or +/-1 when it is axis-aligned, but the
-    # reorientation is a product with an inverse, so it lands within a few double ulps of them.
-    _AXIS_ALIGNED_ATOL = 1e-9
-
     working_multiple = 3.0  # an oblique case is resampled: the resample's own figure
 
     def __init__(self, inverse: bool = True) -> None:
@@ -464,31 +453,7 @@ class Canonical(TransformInverse):
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
         return initial_matrix.inverse() @ self.canonical_direction
 
-    @classmethod
-    def _index_remap(cls, reorientation: torch.Tensor) -> list[tuple[int, bool]] | None:
-        """Per output SPATIAL axis, the source axis it reads and whether it reads it mirrored.
-
-        ``reorientation`` maps an output coordinate onto the input it comes from, so it is an exact
-        remap exactly when it is a signed permutation: output physical axis ``c`` then reads input
-        physical axis ``r``, backwards where the sign is negative. Anything else mixes axes. Axes are
-        returned in array order, where physical axis k is array axis ``n - 1 - k``. The test (every
-        column of L1 norm 1 with peak 1) admits exactly the signed permutations: unit column sums
-        alone would also pass an axis-averaging matrix.
-        """
-        n = reorientation.shape[0]
-        unit = torch.ones(n, dtype=reorientation.dtype)
-        columns = reorientation.abs()
-        if not torch.allclose(columns.sum(0), unit, atol=cls._AXIS_ALIGNED_ATOL):
-            return None
-        if not torch.allclose(columns.amax(0), unit, atol=cls._AXIS_ALIGNED_ATOL):
-            return None
-        remap = []
-        for c in reversed(range(n)):
-            r = int(columns[:, c].argmax())
-            remap.append((n - 1 - r, bool(reorientation[r, c] < 0)))
-        return remap
-
-    def _orthogonal_remap(self, cache_attribute: Attribute) -> list[tuple[int, bool]] | None:
+    def _orthogonal_remap(self, cache_attribute: Attribute) -> AxisRemap | None:
         """The exact index remap this case's reorientation is, or ``None`` where it is not one.
 
         Total: a case whose header carries no usable direction cosines has no remap to make, and an
@@ -497,7 +462,7 @@ class Canonical(TransformInverse):
         """
         if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
             return None
-        return Canonical._index_remap(self._reorientation(cache_attribute))
+        return signed_permutation(self._reorientation(cache_attribute), SIGNED_PERMUTATION_ATOL_FLOAT64)
 
     @staticmethod
     def _carried(per_physical_axis: torch.Tensor, remap: list[tuple[int, bool]] | None) -> torch.Tensor:
@@ -566,7 +531,7 @@ class Canonical(TransformInverse):
         remap = self._orthogonal_remap(cache_attribute)
         if remap is None:
             return shape
-        return [shape[source] for source, _ in remap]
+        return remap_shape(shape, remap)
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Only the case can say which reorientation this is, so only the header can answer. An orthogonal
@@ -587,23 +552,13 @@ class Canonical(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # Target axis k reads source axis ``source``, so the target slice IS the source's: taken at the
-        # far end ``[n - stop, n - start)`` where the remap reads that axis backwards. Flipping the region
-        # read reproduces the patch: a flip restricted to a contiguous region is that region reversed.
-        # Both the slices and the remap are in array order, and the remap covers every axis exactly once.
         remap = self._orthogonal_remap(cache_attribute)
         if remap is None:
             raise TransformError(
                 "Canonical declared a region patch-locality for a direction it cannot remap exactly.",
                 "Report this: patch_locality() and stream_region_source() disagree about the case.",
             )
-        source_slices = [slice(None)] * len(remap)
-        for target, (source, mirrored) in zip(target_slices, remap, strict=False):
-            extent = source_spatial_shape[source]
-            source_slices[source] = (
-                slice(extent - target.stop, extent - target.start) if mirrored else slice(target.start, target.stop)
-            )
-        return source_slices
+        return remap_region(target_slices, source_spatial_shape, remap)
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -627,7 +582,7 @@ class Canonical(TransformInverse):
         center = initial_matrix @ half_extent + initial_origin
         cache_attribute["Origin"] = center - self.canonical_direction @ Canonical._carried(half_extent, remap)
 
-    def _inverse_remap(self, cache_attribute: Attribute) -> list[tuple[int, bool]] | None:
+    def _inverse_remap(self, cache_attribute: Attribute) -> AxisRemap | None:
         """The forward remap judged on the state ``inverse`` runs from: the popped-to source direction.
 
         The inverse pops the canonical geometry and reorients back through the SOURCE direction under
@@ -656,10 +611,7 @@ class Canonical(TransformInverse):
         remap = self._inverse_remap(cache_attribute)
         if remap is None:
             return shape
-        result = list(shape)
-        for k, (source, _) in enumerate(remap):
-            result[source] = shape[k]
-        return result
+        return remap_shape(shape, invert_remap(remap))
 
     def stream_region_target(
         self,
@@ -668,23 +620,15 @@ class Canonical(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # Canonical axis k holds source axis ``source``'s content: a written region pulls, per input
-        # axis, the slice of the output axis it carries: taken mirrored within the input extent where
-        # the remap reads that axis backwards (a flip restricted to a region is that region reversed).
+        # Canonical axis k holds source axis ``source``'s content: a written region pulls through
+        # the inverse remap, per input axis, the slice of the output axis it carries.
         remap = self._inverse_remap(cache_attribute)
         if remap is None:
             raise TransformError(
                 "Canonical declared a region inverse patch-locality for a direction it cannot remap exactly.",
                 "Report this: inverse_patch_locality() and stream_region_target() disagree about the case.",
             )
-        source_slices: list[slice] = []
-        for k, (source, mirrored) in enumerate(remap):
-            target = target_slices[source]
-            extent = source_spatial_shape[k]
-            source_slices.append(
-                slice(extent - target.stop, extent - target.start) if mirrored else slice(target.start, target.stop)
-            )
-        return source_slices
+        return remap_region(target_slices, source_spatial_shape, invert_remap(remap))
 
     def _reorient(self, tensor: torch.Tensor, reorientation: torch.Tensor) -> torch.Tensor:
         """Apply a reorientation: an exact index remap where it is one, a resample where it is not.
@@ -692,16 +636,11 @@ class Canonical(TransformInverse):
         An orthogonal reorientation is a bijection on the voxels, so it must reproduce the input's
         multiset bit for bit, which only a permute and a flip do.
         """
-        remap = Canonical._index_remap(reorientation)
+        remap = signed_permutation(reorientation, SIGNED_PERMUTATION_ATOL_FLOAT64)
         if remap is None:
             matrix = Canonical._affine_matrix(reorientation, torch.tensor([0, 0, 0]))
             return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
-        # The remap is spatial and the tensor is channel-first, so the channel axes lead it unpermuted.
-        offset = tensor.dim() - len(remap)
-        dims = list(range(offset)) + [offset + source for source, _ in remap]
-        flips = [offset + axis for axis, (_, mirrored) in enumerate(remap) if mirrored]
-        # flip materialises the permuted view, so the result never aliases the tensor it was read from.
-        return tensor.permute(dims).flip(flips)
+        return apply_remap(tensor, remap)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Read the source geometry before recording the canonical one over it: the attribute stacks.
@@ -724,14 +663,14 @@ class Gradient(Transform):
     #: destination IS the output).
     working_multiple = 5.0
 
+    # First-difference gradient: each output voxel reads its immediate neighbour, a HALO of radius
+    # 1. The far-edge ConstantPad reproduces the whole-volume border once the halo clamps there.
+    locality = LocalityKind.HALO
+    halo = (1,)
+
     def __init__(self, per_dim: bool = False):
         super().__init__()
         self.per_dim = per_dim
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # First-difference gradient: each output voxel reads its immediate neighbour, a HALO of radius
-        # 1. The far-edge ConstantPad reproduces the whole-volume border once the halo clamps there.
-        return PatchLocality(LocalityKind.HALO, halo=(1,))
 
     @staticmethod
     def _differences(image: torch.Tensor) -> torch.Tensor:

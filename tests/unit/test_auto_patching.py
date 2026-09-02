@@ -246,14 +246,24 @@ class TestMetricReductionContract:
         return [(slice(None), slice(None), *sl) for sl in slices]
 
     @staticmethod
-    def _identity(metric, whole_args, patch_grids):
+    def _materialized(value):
+        """A criterion's reported value as the evaluator records it: 0-d tensors read out to floats,
+        LabelledValues to a per-label dict (the deferred-readout contract)."""
+        from konfai.network.network.measure import LabelledValues
 
+        if isinstance(value, LabelledValues):
+            return dict(zip(value.labels, value.values.tolist(), strict=True))
+        if isinstance(value, torch.Tensor):
+            return float(value.item())
+        return value
+
+    def _identity(self, metric, whole_args, patch_grids):
         expected = metric(*whole_args)
-        expected_value = expected[1] if isinstance(expected, tuple) else expected.item()
+        expected_value = self._materialized(expected[1] if isinstance(expected, tuple) else expected.item())
         for grid in patch_grids:
             states = [metric.partial_metric(*[t[sl] for t in whole_args]) for sl in grid]
             combined = metric.combine_metric(states)
-            got = combined[1] if isinstance(combined, tuple) else combined
+            got = self._materialized(combined[1] if isinstance(combined, tuple) else combined)
             if isinstance(expected_value, dict):
                 assert set(got) == set(expected_value)
                 for k, v in expected_value.items():

@@ -47,7 +47,7 @@ from konfai.utils.errors import AugmentationError
 def test_hue_axis_rotation_preserves_luma() -> None:
     # Hue rotation is a rotation of RGB about the luma axis: it must be identity at theta=0 and leave a
     # grey pixel unchanged for any angle (an Euler XYZ rotation about the coordinate axes would recolour it).
-    from konfai.data.augmentation import _axis_rotation_matrix
+    from konfai.data.augmentation.base import _axis_rotation_matrix
 
     v = torch.tensor([1.0, 1.0, 1.0]) / torch.sqrt(torch.tensor(3.0))
     assert torch.allclose(_axis_rotation_matrix(torch.tensor(0.0), v), torch.eye(4), atol=1e-6)
@@ -153,7 +153,7 @@ def test_intensity_augmentation_inverses_are_identity():
     noise.who_index[0] = [0]
     assert torch.equal(noise.inverse(0, 0, x.clone()), x)
 
-    cutout = CutOUT(c_prob=1.0, cutout_size=2, value=0.0)
+    cutout = CutOUT(cutout_size=0.5, value=0.0)
     cutout.who_index[0] = [0]
     assert torch.equal(cutout.inverse(0, 0, x.clone()), x)
 
@@ -345,7 +345,8 @@ def test_a_regrid_draw_pulls_the_hull_of_its_mapped_corners() -> None:
     """The pull box is the affine image of the target box (``WorldBox.image_under``): the hull of
     the ``2^n`` mapped corners, which is enumerated here the long way and must give the very same
     voxel window, for a rotation composed with a scale at free angles."""
-    from konfai.data.augmentation import EulerTransform, _reflect_interval, _rotation_3d_matrix, _scale_matrix
+    from konfai.data.augmentation import EulerTransform
+    from konfai.data.augmentation.base import _reflect_interval, _rotation_3d_matrix, _scale_matrix
 
     class _Draw(EulerTransform):
         def _state_init(self, index, shapes, caches_attribute):
@@ -430,9 +431,9 @@ def test_simpleitk_augmentations_fail_clearly_when_dependency_is_missing(
     monkeypatch.setattr("konfai.data.augmentation.base.sitk", None)
 
     with pytest.raises(AugmentationError, match="SimpleITK"):
-        Elastix()
-    with pytest.raises(AugmentationError, match="SimpleITK"):
         Mask("mask.mha", 0)
+    # Elastix evaluates its lattice with KonfAI's own kernel: no SimpleITK needed.
+    Elastix()
 
 
 def test_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -493,7 +494,8 @@ def test_euler_source_coordinates_are_bitwise_the_chain_of_temporaries(seed: int
     """The fused, in-place coordinate build equals the step-by-step one bit for bit, on random
     rotations in 2D and 3D, over regions that stay interior (where the reflection is skipped) and
     regions that cross the border (where it runs), and on a singleton axis."""
-    from konfai.data.augmentation import EulerTransform, _rotation_2d_matrix, _rotation_3d_matrix
+    from konfai.data.augmentation import EulerTransform
+    from konfai.data.augmentation.base import _rotation_2d_matrix, _rotation_3d_matrix
 
     generator = torch.Generator().manual_seed(seed)
     for full in ((9, 11, 13), (17, 15), (1, 9, 11)):
@@ -518,7 +520,8 @@ def test_euler_source_coordinates_build_on_the_block_s_device() -> None:
     """Handed a device, the coordinates are built there rather than built on the host and moved.
     The float32 matmul then runs on that device: how far its last bit lands from the host's is
     measured below, and the interpolation it feeds is grid_sample's own tolerance."""
-    from konfai.data.augmentation import EulerTransform, _rotation_3d_matrix
+    from konfai.data.augmentation import EulerTransform
+    from konfai.data.augmentation.base import _rotation_3d_matrix
 
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device")
@@ -534,7 +537,7 @@ def test_euler_source_coordinates_build_on_the_block_s_device() -> None:
 def test_cutout_broadcasts_its_mask_over_the_channels() -> None:
     """One bool mask over the volume, broadcast over the channels: the same voxels are cut, in
     every channel, as when the mask was repeated per channel and re-tested against 1."""
-    draw = CutOUT(1.0, 0.5, -7.0)
+    draw = CutOUT(0.5, -7.0)
     draw._state_init(0, [[6, 7, 8]], [Attribute()])
     tensor = torch.rand((3, 6, 7, 8))
     got = draw._apply(0, 0, tensor, (0, 0, 0), (6, 7, 8))
@@ -550,23 +553,162 @@ def test_cutout_broadcasts_its_mask_over_the_channels() -> None:
     assert bool((got == -7.0).any()) and bool((got == tensor).any())
 
 
-def test_elastix_keeps_one_sampling_grid_per_copy_and_drops_it_with_the_draw() -> None:
-    """The draw keeps grid_sample's sampling grid and nothing beside it: the float64 displacement
-    it was built from (24 bytes per voxel per copy, read by nothing) is gone, and reset_state
-    drops the copies' grids with the draw they belonged to."""
-    pytest.importorskip("SimpleITK")
+def test_cutout_fraction_binds_through_the_config_and_cuts_its_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cutout_size`` is a FRACTION and must survive the YAML binder as one: 0.34 through
+    apply_config cuts about ``0.34**rank`` of the volume (the ``int`` annotation once bound it to
+    0, a silent no-op, while any integer erased the whole copy)."""
+    config = tmp_path / "Config.yml"
+    config.write_text(
+        "Trainer:\n  Dataset:\n    augmentations:\n      A:\n        nb: 1\n"
+        "        data_augmentations:\n          CutOUT:\n"
+        "            cutout_size: 0.34\n            value: 0.0\n"
+    )
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    from konfai.data.augmentation import DataAugmentationsList
+    from konfai.utils.config import apply_config
+
+    augmentations = apply_config("Trainer.Dataset.augmentations.A")(DataAugmentationsList)()
+    augmentations.prepare("A")
+    draw = augmentations.data_augmentations[0]
+    assert isinstance(draw, CutOUT)
+    assert draw.cutout_size == pytest.approx(0.34)
+
+    shape = [24, 24, 24]
+    draw._state_init(0, [list(shape)], [Attribute()])
+    draw.centers[0][0] = torch.tensor([0.5, 0.5, 0.5])  # an interior box: nothing clips at a border
+    cut = draw._apply(0, 0, torch.ones(1, *shape), (0, 0, 0), tuple(shape))
+    fraction = float((cut == 0.0).float().mean())
+    assert fraction == pytest.approx(0.34**3, rel=0.15)
+
+
+def test_cutout_refuses_a_size_outside_the_unit_interval() -> None:
+    # An integer count of voxels is the value the old ``int`` annotation invited, and every one of
+    # them erased the whole copy: refused with the fractional semantics spelled out.
+    for size in (0.0, -0.2, 2, 16):
+        with pytest.raises(AugmentationError, match="cutout_size"):
+            CutOUT(cutout_size=size, value=0.0)
+
+
+def test_elastix_resident_state_is_the_control_lattice_not_the_volume() -> None:
+    """A draw's only state is its control-point lattice: O(control points), never O(volume), and
+    reset_state drops the copies' lattices with the draw they belonged to."""
     draw = Elastix(grid_spacing=8, max_displacement=4)
-    shapes = [[12, 12, 12] for _ in range(3)]
+    shapes = [[48, 48, 48] for _ in range(3)]
     draw._state_init(0, shapes, [Attribute() for _ in shapes])
-    assert not hasattr(draw, "displacement_fields_true")
-    assert [tuple(grid.shape) for grid in draw.displacement_fields[0]] == [(1, 12, 12, 12, 3)] * 3
-    kept = sum(grid.numel() * grid.element_size() for grid in draw.displacement_fields[0])
-    assert kept == 3 * 12**3 * 3 * 4
+    kept = sum(stage.values.nbytes for stage, _grid in draw.draws[0])
+    # 48 voxels at unit spacing over a node every 8: 6 mesh cells -> 9 nodes per axis, 3 float64
+    # components. The volume itself is 48**3 voxels: the lattice must not scale with it.
+    assert kept == 3 * (6 + 3) ** 3 * 3 * 8
+    assert kept < 48**3
     draw.reset_state(0)
-    assert 0 not in draw.displacement_fields
+    assert 0 not in draw.draws
     draw._state_init(1, shapes[:1], [Attribute()])
     draw.reset_state()
-    assert not draw.displacement_fields
+    assert not draw.draws
+
+
+def test_elastix_displacement_matches_simpleitk_to_double_rounding() -> None:
+    """The lazily-evaluated lattice is the SAME transform SimpleITK materialises: the equivalent
+    sitk.BSplineTransform (same domain, same lattice as its parameters) run through
+    TransformToDisplacementFieldFilter agrees at every voxel to double rounding."""
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai.data.sampling import _apply, _displacement_at
+
+    torch.manual_seed(3)
+    shape = [10, 12, 14]
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([-3.0, 5.0, 11.0])
+    attributes["Spacing"] = np.asarray([1.5, 1.75, 2.0])
+    attributes["Direction"] = np.eye(3).reshape(-1)
+    draw = Elastix(grid_spacing=8, max_displacement=4)
+    draw._state_init(0, [list(shape)], [attributes])
+    stage, grid = draw.draws[0][0]
+
+    mesh_xyz = [int(nodes) - 3 for nodes in reversed(stage.grid.size_zyx)]
+    transform = sitk.BSplineTransform(3, 3)
+    domain_origin = grid.origin_xyz - grid.direction_xyz @ (0.5 * grid.spacing_xyz)
+    transform.SetTransformDomainOrigin([float(v) for v in domain_origin])
+    transform.SetTransformDomainPhysicalDimensions(
+        [float(mesh * spacing) for mesh, spacing in zip(mesh_xyz, stage.grid.spacing_xyz, strict=True)]
+    )
+    transform.SetTransformDomainMeshSize(mesh_xyz)
+    transform.SetTransformDomainDirection([float(v) for v in grid.direction_xyz.flatten()])
+    transform.SetParameters([float(v) for v in stage.values.flatten()])
+
+    reference = sitk.Image([int(v) for v in reversed(shape)], sitk.sitkUInt8)
+    reference.SetOrigin([-3.0, 5.0, 11.0])
+    reference.SetSpacing([1.5, 1.75, 2.0])
+    materialise = sitk.TransformToDisplacementFieldFilter()
+    materialise.SetReferenceImage(reference)
+    want = sitk.GetArrayFromImage(materialise.Execute(transform))
+
+    axes = [torch.arange(0, extent, dtype=torch.float64) for extent in shape]
+    index_xyz = torch.stack(list(reversed(torch.meshgrid(*axes, indexing="ij"))), dim=-1)
+    world = _apply(index_xyz, grid.index_to_world, torch.device("cpu"))
+    got = _displacement_at(stage, world, torch.device("cpu")).numpy()
+    np.testing.assert_allclose(got, want, rtol=0, atol=1e-12)
+
+
+def test_elastix_streams_each_region_of_a_copy() -> None:
+    """A region of the warped copy equals the whole-volume warp on that region: the draw declares
+    REGRID, its pull box covers the bounded reach (|d| <= max_displacement plus the far tap), and
+    the same absolute-coordinate arithmetic runs on both routes."""
+    torch.manual_seed(1)
+    draw = Elastix(grid_spacing=8, max_displacement=4)
+    shape = [12, 12, 12]
+    draw._state_init(0, [list(shape)], [Attribute()])
+    assert draw._patch_locality(0, 0, Attribute()).kind is LocalityKind.REGRID
+    volume = torch.rand(1, *shape)
+    whole = draw._compute("case", 0, 0, volume)
+    for target in [
+        (slice(2, 8), slice(3, 9), slice(0, 6)),
+        (slice(0, 12), slice(0, 4), slice(8, 12)),
+    ]:
+        source = tuple(draw._stream_region_source(0, 0, target, list(shape)))
+        for part in source:
+            assert part.start >= 0 and part.stop <= 12
+        block = volume[(slice(None), *source)]
+        from konfai.data.transform import RegionContext
+
+        region = draw._stream_region("case", 0, 0, block, RegionContext(source, target, tuple(shape)))
+        torch.testing.assert_close(region, whole[(slice(None), *target)], rtol=0, atol=1e-5)
+
+
+def test_elastix_streams_each_region_of_an_oblique_copy() -> None:
+    """An oblique Direction mixes the world displacement components on an index axis, so the pull
+    reach comes from the inverse affine's rows: a 45-degree grid combines two components into
+    sqrt(2) times the per-axis bound, and a reach from the spacing alone under-pulls the block
+    (border padding then made a streamed region differ from the whole-volume warp by 0.63 here)."""
+    from konfai.data.geometry import DisplacementStage
+    from konfai.data.transform import RegionContext
+
+    torch.manual_seed(2)
+    draw = Elastix(grid_spacing=8, max_displacement=4)
+    shape = [24, 24, 24]
+    cos, sin = float(np.cos(np.pi / 4)), float(np.sin(np.pi / 4))
+    attribute = Attribute()
+    attribute["Origin"] = np.zeros(3)
+    attribute["Spacing"] = np.ones(3)
+    attribute["Direction"] = np.asarray([[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]).reshape(-1)
+    draw._state_init(0, [list(shape)], [attribute])
+    stage, grid = draw.draws[0][0]
+    # The worst-case draw: every control value at the +bound, so d = (+4, +4, +4) at every voxel
+    # and the combined index reach along the rotated axes is realized, not merely possible.
+    draw.draws[0][0] = (DisplacementStage(stage.grid, np.full_like(stage.values, 4.0), stage.order), grid)
+    volume = torch.rand(1, *shape)
+    whole = draw._compute("case", 0, 0, volume)
+    for target in [
+        (slice(8, 14), slice(8, 14), slice(8, 14)),
+        (slice(0, 24), slice(6, 10), slice(14, 24)),
+    ]:
+        source = tuple(draw._stream_region_source(0, 0, target, list(shape)))
+        block = volume[(slice(None), *source)]
+        region = draw._stream_region("case", 0, 0, block, RegionContext(source, target, tuple(shape)))
+        torch.testing.assert_close(region, whole[(slice(None), *target)], rtol=0, atol=1e-5)
 
 
 def test_an_augmentation_group_is_handed_the_case_not_a_clone_of_it(tmp_path: Path) -> None:

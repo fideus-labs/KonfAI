@@ -54,7 +54,7 @@ class LRSchedulersLoader:
 
     def getschedulers(
         self, key: str, scheduler_classname: str, optimizer: torch.optim.Optimizer
-    ) -> torch.optim.lr_scheduler._LRScheduler:
+    ) -> torch.optim.lr_scheduler.LRScheduler:
         for m in ["torch.optim.lr_scheduler", "konfai.metric.schedulers"]:
             module, name = get_module(scheduler_classname, m)
             if hasattr(module, name):
@@ -74,7 +74,7 @@ class LossSchedulersLoader:
     def __init__(self, nb_step: int = 0) -> None:
         self.nb_step = nb_step
 
-    def getschedulers(self, key: str, scheduler_classname: str) -> torch.optim.lr_scheduler._LRScheduler:
+    def getschedulers(self, key: str, scheduler_classname: str) -> Scheduler:
         return apply_config(f"{key}.{scheduler_classname}")(
             getattr(importlib.import_module("konfai.metric.schedulers"), scheduler_classname)
         )()

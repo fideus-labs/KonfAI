@@ -31,6 +31,7 @@ from konfai.network.network.network import MinimalModel, Network
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError
+from konfai.utils.pretrained import PretrainedFrom
 from konfai.utils.utils import get_module
 
 
@@ -38,8 +39,27 @@ from konfai.utils.utils import get_module
 class ModelLoader:
     """Instantiate the root model graph declared in the active configuration."""
 
-    def __init__(self, classpath: str = "default|segmentation.UNet.UNet") -> None:
+    def __init__(
+        self,
+        classpath: str = "default|segmentation.UNet.UNet",
+        allow_head_resize: bool = False,
+        pretrained_from: PretrainedFrom | None = None,
+    ) -> None:
         self.classpath = classpath
+        self.allow_head_resize = allow_head_resize
+        self.pretrained_from = pretrained_from
+
+    def _apply_options(self, model: Network) -> Network:
+        # The loader can only ENABLE the head resize: a model class that opted in through its own
+        # constructor keeps it when the config default (False) says nothing.
+        if self.allow_head_resize:
+            for module in model.modules():
+                if isinstance(module, Network):
+                    module.allow_head_resize = True
+        # Consumed by Network.load: a fresh (checkpoint-less) TRAIN load seeds the initialised graph
+        # from the reference; a checkpoint's own weights always win over it.
+        model.pretrained_source = self.pretrained_from
+        return model
 
     def _yaml_path(self) -> Path | None:
         raw_path = self.classpath.split("|", maxsplit=1)[-1]
@@ -110,7 +130,7 @@ class ModelLoader:
                 )
 
             model = apply_config(f"{konfai_args}.{name}")(builder)(konfai_without=konfai_without if not train else [])
-            return model
+            return self._apply_options(model)
 
         classpath = self.classpath
         # A config that references a built-in model by the absolute path konfai.models.<kind>.<file>:<Class>
@@ -139,7 +159,7 @@ class ModelLoader:
             )
             model.set_name(name)
 
-        return model
+        return self._apply_options(model)
 
 
 class Model:

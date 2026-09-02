@@ -69,12 +69,12 @@ from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache
 from konfai.utils.runtime import (
     DistributedObject,
     State,
-    _materialized_config,
     configure_workflow_environment,
     get_device,
     record,
     run_distributed_app,
 )
+from konfai.utils.runtime.environment import _materialized_config
 
 _PROBE_ENTRY = "__konfai_plan_probe__"
 
@@ -118,8 +118,8 @@ class TransformPlan:
     #: columns above have no room for. Part of the plan, not of the run, so ``--plan`` carries it:
     #: a note only worth reading after the bytes are written is not worth printing.
     notes: tuple[str, ...] = ()
-    #: Per (group_src, group_dest): the chain spelled out with its destination: the one fact a
-    #: reader wants from a plan line ("what runs, and where does it land").
+    #: The chain spelled out with its destination, one label per ``(group_src, group_dest)``
+    #: pair: the one fact a reader wants from a plan line ("what runs, and where does it land").
     chain_labels: dict[tuple[str, str], str] = field(default_factory=dict)
     #: What the store's decoded-chunk cache may hold out of the budget: part of what the process
     #: holds, so the header says it, and says when a budget puts it under the floor it is worth.

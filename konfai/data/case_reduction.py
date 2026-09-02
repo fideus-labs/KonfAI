@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import torch
@@ -49,13 +49,8 @@ from konfai.data.patching import (
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.budget import budget_share, format_bytes
-from konfai.utils.dataset import (
-    Attribute,
-    Dataset,
-    DataStream,
-    _finalize_running_statistics,
-    _update_running_statistics,
-)
+from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
 from konfai.utils.errors import ReductionError
 
 #: Geometry keys compared between cases under ``grid: strict``. Direction is in because a flipped
@@ -234,7 +229,7 @@ class ReductionPlan:
 class _RunningStatistics:
     """Min/Max/Mean/Std accumulated over regions, so the volume is never resident.
 
-    The store-scan recurrence (:func:`konfai.utils.dataset._update_running_statistics`) is the one
+    The store-scan recurrence (:func:`konfai.utils.dataset.statistics._update_running_statistics`) is the one
     Welford kernel; this feeds it blocks and writes the keys in KonfAI's own spelling.
     """
 
@@ -375,9 +370,9 @@ class CaseReduction:
         allowance = budget_share("regions", budget_bytes) or 0.0
         if self.keeps_folds(plan):
             allowance -= self._folded_output_bytes(plan)
-        self.slab_rows = self._tallest_affordable(ceiling, allowance)
+        self.slab_rows = self._tallest_affordable(plan, ceiling, allowance)
 
-    def _tallest_affordable(self, ceiling: int, allowance: float) -> int:
+    def _tallest_affordable(self, plan: ReductionPlan, ceiling: int, allowance: float) -> int:
         """The tallest region up to ``ceiling`` whose PRICED plan fits ``allowance``.
 
         Bisected on the price itself rather than extrapolated from one height, because none of what
@@ -391,25 +386,31 @@ class CaseReduction:
         refuses, which is the only honest answer, there being no whole-volume path to fall back to.
         """
         ceiling = max(1, int(ceiling))
-        if self._priced_peak(ceiling) <= allowance:
+        if self._priced_peak(plan, ceiling) <= allowance:
             return ceiling
         low, high = 1, ceiling
         while low < high:
             middle = (low + high + 1) // 2
-            if self._priced_peak(middle) <= allowance:
+            if self._priced_peak(plan, middle) <= allowance:
                 low = middle
             else:
                 high = middle - 1
         return low
 
-    def _priced_peak(self, rows: int) -> int:
-        """What the plan prices at ``rows``, leaving the height the sizing is working from alone."""
+    def _priced_peak(self, plan: ReductionPlan, rows: int) -> int:
+        """What ``plan`` prices at ``rows``, leaving the height the sizing is working from alone.
+
+        Only the read fields depend on the height, so only they are recomputed per probe: the rest
+        of the plan (refusal walks, filesystem stats, channel maps) is height-independent, and a
+        bisection re-deriving all of it once put 96% of plan time into the members' geometry walks.
+        """
         held = self.slab_rows
         try:
             self.slab_rows = rows
-            return self.plan().peak_bytes
+            pull_bytes, read_bytes = self._member_read_bytes(int(plan.source_channels))
         finally:
             self.slab_rows = held
+        return replace(plan, slab_rows=rows, pull_bytes=pull_bytes, read_bytes=read_bytes).peak_bytes
 
     def keeps_folds(self, plan: ReductionPlan) -> bool:
         """Whether the stat pass hands its folds to the write pass instead of re-folding them.
@@ -590,7 +591,7 @@ class CaseReduction:
         that cannot answer) contributes nothing: the peak then says what it did before, which is
         what the run-time probe is there to correct.
         """
-        from konfai.data.patching import _SWEEP_ELEMENT_BYTES
+        from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
 
         reads = [manager.region_reads(self.slab_rows) for manager in self.managers]
         present = [read for read in reads if read is not None]
@@ -600,13 +601,6 @@ class CaseReduction:
         return int(pull * element), int(excess * element)
 
     # --------------------------------------------------------------- execution
-
-    def _regions(self, spatial: list[int]) -> list[tuple[slice, ...]]:
-        """The output's regions: slabs along the first spatial axis, whole in the others."""
-        return [
-            (slice(start, min(start + self.slab_rows, spatial[0])), *(slice(0, extent) for extent in spatial[1:]))
-            for start in range(0, spatial[0], self.slab_rows)
-        ]
 
     def _fold(self, region: tuple[slice, ...]) -> torch.Tensor:
         """One region of the reduced volume: every case reads that region, the operator folds them.
@@ -665,7 +659,9 @@ class CaseReduction:
         made, and the first region has already been folded at the planned height: this can correct
         an optimistic price, never spend a budget the sizing declined to spend.
         """
-        start, refitted = 0, not measure
+        # A refit needs a declared budget to judge against; without one the short probe would only
+        # shorten the first region for a no-op.
+        start, refitted = 0, not (measure and self._budget_bytes)
         while start < int(spatial[0]):
             # The probe is SHORT. Every later region is cut against what it measured; the probe
             # itself is cut against nothing, so it is sized so that its own overshoot cannot
@@ -764,10 +760,14 @@ class CaseReduction:
             # subtracted them by), and the write pass then only applies the post stages. Otherwise
             # the second pass re-folds, as before: correctness never depends on the keep.
             self._kept_folds = [] if self.keeps_folds(plan) else None
-            for _region, folded in self._folds(plan.spatial):
+            # The run's FIRST region happens here, so the probe must too: an unmeasured full-height
+            # stat pass is exactly the unbounded first allocation _PROBE_SHARE exists to prevent.
+            # The region is kept beside its fold because a mid-pass refit changes slab_rows: regions
+            # re-derived from the final height would misalign with folds cut at the earlier one.
+            for region, folded in self._folds(plan.spatial, measure=True):
                 statistics.update(folded)
                 if self._kept_folds is not None:
-                    self._kept_folds.append(folded.cpu())
+                    self._kept_folds.append((region, folded.cpu()))
             statistics.write_into(attribute)
         return attribute
 
@@ -856,11 +856,9 @@ class CaseReduction:
         # they are; otherwise every region is folded here, once.
         kept = self._kept_folds
         self._kept_folds = None
-        folds = (
-            ((region, kept[index]) for index, region in enumerate(self._regions(spatial)))
-            if kept is not None
-            else self._folds(spatial, measure=True)
-        )
+        # A stat pass already probed and refit these regions; measuring again would only reset the
+        # high-water mark the run's closing line reports.
+        folds = iter(kept) if kept is not None else self._folds(spatial, measure=not plan.stat_pass)
         writer = RegionWriter(lambda _key, array, header: self._open_stream(spatial, array, header))
         try:
             for region, folded in folds:

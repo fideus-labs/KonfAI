@@ -27,6 +27,10 @@ import numpy as np
 import torch
 
 from konfai.network.network import Network
+from konfai.network.network.measure import CriterionOutput as CriterionOutput
+from konfai.network.network.measure import CriterionResult as CriterionResult
+from konfai.network.network.measure import CriterionValue as CriterionValue
+from konfai.network.network.measure import LabelledValues as LabelledValues
 from konfai.utils.config import record_given_arguments
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import MeasureError
@@ -37,7 +41,7 @@ models_register: dict[str, Network] = {}
 def _require_optional(module: str, *, criterion: str, extra: str) -> ModuleType:
     """Import an optional criterion dependency or raise an actionable error.
 
-    Several criteria (LPIPS, FID) rely on heavyweight optional packages
+    Several criteria (LPIPS, the IMPACT family) rely on heavyweight optional packages
     that are not part of the base install. Importing them through this helper
     turns a missing dependency into a clear, install-ready message raised at
     criterion construction, instead of a raw ``ImportError`` surfacing mid-run.
@@ -94,7 +98,9 @@ class Criterion(torch.nn.Module, ABC):
         raise NotImplementedError(f"{self.get_name()} is not reducible: it cannot combine states.")
 
     @abstractmethod
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        """A loss ``Tensor``, or ``(loss, value)`` / ``(loss, value, map)``: every accepted shape
+        is normalized by ``CriterionResult.of`` at the consumers."""
         raise NotImplementedError()
 
 
@@ -116,9 +122,9 @@ class CriterionWithAttribute(Criterion):
         super().__init__()
 
     @abstractmethod
-    def forward(  # type: ignore[override]
+    def forward(  # type: ignore[override]  # the added keyword is this subclass's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
-    ) -> torch.Tensor:
+    ) -> CriterionOutput:
         raise NotImplementedError()
 
 
@@ -143,11 +149,36 @@ class MaskedLoss(Criterion):
 
         return mask
 
+    def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
+        """Per-voxel contribution whose masked per-item sums reproduce ``self.loss`` through
+        ``_value``; ``None`` routes the masked forward through the generic per-item loop (a loss
+        that is not a pointwise reduction)."""
+        return None
+
+    def _value(self, total: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
+        """The per-item values ``self.loss`` returns from per-item (total, count): the batched
+        twin of ``_finish``."""
+        raise NotImplementedError()
+
+    def _masked_forward(self, kernel: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The masked loss batched: per-item masked sums over the flattened axes, finished by
+        ``_value``, averaged over the items whose mask holds a voxel. No host readout: an empty
+        item is neutralized on the device (its value multiplied by zero, never NaN, so backward
+        stays finite) and the reported value is NaN only when every item is empty."""
+        items = kernel.shape[0]
+        per_item = (kernel * mask).reshape(items, -1).sum(1)
+        counts = mask.reshape(items, -1).sum(1) * (kernel[0].numel() // mask[0].numel())
+        scored = counts > 0
+        values = self._value(torch.where(scored, per_item, per_item.new_ones(())), counts.clamp(min=1))
+        scored_nb = scored.sum()
+        loss = (values * scored).sum() / scored_nb.clamp(min=1)
+        return loss, torch.where(scored_nb > 0, loss, loss.new_tensor(float("nan"))).detach()
+
     def forward(
         self,
         output: torch.Tensor,
         *targets: torch.Tensor,
-    ) -> tuple[torch.Tensor, float]:
+    ) -> CriterionOutput:
 
         if len(targets) == 0:
             raise ValueError("MaskedLoss expects at least one target tensor.")
@@ -155,34 +186,37 @@ class MaskedLoss(Criterion):
         target = targets[0]
         mask = self.get_mask(list(targets[1:]))
 
-        loss = output.new_tensor(0.0)
-        true_nb = 0
-
         if mask is None:
             loss_b = self.loss(
                 output.float(),
                 target.to(device=output.device).float(),
             )
-            return loss_b, loss_b.detach().item()
+            return loss_b, loss_b.detach()
 
         target = target.to(device=output.device)
-        mask = mask.to(device=output.device)
+        mask = mask.to(device=output.device) == 1
 
+        kernel = None if self.mode_image_masked else self._kernel(output.float(), target.float())
+        if kernel is not None:
+            return self._masked_forward(kernel, mask)
+
+        # One readout for the whole batch, where a per-item ``torch.any`` was one sync each.
+        scored = torch.any(mask.reshape(mask.shape[0], -1), dim=1).tolist()
+        loss = output.new_tensor(0.0)
         for batch in range(output.shape[0]):
-            mask_b = mask[batch, ...] == 1
-
-            if not torch.any(mask_b):
+            if not scored[batch]:
                 continue
 
+            mask_b = mask[batch, ...]
             output_b = output[batch, ...].float()
             target_b = target[batch, ...].float()
 
             if self.mode_image_masked:
-                mask_b = mask_b.to(dtype=output_b.dtype)
+                mask_f = mask_b.to(dtype=output_b.dtype)
 
                 loss_b = self.loss(
-                    output_b * mask_b,
-                    target_b * mask_b,
+                    output_b * mask_f,
+                    target_b * mask_f,
                 )
 
             else:
@@ -192,13 +226,13 @@ class MaskedLoss(Criterion):
                 )
 
             loss = loss + loss_b
-            true_nb += 1
 
+        true_nb = sum(scored)
         if true_nb == 0:
             return loss, np.nan
 
         loss = loss / true_nb
-        return loss, loss.detach().item()
+        return loss, loss.detach()
 
     # . Streamed-evaluation hooks -------------------------------------------------------------------
     # A subclass whose ``loss`` reduces to a running sum provides its sufficient statistic and its
@@ -207,7 +241,10 @@ class MaskedLoss(Criterion):
 
     def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
         """Sum-contribution of one (output, target) pair to this loss's running total."""
-        raise NotImplementedError()
+        kernel = self._kernel(x, y)
+        if kernel is None:
+            raise NotImplementedError()
+        return float(kernel.sum().item())
 
     def _finish(self, total: float, count: int) -> float:
         """The value ``self.loss`` would return from a running (total, count)."""

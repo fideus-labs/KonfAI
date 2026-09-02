@@ -31,11 +31,17 @@ loudly instead of silently mis-loading half a network.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import torch
 
+from konfai.utils.config import config
 from konfai.utils.errors import ConfigError
+
+if TYPE_CHECKING:
+    from konfai.network.network.network import Network
 
 
 def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[[], object]) -> list[torch.nn.Module]:
@@ -167,3 +173,102 @@ def transfer_weights_by_execution_order(
             )
         target_leaf.load_state_dict(source_state)
     return len(target_leaves)
+
+
+@config("pretrained_from")
+class PretrainedFrom:
+    """The ``Model.pretrained_from`` config block: seed a model from an external reference checkpoint.
+
+    ``builder`` names the reference class (``monai.networks.nets:UNet``), ``args`` its constructor
+    arguments, and ``checkpoint`` its trained weights: a raw ``state_dict`` file, or a checkpoint
+    dict holding one under ``state_dict``. When a fresh TRAIN initialises the model,
+    :func:`transfer_weights_by_execution_order` fills every tensor from the reference or raises; a
+    checkpoint load (RESUME, PREDICTION) carries its own weights and is never overridden. The
+    transfer runs both forwards on a synthetic input shaped from the model's own channels and
+    spatial rank; ``input_shape`` overrides its spatial extent when the derived one (the model's
+    patch size, else its downsampling multiple) does not fit the graph.
+    """
+
+    def __init__(
+        self,
+        checkpoint: str = "",
+        builder: str = "",
+        args: dict[str, Any] | None = None,
+        input_shape: list[int] | None = None,
+    ) -> None:
+        self.checkpoint = checkpoint
+        self.builder = builder
+        self.args = args
+        self.input_shape = input_shape
+
+    def _reference(self) -> torch.nn.Module:
+        if not self.builder or not self.checkpoint:
+            raise ConfigError(
+                "Model.pretrained_from requires both 'builder' and 'checkpoint'.",
+                "builder names the reference class ('monai.networks.nets:UNet'), checkpoint its weights"
+                " (a state_dict .pt, or a checkpoint dict with a 'state_dict' entry).",
+            )
+        from konfai.utils.utils import get_module
+
+        module, name = get_module(self.builder, "torch.nn")
+        reference_class = getattr(module, name, None)
+        if reference_class is None:
+            raise ConfigError(f"Model.pretrained_from.builder: '{name}' does not exist in '{module.__name__}'.")
+        try:
+            reference = reference_class(**(self.args or {}))
+        except TypeError as error:
+            raise ConfigError(f"Model.pretrained_from.args do not construct '{self.builder}'.", str(error)) from error
+
+        from konfai.utils.runtime.environment import safe_torch_load
+
+        try:
+            state = safe_torch_load(self.checkpoint, torch.device("cpu"))
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ConfigError(
+                f"Model.pretrained_from.checkpoint: cannot load '{self.checkpoint}'.", str(error)
+            ) from error
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        try:
+            reference.load_state_dict(state)
+        except (RuntimeError, TypeError) as error:
+            raise ConfigError(
+                f"Model.pretrained_from.checkpoint: '{self.checkpoint}' does not fit the reference '{self.builder}'.",
+                str(error),
+            ) from error
+        return reference.eval()
+
+    def _example_input(self, model: Network) -> torch.Tensor:
+        # The transfer only needs shapes and execution order, so any input the graph accepts will do.
+        if self.input_shape is not None:
+            spatial = [int(size) for size in self.input_shape]
+        elif (
+            model.patch is not None
+            and model.patch.patch_size is not None
+            and all(int(size) > 0 for size in model.patch.patch_size)
+        ):
+            spatial = [int(size) for size in model.patch.patch_size]
+        else:
+            factors = model.downsampling_factor() or [1] * model.dim
+            if len(factors) != model.dim:
+                factors = [max(factors)] * model.dim
+            # The smallest extent of at least 16 the graph accepts: a multiple of the per-axis factor.
+            spatial = [factor * max(1, math.ceil(16 / factor)) for factor in factors]
+        return torch.randn(1, model.in_channels, *spatial)
+
+    def seed(self, model: Network) -> int:
+        """Fill every tensor of ``model`` from the reference, or raise naming the config key."""
+        reference = self._reference()
+        inputs = self._example_input(model)
+        try:
+            return transfer_weights_by_execution_order(
+                target=model,
+                source=reference,
+                target_forward=lambda: list(model.named_forward(inputs)),
+                source_forward=lambda: reference(inputs),
+            )
+        except ConfigError as error:
+            raise ConfigError(
+                f"Model.pretrained_from: the reference '{self.builder}' cannot seed this model.",
+                *(str(message) for message in error.args),
+            ) from error

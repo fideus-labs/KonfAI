@@ -225,11 +225,23 @@ def run_distributed_app(
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> None:
         params = sig.parameters
+        # A kwarg the entrypoint does not declare must refuse, not vanish: silently dropping one
+        # already forced the --plan short-circuit in main.py. Tolerated beside the signature: the
+        # cluster kwargs (read from the raw kwargs below) and 'command', the CLI's subcommand
+        # discriminator, which only the TRAIN/RESUME entrypoint declares.
+        unknown = set(kwargs) - set(params) - {"name", "memory", "num_nodes", "time_limit", "command"}
+        if unknown:
+            raise ConfigError(
+                f"{func.__name__}() does not accept {sorted(unknown)}.",
+                f"It accepts {sorted(params)}; a cluster submission adds name/memory/num_nodes/time_limit.",
+            )
         kwargs_fun = {k: v for k, v in kwargs.items() if k in params}
 
         bound = sig.bind_partial(*args, **kwargs_fun)
         bound.apply_defaults()
-        is_cluster = "resubmit" in kwargs
+        # The cluster CLI always parses --name (required) and the workflow signatures never declare
+        # it, so its presence in the RAW kwargs is what tells a submission from a local run.
+        is_cluster = "name" in kwargs
         # The auto memory budget is a NODE budget, but build-time sizing (the evaluation auto-patch)
         # runs while ``func(...)`` constructs the workflow: before the spawn where world_size exists.
         # The launcher therefore leaves the per-node rank count in the environment, and restores it
@@ -253,7 +265,6 @@ def run_distributed_app(
                         "memory": kwargs["memory"],
                         "num_nodes": kwargs["num_nodes"],
                         "time_limit": kwargs["time_limit"],
-                        "resubmit": bool(kwargs.get("resubmit", False)),
                     }
                     if is_cluster
                     else None
@@ -365,13 +376,6 @@ def execute_distributed_object(
                     if configured_object.manual_seed is not None:
                         seed_all(configured_object.manual_seed)
                     if cluster_config is not None:
-                        if cluster_config["resubmit"]:
-                            # Auto-requeue is not implemented; warn instead of silently dropping the flag.
-                            print(
-                                "[KonfAI] WARNING: --resubmit is not implemented yet; this job will NOT "
-                                "auto-requeue at the time limit. Relaunch manually with the RESUME command "
-                                "pointing at the latest checkpoint to continue training."
-                            )
                         with clock.phase("setup"):
                             configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
                         clock.launch()
@@ -395,6 +399,15 @@ def execute_distributed_object(
                     world_size = len(gpu_ids)
                     if world_size == 0:
                         world_size = cpu_workers
+                    if not quiet:
+                        # One line naming the resolved devices: omitting --gpu runs on CPU, and a
+                        # silent CPU fallback on a GPU machine is a 10-100x slowdown nobody sees.
+                        device_line = (
+                            "cuda:" + ",".join(str(i) for i in gpu_ids)
+                            if gpu_ids
+                            else f"CPU ({cpu_workers} worker{'s' if cpu_workers > 1 else ''})"
+                        )
+                        print(f"[KonfAI] Running on {device_line}")
                     with clock.phase("setup"):
                         configured_object.setup(world_size)
                     # Share tensors through /dev/shm files instead of one file descriptor per tensor:

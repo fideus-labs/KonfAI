@@ -24,14 +24,13 @@ continue monotonically from the loaded checkpoint instead of restarting, and the
 resumed model still predicts finite values through the PREDICTION workflow.
 """
 
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 import torch
-from harness import konfai_cli_command, prepare_experiment_dir, replace_once, subprocess_env
+from harness import konfai_cli_command, prepare_experiment_dir, replace_once, run_workflow
 
 pytestmark = pytest.mark.integration
 
@@ -95,12 +94,7 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     )
 
     cli = konfai_cli_command()
-    subprocess.run(
-        [*cli, "TRAIN", "-y", "--cpu", "1", "-q", "-c", "Config.yml"],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
+    run_workflow([*cli, "TRAIN", "-y", "--cpu", "1", "-q", "-c", "Config.yml"], experiment_dir)
 
     checkpoints_dir = paths["checkpoints_dir"] / train_name
     initial_checkpoints = _read_checkpoints(checkpoints_dir)
@@ -112,11 +106,9 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     assert it_end >= EPOCHS_INITIAL and it_end % EPOCHS_INITIAL == 0
     its_per_epoch = it_end // EPOCHS_INITIAL
 
-    subprocess.run(
+    run_workflow(
         [*cli, "RESUME", "-y", "--cpu", "1", "-q", "-c", "ConfigResume.yml", "--model", str(last_checkpoint)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
+        experiment_dir,
     )
 
     final_checkpoints = _read_checkpoints(checkpoints_dir)
@@ -135,8 +127,10 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     epochs_rerun = EPOCHS_TOTAL - epoch_end
     assert max(new_epochs) == EPOCHS_TOTAL - 1
     assert max(new_its) == it_end + epochs_rerun * its_per_epoch
-    # One checkpoint per training iteration (it_validation: 1) plus the final exit save.
-    assert len(new_checkpoints) == epochs_rerun * its_per_epoch + 1
+    # One checkpoint per training iteration (it_validation: 1). The exit no longer writes a
+    # duplicate of the last scored save: an exit save happens only when iterations advanced
+    # past it (a crash), and it is then named crash_*.pt.
+    assert len(new_checkpoints) == epochs_rerun * its_per_epoch
 
     # The optimizer state itself round-tripped: AdamW step counters equal the total
     # number of iterations across both runs (not just the resumed run's own count).
@@ -154,11 +148,9 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path) -> None:
     assert any((weights_after[name] - weights_before[name]).abs().max().item() > 0 for name in float_names)
 
     # The resumed model is still usable end-to-end and predicts finite values.
-    subprocess.run(
+    run_workflow(
         [*cli, "PREDICTION", "-y", "--cpu", "1", "-q", "-c", "Prediction.yml", "--models", str(final_checkpoint)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
+        experiment_dir,
     )
     expected_cases = sorted(path.name for path in paths["dataset_dir"].iterdir() if path.is_dir())
     predicted = sorted((experiment_dir / "Predictions" / train_name / "Dataset").rglob("sCT.mha"))

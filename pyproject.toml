@@ -36,10 +36,7 @@ dependencies = [
   "tqdm",
   "numpy",
   "ruamel.yaml",
-  "psutil",
-  "lxml",
-  "requests",
-  "huggingface_hub"
+  "psutil"
 ]
 
 [project.urls]
@@ -62,7 +59,6 @@ vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
 ssim = ["scikit-image"]
-fid = ["scipy", "torchvision"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
 omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
@@ -78,13 +74,15 @@ all = [
   "konfai[vtk]",
   "konfai[lpips]",
   "konfai[ssim]",
-  "konfai[fid]",
   "konfai[cluster]",
   "konfai[dicom]",
   "konfai[omezarr]",
   "konfai[s3]",
   "konfai[export]",
-  "konfai[smp]"
+  "konfai[smp]",
+  # The IMPACT criteria download their feature extractors from the Hub; imported lazily,
+  # and their refusal names this extra.
+  "huggingface_hub"
 ]
 dev = [
   "SimpleITK>=2.0",
@@ -107,16 +105,15 @@ dev = [
   "mypy",
   "build",
   "types-requests",
+  # The docs toolchain: keep in sync with docs/requirements.txt (the RTD list).
   "sphinx>=7.0",
   "shibuya",
   "myst-parser",
-  "nbsphinx",
-  "ipython",
-  "ipykernel",
   "sphinx-autodoc-typehints",
   "sphinx-copybutton",
   "sphinx-togglebutton",
-  "sphinx-tabs"
+  "sphinx-tabs",
+  "sphinxcontrib-mermaid"
 ]
 
 [tool.setuptools_scm]
@@ -131,7 +128,8 @@ include = ["konfai", "konfai.*"]
 exclude = ["apps*", "konfai-apps*"]
 
 [tool.setuptools.package-data]
-# Ship the declarative model catalog (konfai/models/yaml/*.yml) in the wheel.
+# Ship the declarative model catalog (konfai/models/yaml/*.yml) and the PEP 561 marker in the wheel.
+"konfai" = ["py.typed"]
 "konfai.models.yaml" = ["*.yml"]
 
 [tool.pixi.workspace]
@@ -139,7 +137,9 @@ channels = ["conda-forge"]
 platforms = ["linux-64", "osx-arm64", "win-64"]
 
 [tool.pixi.pypi-dependencies]
-konfai = { path = ".", editable = true }
+# The dev extra IS the dev environment: one list, so `pixi run check` and CI (`pip install -e
+# ".[dev]"`) exercise the same dependencies. Only twine and submitit are pixi-only additions.
+konfai = { path = ".", editable = true, extras = ["dev"] }
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.14"
@@ -155,34 +155,18 @@ docs = { features = ["default", "docs"], solve-group = "default" }
 # Feature: dev
 # ---------------------------------------------------------------------------
 [tool.pixi.feature.dev.pypi-dependencies]
-pytest = "*"
-pytest-cov = "*"
-pytest-xdist = "*"
-ruff = "==0.15.2"
-build = "*"
 twine = "*"
-mypy = "*"
-types-requests = "*"
 submitit = "*"
-SimpleITK = ">=2.0"
-h5py = "*"
-tensorboard = "*"
-nvidia-ml-py = "*"
-pydicom = "*"
-zarr = ">=3"
-ngff-zarr = ">=0.45"
-dask = "*"
-scikit-image = "*"
 
 [tool.pixi.feature.dev.tasks]
 test = { cmd = "pytest -q -n auto --dist loadfile tests/", description = "Run the test suite" }
-test-fast = { cmd = 'pytest -q -m "not slow and not integration" tests/', description = "Run the test suite without slow oracle and integration tests" }
+test-fast = { cmd = 'pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/', description = "Run the test suite without slow oracle and integration tests" }
 test-apps = { cmd = "pytest -q konfai-apps/tests", description = "Run the konfai-apps test suite" }
 test-cov = { cmd = "pytest -n auto --dist loadfile --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
-lint = { cmd = "ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Lint source code" }
-format = { cmd = "ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Format source code" }
-format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio tests", description = "Check formatting without modifying files" }
-typecheck = { cmd = "python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio --ignore-missing-imports --no-site-packages", description = "Type-check all packages" }
+lint = { cmd = "ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio apps tests", description = "Lint source code" }
+format = { cmd = "ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio apps tests", description = "Format source code" }
+format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio apps tests", description = "Check formatting without modifying files" }
+typecheck = { cmd = "python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio", description = "Type-check all packages ([tool.mypy] governs; real stubs in use)" }
 build = { cmd = "python -m build", description = "Build sdist and wheel" }
 check = { depends-on = ["lint", "format-check", "test", "test-apps"], description = "Run all quality checks" }
 
@@ -243,6 +227,12 @@ addopts = "-q"
 markers = [
     "slow: marks tests as slow (deselect with -m 'not slow')",
     "integration: marks integration tests",
+]
+filterwarnings = [
+    # SimpleITK's GetImageFromArray/GetArrayViewFromImage assigns array.shape in place
+    # (SimpleITK/extra.py), which NumPy 2.5 deprecated: ~1000 copies per heavy file run bury every
+    # other warning. Drop this once the SimpleITK floor ships a reshape-based fix.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:SimpleITK",
 ]
 
 # ---------------------------------------------------------------------------

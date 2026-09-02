@@ -23,7 +23,7 @@ import os
 import numpy as np
 import torch
 
-from konfai.metric.measure.base import Criterion, _require_optional, models_register
+from konfai.metric.measure.base import Criterion, models_register
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.config import apply_config
 from konfai.utils.utils import get_module
@@ -38,14 +38,6 @@ class PatchGanLoss(Criterion):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         target = self._buffers["target"]
         return self.loss(output, (torch.ones_like(output) * target).to(output.device))
-
-
-class WGP(Criterion):
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        return torch.mean((output - 1) ** 2)
 
 
 class Gram(Criterion):
@@ -182,67 +174,3 @@ class PerceptualLoss(Criterion):
         else:
             loss = self._compute(output, *targets)
         return loss.to(output)
-
-
-class FID(Criterion):
-    class InceptionV3(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-
-            torchvision_models = _require_optional("torchvision.models", criterion="FID", extra="fid")
-            inception_v3 = torchvision_models.inception_v3
-            Inception_V3_Weights = torchvision_models.Inception_V3_Weights
-
-            self.model = inception_v3(weights=Inception_V3_Weights.DEFAULT, transform_input=False)
-            self.model.fc = torch.nn.Identity()
-            self.model.eval()
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.model(x)
-
-    def __init__(self) -> None:
-        super().__init__()
-        _require_optional("scipy.linalg", criterion="FID", extra="fid")
-        # Built on the CPU and moved to the evaluated tensor's device in forward: a hardcoded .cuda()
-        # crashes CPU-only hosts and pins every DDP rank to the same GPU.
-        self.inception_model = FID.InceptionV3()
-
-    @staticmethod
-    def preprocess_images(image: torch.Tensor) -> torch.Tensor:
-        # resize/normalise-with-mean-std live in torchvision.transforms.functional, not torch.nn.functional
-        # (which has no ``resize`` and whose ``normalize`` takes no mean/std).
-        tvf = _require_optional("torchvision.transforms.functional", criterion="FID", extra="fid")
-        resized = tvf.resize(image, [299, 299]).repeat((1, 3, 1, 1))
-        return tvf.normalize(resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-    @staticmethod
-    def get_features(images: torch.Tensor, model: torch.nn.Module) -> np.ndarray:
-        with torch.no_grad():
-            features = model(images).cpu().numpy()
-        return features
-
-    @staticmethod
-    def calculate_fid(real_features: np.ndarray, generated_features: np.ndarray) -> float:
-        mu1 = np.mean(real_features, axis=0)
-        sigma1 = np.cov(real_features, rowvar=False)
-        mu2 = np.mean(generated_features, axis=0)
-        sigma2 = np.cov(generated_features, rowvar=False)
-
-        diff = mu1 - mu2
-        linalg = _require_optional("scipy.linalg", criterion="FID", extra="fid")
-
-        covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-        if np.iscomplexobj(covmean):
-            covmean = covmean.real
-
-        return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * np.trace(covmean)
-
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        self.inception_model.to(output.device)
-        real_images = FID.preprocess_images(targets[0].to(output.device).squeeze(0).permute([1, 0, 2, 3]))
-        generated_images = FID.preprocess_images(output.squeeze(0).permute([1, 0, 2, 3]))
-
-        real_features = FID.get_features(real_images, self.inception_model)
-        generated_features = FID.get_features(generated_images, self.inception_model)
-
-        return FID.calculate_fid(real_features, generated_features)

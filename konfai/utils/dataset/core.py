@@ -42,9 +42,9 @@ from konfai.utils.dataset.attribute import (
     as_channel_first,
     data_to_image,
     data_to_transform,
-    is_an_image,
 )
 from konfai.utils.dataset.backend import File as _File
+from konfai.utils.dataset.backend import backend_for
 from konfai.utils.dataset.dicom_file import DicomFile
 from konfai.utils.dataset.h5 import H5File
 from konfai.utils.dataset.itk_transform_file import ItkTransformFile
@@ -127,7 +127,7 @@ class Dataset:
         # rather than ignored: only OME-NGFF has multiple levels, so a pyramid asked of an mha or an
         # h5 is a request the format cannot serve, and silently writing one level would leave the
         # consumer's ``@1`` resolving to a level that does not exist.
-        if scale_factors and self.file_format != "omezarr":
+        if scale_factors and not backend_for(self.file_format).writes_pyramid:
             raise DatasetManagerError(
                 f"A pyramid was asked of a '{self.file_format}' destination, which has no levels.",
                 "Only ':omezarr' stores levels. Drop scale_factors, or write to ':omezarr'.",
@@ -136,6 +136,11 @@ class Dataset:
         self.downsample_method = downsample_method
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
+        #: Root-existence and case-path probes are one round-trip each on a remote root, per entry
+        #: read without these: a root seen once is not re-probed (a vanished one fails loudly at
+        #: the read), and a case resolved once keeps its path until a write drops the caches.
+        self._root_seen = False
+        self._case_paths: dict[tuple[str, str], str] = {}
         #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
         #: ``(group, name)``: computed once per volume, whatever the number of chains reading it.
         self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
@@ -144,15 +149,20 @@ class Dataset:
         """One entry's backing file, opened as this dataset's root is."""
         return self.File(filename, read, self.file_format, self.level)
 
+    @property
+    def _backend(self) -> type[_AbstractFile]:
+        """The class serving this dataset's format: where the per-backend facts are declared."""
+        return backend_for(self.file_format)
+
     @staticmethod
     def _normalize_path(filename: str | Path, file_format: str) -> tuple[str, bool]:
-        # A single-store h5 is one file, every other backend a directory of cases: only the latter gets the
+        # A single store is one file, every other backend a directory of cases: only the latter gets the
         # trailing slash that marks ``is_directory``. Keep the two in lock-step so a path never ends up a
         # directory-flagged h5 (which would write the hidden dotfile ``<dir>/.h5``). ``as_posix`` keeps the
         # separator forward on every OS, so the stored filename (and the trailing-slash marker) is the same
         # on Windows, where ``prefix / name`` would otherwise render backslashes.
         path = uri.normalize(filename)
-        if file_format != "h5" and not path.endswith("/"):
+        if not backend_for(file_format).single_store and not path.endswith("/"):
             path += "/"
         return path, path.endswith("/")
 
@@ -207,8 +217,9 @@ class Dataset:
         view, for the callers that manipulate the path.
         """
         root = self.filename
-        if self.file_format == "h5" and not root.endswith(".h5"):
-            return f"{root}.h5"
+        suffix = self._backend.case_file_suffix
+        if self._backend.single_store and suffix and not root.endswith(suffix):
+            return f"{root}{suffix}"
         return root
 
     @property
@@ -225,12 +236,10 @@ class Dataset:
         """Whether writes to different entries land in disjoint files, so a background writer may
         flush one entry while another thread writes elsewhere in the dataset.
 
-        Mirrors the backend dispatch in ``File.__enter__``: everything that is not a single-store
-        backend is a :class:`SitkFile` directory, one image file per ``(group, name)``. A single
-        store (one HDF5 file, one zarr hierarchy, a DICOM series) shares handles and metadata across
-        entries and must stay serial.
+        The backend's own declaration: a store that shares handles or metadata across entries (one
+        HDF5 file, a zarr hierarchy, a DICOM series) says so and stays serial.
         """
-        return self.file_format not in ("h5", "omezarr", "dicom")
+        return self._backend.concurrent_write_safe
 
     def _write_target(self, group: str, name: str) -> tuple[_File, str]:
         """The file a ``(group, name)`` write lands in and the entry name inside it, caches dropped.
@@ -242,6 +251,7 @@ class Dataset:
         uri.refuse_write(self.filename)
         self._names_cache.clear()
         self._infos_cache.clear()
+        self._case_paths.clear()
         self.case_facts.clear()
         if self.is_directory:
             os.makedirs(self.filename, exist_ok=True)
@@ -282,14 +292,11 @@ class Dataset:
     def can_stream_data(self, attributes: Attribute) -> bool:
         """Whether ``open_data_stream`` can serve this dataset's write format.
 
-        H5 and OME-Zarr always can; MetaImage ``mha`` needs image geometry to write its header up
-        front; every other format only writes whole volumes (use ``write``).
+        The backend's own declaration: H5 and OME-Zarr always can; MetaImage/NIfTI need image
+        geometry to write their headers up front; every other format only writes whole volumes
+        (use ``write``).
         """
-        if self.file_format in ("h5", "omezarr"):
-            return True
-        if self.file_format == "itktransform":
-            return is_an_image(attributes)
-        return self.file_format in ("mha", "nii") and is_an_image(attributes)
+        return self._backend.can_stream(self.file_format, attributes)
 
     def open_data_stream(
         self,
@@ -330,11 +337,18 @@ class Dataset:
         """The file a directory dataset stores case ``name`` under, or ``None`` if absent on disk.
 
         The returned path omits the implicit ``.h5`` suffix h5 case files carry: ``H5File``
-        re-appends it on open.
+        re-appends it on open. A case found once is not probed again (the probe is a round-trip on
+        a remote root, per entry read); an ABSENT case stays a fresh question, because a run may
+        produce it mid-read.
         """
+        memo_key = (sub_directory, name)
+        memoised = self._case_paths.get(memo_key)
+        if memoised is not None:
+            return memoised
         path = f"{self.filename}{sub_directory}{name}"
-        on_disk = f"{path}{'.h5' if self.file_format == 'h5' else ''}"
+        on_disk = f"{path}{self._backend.case_file_suffix or ''}"
         if uri.exists(on_disk):
+            self._case_paths[memo_key] = path
             return path
         if uri.is_uri(on_disk):
             return None  # no writer of a remote root, so no backup of one to recover
@@ -360,11 +374,12 @@ class Dataset:
         path's last component, so the coordinates are ``("", group)`` there and ``(groups, name)``
         on a single-file dataset. Raises ``DatasetManagerError`` when the dataset or the entry is missing.
         """
-        if not self.exists_on_disk():
+        if not self._root_seen and not self.exists_on_disk():
             raise DatasetManagerError(
                 f"The dataset '{self.filename}' does not exist.",
                 "Check 'dataset_filenames' and the path it names.",
             )
+        self._root_seen = True
         if self.is_directory:
             for sub_directory in self._get_sub_directories(groups):
                 path = self._case_path(sub_directory, name)
@@ -599,14 +614,15 @@ class Dataset:
                 yield from file.get_names(groups)
             return
         group = groups.split("/")[-1]
+        suffix = self._backend.case_file_suffix
         for sub_directory in self._get_sub_directories(groups):
             root = f"{self.filename}{sub_directory}"
             for name in uri.list_names(root):
-                if self.file_format == "h5" and uri.is_dir(f"{root}{name}"):
+                if suffix and uri.is_dir(f"{root}{name}"):
                     continue
                 with self._file(f"{root}{name}", True) as file:
                     if file.is_exist(group):
-                        yield name.replace(".h5", "") if self.file_format == "h5" else name
+                        yield name.removesuffix(suffix) if suffix else name
 
     def get_names(self, groups: str, index: list[int] | None = None) -> list[str]:
         if index is None and groups in self._names_cache:
@@ -643,7 +659,7 @@ class Dataset:
 
     def get_group(self) -> list[str]:
         if self.is_directory:
-            if self.file_format in {"dicom", "omezarr"}:
+            if self._backend.lists_case_entries:
                 groups_set = set()
                 for case in uri.list_names(self.filename):
                     case_path = uri.join(self.filename, case)

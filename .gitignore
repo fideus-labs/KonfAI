@@ -19,3 +19,4 @@ docs/_build/
 build/
 mcp-workspace/
 KonfAI_Workspaces/
+konfai-mcp/tests/fixtures/

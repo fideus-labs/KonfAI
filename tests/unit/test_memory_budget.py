@@ -215,7 +215,7 @@ def test_a_slurm_per_cpu_grant_is_multiplied_by_the_task_cpus(monkeypatch: pytes
 #   8 volumes x 512 elements x 4 bytes = 16384 bytes.
 _GROUP_SHAPE = [1, 8, 8, 8]
 _CASES = ["case_a", "case_b", "case_c", "case_d"]
-_DATASET_BYTES = 2 * len(_CASES) * 512 * data_manager._CACHE_ELEMENT_BYTES
+_DATASET_BYTES = 2 * len(_CASES) * 512 * data_manager.samples._CACHE_ELEMENT_BYTES
 
 
 def _make_train(memory_budget: str | float | None) -> DataTrain:

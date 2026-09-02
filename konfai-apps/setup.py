@@ -33,4 +33,16 @@ def _release_version() -> str:
 
 _version = _release_version()
 
-setup(install_requires=[f"konfai=={_version}", "SimpleITK", "fastapi", "uvicorn", "python-multipart"])
+# ``requests`` and ``huggingface_hub`` are declared here, not inherited: konfai core no longer
+# depends on either.
+setup(
+    install_requires=[
+        f"konfai=={_version}",
+        "SimpleITK",
+        "requests",
+        "huggingface_hub",
+        "fastapi",
+        "uvicorn",
+        "python-multipart",
+    ]
+)

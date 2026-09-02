@@ -600,6 +600,9 @@ class GeneratorV3(network.Network):
             dim: int,
         ) -> None:
             super().__init__()
+            # nb_class=0: no segmentation heads inside a GAN generator. UNet.UNetBlock has no
+            # internal X_0_* branches (that is NestedUNet's convention), so naming them here bound
+            # the Tanh head to the argmax label map (1-channel, long) instead of the feature map.
             self.add_module(
                 "UNetBlock_0",
                 UNet.UNetBlock(
@@ -610,15 +613,13 @@ class GeneratorV3(network.Network):
                     upsample_mode=blocks.UpsampleMode[upsample_mode],
                     attention=attention,
                     block=blocks.ConvBlock if block_type == "Conv" else blocks.ResBlock,
-                    nb_class=1,
+                    nb_class=0,
                     dim=dim,
                 ),
-                out_branch=[f"X_0_{j + 1}" for j in range(len(channels) - 2)],
             )
             self.add_module(
                 "Head",
                 GeneratorV3.NestedUNetHead(channels[:2], dim=dim),
-                in_branch=[f"X_0_{len(channels) - 2}"],
             )
 
     def __init__(

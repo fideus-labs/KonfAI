@@ -85,11 +85,10 @@ A third independent package (depends only on KonfAI's public API) exposing a **F
 
 **Working on the MCP server, how to validate a change:**
 
-- **Synthetic fixtures:** `pixi run --environment dev python audit/make_fixtures.py` (note: `audit/` is
-  currently local-only/untracked, so commit it or regenerate it before relying on this flow elsewhere) builds a segmentation
-  dataset, a registration pair with a known translation, a synthesis pair, a 3-level OME-Zarr store, and
-  corrupted/unsupported inputs under `audit/fixtures/` (procedural, no patient data). Reuse these, do not
-  invent ad-hoc data in `/tmp`.
+- **Synthetic fixtures:** `pixi run --environment dev python konfai-mcp/tests/make_fixtures.py` builds a
+  segmentation dataset, a registration pair with a known translation, a synthesis pair, a 3-level OME-Zarr
+  store, and corrupted/unsupported inputs under the gitignored `konfai-mcp/tests/fixtures/` (procedural, no
+  patient data). Reuse these, do not invent ad-hoc data in `/tmp`.
 - **Drive it black-box first, not by tool name.** Formulate a real objective ("segment these CT volumes"),
   then exercise the loop through a `fastmcp.Client` exactly as `test_mcp_server_segmentation_pipeline.py`
   does. A new tool is not "done" because it returns without an exception.
@@ -105,9 +104,10 @@ A third independent package (depends only on KonfAI's public API) exposing a **F
   spawn subprocess (`run_api_in_subprocess`) and gate it behind `allow_untrusted_code` where applicable;
   (4) document per-parameter meaning via `Annotated[..., Field(description=...)]`, not only prose; (5) add a
   pytest that inspects the output.
-- **Adding a workflow kind touches ~7 registries** (WORKFLOWS, WORKFLOW_CONFIG_FILES/ROOT_KEYS, runner
-  command map, capabilities `_WORKFLOW_ROOTS`, `Job.kind` Literal + retry map, GUIDE). Prefer one descriptor
-  table consumed everywhere over editing each.
+- **Adding a workflow kind is one `WorkflowSpec` entry** in `konfai-mcp/konfai_mcp/workflows.py` plus the
+  two `Literal` aliases beside it (and a `GUIDE`/tool description); every other map (config filename, root
+  key, runner command, capabilities class, retry tool) derives from that table, and
+  `tests/test_workflow_registry.py` pins the derivations to it.
 - **Safety invariants to preserve:** validation/smoke-tests never execute in the server process; only
   `read/write_session_file` are path-jailed (dataset tools read arbitrary host paths by design, so keep it
   that way only for the trusted-local deployment, and never widen writes). `cancel_job` now reaps the whole
@@ -128,7 +128,7 @@ pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konf
 pip install -e ./konfai-mcp  && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate)
 ```
 
-The Pixi `dev` env carries the imaging extras; a bare `pip install .[dev]` does not. `pixi run test` does **not** run `konfai-apps/tests` or `konfai-mcp/tests`; install those packages first (they pull their own runtime deps), exactly as their CI does. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `fid`, `cluster`, `export`, …).
+The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run `konfai-apps/tests` or `konfai-mcp/tests`; install those packages first (they pull their own runtime deps), exactly as their CI does. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
 
 ## 6b. Releasing
 
@@ -175,9 +175,10 @@ Conventional Commits only took hold at `v1.5.9`, and rendering further back emit
 - **`outputs_criterions` keys equal a module's dotted path**; the `:`/`.` separators are load-bearing.
 - **`state_dict` load/save does not recurse into nested `Network`s** (each owns its optimizer/state); alias lists are positional.
 - **The YAML model builder is the trusted/untrusted boundary**: only registry types, and module names contain no `.`.
-- **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel. Core must never import
-  `konfai_apps` **at module level**. Known exception: `data/transform/inference.py` `KonfAIInference.infer_entry` does a
-  lazy, guarded import: a layering inversion pending an owner decision (see `REFACTORING.md` §C); do not add more.
+- **`konfai-apps` is a separate package**; `apps/` is excluded from the `konfai` wheel. Core never imports
+  `konfai_apps`. The one sanctioned edge is the loader shim in `data/transform/__init__.py`: the bare stage
+  name `KonfAIInference` (published bundles spell it) resolves to `konfai_apps.transforms` when konfai-apps
+  is installed and refuses with the install hint otherwise; do not add more.
 - **The pretrained bridge fills every target tensor or raises**; never report a partial load as success.
 - **The config write is atomic** (temp + `os.replace`); a reader must never see a truncated config and bind all-defaults.
 
@@ -213,7 +214,9 @@ Three, and only three, places decide trust. Keep them honest:
   `level='train_step'` does a real forward+backward.
 - **`transform_shape()` must be exact**: patch planning trusts it, a wrong prediction corrupts reassembly.
 - **Reading a config mutates it**, so snapshot bytes before any validation that builds a workflow.
-- **Adding a workflow kind touches ~12 registries + ~8 `Literal`s**; prefer one descriptor table over editing each.
+- **Adding a workflow kind**: in konfai-mcp this is one `WorkflowSpec` entry + two `Literal` aliases
+  (drift-tested, see §5b); in core it still touches several maps (`main.py` `_COMMANDS`/`_INIT_TARGETS`,
+  `State`, api.py). Prefer extending the descriptor tables over scattering new registries.
 - **Union coercion in the config binder is declaration-order-sensitive**: `overlap: 0.25` once bound `0`
   (lossy `int` won). Fixed; pinned by
   `test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`. Any new union-typed

@@ -27,7 +27,11 @@ transient when there is one, a fixed factor when the OOM left no number) re-plan
 restarts. When everything fits (the common case) nothing here runs at all.
 """
 
+from typing import Any
+
 import torch
+
+from konfai.utils.utils import concretize_patch_size, size_free_axes
 
 #: Fraction of the free VRAM a step may claim; the reserve absorbs allocator fragmentation and
 #: transients the measured run did not exercise (mirrors the accumulation gate's margin).
@@ -116,3 +120,64 @@ def next_patch_candidate(
     for axis in free:
         shrunk[axis] = min(snapped(axis, int(candidate[axis] * ratio)), candidate[axis])
     return shrunk if shrunk != list(candidate) else None
+
+
+class VramAutoPatchMixin:
+    """The auto-patch state and shrink policy the training and prediction workflows share.
+
+    The state lives on the workflow object itself: the free-axis template captured from the user's
+    patch (a per-axis ``0`` marks a FREE axis and opts into the OOM restart loop), the current
+    candidate, and the model's per-axis input multiple. Each workflow keeps only its own injection
+    points around this: the trainer its multi-rank shrink rendezvous, the predictor its
+    accumulation reserve and output reset.
+    """
+
+    #: The workflow's dataset (set by the subclass __init__): the grids re-cut on a re-plan.
+    dataset: Any
+
+    def _capture_vram_patch_template(self, patch: Any) -> None:
+        """Capture the user's free-axis convention before any re-plan materialises sizes over it."""
+        self._vram_patch_template: list[int] | None = (
+            [int(size) for size in patch.patch_size]
+            if patch is not None and patch.patch_size is not None and any(size == 0 for size in patch.patch_size)
+            else None
+        )
+        self._vram_patch_candidate: list[int] | None = None
+        #: Per-axis input multiple the model needs (its downsampling factor); a free axis snaps to
+        #: it. The subclass sets it once the model graph is final.
+        self._downsampling_factor: list[int] | None = None
+
+    def _presize_free_axes(self) -> bool:
+        """Round the free patch axes up to the model's valid input multiple before the first step,
+        so the network's encoder/decoder skips align instead of crashing on a non-divisible extent.
+        Every rank rounds the same worst case to the same size, so no rendezvous is needed here
+        (unlike the OOM shrink). True when the grids were re-cut: the caller re-fetches its loaders.
+        """
+        sized = size_free_axes(self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor)
+        if sized is None:
+            return False
+        self._adopt_patch_candidate(sized)
+        return True
+
+    def _adopt_patch_candidate(self, candidate: list[int]) -> None:
+        """Record ``candidate`` and re-cut every prepared grid to it."""
+        self._vram_patch_candidate = candidate
+        self.dataset.replan_patch(candidate)
+
+    def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
+        """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
+
+        The first OOM starts from the worst prepared case at full extent (the size the failed grid
+        effectively ran); later ones shrink the current candidate further.
+        """
+        if self._vram_patch_template is None:
+            return None
+        worst = self.dataset.worst_case_shape()
+        if worst is None:
+            return None
+        candidate = self._vram_patch_candidate or concretize_patch_size(
+            self._vram_patch_template, worst, self._downsampling_factor
+        )
+        return next_patch_candidate(
+            candidate, self._vram_patch_template, worst, measured, usable, self._downsampling_factor
+        )

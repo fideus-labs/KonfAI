@@ -26,7 +26,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.utils.dataset import Attribute, Dataset, _get_h5_file_lock, get_infos, image_to_data
+from konfai.utils.dataset import Attribute, Dataset, get_infos, image_to_data
+from konfai.utils.dataset import raw_block as raw_block_module
+from konfai.utils.dataset.h5 import _get_h5_file_lock
 from konfai.utils.errors import DatasetManagerError
 
 sitk = pytest.importorskip("SimpleITK")
@@ -103,9 +105,65 @@ def test_attribute_holding_a_long_array_round_trips_past_numpys_print_threshold(
     np.testing.assert_allclose(attribute.get_np_array("Long"), np.arange(2000, dtype=float))
 
 
+def test_attribute_names_the_key_whose_value_does_not_parse_back_flat() -> None:
+    """A >= 2-D value is stored as a nested print (Crop's ``box`` is read back through its own
+    parser, so the write door cannot refuse the rank), and reading it back as an array used to be
+    an anonymous ``ValueError`` deep in numpy: the refusal now names the key and the remedy."""
+    attribute = Attribute()
+    attribute["MyMatrix"] = np.eye(3)
+    with pytest.raises(DatasetManagerError, match=r"'MyMatrix'.*flat"):
+        attribute.get_np_array("MyMatrix")
+    with pytest.raises(DatasetManagerError, match="flatten the value"):
+        attribute.get_tensor("MyMatrix")
+    assert attribute["MyMatrix_0"] == "[[1. 0. 0.] [0. 1. 0.] [0. 0. 1.]]", "the text door still serves it"
+    with pytest.raises(DatasetManagerError, match=r"'MyMatrix'"):
+        attribute.pop_np_array("MyMatrix")
+    attribute["Direction"] = np.eye(3).flatten()  # the flat form parses back exactly
+    np.testing.assert_array_equal(attribute.get_np_array("Direction"), np.eye(3).flatten())
+
+
 # --------------------------------------------------------------------------------------
 # HDF5 backend: directories, modes, and per-file locking
 # --------------------------------------------------------------------------------------
+
+
+def test_h5_missing_group_raises_the_designed_refusal_not_attributeerror(tmp_path: Path, image_attributes) -> None:
+    """H5File._get_dataset answered None for an absent group and every reader dereferenced it:
+    ``AttributeError: 'NoneType' object has no attribute 'shape'`` deep in numpy, where every
+    sibling backend names the entry. The backend-level coordinates are the ones the dataset's
+    directory branch passes for a directory of case files: ``("", group)``."""
+    h5py_module = pytest.importorskip("h5py")
+    del h5py_module
+    volume = np.arange(1 * 2 * 3 * 4, dtype=np.float32).reshape(1, 2, 3, 4)
+    Dataset(tmp_path / "Cases", "h5").write("ct", "CASE_000", volume, image_attributes([0.0] * 3, [1.0] * 3))
+
+    reader = Dataset.H5File(str(tmp_path / "Cases"), True)
+    with reader as _:
+        for read in (
+            lambda: reader.file_to_data("", "missing_group"),
+            lambda: reader.get_infos("", "missing_group"),
+            lambda: reader.file_to_data_slice("", "missing_group", (slice(None),)),
+            lambda: reader.file_to_data("nope", "CASE_000"),
+        ):
+            with pytest.raises(DatasetManagerError, match="is not in"):
+                read()
+
+
+def test_h5_read_chunk_cache_takes_its_slice_of_the_declared_budget() -> None:
+    """The HDF5 read pool's rdcc cache was the one decoded-block cache that ignored the declared
+    budget: 128 MiB per handle, up to 8 handles, whatever the declaration. Declared, the pool at
+    capacity now stays inside the same cache share every other decoded-block cache draws from."""
+    pytest.importorskip("h5py")
+    from konfai.utils.budget import BUDGET_SHARES, set_per_rank_budget
+    from konfai.utils.dataset.h5 import _H5ReadPool
+
+    try:
+        set_per_rank_budget(256 << 20)
+        expected = int((256 << 20) * BUDGET_SHARES["cache"]) // _H5ReadPool._MAX
+        assert Dataset.H5File._read_chunk_cache_bytes() == expected
+    finally:
+        set_per_rank_budget(None)
+    assert Dataset.H5File._read_chunk_cache_bytes() == Dataset.H5File._READ_CHUNK_CACHE_BYTES
 
 
 def test_h5_dataset_creates_nested_parent_directories(tmp_path: Path, image_attributes) -> None:
@@ -414,7 +472,7 @@ def test_init_keeps_token_for_plain_file_dataset(tmp_path: Path) -> None:
 def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
     # A chunk spans every other axis whole, the channels included, and is accumulated in float64. Cut
     # on a plane alone, a 122-channel volume holds 122 times the budget: 7 GiB where 0.06 was meant.
-    from konfai.utils.dataset import _STATISTICS_CHUNK_ELEMENTS, _statistics_chunk_length
+    from konfai.utils.dataset.statistics import _STATISTICS_CHUNK_ELEMENTS, _statistics_chunk_length
 
     for channels in (1, 4, 122):
         shape = [channels, 400, 512, 512]
@@ -425,7 +483,7 @@ def test_a_statistics_chunk_is_budgeted_with_its_channels() -> None:
 
 
 def test_a_statistics_chunk_reaches_further_on_a_thin_volume() -> None:
-    from konfai.utils.dataset import _statistics_chunk_length
+    from konfai.utils.dataset.statistics import _statistics_chunk_length
 
     thin, wide = [1, 400, 64, 64], [1, 400, 512, 512]
     assert _statistics_chunk_length(thin, 1, budget=1 << 20) > _statistics_chunk_length(wide, 1, budget=1 << 20)
@@ -608,7 +666,7 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
     it on the way back would hand it the store as it is now and launder a stale view into a fresh-looking
     one, so the write that arrived meanwhile would stay invisible for the rest of the process."""
     pytest.importorskip("h5py")
-    from konfai.utils.dataset import _h5_read_pool
+    from konfai.utils.dataset.h5 import _h5_read_pool
 
     root = str(tmp_path / "ds") + "/"
     Path(root).mkdir()
@@ -794,7 +852,7 @@ def _block_image(data: np.ndarray, direction: np.ndarray) -> "sitk.Image":
 
 def _write_block_fixture(root: Path, kind: str) -> tuple[Path, np.ndarray]:
     """One file of ``kind`` under ``root``, and the channel-first array it holds."""
-    from konfai.utils.dataset import _MhaDataStream, _NiftiDataStream
+    from konfai.utils.dataset.stream import _MhaDataStream, _NiftiDataStream
 
     rng = np.random.default_rng(len(kind))
     scalar = (rng.normal(size=(1, 12, 14, 16)) * 100).astype(np.float32)
@@ -881,10 +939,9 @@ def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
     tmp_path: Path, monkeypatch, kind: str, corner: bool
 ) -> None:
     """Same bytes, same dtype, same attribute record (keys, order, text) as ITK's streaming reader."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, kind)
-    assert dataset_module._pixel_block(str(path)) is not None
+    assert raw_block_module._pixel_block(str(path)) is not None
     assert Dataset.SitkFile._supports_region_read(str(path))
     region = _block_region(data, corner)
     backend = _block_backend(path)
@@ -897,14 +954,16 @@ def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
     np.testing.assert_array_equal(got, want)
     np.testing.assert_array_equal(got, data[region])
     if data.shape[0] > 1 and path.suffix == ".nii":
-        # ITK aborts on a region of a vector NIfTI, so its route reads the volume whole and records
-        # the volume's origin; the block route records the region's, like every other format.
+        # ITK aborts on a region of a vector NIfTI, so its route reads the volume whole; both
+        # routes still record the REGION's origin (the shared region-geometry update), and only
+        # the first rung of the Origin stack differs: ITK's extract origin on the block route,
+        # the volume's on the whole-read one.
         index_xyz = np.asarray([item.start for item in reversed(region[1:])], dtype=np.float64)
         direction = want_attributes.get_np_array("Direction").reshape(3, 3)
-        expected = want_attributes.get_np_array("Origin") + direction @ (
-            index_xyz * want_attributes.get_np_array("Spacing")
-        )
+        volume_origin = Attribute._parse_array(dict(want_attributes)["Origin_0"])
+        expected = volume_origin + direction @ (index_xyz * want_attributes.get_np_array("Spacing"))
         np.testing.assert_array_equal(attributes.get_np_array("Origin"), expected)
+        np.testing.assert_array_equal(want_attributes.get_np_array("Origin"), expected)
         rungs = ("Origin_0", "Origin_1")
         assert {k: v for k, v in attributes.items() if k not in rungs} == {
             k: v for k, v in want_attributes.items() if k not in rungs
@@ -935,10 +994,9 @@ def test_every_patch_of_a_grid_records_what_itk_records(tmp_path: Path, monkeypa
 @pytest.mark.parametrize("kind", _BLOCK_LEFT_TO_ITK)
 def test_a_file_the_block_route_declines_is_still_read_by_itk(tmp_path: Path, kind: str) -> None:
     """Compressed, detached, rescaled, or another format: the block route steps aside, ITK answers."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, kind)
-    assert dataset_module._pixel_block(str(path)) is None
+    assert raw_block_module._pixel_block(str(path)) is None
     region = _block_region(data)
     got, attributes = _block_backend(path).file_to_data_slice("", path.name.split(".", 1)[0], region)
 
@@ -951,7 +1009,8 @@ def test_a_file_the_block_route_declines_is_still_read_by_itk(tmp_path: Path, ki
 
 def test_a_stepped_region_off_the_raw_block_reads_as_itk_reads_it_whole(tmp_path: Path, monkeypatch) -> None:
     """A step ITK cannot extract is served whole and sliced: the block serves the same values and
-    keeps the record ITK's route leaves, the volume's own geometry."""
+    the same record as ITK's route — the volume's own geometry, then the region's shifted origin
+    and step-scaled spacing, the record every backend returns for the samples actually kept."""
 
     path, data = _write_block_fixture(tmp_path, "vector.mha")
     region = (slice(0, 3, 2), slice(1, 12, 3), slice(0, 14, 2), slice(2, 16, 3))
@@ -963,12 +1022,50 @@ def test_a_stepped_region_off_the_raw_block_reads_as_itk_reads_it_whole(tmp_path
     np.testing.assert_array_equal(got, want)
     np.testing.assert_array_equal(got, data[region])
     assert dict(attributes) == dict(want_attributes)
+    volume_origin = Attribute._parse_array(dict(attributes)["Origin_0"])
+    volume_spacing = Attribute._parse_array(dict(attributes)["Spacing_0"])
+    direction = attributes.get_np_array("Direction").reshape(3, 3)
+    start_xyz = np.asarray([2.0, 0.0, 1.0])
+    np.testing.assert_array_equal(
+        attributes.get_np_array("Origin"), volume_origin + direction @ (start_xyz * volume_spacing)
+    )
+    np.testing.assert_array_equal(attributes.get_np_array("Spacing"), volume_spacing * [3.0, 2.0, 3.0])
+
+
+def test_a_stepped_region_carries_the_same_geometry_record_whatever_the_backend(tmp_path: Path) -> None:
+    """The same stepped read of the same logical volume used to answer three different geometry
+    records depending on the file format it was stored in: SitkFile kept the volume's origin and
+    un-scaled spacing where OME-Zarr and DICOM returned the region's. One shared helper now
+    computes the record everywhere: the first kept sample's world position, the step-scaled
+    spacing."""
+    pytest.importorskip("zarr")
+    pytest.importorskip("pydicom")
+    volume = np.arange(1 * 6 * 8 * 10, dtype=np.int16).reshape(1, 6, 8, 10)
+    origin = np.asarray([10.0, 20.0, 30.0])
+    spacing = np.asarray([0.5, 1.5, 2.0])
+    direction = np.asarray([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    region = (slice(None), slice(1, 6, 2), slice(0, 8, 3), slice(2, 10, 2))
+    start_xyz, step_xyz = np.asarray([2.0, 0.0, 1.0]), np.asarray([2.0, 3.0, 2.0])
+
+    for file_format in ("mha", "omezarr", "dicom"):
+        attributes = Attribute()
+        attributes["Origin"] = origin
+        attributes["Spacing"] = spacing
+        attributes["Direction"] = direction.flatten()
+        dataset = Dataset(tmp_path / file_format, file_format)
+        dataset.write("CT", "CASE_000", volume, attributes)
+        data, record = dataset.read_data_slice("CT", "CASE_000", region)
+
+        np.testing.assert_array_equal(data, volume[region], err_msg=file_format)
+        np.testing.assert_allclose(
+            record.get_np_array("Origin"), origin + direction @ (start_xyz * spacing), err_msg=file_format
+        )
+        np.testing.assert_allclose(record.get_np_array("Spacing"), spacing * step_xyz, err_msg=file_format)
 
 
 def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path, monkeypatch) -> None:
     """ITK reads the header once per file, not once per region; a file rewritten under the same
     name gets a record of its own."""
-    from konfai.utils import dataset as dataset_module
 
     path, data = _write_block_fixture(tmp_path, "scalar.mha")
     reads = {"header": 0}
@@ -979,7 +1076,7 @@ def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path,
         return real(self)
 
     monkeypatch.setattr(sitk.ImageFileReader, "ReadImageInformation", counting)
-    dataset_module._pixel_block_at.cache_clear()
+    raw_block_module._pixel_block_at.cache_clear()
     backend = _block_backend(path)
     for plane in range(10):
         region = (slice(None), slice(plane, plane + 1), slice(None), slice(None))

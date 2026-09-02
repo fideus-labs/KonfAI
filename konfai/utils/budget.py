@@ -26,6 +26,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import warnings
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,9 @@ from konfai.utils.errors import ConfigError
 # the model's optimizer/gradient state, DataLoader worker copies, CUDA pinned staging buffers, and
 # allocator slack. Caching runs with zero DataLoader workers, so a fifth of the node held back is ample.
 AUTO_MEMORY_SAFETY_FRACTION = 0.8
+
+#: The smallest declared budget the stack can honor (see the warning in resolve_memory_budget).
+MINIMUM_DECLARED_BUDGET_BYTES = 256 << 20
 
 # Decimal (10^n) and binary (2^n) suffixes; "" / "b" are bytes. Case is folded before lookup.
 _MEMORY_UNIT_BYTES: dict[str, int] = {
@@ -458,6 +462,20 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
             f"auto: {format_bytes(node_bytes)} {source} x {AUTO_MEMORY_SAFETY_FRACTION:.0%}",
             shared_across_ranks=True,
         )
-    return MemoryBudget(
-        float(parse_memory_budget_bytes(memory_budget)), f"{memory_budget!r}", shared_across_ranks=False
-    )
+    declared = parse_memory_budget_bytes(memory_budget)
+    if declared < MINIMUM_DECLARED_BUDGET_BYTES:
+        # Below this the declaration describes no process that can run: the interpreter with torch
+        # and one imaging backend was measured at 647 MiB resident before the first voxel, and the
+        # per-case engine floor, the statistics scan's blocks and one collate copy sit outside the
+        # sizing model (a smaller declaration held at 512 MiB and broke below 128 as an
+        # unattributable kill deep in a run). Warned rather than refused: tests and probes size
+        # tiny fixtures under tiny declarations on purpose.
+        warnings.warn(
+            f"memory_budget {memory_budget!r} is below the smallest supported declaration"
+            f" ({MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB): the process floor alone is several times"
+            " this figure, and what the sizing model cannot see may exceed it. Declare at least"
+            " 512 MiB, or 'auto' to size from the detected memory.",
+            UserWarning,
+            stacklevel=2,
+        )
+    return MemoryBudget(float(declared), f"{memory_budget!r}", shared_across_ranks=False)

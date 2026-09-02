@@ -201,11 +201,17 @@ reliable custom behavior, inheriting from `Network` is the supported path.
 Use `konfai.data.transform.Transform` for one-way transforms and
 `TransformInverse` when KonfAI must be able to invert the operation later.
 
-The key methods are:
+The contract is tiered, and tier 0 is all a correct transform owes:
 
-- `__call__(name, tensor, cache_attribute)` to transform the tensor
-- `transform_shape(...)` if the transform changes the tensor shape
-- `inverse(...)` if you inherit from `TransformInverse`
+- **Tier 0, correct**: `__call__(name, tensor, cache_attribute)`, plus
+  `transform_shape(...)` if the transform changes the spatial shape (and
+  `inverse(...)` if you inherit from `TransformInverse`). The stage then runs
+  on the whole volume and nothing silently breaks.
+- **Tier 1, streaming**: set the `locality` class attribute (a `LocalityKind`;
+  plus `halo` for a bounded neighbourhood) and the stage streams.
+- **Tier 2, streaming-aware**: method overrides, only where the answer depends
+  on the case or the stage owns a region's geometry or reads beside it. See
+  {doc}`../reference/api/extension-points`.
 
 `cache_attribute` is where you should save anything needed later by the inverse
 transform.

@@ -231,10 +231,15 @@ class Generator(network.Network):
 class Gan(network.Network):
     def __init__(
         self,
-        generator: Generator = Generator(),
-        discriminator: Discriminator = Discriminator(),
+        # Annotations stay non-optional: the config binder builds a config-object parameter from
+        # its annotation and `X | None = None` would mean "only if configured". The None default
+        # gives each Gan() fresh sub-networks instead of instances shared through the signature.
+        generator: Generator = None,  # type: ignore[assignment]
+        discriminator: Discriminator = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
+        generator = generator if generator is not None else Generator()
+        discriminator = discriminator if discriminator is not None else Discriminator()
         self.add_module(
             "Discriminator_B",
             discriminator,

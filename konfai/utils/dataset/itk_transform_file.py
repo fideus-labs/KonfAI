@@ -143,6 +143,24 @@ class ItkTransformFile(AbstractFile):
         self.filename = filename
         self.read = read
 
+    @classmethod
+    def open(
+        cls,
+        filename: str,
+        read: bool,
+        file_format: str,
+        level: int = 0,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> ItkTransformFile:
+        del file_format, level, scale_factors, downsample_method
+        return cls(f"{filename}/", read)
+
+    @classmethod
+    def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
+        del file_format
+        return is_an_image(attributes)  # only a displacement FIELD writes by regions
+
     def __enter__(self):
         return self
 

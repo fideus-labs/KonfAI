@@ -27,10 +27,8 @@ from konfai.data.transform.base import RegionContext as RegionContext
 from konfai.data.transform.base import Transform as Transform
 from konfai.data.transform.base import TransformInverse as TransformInverse
 from konfai.data.transform.base import TransformLoader as TransformLoader
-from konfai.data.transform.base import _is_augmentation as _is_augmentation
 from konfai.data.transform.base import sitk as sitk
 from konfai.data.transform.base import stat_seed_valid as stat_seed_valid
-from konfai.data.transform.chain import _REDUCE_OWN_KEYS as _REDUCE_OWN_KEYS
 from konfai.data.transform.chain import Expand as Expand
 from konfai.data.transform.chain import Reduce as Reduce
 from konfai.data.transform.chain import resolve_operator as resolve_operator
@@ -42,10 +40,6 @@ from konfai.data.transform.ensemble import Percentage as Percentage
 from konfai.data.transform.ensemble import SegmentationDisagreement as SegmentationDisagreement
 from konfai.data.transform.ensemble import StandardDeviation as StandardDeviation
 from konfai.data.transform.ensemble import Variance as Variance
-from konfai.data.transform.ensemble import _MemberSpread as _MemberSpread
-from konfai.data.transform.inference import DEFAULT_INFERENCE_MODEL_NAME as DEFAULT_INFERENCE_MODEL_NAME
-from konfai.data.transform.inference import DEFAULT_INFERENCE_REPO_ID as DEFAULT_INFERENCE_REPO_ID
-from konfai.data.transform.inference import KonfAIInference as KonfAIInference
 from konfai.data.transform.intensity import Clip as Clip
 from konfai.data.transform.intensity import HistogramMatching as HistogramMatching
 from konfai.data.transform.intensity import Normalize as Normalize
@@ -53,7 +47,6 @@ from konfai.data.transform.intensity import Standardize as Standardize
 from konfai.data.transform.intensity import Statistics as Statistics
 from konfai.data.transform.intensity import TensorCast as TensorCast
 from konfai.data.transform.intensity import UnNormalize as UnNormalize
-from konfai.data.transform.intensity import _seeded_scalar as _seeded_scalar
 from konfai.data.transform.io import Save as Save
 from konfai.data.transform.io import Write as Write
 from konfai.data.transform.labels import Argmax as Argmax
@@ -65,22 +58,7 @@ from konfai.data.transform.labels import OneHot as OneHot
 from konfai.data.transform.labels import SelectLabel as SelectLabel
 from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
-from konfai.data.transform.labels import _axis_reduction_locality as _axis_reduction_locality
-from konfai.data.transform.labels import _forget_model_channel_counts as _forget_model_channel_counts
-from konfai.data.transform.resample import _FIELD_ELEMENT_BYTES as _FIELD_ELEMENT_BYTES
-from konfai.data.transform.resample import _FIELD_WINDOW_COPIES as _FIELD_WINDOW_COPIES
 from konfai.data.transform.resample import Resample as Resample
-from konfai.data.transform.resample import _DerivedGrid as _DerivedGrid
-from konfai.data.transform.resample import _DisplacementSource as _DisplacementSource
-from konfai.data.transform.resample import _optional_image_filler as _optional_image_filler
-from konfai.data.transform.resample import _OwnGrid as _OwnGrid
-from konfai.data.transform.resample import _ReferenceGrid as _ReferenceGrid
-from konfai.data.transform.resample import _resample_with_sitk as _resample_with_sitk
-from konfai.data.transform.resample import _set_image_from_array as _set_image_from_array
-from konfai.data.transform.resample import _SitkInput as _SitkInput
-from konfai.data.transform.resample import _stages_bytes as _stages_bytes
-from konfai.data.transform.resample import _StoredMap as _StoredMap
-from konfai.data.transform.resample import _TargetGrid as _TargetGrid
 from konfai.data.transform.shape import Canonical as Canonical
 from konfai.data.transform.shape import Crop as Crop
 from konfai.data.transform.shape import Flatten as Flatten
@@ -89,11 +67,8 @@ from konfai.data.transform.shape import Gradient as Gradient
 from konfai.data.transform.shape import Padding as Padding
 from konfai.data.transform.shape import Permute as Permute
 from konfai.data.transform.shape import Squeeze as Squeeze
-from konfai.utils.ITK import _require_simpleitk as _require_simpleitk
 
 __all__ = [
-    "DEFAULT_INFERENCE_MODEL_NAME",
-    "DEFAULT_INFERENCE_REPO_ID",
     "Argmax",
     "Canonical",
     "Clip",
@@ -107,7 +82,6 @@ __all__ = [
     "Gradient",
     "HistogramMatching",
     "InferenceStack",
-    "KonfAIInference",
     "LocalityKind",
     "Magnitude",
     "Mask",
@@ -142,3 +116,21 @@ __all__ = [
     "split_expand",
     "stat_seed_valid",
 ]
+
+
+def __getattr__(name: str):
+    # ``KonfAIInference`` lives in konfai-apps (it drives a nested app run), but published configs
+    # spell the bare name, which the TransformLoader resolves against this package: hand the class
+    # over when konfai-apps is installed, refuse with the install otherwise.
+    if name == "KonfAIInference":
+        try:
+            from konfai_apps.transforms import KonfAIInference
+        except ImportError as exc:
+            from konfai.utils.errors import TransformError
+
+            raise TransformError(
+                "KonfAIInference requires the standalone 'konfai-apps' package.",
+                "Install it with 'pip install konfai-apps'.",
+            ) from exc
+        return KonfAIInference
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

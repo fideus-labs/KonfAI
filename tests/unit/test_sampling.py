@@ -142,7 +142,7 @@ def test_the_host_resampler_and_the_walk_agree_on_an_integer_payload():
     handful of voxels) so a real divergence, which moves voxels by far more, cannot hide in it.
     ``nearest`` copies voxels and must be exact, integers included.
     """
-    from konfai.data.transform import _resample_with_sitk
+    from konfai.data.transform.resample import _resample_with_sitk
 
     image = _image(oblique=True)
     counts = (sitk.GetArrayFromImage(image) * 4.0).astype(np.int16)

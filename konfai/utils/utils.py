@@ -14,7 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compatibility facade for KonfAI utility helpers and lightweight array utilities."""
+"""The patch/overlap and storage-format grammar shared by every workflow: patch sizing and overlap
+resolution, the supported-extension and ``path:spec`` vocabulary, and the classpath importer."""
 
 import importlib
 import itertools

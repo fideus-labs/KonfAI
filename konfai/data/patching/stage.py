@@ -133,6 +133,22 @@ class AugmentedStage:
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         return self.augmentation.patch_locality(self.index, self.a, cache_attribute)
 
+    def output_channels(self, channels: int) -> int:
+        """Only Mask/Permute reshape, and neither folds the channel axis: a draw keeps it."""
+        return channels
+
+    def case_working_multiple(self, name: str) -> float:
+        """What this copy's draw allocates beyond its block, in volumes-worth of it.
+
+        From the draw's locality: a REGRID draw resamples through ``grid_sample``, which builds the
+        pull box's coordinate grid (one volume per spatial axis) beside the landed block; any other
+        draw returns a fresh tensor or a view over a field of its own (one volume). Priced at zero,
+        an Expand copy's draws swept under a budget that never heard of their buffers.
+        """
+        del name
+        kind = self.patch_locality(Attribute()).kind
+        return 4.0 if kind is LocalityKind.REGRID else 1.0
+
     def stream_region_source(
         self,
         name: str,

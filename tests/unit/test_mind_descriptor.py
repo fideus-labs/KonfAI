@@ -100,7 +100,7 @@ def test_konfai_mind_is_a_frozen_network_and_survives_load_init() -> None:
     model.set_name("MIND")
     assert isinstance(model, Network)
     # No learnable parameters (all shift kernels are frozen).
-    assert not any(p.requires_grad for p in model.parameters(pretrained=False))
+    assert not any(p.requires_grad for p in model.parameters())
 
     kernel_before = model["Descriptor"].conv1.weight.detach().clone()
     model.load({}, init=True)  # the trainer's fresh-start call

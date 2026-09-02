@@ -42,9 +42,10 @@ _RUN_ROOT_KIND = {
     "Transforms": "transform",
 }
 # App job kinds → the workflow vocabulary the client speaks: an `infer` job runs a prediction, an
-# `evaluate` job an evaluation. Announced under the app vocabulary, a run sits outside every panel the
-# client gates on kind (the evaluation table, the prediction browse target, the sub-tab order).
-_APP_RUN_KIND = {"infer": "prediction", "evaluate": "evaluation"}
+# `evaluate` job an evaluation, a `finetune` job a training. Announced under the app vocabulary, a run
+# sits outside every panel the client gates on kind (the evaluation table, the prediction browse
+# target, the sub-tab order).
+_APP_RUN_KIND = {"infer": "prediction", "evaluate": "evaluation", "finetune": "train"}
 
 
 def _finite(value: Any) -> Any:

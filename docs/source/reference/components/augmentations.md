@@ -51,7 +51,7 @@ Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
 | `Rotate` | Random rotation (degrees). | `a_min=0, a_max=360, is_quarter=False` | **yes** with `is_quarter: true` | **yes** | **yes**: an index remap with `is_quarter: true`, and a free angle streams through the affine's own pull box |
 | `Scale` | Random log2-normal isotropic scale. | `s_std=0.2` | no | **yes** | **yes**: the region pulls its own window through the affine, so no fixed halo is needed |
 | `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes**: index remap; no with `vector_field: true` (negating a channel changes values) |
-| `Elastix` | Random BSpline elastic warp (SimpleITK). | `grid_spacing=16, max_displacement=16` | no | no | no: the displacement field is built at the full shape and indexed by absolute position |
+| `Elastix` | Random cubic-BSpline elastic warp, drawn as a control-point lattice. | `grid_spacing=16, max_displacement=16` (world units) | no | no | **yes**: the displacement is evaluated lazily from the lattice, and no voxel moves further than `max_displacement`, which bounds the source box a region pulls |
 | `Permute` | Random spatial-axis permutation (**3-D only**). | `prob_permute=[0.5,0.5]` | **yes** | **yes** | **yes**: index remap |
 | `Mask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | no | no: the output grid is the mask's, and the mask is already resident |
 
@@ -75,9 +75,9 @@ them streams: a voxel comes out the same whatever region it was read in.
 | Name | Purpose | Key args (defaults) | Notes | Stream |
 | --- | --- | --- | --- | --- |
 | `Noise` | Diffusion-style forward noising (zero-terminal-SNR β schedule). | `n_std` (required), `noise_step=1000` | Its `prob` is the max noise timestep, not an apply probability; it always applies. | **yes**: the field is a function of the voxel's position and the copy's seed, so a region draws the values it would have had in the whole volume |
-| `CutOUT` | Random cutout box filled with `value`. | `c_prob`, `cutout_size`, `value` (all required) | Gating uses the base probability. | **yes**: the box is placed in the whole volume's coordinates, so a region sees the part of it that falls inside it |
+| `CutOUT` | Random cutout box filled with `value`. | `cutout_size` (a fraction of the extent per axis, in `(0, 1]`), `value` (both required) | Gating uses the base probability; a `cutout_size` outside `(0, 1]` is refused. | **yes**: the box is placed in the whole volume's coordinates, so a region sees the part of it that falls inside it |
 
-`Elastix` and `Mask` require SimpleITK. The `vector_field` flag on `Flip` should
+`Mask` requires SimpleITK. The `vector_field` flag on `Flip` should
 only be enabled for single-channel or genuine vector-field groups.
 
 ## Next steps

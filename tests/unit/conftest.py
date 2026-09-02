@@ -111,6 +111,16 @@ def streaming_dataset_stub() -> type[StreamingDatasetStub]:
     return StreamingDatasetStub
 
 
+@pytest.fixture(scope="session")
+def oracle_cases(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Dataset]:
+    """One case on disk per oracle geometry: built once, read by every streamed-oracle row that
+    runs on it (the ``test_streamed_oracle_*`` family)."""
+    from oracle_support import GEOMETRIES, build_case
+
+    root = tmp_path_factory.mktemp("oracle")
+    return {name: build_case(root / name, geometry) for name, geometry in GEOMETRIES.items()}
+
+
 _TTA_SHAPE = [6, 4, 3]
 _TTA_PATCH_SIZE = [2, 4, 3]
 _TTA_OVERLAP = 1

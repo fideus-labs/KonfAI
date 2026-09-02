@@ -459,7 +459,7 @@ def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp
     import subprocess
     import sys
 
-    from konfai.utils.dataset import _retire_dead_debris
+    from konfai.utils.dataset.staging import _retire_dead_debris
 
     final = tmp_path / "CT.ome.zarr"
     final.mkdir()
@@ -547,7 +547,7 @@ def test_replacing_an_h5_entry_keeps_the_old_one_until_the_new_is_in_place(tmp_p
 def _kill_between_the_two_moves(dataset: Dataset, name: str, volume: np.ndarray, attributes: Attribute) -> None:
     """Leave on disk exactly what a writer killed between the move-aside and the publish leaves:
     the previous entry under its backup name, nothing under its own."""
-    from konfai.utils.dataset import _replaced_name
+    from konfai.utils.dataset.staging import _replaced_name
 
     dataset.write("CT", name, volume, attributes)
     if dataset.file_format == "h5":

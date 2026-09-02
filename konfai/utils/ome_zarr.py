@@ -966,20 +966,15 @@ def _grid_is_axis_aligned(attributes: dict[str, Any] | None) -> bool:
     grid can be declared a ``displacements`` transformation; an oriented one keeps the label-only
     layout, its Direction in the sidecar.
 
-    ``Attribute`` versions its keys (``Direction_0``, ``Direction_1``, ...), and the sidecar dict
-    arrives here verbatim: the LATEST version is the grid the store describes.
+    The sidecar dict is read through :class:`Attribute`, the one owner of the versioned-key stack
+    and the printed-array format: the LATEST ``Direction`` is the grid the store describes.
     """
-    versions = {
-        key: value
-        for key, value in (attributes or {}).items()
-        if key == "Direction" or (key.startswith("Direction_") and key.removeprefix("Direction_").isdigit())
-    }
-    if not versions:
+    from konfai.utils.dataset.attribute import Attribute
+
+    record = Attribute(attributes or {})
+    if "Direction" not in record:
         return True
-    value = versions[max(versions, key=lambda key: int(key.rsplit("_", 1)[-1]) if "_" in key else -1)]
-    flat = np.asarray(
-        str(value).replace("[", " ").replace("]", " ").split() if isinstance(value, str) else value, dtype=np.float64
-    ).ravel()
+    flat = record.get_np_array("Direction")
     side = round(len(flat) ** 0.5)
     return side * side == len(flat) and bool(np.allclose(flat.reshape(side, side), np.eye(side)))
 

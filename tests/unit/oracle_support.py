@@ -18,7 +18,7 @@
 
 A stage must behave as if it had seen the whole volume: proven on the READ side, patch by patch
 (``test_transform_locality_contract``), and on the WRITE side, region by region over dtype, rank and
-budget (``test_streamed_oracle``). Both need the same two things, so both read them here: the
+budget (the ``test_streamed_oracle_*`` family). Both need the same two things, so both read them here: the
 enumeration of the built-ins with one representative configuration each, and a case on disk holding
 one volume per input kind those configurations consume.
 
@@ -29,17 +29,19 @@ seed, which is how the oracle varies rank and geometry without varying anything 
 """
 
 import inspect
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 from konfai.data import augmentation as augmentation_module
 from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentation
 from konfai.data.augmentation import Flip as FlipAugmentation
-from konfai.data.patching import DatasetManager, DatasetPatch
+from konfai.data.materialize import CaseMaterializer, Verdict
+from konfai.data.patching import DatasetManager, DatasetPatch, SweepSegment
 from konfai.data.transform import (
     Argmax,
     Canonical,
@@ -73,7 +75,7 @@ from konfai.data.transform import (
     Write,
 )
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import TransformError
+from konfai.utils.errors import DatasetManagerError, TransformError
 
 CASE_NAME = "CASE_000"
 
@@ -670,8 +672,17 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
         "Contrast": [AugmentationCase(augmentation_module.Contrast(0.5), LocalityKind.POINTWISE, True)],
         # The box is normalised to the volume; a region keeps its part of it. A wide box so it lands
         # in more than one patch of the fixture.
-        "CutOUT": [AugmentationCase(augmentation_module.CutOUT(1.0, 0.5, 0.0), LocalityKind.POINTWISE, True)],
-        "Elastix": [AugmentationCase(augmentation_module.Elastix(), LocalityKind.WHOLE_VOLUME, False)],
+        "CutOUT": [AugmentationCase(augmentation_module.CutOUT(0.5, 0.0), LocalityKind.POINTWISE, True)],
+        # A lattice draw with a bounded reach (|d| <= max_displacement by convexity): each region
+        # pulls its own widened box and the warp resamples it, so the copies stream as a REGRID.
+        "Elastix": [
+            AugmentationCase(
+                augmentation_module.Elastix(grid_spacing=8, max_displacement=2),
+                LocalityKind.REGRID,
+                True,
+                atol=AUGMENTATION_ATOL,
+            )
+        ],
         "Flip": [
             AugmentationCase(FlipAugmentation(f_prob=[1.0, 1.0, 1.0]), LocalityKind.ORIENTATION, True),
             # A displacement field's flipped components are negated, which is not a bijection on values.
@@ -748,3 +759,148 @@ def builtin_augmentations() -> list[type[DataAugmentation]]:
         and cls.__module__ == augmentation_module.__name__
         and not inspect.isabstract(cls)
     ]
+
+
+# --------------------------------------------------------------------------------------
+# The write-side sweep vocabulary of the streamed-oracle family (test_streamed_oracle_*):
+# one property, one axis per file, and here what every file shares: the same case driven
+# region by region (as the budget cuts it) and whole, then compared.
+# --------------------------------------------------------------------------------------
+
+#: The geometries the oracle matrix runs on, drawn from a FIXED seed list rather than per run: a
+#: property that fails only on Tuesday's seed is not a property. Extents land in 16..40, which keeps
+#: the family inside its time budget while leaving every axis room for several regions.
+GEOMETRIES = {
+    "rank3-seed11": seeded_geometry(11, 3),
+    "rank3-seed23": seeded_geometry(23, 3),
+    "rank2-seed37": seeded_geometry(37, 2),
+}
+#: The one the tests that vary something OTHER than the geometry run on.
+MAIN = "rank3-seed11"
+
+
+@dataclass(frozen=True)
+class Route:
+    """How the sweep is made to cut the case, as the height one region spans of its first axis."""
+
+    name: str
+    #: Rows per region, as a fraction of the case's first extent. ``None`` leaves the sweep its own
+    #: cap, which covers these extents whole.
+    height: float | None
+
+
+#: One region, a handful, and one row each: the three decompositions of the same case.
+ROUTES = (Route("one-region", None), Route("few-regions", 0.25), Route("row-regions", 0.0))
+
+
+def budget_for(manager: DatasetManager, route: Route) -> float | None:
+    """The smallest per-rank budget under which the sweep cuts regions of ``route``'s height.
+
+    Found by bisecting the production sizing rule rather than by restating it: the test says how
+    tall a region should be, and ``_sweep_tile`` says what budget buys it. Asked with the landing
+    and the pull maps the sweep itself will use, because that is what the budget is spent on.
+    """
+    if route.height is None:
+        return None
+    # Every copy the run will sweep, each with the landing and the pull maps of its own chain: a
+    # draw that samples through an affine pulls more than the shared prefix, and the budget the
+    # matrix asks for is the one that buys the height on all of them.
+    augmented = manager._expand is not None
+    copies = [0] if not augmented else list(range(1, int(manager._expand.nb) + 1))
+    segments = {a: manager.sweep_segments(a, augmented) or [] for a in copies}
+    rows = max(1, int(route.height * int(manager.shapes[copies[0]][0])))
+    low, high = 1.0, float(2**48)
+    for _ in range(64):
+        middle = (low + high) / 2
+        manager.set_memory_budget(middle)
+        if min(_sweep_height(manager, sweeps) for sweeps in segments.values()) < rows:
+            low = middle
+        else:
+            high = middle
+    manager.set_memory_budget(None)
+    return high
+
+
+def _sweep_height(manager: DatasetManager, segments: Sequence[SweepSegment]) -> int:
+    """The shortest region the sizing buys these segments under the budget the manager currently
+    carries; zero where one of them does not fit, which is below every height the routes ask for."""
+    heights = []
+    for segment in segments:
+        try:
+            # The segment's own price (its stages, its store): the rule stream_refusal and the
+            # sweep spend the budget by -- a copy's draws included.
+            heights.append(manager.sizer_for(segment).sweep_tile()[0])
+        except DatasetManagerError:
+            return 0
+    return min(heights, default=0)
+
+
+@dataclass(frozen=True)
+class Written:
+    """One materialization's result: what landed, how it landed, and in how many pieces."""
+
+    array: np.ndarray
+    attribute: Attribute
+    verdict: Verdict
+    regions: int
+
+
+def count_regions(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
+    """Count the regions a sweep reads, so a row cannot pass by never having been decomposed."""
+    read = DatasetManager._read_streamed_region
+    counted = [0]
+
+    def counting(self, *args, **kwargs):
+        counted[0] += 1
+        return read(self, *args, **kwargs)
+
+    monkeypatch.setattr(DatasetManager, "_read_streamed_region", counting)
+    return lambda: counted[0]
+
+
+def sweep(
+    dataset: Dataset, group: str, stage: Transform, destination: Path, route: Route, monkeypatch: pytest.MonkeyPatch
+) -> Written:
+    """Write ``stage`` over the case region by region, cut as ``route`` says, and read back what landed."""
+    stage.set_datasets([dataset])
+    case_manager = manager(dataset, [stage, Save(f"{destination}:h5")], group=group)
+    budget = budget_for(case_manager, route)
+    with monkeypatch.context() as context:
+        regions = count_regions(context)
+        verdict = CaseMaterializer(case_manager).materialize(fallback_budget_bytes=budget)
+        array, attribute = Dataset(destination, "h5").read_data(group, CASE_NAME)
+        return Written(array, attribute, verdict, regions())
+
+
+def whole_volume(dataset: Dataset, group: str, stage: Transform, destination: Path) -> Written:
+    """The reference: the same chain over the assembled case, which is what streaming must reproduce."""
+    stage.set_datasets([dataset])
+    case_manager = manager(dataset, [stage, Save(f"{destination}:h5")], group=group)
+    CaseMaterializer(case_manager)._assemble_and_write(0)
+    case_manager.unload()
+    array, attribute = Dataset(destination, "h5").read_data(group, CASE_NAME)
+    return Written(array, attribute, Verdict.WHOLE_VOLUME, 0)
+
+
+def assert_same(got: Written, want: Written, atol: float, rtol: float = 0.0) -> None:
+    """Same voxels within the stated bound, same dtype, same geometry: streaming is invisible."""
+    assert got.array.shape == want.array.shape
+    assert got.array.dtype == want.array.dtype
+    np.testing.assert_allclose(got.array, want.array, rtol=rtol, atol=atol)
+    for key in ("Origin", "Spacing", "Direction"):
+        np.testing.assert_allclose(got.attribute.get_np_array(key), want.attribute.get_np_array(key), rtol=0, atol=0)
+
+
+def oracle_matrix(geometries: Sequence[str]) -> list[tuple[str, StageCase, Route]]:
+    """Every (geometry, built-in, decomposition) the property is proven on, for these geometries."""
+    return [
+        (geometry, case, route)
+        for geometry in geometries
+        for case in streamable_cases(GEOMETRIES[geometry])
+        for route in ROUTES
+    ]
+
+
+def identify(entry: tuple[str, StageCase, Route]) -> str:
+    geometry, case, route = entry
+    return f"{type(case.transform).__name__}-{case.group}-{geometry}-{route.name}"

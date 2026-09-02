@@ -42,6 +42,7 @@ def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], strea
     evaluator._pending_name = None
     evaluator._last_result = {}
     evaluator._map_sinks = {}
+    evaluator._scored_names = set()
     return evaluator
 
 

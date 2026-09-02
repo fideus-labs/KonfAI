@@ -21,6 +21,7 @@ import math
 from collections import deque
 from collections.abc import Iterator
 from itertools import islice
+from typing import Any, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -30,6 +31,87 @@ from konfai.network.network.base import strip_accumulated
 from konfai.network.network.loaders import CriterionsAttr, TargetCriterionsLoader
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
+
+
+class LabelledValues(NamedTuple):
+    """A per-label metric before its host readout: one value per label (NaN for a label the
+    reference lacks) and the labels naming them. ``Measure._materialize`` reads the tensor in the
+    same batched transfer as the scalar losses; the evaluator turns it into a per-label dict."""
+
+    values: torch.Tensor
+    labels: list[Any]
+
+
+#: The value a criterion reports beside its loss: a float, a 0-d tensor read lazily off its device,
+#: a dict of per-label floats, or a :class:`LabelledValues` pair read lazily.
+CriterionValue: TypeAlias = float | torch.Tensor | dict[Any, float] | LabelledValues
+
+#: Every shape ``Criterion.forward`` may return; ``CriterionResult.of`` normalizes them all.
+CriterionOutput: TypeAlias = (
+    torch.Tensor | tuple[torch.Tensor, CriterionValue] | tuple[torch.Tensor, CriterionValue, torch.Tensor]
+)
+
+
+class CriterionResult(NamedTuple):
+    """A criterion's forward, normalized: the loss tensor, the reported value, the optional
+    per-voxel map. ``of`` is the one place the accepted shapes are checked."""
+
+    loss: torch.Tensor
+    value: CriterionValue
+    map: torch.Tensor | None = None
+
+    @classmethod
+    def of(cls, raw: CriterionOutput, criterion: str = "criterion") -> "CriterionResult":
+        if isinstance(raw, torch.Tensor):
+            # Funnel through the tuple path so the bare-loss value passes the same shape check.
+            raw = (raw, raw.detach())
+        if not isinstance(raw, tuple) or not 2 <= len(raw) <= 3 or not isinstance(raw[0], torch.Tensor):
+            raise MeasureError(
+                f"'{criterion}' returned {type(raw).__name__} instead of a criterion result.",
+                "A criterion returns a loss Tensor, or (loss, value) with value a float, a 0-d "
+                "Tensor, a dict of floats or a (values, labels) pair, plus an optional per-voxel "
+                "map Tensor third.",
+            )
+        loss, value = raw[0], raw[1]
+        map_ = raw[2] if len(raw) == 3 else None
+        if isinstance(value, np.generic):
+            value = float(value)
+        elif isinstance(value, bool | int):
+            value = float(value)
+        elif isinstance(value, tuple) and not isinstance(value, LabelledValues):
+            if len(value) == 2 and isinstance(value[0], torch.Tensor) and isinstance(value[1], list):
+                value = LabelledValues(value[0], value[1])
+        if isinstance(value, torch.Tensor) and value.numel() != 1:
+            # A multi-element plain value would silently shift the deferred per-device readout.
+            raise MeasureError(
+                f"'{criterion}' reported a tensor of {value.numel()} elements.",
+                "The reported value is a single number: reduce it, or report a (values, labels) "
+                "pair for a per-label metric.",
+            )
+        if isinstance(value, LabelledValues) and (value.values.ndim != 1 or value.values.numel() != len(value.labels)):
+            # A misshaped pair passes here but explodes far away, in the materialized() zip.
+            raise MeasureError(
+                f"'{criterion}' reported {tuple(value.values.shape)} values for {len(value.labels)} labels.",
+                "A per-label metric reports a 1-D tensor holding exactly one value per label.",
+            )
+        if not isinstance(value, float | torch.Tensor | dict | LabelledValues) or (
+            map_ is not None and not isinstance(map_, torch.Tensor)
+        ):
+            raise MeasureError(
+                f"'{criterion}' reported a {type(value).__name__} value.",
+                "The reported value is a float, a 0-d Tensor, a dict of floats or a "
+                "(values, labels) pair, and a map is a Tensor.",
+            )
+        return cls(loss, value, map_)
+
+    def materialized(self) -> float | dict[Any, float]:
+        """The reported value as plain floats, read off their device: for per-case consumers (the
+        evaluator records into JSON immediately, where a sync is the cadence anyway)."""
+        if isinstance(self.value, LabelledValues):
+            return dict(zip(self.value.labels, self.value.values.tolist(), strict=True))
+        if isinstance(self.value, torch.Tensor):
+            return float(self.value.item())
+        return self.value
 
 
 class _RunningNanMean:
@@ -85,10 +167,11 @@ class Measure:
             self._mean = _RunningNanMean()
             self._mean_weight = _RunningNanMean()
             self._recorded = 0
-            # Values recorded but not yet in ``_values``: a loss is kept as its 0-d tensor, because
-            # reading it inside the forward stalls the CPU on the whole graph before backward is
-            # enqueued. The consumers read them in one transfer per device (``Measure._materialize``).
-            self._unread: list[float | torch.Tensor] = []
+            # Values recorded but not yet in ``_values``: a loss is kept as its 0-d tensor (a
+            # per-label metric as its LabelledValues), because reading it inside the forward stalls
+            # the CPU on the whole graph before backward is enqueued. The consumers read them in one
+            # transfer per device (``Measure._materialize``).
+            self._unread: list[float | torch.Tensor | LabelledValues] = []
 
         def reset_loss(self) -> None:
             self._loss.clear()
@@ -119,21 +202,19 @@ class Measure:
         def weights_mean(self, n: int) -> float:
             return float(np.nanmean(_tail(self._weight, n))) if n > 0 else self._mean_weight.mean()
 
-        def add(self, weight: float, value: torch.Tensor | tuple[torch.Tensor, float | dict[str, float]]) -> None:
-            true_value: float | torch.Tensor
-            if isinstance(value, tuple):
-                loss_value, true_value = value
-                if isinstance(true_value, dict):
-                    # Per-label/landmark metrics (Dice, TRE) report a dict; the logging windows
-                    # nan-mean ``_values``, so store a scalar summary here while the tensor still
-                    # carries the metric. Absent labels are NaN and are ignored by the mean.
-                    numeric = [v for v in true_value.values() if isinstance(v, int | float)]
-                    true_value = float(np.nanmean(numeric)) if numeric else float("nan")
+        def add(self, weight: float, value: CriterionOutput) -> None:
+            result = CriterionResult.of(value, self.name)
+            true_value: float | torch.Tensor | LabelledValues
+            if isinstance(result.value, dict):
+                # Per-label dicts of plain floats (the hard-label Dice route); the logging windows
+                # nan-mean ``_values``, so store the scalar summary. Absent labels are NaN and are
+                # ignored by the mean.
+                numeric = [v for v in result.value.values() if isinstance(v, int | float)]
+                true_value = float(np.nanmean(numeric)) if numeric else float("nan")
             else:
-                loss_value = value
-                true_value = value.detach()
+                true_value = result.value
 
-            self._loss.append((weight, loss_value if self.is_loss else loss_value.detach()))
+            self._loss.append((weight, result.loss if self.is_loss else result.loss.detach()))
             self._unread.append(true_value)
             self._weight.append(weight)
             self._mean_weight.add(weight)
@@ -320,17 +401,25 @@ class Measure:
 
     def _materialize(self) -> None:
         """Append every unread value to its record's window, in the order recorded, reading the
-        tensors off their device in one transfer per device."""
+        tensors off their device in one transfer per device. A ``LabelledValues`` lands as its
+        NaN-skipping mean over the labels: what the eager per-label dict summarized before."""
         records = [record for _, record in self._records() if record._unread]
         tensors: dict[torch.device, list[torch.Tensor]] = {}
         for record in records:
             for value in record._unread:
-                if isinstance(value, torch.Tensor):
-                    tensors.setdefault(value.device, []).append(value.reshape(()))
-        read = {device: iter(torch.stack(batch).tolist()) for device, batch in tensors.items()}
+                tensor = value.values if isinstance(value, LabelledValues) else value
+                if isinstance(tensor, torch.Tensor):
+                    tensors.setdefault(tensor.device, []).append(tensor.reshape(-1))
+        read = {device: iter(torch.cat(batch).tolist()) for device, batch in tensors.items()}
         for record in records:
             for value in record._unread:
-                record._record(next(read[value.device]) if isinstance(value, torch.Tensor) else value)
+                if isinstance(value, LabelledValues):
+                    values = list(islice(read[value.values.device], value.values.numel()))
+                    record._record(float(np.nanmean(values)) if values else float("nan"))
+                elif isinstance(value, torch.Tensor):
+                    record._record(next(read[value.device]))
+                else:
+                    record._record(value)
             record._unread.clear()
 
     def set_window(self, n: int) -> None:

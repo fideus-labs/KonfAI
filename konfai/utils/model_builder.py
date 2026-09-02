@@ -58,6 +58,10 @@ _MODULE_REGISTRY: dict[str, ModuleFactory] = {
     "AdaptiveAvgPool": _dimensional_factory("AdaptiveAvgPool"),
     "BatchNorm": _dimensional_factory("BatchNorm"),
     "InstanceNorm": _dimensional_factory("InstanceNorm"),
+    "ConstantPad": _dimensional_factory("ConstantPad"),
+    "ConstantPad1d": torch.nn.ConstantPad1d,
+    "ConstantPad2d": torch.nn.ConstantPad2d,
+    "ConstantPad3d": torch.nn.ConstantPad3d,
     "Conv1d": torch.nn.Conv1d,
     "Conv2d": torch.nn.Conv2d,
     "Conv3d": torch.nn.Conv3d,
@@ -74,11 +78,19 @@ _MODULE_REGISTRY: dict[str, ModuleFactory] = {
     "LeakyReLU": torch.nn.LeakyReLU,
     "PReLU": torch.nn.PReLU,
     "GELU": torch.nn.GELU,
+    "SiLU": torch.nn.SiLU,
+    "ELU": torch.nn.ELU,
+    "CELU": torch.nn.CELU,
+    "Mish": torch.nn.Mish,
+    "Softplus": torch.nn.Softplus,
+    "Hardswish": torch.nn.Hardswish,
     "Sigmoid": torch.nn.Sigmoid,
     "Tanh": torch.nn.Tanh,
     "Softmax": torch.nn.Softmax,
     "Identity": torch.nn.Identity,
+    "PixelShuffle": torch.nn.PixelShuffle,
     "Add": blocks.Add,
+    "Detach": blocks.Detach,
     "Multiply": blocks.Multiply,
     "ClipNormalize": blocks.ClipNormalize,
     "ArgMax": blocks.ArgMax,
@@ -171,6 +183,16 @@ def register_module(name: str, cls: type[torch.nn.Module]) -> None:
 def list_registered_modules() -> list[str]:
     """Return all safe module type names accepted by the builder."""
     return sorted(_MODULE_REGISTRY)
+
+
+def registered_module_types() -> dict[str, ModuleFactory]:
+    """The builder's module registry (a YAML ``type:`` entry per name), as a copy."""
+    return dict(_MODULE_REGISTRY)
+
+
+def registered_object_types() -> dict[str, ObjectFactory]:
+    """The builder's object registry (a YAML ``$object`` entry per name), as a copy."""
+    return dict(_OBJECT_REGISTRY)
 
 
 def _lookup_reference(path: str, parameters: dict[str, Any]) -> Any:

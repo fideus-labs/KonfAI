@@ -479,7 +479,7 @@ _FIELD_WINDOW_COPIES = 3.0
 
 #: What one element of a decoded field weighs under the bit-exact walk: read as float64 whatever
 #: the store holds (:meth:`_DisplacementSource.read`), while the plan counts its volumes at
-#: :data:`~konfai.data.patching._SWEEP_ELEMENT_BYTES`: the ratio is what a field window costs in
+#: :data:`~konfai.data.patching.budget._SWEEP_ELEMENT_BYTES`: the ratio is what a field window costs in
 #: the currency the plan is written in. Under ``precision: fast`` the field is held in float32 and
 #: weighs half (:meth:`Resample._field_element_bytes`).
 _FIELD_ELEMENT_BYTES = 8
@@ -1069,18 +1069,6 @@ class Resample(TransformInverse):
             stages.extend(self._stored_stages(name, box))
         return tuple(stages)
 
-    def _bound(self, name: str) -> TransformBound:
-        """What the map is guaranteed to do, from stored coefficients alone, no voxel read."""
-        rank = self._source_grid(name).rank
-        folded = TransformBound.exact(AffineMap.identity(rank))
-        if self.displacement is not None or (self.transforms is not None and self._stored_map(name).field):
-            raise TransformError(
-                "a field's reach is unknown before its values are read; nothing bounds it from headers."
-            )
-        if self.transforms is not None:
-            folded = self._stored_map(name).bound.after(folded)
-        return folded
-
     def _pricing_bound(self, name: str) -> TransformBound:
         """The map's bound as the PLAN prices it: headers and declarations, never a voxel.
 
@@ -1255,7 +1243,7 @@ class Resample(TransformInverse):
         # purpose so an externally written double field is not quantized before the exact
         # arithmetic), so each of its components weighs two of the plan's volumes, not one.
         # Charging it at one was counting eight bytes as four.
-        from konfai.data.patching import _SWEEP_ELEMENT_BYTES
+        from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
 
         widening = self._field_element_bytes / _SWEEP_ELEMENT_BYTES
         window = max(1, int(shape[0])) * (target_voxel / field_voxel) * widening

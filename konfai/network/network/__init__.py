@@ -28,17 +28,12 @@ from konfai.network.network.loaders import OptimizerLoader as OptimizerLoader
 from konfai.network.network.loaders import TargetCriterionsLoader as TargetCriterionsLoader
 from konfai.network.network.loaders import build_configured_criterions as build_configured_criterions
 from konfai.network.network.measure import Measure as Measure
-from konfai.network.network.measure import _RunningNanMean as _RunningNanMean
-from konfai.network.network.measure import _tail as _tail
 from konfai.network.network.model import Model as Model
 from konfai.network.network.model import ModelLoader as ModelLoader
 from konfai.network.network.network import MinimalModel as MinimalModel
 from konfai.network.network.network import ModuleArgsDict as ModuleArgsDict
 from konfai.network.network.network import Network as Network
 from konfai.network.network.network import OutputsGroup as OutputsGroup
-from konfai.network.network.network import _channels_last as _channels_last
-from konfai.network.network.network import _flat_downsampling as _flat_downsampling
-from konfai.network.network.network import _leaf_spatial_stride as _leaf_spatial_stride
 
 __all__ = [
     "CriterionsAttr",

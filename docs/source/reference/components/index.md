@@ -50,11 +50,12 @@ reflection engine binds YAML keys directly to constructor parameter names. Two
 ways to get the exhaustive list for any component:
 
 1. **Let KonfAI materialise the defaults.** Reference the component in a config
-   and run the workflow (or run with `KONFAI_CONFIG_MODE=default`). KonfAI writes
+   and run `konfai <COMMAND> --init` (or the workflow itself). KonfAI writes
    every resolved default back into the YAML file, giving you a complete,
    fully-expanded subtree to edit. (This is the same
    [config-mutation behaviour](../../concepts/configuration.md) that surprises
-   new users: here it is a feature.)
+   new users: here it is a feature.) `konfai list <kind>` prints every
+   component's exact YAML spelling.
 2. **Read the signature.** Where a bare name is looked up depends on the kind:
 
    | Kind | Bare name resolves in |

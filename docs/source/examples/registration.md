@@ -20,12 +20,12 @@ KonfAI checkout, install the ITK reader/writer and TensorBoard support used by
 training:
 
 ```bash
-python -m pip install -e ".[itk,tensorboard,fid]"
+python -m pip install -e ".[itk,tensorboard]" scipy
 cd examples/Registration
 ```
 
-`fid` is there for `scipy`, which `make_dataset.py` uses to apply the
-displacement field; it is the only extra that carries it.
+`scipy` is there for `make_dataset.py`, which uses it to apply the
+displacement field; no KonfAI extra carries it.
 
 The commands below show GPU 0; replace `--gpu 0` with `--cpu 1` for a CPU-only
 run, but note the shipped configuration is 400 epochs at `256 × 256`: about

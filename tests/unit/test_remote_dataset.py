@@ -38,10 +38,13 @@ fsspec = pytest.importorskip("fsspec")
 @pytest.fixture
 def memory_root() -> str:
     """An empty ``memory://`` root, cleared of whatever a previous test left behind."""
+    from konfai.utils.dataset.ome_zarr_file import _forget_resolved_paths
+
     fs = fsspec.filesystem("memory")
     fs.store.clear()
     fs.pseudo_dirs.clear()
     fs.pseudo_dirs.append("")
+    _forget_resolved_paths()  # the entry-path memo outlives the store this fixture just emptied
     return "memory://cohort"
 
 
@@ -122,6 +125,34 @@ def test_a_remote_entry_is_read_region_by_region(memory_root: str) -> None:
     region = (slice(0, 1), slice(2, 5), slice(0, 8), slice(0, 10))
     read, _attributes = dataset.read_data_slice("CT", "CASE_000", region)
     np.testing.assert_allclose(read, volume[region])
+
+
+def test_repeated_remote_region_reads_pay_no_path_resolution_round_trips(
+    memory_root: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every region read paid several ``fs.info`` round-trips of re-resolution before touching
+    cached data: the root probe, the case probe, and the store-suffix probes. None of those
+    answers can change mid-run, so after the first read they are memoised and a patch read
+    touches only the caches."""
+    volume = (np.random.default_rng(2).random((1, 6, 8, 10)) * 100).astype(np.float32)
+    _publish(memory_root, "CASE_000", "CT", volume)
+    dataset = Dataset(memory_root, "omezarr")
+    region = (slice(0, 1), slice(1, 4), slice(0, 8), slice(0, 10))
+    dataset.read_data_slice("CT", "CASE_000", region)  # resolves once, and memoises
+
+    calls = {"info": 0}
+    real_info = fsspec.filesystem("memory").__class__.info
+
+    def counting(self, *args, **kwargs):
+        calls["info"] += 1
+        return real_info(self, *args, **kwargs)
+
+    monkeypatch.setattr(fsspec.filesystem("memory").__class__, "info", counting)
+    for _ in range(3):
+        read, _ = dataset.read_data_slice("CT", "CASE_000", region)
+        np.testing.assert_allclose(read, volume[region])
+
+    assert calls["info"] == 0
 
 
 def test_an_unreachable_remote_root_raises_instead_of_reporting_no_cases(

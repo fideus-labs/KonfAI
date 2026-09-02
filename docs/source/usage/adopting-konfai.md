@@ -66,6 +66,10 @@ For a weight-exact pair,
 `konfai.utils.pretrained.transfer_weights_by_execution_order` pairs weighted
 leaf modules in forward-execution order and checks every local state shape. It
 is useful when graph names differ but execution structure and parameters match.
+The config entry point is `Model.pretrained_from` (checkpoint + reference
+builder classpath + its args), so a fresh TRAIN seeds from another framework's
+checkpoint without any Python: see the
+["Start from MONAI, torchvision or nnU-Net weights" section](../reference/components/models.md).
 
 This bridge is strict, not universal. It raises `ConfigError` on a different leaf
 count, a per-leaf key or shape mismatch, a target tensor no traced leaf owns, and a
@@ -109,7 +113,10 @@ the next layer.
 - MONAI's component breadth;
 - Lightning's ecosystem and maturity for arbitrary training-loop patterns;
 - a general spatial dependency compiler for every custom transform;
-- published controlled benchmarks proving universal speedups over these tools.
+- proof of universal speedups over these tools: the tracked harness
+  ({doc}`benchmarks`) reproduces the bounded-memory claim and pins the app
+  tables' protocol, but the comparisons are per app and per case, not a
+  general claim.
 
 ## Trust boundary
 

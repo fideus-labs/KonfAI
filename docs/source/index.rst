@@ -278,6 +278,7 @@ KonfAI
    usage/python-workflows
    usage/large-images
    usage/custom-models
+   usage/benchmarks
    usage/docker
 
 .. toctree::

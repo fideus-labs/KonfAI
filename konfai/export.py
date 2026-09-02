@@ -19,8 +19,8 @@
 A trained model becomes ``model.onnx`` (graph + weights, single file) plus ``manifest.json``
 (patch geometry, input/output spec) for a Python-free runtime. Three constraints shape the code:
 
-* KonfAI ``Network`` overrides ``state_dict()`` with a custom signature that breaks the
-  TorchScript exporter, so the **dynamo** exporter is used.
+* ``Network.named_forward`` is a Python generator, which TorchScript cannot script, so the
+  **dynamo** exporter is used.
 * ``Network.forward`` returns per-output-group results (empty without ``init()``), so the
   graph is reached via ``named_forward`` and a named head is selected.
 * The dynamo exporter writes weights as external data; they are inlined so the ``.onnx`` is

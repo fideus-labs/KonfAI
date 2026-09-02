@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from konfai.utils.budget import per_rank_budget_bytes
+from konfai.utils.errors import DatasetManagerError
 
 #: Elements a block of ``Dataset.iter_data_blocks`` holds when no budget was declared: the read grain
 #: of a scan (the statistics fold, the quantile scan), whatever the backend.
@@ -334,6 +335,65 @@ def _empty_statistics_state(channels: int) -> dict[str, Any]:
         "channel_min": np.full(channels, np.inf),
         "channel_max": np.full(channels, -np.inf),
     }
+
+
+def read_masked_data_statistics(
+    source: Any,
+    group: str,
+    mask_source: Any,
+    mask_group: str,
+    name: str,
+) -> dict[str, Any]:
+    """Min/max/mean/std of one entry over the voxels where the mask entry equals 1, streamed.
+
+    The masked twin of ``Dataset.read_data_statistics``: both volumes are walked slab by slab along
+    the first spatial axis (the slab aligned to the volume's own read granularity where it states
+    one), and only the selected values enter the running fold, so neither volume is ever held. A
+    store that cannot serve bounded region reads is read whole ONCE and sliced in memory, exactly
+    as ``Dataset.iter_data_blocks`` serves such stores: a region read of them decodes the whole
+    volume anyway, so reading per slab would hold the same peak once per slab.
+
+    The mask must sit on the volume's own grid (same spatial extent): a mask elsewhere would select
+    from the wrong place and the statistics would look right. The channel counts must agree too,
+    since selection is ``volume[mask == 1]``. ``source`` and ``mask_source`` are Datasets (duck
+    typed: this module is below the Dataset class).
+    """
+    shape, _ = source.get_infos(group, name)
+    mask_shape, _ = mask_source.get_infos(mask_group, name)
+    if list(shape) != list(mask_shape):
+        raise DatasetManagerError(
+            f"'{name}': the mask '{mask_group}' has shape {list(mask_shape)} where '{group}' has {list(shape)}.",
+            "A masked statistic reads the two volumes voxel by voxel: store the mask on the"
+            " volume's own grid (same extent, same channels).",
+        )
+
+    def slab_reader(dataset: Any, entry_group: str) -> Callable[[tuple[slice, ...]], np.ndarray]:
+        if len(shape) >= 2 and dataset.bounded_region_reads(entry_group, name):
+            return lambda slices: dataset.read_data_slice(entry_group, name, slices)[0]
+        resident = dataset.read_data(entry_group, name)[0]
+        return lambda slices: resident[slices]
+
+    read_volume = slab_reader(source, group)
+    read_mask = slab_reader(mask_source, mask_group)
+    rows = _statistics_chunk_length(shape, 1, _statistics_block_elements()) if len(shape) >= 2 else 1
+    granularity = source.read_granularity(group, name) if len(shape) >= 2 else None
+    if granularity is not None and len(granularity) > 1:
+        block = max(1, int(granularity[1]))
+        rows = max(block, rows // block * block)
+    extent = int(shape[1]) if len(shape) >= 2 else 1
+    state: dict[str, Any] | None = None
+    for start in range(0, extent, rows):
+        slices: tuple[slice, ...] = (
+            slice(None),
+            slice(start, min(extent, start + rows)),
+            *(slice(None) for _ in shape[2:]),
+        )
+        if len(shape) < 2:
+            slices = (slice(None),)
+        selected = read_volume(slices)[read_mask(slices) == 1]
+        if selected.size:
+            state = _update_running_statistics(state, selected.reshape(1, -1))
+    return _finalize_running_statistics(state)
 
 
 def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]:

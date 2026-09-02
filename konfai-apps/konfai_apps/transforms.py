@@ -15,19 +15,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""A KonfAI app run as a chain stage."""
+"""A KonfAI app run as a chain stage.
+
+Published configs spell the stage by its bare name (``KonfAIInference:``); core's transform package
+resolves that name to this class when ``konfai-apps`` is installed.
+"""
 
 import os
 import tempfile
 from multiprocessing import current_process, get_context
 from pathlib import Path
 
+import SimpleITK as sitk
 import torch
-
 from konfai import cuda_visible_devices
-from konfai.data.transform.base import Transform, sitk
+from konfai.data.transform import Transform
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
-from konfai.utils.ITK import _require_simpleitk
 
 # Published app used by KonfAIInference when the configuration leaves repo/model unset.
 DEFAULT_INFERENCE_REPO_ID = "VBoussot/MRSegmentator-KonfAI"
@@ -79,13 +82,7 @@ class KonfAIInference(Transform):
         # footprint fits, so it runs at its trained patch_size, not a shrunk one. setdefault so an
         # explicit caller setting still wins.
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-        try:
-            from konfai_apps import KonfAIApp
-        except ImportError as exc:  # pragma: no cover - depends on optional install
-            raise RuntimeError(
-                "KonfAIInference requires the standalone 'konfai-apps' package. "
-                "Install it from the repository with 'pip install -e ./konfai-apps'."
-            ) from exc
+        from konfai_apps import KonfAIApp
 
         # Nested KonfAI runs must choose their own rendezvous ports instead of
         # inheriting the parent's already-bound distributed settings.
@@ -111,7 +108,6 @@ class KonfAIInference(Transform):
                 "KonfAIInference cannot run inside daemon DataLoader workers. "
                 "Use 'Dataset.num_workers: 0' for pipelines that include this transform."
             )
-        _require_simpleitk()
         with tempfile.TemporaryDirectory() as tmpdir:
             dataset_path = Path(tmpdir) / "Dataset"
             if self.per_channel:

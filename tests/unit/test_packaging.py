@@ -88,10 +88,11 @@ def import_without_simpleitk(name, *args, **kwargs):
 
 builtins.__import__ = import_without_simpleitk
 import konfai.data.transform
+import konfai.utils.ITK
 
 assert konfai.data.transform.sitk is None
 try:
-    konfai.data.transform._require_simpleitk()
+    konfai.utils.ITK._require_simpleitk()
 except Exception as exc:
     assert "pip install konfai[itk]" in str(exc), str(exc)
 else:
@@ -257,6 +258,9 @@ def test_wheel_ships_model_zoo_and_catalog(built_wheel: Path) -> None:
     assert not missing_python, f"models/python files missing from the wheel: {missing_python}"
     missing_yaml = sorted(expected_yaml - names)
     assert not missing_yaml, f"catalog .yml files missing from the wheel: {missing_yaml}"
+
+    # PEP 561: without the marker every downstream type checker treats konfai as untyped.
+    assert "konfai/py.typed" in names, "py.typed missing from the wheel"
 
     forbidden_top_level = {"apps", "konfai-apps", "konfai_apps", "konfai-mcp", "konfai_mcp"}
     leaked = sorted(n for n in names if n.split("/", 1)[0] in forbidden_top_level)

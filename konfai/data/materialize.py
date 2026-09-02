@@ -42,11 +42,12 @@ from konfai.data.patching import (
     AugmentedStage,
     DatasetManager,
     SweepSegment,
+)
+from konfai.data.patching.stage import _ReadStagePlan, _stage_name
+from konfai.data.patching.sweep import (
     _PendingSweep,
     _pull_block_voxels,
-    _ReadStagePlan,
     _stage_failures_explained,
-    _stage_name,
     _sweep_targets,
     _SweepMember,
 )
@@ -393,7 +394,7 @@ class CaseMaterializer:
         if not any(
             extent < segment.landing[axis]
             for segment in self.manager.sweep_segments() or []
-            for axis, extent in enumerate(manager._sweep_tile(segment.landing, segment.channels, segment.plans))
+            for axis, extent in enumerate(manager.sizer_for(segment).sweep_tile())
         ):
             return False
         for stage in manager.chain_stages(0):
@@ -472,7 +473,7 @@ class CaseMaterializer:
 
     def _segment_read_factor(self, segment: SweepSegment) -> float:
         """One segment's reads over its source's voxels, block by block through the plan's own pulls."""
-        tile = self.manager._sweep_tile(segment.landing, segment.channels, segment.plans)
+        tile = self.manager.sizer_for(segment).sweep_tile()
         targets = list(_sweep_targets(segment.landing, tile))
         # A source that is not on disk yet is a Save cache this run sweeps first, onto a store that
         # serves region writes, and every such store serves bounded reads: priced as bounded, not

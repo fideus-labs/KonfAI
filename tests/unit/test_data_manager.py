@@ -33,6 +33,7 @@ from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager import (
     BatchDataItem,
     Data,
+    DataItem,
     DataPrediction,
     DatasetIter,
     DataTrain,
@@ -40,14 +41,16 @@ from konfai.data.data_manager import (
     GroupTransform,
     PatchReadOrder,
     PredictionSubset,
-    TrainSubset,
+    Subset,
     WindowedCaseSampler,
-    _cache_worker_count,
+    collate_konfai,
 )
+from konfai.data.data_manager.samples import _cache_worker_count
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, TensorCast, Transform, TransformLoader
 from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.errors import DatasetManagerError
 from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
 from oracle_support import geometry
@@ -142,12 +145,51 @@ def test_data_split_prediction_keeps_case_patches_together_and_allows_empty_shar
         4,
     )
 
+    # Whole cases dealt largest-first onto the least-loaded rank: the two 2-patch cases land on the
+    # first two ranks, the 1-patch case on the third, and the spare rank stays empty.
     assert shards == [
         [(0, 0, 0), (0, 0, 1)],
-        [(1, 0, 0)],
         [(2, 0, 0), (2, 0, 1)],
+        [(1, 0, 0)],
         [],
     ]
+
+
+def test_one_pass_split_balances_ranks_by_patch_load_and_restarts_identically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An equal-count contiguous split lands a [1000, 10, 10, 10]-patch cohort as 1010 vs 20 on two
+    ranks and idles one GPU behind the other; balancing by patch load lands 1000 vs 30."""
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    counts = [1000, 10, 10, 10]
+    mapping = [(case, 0, patch) for case, count in enumerate(counts) for patch in range(count)]
+
+    shards = Data._split(mapping, 2)
+
+    assert sorted(len(shard) for shard in shards) == [30, 1000]
+    owner: dict[int, int] = {}
+    for rank, shard in enumerate(shards):
+        for entry in shard:
+            assert owner.setdefault(entry[0], rank) == rank, f"case {entry[0]} split across ranks"
+        # Within a shard each case keeps its entries in mapping order (read order == write order).
+        for case in {entry[0] for entry in shard}:
+            assert [entry for entry in shard if entry[0] == case] == [entry for entry in mapping if entry[0] == case]
+    # Deterministic: a restart shards identically.
+    assert Data._split(mapping, 2) == shards
+
+
+def test_train_split_stays_contiguous_and_untouched_by_the_one_pass_balancer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # TRAIN shuffles the mapping anyway and its DDP contract is equal-LENGTH shards: the balanced
+    # per-case deal is a one-pass-only change.
+    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
+    counts = [1000, 10, 10, 10]
+    mapping = [(case, 0, patch) for case, count in enumerate(counts) for patch in range(count)]
+
+    shards = Data._split(mapping, 2)
+
+    assert shards == [mapping[:515], mapping[515:]]
 
 
 def test_data_remap_dataset_indices_compacts_sparse_mapping_indices() -> None:
@@ -235,6 +277,61 @@ def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path:
 
     assert train_names == ["CASE_000"]
     assert validation_names == ["CASE_001", "CASE_002", "CASE_003"]
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "1:3",
+        "0:-2",
+        "CASE_001",
+        ["CASE_001", "CASE_002"],
+        ["~CASE_001"],
+        [0, "CASE_002"],
+        "file",
+        ["file", "CASE_002"],
+    ],
+    ids=["slice", "negative-slice", "name", "names", "exclusion", "mixed", "file", "file-and-name"],
+)
+def test_subset_and_validation_accept_the_same_selector_spellings(tmp_path: Path, selector) -> None:
+    """'validation:' resolves through the same selector grammar as 'subset:': one set of spellings
+    to learn, and every fix or extension lands on both keys at once."""
+    names = ["CASE_000", "CASE_001", "CASE_002", "CASE_003"]
+    fold = tmp_path / "fold.txt"
+    fold.write_text("CASE_001\nCASE_003\n", encoding="utf-8")
+
+    def resolve(spelling):
+        return str(fold) if spelling == "file" else spelling
+
+    selector = [resolve(s) for s in selector] if isinstance(selector, list) else resolve(selector)
+
+    kept_by_subset = Subset(selector)(list(names), {})
+    dataset = DataTrain(augmentations=None, validation=selector)
+    train_names, validation_names = dataset._split_train_validation_names(list(names))
+
+    assert set(validation_names) == kept_by_subset
+    assert sorted(train_names + validation_names) == names
+
+
+def test_a_negative_slice_end_counts_from_the_end_python_style() -> None:
+    # '0:-2' once clipped to an empty range and blamed the subset as "too restrictive".
+    names = [f"CASE_{index:03d}" for index in range(5)]
+    assert Subset("0:-2")(names, {}) == {"CASE_000", "CASE_001", "CASE_002"}
+    assert Subset("-2:5")(names, {}) == {"CASE_003", "CASE_004"}
+
+
+def test_an_unresolvable_validation_selector_is_refused_with_the_accepted_spellings() -> None:
+    dataset = DataTrain(augmentations=None, validation="no_such_case_or_file")
+
+    with pytest.raises(DatasetManagerError, match="same selector spellings as 'subset'"):
+        dataset._split_train_validation_names(["CASE_000", "CASE_001"])
+
+
+def test_a_validation_list_with_an_unsupported_element_type_is_refused() -> None:
+    dataset = DataTrain(augmentations=None, validation=[0.5, "CASE_000"])
+
+    with pytest.raises(DatasetManagerError, match="Invalid list type"):
+        dataset._split_train_validation_names(["CASE_000", "CASE_001"])
 
 
 def test_data_train_validation_none_keeps_full_dataset_for_training() -> None:
@@ -325,7 +422,7 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
         },
         augmentations={"DataAugmentation_0": augmentations},
         patch=None,
-        subset=TrainSubset(shuffle=False),
+        subset=Subset(shuffle=False),
         validation=0.2,
         validation_augmentations=validation_augmentations,
     )
@@ -640,6 +737,66 @@ def test_reset_augmentation_shares_one_draw_across_destination_groups() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Destination groups must agree on the patch grid: the mapping is counted on ONE of them
+# --------------------------------------------------------------------------------------
+
+
+def _plain_manager(group_dest: str, array: np.ndarray) -> DatasetManager:
+    return DatasetManager(
+        index=0,
+        group_src="src",
+        group_dest=group_dest,
+        name="case_000",
+        dataset=cast(Dataset, _DummyDataset(array)),
+        patch=DatasetPatch([4, 4]),
+        transforms=[],
+        data_augmentations_list=[],
+    )
+
+
+def test_cross_group_patch_count_check_names_the_case_the_groups_and_their_shapes() -> None:
+    agreeing = {
+        "A": [_plain_manager("A", np.zeros((1, 8, 8), np.float32))],
+        "B": [_plain_manager("B", np.zeros((1, 8, 8), np.float32))],
+    }
+    Data._check_cross_group_patch_counts(agreeing, 1)  # same grids: no refusal
+
+    disagreeing = {
+        "A": [_plain_manager("A", np.zeros((1, 8, 8), np.float32))],
+        "B": [_plain_manager("B", np.zeros((1, 8, 4), np.float32))],
+    }
+    with pytest.raises(DatasetManagerError) as refusal:
+        Data._check_cross_group_patch_counts(disagreeing, 1)
+
+    message = str(refusal.value)
+    assert "case_000" in message and "'A'" in message and "'B'" in message
+    assert "[8, 8]" in message and "[8, 4]" in message
+
+
+def test_destination_groups_with_disagreeing_grids_are_refused_at_prepare(tmp_path: Path) -> None:
+    """Two chains folding a case to different grids used to surface as an IndexError deep in a
+    loader worker (last group counted larger) or as silently unenumerated patches (smaller): the
+    disagreement is a config error and must be refused before a single patch is read."""
+    pytest.importorskip("SimpleITK")
+    store = Dataset(tmp_path / "Dataset", "mha")
+    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    store.write("SEG", "CASE_000", np.zeros((1, 8, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset = DataPrediction(
+        augmentations=None,
+        dataset_filenames=[f"{tmp_path / 'Dataset'}:mha"],
+        groups_src={
+            group: Group(groups_dest={group: GroupTransform(transforms=None, patch_transforms=None)})
+            for group in ("CT", "SEG")
+        },
+        patch=DatasetPatch(patch_size=[4, 4], overlap=None),
+        subset=PredictionSubset(),
+    )
+
+    with pytest.raises(DatasetManagerError, match="disagree on the patch grid"):
+        dataset.prepare()
+
+
+# --------------------------------------------------------------------------------------
 # WindowedCaseSampler - locality-aware training order, worker sharding, buffer hit rate
 # --------------------------------------------------------------------------------------
 
@@ -950,11 +1107,11 @@ def test_prediction_subset_order_stays_case_major_and_unwindowed() -> None:
     assert list(iter(windowed)) == list(range(len(mapping)))
 
 
-def test_train_subset_exposes_shuffle_window_knob() -> None:
+def test_subset_exposes_shuffle_window_knob() -> None:
     # The knob is a plain constructor argument so the reflection config engine can bind it.
-    default = TrainSubset()
+    default = Subset()
     assert default.shuffle_window is None
-    configured = TrainSubset(shuffle_window=4)
+    configured = Subset(shuffle_window=4)
     assert configured.shuffle_window == 4
     assert configured.shuffle is True
 
@@ -1152,6 +1309,80 @@ def test_pin_memory_reaches_the_batch_tensor() -> None:
     assert pinned, "pin_memory: true never reached the batch's tensor"
     assert batch["CT"].name == ["case"]
     assert batch["CT"].is_input is True
+
+
+# --------------------------------------------------------------------------------------
+# collate_konfai: a one-pass singleton batches as a view, a training singleton as a copy
+# --------------------------------------------------------------------------------------
+
+
+def _singleton_sample(tensor: torch.Tensor, aliases_cache: bool) -> dict[str, DataItem]:
+    return {"CT": DataItem("case", tensor, Attribute(), 0, 0, 0, True, aliases_cache=aliases_cache)}
+
+
+def test_collate_batches_a_one_pass_singleton_as_a_view_and_a_training_singleton_as_a_copy() -> None:
+    """The stack copy is a whole volume per case on the batch_size=1 evaluation path, outside the
+    memory budget's sizing; a training item may alias the epoch-spanning cache, so its copy is what
+    protects the cache from any downstream in-place op."""
+    tensor = torch.arange(4.0).reshape(1, 2, 2)
+
+    view = collate_konfai([_singleton_sample(tensor, aliases_cache=False)])["CT"].tensor
+    assert view.data_ptr() == tensor.data_ptr(), "the one-pass singleton must be a view, not a copy"
+    assert view.shape == (1, 1, 2, 2)
+
+    copy = collate_konfai([_singleton_sample(tensor, aliases_cache=True)])["CT"].tensor
+    assert copy.data_ptr() != tensor.data_ptr(), "a cache-aliasing singleton must be copied"
+    assert torch.equal(copy[0], tensor)
+
+
+def test_collate_still_copies_inside_a_dataloader_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A worker's batch travels by STORAGE, and a patch-view's storage is the whole resident case.
+    monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: SimpleNamespace(id=0, num_workers=2))
+    tensor = torch.arange(4.0).reshape(1, 2, 2)
+
+    batched = collate_konfai([_singleton_sample(tensor, aliases_cache=False)])["CT"].tensor
+
+    assert batched.data_ptr() != tensor.data_ptr()
+
+
+def test_one_pass_loaders_mark_their_samples_as_cache_free() -> None:
+    # The flag rides the DatasetIter factory: one-pass workflows read each case once, so their
+    # items alias no tensor that is read again; training items may alias the cache.
+    from konfai.data.data_manager import DataMetric
+
+    assert DataPrediction(augmentations=None).datasetIter.keywords["single_pass"] is True
+    assert DataMetric().datasetIter.keywords["single_pass"] is True
+    assert DataTrain(augmentations=None).datasetIter.keywords["single_pass"] is False
+
+
+def test_dataset_iter_marks_items_from_its_single_pass_flag() -> None:
+    def dataset_iter(single_pass: bool) -> DatasetIter:
+        manager = DatasetManager(
+            index=0,
+            group_src="src",
+            group_dest="dest",
+            name="case_000",
+            dataset=cast(Dataset, _DummyDataset(np.zeros((1, 2, 2), np.float32))),
+            patch=None,
+            transforms=[_WholeVolumeTransform()],
+            data_augmentations_list=[],
+        )
+        return DatasetIter(
+            rank=0,
+            data={"dest": [manager]},
+            mapping=[(0, 0, 0)],
+            groups_src={"src": Group(groups_dest={"dest": GroupTransform(transforms=None, patch_transforms=None)})},
+            inline_augmentations=False,
+            data_augmentations_list=[],
+            patch_size=None,
+            overlap=None,
+            buffer_size=1,
+            use_cache=False,
+            single_pass=single_pass,
+        )
+
+    assert dataset_iter(single_pass=True)[0]["dest"].aliases_cache is False
+    assert dataset_iter(single_pass=False)[0]["dest"].aliases_cache is True
 
 
 # --------------------------------------------------------------------------------------

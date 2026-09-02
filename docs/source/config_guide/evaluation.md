@@ -27,6 +27,10 @@ konfai EVALUATION -y --config Evaluation.yml
 The output directory is controlled by `Evaluator.train_name` in the YAML and
 `--evaluations-dir` on the CLI.
 
+Evaluation persists per case as it goes: each rank appends finished cases to a
+`*.cases.rank<N>.jsonl` file beside the metric JSON, so a rerun after an
+interruption pays only the cases that are not yet recorded.
+
 ## Top-level fields
 
 | Field | Type | Default in code | Required | Effect |

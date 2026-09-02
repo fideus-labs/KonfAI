@@ -457,7 +457,7 @@ def test_a_solo_copy_sweeps_on_the_requested_device(tmp_path: Path, monkeypatch:
     ("draw", "regime", "atol"),
     [
         (lambda: _draw(Noise(1.0)), (Verdict.STREAM, Regime.SHARED), 0.0),  # a field hashed on position: per-voxel
-        (lambda: _draw(CutOUT(1.0, 0.5, 0.0)), (Verdict.STREAM, Regime.SHARED), 0.0),  # a box on the volume's grid
+        (lambda: _draw(CutOUT(0.5, 0.0)), (Verdict.STREAM, Regime.SHARED), 0.0),  # a box on the volume's grid
         (
             lambda: _draw(Rotate(a_min=10.0, a_max=10.0)),
             (Verdict.STREAM, Regime.SOLO),

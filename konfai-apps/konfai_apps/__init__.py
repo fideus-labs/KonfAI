@@ -18,11 +18,15 @@
 
 from .app import AbstractKonfAIApp, KonfAIApp, KonfAIAppClient, run_distributed_app, run_remote_job
 from .cli import add_common_konfai_apps, main_apps, main_apps_server
+from .transforms import DEFAULT_INFERENCE_MODEL_NAME, DEFAULT_INFERENCE_REPO_ID, KonfAIInference
 
 __all__ = [
+    "DEFAULT_INFERENCE_MODEL_NAME",
+    "DEFAULT_INFERENCE_REPO_ID",
     "AbstractKonfAIApp",
     "KonfAIApp",
     "KonfAIAppClient",
+    "KonfAIInference",
     "add_common_konfai_apps",
     "main_apps",
     "main_apps_server",

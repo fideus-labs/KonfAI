@@ -28,13 +28,12 @@ oracles: the ensemble mean must match ``(A + B) / 2`` and a ``Concat`` TTA reduc
 with the ``Sum`` transform must yield ``A + B`` (one term per TTA branch).
 """
 
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
-from harness import TTA_AUGMENTATIONS_BLOCK, prepare_experiment_dir, replace_once, subprocess_env
+from harness import TTA_AUGMENTATIONS_BLOCK, prepare_experiment_dir, replace_once, run_workflow
 
 pytestmark = pytest.mark.integration
 
@@ -139,12 +138,7 @@ def ensemble_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
 
     runner_path = experiment_dir / "run_ensemble_tta.py"
     runner_path.write_text(RUNNER_SOURCE.replace("__TRAIN_NAME__", TRAIN_NAME), encoding="utf-8")
-    subprocess.run(
-        [sys.executable, str(runner_path)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        check=True,
-    )
+    run_workflow([sys.executable, str(runner_path)], experiment_dir)
     return {
         "experiment_dir": experiment_dir,
         "dataset_dir": paths["dataset_dir"],

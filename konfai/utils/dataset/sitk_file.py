@@ -25,10 +25,10 @@ import glob
 import os
 import re
 import warnings
+import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
 from pathlib import Path
 
 import numpy as np
-from lxml import etree  # nosec B410
 
 try:
     import SimpleITK as sitk
@@ -41,6 +41,7 @@ from konfai.utils.dataset.attribute import (
     data_to_image,
     image_to_data,
     is_an_image,
+    region_geometry,
 )
 from konfai.utils.dataset.landmarks import read_landmarks, write_landmarks
 from konfai.utils.dataset.raw_block import (
@@ -67,6 +68,17 @@ from konfai.utils.utils import (
 _unstreamed_formats_warned: set[str] = set()
 
 
+def _require_sitk(path: str, action: str = "read") -> None:
+    """The structured refusal for a bare install, called at every SimpleITK touch point: guarding
+    the backend whole would refuse the npy/fcsv/xml/vtk entries it serves with no SimpleITK at
+    all."""
+    if sitk is None:
+        raise DatasetManagerError(
+            f"SimpleITK is required to {action} '{path}'.",
+            "Install it with: pip install konfai[itk] (or konfai[imaging]).",
+        )
+
+
 def _warn_unstreamed_region_read(path: str) -> None:
     """Warn that `path`'s format decodes the whole volume for every patch region read from it.
 
@@ -91,6 +103,25 @@ class SitkFile(AbstractFile):
         self.filename = filename
         self.read = read
         self.file_format = file_format
+
+    @classmethod
+    def open(
+        cls,
+        filename: str,
+        read: bool,
+        file_format: str,
+        level: int = 0,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> SitkFile:
+        del level, scale_factors, downsample_method
+        return cls(f"{filename}/", read, file_format)
+
+    @classmethod
+    def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
+        # The region-writable formats are the region-readable ones: an uncompressed MetaImage or
+        # NIfTI is a fixed header plus a flat raw block, written through a memmap.
+        return file_format in ("mha", "nii") and is_an_image(attributes)
 
     @staticmethod
     def _normalize_slices(slices: tuple[slice, ...], shape: list[int]) -> tuple[slice, ...]:
@@ -119,6 +150,7 @@ class SitkFile(AbstractFile):
 
         Cached: the patch path asks this per read, and it opens the file to read a header.
         """
+        _require_sitk(path)
         if _pixel_block(path) is not None:
             return True  # a memmap of the raw block reads the region's pages and no other
         image_io = sitk.ImageFileReader.GetImageIOFromFileName(path)
@@ -150,6 +182,8 @@ class SitkFile(AbstractFile):
         volume is the cost and the streaming refusal already says so.
         """
         path = self._resolve_data_path(name)
+        if path is not None:
+            _require_sitk(path)
         block = _pixel_block(path) if path is not None else None
         if block is None:
             return None
@@ -186,12 +220,12 @@ class SitkFile(AbstractFile):
         return matches[0] if matches else None
 
     def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+        _require_sitk(path)
         block = _pixel_block(path)
         if block is not None:
             # The region's bytes off the file, where ITK's streaming reader decodes them through
             # its pipeline: 3.5 ms against 0.09 ms for a 64^3 region of an uncompressed 256^3
-            # .mha, the same bytes. The record ITK's route leaves is kept: the region's origin
-            # for a direct slice, the volume's for a stepped one, which ITK reads whole.
+            # .mha, the same bytes. The record ITK's route leaves is kept, key for key.
             normalized = self._normalize_slices(slices, list(block.shape))
             if all(item.step > 0 for item in normalized):
                 try:
@@ -199,9 +233,7 @@ class SitkFile(AbstractFile):
                 except (OSError, ValueError):  # replaced under the stat: ITK answers for it
                     pass
                 else:
-                    index_xyz = [item.start for item in reversed(normalized[1:])]
-                    direct = self._supports_direct_slice(normalized)
-                    return data, _pixel_block_attributes(block, index_xyz if direct else None)
+                    return data, _pixel_block_attributes(block, normalized[1:])
         reader = sitk.ImageFileReader()
         reader.SetFileName(path)
         reader.ReadImageInformation()
@@ -212,7 +244,19 @@ class SitkFile(AbstractFile):
         normalized = self._normalize_slices(slices, data_shape)
 
         if not self._supports_direct_slice(normalized) or _nifti_extract_aborts(path):
+            # ITK reads the volume whole here; the record is still the REGION's, like every other
+            # backend's: the volume's own geometry, then the shifted origin (and, for a step, the
+            # step-scaled spacing) of the samples actually returned.
             data, attributes = self.file_to_data("", name)
+            origin, spacing = region_geometry(
+                attributes.get_np_array("Origin"),
+                attributes.get_np_array("Spacing"),
+                attributes.get_np_array("Direction"),
+                normalized[1:],
+            )
+            attributes["Origin"] = origin
+            if any(item.step != 1 for item in normalized[1:]):
+                attributes["Spacing"] = spacing
             return data[normalized], attributes
 
         if not self._supports_region_read(path):
@@ -225,10 +269,10 @@ class SitkFile(AbstractFile):
 
         image = reader.Execute()
         data, attributes = image_to_data(image)
-        origin = np.asarray(reader.GetOrigin(), dtype=np.float64)
-        spacing = np.asarray(reader.GetSpacing(), dtype=np.float64)
-        direction = np.asarray(reader.GetDirection(), dtype=np.float64).reshape(len(spacing), len(spacing))
-        attributes["Origin"] = origin + direction @ (np.asarray(extract_index_xyz, dtype=np.float64) * spacing)
+        origin, _spacing = region_geometry(
+            reader.GetOrigin(), reader.GetSpacing(), reader.GetDirection(), normalized[1:]
+        )
+        attributes["Origin"] = origin
         return data[normalized[:1] + tuple(slice(None) for _ in normalized[1:])], attributes
 
     def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
@@ -240,6 +284,7 @@ class SitkFile(AbstractFile):
             )
         attributes = Attribute()
         if path.endswith(".itk.txt"):
+            _require_sitk(path)
             datas = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
             max_len = max(len(v) for v in datas)
             data = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
@@ -247,7 +292,7 @@ class SitkFile(AbstractFile):
             data = read_landmarks(Path(path))
         elif path.endswith(".xml"):
             with open(path, "rb") as xml_file:
-                root = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
+                root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
             node = root
             while len(node):
                 node = node[-1]
@@ -270,6 +315,7 @@ class SitkFile(AbstractFile):
         elif path.endswith(".npy"):
             data = np.load(path)
         else:
+            _require_sitk(path)
             image = sitk.ReadImage(path)
             data, attributes_tmp = image_to_data(image)
             attributes.update(attributes_tmp)
@@ -324,7 +370,7 @@ class SitkFile(AbstractFile):
         if attributes is None:
             attributes = Attribute()
         os.makedirs(self.filename, exist_ok=True)
-        if isinstance(data, sitk.Image):
+        if sitk is not None and isinstance(data, sitk.Image):
             for k, v in attributes.items():
                 if v and len(v):
                     data.SetMetaData(k, v)
@@ -336,7 +382,7 @@ class SitkFile(AbstractFile):
             os.replace(staging, final)
             with contextlib.suppress(Exception):
                 _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write
-        elif isinstance(data, sitk.Transform):
+        elif sitk is not None and isinstance(data, sitk.Transform):
             sitk.WriteTransform(data, f"{self.filename}{name}.itk.txt")
         elif self.is_vtk_polydata(data):
             import vtk
@@ -346,6 +392,7 @@ class SitkFile(AbstractFile):
             vtk_writer.SetInputData(data)
             vtk_writer.Write()
         elif is_an_image(attributes):
+            _require_sitk(f"{self.filename}{name}.{self.file_format}", "write")
             self.data_to_file(name, data_to_image(data, attributes), attributes)
         elif len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0:
             data = np.round(data, 4)
@@ -353,18 +400,17 @@ class SitkFile(AbstractFile):
         elif "path" in attributes:
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
-                    root = etree.parse(xml_file, etree.XMLParser(remove_blank_text=True)).getroot()  # nosec B320
+                    root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
                     xml_file.close()
             else:
-                root = etree.Element(name)
+                root = ET.Element(name)
             node = root
             path = attributes["path"].split(":")
 
             for node_name in path:
                 node_tmp = node.find(node_name)
                 if node_tmp is None:
-                    node_tmp = etree.SubElement(node, node_name)
-                    node.append(node_tmp)
+                    node_tmp = ET.SubElement(node, node_name)
                 node = node_tmp
             if attributes is not None:
                 for attribute_tmp in attributes.keys():
@@ -374,7 +420,10 @@ class SitkFile(AbstractFile):
             if data.size > 0:
                 node.text = ", ".join(map(str, data.flatten()))
             with open(f"{self.filename}{name}.xml", "wb") as f:
-                f.write(etree.tostring(root, pretty_print=True, encoding="utf-8"))
+                # ``ET.indent`` replaces whitespace-only text/tails, so a re-read file re-indents
+                # cleanly instead of accumulating blank lines.
+                ET.indent(root)
+                f.write(ET.tostring(root, encoding="utf-8"))
                 f.close()
         else:
             np.save(f"{self.filename}{name}.npy", data)
@@ -424,12 +473,6 @@ class SitkFile(AbstractFile):
             _recover_orphaned_backup(Path(f"{base}.{ext}"))
         return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
 
-    def get_names(self, group: str) -> list[str]:
-        raise NotImplementedError()
-
-    def get_group(self) -> list[str]:
-        raise NotImplementedError()
-
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         attributes = Attribute()
         # Resolve the actual entry path (any image extension, not only the dataset's file_format):
@@ -439,6 +482,7 @@ class SitkFile(AbstractFile):
         entry = f"{group if group is not None else ''}{name}"
         path = self._resolve_data_path(entry)
         if path is not None and not path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk", ".npy")):
+            _require_sitk(path)
             file_reader = sitk.ImageFileReader()
             file_reader.SetFileName(path)
             file_reader.ReadImageInformation()

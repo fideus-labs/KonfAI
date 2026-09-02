@@ -155,11 +155,11 @@ def test_execute_distributed_object_sets_shared_master_port_without_forcing_laun
     assert spawn_calls["nprocs"] == 2
 
 
-def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
+def test_cluster_kwargs_route_the_run_through_submitit_instead_of_spawning(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    submitted = []
 
     class DummyContext:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -178,8 +178,8 @@ def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
         def update_parameters(self, *_args, **_kwargs) -> None:
             pass
 
-        def submit(self, *_args, **_kwargs) -> None:
-            pass
+        def submit(self, *args, **_kwargs) -> None:
+            submitted.append(args)
 
     class DummyDistributed(DistributedObject):
         def __init__(self) -> None:
@@ -195,10 +195,10 @@ def test_cluster_resubmit_flag_warns_that_auto_requeue_is_not_wired(
     monkeypatch.setattr("konfai.utils.runtime.distributed.TensorBoard", DummyContext)
     monkeypatch.setitem(sys.modules, "submitit", SimpleNamespace(AutoExecutor=DummyExecutor))
 
-    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 1, "time_limit": 60, "resubmit": True}
+    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 1, "time_limit": 60}
     execute_distributed_object(DummyDistributed(), gpu=[0], cpu=1, quiet=True, cluster_kwargs=cluster_kwargs)
 
-    assert "--resubmit is not implemented" in capsys.readouterr().out
+    assert len(submitted) == 1
 
 
 def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
@@ -992,3 +992,23 @@ def test_a_rank_bounds_the_chunk_cache_by_its_own_share_of_the_budget(monkeypatc
 
     assert budget_module.per_rank_budget_bytes() == 96 << 20
     assert ome_zarr._chunk_cache().capacity == ome_zarr.chunk_cache_capacity()
+
+
+def test_run_distributed_app_refuses_a_kwarg_the_entrypoint_does_not_declare() -> None:
+    """A kwarg outside the signature and the cluster set must refuse, not vanish: the silent drop
+    is what forced main.py's --plan short-circuit."""
+
+    class Sentinel(Exception):
+        pass
+
+    @rt_dist.run_distributed_app
+    def build(gpu: list[int] | None = None, cpu: int | None = None) -> None:
+        raise Sentinel
+
+    with pytest.raises(ConfigError, match="plan"):
+        build(plan=True)
+
+    # The tolerated names pass the gate and reach the build: the cluster set is read from the raw
+    # kwargs and 'command' is the CLI dispatch discriminator only TRAIN/RESUME declares.
+    with pytest.raises(Sentinel):
+        build(command="PREDICTION")

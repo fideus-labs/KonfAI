@@ -29,10 +29,8 @@ from typing import ClassVar
 import numpy as np
 import pytest
 from konfai.data.materialize import CaseMaterializer, Verdict
-from konfai.data.patching import (
-    SWEEP_CLOCK,
-    DatasetManager,
-    DatasetPatch,
+from konfai.data.patching import SWEEP_CLOCK, DatasetManager, DatasetPatch
+from konfai.data.patching.sweep import (
     _ReadAhead,
     _stage_failure,
     _sweep_pipeline_depth,
@@ -412,7 +410,8 @@ def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
     ahead, the one the reader holds while the queue is full, and the one being written behind.
     Counted here as blocks between their read and their write, with a writer slower than the
     reader so the queue fills and the reader blocks on it."""
-    from konfai.data.patching import RegionWriter, _sweep_resident_regions
+    from konfai.data.patching import RegionWriter
+    from konfai.data.patching.sweep import _sweep_resident_regions
 
     depth = 1
     monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)

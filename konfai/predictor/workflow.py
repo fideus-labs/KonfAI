@@ -48,14 +48,13 @@ from konfai.utils.runtime import (
     DistributedObject,
     State,
     configure_workflow_environment,
-    confirm_overwrite_or_raise,
     run_distributed_app,
 )
-from konfai.utils.utils import concretize_patch_size, get_module, size_free_axes
+from konfai.utils.utils import concretize_patch_size, get_module
 
 
 @config()
-class Predictor(DistributedObject):
+class Predictor(vram.VramAutoPatchMixin, DistributedObject):
     """
     KonfAI's main prediction controller.
 
@@ -94,17 +93,10 @@ class Predictor(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
-        # Auto-patching (VRAM): a per-axis 0 in the user's patch_size marks a FREE axis and opts into
-        # the OOM restart loop: captured before any re-plan materialises concrete sizes over it.
-        patch = dataset.patch
-        self._vram_patch_template: list[int] | None = (
-            [int(size) for size in patch.patch_size]
-            if patch is not None and patch.patch_size is not None and any(size == 0 for size in patch.patch_size)
-            else None
-        )
-        self._vram_patch_candidate: list[int] | None = None
-        # Per-axis input multiple the model needs (its downsampling factor); a free axis is sized to it.
-        self._downsampling_factor: list[int] | None = None
+        self._capture_vram_patch_template(dataset.patch)
+        #: Cases whose every configured output already existed when the run started: frozen at
+        #: ``setup`` on the launcher, so every rank (restarts included) shards the same work list.
+        self._done_case_indices: set[int] = set()
         module, name = get_module(combine, "konfai.predictor")
         if module.__name__ == "konfai.predictor":
             self.combine = getattr(module, name)()
@@ -203,13 +195,26 @@ class Predictor(DistributedObject):
         """
         for dataset_filename in self.datasets_filename:
             path = self.predict_path / dataset_filename
-            if os.path.exists(path) and len(list(Path(path).rglob("*.yml"))):
-                confirm_overwrite_or_raise(path, "prediction", PredictorError)
-
             if not os.path.exists(path):
                 os.makedirs(path)
 
         shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
+
+        # Per-case resume, the semantics TRANSFORM documents: a case whose every configured output
+        # is already on disk is skipped, so a rerun after a mid-cohort failure pays only the missing
+        # cases; --overwrite recomputes everything. The set is frozen here, on the launcher, so
+        # every rank (and every OOM-restart re-plan) shards the same reduced work list.
+        if os.environ.get("KONFAI_OVERWRITE") != "True" and self.outputs_dataset:
+            self._done_case_indices = {
+                index
+                for index, name in enumerate(self.dataset.case_names)
+                if all(output.is_dataset_exist(output.group, name) for output in self.outputs_dataset.values())
+            }
+            if self._done_case_indices:
+                print(
+                    f"[KonfAI] prediction: {len(self._done_case_indices)}/{len(self.dataset.case_names)}"
+                    " case(s) already written -> skipped (--overwrite recomputes)."
+                )
 
         self.model_composite = ModelComposite(self.model, self.combine)
         if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
@@ -233,7 +238,21 @@ class Predictor(DistributedObject):
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
+        self._drop_done_cases()
         self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
+
+    def _drop_done_cases(self) -> None:
+        """Drop the already-written cases' entries from the prepared patch mapping.
+
+        Applied to the mapping rather than the case list so the surviving cases keep their indices
+        (the managers and the loader's remapping stay untouched), and re-applied after every
+        ``replan_patch``, which rebuilds the mapping from scratch.
+        """
+        if not self._done_case_indices:
+            return
+        self.dataset._prepared_mapping = [
+            entry for entry in self.dataset._prepared_mapping if entry[0] not in self._done_case_indices
+        ]
 
     def _report_chain_drift(self) -> None:
         """Warn when the chain applied to a model input is not the one its checkpoint trained on.
@@ -349,18 +368,10 @@ class Predictor(DistributedObject):
         model_composite = Model(model_composite)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
         dataloader = dataloaders[0]
-        # Round a free patch axis up to the model's valid input multiple before the first attempt, so
-        # the network's encoder/decoder skips align instead of crashing on a non-divisible extent (the
-        # border padding fills the round-up, cropped back after the forward). A whole-axis extent still
-        # too large for VRAM OOMs into the shrink loop below, which keeps the size valid too.
-        if self._vram_patch_candidate is None:
-            sized = size_free_axes(
-                self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor
-            )
-            if sized is not None:
-                self._vram_patch_candidate = sized
-                self.dataset.replan_patch(sized)
-                dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
+        # A whole-axis extent still too large for VRAM OOMs into the shrink loop below, which keeps
+        # the size valid too (the border padding fills the round-up, cropped back after the forward).
+        if self._vram_patch_candidate is None and self._presize_free_axes():
+            dataloader = self._rank_dataloader(world_size, global_rank)
         while True:
             try:
                 with _Predictor(
@@ -396,19 +407,20 @@ class Predictor(DistributedObject):
                     f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
                     f"re-planning the free patch axes to {candidate} and restarting this rank's cases."
                 )
-                self._vram_patch_candidate = candidate
-                self.dataset.replan_patch(candidate)
-                dataloader = self.dataset.get_data(world_size)[0][global_rank][0]
+                self._adopt_patch_candidate(candidate)
+                dataloader = self._rank_dataloader(world_size, global_rank)
+
+    def _rank_dataloader(self, world_size: int, global_rank: int) -> DataLoader:
+        """This rank's loader over the re-planned grids, the already-written cases dropped again
+        (a re-plan rebuilds the mapping from scratch)."""
+        self._drop_done_cases()
+        return self.dataset.get_data(world_size)[0][global_rank][0]
 
     def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
-        """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
-
-        The first OOM starts from the worst prepared case at full extent (the size the failed grid
-        effectively ran); later ones shrink the current candidate further. When the framework picks
-        the size, it must also leave the blend on the GPU: the accumulation footprint is RESERVED
-        beside the forward, so the sized patch passes the accumulation gate. Only when that reserve
-        fits at no size (or cannot be priced) is the forward sized alone: the gate's memory-safe
-        CPU blend absorbs that case.
+        """The shared shrink step, with the blend kept on the GPU when it fits: the accumulation
+        footprint is RESERVED beside the forward, so the sized patch passes the accumulation gate.
+        Only when that reserve fits at no size (or cannot be priced) is the forward sized alone:
+        the gate's memory-safe CPU blend absorbs that case.
         """
         if self._vram_patch_template is None:
             return None
@@ -419,14 +431,11 @@ class Predictor(DistributedObject):
             self._vram_patch_template, worst, self._downsampling_factor
         )
         reserve = self._accumulation_reserve(candidate, worst)
-        snap = self._downsampling_factor
         if reserve is not None:
-            shrunk = vram.next_patch_candidate(
-                candidate, self._vram_patch_template, worst, measured, usable - reserve, snap
-            )
+            shrunk = super()._shrunken_patch(measured, usable - reserve)
             if shrunk is not None:
                 return shrunk
-        return vram.next_patch_candidate(candidate, self._vram_patch_template, worst, measured, usable, snap)
+        return super()._shrunken_patch(measured, usable)
 
     def _accumulation_reserve(self, candidate: list[int], worst: list[int]) -> float | None:
         """Bytes each case keeps resident while its patches accumulate, per output writer: the
@@ -469,8 +478,8 @@ class Predictor(DistributedObject):
 
 def build_predict(
     models: list[Path],
-    prediction_file: Path | str | dict = Path("./Prediction.yml").resolve(),
-    predictions_dir: Path | str = Path("./Predictions").resolve(),
+    prediction_file: Path | str | dict = Path("./Prediction.yml"),
+    predictions_dir: Path | str = Path("./Predictions"),
 ) -> DistributedObject:
     """
     Build and return the configured prediction workflow without executing it.
@@ -506,18 +515,19 @@ def build_predict(
 def predict(
     models: list[Path],
     overwrite: bool = False,
-    gpu: list[int] | None = cuda_visible_devices(),
+    gpu: list[int] | None = None,
     cpu: int = 1,
     quiet: bool = False,
     tensorboard: bool = False,
-    prediction_file: Path | str | dict = Path("./Prediction.yml").resolve(),
-    predictions_dir: Path | str = Path("./Predictions").resolve(),
+    prediction_file: Path | str | dict = Path("./Prediction.yml"),
+    predictions_dir: Path | str = Path("./Predictions"),
 ) -> DistributedObject:
     """
     Build and execute the configured prediction workflow.
 
-    This compatibility wrapper preserves the historical CLI-facing API while
-    delegating the pure build step to :func:`build_predict`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
+    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
+    The pure build step is :func:`build_predict`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_predict(

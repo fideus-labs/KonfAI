@@ -27,7 +27,7 @@ import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
-import konfai.data.transform as transform_module
+import konfai.data.transform.resample as resample_module
 import numpy as np
 import pytest
 import torch
@@ -927,7 +927,7 @@ def test_a_field_resample_prices_the_field_window_its_case_actually_holds(tmp_pa
     # is read as float64 and the plan counts a volume at four bytes), materialised THREE times over
     # while ITK is handed it. The general walk this case also takes is NOT added: it slabs itself
     # against the declared budget.
-    expected = warp.working_multiple + 3.0 * 2.0 * transform_module._FIELD_WINDOW_COPIES
+    expected = warp.working_multiple + 3.0 * 2.0 * resample_module._FIELD_WINDOW_COPIES
     assert warp.case_working_multiple("CASE_000") == pytest.approx(expected)
     # A case this stage has never met answers the class's figure rather than guessing at a grid.
     assert warp.case_working_multiple("NEVER_SEEN") == warp.working_multiple
@@ -1138,6 +1138,40 @@ def test_the_folds_a_stat_pass_keeps_come_out_of_the_regions_share(tmp_path: Pat
     # No budget: nothing is subtracted from nothing, and nothing is kept.
     engine.fit_budget(None)
     assert not engine.keeps_folds(engine.plan())
+
+
+def test_the_stat_pass_is_the_measured_pass_and_the_write_pass_replays_kept_folds(tmp_path: Path) -> None:
+    """The run's FIRST region is the probe wherever it happens.
+
+    A stat pass at full height was exactly the unbounded first allocation _PROBE_SHARE exists to
+    prevent (90 GiB resident on a 122 GiB host, kernel kill, nothing measured). And the regions a
+    stat pass keeps must travel beside their folds: a mid-pass refit changes ``slab_rows``, so
+    regions re-derived at the final height would misalign with folds cut at the earlier one.
+    """
+    from konfai.data.transform import Standardize
+
+    engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [Standardize()])
+    plan = engine.plan()
+    assert plan.stat_pass, "a GLOBAL_STAT stage after the fold is what makes the second pass"
+    output = engine._folded_output_bytes(plan)
+    engine.fit_budget(output / (BUDGET_SHARES["regions"] * _KEPT_FOLDS_SHARE_OF_REGIONS * 0.99))
+    plan = engine.plan()
+    assert engine.keeps_folds(plan)
+    engine.slab_rows = 4
+
+    meters: list[int] = []
+    engine._open_meter = lambda: meters.append(1) or HeldMeter(lambda: 1, 0)  # type: ignore[method-assign]
+    folded_regions: list[tuple[slice, ...]] = []
+    original_fold = engine._fold
+    engine._fold = lambda region: folded_regions.append(region) or original_fold(region)  # type: ignore[method-assign]
+
+    engine._write_folds(plan)
+
+    assert meters == [1], "the stat pass runs the run's first region, so it is the one measured pass"
+    heights = [region[0].stop - region[0].start for region in folded_regions]
+    assert heights[0] == 1, "the run's first region is the probe: short"
+    assert heights[1] == 4, "and the rest walk the planned height"
+    assert sum(heights) == plan.spatial[0], "every row folded exactly once: the write pass replays kept folds"
 
 
 def test_a_value_neutral_stage_does_not_decide_the_region_height(tmp_path: Path) -> None:

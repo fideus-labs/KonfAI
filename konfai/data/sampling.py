@@ -325,9 +325,6 @@ def source_index(
     """
     rank = target_grid.rank
     rows_total = int(target_grid.size_zyx[0])
-    plane = 1
-    for extent in target_grid.size_zyx[1:]:
-        plane *= int(extent)
     # The walk holds several float64 tensors per voxel at once (world, index, per-tap weights and
     # positions, the corner gather), so a large region's TRANSIENTS dwarf its result: ~30 GB beside
     # a 3.6 GB answer, measured on an ExaSPIM slab. Slabbing the leading array axis bounds them

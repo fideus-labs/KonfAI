@@ -36,17 +36,29 @@ from konfai.utils.model_builder import (
 BUILTIN_TYPES = [
     "ArgMax",
     "AvgPool",
+    "CELU",
     "Concat",
+    "ConstantPad",
+    "ConstantPad1d",
+    "ConstantPad2d",
+    "ConstantPad3d",
     "Conv",
     "Conv1d",
     "Conv2d",
     "Conv3d",
     "ConvTranspose",
     "ConvBlock",
+    "Detach",
+    "ELU",
+    "Hardswish",
     "Identity",
     "MaxPool",
+    "Mish",
+    "PixelShuffle",
     "ResBlock",
+    "SiLU",
     "Softmax",
+    "Softplus",
 ]
 
 THREE_MODULE_YAML = """
@@ -69,6 +81,35 @@ modules:
 """
 
 SINGLE_IDENTITY_YAML = "modules:\n  - type: Identity\n"
+
+# Exercises the stateless torch.nn atoms added for post-2019 architectures: the ConstantPad
+# dimensional factory, SiLU/Mish activations, PixelShuffle, and blocks.Detach.
+MODERN_ATOMS_YAML = """
+name: ModernAtoms
+modules:
+  - name: Pad
+    type: ConstantPad
+    args:
+      dim: 2
+      padding: 1
+      value: 0.0
+  - name: Conv
+    type: Conv2d
+    args:
+      in_channels: 1
+      out_channels: 4
+      kernel_size: 3
+  - name: SiLU
+    type: SiLU
+  - name: Shuffle
+    type: PixelShuffle
+    args:
+      upscale_factor: 2
+  - name: Mish
+    type: Mish
+  - name: Stop
+    type: Detach
+"""
 
 ROUTED_GRAPH_YAML = """
 name: RoutedGraph
@@ -118,6 +159,22 @@ class TestBuildModelFromYaml:
         output = model.forward_tensor(torch.randn(2, 16, 4, 4))
 
         assert output.shape == (2, 1, 4, 4)
+
+    def test_modern_atoms_build_and_forward(self) -> None:
+        model = build_model_from_yaml(yaml_str=MODERN_ATOMS_YAML)
+
+        children = dict(model.items())
+        assert isinstance(children["Pad"], torch.nn.ConstantPad2d)
+        assert isinstance(children["SiLU"], torch.nn.SiLU)
+        assert isinstance(children["Shuffle"], torch.nn.PixelShuffle)
+        assert isinstance(children["Mish"], torch.nn.Mish)
+        assert isinstance(children["Stop"], model_builder.blocks.Detach)
+
+        inputs = torch.randn(2, 1, 8, 8, requires_grad=True)
+        output = model.forward_tensor(inputs)
+        # pad 8->10, conv k3 10->8 with 4 channels, PixelShuffle(2) folds them into 1x16x16.
+        assert output.shape == (2, 1, 16, 16)
+        assert not output.requires_grad  # the terminal Detach cut the graph
 
     def test_single_identity_module_builds_one_child_network(self) -> None:
         model = build_model_from_yaml(yaml_str=SINGLE_IDENTITY_YAML)

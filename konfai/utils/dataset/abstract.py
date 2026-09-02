@@ -36,9 +36,66 @@ if TYPE_CHECKING:
 
 
 class AbstractFile(ABC):
+    """One storage backend: how a ``(group, name)`` entry is read, written and enumerated.
+
+    The per-backend FACTS live here as class-level declarations, so a new backend is one module
+    plus one :data:`~konfai.utils.dataset.backend.BACKENDS` entry: the dataset consults the class,
+    never a format-name branch of its own.
+    """
+
+    #: One store holds every case (a single ``.h5`` file); a directory backend keeps one file (or
+    #: store directory) per case, and the dataset walks the root itself.
+    single_store: bool = False
+
+    #: Whether writes to different entries land in disjoint files, so a background writer may
+    #: flush one entry while another thread writes elsewhere in the dataset. A backend whose
+    #: entries share handles or metadata (one HDF5 file, a zarr hierarchy, a DICOM series)
+    #: declares False and stays serial.
+    concurrent_write_safe: bool = True
+
+    #: The suffix a case file carries implicitly on disk (``.h5``), or ``None`` when the case path
+    #: is spelled as listed.
+    case_file_suffix: str | None = None
+
+    #: Whether this backend reads a remote (URI) root; the rest open a local path.
+    reads_remote: bool = False
+
+    #: Whether a written store can hold multiscale levels (``scale_factors``): only a format with
+    #: levels may be asked for a pyramid.
+    writes_pyramid: bool = False
+
+    #: Whether a case is a directory of entries the backend itself enumerates (``get_group`` on
+    #: the case), rather than plain files the dataset walks.
+    lists_case_entries: bool = False
+
     @abstractmethod
-    def __init__(self) -> None:
+    def __init__(self, filename: str, read: bool) -> None:
         pass
+
+    @classmethod
+    def open(
+        cls,
+        filename: str,
+        read: bool,
+        file_format: str,
+        level: int = 0,
+        scale_factors: list[int] | None = None,
+        downsample_method: str | None = None,
+    ) -> AbstractFile:
+        """This backend on ``filename``, built from the dispatch's full hand: each backend takes
+        the arguments its constructor actually needs and ignores the rest."""
+        del file_format, level, scale_factors, downsample_method
+        return cls(filename, read)
+
+    @classmethod
+    def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
+        """Whether this backend can serve incremental region writes for ``file_format``.
+
+        The base answers ``False``: a backend that cannot stream is written whole through
+        ``data_to_file``.
+        """
+        del file_format, attributes
+        return False
 
     @abstractmethod
     def __enter__(self):
@@ -127,13 +184,15 @@ class AbstractFile(ABC):
         """Open ``name`` for incremental region writes; ``None`` when this backend cannot."""
         return None
 
-    @abstractmethod
     def get_names(self, group: str) -> list[str]:
-        pass
+        """The cases of ``group`` this store holds. Only a backend that enumerates its own entries
+        answers (a single store, a store-per-case directory); a plain-file backend's cases are the
+        root's listing, which the dataset walks itself."""
+        raise NotImplementedError(f"{type(self).__name__} keeps one file per entry; the dataset lists its root.")
 
-    @abstractmethod
     def get_group(self) -> list[str]:
-        pass
+        """The groups this store holds, under the same contract as :meth:`get_names`."""
+        raise NotImplementedError(f"{type(self).__name__} keeps one file per entry; the dataset walks its root.")
 
     @abstractmethod
     def is_exist(self, group: str, name: str | None = None) -> bool:

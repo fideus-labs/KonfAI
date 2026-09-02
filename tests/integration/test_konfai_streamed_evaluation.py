@@ -23,7 +23,6 @@ feature stands on), and that the budget run actually took the patched path.
 """
 
 import json
-import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -33,7 +32,7 @@ import pytest
 
 SimpleITK = pytest.importorskip("SimpleITK")
 
-from harness import subprocess_env, write_image  # noqa: E402  (the harness imports SimpleITK itself)
+from harness import run_workflow, write_image  # noqa: E402  (the harness imports SimpleITK itself)
 
 pytestmark = pytest.mark.integration
 
@@ -137,13 +136,7 @@ def _run_evaluation(experiment_dir: Path, memory_budget: str) -> str:
         ),
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [sys.executable, str(runner)],
-        cwd=experiment_dir,
-        env=subprocess_env(),
-        capture_output=True,
-        text=True,
-    )
+    completed = run_workflow([sys.executable, str(runner)], experiment_dir, check=False, capture_output=True, text=True)
     assert completed.returncode == 0, f"evaluation failed:\n{completed.stdout}\n{completed.stderr}"
     return completed.stdout + completed.stderr
 

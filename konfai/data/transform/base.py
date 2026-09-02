@@ -18,6 +18,7 @@
 """The transform contract: locality, regions, the base classes and the loader."""
 
 import importlib
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -159,7 +160,37 @@ def stat_seed_valid(upstream: Iterable[PatchLocality]) -> bool:
 
 
 class Transform(NeedDevice, ABC):
-    """Base class for transforms operating on tensors and cached attributes."""
+    """Base class for transforms operating on tensors and cached attributes.
+
+    The contract is tiered, and every default is fail-safe, so a stage owes only what its behaviour
+    actually needs:
+
+    - **Tier 0 — correct**: implement ``__call__`` alone. The stage runs on the whole volume
+      (the default declaration is ``WHOLE_VOLUME``), keeps its shape and channels, and nothing
+      silently breaks.
+    - **Tier 1 — streaming**: set the :attr:`locality` class attribute (plus :attr:`halo` for a
+      bounded neighbourhood), and override :meth:`transform_shape` / :meth:`output_channels` only
+      if the stage changes the spatial shape or the channel count. A per-voxel value map is one
+      attribute away from streaming.
+    - **Tier 2 — streaming-aware**: the method overrides, needed only where the answer depends on
+      the case (:meth:`patch_locality` read off the header) or where the stage owns a region's
+      geometry or reads beside it (:meth:`stream_region_source`, :meth:`stream_region`,
+      :meth:`plan_region_reads`, :meth:`stream_slab`, :meth:`write_stream_cache_attribute`).
+    """
+
+    #: Tier-1 declaration: the one :class:`LocalityKind` this stage's contract is, when it is
+    #: unconditional. The base :meth:`patch_locality` answers from it; ``None`` (the default) keeps
+    #: the fail-safe ``WHOLE_VOLUME``. A declaration that depends on the configuration or the case
+    #: overrides the method instead, as does one carrying ``stat_keys`` or a ``reason``.
+    locality: LocalityKind | None = None
+
+    #: Tier-1 companion to a ``HALO`` :attr:`locality`: the per-spatial-axis radius in array order
+    #: (a length-1 tuple broadcasts to every axis), exactly as :class:`PatchLocality` carries it.
+    halo: tuple[int, ...] = ()
+
+    #: The loader's resolution sentence for a bare name both stage namespaces define, surfaced as
+    #: the default :meth:`plan_note`; ``None`` for the unambiguous rest.
+    _ambiguous_name_note: str | None = None
 
     #: What ``__call__`` allocates ON TOP of its input and its output, in volumes-worth of the case.
     #: Every sizing route reads it: the sweep prices a region with it, a reduction charges the member
@@ -247,8 +278,9 @@ class Transform(NeedDevice, ABC):
         decides (a reorientation that is only a flip when the direction cosines are axis-aligned, a
         resample whose halo is the case's own scale) can still declare it up front.
 
-        The default ``WHOLE_VOLUME`` is the safety net: any transform (including third-party custom
-        ones) that does not override this falls to the whole-volume path, so nothing silently breaks.
+        The base answers from the :attr:`locality` attribute where one is set; otherwise the
+        default ``WHOLE_VOLUME`` is the safety net: any transform (including third-party custom
+        ones) that declares nothing falls to the whole-volume path, so nothing silently breaks.
 
         An override is bound by three rules:
 
@@ -263,6 +295,8 @@ class Transform(NeedDevice, ABC):
           with an empty ``Attribute``, and a group carries only what its writer stored, so a missing
           key must return ``WHOLE_VOLUME``, never raise.
         """
+        if self.locality is not None:
+            return PatchLocality(self.locality, halo=self.halo)
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def stream_region_source(
@@ -327,10 +361,11 @@ class Transform(NeedDevice, ABC):
         once, so a note about the STAGE may repeat per case without repeating on the page, while a
         note about the CASE stays one line each.
 
-        The base holds nothing: most stages have nothing to add to their regime and their bytes.
+        The base carries only what the loader recorded: the resolution sentence for a bare name
+        both stage namespaces define, so the plan says which class actually ran.
         """
         del group_dest, name, shape, cache_attribute
-        return None
+        return self._ambiguous_name_note
 
     def stream_abort(self, name: str) -> None:
         """Drop whatever ``stream_slab`` holds open for ``name`` after a mid-case failure.
@@ -499,6 +534,11 @@ class TransformLoader:
         if not prefer_augmentation:
             first, second = second, first
         module, name = get_module(classpath, first)
+        ambiguity: str | None = None
+        if ":" not in classpath and hasattr(module, name):
+            ambiguity = self._ambiguity_sentence(name, first, second, prefer_augmentation)
+            if ambiguity is not None:
+                warnings.warn(ambiguity, stacklevel=2)
         if not hasattr(module, name) and ":" not in classpath:
             module, name = get_module(classpath, second)
             if not hasattr(module, name):
@@ -524,6 +564,9 @@ class TransformLoader:
         subtree = f"{konfai_args}.{_escape_key_component(classpath)}"
         transform = apply_config(subtree)(factory)()
         if isinstance(transform, Transform):
+            if ambiguity is not None:
+                # Surfaced again as the stage's plan_note, so the TRANSFORM plan records which class ran.
+                transform._ambiguous_name_note = ambiguity
             transform.prepare(subtree)
             return transform
         if _is_augmentation(transform):
@@ -532,6 +575,23 @@ class TransformLoader:
             transform.load(1.0)
             return transform
         return Foreign(transform, classpath)
+
+    @staticmethod
+    def _ambiguity_sentence(name: str, winner: str, loser: str, prefer_augmentation: bool) -> str | None:
+        """One sentence naming what a bare name resolved to and the qualified spelling of the loser,
+        when both stage namespaces define it (Flip, Mask, Permute, Foreign): adding or removing an
+        Expand above such a name silently swaps a deterministic transform for a per-copy draw, and
+        with default arguments neither the binder nor strict_config would say so."""
+        if not hasattr(importlib.import_module(loser), name):
+            return None
+        if prefer_augmentation:
+            marker = "past an Expand marker, a bare name is the copies' draw"
+        else:
+            marker = "before any Expand marker, a bare name is the transform"
+        return (
+            f"'{name}' resolved to {winner}.{name} ({marker});"
+            f" spell '{loser}:{name}' for the {loser.rsplit('.', 1)[-1]}."
+        )
 
     @staticmethod
     def _closest_stage_name(name: str) -> str:

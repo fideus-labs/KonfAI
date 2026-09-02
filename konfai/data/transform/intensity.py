@@ -21,8 +21,9 @@ import numpy as np
 import torch
 
 from konfai.data.transform.base import LocalityKind, PatchLocality, Transform, TransformInverse, sitk
-from konfai.utils.dataset import Attribute, data_to_image, image_to_data
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
+from konfai.utils.dataset.statistics import read_masked_data_statistics
+from konfai.utils.errors import DatasetManagerError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 
 
@@ -35,6 +36,57 @@ def _seeded_scalar(cache_attribute: Attribute, key: str) -> float:
         return float(cache_attribute[key])
     except (TypeError, ValueError):
         return float(cache_attribute.get_tensor(key).reshape(-1)[0])
+
+
+def _dataset_holding(datasets: list[Dataset], group: str, name: str) -> Dataset:
+    """The dataset holding the case's ``group``, or a refusal naming it."""
+    for dataset in datasets:
+        if dataset.is_dataset_exist(group, name):
+            return dataset
+    raise DatasetManagerError(
+        f"No dataset holds '{group}' for case '{name}'.",
+        "Check the group name against the datasets the run reads.",
+    )
+
+
+class _MaskedStatisticsSeed:
+    """The masked whole-volume statistics of a stage's own group, per case, from the stores.
+
+    A masked ``Clip``/``Standardize`` needs the CASE's statistic under the mask before its first
+    region, and a region cannot derive it: the two volumes are scanned once per case, streamed
+    (:func:`read_masked_data_statistics`), and memoised here. The group the chain reads is the one
+    thing ``__call__`` is never told, so ``transform_shape`` records it: every plan folds it before
+    a region flows. The mask is assumed to sit on the volume's own grid, as :class:`~konfai.data.
+    transform.Mask` assumes; the scan refuses a mask whose extent is not the volume's.
+    """
+
+    def __init__(self, mask: str) -> None:
+        self.mask = mask
+        self.group: str | None = None
+        self._by_case: dict[str, dict[str, float]] = {}
+
+    def record_group(self, group_src: str) -> None:
+        if group_src:
+            self.group = group_src
+
+    def statistics(self, datasets: list[Dataset], name: str) -> dict[str, float]:
+        cached = self._by_case.get(name)
+        if cached is not None:
+            return cached
+        if self.group is None:
+            raise TransformError(
+                "The masked statistic has no group to scan: the chain was never planned.",
+                "Report this: transform_shape() records the group before any region flows.",
+            )
+        stats = read_masked_data_statistics(
+            _dataset_holding(datasets, self.group, name),
+            self.group,
+            _dataset_holding(datasets, self.mask, name),
+            self.mask,
+            name,
+        )
+        self._by_case[name] = stats
+        return stats
 
 
 class Clip(Transform):
@@ -61,16 +113,21 @@ class Clip(Transform):
         self.save_clip_min = save_clip_min
         self.save_clip_max = save_clip_max
         self.mask = mask
+        self._masked_seed = _MaskedStatisticsSeed(mask) if mask is not None else None
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        # Identity on the shape; a masked bound records the group the chain reads, which the masked
+        # disk scan needs and __call__ is never told.
+        if self._masked_seed is not None:
+            self._masked_seed.record_group(group_src)
+        return shape
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # A mask reads a separate full volume, and a percentile bound needs the whole histogram:
-        # both force a whole-volume load. A 'min'/'max' bound needs a global disk statistic
-        # (GLOBAL_STAT); fixed float bounds clip each voxel independently (POINTWISE).
-        if self.mask is not None:
-            return PatchLocality(
-                LocalityKind.WHOLE_VOLUME,
-                reason=f"the bounds are read under mask '{self.mask}', a second whole volume; drop the mask to stream",
-            )
+        # A percentile bound needs the whole histogram (whole-volume). A 'min'/'max' bound needs a
+        # global statistic: a seeded disk one (GLOBAL_STAT with its key), or under a mask a masked
+        # disk scan the stage seeds itself (GLOBAL_STAT with no key: the dispatcher still guards
+        # the seed's validity and seeds nothing). Fixed float bounds never read the mask and clip
+        # each voxel independently (POINTWISE).
         stat_keys: set[str] = set()
         for bound, key in ((self.min_value, "Min"), (self.max_value, "Max")):
             if isinstance(bound, str):
@@ -84,26 +141,49 @@ class Clip(Transform):
                     )
         if not stat_keys:
             return PatchLocality(LocalityKind.POINTWISE)
+        if self.mask is not None:
+            return PatchLocality(LocalityKind.GLOBAL_STAT)
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
+    def _masked_values(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """The tensor's values under the mask, on the whole-volume path (the reference)."""
+        mask = self.read_companion(self.mask, name)  # type: ignore[arg-type]
+        if tuple(mask.shape) != tuple(tensor.shape):
+            raise TransformError(
+                f"The mask '{self.mask}' has shape {list(mask.shape)} where the tensor in hand has"
+                f" {list(tensor.shape)}: it cannot be indexed against a region.",
+                "A masked bound needs the whole volume here; report this if the chain was planned.",
+            )
+        return tensor[mask == 1]
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        tensor_masked = tensor if self.mask is None else tensor[self.read_companion(self.mask, name) == 1]
+        seeded_masked = self.mask is not None and "StatisticsSeeded" in cache_attribute
+        selected: torch.Tensor | None = None
+
+        def values() -> torch.Tensor:
+            nonlocal selected
+            if selected is None:
+                selected = tensor if self.mask is None else self._masked_values(name, tensor)
+            return selected
 
         if isinstance(self.min_value, str):
             if self.min_value == "min":
-                # Seeded-first, as Normalize reads it: on a streamed path the dispatcher has read
-                # the CASE's statistic from disk and the tensor in hand is one region of it --
-                # computed here, the bound (and what save_clip_min records) would be the region's.
-                if self.mask is None and "StatisticsSeeded" in cache_attribute and "Min" in cache_attribute:
+                # Seeded-first, as Normalize reads it: on a streamed path the tensor in hand is one
+                # region of the case -- computed here, the bound (and what save_clip_min records)
+                # would be the region's. A masked bound seeds from the masked disk scan instead: a
+                # bare seed may be an unmasked stage's.
+                if seeded_masked:
+                    min_value = self._masked_seed.statistics(self.datasets, name)["min"]  # type: ignore[union-attr]
+                elif self.mask is None and "StatisticsSeeded" in cache_attribute and "Min" in cache_attribute:
                     min_value = _seeded_scalar(cache_attribute, "Min")
                 else:
-                    min_value = torch.min(tensor_masked)
+                    min_value = torch.min(values())
             elif self.min_value.startswith("percentile:"):
                 try:
                     percentile = float(self.min_value.split(":")[1])
                     # ``np.percentile`` cannot coerce a CUDA tensor (finalize slots may hand Clip a
                     # GPU-resident volume); ``.cpu()`` is a no-op view on a host tensor.
-                    min_value = np.percentile(tensor_masked.detach().cpu(), percentile)
+                    min_value = np.percentile(values().detach().cpu(), percentile)
                 except (IndexError, ValueError) as exc:
                     raise ValueError(
                         f"Invalid format for min_value: '{self.min_value}'. Expected 'percentile:<float>'"
@@ -118,14 +198,16 @@ class Clip(Transform):
 
         if isinstance(self.max_value, str):
             if self.max_value == "max":
-                if self.mask is None and "StatisticsSeeded" in cache_attribute and "Max" in cache_attribute:
+                if seeded_masked:
+                    max_value = self._masked_seed.statistics(self.datasets, name)["max"]  # type: ignore[union-attr]
+                elif self.mask is None and "StatisticsSeeded" in cache_attribute and "Max" in cache_attribute:
                     max_value = _seeded_scalar(cache_attribute, "Max")
                 else:
-                    max_value = torch.max(tensor_masked)
+                    max_value = torch.max(values())
             elif self.max_value.startswith("percentile:"):
                 try:
                     percentile = float(self.max_value.split(":")[1])
-                    max_value = np.percentile(tensor_masked.detach().cpu(), percentile)
+                    max_value = np.percentile(values().detach().cpu(), percentile)
                 except (IndexError, ValueError) as exc:
                     raise ValueError(
                         f"Invalid format for max_value: '{self.max_value}'. Expected 'percentile:<float>'"
@@ -252,13 +334,12 @@ class UnNormalize(Transform):
     # CUDA allocator, the same as Standardize, whose arithmetic this is.
     working_multiple = 1.0
 
+    locality = LocalityKind.POINTWISE
+
     def __init__(self, min_value: int = -1024, max_value: int = 3071) -> None:
         super().__init__()
         self.min_value = min_value
         self.max_value = max_value
-
-    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.POINTWISE)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return (tensor + 1) / 2 * (self.max_value - self.min_value) + self.min_value
@@ -282,17 +363,21 @@ class Standardize(TransformInverse):
         self.mean = mean
         self.std = std
         self.mask = mask
+        self._masked_seed = _MaskedStatisticsSeed(mask) if mask is not None else None
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        # Identity on the shape; a masked statistic records the group the chain reads, which the
+        # masked disk scan needs and __call__ is never told.
+        if self._masked_seed is not None:
+            self._masked_seed.record_group(group_src)
+        return shape
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # A mask reads a separate full volume (whole-volume). Any of mean/std left unset is taken from
-        # a volume-global disk statistic (GLOBAL_STAT); when both are given, the standardization is a
-        # per-voxel affine map with constant coefficients (POINTWISE).
-        if self.mask is not None:
-            return PatchLocality(
-                LocalityKind.WHOLE_VOLUME,
-                reason=f"the statistics are taken under mask '{self.mask}', a second whole volume;"
-                " drop the mask to stream",
-            )
+        # Any of mean/std left unset is a global statistic: a seeded disk one (GLOBAL_STAT with its
+        # key), or under a mask a masked disk scan the stage seeds itself, once per case
+        # (GLOBAL_STAT with no key: the dispatcher still guards the seed's validity and seeds
+        # nothing). Once seeded, no region reads the mask: the map is a per-voxel affine. With both
+        # coefficients given, the mask selects nothing that is read (POINTWISE).
         stat_keys: set[str] = set()
         if self.mean is None:
             stat_keys.add("Mean")
@@ -300,23 +385,57 @@ class Standardize(TransformInverse):
             stat_keys.add("Std")
         if not stat_keys:
             return PatchLocality(LocalityKind.POINTWISE)
+        if self.mask is not None:
+            return PatchLocality(LocalityKind.GLOBAL_STAT)
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
 
+    def _masked_values(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """The tensor's values under the mask, on the whole-volume path (the reference)."""
+        mask = self.read_companion(self.mask, name)  # type: ignore[arg-type]
+        if tuple(mask.shape) != tuple(tensor.shape):
+            raise TransformError(
+                f"The mask '{self.mask}' has shape {list(mask.shape)} where the tensor in hand has"
+                f" {list(tensor.shape)}: it cannot be indexed against a region.",
+                "A masked statistic needs the whole volume here; report this if the chain was planned.",
+            )
+        return tensor[mask == 1]
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        tensor_masked = tensor if self.mask is None else tensor[self.read_companion(self.mask, name) == 1]
+        if self.mask is not None and (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute:
+            # A streamed region: the mask cannot be indexed against it, and a bare 'Mean' seed may
+            # be an unmasked stage's. The case's masked statistic is scanned from the stores once
+            # (memoised) and every region applies the same per-voxel affine map.
+            stats = self._masked_seed.statistics(self.datasets, name)  # type: ignore[union-attr]
+            mean_value = torch.tensor(self.mean) if self.mean is not None else torch.tensor([float(stats["mean"])])
+            std_value = torch.tensor(self.std) if self.std is not None else torch.tensor([float(stats["std"])])
+            if "Mean" not in cache_attribute:
+                cache_attribute["Mean"] = mean_value
+            if "Std" not in cache_attribute:
+                cache_attribute["Std"] = std_value
+            if self.lazy:
+                return tensor
+            mean = self._broadcast(mean_value.to(tensor.device), tensor)
+            std = self._broadcast(std_value.to(tensor.device), tensor)
+            return (tensor - mean) / std
+
+        selected: torch.Tensor | None = None
+
+        def values() -> torch.Tensor:
+            nonlocal selected
+            if selected is None:
+                selected = tensor if self.mask is None else self._masked_values(name, tensor)
+            return selected
 
         if "Mean" not in cache_attribute:
             cache_attribute["Mean"] = (
-                torch.tensor([torch.mean(tensor_masked.type(torch.float32))])
+                torch.tensor([torch.mean(values().type(torch.float32))])
                 if self.mean is None
                 else torch.tensor(self.mean)
             )
 
         if "Std" not in cache_attribute:
             cache_attribute["Std"] = (
-                torch.tensor([torch.std(tensor_masked.type(torch.float32))])
-                if self.std is None
-                else torch.tensor(self.std)
+                torch.tensor([torch.std(values().type(torch.float32))]) if self.std is None else torch.tensor(self.std)
             )
         if self.lazy:
             return tensor

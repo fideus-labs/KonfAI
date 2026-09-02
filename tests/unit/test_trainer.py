@@ -47,7 +47,7 @@ class _DummySummaryWriter:
 
 class _DummyModelModule:
     @staticmethod
-    def state_dict() -> dict[str, torch.Tensor]:
+    def network_states() -> dict[str, torch.Tensor]:
         return {"weight": torch.tensor([1.0])}
 
     @staticmethod
@@ -219,7 +219,12 @@ def test_bootstrap_prefers_real_best_over_exit_checkpoint(tmp_path: Path, monkey
 
 
 def test_checkpoint_persists_ema_n_averaged(tmp_path: Path, monkeypatch) -> None:
-    base = nn.Linear(2, 2)
+    # checkpoint_save reads the EMA module through the Network contract (network_states).
+    class _Base(nn.Linear):
+        def network_states(self) -> dict[str, dict[str, torch.Tensor]]:
+            return {"Base": self.state_dict()}
+
+    base = _Base(2, 2)
     ema = AveragedModel(base)
     ema.update_parameters(base)
     ema.update_parameters(base)
@@ -248,7 +253,7 @@ def test_checkpoint_save_returns_before_the_file_lands_and_the_file_equals_the_l
     net(torch.ones(1, 3)).sum().backward()
     optimizer.step()
     network = SimpleNamespace(optimizer=optimizer, _it=4, _nb_lr_update=2, measure=None)
-    module = SimpleNamespace(state_dict=net.state_dict, get_networks=lambda: {"Net": network})
+    module = SimpleNamespace(network_states=net.state_dict, get_networks=lambda: {"Net": network})
     trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"], model=SimpleNamespace(module=module))
 
     gate = threading.Event()
@@ -513,6 +518,7 @@ def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: 
     trainer.name = "RUN"
     trainer.size = 1
     trainer.it = 0
+    trainer._split_seed = 0
     trainer.ema_decay = 0.999
     trainer.model_ema = None
     trainer.override_lr = None

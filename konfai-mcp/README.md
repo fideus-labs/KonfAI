@@ -241,9 +241,9 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
      app (config + code + checkpoints) into the session so it runs as a normal
      experiment through `run_prediction` / `run_resume` / `run_evaluation`
 2. **Fine-tune an app**: start training from a published model rather than a
-   blank slate: `fine_tune_app` adapts it to the user's dataset and writes a
-   resolvable app bundle (or `import_app` + `run_resume(weights_only=True)` when
-   the training config has to be edited first).
+   blank slate: `fine_tune_app` adapts it to the user's dataset in one call and
+   writes a resolvable app bundle; `import_app` + `run_resume(weights_only=True)`
+   is the full-control tier (custom losses, config surgery).
 3. **Train from scratch**: author a config (the loop above) and, when done,
    `package_app_from_session` turns the trained model into a bundle too.
 

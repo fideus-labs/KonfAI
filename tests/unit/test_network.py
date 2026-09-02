@@ -29,7 +29,8 @@ import pytest
 import torch
 from konfai.metric.schedulers import Constant, PolyLRScheduler
 from konfai.network.blocks import Add
-from konfai.network.network import CriterionsAttr, Measure, ModuleArgsDict, Network, _channels_last
+from konfai.network.network import CriterionsAttr, Measure, ModuleArgsDict, Network
+from konfai.network.network.network import _channels_last
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
 
@@ -186,12 +187,13 @@ def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings() -> None:
             self.add_module("head", torch.nn.Linear(4, 2))
 
     old = _Net(fc_out=4)
-    # Network.state_dict() wraps the flat params under the network name; load_state_dict
+    # Network.network_states() wraps the flat params under the network name; load_state_dict
     # consumes that inner flat dict ("fc.weight", ...).
-    inner = next(iter(old.state_dict().values()))
+    inner = next(iter(old.network_states().values()))
     checkpoint = {key: value.clone() for key, value in inner.items()}
 
     new = _Net(fc_out=6)  # fc output grows 4 -> 6 (resized); head is unchanged
+    new.allow_head_resize = True  # the resize path is opt-in
     new.load_state_dict(checkpoint)  # must not raise
 
     fc = new["fc"]
@@ -201,6 +203,206 @@ def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings() -> None:
     # The sibling after the resized layer must still be loaded (an early `return` would skip it).
     assert torch.equal(head.weight, checkpoint["head.weight"])
     assert torch.equal(head.bias, checkpoint["head.bias"])
+
+
+class _ResizableNet(Network):
+    def __init__(self, fc_out: int) -> None:
+        super().__init__(in_channels=1)
+        self.add_module("fc", torch.nn.Linear(4, fc_out))
+
+
+def test_load_state_dict_shape_mismatch_raises_without_opt_in() -> None:
+    """The overlap-copy resize is opt-in (``allow_head_resize``): by default a checkpoint whose
+    out-channels disagree with the model fails the load, naming the tensor and both shapes."""
+    checkpoint = next(iter(_ResizableNet(fc_out=4).network_states().values()))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _ResizableNet(fc_out=6).load_state_dict(checkpoint)
+
+    message = str(excinfo.value)
+    assert "fc.weight" in message
+    assert "[4, 4]" in message and "[6, 4]" in message
+
+
+def test_opt_in_head_resize_warns_through_the_logger(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    checkpoint = next(iter(_ResizableNet(fc_out=4).network_states().values()))
+    new = _ResizableNet(fc_out=6)
+    new.allow_head_resize = True
+
+    with caplog.at_level(logging.WARNING, logger="konfai.network.network.network"):
+        new.load_state_dict(checkpoint)
+
+    assert any("fc" in record.getMessage() for record in caplog.records)
+    assert torch.equal(new["fc"].weight[:4], checkpoint["fc.weight"])
+
+
+# --------------------------------------------------------------------------------------
+# _apply_network: dedup by object identity, refuse a genuine name collision
+# --------------------------------------------------------------------------------------
+
+
+def test_two_distinct_networks_sharing_a_name_raise_config_error() -> None:
+    """Dedup by NAME silently dropped a second distinct same-named sibling from every fan-out
+    (init/backward/checkpoint). Dedup is by object identity; a genuine collision refuses,
+    because the name is the checkpoint key and could never save correctly."""
+
+    class Leaf(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+        def get_name(self) -> str:
+            return "Gen"
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("A", Leaf())
+            self.add_module("B", Leaf())
+
+    with pytest.raises(ConfigError, match="share the name 'Gen'"):
+        Root().get_networks()
+
+
+def test_same_network_object_under_several_module_names_is_visited_once() -> None:
+    """The shipped Gan adds ONE discriminator under three module names: identity dedup keeps
+    that pattern working (one name, one visit, no collision)."""
+
+    class Leaf(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self, leaf: Network) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("A", leaf)
+            self.add_module("B", leaf)
+            self.add_module("C", leaf)
+
+    leaf = Leaf()
+    networks = Root(leaf).get_networks()
+    assert set(networks.keys()) == {"Root.Leaf", "Root"}
+    assert networks["Root.Leaf"] is leaf
+
+
+# --------------------------------------------------------------------------------------
+# torch protocol names keep torch signatures; the KonfAI aggregates carry KonfAI names
+# --------------------------------------------------------------------------------------
+
+
+def test_torch_protocol_signatures_are_honoured_and_state_dict_skips_nested_networks() -> None:
+    """``state_dict``/``named_parameters`` accept torch's kwargs (DDP/tooling pass
+    prefix/recurse/remove_duplicate); the aggregates live on ``network_states``/
+    ``graph_parameters``. The flat ``state_dict`` still skips nested Networks: each owns its
+    own checkpoint entry."""
+
+    class Sub(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Head", torch.nn.Conv2d(1, 1, 1))
+            self.add_module("Sub", Sub())
+
+    root = Root()
+
+    flat = root.state_dict(prefix="m.", keep_vars=True)
+    assert set(flat) == {"m.Head.weight", "m.Head.bias"}  # nested Sub excluded, prefix honoured
+    assert flat["m.Head.weight"].requires_grad  # keep_vars honoured
+
+    named = dict(root.named_parameters(prefix="p", recurse=True, remove_duplicate=True))
+    assert "p.Head.weight" in named and "p.Sub.Conv.weight" in named
+
+    aggregate = root.network_states()
+    assert set(aggregate) == {"Root", "Root.Sub"}
+    assert set(aggregate["Root"]) == {"Head.weight", "Head.bias"}
+    assert set(aggregate["Root.Sub"]) == {"Conv.weight", "Conv.bias"}
+
+    assert [name for name, _ in root.graph_parameters()] == [
+        "Head.weight",
+        "Head.bias",
+        "Sub.Conv.weight",
+        "Sub.Conv.bias",
+    ]
+
+
+# --------------------------------------------------------------------------------------
+# Alias remapping (Network.load) and positional alias pairing (get_mapping)
+# --------------------------------------------------------------------------------------
+
+
+def test_alias_remap_is_segment_aligned_and_rewrites_only_the_leading_prefix() -> None:
+    """Checkpoint keys are remapped by module alias: 'layer1' must not claim 'layer10.*'
+    (non-segment ``startswith`` did), and only the leading prefix is rewritten."""
+
+    class _Aliased(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("A", torch.nn.Conv2d(1, 1, 1), alias=["layer1"])
+            self.add_module("B", torch.nn.Conv2d(1, 1, 1), alias=["layer10"])
+
+    checkpoint = {
+        "Model": {
+            "_Aliased": {
+                "layer1.weight": torch.full((1, 1, 1, 1), 1.0),
+                "layer1.bias": torch.tensor([1.0]),
+                "layer10.weight": torch.full((1, 1, 1, 1), 2.0),
+                "layer10.bias": torch.tensor([2.0]),
+            }
+        }
+    }
+    net = _Aliased()
+    net.load(cast(Any, checkpoint), init=False)
+
+    assert torch.equal(net["A"].weight, torch.full((1, 1, 1, 1), 1.0))
+    assert torch.equal(net["B"].weight, torch.full((1, 1, 1, 1), 2.0))
+
+
+def test_model_loader_enables_head_resize_on_every_network_and_never_disables() -> None:
+    """``Model: allow_head_resize: true`` reaches every nested network; the loader default
+    (False) never overrides a model class that opted in through its own constructor."""
+    from konfai.network.network import ModelLoader
+
+    class Sub(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Sub", Sub())
+
+    enabled = ModelLoader(allow_head_resize=True)._apply_options(Root())
+    assert all(net.allow_head_resize for net in [enabled, *enabled.get_networks().values()])
+
+    opted_in = Root()
+    opted_in.allow_head_resize = True
+    assert ModelLoader()._apply_options(opted_in).allow_head_resize
+
+
+def test_get_mapping_alias_shortfall_raises_config_error_naming_the_module() -> None:
+    """Positional alias pairing raised a bare IndexError when a nested block maps more entries
+    than the alias list covers; the refusal names the module and the counts."""
+
+    class _Child(ModuleArgsDict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module("L", torch.nn.Conv2d(1, 1, 1), alias=["a1", "a2"])
+
+    class _Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Child", _Child(), alias=["p"])
+
+    with pytest.raises(ConfigError, match=r"Child.*1 alias"):
+        _Root().get_mapping()
 
 
 # --------------------------------------------------------------------------------------
@@ -282,29 +484,30 @@ def test_loss_add_does_not_read_a_loss_off_its_device() -> None:
 
 
 def test_measure_reads_every_unread_value_in_one_transfer(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Two criteria over three batches, one of them handing a float in the middle: one stack per
-    # device reads the lot, each record keeps the order it recorded, and the floats equal `.item()`.
+    # Two criteria over three batches, one of them handing a float in the middle: one concatenated
+    # transfer per device reads the lot, each record keeps the order it recorded, and the floats
+    # equal `.item()`.
     loss = Measure.Loss("l", "out", "tgt", 0, is_loss=True, accumulation=False)
     metric = Measure.Loss("m", "out", "tgt", 0, is_loss=False, accumulation=False)
     for i in range(3):
         loss.add(1.0, torch.tensor(float(i)))
         metric.add(1.0, (torch.tensor([11.0]), 11.5) if i == 1 else torch.tensor([10.0 + i]))
-    stacked: list[int] = []
-    original_stack = torch.stack
+    transfers: list[int] = []
+    original_cat = torch.cat
 
-    def counting_stack(tensors, *args, **kwargs):
-        stacked.append(len(tensors))
-        return original_stack(tensors, *args, **kwargs)
+    def counting_cat(tensors, *args, **kwargs):
+        transfers.append(len(tensors))
+        return original_cat(tensors, *args, **kwargs)
 
-    monkeypatch.setattr(torch, "stack", counting_stack)
+    monkeypatch.setattr(torch, "cat", counting_cat)
     measure = _measure_of(loss, metric)
 
     assert measure.format_loss(True, 3) == {"l": (1.0, 1.0)}
-    assert stacked == [5]
+    assert transfers == [5]
     assert list(loss._values) == [0.0, 1.0, 2.0]
     assert list(metric._values) == [10.0, 11.5, 12.0]
     assert measure.get_last_values(3) == {"l": 1.0, "m": pytest.approx(33.5 / 3)}
-    assert stacked == [5]  # nothing was left unread: no second transfer
+    assert transfers == [5]  # nothing was left unread: no second transfer
 
 
 def test_whole_history_mean_is_a_running_mean_and_the_window_is_bounded() -> None:
@@ -578,7 +781,7 @@ def test_load_restores_nested_network_optimizer_and_counters() -> None:
     saved_sub._nb_lr_update = 7
 
     # Mirror checkpoint_save: dotted get_networks() keys.
-    state_dict: dict = {"Model": source.state_dict()}
+    state_dict: dict = {"Model": source.network_states()}
     for name, net in source.get_networks().items():
         if net.optimizer is not None:
             state_dict[f"{name}_optimizer_state_dict"] = net.optimizer.state_dict()

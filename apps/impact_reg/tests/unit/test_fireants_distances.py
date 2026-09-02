@@ -23,11 +23,10 @@ the plain differentiable value and Dice is the SOFT (unrounded) overlap. This lo
 import numpy as np
 import pytest
 import torch
-
 from impact_reg_konfai.models.fireants import (
+    _DISTANCES,
     _EPS,
     _CosineDistance,
-    _DISTANCES,
     _NCCDistance,
     _SoftDiceDistance,
 )

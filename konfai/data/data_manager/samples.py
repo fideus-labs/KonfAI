@@ -61,6 +61,10 @@ class DataItem:
     a: int
     p: int
     is_input: bool
+    #: Whether ``tensor`` may alias a tensor the loader keeps and reads again (the training cache,
+    #: re-read every epoch): the collate must then batch a COPY, never a view a downstream in-place
+    #: op could write through. One-pass loaders clear it, and their singletons batch as views.
+    aliases_cache: bool = True
 
 
 @dataclass(frozen=True)
@@ -89,13 +93,25 @@ Sample: TypeAlias = dict[str, DataItem]
 BatchSample: TypeAlias = dict[str, BatchDataItem]
 
 
+def _batch_tensor(items: list[DataItem]) -> torch.Tensor:
+    """The batch tensor: a view for a singleton that aliases no re-read cache, a stacked copy else.
+
+    ``torch.stack`` copies, and on the ``batch_size=1`` evaluation path that copy is a whole volume
+    per case, outside the memory budget's sizing. The view stays in the main process: a worker's
+    batch travels by STORAGE, and a patch-view's storage is the whole resident case.
+    """
+    if len(items) == 1 and not items[0].aliases_cache and data.get_worker_info() is None:
+        return items[0].tensor.unsqueeze(0)
+    return torch.stack([it.tensor for it in items], dim=0)
+
+
 def collate_konfai(batch: list[Sample]) -> BatchSample:
     """Collate KonfAI samples into the batch structure expected by the workflows."""
     batch_sample: BatchSample = {}
     for k in batch[0].keys():
         items = [b[k] for b in batch]
         batch_sample[k] = BatchDataItem(
-            tensor=torch.stack([it.tensor for it in items], dim=0),
+            tensor=_batch_tensor(items),
             x=[it.x for it in items],
             a=[it.a for it in items],
             p=[it.p for it in items],
@@ -123,10 +139,14 @@ class DatasetIter(data.Dataset):
         apply_augmentations: bool = True,
         use_cache=True,
         batch_size: int = 1,
+        single_pass: bool = False,
     ) -> None:
         self.rank = rank
         self.data = data
         self.mapping = mapping
+        # A one-pass workflow never re-reads what a sample's tensor could alias, so its items may
+        # batch as views; a training loader's items may alias the epoch-spanning cache and may not.
+        self.single_pass = single_pass
         self.patch_size = patch_size
         self.overlap = overlap
         self.groups_src = groups_src
@@ -302,5 +322,6 @@ class DatasetIter(data.Dataset):
                 a,
                 p,
                 chain.is_input,
+                aliases_cache=not self.single_pass,
             )
         return sample

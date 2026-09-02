@@ -42,7 +42,7 @@ def test_flatten_transforms_recurses_into_nested_composites() -> None:
     nested (``GetNthTransform`` returns it as-is), so a single-level walk would hand that composite to
     the per-leaf type switch, which rejects it: the recursion is what keeps a nested chain storable."""
     sitk = pytest.importorskip("SimpleITK")
-    from konfai.utils.dataset import _flatten_transforms
+    from konfai.utils.dataset.attribute import _flatten_transforms
 
     inner = sitk.CompositeTransform([sitk.Euler3DTransform(), sitk.AffineTransform(3)])
     outer = sitk.CompositeTransform(3)
@@ -284,6 +284,56 @@ class TestDicomRegionDecode:
 
         np.testing.assert_array_equal(got, volume[:, 1:4:2])
         assert sorts["count"] == 0
+
+    def test_overlapping_region_reads_decode_each_plane_once(self, tmp_path: Path, monkeypatch) -> None:
+        """A series stores one file per plane, and every region read touching a z index used to
+        re-parse and re-decode that file whole: overlapping regions of a sweep paid one full
+        ``dcmread`` per touched slice per region. The plane cache decodes each file once per pass."""
+        pydicom = pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+
+        root = tmp_path / "CT"
+        volume = np.arange(1 * 6 * 8 * 8, dtype=np.int16).reshape(1, 6, 8, 8)
+        dicom.write_dicom_series(root, volume, origin=(0.0,) * 3, spacing=(1.0,) * 3)
+        dicom.get_dicom_info(root)
+        reads: list[str] = []
+        real_dcmread = pydicom.dcmread
+
+        def counting(*args, **kwargs):
+            if not kwargs.get("stop_before_pixels", False):
+                reads.append(str(args[0]))
+            return real_dcmread(*args, **kwargs)
+
+        monkeypatch.setattr(pydicom, "dcmread", counting)
+        first, *_ = dicom.read_dicom_series_slice(root, (slice(None), slice(0, 4), slice(1, 6), slice(0, 5)))
+        second, *_ = dicom.read_dicom_series_slice(root, (slice(None), slice(2, 6), slice(2, 8), slice(3, 8)))
+
+        np.testing.assert_array_equal(first, volume[:, 0:4, 1:6, 0:5])
+        np.testing.assert_array_equal(second, volume[:, 2:6, 2:8, 3:8])
+        assert len(reads) == 6, "six distinct planes touched; the two overlapping slices decode once"
+        assert len(set(reads)) == 6
+
+    def test_the_plane_cache_takes_the_cache_share_of_a_declared_budget(self) -> None:
+        pytest.importorskip("pydicom")
+        from konfai.utils import dicom
+        from konfai.utils.budget import BUDGET_SHARES, set_per_rank_budget
+
+        try:
+            set_per_rank_budget(128 << 20)
+            assert dicom._plane_cache_capacity() == int((128 << 20) * BUDGET_SHARES["cache"])
+        finally:
+            set_per_rank_budget(None)
+        assert dicom._plane_cache_capacity() == dicom._PLANE_CACHE_DEFAULT_BYTES
+
+    def test_a_dicom_series_declares_its_plane_as_the_read_grain(self, tmp_path: Path) -> None:
+        """One file per z step, decoded as a whole plane: the plan aligns and prices a sweep on the
+        plane exactly as it does a memmapped band, instead of trusting a silent None."""
+        pytest.importorskip("pydicom")
+        volume = np.zeros((1, 3, 6, 5), dtype=np.int16)
+        dataset = Dataset(tmp_path / "DICOM", "dicom")
+        dataset.write("CT", "CASE_001", volume, _image_attributes())
+
+        assert dataset.read_granularity("CT", "CASE_001") == (1, 1, 6, 5)
 
     def test_the_series_info_memo_is_unbounded_and_a_write_clears_it(self, tmp_path: Path) -> None:
         """A miss re-reads every slice header twice; a bound of 64 series missed on every patch of a
