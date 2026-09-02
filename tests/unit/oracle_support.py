@@ -818,7 +818,9 @@ def _sweep_height(manager: DatasetManager, segments: Sequence[SweepSegment]) -> 
     heights = []
     for segment in segments:
         try:
-            heights.append(manager._sweep_tile(segment.landing, segment.channels, segment.plans)[0])
+            # The segment's own price (its stages, its store): the rule stream_refusal and the
+            # sweep spend the budget by -- a copy's draws included.
+            heights.append(manager.sizer_for(segment).sweep_tile()[0])
         except DatasetManagerError:
             return 0
     return min(heights, default=0)
