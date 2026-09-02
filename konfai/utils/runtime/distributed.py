@@ -399,6 +399,15 @@ def execute_distributed_object(
                     world_size = len(gpu_ids)
                     if world_size == 0:
                         world_size = cpu_workers
+                    if not quiet:
+                        # One line naming the resolved devices: omitting --gpu runs on CPU, and a
+                        # silent CPU fallback on a GPU machine is a 10-100x slowdown nobody sees.
+                        device_line = (
+                            "cuda:" + ",".join(str(i) for i in gpu_ids)
+                            if gpu_ids
+                            else f"CPU ({cpu_workers} worker{'s' if cpu_workers > 1 else ''})"
+                        )
+                        print(f"[KonfAI] Running on {device_line}")
                     with clock.phase("setup"):
                         configured_object.setup(world_size)
                     # Share tensors through /dev/shm files instead of one file descriptor per tensor:

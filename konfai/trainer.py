@@ -57,6 +57,7 @@ from konfai.utils.live_control import LiveControl
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
+    NullSummaryWriter,
     State,
     clear_directory_except_logs,
     configure_workflow_environment,
@@ -67,7 +68,6 @@ from konfai.utils.runtime import (
     seed_all,
     synchronize_data,
 )
-from konfai.utils.utils import concretize_patch_size, size_free_axes
 
 
 class EarlyStoppingBase:
@@ -259,6 +259,7 @@ class _Trainer:
         config_snapshot: Path,
         dataloader_training: DataLoader,
         dataloader_validation: DataLoader | None = None,
+        auto_patched: bool = False,
     ) -> None:
         self.world_size = world_size
         self.global_rank = global_rank
@@ -286,13 +287,23 @@ class _Trainer:
         self._live_control = LiveControl(statistics_directory() / self.train_name / "control.json")
         self._interventions: list[dict[str, Any]] = []
         if SummaryWriter is None:
-            raise ImportError(
-                "TensorBoard is required for training logging. Install it with: pip install konfai[tensorboard]"
-            )
-        self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
+            # A missing logger must never refuse the run: training still produces a model, and only
+            # the curves are lost. One line says so; the extra keeps them.
+            if self.global_rank == 0:
+                print(
+                    "[KonfAI] TensorBoard is not installed: no curves or images will be logged"
+                    " (pip install konfai[tensorboard] to keep them)."
+                )
+            self.tb: Any = NullSummaryWriter()
+        else:
+            self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self._best_checkpoint_path: Path | None = None
         self._best_checkpoint_loss: float | None = None
         self._checkpoint_writer = _CheckpointWriter()
+        #: Whether an OOM here restarts the run instead of ending it (a free patch axis declared).
+        self._auto_patched = auto_patched
+        #: The iteration of the last save: an exit at the same iteration has nothing new to record.
+        self._saved_at_it = it
         self._loss_keys: set[str] = set()
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
@@ -302,10 +313,18 @@ class _Trainer:
         return self
 
     def __exit__(self, exc_type, value, traceback):
-        """Closes the SummaryWriter if used."""
+        """Close the writer and save an exit checkpoint only when it records anything.
+
+        An exit at the last save's iteration adds nothing, and the auto-patch OOM restart is about
+        to rebuild and continue: both used to leave a multi-GB worst-score snapshot behind (the
+        restart's, of untrained weights, unprunable). A genuine failure that DID advance keeps its
+        crash-save, under a name that says what it is.
+        """
         if self.tb is not None:
             self.tb.close()
-        self.checkpoint_save(None)
+        oom_restart = self._auto_patched and exc_type is not None and issubclass(exc_type, torch.cuda.OutOfMemoryError)
+        if not oom_restart and self.it != self._saved_at_it:
+            self.checkpoint_save(None, crash=exc_type is not None)
         self._checkpoint_writer.join()
 
     def _declare_measure_window(self) -> None:
@@ -319,12 +338,18 @@ class _Trainer:
                     network.measure.set_window(max(self.it_validation, validation))
 
     def _initialize_best_checkpoint_state(self) -> None:
-        """Bootstrap BEST-checkpoint tracking once, including resume scenarios."""
+        """Bootstrap BEST-checkpoint tracking once, including resume scenarios.
+
+        Crash saves (``crash_*.pt``) are the user's to manage: never a contender for best, never
+        pruned. When only unscored checkpoints remain (their stored loss is the worst-score
+        sentinel), they all hold the same claim, so the newest: the most-trained snapshot: is kept
+        and the rest are pruned; ``is_better`` is strict, so no scan can elect one best.
+        """
         path = checkpoints_directory() / self.train_name
         if not path.exists():
             return
 
-        all_checkpoints = sorted(path.glob("*.pt"))
+        all_checkpoints = sorted(p for p in path.glob("*.pt") if not p.name.startswith("crash_"))
         best_loss = self.early_stopping.worst_score
         best_ckpt: Path | None = None
         for checkpoint_path in all_checkpoints:
@@ -336,9 +361,12 @@ class _Trainer:
                 best_loss = checkpoint_loss
                 best_ckpt = checkpoint_path
 
+        if best_ckpt is None and len(all_checkpoints) > 1:
+            best_ckpt = max(all_checkpoints, key=lambda p: p.stat().st_mtime)
+            best_loss = self.early_stopping.worst_score
         if best_ckpt is not None:
             self._best_checkpoint_path = best_ckpt
-            self._best_checkpoint_loss = best_loss
+            self._best_checkpoint_loss = best_loss if math.isfinite(best_loss) else None
             for checkpoint_path in all_checkpoints:
                 if checkpoint_path != best_ckpt:
                     checkpoint_path.unlink()
@@ -629,7 +657,7 @@ class _Trainer:
             yaml.dump(data, file)
         os.replace(tmp, target)
 
-    def checkpoint_save(self, loss: float | None) -> None:
+    def checkpoint_save(self, loss: float | None, crash: bool = False) -> None:
         """
         Saves model and optimizer states. Keeps either all checkpoints or only the best one.
 
@@ -639,6 +667,9 @@ class _Trainer:
 
         Args:
             loss (float): Current loss used for best checkpoint selection.
+            crash (bool): A save on an exceptional exit: named ``crash_<date>.pt`` and left outside
+                BEST retention, so the last state survives beside the best one instead of being
+                retired by it.
         """
         if self.global_rank != 0:
             return
@@ -647,12 +678,13 @@ class _Trainer:
         path = checkpoints_directory() / self.train_name
         path.mkdir(parents=True, exist_ok=True)
 
-        date = current_date()
+        date = f"crash_{current_date()}" if crash else current_date()
         save_path = path / f"{date}.pt"
         collision = 1
         while save_path.exists():
             save_path = path / f"{date}_{collision}.pt"
             collision += 1
+        self._saved_at_it = self.it
 
         # An unscored checkpoint (the final save at close) carries the worst possible score so
         # `_update_best_checkpoint` retires it in BEST mode instead of leaving it beside the real best.
@@ -699,7 +731,7 @@ class _Trainer:
             staging = save_path.with_name(f"{save_path.name}.{os.getpid()}.tmp")
             torch.save(snapshot, staging)
             os.replace(staging, save_path)
-            if self.save_checkpoint_mode == "BEST":
+            if self.save_checkpoint_mode == "BEST" and not crash:
                 self._update_best_checkpoint(save_path, checkpoint_loss)
 
         self._checkpoint_writer.submit(publish)
@@ -847,7 +879,7 @@ def _agreed_patch(gathered: list, template: list[int]) -> list[int] | None:
 
 
 @config()
-class Trainer(DistributedObject):
+class Trainer(vram.VramAutoPatchMixin, DistributedObject):
     """
     Public API for training a model using the KonfAI framework.
     Wraps setup, checkpointing, resuming, logging, and launching distributed _Trainer.
@@ -898,16 +930,7 @@ class Trainer(DistributedObject):
         super().__init__(train_name)
         self.manual_seed = manual_seed
         self.dataset = dataset
-        # Auto-patching (VRAM): a per-axis 0 in the user's patch_size marks a FREE axis and opts into
-        # the OOM restart loop: captured before any re-plan materialises concrete sizes over it.
-        patch = dataset.patch
-        self._vram_patch_template: list[int] | None = (
-            [int(size) for size in patch.patch_size]
-            if patch is not None and patch.patch_size is not None and any(size == 0 for size in patch.patch_size)
-            else None
-        )
-        self._vram_patch_candidate: list[int] | None = None
-        self._downsampling_factor: list[int] | None = None
+        self._capture_vram_patch_template(dataset.patch)
         self.autocast = autocast
         self.channels_last = channels_last
         self.epochs = epochs
@@ -927,26 +950,47 @@ class Trainer(DistributedObject):
         self.gpu_checkpoints = gpu_checkpoints
         self.save_checkpoint_mode = save_checkpoint_mode
         self.config_path_src = config_file()
-        config_namefile = self.config_path_src.name.replace(".yml", "")
-        self.config_namefile = statistics_directory() / self.name / f"{config_namefile}_{self.it}.yml"
+        self.config_namefile = statistics_directory() / self.name / self.config_path_src.name
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
         state = State[konfai_state()]
         # Cut the grids with the model's downsampling multiple already known, so each case's free axis
         # rounds up to a valid input size (the graph (hence the factor) is final before init()).
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
-        if self.manual_seed is not None:
-            # The train/validation split is drawn inside prepare() here on the launcher, before spawn.
-            # Without seeding, the global RNG is unseeded, so every run: a fresh TRAIN or a RESUME --
-            # redraws a different split and leaks validation cases into training. Per-rank seeding for the
-            # actual training happens later in the distributed runtime.
-            seed_all(self.manual_seed)
+        # The train/validation split is drawn inside prepare() here on the launcher, before spawn.
+        # It always comes from a CONCRETE seed: the configured one, or the seed the previous run
+        # recorded, or a fresh draw: an unseeded split would be redrawn on RESUME and leak
+        # validation cases into training. Per-rank seeding for the actual training happens later in
+        # the distributed runtime, and stays opt-in (`manual_seed`), as do the cudnn flags.
+        self._split_seed = self._resolve_split_seed(state)
+        seed_all(self._split_seed)
         self.dataset.prepare()
         self.model.bind(
             self.autocast, state, self.dataset.get_groups_dest(), self.gradient_checkpoints, self.gpu_checkpoints
         )
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()
+
+    def _resolve_split_seed(self, state: State) -> int:
+        """The seed every draw in ``prepare()`` (the split first) comes from, always concrete.
+
+        The configured ``manual_seed`` when there is one; on RESUME of an unseeded run, the seed the
+        TRAIN run recorded in its workspace, so the rebuilt split is the one the checkpoint trained
+        on; otherwise a fresh draw, recorded by ``setup`` for the next RESUME.
+        """
+        if self.manual_seed is not None:
+            return self.manual_seed
+        if state == State.RESUME:
+            recorded = self._recorded_split_seed()
+            if recorded is not None:
+                return recorded
+        return int.from_bytes(os.urandom(4), "little")
+
+    def _recorded_split_seed(self) -> int | None:
+        try:
+            return int((statistics_directory() / self.name / "Seed.txt").read_text().strip())
+        except (OSError, ValueError):
+            return None
 
     def setup(self, world_size: int):
         """
@@ -999,17 +1043,15 @@ class Trainer(DistributedObject):
         with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
             for name in validation_names:
                 f.write(name + "\n")
+        # The seed the split was drawn from, kept where RESUME looks for it (_resolve_split_seed):
+        # written here, after the fresh-TRAIN clearing above, so it survives its own run.
+        (statistics_directory() / self.name / "Seed.txt").write_text(f"{self._split_seed}\n")
 
     def set_model(self, path_to_model: str | Path) -> None:
         self.path_to_model = str(path_to_model)
 
     def set_lr(self, lr: float | None) -> None:
         self.override_lr = lr
-
-    def __exit__(self, exc_type, value, traceback):
-        """Exit training context and trigger save of model/checkpoints."""
-        super().__exit__(exc_type, value, traceback)
-        self._save()
 
     def _load(self) -> dict[str, dict[str, torch.Tensor]]:
         """
@@ -1028,14 +1070,6 @@ class Trainer(DistributedObject):
         if "it" in state_dict:
             self.it = state_dict["it"]
         return state_dict
-
-    def _save(self) -> None:
-        if self.config_namefile.exists():
-            new_name = f"{self.config_namefile.stem}_{self.it}.yml"
-            os.rename(
-                self.config_namefile,
-                self.config_namefile.parent / new_name,
-            )
 
     def _ema_update(self) -> dict[str, Callable]:
         """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn``, one ``_foreach_lerp_``
@@ -1075,13 +1109,7 @@ class Trainer(DistributedObject):
             if self.channels_last:
                 Network.set_channels_last(self.model_ema.module)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
-        # Round a free patch axis up to the model's valid input multiple before the first step, so the
-        # network's skips align instead of crashing on a non-divisible extent; every rank rounds the
-        # same worst case to the same size, so no rendezvous is needed here (unlike the OOM shrink).
-        sized = size_free_axes(self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor)
-        if sized is not None:
-            self._vram_patch_candidate = sized
-            self.dataset.replan_patch(sized)
+        if self._presize_free_axes():
             dataloaders = self.dataset.get_data(world_size)[0][global_rank]
         while True:
             try:
@@ -1104,6 +1132,7 @@ class Trainer(DistributedObject):
                     self.model_ema,
                     self.config_namefile,
                     *dataloaders,
+                    auto_patched=self._vram_patch_template is not None,
                 ) as t:
                     t.run()
                 return
@@ -1139,28 +1168,9 @@ class Trainer(DistributedObject):
                     f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
                     f"re-planning the free patch axes to {agreed} and restarting the training run."
                 )
-                self._vram_patch_candidate = agreed
-                self.dataset.replan_patch(agreed)
+                self._adopt_patch_candidate(agreed)
                 vram.reset_peak(device)
                 dataloaders = self.dataset.get_data(world_size)[0][global_rank]
-
-    def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
-        """One shrink step for the free patch axes after a CUDA OOM (``None`` = not auto, or floor).
-
-        The first OOM starts from the worst prepared case at full extent (the size the failed grid
-        effectively ran); later ones shrink the current candidate further.
-        """
-        if self._vram_patch_template is None:
-            return None
-        worst = self.dataset.worst_case_shape()
-        if worst is None:
-            return None
-        candidate = self._vram_patch_candidate or concretize_patch_size(
-            self._vram_patch_template, worst, self._downsampling_factor
-        )
-        return vram.next_patch_candidate(
-            candidate, self._vram_patch_template, worst, measured, usable, self._downsampling_factor
-        )
 
 
 def build_train(
@@ -1222,7 +1232,7 @@ def train(
     command: State = State.TRAIN,
     overwrite: bool = False,
     model: Path | str | None = None,
-    gpu: list[int] | None = cuda_visible_devices(),
+    gpu: list[int] | None = None,
     cpu: int | None = None,
     quiet: bool = False,
     tensorboard: bool = False,

@@ -51,6 +51,7 @@ from konfai.utils.runtime.logging import ANSI_ESCAPE_RE as ANSI_ESCAPE_RE
 from konfai.utils.runtime.logging import DataLog as DataLog
 from konfai.utils.runtime.logging import Log as Log
 from konfai.utils.runtime.logging import MinimalLog as MinimalLog
+from konfai.utils.runtime.logging import NullSummaryWriter as NullSummaryWriter
 from konfai.utils.runtime.logging import TensorBoard as TensorBoard
 from konfai.utils.runtime.logging import record as record
 
@@ -62,6 +63,7 @@ __all__ = [
     "Log",
     "MinimalLog",
     "NeedDevice",
+    "NullSummaryWriter",
     "State",
     "TensorBoard",
     "apply_cpu_thread_budget",

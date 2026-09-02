@@ -518,6 +518,7 @@ def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: 
     trainer.name = "RUN"
     trainer.size = 1
     trainer.it = 0
+    trainer._split_seed = 0
     trainer.ema_decay = 0.999
     trainer.model_ema = None
     trainer.override_lr = None
