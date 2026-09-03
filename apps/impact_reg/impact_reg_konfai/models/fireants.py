@@ -687,7 +687,10 @@ class FireANTsEngine:
             # centre of FRAME (N=0), "com" the centre of MASS (N=1). "cof" aligns the image frames,
             # not the subjects, so a subject sitting off its frame centre starts the chain misplaced.
             init_translation: str | torch.Tensor = "cof"
-            if self._moments_init == "com":
+            if self._moments_init == "none":
+                # Identity, not a seed: the pair arrives centred and the rigid starts where it is.
+                init_translation = torch.zeros((1, 3), device=device, dtype=torch.float32)
+            elif self._moments_init == "com":
                 init_translation = self._center_of_mass_translation(
                     fixed,
                     moving,
@@ -883,10 +886,13 @@ class RegistrationNet(network.Network):
             "Gradient step size of the affine optimisation; higher converges faster but risks overshoot.",
         ] = 0.003,
         moments_init: Annotated[
-            Literal["cof", "com"],
+            Literal["cof", "com", "none"],
             "Initial translation seeding the rigid stage, mirroring ANTs' -r [fixed,moving,N]: 'cof' = centre "
             "of frame (N=0), 'com' = intensity-weighted centre of mass (N=1). Prefer 'com' when the subject "
-            "sits off its frame centre, where aligning frames starts the chain misplaced.",
+            "sits off its frame centre, where aligning frames starts the chain misplaced. 'none' seeds "
+            "nothing and starts the rigid from identity: for a pair the caller has already centred, where "
+            "'com' re-estimates a translation that is zero and 'cof' undoes the centring by aligning "
+            "frames instead of subjects.",
         ] = "cof",
         linear_method: Annotated[
             Literal["rigid_affine", "rigid", "none"],
