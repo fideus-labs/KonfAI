@@ -390,6 +390,10 @@ _API_EXPORTS = (
     "evaluate",
     "predict",
     "train",
+    "train_model",
+    "predict_model",
+    "import_bundle",
+    "export_bundle",
     "TransformResult",
     "EvaluationResult",
 )

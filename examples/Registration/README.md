@@ -81,8 +81,7 @@ adversarial loops) stay in Python; standard feed-forward graphs can be YAML.
 (`VBoussot/konfai-demo`, cached by the Hub after the first run), windows them to `[0, 1]`, and crops
 each to `256x256` around the body.
 
-It needs `scipy` to apply the displacement field, which the base install does not pull in. KonfAI
-carries it only under the `fid` extra. (`huggingface_hub`, which fetches the CT, is a core dependency.)
+It needs `scipy` to apply the displacement field, which no KonfAI extra pulls in: `pip install scipy`. (`huggingface_hub`, which fetches the CT, is a core dependency.)
 
 Run all commands from this directory:
 
