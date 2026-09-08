@@ -158,6 +158,6 @@ Common evaluation mistakes:
 
 ## Next steps
 
-- {doc}`../concepts/datasets`: the `dataset_filenames` merge flags and the
+- {doc}`index`: the `dataset_filenames` merge flags and the
   `validation` selector used here.
 - {doc}`prediction`: to produce the prediction dataset this file scores.

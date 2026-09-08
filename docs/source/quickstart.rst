@@ -121,4 +121,4 @@ Where to go next
 
 - :doc:`examples/index` to adapt one of the shipped workflows to your own data.
 - :doc:`config_guide/index` for what every key in the three YAML files does.
-- :doc:`concepts/index` to understand the machinery you just ran.
+- :doc:`config_guide/index` to understand the machinery you just ran.

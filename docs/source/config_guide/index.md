@@ -1,9 +1,13 @@
-# Configuration model
+# Configuration
 
-This page explains how KonfAI turns a YAML file into live Python objects: the
-reflection engine behind every `Trainer`, `Predictor`, `Evaluator`, and `Transformer`. Read it
-when a config key is not binding the way you expect, or before you expose a
-custom class to YAML.
+KonfAI is a configuration-driven object builder. A YAML file does not pass
+values into a fixed script: it decides which Python classes are instantiated
+and how they are connected, and reading it resolves every default back into
+the file, so a run leaves a complete record of the experiment. This page is
+the engine behind every `Trainer`, `Predictor`, `Evaluator` and `Transformer`,
+the binding rules, where a bare name resolves, and the `Dataset` conventions
+the four workflow pages share. Read it when a key is not binding the way you
+expect, or before you expose a custom class to YAML.
 
 ```{note}
 Reading a config **mutates it**: loading a run resolves every default and
@@ -15,26 +19,50 @@ binds `None`: null is the disabled spelling and is never replaced by the
 default.
 ```
 
-KonfAI is fundamentally a **configuration-driven object builder**.
+## Four files, four commands
 
-The YAML file does not just pass values into a fixed script. It determines
-which Python classes are instantiated and how they are connected.
+The root key of a YAML file selects the workflow object, and one command reads
+each file:
 
-## Root workflow objects
+| Command | File | Root key | Class | Writes |
+| --- | --- | --- | --- | --- |
+| `konfai TRAIN` / `RESUME` | `Config.yml` | `Trainer:` | `konfai.trainer.Trainer` | `Checkpoints/<train_name>/`, `Statistics/<train_name>/` |
+| `konfai PREDICTION` | `Prediction.yml` | `Predictor:` | `konfai.predictor.Predictor` | `Predictions/<train_name>/` |
+| `konfai EVALUATION` | `Evaluation.yml` | `Evaluator:` | `konfai.evaluator.Evaluator` | `Evaluations/<train_name>/Metric_*.json` |
+| `konfai TRANSFORM` | `Transform.yml` | `Transformer:` | `konfai.transformer.Transformer` | wherever each `Write:` points, plus `Transforms/<name>/outputs.json` |
 
-The root key of the YAML selects the high-level workflow object:
+```{mermaid}
+flowchart LR
+    C[Config.yml<br/>Trainer:]:::cfg --> T([konfai TRAIN]):::cmd
+    P[Prediction.yml<br/>Predictor:]:::cfg --> R([konfai PREDICTION]):::cmd
+    E[Evaluation.yml<br/>Evaluator:]:::cfg --> V([konfai EVALUATION]):::cmd
+    X[Transform.yml<br/>Transformer:]:::cfg --> W([konfai TRANSFORM]):::cmd
 
-- `Trainer` for training
-- `Predictor` for inference
-- `Evaluator` for metrics
-- `Transformer` for dataset preparation
+    T --> TO[Checkpoints/&lt;train_name&gt;<br/>Statistics/&lt;train_name&gt;]:::out
+    R --> RO[Predictions/&lt;train_name&gt;]:::out
+    V --> VO[Evaluations/&lt;train_name&gt;<br/>Metric_*.json]:::out
+    W --> WO[wherever each Write: points<br/>Transforms/&lt;name&gt;/outputs.json]:::out
 
-These names map directly to the public classes in:
+```
 
-- `konfai.trainer.Trainer`
-- `konfai.predictor.Predictor`
-- `konfai.evaluator.Evaluator`
-- `konfai.transformer.Transformer`
+One root key per file, one command per file. The same reflection engine builds
+each one: only the root key changes what it builds. The model workflows write
+into a single workspace keyed by `train_name`, so the `train_name` in each
+config file must name the run you intend to touch. `TRANSFORM` is the
+exception: it is keyed by `name`, and only its log, its plan and a copy of its
+config land in the workspace (`Transforms/<name>/`): the data goes wherever
+each `Write:` stage says, which that run directory records in `outputs.json`.
+
+Each page of this guide starts with the commands that run its workflow. Read
+{doc}`training` first: it introduces the structures (`Model`, `Dataset`,
+`outputs_criterions`) the other pages reuse. Then {doc}`prediction` and
+{doc}`evaluation` as you reach those workflows. {doc}`transform` stands apart:
+dataset preparation has no `Model:` block, so it is the one page you can read
+on its own if you only process data. The pages focus on the fields that are
+stable and visible in the codebase and the shipped examples; for built-in
+models, transforms and metrics, the exact available parameters depend on the
+selected classpath, and {ref}`config-discover` says how to get the exhaustive
+list.
 
 ## How YAML becomes Python objects
 
@@ -207,6 +235,54 @@ The two main styles are:
 Use the second form when you add custom files inside an example or project
 directory. It is usually the least ambiguous option.
 
+### How a name is resolved
+
+Most component names in a config are resolved by `konfai.utils.utils.get_module` in
+one of two ways. Three kinds do **not** go through it: loss-weight schedulers and
+optimizers are looked up directly inside `konfai.metric.schedulers` and `torch.optim`
+(so `module:Class` is not accepted for them), and a storage backend is never named at
+all, you pick a format token in `dataset_filenames`.
+
+| Form | Example | Resolves to |
+| --- | --- | --- |
+| **bare name** | `Dice`, `Standardize`, `Flip` | inside that kind's package (`konfai.metric.measure`, `konfai.data.transform`, `konfai.data.augmentation`, …) |
+| **`module:Class`** | `torch:nn:L1Loss`, `monai.losses:DiceLoss`, `Loss:MyWrapper` | *any* importable module: an installed library **or** a local `.py` file next to your config (the current working directory is on `sys.path`) |
+
+So the component pages list the **bare name** for built-ins; you are never limited
+to them: any importable class that satisfies the same contract works via the
+`module:Class` form. The binding rules above are the full resolution rules;
+{doc}`../usage/custom-models` says how to write your own.
+
+(config-discover)=
+### How to discover a component's parameters
+
+The tables give the **key** constructor arguments and defaults, but the exact,
+always-current parameter set is whatever the class's `__init__` declares: the
+reflection engine binds YAML keys directly to constructor parameter names. Two
+ways to get the exhaustive list for any component:
+
+1. **Let KonfAI materialise the defaults.** Reference the component in a config
+   and run `konfai <COMMAND> --init` (or the workflow itself). KonfAI writes
+   every resolved default back into the YAML file, giving you a complete,
+   fully-expanded subtree to edit. (This is the same
+   [config-mutation behaviour](#configuration) that surprises
+   new users: here it is a feature.) `konfai list <kind>` prints every
+   component's exact YAML spelling.
+2. **Read the signature.** Where a bare name is looked up depends on the kind:
+
+   | Kind | Bare name resolves in |
+   | --- | --- |
+   | criteria | `konfai/metric/measure/` |
+   | transforms | `konfai/data/transform/` (one module per family), then `konfai/data/augmentation/` |
+   | augmentations | `konfai/data/augmentation/` |
+   | models | `konfai/models/python/**` |
+   | learning-rate schedulers | `torch.optim.lr_scheduler` **first**, then `konfai/metric/schedulers.py` |
+   | loss-weight schedulers | `konfai/metric/schedulers.py` only |
+   | patch blending (`patch_combine`) | `konfai/data/patching/blend.py` |
+   | reduction operators (a prediction's copies *and* a cohort's cases) | `konfai/data/reduction.py` |
+
+   So a bare `StepLR` resolves *outside* KonfAI, in torch.
+
 ## `default|...` values
 
 The `default|...` prefix is an important KonfAI convention. Its behavior is
@@ -265,8 +341,150 @@ The `examples/Synthesis` workflow is the clearest repository example:
 - `UnNormalize.py` defines a local transform
 - the YAML references them with `Model:...` and `UnNormalize:...`
 
+## The `Dataset` block
+
+Every workflow reads its data through a `Dataset:` block, and four conventions
+are shared by all of them: the on-disk layout, the `groups_src` mapping, the
+`dataset_filenames` selectors and the `subset` / `validation` grammar. The
+per-workflow keys (`batch_size`, `memory_budget`, `Patch`, augmentations) are
+on each workflow's page; patch extraction and the memory regimes are explained
+on {doc}`../usage/large-images`.
+
+### Expected layout
+
+Typical layouts in the repository look like this:
+
+```text
+Dataset/
+├── CASE_001/
+│   ├── CT.mha
+│   └── SEG.mha
+└── CASE_002/
+    ├── CT.mha
+    └── SEG.mha
+```
+
+```text
+Dataset/
+├── CASE_001/
+│   ├── MR.mha
+│   ├── CT.mha
+│   └── MASK.mha
+└── CASE_002/
+    ├── MR.mha
+    ├── CT.mha
+    └── MASK.mha
+```
+
+The concrete file extension is not restricted to `.mha`. KonfAI supports the
+extensions listed in `konfai.utils.utils.SUPPORTED_EXTENSIONS`. A spec may also
+name a format that is a **backend rather than a suffix** (`:itktransform`, whose
+entries are `<group>.h5`): those live in `SUPPORTED_BACKEND_FORMATS`, and
+`SUPPORTED_FORMATS` is the union a `path[:flag]:format` spec is checked against.
+
+Directory-backed formats use the same case/group model:
+
+```text
+DicomDataset/CASE_001/CT/*.dcm
+OmeDataset/CASE_001/CT.ome.zarr/
+```
+
+### `groups_src` and `groups_dest`
+
+Each workflow describes how on-disk groups should be loaded through the
+`Dataset.groups_src` mapping.
+
+Example:
+
+```yaml
+Dataset:
+  groups_src:
+    CT:
+      groups_dest:
+        CT:
+          transforms:
+            Standardize:
+              lazy: false
+              mean: None
+              std: None
+              mask: None
+              inverse: false
+          is_input: true
+```
+
+Conceptually:
+
+- `groups_src` identifies what must exist on disk
+- `groups_dest` identifies how the loaded tensors are exposed to the workflow
+- `is_input: true` marks tensors that are fed into the model
+
+The logic lives in `konfai.data.data_manager.GroupTransform` and the `Data*`
+dataset classes.
+
+### Dataset file selectors
+
+The `dataset_filenames` field accepts strings in the form:
+
+- `path`
+- `path:format`
+- `path:flag:format`
+
+This behavior is implemented in `konfai.data.data_manager.DataSources._resolve_dataset_sources()`,
+which delegates the parsing to `konfai.utils.utils.split_path_spec()`.
+
+The most important conventions are:
+
+- `a` means “append / union”
+- `i` means “intersection / keep only common cases”
+
+Examples:
+
+- `./Dataset:a:mha`
+- `./Predictions/TRAIN_01/Dataset:i:mha`
+- `./DicomDataset:a:dicom`
+- `./OmeDataset:a:omezarr`
+
+### Training subsets and validation
+
+KonfAI supports several ways to define subsets and validation sets.
+
+From the dataset code, `subset` may be:
+
+- `None`
+- a slice string such as `0:10`
+- a path to a text file listing case names
+- a `~path.txt` exclusion file
+- a list of indices
+- a list of case names
+- a list of case-list files
+
+From the dataset code, `validation` may be:
+
+- `None`
+- a float such as `0.2`
+- a slice string such as `0:10` (a negative end counts from the end,
+  Python-style: `0:-2`)
+- a path to a text file listing case names
+- a `~path.txt` exclusion file
+- a list of indices
+- a list of case names
+- a list mixing case names and case-list files
+
+Three semantics are worth remembering:
+
+- `subset: None` keeps the full dataset;
+- `validation: None` disables the split;
+- `subset` and `validation` accept the same selector spellings (slices, names,
+  files, `~` exclusion): one grammar, implemented by `Subset`.
+
+The `subset` object is applied before validation splitting and can exclude or
+include items.
+
 ## Next steps
 
-- {doc}`datasets`: how the configured dataset sections map onto lazy, patch-based storage.
-- {doc}`model-graph`: how `Model` sections address named module outputs for losses and metrics.
-- {doc}`../config_guide/index`: the key-by-key reference for the workflow config files.
+- {doc}`training`: every `Config.yml` key the training workflow reads.
+- {doc}`../reference/components/models`: how `Model` sections address named
+  module outputs for losses, metrics and exported predictions.
+- {doc}`../usage/custom-models`: exposing a class of your own to YAML.
+- {doc}`../usage/python-api`: the same workflows as Python callables, with the
+  config tree as a dict.

@@ -297,7 +297,7 @@ See:
 ## Next steps
 
 - {doc}`evaluation`: to score the written predictions against ground truth.
-- {doc}`../concepts/datasets`: the shared `dataset_filenames`, `groups_src`,
+- {doc}`index`: the shared `dataset_filenames`, `groups_src`,
   and `subset` conventions.
-- {doc}`../concepts/model-graph`: how the model output paths referenced by
+- {doc}`../reference/components/models`: how the model output paths referenced by
   `outputs_dataset` are named.

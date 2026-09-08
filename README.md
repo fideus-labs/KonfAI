@@ -193,7 +193,7 @@ result.outputs   # where each deliverable landed
 
 `konfai.plan_transform` returns the plan without running it; `konfai.train`,
 `konfai.predict` and `konfai.evaluate` take a config path or the same tree as a
-dict. → [**Python workflows**](https://konfai.readthedocs.io/en/latest/usage/python-workflows.html).
+dict. → [**Python workflows**](https://konfai.readthedocs.io/en/latest/usage/python-api.html).
 
 ---
 
@@ -279,14 +279,14 @@ for a reduction, SKIP when the output already exists. The console gets a
 one-line summary; the run's log opens with the plan in full.
 `--plan` prints that full report and stops without transforming.
 
-→ [**Patch streaming**](https://konfai.readthedocs.io/en/latest/concepts/streaming.html): what streams, what does not, and why.
+→ [**Patch streaming**](https://konfai.readthedocs.io/en/latest/usage/large-images.html#patch-streaming): what streams, what does not, and why.
 
 ---
 
 ## What's in the box
 
 Everything below is referenceable by name in YAML. See the
-[**built-in component catalogue**](https://konfai.readthedocs.io/en/latest/reference/components/index.html)
+[**built-in component catalogue**](https://konfai.readthedocs.io/en/latest/reference/components/models.html)
 for classpaths and constructor arguments.
 
 | Kind | Examples | Catalogue |
@@ -294,8 +294,8 @@ for classpaths and constructor arguments.
 | **Models** | `UNet`, `NestedUNet`, `ResNet`, `VAE`, `VoxelMorph`, GAN/diffusion families | [models](https://konfai.readthedocs.io/en/latest/reference/components/models.html) |
 | **Losses & metrics** | `Dice`, `MAE`, `PSNR`, `SSIM`, `LPIPS`, `FID`, `CrossEntropyLoss`, `TRE`, `IMPACTReg`, `IMPACTSynth` | [losses-metrics](https://konfai.readthedocs.io/en/latest/reference/components/losses-metrics.html) |
 | **Transforms** | `Standardize`, `Normalize`, `Clip`, `Resample*`, `OneHot`, `Crop` (~40) | [transforms](https://konfai.readthedocs.io/en/latest/reference/components/transforms.html) |
-| **Augmentations** | `Flip`, `Rotate`, `Elastix`, `Noise`, `CutOUT` (~15) | [augmentations](https://konfai.readthedocs.io/en/latest/reference/components/augmentations.html) |
-| **Schedulers** | weight (`Constant`, `CosineAnnealing`) + LR (`PolyLRScheduler`, `Warmup`, any torch) | [schedulers](https://konfai.readthedocs.io/en/latest/reference/components/schedulers.html) |
+| **Augmentations** | `Flip`, `Rotate`, `Elastix`, `Noise`, `CutOUT` (~15) | [augmentations](https://konfai.readthedocs.io/en/latest/reference/components/transforms.html#augmentations) |
+| **Schedulers** | weight (`Constant`, `CosineAnnealing`) + LR (`PolyLRScheduler`, `Warmup`, any torch) | [schedulers](https://konfai.readthedocs.io/en/latest/reference/components/losses-metrics.html#schedulers) |
 | **Storage backends** | ITK, HDF5, DICOM series, OME-Zarr | [storage-backends](https://konfai.readthedocs.io/en/latest/reference/components/storage-backends.html) |
 
 Not limited to these: any importable class (`monai.losses:DiceLoss`,
@@ -315,7 +315,7 @@ experimentation**. Through the **KonfAI-MCP server**, an agent can:
 
 Every execution stays **reproducible, structured, and grounded in the same YAML
 workflows** a human would run, bridging LLM reasoning and real experimental
-execution. See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
+execution. See the [ecosystem map](https://konfai.readthedocs.io/en/latest/usage/apps.html#the-ecosystem-around-an-app)
 for the current status.
 
 ---
@@ -346,14 +346,14 @@ konfai-studio            # -> http://127.0.0.1:8730
 | Package | What it is |
 | --- | --- |
 | **`konfai`** | the core framework (this repo) |
-| **`konfai-apps`** | package a workflow as an app: [CLI](https://konfai.readthedocs.io/en/latest/reference/cli.html), [HTTP server](https://konfai.readthedocs.io/en/latest/reference/app-server-api.html), [Python API](https://konfai.readthedocs.io/en/latest/reference/python-api.html) |
+| **`konfai-apps`** | package a workflow as an app: [CLI](https://konfai.readthedocs.io/en/latest/reference/cli.html), [HTTP server](https://konfai.readthedocs.io/en/latest/reference/app-server-api.html), [Python API](https://konfai.readthedocs.io/en/latest/usage/python-api.html#apps-the-konfai-apps-package) |
 | **App bundles** (`apps/`) | ready-to-run: `impact-synth`, `impact-seg`, `mrsegmentator`, `totalsegmentator`, `impact-reg` |
 | **[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI)** | run segmentation, synthesis, evaluation, and uncertainty Apps from 3D Slicer |
 | **[SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg)** | run IMPACT-Reg presets and inspect registration results in 3D Slicer |
 | **KonfAI-MCP** | expose KonfAI to LLM agents: inspect data, author configs, launch and monitor runs |
 | **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp`: inspect data, train, predict, evaluate, and compare from one conversation |
 
-See the [ecosystem map](https://konfai.readthedocs.io/en/latest/ecosystem/index.html)
+See the [ecosystem map](https://konfai.readthedocs.io/en/latest/usage/apps.html#the-ecosystem-around-an-app)
 for what is shipped vs. in-progress.
 
 ---
@@ -363,14 +363,14 @@ for what is shipped vs. in-progress.
 📚 **Full docs: <https://konfai.readthedocs.io/en/latest/>**
 
 - [Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html): first end-to-end run
-- [Core concepts](https://konfai.readthedocs.io/en/latest/concepts/index.html): how YAML becomes Python objects
+- [Core concepts](https://konfai.readthedocs.io/en/latest/config_guide/index.html): how YAML becomes Python objects
 - [Large images](https://konfai.readthedocs.io/en/latest/usage/large-images.html): regional reads, fallback, and tuning
 - [Adopt from PyTorch/MONAI](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html): reuse and tool choice
-- [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/index.html): everything you can configure
+- [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/models.html): everything you can configure
 - [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html): runnable Segmentation, Synthesis & Registration workflows, a model of your own in ten lines, a public 2.4 GB OME-Zarr read where it lives, plus five published-app demos
 
 🐳 **Docker:** `vboussot/konfai`,
-[guide](https://konfai.readthedocs.io/en/latest/usage/docker.html).
+[guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html#docker).
 
 ---
 

@@ -45,7 +45,7 @@ everything, `[dev]` adds the test, lint and docs tooling.
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `ssim` | `scikit-image` | the `SSIM` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
-| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../reference/python-api` |
+| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
 | `all` | everything above, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |
 | `dev` | pytest, ruff, mypy, sphinx, … | working on KonfAI itself |
@@ -118,7 +118,7 @@ pytest -q tests/
 KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
 drivers and CUDA version. If your PyTorch already matches your machine, there is
 nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
-first, then KonfAI. For containers, see {doc}`../usage/docker`.
+first, then KonfAI. For containers, see [Docker](#docker) below.
 
 ## If something is missing
 
@@ -133,6 +133,15 @@ first, then KonfAI. For containers, see {doc}`../usage/docker`.
 - **`konfai-cluster` not found**: the command ships with `konfai` itself, so
   "not found" means the environment mismatch of the first bullet. Install
   `konfai[cluster]` only when submission fails on a missing `submitit`.
+
+
+```{include} ../../../docker/README.md
+:heading-offset: 1
+```
+
+The `docker run` examples above mount the current directory as `/workspace`:
+run them from the directory that contains your configs, data, and checkpoints.
+{doc}`../reference/cli` lists the flags used in the container commands.
 
 Next: {doc}`../quickstart` runs a real train, predict and evaluate loop in about
 seven minutes. {doc}`../reference/cli` lists every command and flag.

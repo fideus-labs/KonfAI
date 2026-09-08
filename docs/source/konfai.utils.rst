@@ -97,7 +97,7 @@ konfai.utils.errors module
 --------------------------
 
 The ``KonfAIError`` taxonomy: every designed refusal a workflow raises. The
-Python workflows (:doc:`usage/python-workflows`) let these propagate; only the
+Python workflows (:doc:`usage/python-api`) let these propagate; only the
 CLI catches them.
 
 .. automodule:: konfai.utils.errors

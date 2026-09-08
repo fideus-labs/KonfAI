@@ -4,7 +4,7 @@ KonfAI reads and writes datasets through pluggable backends in
 `konfai/utils/dataset/` (one module per backend, addressed as `Dataset.<Backend>`). You rarely name a backend
 directly, you pick a **format token** in a `dataset_filenames` spec
 (`./Dataset:a:mha`), and the token is dispatched to a backend. See
-{doc}`../../concepts/datasets` for the grouped case/group layout these backends
+{doc}`../../config_guide/index` for the grouped case/group layout these backends
 serve; the DICOM and OME-Zarr reader APIs are detailed below.
 
 ## Backends
@@ -31,7 +31,6 @@ region-**readable** one, a memmap over the raw pixel block, which needs the imag
 geometry up front. An `:itktransform` entry writes its parameters region by
 region and the file is exactly what `sitk.WriteTransform` would have produced;
 any other transform kind is written whole.
-
 
 `pip install "konfai[imaging]"` installs every backend at once
 (`SimpleITK, h5py, pydicom, zarr, ngff-zarr`).
@@ -137,7 +136,7 @@ returns a four-tuple:
 | `direction` | `(9,)` | row-major 3×3 direction-cosine matrix, flattened |
 
 The `origin` / `spacing` / `direction` triple maps directly onto an `Attribute`
-(`Origin`, `Spacing`, `Direction`; see {doc}`../../concepts/datasets`), so a
+(`Origin`, `Spacing`, `Direction`; see [Geometry](#geometry-the-attribute) below), so a
 DICOM series travels through the pipeline under the same geometry contract as
 any other format.
 
@@ -308,30 +307,24 @@ reads touch only selected chunks, and DICOM patch reads decode only selected
 slices. In workflow YAML use `./Dataset:dicom` or `./Dataset:omezarr` in
 `dataset_filenames`.
 
-## Patching, streaming & reassembly
+## Geometry: the `Attribute`
 
-The data layer (`konfai/data/patching/`, `konfai/data/data_manager/`) never
-loads a whole volume when it can avoid it:
+Reading a medical image is not just reading pixels: the physical geometry must
+travel with the array so predictions can be written back into the same space.
+`konfai.utils.dataset.Attribute` is the container that carries it.
 
-- **`DatasetPatch`** (the `Patch:` config block): `patch_size` (default
-  `[128,128,128]`), `overlap` (`None` → auto-tiling), `pad_value` (`None` → pad
-  with `data.min()`), `extend_slice` (2.5-D context, only when `patch_size[0]==1`).
-- **`ModelPatch`**: patching applied *inside* a model graph, with a
-  `patch_combine` blender for overlap reassembly: `Mean`, `Cosinus`, `Trim`, or
-  `Gaussian` (nnU-Net-style importance weighting).
-- **Streaming** reads a planned source region through `read_data_slice`.
-  Transform and sampled-augmentation locality determines whether that region is
-  exact, haloed, index-remapped, cropped, rescaled, or unavailable. When the
-  chain cannot be represented by one bounded region, KonfAI uses the safe
-  whole-volume buffer. See {doc}`../../concepts/streaming` for the planner.
-- **`Accumulator`** reassembles patches with overlap blending, correcting border
-  voxels covered by fewer patches. Patch **read order must match write order**: a load-bearing invariant.
+`Attribute` is a `dict[str, Any]` subclass that stores, among other metadata, the
+three values that define an image in physical space:
 
-```{important}
-For PREDICTION / EVALUATION, **all patches of a case stay on the same DDP rank**
-(the whole volume is reassembled per rank). For TRAIN, shards are padded to the
-same length so every rank executes the same number of backward passes.
-```
+- **`Origin`**: physical position of the first voxel
+- **`Spacing`**: voxel size along each axis, in `(x, y, z)` order
+- **`Direction`**: the flattened direction-cosine matrix
+
+Numeric values are stored as strings and recovered with `get_np_array(key)` or
+`get_tensor(key)`. Keys use a stack-like naming scheme (`Origin_0`, `Origin_1`,
+…) so a chain of transforms can push successive geometries and pop them to invert
+the chain, which is how KonfAI restores the original geometry when exporting a
+prediction.
 
 ## Three things to know
 
@@ -352,8 +345,8 @@ multi-dimensional does not survive a read. Geometry is safe because `Origin` and
 
 ## Next steps
 
-- {doc}`../../concepts/datasets`: grouped dataset layout, selectors, patching
-- {doc}`../../concepts/streaming`: locality declarations, planner rules, and fallbacks
+- {doc}`../../config_guide/index`: grouped dataset layout and selectors
+- {doc}`../../usage/large-images`: locality declarations, planner rules, and fallbacks
 - {doc}`transforms`: transform capabilities and streamability
-- {doc}`../api/extension-points`: adding your own backend (the `AbstractFile`
+- {doc}`../../usage/custom-models`: adding your own backend (the `AbstractFile`
   declarations and the `BACKENDS` registry)

@@ -362,8 +362,8 @@ The most practical examples in the repository are:
 
 ## Next steps
 
-- {doc}`../concepts/datasets`: the shared `dataset_filenames`, `groups_src`,
+- {doc}`index`: the shared `dataset_filenames`, `groups_src`,
   `subset`, and `validation` conventions used above.
-- {doc}`../concepts/model-graph`: how module names become the output paths
+- {doc}`../reference/components/models`: how module names become the output paths
   used in `outputs_criterions`.
 - {doc}`prediction`: to configure inference with the trained model.

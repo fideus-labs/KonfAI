@@ -213,7 +213,7 @@ array. Start with level 0, then consult
 
 - {doc}`getting-started/installation`: the extras and verification steps
   behind most install-time symptoms.
-- {doc}`reference/environment`: the `KONFAI_*` environment variables that
+- {doc}`reference/cli`: the `KONFAI_*` environment variables that
   drive runtime behavior.
 - {doc}`usage/apps`: running packaged apps locally or against a remote
   `konfai-apps-server`.

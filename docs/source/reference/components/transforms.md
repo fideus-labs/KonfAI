@@ -51,7 +51,7 @@ Three things govern the chain rather than any single transform:
   before it, down to a single bounded read. `[Dilate, Gradient]` (two halos that
   add) and `[Canonical, Permute]` (two reorientations) both stream. Augmentations
   count: a copy's draw is planned as part of the same chain. See
-  {doc}`../../concepts/streaming` for how the planner folds them.
+  {doc}`../../usage/large-images` for how the planner folds them.
 - **A statistic is seeded from the stored volume.** `Normalize`, `Standardize`
   and `Clip(min_value="min")` read their statistic from disk, which is their input
   only if every earlier stage left the values alone. Reorienting does; mapping
@@ -136,7 +136,6 @@ reads as a zero field and says so.
 Inverting undoes the grid change only: a declared map is not inverted, and a
 stage that changes no grid refuses rather than pretend.
 
-
 ## Labels & masks
 
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
@@ -189,9 +188,91 @@ override needed.
 default every `Transform` inherits, not a statement that the operation could not
 be streamed.
 
+## Augmentations
+
+See the {doc}`../../examples/visual-gallery` for reproducible visual examples of
+spatial, intensity, noise, and CutOUT augmentations.
+
+Augmentations are **random, train-time** data augmentations in
+`konfai/data/augmentation/` (base class `DataAugmentation`). Unlike transforms,
+they are sampled per case and applied only during training:
+
+```yaml
+Dataset:
+  augmentations:
+    DataAugmentation_0:
+      data_augmentations:
+        Flip:                     # bare name → konfai.data.augmentation.Flip
+          f_prob: [0, 0.5, 0.5]   # per-axis flip probability
+          prob: 1                 # belongs UNDER the augmentation, not beside it
+      nb: 1                       # number of augmented copies per sample
+```
+
+**Lifecycle.** Parameters are drawn **once per case index** and cached, so every
+patch of a case shares the same draw within an epoch (mandatory for patch
+consistency). `reset_state` re-samples each epoch. A subclass implements
+`_state_init` (sample params) and `_compute` (apply); `_inverse` supports
+test-time augmentation reassembly.
+
+```{important}
+**`Mask`, `Permute` and `Rotate` may change spatial shape.** `Rotate` only does so
+on a quarter turn, which transposes the extents it swaps (`is_quarter=True`); a
+sampled angle keeps the grid. Everything else preserves geometry.
+```
+
+**Patch streaming.** The **Stream** column says whether a copy's patches can be
+cut straight from disk or whether the augmentation needs the case loaded whole
+(see [Patch streaming](#patch-streaming) above). An augmentation answers per **copy**, not per
+transform: the answer follows the draw, so two copies of the same case can differ
+and the same copy can differ next epoch. A copy the draw did not select is the
+identity, which streams. The draw is planned as part of the group's chain, one
+list, so a region augmentation and a region transform (`Dilate`, `Canonical`, a
+resampler) compose exactly like two transforms: each pulls its region through the
+one before it, down to a single bounded read. An augmentation you write yourself
+starts at the whole volume and streams nothing until it declares otherwise.
+
+### Spatial (Euler transforms)
+
+Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
+
+| Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
+| --- | --- | --- | --- | --- | --- |
+| `Translate` | Random translation (voxels). | `t_min=-10, t_max=10, is_int=False` | no | **yes** | **yes**: a halo of the drawn shift (plus a voxel for interpolation), while that stays within half the patch |
+| `Rotate` | Random rotation (degrees). | `a_min=0, a_max=360, is_quarter=False` | **yes** with `is_quarter: true` | **yes** | **yes**: an index remap with `is_quarter: true`, and a free angle streams through the affine's own pull box |
+| `Scale` | Random log2-normal isotropic scale. | `s_std=0.2` | no | **yes** | **yes**: the region pulls its own window through the affine, so no fixed halo is needed |
+| `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes**: index remap; no with `vector_field: true` (negating a channel changes values) |
+| `Elastix` | Random cubic-BSpline elastic warp, drawn as a control-point lattice. | `grid_spacing=16, max_displacement=16` (world units) | no | no | **yes**: the displacement is evaluated lazily from the lattice, and no voxel moves further than `max_displacement`, which bounds the source box a region pulls |
+| `Permute` | Random spatial-axis permutation (**3-D only**). | `prob_permute=[0.5,0.5]` | **yes** | **yes** | **yes**: index remap |
+| `Mask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | no | no: the output grid is the mask's, and the mask is already resident |
+
+### Intensity (colour transforms)
+
+Apply a per-index colour affine to RGB(3-ch) or L(1-ch) tensors. Their inverse is
+a no-op (colour changes don't move voxels). The draw is a colour matrix applied to
+each voxel on its own (no neighbour, no coordinate, no extent), so every one of
+them streams: a voxel comes out the same whatever region it was read in.
+
+| Name | Purpose | Key args (defaults) |
+| --- | --- | --- |
+| `Brightness` | Additive brightness. | `b_std` (required) |
+| `Contrast` | Multiplicative contrast (log2-normal). | `c_std` (required) |
+| `LumaFlip` | Random luma (value) inversion. |: |
+| `HUE` | Random hue rotation. | `hue_max` (required) |
+| `Saturation` | Random saturation scale. | `s_std` (required) |
+
+### Other
+
+| Name | Purpose | Key args (defaults) | Notes | Stream |
+| --- | --- | --- | --- | --- |
+| `Noise` | Diffusion-style forward noising (zero-terminal-SNR β schedule). | `n_std` (required), `noise_step=1000` | Its `prob` is the max noise timestep, not an apply probability; it always applies. | **yes**: the field is a function of the voxel's position and the copy's seed, so a region draws the values it would have had in the whole volume |
+| `CutOUT` | Random cutout box filled with `value`. | `cutout_size` (a fraction of the extent per axis, in `(0, 1]`), `value` (both required) | Gating uses the base probability; a `cutout_size` outside `(0, 1]` is refused. | **yes**: the box is placed in the whole volume's coordinates, so a region sees the part of it that falls inside it |
+
+`Mask` requires SimpleITK. The `vector_field` flag on `Flip` should
+only be enabled for single-channel or genuine vector-field groups.
+
 ## Next steps
 
-- {doc}`augmentations`: the random, train-time counterpart
-- {doc}`../../concepts/datasets`: where transforms sit in a dataset config
-- {doc}`../api/extension-points`: write your own `Transform` (implement
-  `__call__` **and** `transform_shape()`)
+- {doc}`../../config_guide/index`: where the `transforms:` and `augmentations:` blocks sit in a config
+- {doc}`../../usage/large-images`: what decides whether a chain streams
+- {doc}`../../usage/custom-models`: write your own `Transform` (implement
+  `__call__` **and** `transform_shape()`) or `DataAugmentation`

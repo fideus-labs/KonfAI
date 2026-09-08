@@ -87,7 +87,7 @@ The bytes are the ones a CPU run writes: bit for bit for every pointwise,
 halo, orientation or crop stage and for a nearest, cubic or axis-aligned
 `Resample`; a *linear* resample through a map that does not factorise (a
 rotation, a stored field) may differ by about 1e-5 of the data's range on CUDA
-(see {doc}`../concepts/streaming`), and these bounds assume `precision: exact`,
+(see {doc}`../usage/large-images`), and these bounds assume `precision: exact`,
 the default. Without `--gpu` a `Resample` goes through ITK's own resampler on
 the host, the fastest exact one there is, and everything else through torch. The gain of `--gpu` is modest for a light chain (the reads and
 the writes are the cost either way) and grows with the volume and the chain. `--gpu` also matters when a chain embeds a `KonfAIInference`
@@ -372,7 +372,7 @@ also declare `working_multiple` if it allocates over the buffer it is handed,
 or the plan promises a working set the run exceeds. The full operator contract
 (`voxel_local` and its corruption trap, `incremental`, `working_multiple_for`,
 `output_channels`), with a code skeleton, is in
-{doc}`../reference/api/extension-points`.
+{doc}`../usage/custom-models`.
 
 ```{warning}
 `Mean` and `Median` are for intensities. Both answer with values that were in no
@@ -823,7 +823,7 @@ show.
   below the default; it is printed for the run, so read it against your chain:
   it names a possibility, and a chain with no such resample is exact. How a
   streamed result compares to a whole-volume one stage by stage is in
-  {doc}`../concepts/streaming`.
+  {doc}`../usage/large-images`.
 
 ## Statistics a stage can ask for
 

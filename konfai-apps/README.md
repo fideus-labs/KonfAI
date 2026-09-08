@@ -283,7 +283,7 @@ Useful entry points in the main repository:
 - [`../README.md`](../README.md)
 - [`../apps/README.md`](../apps/README.md)
 - [`../docs/source/usage/apps.md`](../docs/source/usage/apps.md)
-- [`../docs/source/usage/remote-server.md`](../docs/source/usage/remote-server.md)
+- [`../docs/source/reference/app-server-api.md`](../docs/source/reference/app-server-api.md)
 - [`../docs/source/reference/cli.md`](../docs/source/reference/cli.md)
 
 ## Current Scope
