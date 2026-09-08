@@ -21,7 +21,7 @@ import math
 from collections import deque
 from collections.abc import Iterator
 from itertools import islice
-from typing import Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -31,6 +31,10 @@ from konfai.network.network.base import strip_accumulated
 from konfai.network.network.loaders import CriterionsAttr, TargetCriterionsLoader
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
+
+if TYPE_CHECKING:
+    from konfai.metric.measure.base import CriterionWithInit
+    from konfai.network.network.network import ModuleArgsDict
 
 
 class LabelledValues(NamedTuple):
@@ -268,7 +272,7 @@ class Measure:
     def release_targets(self) -> None:
         self._targets.clear()
 
-    def init(self, model: torch.nn.Module, group_dest: list[str]) -> None:
+    def init(self, model: "ModuleArgsDict", group_dest: list[str]) -> None:
         outputs_group_rename = {}
 
         modules = []
@@ -302,7 +306,9 @@ class Measure:
                     # the CriterionsAttr value: indexing the dict here would always read False and
                     # silently skip graph-rewiring criteria such as KLDivergence.
                     if getattr(criterion, "accepts_init", False):
-                        outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
+                        outputs_group_rename[output_group] = cast("CriterionWithInit", criterion).init(
+                            model, output_group, target_group
+                        )
 
         outputs_criterions_bak = self.outputs_criterions.copy()
         for old, new in outputs_group_rename.items():
@@ -427,6 +433,49 @@ class Measure:
         will read. Grows only; without a call the history is unbounded."""
         for _, record in self._records():
             record.set_window(n)
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        """Scalar history for logs and plateau schedules, bounded by the declared logging window.
+
+        Running means retain their totals/counts; gradients and device tensors are never serialized.
+        """
+        self._materialize()
+        return {
+            "version": 1,
+            "records": {
+                group: {
+                    name: {
+                        "values": [float(value) for value in record._values],
+                        "weights": [float(weight) for weight in record._weight],
+                        "window": record._values.maxlen,
+                        "mean": (float(record._mean.total), record._mean.count),
+                        "mean_weight": (float(record._mean_weight.total), record._mean_weight.count),
+                        "recorded": record._recorded,
+                    }
+                    for name, record in records.items()
+                }
+                for group, records in self._loss.items()
+            },
+        }
+
+    def load_checkpoint_state(self, state: dict[str, Any]) -> None:
+        """Restore scalar histories into the same configured criteria, preserving a widened window."""
+        if state.get("version") != 1 or state["records"].keys() != self._loss.keys():
+            raise MeasureError("RESUME measure history does not match the configured criterion groups.")
+        for group, records in self._loss.items():
+            saved = state["records"][group]
+            if saved.keys() != records.keys():
+                raise MeasureError("RESUME measure history does not match the configured criteria.")
+            for name, record in records.items():
+                entry = saved[name]
+                window = max(record._values.maxlen or 0, entry["window"] or len(entry["values"]), 1)
+                record._values = deque(entry["values"], maxlen=window)
+                record._weight = deque(entry["weights"], maxlen=window)
+                record._mean.total, record._mean.count = entry["mean"]
+                record._mean_weight.total, record._mean_weight.count = entry["mean_weight"]
+                record._recorded = entry["recorded"]
+                record._unread.clear()
+                record.reset_loss()
 
     def _read(self, n: int) -> Iterator[tuple[str, "Measure.Loss"]]:
         """The records given at least ``n`` values, every value read off its device, and the window

@@ -18,6 +18,7 @@
 """The per-rank prediction loop: fetch, forward, blend, finalize."""
 
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import torch
@@ -119,7 +120,7 @@ class _Predictor:
         self.autocast = autocast
         self.it = 0
 
-        self.dataset: DatasetIter = self.dataloader_prediction.dataset
+        self.dataset = cast(DatasetIter, self.dataloader_prediction.dataset)
         patch_size, overlap = self.dataset.get_patch_config()
         for output_dataset in self.outputs_dataset.values():
             output_dataset.set_patch_config(
@@ -139,6 +140,7 @@ class _Predictor:
         self._has_runtime_measures = any(
             network.measure is not None for network in self.model_composite.module.get_networks().values()
         )
+        self.tb: SummaryWriter | NullSummaryWriter | None
         if self._has_runtime_measures or len(self.data_log):
             if SummaryWriter is None:
                 # A missing logger must never refuse the run: the predictions are still written,
@@ -179,7 +181,7 @@ class _Predictor:
 
         self.model_composite.eval()
         self.model_composite.module.set_state(NetState.PREDICTION)
-        self.dataloader_prediction.dataset.load("Prediction")
+        self.dataset.load("Prediction")
         PREDICTION_CLOCK.reset()
         try:
             with PREDICTION_CLOCK.phase("prediction"):

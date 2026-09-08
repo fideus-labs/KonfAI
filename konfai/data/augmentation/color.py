@@ -42,8 +42,8 @@ class ColorTransform(DataAugmentation):
             matrix = matrix.to(tensor.device)
             result = matrix[:, :3, :3] @ result.float() + matrix[:, :3, 3:]
         elif tensor.shape[0] == 1:
-            matrix = matrix[:, :3, :].mean(dim=1, keepdims=True).to(tensor.device)
-            result = result.float() * matrix[:, :, :3].sum(dim=2, keepdims=True) + matrix[:, :, 3:]
+            matrix = matrix[:, :3, :].mean(dim=1, keepdim=True).to(tensor.device)
+            result = result.float() * matrix[:, :, :3].sum(dim=2, keepdim=True) + matrix[:, :, 3:]
         else:
             raise AugmentationError("Image must be RGB (3 channels) or L (1 channel)")
         return result.reshape(tensor.shape)

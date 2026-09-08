@@ -189,7 +189,8 @@ def _scored_checkpoint(workspace: Path) -> Path:
     scored = [
         path
         for path in sorted(workspace.glob("*.pt"))
-        if np.isfinite(torch.load(path, map_location="cpu", weights_only=False)["loss"])
+        if path.name != "resume_latest.pt"
+        and np.isfinite(torch.load(path, map_location="cpu", weights_only=False)["loss"])
     ]
     assert len(scored) == 1, [path.name for path in sorted(workspace.glob("*.pt"))]
     return scored[0]

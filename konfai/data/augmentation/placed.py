@@ -75,7 +75,7 @@ class Noise(PlacedDraw):
         self.n_std = n_std
         self.noise_step = noise_step
 
-        self.ts: dict[int, list[torch.Tensor]] = {}
+        self.ts: dict[int, list[torch.Tensor | int]] = {}
         self.field_seeds: dict[int, list[int]] = {}  #: one field seed per copy, drawn with the step
         self.betas = torch.linspace(beta_start, beta_end, noise_step)
         self.betas = Noise.enforce_zero_terminal_snr(self.betas)
@@ -220,7 +220,7 @@ class Mask(DataAugmentation):
         )
         return torch.where(
             mask.to(tensor.device) == 1,
-            torch.nn.functional.pad(tensor, tuple(padding), mode="constant", value=value)[tuple(slices)],
+            torch.nn.functional.pad(tensor, tuple(padding), mode="constant", value=value.item())[tuple(slices)],
             value,
         )
 

@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from functools import wraps
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import torch
@@ -53,6 +53,9 @@ from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.runtime.environment import ClusterKwargs
 from konfai.utils.runtime.logging import Log, TensorBoard
 from konfai.utils.utils import env_flag
+
+if TYPE_CHECKING:
+    from konfai.network.network import Network
 
 _T = TypeVar("_T")
 
@@ -130,7 +133,7 @@ class DistributedObject(ABC):
         world_size: int,
         global_rank: int,
         gpu: int,
-        models: dict[str, torch.nn.Module],
+        models: dict[str, "Network"],
         n: int,
         sync: bool = True,
     ) -> dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]]:

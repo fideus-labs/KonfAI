@@ -41,10 +41,10 @@ import operator
 import tempfile
 import threading
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -71,6 +71,10 @@ except ImportError:
     dask = None  # type: ignore[assignment]
     ngff_zarr = None  # type: ignore[assignment]
     _NGFF_ZARR_AVAILABLE = False
+
+if TYPE_CHECKING:
+    from ngff_zarr.v06.zarr_metadata import Metadata as MetadataV06
+    from ngff_zarr.v06.zarr_metadata import SupportedDims
 
 _KONFAI_ATTR_KEY = "konfai"
 _SPATIAL = ("z", "y", "x")
@@ -611,7 +615,22 @@ def _assemble_window(
     """Fill ``out`` with the ``wanted`` chunks of ``array``, served from ``cache`` or decoded whole
     and cached."""
     shape, chunks = array.shape, array.chunks
+
+    def window_of(coords: tuple, chunk: np.ndarray) -> None:
+        # Where this chunk lands in the output, and which part of it.
+        src: list[slice] = []
+        dst: list[slice] = []
+        for c, ch, sel in zip(coords, chunks, selections, strict=True):
+            lo = max(sel.start, c * ch)
+            hi = min(sel.stop, (c + 1) * ch)
+            src.append(slice(lo - c * ch, hi - c * ch))
+            dst.append(slice(lo - sel.start, hi - sel.start))
+        out[tuple(dst)] = chunk[tuple(src)]
+
+    wanted_set = set(wanted)
     missing = [coords for coords in wanted if cache.get((identity, coords)) is None]
+    placed_from_hull: set[tuple] = set()
+    from_hull: dict[tuple, np.ndarray] = {}
     if missing:
         # ONE zarr read for the chunk-aligned hull of what is missing: zarr decodes the chunks of a
         # single selection in parallel, and one call per chunk would serialise them (measured 1.5x
@@ -626,14 +645,27 @@ def _assemble_window(
         decoded = np.asarray(array[hull])
         for coords in itertools.product(*(range(lo_, hi_ + 1) for lo_, hi_ in zip(lo, hi, strict=True))):
             key = (identity, coords)
-            if cache.get(key) is not None:
-                continue
             piece = tuple(
                 slice((c - lo_) * ch, min((c - lo_ + 1) * ch, extent - lo_ * ch))
                 for c, lo_, ch, extent in zip(coords, lo, chunks, shape, strict=True)
             )
-            cache.put(key, np.ascontiguousarray(decoded[piece], dtype=out.dtype))
-        del decoded
+            if coords in wanted_set:
+                # Served from the hull while it is here: a cache smaller than the hull would evict
+                # the chunk before the read below asks for it, and decode it a second time.
+                from_hull[coords] = decoded[piece]
+            if cache.get(key) is None:
+                # A COPY, never a slice of the hull: a contiguous slice stays a view whose parent
+                # allocation the cache would keep alive whole while counting the slice's bytes.
+                cache.put(key, np.array(decoded[piece], dtype=out.dtype, order="C"))
+        # The hull's windows are placed here, before it is released, one per worker (disjoint
+        # destinations, numpy releases the GIL for the copy); the cache is touched for each, in
+        # read order, so its recency is the one a read through the cache would have left.
+        map_over_rank_pool(lambda coords: window_of(coords, from_hull[coords]), list(from_hull))
+        placed_from_hull.update(from_hull)
+        for coords in wanted:
+            if coords in from_hull:
+                cache.get((identity, coords))
+        del decoded, from_hull
 
     def place(coords: tuple) -> None:
         chunk = cache.get((identity, coords))
@@ -642,19 +674,11 @@ def _assemble_window(
                 slice(c * ch, min((c + 1) * ch, extent)) for c, ch, extent in zip(coords, chunks, shape, strict=True)
             )
             chunk = np.asarray(array[window])
-        # Where this chunk lands in the output, and which part of it.
-        src: list[slice] = []
-        dst: list[slice] = []
-        for c, ch, sel in zip(coords, chunks, selections, strict=True):
-            lo = max(sel.start, c * ch)
-            hi = min(sel.stop, (c + 1) * ch)
-            src.append(slice(lo - c * ch, hi - c * ch))
-            dst.append(slice(lo - sel.start, hi - sel.start))
-        out[tuple(dst)] = chunk[tuple(src)]
+        window_of(coords, chunk)
 
-    # One chunk per worker: a chunk owns its window of the output, so the destinations are disjoint,
-    # and numpy releases the GIL for the copy.
-    map_over_rank_pool(place, wanted)
+    # A chunk cached before the fill can lie inside the hull and be evicted by that fill.
+    # It was already placed from the hull too: asking the cache again would decode it twice.
+    map_over_rank_pool(place, [coords for coords in wanted if coords not in placed_from_hull])
 
 
 def _level_path(store_path: str, level: int) -> str | None:
@@ -820,14 +844,14 @@ def read_ome_zarr_data_slice(
 def _spatial_geometry(
     ndim: int,
     shape_label: str,
-    spacing: Sequence[float] | None,
-    origin: Sequence[float] | None,
-) -> tuple[list[str], list[float], list[float]]:
+    spacing: Sequence[float] | np.ndarray | None,
+    origin: Sequence[float] | np.ndarray | None,
+) -> tuple[list[SupportedDims], list[float], list[float]]:
     """The NGFF spatial axes of a channel-first array with ``ndim`` dims, and its per-axis
     scale/translation in axis order: geometry arrives ``(x, y, z)`` (SimpleITK order)."""
     if ndim not in {3, 4}:
         raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X array, got {shape_label}.")
-    spatial_axes = ["y", "x"] if ndim == 3 else ["z", "y", "x"]
+    spatial_axes: list[SupportedDims] = ["y", "x"] if ndim == 3 else ["z", "y", "x"]
     dimension = len(spatial_axes)
     spacing_xyz = list(spacing if spacing is not None else [1.0] * dimension)
     origin_xyz = list(origin if origin is not None else [0.0] * dimension)
@@ -877,8 +901,8 @@ def write_ome_zarr(
     store_path: str | Path,
     data: np.ndarray,
     *,
-    spacing: Sequence[float] | None = None,
-    origin: Sequence[float] | None = None,
+    spacing: Sequence[float] | np.ndarray | None = None,
+    origin: Sequence[float] | np.ndarray | None = None,
     attributes: dict[str, Any] | None = None,
     chunks: Sequence[int] | None = None,
     displacement_field: bool = False,
@@ -989,7 +1013,7 @@ def _declare_displacements_transform(multiscales: Any) -> None:
     """
     from ngff_zarr.v06.zarr_metadata import Axis, CoordinateSystem, CoordinateSystemIdentifier, Displacements
 
-    spatial = [str(dim) for dim in multiscales.images[0].dims if dim in _SPATIAL]
+    spatial: list[SupportedDims] = [dim for dim in multiscales.images[0].dims if dim in _SPATIAL]
     physical = CoordinateSystem(name=_PHYSICAL_CS, axes=[Axis(name=name, type="space", unit=None) for name in spatial])
     reference = CoordinateSystemIdentifier(name=_PHYSICAL_CS)
     entry = Displacements(
@@ -1055,8 +1079,8 @@ def create_ome_zarr_store(
     shape: Sequence[int],
     dtype: Any,
     *,
-    spacing: Sequence[float] | None = None,
-    origin: Sequence[float] | None = None,
+    spacing: Sequence[float] | np.ndarray | None = None,
+    origin: Sequence[float] | np.ndarray | None = None,
     attributes: dict[str, Any] | None = None,
     chunks: Sequence[int] | None = None,
     displacement_field: bool = False,
@@ -1081,9 +1105,9 @@ def create_ome_zarr_store(
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
     )
-    dims = ["c", *spatial_axes]
-    scale = {"c": 1.0, **dict(zip(spatial_axes, scale_values, strict=True))}
-    translation = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
+    dims: list[SupportedDims] = ["c", *spatial_axes]
+    scale: dict[Hashable, float] = {"c": 1.0, **dict(zip(spatial_axes, scale_values, strict=True))}
+    translation: dict[Hashable, float] = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
 
     if chunks is None:
         spatial_chunks = [min(extent, CHUNK_SPATIAL_TILE) for extent in shape[1:]]
@@ -1165,11 +1189,12 @@ def append_ome_zarr_levels(
     if multiscales.metadata.coordinateTransformations:
         # A conformant field keeps its ``displacements`` entry (and the coordinate system it names)
         # through the append: the entry references level 0, which this never rewrites.
-        declared = {system.name for system in derived.metadata.coordinateSystems}
+        metadata = cast("MetadataV06", derived.metadata)  # to_multiscales builds v06 metadata
+        declared = {system.name for system in metadata.coordinateSystems}
         derived.metadata = dataclasses.replace(
-            derived.metadata,
+            metadata,
             coordinateSystems=[
-                *derived.metadata.coordinateSystems,
+                *metadata.coordinateSystems,
                 *(s for s in multiscales.metadata.coordinateSystems if s.name not in declared),
             ],
             coordinateTransformations=multiscales.metadata.coordinateTransformations,
@@ -1179,13 +1204,14 @@ def append_ome_zarr_levels(
     # it; a v3 store carries a codec chain instead and keeps the writer's default.
     level_zero = zarr.open_group(str(store), mode="r")[multiscales.metadata.datasets[0].path]
     compressor = level_zero.metadata.to_dict().get("compressor")
+    compressor_kwargs: dict[str, Any] = {"compressor": compressor} if compressor else {}
     ngff_zarr.to_ngff_zarr(
         str(store),
         derived,
         overwrite=False,
         version=_RFC5_VERSION if field else _DEFAULT_VERSION,
         start_level=1,
-        **({"compressor": compressor} if compressor else {}),
+        **compressor_kwargs,
     )
     clear_ome_zarr_cache(store)
 

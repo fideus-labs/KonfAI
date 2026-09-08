@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from functools import partial
 from typing import Any
 
@@ -320,6 +320,35 @@ def _update_running_statistics(
         state["min"] = min(state["min"], float(flat.min()))
         state["max"] = max(state["max"], float(flat.max()))
     return state
+
+
+def _update_running_extrema(state: dict[str, Any] | None, array: np.ndarray) -> dict[str, Any]:
+    """Update running min/max only, over the volume and per channel, in the array's own dtype:
+    what a ``Normalize`` asks for, without the float64 cast and the Welford pass the mean and std
+    need (on the streaming bench, most of the scan's own time). The state keeps its moment
+    fields at zero, and the reader that asked for extrema reads nothing else."""
+    values = np.asarray(array)
+    per_channel = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
+    channels = per_channel.shape[0]
+    if per_channel.size == 0:
+        return state or _empty_statistics_state(channels)
+    if state is None:
+        state = _empty_statistics_state(channels)
+    channel_min = per_channel.min(axis=1)
+    channel_max = per_channel.max(axis=1)
+    state["channel_min"] = np.minimum(state["channel_min"], channel_min)
+    state["channel_max"] = np.maximum(state["channel_max"], channel_max)
+    state["min"] = min(state["min"], float(channel_min.min()))
+    state["max"] = max(state["max"], float(channel_max.max()))
+    state["count"] += float(per_channel.size)
+    state["channel_count"] += float(per_channel.shape[1])
+    return state
+
+
+def needs_moments(keys: Iterable[str] | None) -> bool:
+    """Whether a statistics request (the public keys, ``min``/``max_per_channel``/...) needs the
+    mean or the std: ``None`` asks for everything."""
+    return keys is None or any(key.startswith(("mean", "std")) for key in keys)
 
 
 def _empty_statistics_state(channels: int) -> dict[str, Any]:

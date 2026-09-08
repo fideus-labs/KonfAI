@@ -270,13 +270,12 @@ class MaskedLoss(Criterion):
                 mask_f = mask_b.to(dtype=output_b.dtype)
                 items.append((self._stat(output_b * mask_f, target_b * mask_f), output_b.numel(), True))
             else:
-                items.append(
-                    (
-                        self._stat(torch.masked_select(output_b, mask_b), torch.masked_select(target_b, mask_b)),
-                        int(mask_b.sum().item()),
-                        True,
-                    )
-                )
+                # The mask broadcasts over the channels when it selects, so the count is the
+                # selection's, not the mask's: one channel of mask over C channels of output
+                # selects C times the mask's voxels, which is what ``forward``'s mean divides by.
+                selected_output = torch.masked_select(output_b, mask_b)
+                selected_target = torch.masked_select(target_b, mask_b)
+                items.append((self._stat(selected_output, selected_target), selected_output.numel(), True))
         return ("items", items)
 
     def combine_metric(self, states: list[Any]) -> Any:

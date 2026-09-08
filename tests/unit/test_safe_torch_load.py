@@ -64,7 +64,8 @@ def test_safe_torch_load_falls_back_for_non_safe_objects(tmp_path: Path, monkeyp
     assert loaded["state"].value == 7
 
 
-def test_safe_torch_load_downloads_https_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mmap", [False, True])
+def test_safe_torch_load_downloads_https_urls(monkeypatch: pytest.MonkeyPatch, mmap: bool) -> None:
     weights_only_calls: list[bool | None] = []
 
     def fake_hub(url, *, map_location, weights_only):
@@ -73,13 +74,14 @@ def test_safe_torch_load_downloads_https_urls(monkeypatch: pytest.MonkeyPatch) -
         return {"weight": torch.tensor([3.0])}
 
     monkeypatch.setattr(runtime_module.torch.hub, "load_state_dict_from_url", fake_hub)
-    loaded = safe_torch_load("https://example.com/model.pt", "cpu")
+    loaded = safe_torch_load("https://example.com/model.pt", "cpu", mmap=mmap)
 
     assert weights_only_calls == [True]
     assert torch.equal(loaded["weight"], torch.tensor([3.0]))
 
 
-def test_safe_torch_load_does_not_fall_back_for_https(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mmap", [False, True])
+def test_safe_torch_load_does_not_fall_back_for_https(monkeypatch: pytest.MonkeyPatch, mmap: bool) -> None:
     # A remote checkpoint is untrusted: if the safe load fails (e.g. a crafted payload), it must NOT
     # retry with weights_only=False, which would run arbitrary code from the download.
     weights_only_calls: list[bool | None] = []
@@ -91,6 +93,33 @@ def test_safe_torch_load_does_not_fall_back_for_https(monkeypatch: pytest.Monkey
     monkeypatch.setattr(runtime_module.torch.hub, "load_state_dict_from_url", fake_hub)
 
     with pytest.raises(RuntimeError):
-        safe_torch_load("https://example.com/model.pt", "cpu")
+        safe_torch_load("https://example.com/model.pt", "cpu", mmap=mmap)
 
     assert weights_only_calls == [True]  # never retried with the unsafe unpickler
+
+
+@pytest.mark.parametrize("zip_format", [False, True])
+@pytest.mark.parametrize("custom_object", [False, True])
+def test_mmap_opt_in_preserves_legacy_and_trusted_object_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, zip_format: bool, custom_object: bool
+) -> None:
+    checkpoint = tmp_path / "checkpoint.pt"
+    state = {"weight": torch.tensor([1.0, 2.0]), "loss": 0.25}
+    if custom_object:
+        state["state"] = _NonSafeState(7)
+    torch.save(state, checkpoint, _use_new_zipfile_serialization=zip_format)
+    original_load = torch.load
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append((kwargs["weights_only"], kwargs.get("mmap", False)))
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.torch, "load", spy)
+    loaded = safe_torch_load(checkpoint, "cpu", mmap=True)
+
+    assert calls == [(True, zip_format)] + ([(False, zip_format)] if custom_object else [])
+    assert torch.equal(loaded["weight"], state["weight"])
+    assert loaded["loss"] == 0.25
+    if custom_object:
+        assert loaded["state"].value == 7

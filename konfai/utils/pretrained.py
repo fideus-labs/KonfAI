@@ -227,8 +227,13 @@ class PretrainedFrom:
             raise ConfigError(
                 f"Model.pretrained_from.checkpoint: cannot load '{self.checkpoint}'.", str(error)
             ) from error
-        if isinstance(state, dict) and "state_dict" in state:
-            state = state["state_dict"]
+        # A wrapped checkpoint: Lightning and most trainers under "state_dict", nnU-Net under
+        # "network_weights" (its checkpoint_final.pth carries the optimizer and the plans beside it).
+        if isinstance(state, dict):
+            for key in ("state_dict", "network_weights"):
+                if key in state and isinstance(state[key], dict):
+                    state = state[key]
+                    break
         try:
             reference.load_state_dict(state)
         except (RuntimeError, TypeError) as error:

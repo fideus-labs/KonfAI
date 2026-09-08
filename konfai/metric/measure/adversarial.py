@@ -36,7 +36,7 @@ class PatchGanLoss(Criterion):
         self.register_buffer("target", torch.tensor(target).type(torch.float32))
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        target = self._buffers["target"]
+        target = self.get_buffer("target")
         return self.loss(output, (torch.ones_like(output) * target).to(output.device))
 
 
@@ -116,7 +116,7 @@ class PerceptualLoss(Criterion):
 
         self.model.eval()
         self.model.requires_grad_(False)
-        self.models: dict[int, torch.nn.Module] = {}
+        self.models: dict[int, Network] = {}
 
     def preprocessing(self, tensor: torch.Tensor) -> torch.Tensor:
         return tensor
@@ -131,9 +131,9 @@ class PerceptualLoss(Criterion):
 
             for zipped_layers in list(
                 zip(
-                    self.models[output.device.index].get_layers([output], set(self.modules_loss.keys()).copy()),
+                    self.models[output.device.index].get_layers([output], list(self.modules_loss)),
                     *[
-                        self.models[output.device.index].get_layers([target], set(self.modules_loss.keys()).copy())
+                        self.models[output.device.index].get_layers([target], list(self.modules_loss))
                         for target in targets
                     ],
                     strict=False,

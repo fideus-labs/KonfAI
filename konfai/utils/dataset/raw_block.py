@@ -23,7 +23,7 @@ import functools
 import os
 import struct
 from collections.abc import Sequence
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import numpy as np
 
@@ -125,7 +125,8 @@ def _nifti_raw_block(path: str) -> tuple[int, np.dtype] | None:
         header = file.read(348)
     if len(header) < 348 or header[344:348] != b"n+1\x00":  # a .hdr/.img pair keeps its block elsewhere
         return None
-    order = next((order for order in ("<", ">") if struct.unpack(f"{order}i", header[:4])[0] == 348), None)
+    orders: tuple[Literal["<"], Literal[">"]] = ("<", ">")
+    order = next((order for order in orders if struct.unpack(f"{order}i", header[:4])[0] == 348), None)
     if order is None:
         return None
     dtype = _NIFTI_DTYPES.get(struct.unpack(f"{order}h", header[70:72])[0])

@@ -1180,3 +1180,99 @@ def test_channels_last_lays_out_every_weight_and_every_input_of_its_rank() -> No
     for name in before:
         torch.testing.assert_close(after[name], before[name], rtol=1e-5, atol=1e-6)
     assert _channels_last(torch.zeros(3)).dim() == 1
+
+
+# ---- a TRAIN whose networks resolve no optimizer ----
+
+
+class _NoOptimizerNet(Network):
+    def __init__(self) -> None:
+        super().__init__(in_channels=1, optimizer=None, dim=2)
+        self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+
+def test_bind_refuses_a_train_whose_networks_resolve_no_optimizer() -> None:
+    """A YAML-catalog model with `optimizer: None` once trained an epoch with the backward skipped,
+    a loss that never moved and a checkpoint written: exit 0."""
+    from konfai.utils.runtime import State
+
+    with pytest.raises(ConfigError, match=r"Model\._NoOptimizerNet\.optimizer"):
+        _NoOptimizerNet().bind(False, State.TRAIN, [])
+    _NoOptimizerNet().bind(False, State.PREDICTION, [])  # nothing trains: nothing to refuse
+
+
+def test_bind_accepts_a_composite_whose_nested_network_owns_the_optimizer() -> None:
+    from konfai.utils.runtime import State
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("Sub", _NoOptimizerNet())
+
+    root = Root()
+    sub = cast(Network, root["Sub"])
+    sub.optimizer = torch.optim.SGD(sub.parameters(), lr=0.1)  # what its own loader would build
+    root.bind(False, State.TRAIN, [])
+
+
+# ---- DDP synchronisation across an accumulation window ----
+
+
+class _NoSyncModel:
+    """A stand-in for the DDP wrapper: records when ``no_sync`` is entered."""
+
+    def __init__(self) -> None:
+        self.entered = 0
+
+    def no_sync(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def context():
+            self.entered += 1
+            yield
+
+        return context()
+
+
+def test_accumulation_sync_spans_the_step_and_skips_the_reduction_off_the_boundary() -> None:
+    """DDP marks the gradients to reduce in ``forward``: a ``no_sync`` around the backward alone
+    reduced every micro-batch. The context is decided before the forward, and holds only when no
+    network of the graph steps on this batch."""
+
+    class LeafA(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2, nb_batch_per_step=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class LeafB(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2, nb_batch_per_step=3)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("A", LeafA())
+            self.add_module("B", LeafB())
+
+    root = Root()
+    a, b = cast(Network, root["A"]), cast(Network, root["B"])
+    for leaf in (a, b):
+        leaf.optimizer = torch.optim.SGD(leaf.parameters(), lr=0.1)
+    ddp = _NoSyncModel()
+
+    entered: list[bool] = []
+    for it in range(6):
+        a._it = b._it = it
+        before = ddp.entered
+        with root.accumulation_sync(ddp):
+            pass
+        entered.append(ddp.entered > before)
+    # A steps on it 1, 3, 5; B on 2, 5: only it 0 and 4 accumulate everywhere, so only they skip.
+    assert entered == [True, False, False, False, True, False]
+
+    untrained = Root()  # no optimizer anywhere: nothing accumulates, the ordinary context
+    with untrained.accumulation_sync(ddp):
+        pass
+    assert ddp.entered == 2

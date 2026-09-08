@@ -22,6 +22,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 from konfai.metric.measure import (
+    MAE,
+    MSE,
     SSIM,
     CriterionResult,
     Dice,
@@ -1194,3 +1196,119 @@ def test_criterion_result_refuses_a_misshaped_labelled_pair() -> None:
         CriterionResult.of((loss, LabelledValues(torch.tensor(0.1), ["a", "b"])), "Dice")
     ok = CriterionResult.of((loss, LabelledValues(torch.tensor([0.1, 0.2]), ["a", "b"])), "Dice")
     assert ok.value.labels == ["a", "b"]
+
+
+class TestMaskedStreamedDenominator:
+    """The masked partial statistic counts what the mask SELECTS: a one-channel mask over C
+    channels selects C times its voxels, the denominator ``forward``'s mean divides by. Counting
+    the mask's own voxels made the streamed MAE of a two-channel tensor twice the eager one."""
+
+    @pytest.mark.parametrize("channels", [1, 2, 3])
+    @pytest.mark.parametrize("metric_cls", [MAE, MSE])
+    def test_partial_matches_forward_over_channels(self, metric_cls, channels):
+        output = torch.arange(2 * channels * 2 * 2, dtype=torch.float32).reshape(2, channels, 2, 2)
+        target = torch.zeros_like(output)
+        mask = torch.ones(2, 1, 2, 2, dtype=torch.uint8)
+        mask[1, 0, 0, :] = 0  # a partial mask on the second item
+        metric = metric_cls()
+        eager = metric(output, target, mask)[1]
+        halves = [metric.partial_metric(output[..., :1, :], target[..., :1, :], mask[..., :1, :])]
+        halves.append(metric.partial_metric(output[..., 1:, :], target[..., 1:, :], mask[..., 1:, :]))
+        assert metric.combine_metric(halves)[1] == pytest.approx(eager, rel=1e-6)  # float32 sums
+        assert metric.combine_metric([metric.partial_metric(output, target, mask)])[1] == pytest.approx(eager)
+
+    def test_two_channels_under_a_full_mask_read_the_plain_mean(self):
+        output = torch.arange(8, dtype=torch.float32).reshape(1, 2, 2, 2)
+        target = torch.zeros_like(output)
+        mask = torch.ones(1, 1, 2, 2, dtype=torch.uint8)
+        state = MAE().partial_metric(output, target, mask)
+        assert state == ("items", [(28.0, 8, True)])
+        assert MAE().combine_metric([state])[1] == pytest.approx(3.5)
+
+    def test_an_empty_mask_item_keeps_its_convention(self):
+        output = torch.rand(2, 2, 3, 3)
+        mask = torch.zeros(2, 1, 3, 3, dtype=torch.uint8)
+        mask[0] = 1
+        metric = MAE()
+        assert metric.combine_metric([metric.partial_metric(output, output * 2, mask)])[1] == pytest.approx(
+            metric(output, output * 2, mask)[1]
+        )
+        assert np.isnan(metric.combine_metric([metric.partial_metric(output, output, torch.zeros_like(mask))])[1])
+
+
+class TestDiceLabelDtypes:
+    """A label map arrives in the dtype its file holds; ``bincount`` counts uint8 and the signed
+    integers but has no CPU kernel for uint16/uint32/uint64, the storage types of many label
+    files. Every dtype that can hold the labels scores the same."""
+
+    @pytest.mark.parametrize("dtype", [torch.uint8, torch.uint16, torch.uint32, torch.uint64, torch.int32, torch.int64])
+    def test_every_integer_dtype_scores_alike(self, dtype):
+        rng = np.random.default_rng(3)
+        reference = torch.tensor(rng.integers(0, 4, (1, 1, 6, 6)))
+        prediction = reference.clone()
+        prediction[..., :2, :] = (prediction[..., :2, :] + 1) % 4
+        expected = Dice()(prediction.to(torch.int64), reference.to(torch.int64))[1]
+        got = Dice()(prediction.to(dtype), reference.to(dtype))[1]
+        assert got == expected
+
+    def test_identical_uint16_maps_score_one(self):
+        labels = torch.tensor(np.random.default_rng(4).integers(0, 3, (1, 1, 5, 5)).astype(np.uint16))
+        value = Dice()(labels, labels)[1]
+        assert all(v == pytest.approx(1.0) for v in value.values())
+
+    def test_a_uint64_label_past_the_signed_range_is_refused(self):
+        labels = torch.tensor(np.array([[[[1, 2], [3, 2**63]]]], dtype=np.uint64))
+        with pytest.raises(MeasureError, match="2\\^63"):
+            Dice()(labels, labels)
+
+
+def test_checkpoint_preserves_bounded_measure_history_and_plateau_decisions(tmp_path):
+    from konfai.network.network import Measure, Network
+
+    def model():
+        network = Network()
+        network.optimizer = torch.optim.SGD([torch.nn.Parameter(torch.ones(1))], lr=0.1)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(network.optimizer, patience=1, factor=0.1)
+        network.schedulers = {scheduler: 0}
+        network.measure = object.__new__(Measure)
+        record = Measure.Loss("MAE", "out", "target", 0, True, False)
+        network.measure._loss = {0: {"out:target:MAE": record}}
+        network.measure.set_window(2)
+        return network, record
+
+    original, record = model()
+    # A large history, including deferred tensors and a NaN. The checkpoint stays two values wide.
+    for index in range(20):
+        record.add(1.0, torch.tensor(float("nan") if index == 3 else 1.0))
+        original.measure.reset_loss()
+    original.update_lr()  # plateau's first observation: whole-history mean == 1
+    record.add(0.5, torch.tensor(10.0))  # unread when captured
+    state = {
+        "measure": original.measure.checkpoint_state(),
+        "optimizer": original.optimizer.state_dict(),
+        "schedule": original.schedule_states(),
+    }
+    path = tmp_path / "history.pt"
+    torch.save(state, path)
+    entry = state["measure"]["records"][0]["out:target:MAE"]
+    assert len(entry["values"]) == len(entry["weights"]) == 2
+    assert entry["recorded"] == 21
+    assert entry["mean"] == (29.0, 20)
+
+    saved = torch.load(path, weights_only=True)
+    resumed, resumed_record = model()
+    resumed.optimizer.load_state_dict(saved["optimizer"])
+    resumed._load_schedule_states({"Network_schedulers_state_dict": saved["schedule"]}, "Network")
+    resumed.measure.load_checkpoint_state(saved["measure"])
+    assert resumed.measure.get_last_values(0) == original.measure.get_last_values(0)
+    assert resumed.measure.get_last_weights(0) == original.measure.get_last_weights(0)
+    assert resumed.measure.format_loss(True, 2) == original.measure.format_loss(True, 2)
+    assert resumed_record._unread == [] and len(resumed_record) == 0
+    for network, item in ((original, record), (resumed, resumed_record)):
+        for _ in range(2):
+            # With the saved history these remain bad whole-history means (>1), triggering
+            # decay. Losing the history would observe 0, improve, and keep LR at 0.1.
+            item.add(0.5, torch.tensor(0.0))
+            network.update_lr()
+        assert network.optimizer.param_groups[0]["lr"] == pytest.approx(0.01)
+    assert resumed.measure.get_last_values(0) == original.measure.get_last_values(0)

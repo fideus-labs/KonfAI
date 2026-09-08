@@ -115,7 +115,7 @@ class ModelLoader:
 
             def builder(
                 parameters: dict[str, Any] | None = None,
-                optimizer: OptimizerLoader | None = None,
+                optimizer: OptimizerLoader = OptimizerLoader(),
                 schedulers: dict[str, LRSchedulersLoader] | None = None,
                 outputs_criterions: dict[str, TargetCriterionsLoader] | None = None,
                 patch: ModelPatch | None = None,

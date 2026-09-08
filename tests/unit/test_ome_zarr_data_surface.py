@@ -653,19 +653,18 @@ def test_a_store_named_with_a_path_forgets_the_chunks_read_under_its_uri_spellin
     assert cache.get(((read_as, "0"), (0, 0, 0))) is None
 
 
-@pytest.mark.parametrize(("capacity_chunks", "beats_lru"), [(39, True), (24, False)])
+@pytest.mark.parametrize(("capacity_chunks", "both_is_best"), [(39, True), (24, False)])
 def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_beside(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity_chunks: int, beats_lru: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity_chunks: int, both_is_best: bool
 ) -> None:
-    """Under the 64 chunks that hold both stores' futures, the source alone declared pins its own
-    while the companion, ranked by recency, is decoded again where the source is kept for a use
-    regions away: 44 + 105 at 39 chunks, 96 + 138 at 24 (LRU: 90 + 90 and 96 + 96). Both
-    declared, each is evicted by its own next use: 66 + 66 and 100 + 96. Neither reaches its 44
-    with the other's future to keep in a cache under one store: the misses are Belady's over the
-    two stores' interleaved reads (58 + 58 at 39 against an oracle's 58 + 54, 84 + 74 at 24
-    against 84 + 78), and the decodes above them are the chunk-aligned hull a sparse miss decodes
-    again (``_assemble_window``), which at 24, under one region's two hulls, is what puts the
-    count four over LRU's while the misses stay under it (158 against 176)."""
+    """Under the 64 chunks that hold both stores' futures (LRU: 61 + 55 at 39 chunks, 65 + 61 at
+    24), the source alone declared pins its own while the companion, ranked by recency, is decoded
+    again where the source is kept for a use regions away: 44 + 59 at 39. Both declared, each is
+    evicted by its own next use: 53 + 44, the fewest of the three. At 24, a cache under one
+    store's footprint, the companion decodes its 61 whatever is declared and the source is what
+    the ranking moves: 50 alone, 59 with the companion's future competing for the same slots,
+    still under LRU's 65. (A window is served from the decoded hull before the hull is released,
+    so a sparse miss no longer decodes a chunk twice: the counts above are the misses.)"""
     _two_stores(tmp_path)
 
     def sweep(declared: str) -> dict[str, int]:
@@ -674,11 +673,13 @@ def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_be
         )
 
     lru, alone, both = sweep("nothing"), sweep("source"), sweep("both")
-    assert sum(both.values()) < sum(alone.values()), f"{both} against {alone} with the source alone declared"
-    assert both["Labels"] < alone["Labels"], "the companion is no longer sacrificed to the source's future"
-    assert both["Labels"] <= lru["Labels"], "and decoded no more than under LRU"
-    if beats_lru:
-        assert sum(both.values()) < sum(lru.values()), f"{both} against LRU's {lru}"
+    assert sum(both.values()) < sum(lru.values()), f"{both} against LRU's {lru}"
+    assert both["Labels"] <= lru["Labels"], "the companion is decoded no more than under LRU"
+    if both_is_best:
+        assert sum(both.values()) < sum(alone.values()), f"{both} against {alone} with the source alone declared"
+        assert both["Labels"] < alone["Labels"], "the companion is no longer sacrificed to the source's future"
+    else:
+        assert sum(alone.values()) <= sum(both.values()) < sum(lru.values())
 
 
 @pytest.mark.parametrize("shuffle", [False, True], ids=["grid-order", "shuffled-epoch"])

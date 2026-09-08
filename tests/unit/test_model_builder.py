@@ -405,3 +405,7 @@ modules:
         assert model.in_channels == 3
         assert isinstance(model["Conv"], torch.nn.Conv2d)
         assert model["Conv"].out_channels == 5
+        # An absent `optimizer:` key takes the default loader, as a Python model does; `None`
+        # was the YAML route's default and trained nothing, silently.
+        assert model.optimizerLoader is not None
+        assert "optimizer:" in config_path.read_text(encoding="utf-8")

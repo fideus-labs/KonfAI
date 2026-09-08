@@ -98,7 +98,7 @@ def _patch_views(
         yield output, target, mask
         return
     model_patch = ModelPatch(patch_shape)
-    model_patch.load(output.shape[2:])
+    model_patch.load(list(output.shape[2:]))
     for index in range(model_patch.get_size(0)):
         yield (
             model_patch.get_data(output, index, 0, True),

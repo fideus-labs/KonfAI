@@ -45,6 +45,9 @@ widths). The final ``x_{0}_{depth}`` node has no skip. A ``Conv(3x3)`` segmentat
 (``activation=None``); the terminal node is ``SegmentationHead``.
 """
 
+from collections.abc import Callable
+from typing import cast
+
 import torch
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
@@ -126,7 +129,7 @@ class UNetPlusPlus(network.Network):
         )
         self.add_module(
             "StemNorm",
-            blocks.get_norm(blocks.NormMode.BATCH, _STEM_CHANNELS, dim),
+            cast(torch.nn.Module, blocks.get_norm(blocks.NormMode.BATCH, _STEM_CHANNELS, dim)),
             in_branch=["enc_c1"],
             out_branch=["enc_c1"],
         )
@@ -288,7 +291,7 @@ def _decoder_block_config() -> blocks.BlockConfig:
 
 def _activation_module(activation: str) -> torch.nn.Module:
     """Map an smp activation name to the matching curated torch module (raw logits stay activation=None)."""
-    mapping = {
+    mapping: dict[str, Callable[[], torch.nn.Module]] = {
         "sigmoid": torch.nn.Sigmoid,
         "tanh": torch.nn.Tanh,
         "softmax": lambda: torch.nn.Softmax(dim=1),

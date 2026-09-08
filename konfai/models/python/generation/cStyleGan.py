@@ -16,6 +16,7 @@
 
 import importlib
 import itertools
+from typing import cast
 
 import torch
 from konfai.data.patching import ModelPatch
@@ -69,7 +70,7 @@ class ModulatedConv(torch.nn.Module):
                     torch.randn((conv.out_channels, conv.in_channels, *conv.kernel_size))
                 )
             conv.forward = self.forward
-            self.styles = None
+            self.styles: torch.Tensor | None = None
             self.dim = dim
 
         def set_style(self, styles: torch.Tensor) -> None:
@@ -134,10 +135,10 @@ class ModulatedConv(torch.nn.Module):
 
     def forward(self, tensor: torch.Tensor, styles: torch.Tensor) -> torch.Tensor:
         for conv in self.convs:
-            conv.set_style(styles.clone())
+            cast(ModulatedConv._ModulatedConv, conv).set_style(styles.clone())
         return self.module(tensor)
 
-    def apply(self, module: torch.nn.Module):
+    def apply(self, module: torch.nn.Module):  # type: ignore[override]  # not Module.apply: wraps each conv
         if isinstance(module, torch.nn.modules.conv._ConvNd):
             del module.weight
             module.bias = None

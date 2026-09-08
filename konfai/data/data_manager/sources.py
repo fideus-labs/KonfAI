@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 from torch.utils.data import DataLoader
@@ -477,7 +477,7 @@ class Data(DataSources):
         elif resolved_num_workers is None:
             resolved_num_workers = self._default_num_workers(use_cache)
         self.resolved_num_workers: int = resolved_num_workers
-        self.dataLoader_args: dict[str, object] = {
+        self.dataLoader_args: dict[str, Any] = {
             "num_workers": resolved_num_workers,
             "pin_memory": self._pin_memory,
             "collate_fn": collate_konfai,

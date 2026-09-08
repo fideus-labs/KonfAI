@@ -146,3 +146,54 @@ def test_chunk_cache_serves_the_same_bytes_and_survives_eviction(tmp_path):
     finally:
         OZ._CHUNK_CACHE = None
         OZ.clear_ome_zarr_cache()
+
+
+class _CountingArray:
+    """A chunked array over numpy that counts the reads ``_assemble_window`` asks the store for."""
+
+    def __init__(self, values: np.ndarray, chunks: tuple[int, ...]) -> None:
+        self.values, self.chunks, self.reads = values, chunks, []
+
+    @property
+    def shape(self):
+        return self.values.shape
+
+    @property
+    def dtype(self):
+        return self.values.dtype
+
+    def __getitem__(self, index):
+        self.reads.append(index)
+        return self.values[index]
+
+
+@pytest.mark.parametrize("cached", [None, (0, 1)])
+def test_chunk_cache_owns_its_entries_and_serves_the_window_from_the_hull(cached):
+    """A cache entry sliced from the decoded hull stayed a VIEW keeping the whole hull alive while
+    the cap counted the slice; and a cache smaller than the hull evicted a chunk before the read
+    placed it, decoding it a second time. Entries own their bytes, and the hull fills the window
+    before it is released."""
+    from konfai.utils import ome_zarr as OZ
+
+    values = np.arange(8 * 8, dtype=np.int32).reshape(8, 8)
+    array = _CountingArray(values, (4, 4))
+    cache = OZ._DecodedChunkCache(values.itemsize * 16)  # exactly one chunk
+    if cached is not None:
+        # A cached middle chunk is inside the missing chunks' hull and can be evicted while
+        # filling it. Its output has already been served from the hull, so it needs no reread.
+        cache.put((("id",), cached), values[:4, 4:].copy())
+    selections = (slice(2, 7), slice(1, 8))
+    wanted = [(0, 0), (0, 1), (1, 0), (1, 1)]
+    out = np.empty((5, 7), dtype=values.dtype)
+    OZ._assemble_window(cache, ("id",), array, selections, wanted, out)
+
+    np.testing.assert_array_equal(out, values[selections])
+    assert len(array.reads) == 1  # the hull, once: nothing decoded twice
+    assert all(chunk.flags.owndata for chunk in cache._entries.values())
+    assert cache.held_bytes == sum(chunk.nbytes for chunk in cache._entries.values()) <= cache.capacity
+
+    # Cached chunks are served from the cache, the rest through one hull.
+    array.reads.clear()
+    OZ._assemble_window(cache, ("id",), array, selections, wanted, out)
+    np.testing.assert_array_equal(out, values[selections])
+    assert len(array.reads) == 1

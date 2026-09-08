@@ -292,7 +292,7 @@ class Rotate(EulerTransform):
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         dim = len(shapes[0])
         func = _rotation_3d_matrix if dim == 3 else _rotation_2d_matrix
-        angles = []
+        angles: torch.Tensor
 
         if self.is_quarter:
             quarter_angles = torch.tensor([90.0, 180.0, 270.0])

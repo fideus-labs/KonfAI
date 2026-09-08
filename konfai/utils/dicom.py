@@ -176,7 +176,7 @@ def sort_series(files: list[Path], *, stop_before_pixels: bool = False) -> list[
         Datasets sorted by their position along the acquisition normal.
     """
     _require_pydicom()
-    datasets = [pydicom.dcmread(str(f), stop_before_pixels=stop_before_pixels) for f in files]
+    datasets: list[DicomDataset] = [pydicom.dcmread(str(f), stop_before_pixels=stop_before_pixels) for f in files]
     datasets.sort(key=_slice_position)
     return datasets
 
@@ -577,9 +577,9 @@ def write_dicom_series(
     directory: str | Path,
     volume: np.ndarray,
     *,
-    origin: Sequence[float] | None = None,
-    spacing: Sequence[float] | None = None,
-    direction: Sequence[float] | None = None,
+    origin: Sequence[float] | np.ndarray | None = None,
+    spacing: Sequence[float] | np.ndarray | None = None,
+    direction: Sequence[float] | np.ndarray | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
     """Write a scalar ``C-Z-Y-X`` volume as an uncompressed DICOM series."""

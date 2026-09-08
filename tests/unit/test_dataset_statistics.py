@@ -29,6 +29,7 @@ import numpy as np
 import pytest
 from konfai.utils.budget import set_per_rank_budget
 from konfai.utils.dataset import Dataset
+from konfai.utils.dataset import core as core_module
 from konfai.utils.dataset import h5 as h5_module
 from konfai.utils.dataset import statistics as statistics_module
 from konfai.utils.dataset.statistics import (
@@ -427,3 +428,26 @@ def test_a_scan_of_a_float64_source_reads_blocks_the_budget_holds(
     held = max(int(np.prod(shape)) for shape in blocks) * 8 * statistics_module._STATISTICS_BLOCKS_IN_FLIGHT
     assert held <= budget, f"{held} B held against a {budget} B budget"
     _assert_close_to_numpy(got, volume)
+
+
+def test_an_extrema_only_request_folds_min_and_max_in_the_stored_dtype(tmp_path: Path, monkeypatch) -> None:
+    """A ``Normalize`` asks for Min/Max: the scan folds one min and one max per block in the stored
+    dtype and never runs the float64 Welford pass; the extrema equal the full scan's."""
+    pytest.importorskip("h5py")
+    rng = np.random.default_rng(5)
+    volume = rng.integers(-1024, 3072, (2, 9, 12, 10), dtype=np.int16)
+    dataset = Dataset(tmp_path / "store", "h5")
+    dataset.write("CT", "P0", volume)
+
+    full = dataset.read_data_statistics("CT", "P0")
+
+    def no_moments(state, array):
+        raise AssertionError("the moments fold ran for an extrema-only request")
+
+    monkeypatch.setattr(statistics_module, "_update_running_statistics", no_moments)
+    monkeypatch.setattr(core_module, "_update_running_statistics", no_moments)
+    got = dataset.read_data_statistics("CT", "P0", keys=["min", "max_per_channel"])
+    for key in ("min", "max", "min_per_channel", "max_per_channel"):
+        assert got[key] == full[key]
+    got = dataset.read_data_statistics("CT", "P0", [1], keys=["max"])
+    assert got["max"] == float(volume[1].max()) and got["min"] == float(volume[1].min())

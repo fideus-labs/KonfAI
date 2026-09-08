@@ -372,7 +372,7 @@ class LPIPS(MaskedLoss):
     def _loss(loss_fn_alex, dataset_patch: ModelPatch, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         # Follow the input's device (the DDP rank's GPU, or CPU) instead of a hardcoded device 0.
         loss_fn_alex = loss_fn_alex.to(x.device)
-        dataset_patch.load(x.shape[2:])
+        dataset_patch.load(list(x.shape[2:]))
 
         loss = x.new_tensor(0.0)
         for patch_input in dataset_patch.disassemble(LPIPS.normalize(x), LPIPS.normalize(y)):
@@ -443,7 +443,7 @@ class BCE(Criterion):
         self.register_buffer("target", torch.tensor(target).type(torch.float32))
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        target = self._buffers["target"]
+        target = self.get_buffer("target")
         return self.loss(output, target.to(output.device).expand_as(output))
 
 
@@ -456,12 +456,12 @@ class KLDivergence(CriterionWithInit):
         self.shape = shape
         self.loss = torch.nn.KLDivLoss()
 
-    def init(self, model: Network, output_group: str, target_group: str) -> str:
+    def init(self, model: torch.nn.Module, output_group: str, target_group: str) -> str:
+        if not isinstance(model, Network):
+            raise MeasureError(f"KLDivergence rewires a KonfAI Network, got {type(model).__name__}.")
         model._compute_channels_trace(model, model.in_channels, None, None)
 
-        last_module = model
-        for name in output_group.split(".")[:-1]:
-            last_module = last_module[name]
+        last_module = model.get_submodule(".".join(output_group.split(".")[:-1]))
 
         modules = last_module._modules.copy()
         last_module._modules.clear()

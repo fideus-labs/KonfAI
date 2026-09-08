@@ -743,15 +743,20 @@ def test_available_cpus_is_the_tighter_of_affinity_and_cgroup_quota(monkeypatch,
     proc.write_text("0::/a/b\n")
     monkeypatch.setattr(bd, "_CGROUP_ROOT", str(root))
     monkeypatch.setattr(bd, "_PROC_SELF_CGROUP", str(proc))
-    assert bd.available_cpus() == 8  # no quota file: the affinity mask
+
+    def available_cpus() -> int:
+        bd.forget_cgroup_cpu_ceiling()  # the quota is read once per process: re-read it here
+        return bd.available_cpus()
+
+    assert available_cpus() == 8  # no quota file: the affinity mask
     (root / "a" / "b" / "cpu.max").write_text("max 100000\n")
-    assert bd.available_cpus() == 8  # unbounded quota
+    assert available_cpus() == 8  # unbounded quota
     (root / "a" / "cpu.max").write_text("350000 100000\n")  # the quota sits on an ANCESTOR
-    assert bd.available_cpus() == 4  # 3.5 CPUs of quota round up
+    assert available_cpus() == 4  # 3.5 CPUs of quota round up
     (root / "a" / "b" / "cpu.max").write_text("garbage\n")  # a malformed file is skipped, not raised
-    assert bd.available_cpus() == 4
+    assert available_cpus() == 4
     (root / "a" / "b" / "cpu.max").write_text("100000 0\n")  # a zero period too
-    assert bd.available_cpus() == 4
+    assert available_cpus() == 4
 
 
 @pytest.mark.parametrize("mount", ["cpu", "cpu,cpuacct"], ids=["symlinked-cpu", "joint-mount-only"])
@@ -773,9 +778,11 @@ def test_available_cpus_reads_a_cgroup_v1_quota(monkeypatch, tmp_path, mount: st
     monkeypatch.setattr(bd, "_PROC_SELF_CGROUP", str(proc))
     (root / mount / "docker" / "abc" / "cpu.cfs_quota_us").write_text("-1\n")
     (root / mount / "docker" / "abc" / "cpu.cfs_period_us").write_text("100000\n")
+    bd.forget_cgroup_cpu_ceiling()
     assert bd.available_cpus() == 16  # unbounded
     (root / mount / "docker" / "cpu.cfs_quota_us").write_text("250000\n")  # the ancestor's quota
     (root / mount / "docker" / "cpu.cfs_period_us").write_text("100000\n")
+    bd.forget_cgroup_cpu_ceiling()
     assert bd.available_cpus() == 3  # 2.5 CPUs round up
 
 

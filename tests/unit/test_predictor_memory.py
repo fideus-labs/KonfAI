@@ -906,3 +906,71 @@ def test_a_grid_swept_off_axis_zero_takes_the_whole_volume_path(monkeypatch: pyt
     from konfai.data.patching import StreamingAccumulator
 
     assert not isinstance(output_dataset.output_layer_accumulator[0][0], StreamingAccumulator)
+
+
+class _StockNet(Network):
+    """A network with a weight and the stock loader: the ``Model`` entry is where its weights come from."""
+
+    def __init__(self) -> None:
+        super().__init__(in_channels=1, dim=2)
+        self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+
+def test_model_composite_refuses_a_checkpoint_without_a_weights_entry() -> None:
+    """A raw ``state_dict()`` or a ``{"state_dict": ...}`` wrapper carries no ``Model`` entry: the stock
+    loader took nothing from it and the run predicted with the constructor's weights, successfully."""
+    from konfai.utils.errors import PredictorError
+
+    raw = {"Conv.weight": torch.ones(1, 1, 1, 1), "Conv.bias": torch.zeros(1)}
+    for state in (raw, {"state_dict": raw}, {"Model_EMA": _StockNet().network_states()}):
+        composite = ModelComposite(_StockNet(), Mean())
+        with pytest.raises(PredictorError, match="no 'Model' entry"):
+            composite.load([state])  # refused at load, before any case is predicted
+
+
+def test_model_composite_loads_a_konfai_checkpoint_and_a_custom_loader() -> None:
+    source = _StockNet()
+    with torch.no_grad():
+        source["Conv"].weight.fill_(2.0)
+        source["Conv"].bias.fill_(0.25)
+    composite = ModelComposite(_StockNet(), Mean())
+    composite.load([{"Model": source.network_states()}])
+    loaded = composite._model_for_index(0)
+    assert float(loaded["Conv"].weight.sum()) == 2.0 and float(loaded["Conv"].bias.sum()) == 0.25
+
+    custom = ModelComposite(DummyPredictNetwork(), Mean())  # owns its format through its own load()
+    custom.load([{"scale": 3.0}])
+    assert custom._model_for_index(0).scale == 3.0
+
+
+def test_model_composite_uses_the_declared_model_weights_when_ema_is_also_present() -> None:
+    source, ema = _StockNet(), _StockNet()
+    with torch.no_grad():
+        source["Conv"].weight.fill_(2.0)
+        source["Conv"].bias.fill_(0.25)
+        ema["Conv"].weight.fill_(9.0)
+        ema["Conv"].bias.fill_(1.0)
+    composite = ModelComposite(_StockNet(), Mean())
+    composite.load([{"Model": source.network_states(), "Model_EMA": ema.network_states()}])
+    loaded = composite._model_for_index(0)
+    torch.testing.assert_close(loaded["Conv"](torch.ones(1, 1, 2, 2)), torch.full((1, 1, 2, 2), 2.25))
+
+
+def test_model_composite_caches_only_the_inference_entries_of_a_checkpoint() -> None:
+    """A training checkpoint carries the optimizer state beside the weights, as large again per
+    member for Adam; an ensemble held every member's whole file on the host."""
+    source = _StockNet()
+    state = {
+        "Model": source.network_states(),
+        "_StockNet_optimizer_state_dict": {"state": {"big": torch.zeros(1000)}},
+        "epoch": 3,
+    }
+    composite = ModelComposite(_StockNet(), Mean())
+    composite.load([state])
+    composite._model_for_index(0)
+    assert set(composite._state_cache[0]) == {"Model"}
+
+    custom = ModelComposite(DummyPredictNetwork(), Mean())  # owns its format: the file is kept whole
+    custom.load([{"scale": 3.0, "extra": 1}])
+    custom._model_for_index(0)
+    assert set(custom._state_cache[0]) == {"scale", "extra"}

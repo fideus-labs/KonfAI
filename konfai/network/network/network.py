@@ -23,9 +23,9 @@ import os
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from functools import partial
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import torch
 from torch.utils.checkpoint import checkpoint
@@ -74,7 +74,7 @@ def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
             torch.nn.AvgPool3d,
         ),
     ):
-        stride = module.stride if module.stride is not None else module.kernel_size
+        stride: int | tuple[int, ...] = module.stride if module.stride is not None else module.kernel_size
     elif isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)):
         stride = module.stride
     else:
@@ -84,7 +84,7 @@ def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
     return [int(s) for s in (stride if isinstance(stride, (tuple, list)) else [stride] * ndim)]
 
 
-def _flat_downsampling(module: torch.nn.Module, ndim: int) -> list[int]:
+def _flat_downsampling(module: torch.nn.Module | None, ndim: int) -> list[int]:
     """Product of every strided ``Conv``/``MaxPool`` inside ``module`` (itself included), each
     trailing-aligned to ``ndim``: a leaf of lower dimensionality acts on the LAST axes, so a 2D conv in
     a 3D graph leaves the leading axis untouched.
@@ -95,6 +95,8 @@ def _flat_downsampling(module: torch.nn.Module, ndim: int) -> list[int]:
     crashes the model's skip reassembly.
     """
     factor = [1] * ndim
+    if module is None:  # an absent child (a NONE norm): named_forward skips it
+        return factor
     for leaf in module.modules():
         stride = _leaf_spatial_stride(leaf)
         if stride is None:
@@ -225,7 +227,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def add_module(
         self,
         name: str,
-        module: torch.nn.Module,
+        module: torch.nn.Module | None,
         in_branch: Sequence[int | str] = [0],
         out_branch: Sequence[int | str] = [0],
         pretrained: bool = True,
@@ -306,7 +308,8 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
     def init(self, init_type: str, init_gain: float):
         for module in self._modules.values():
-            ModuleArgsDict.init_func(module, init_type, init_gain)
+            if module is not None:
+                ModuleArgsDict.init_func(module, init_type, init_gain)
 
     def named_forward(
         self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
@@ -401,10 +404,10 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             del branchs
 
     def forward(self, *input: torch.Tensor) -> torch.Tensor:
-        _v = input
+        _v: torch.Tensor | tuple[torch.Tensor, ...] = input
         for _, _v in self.named_forward(*input):
             pass
-        return _v
+        return cast(torch.Tensor, _v)
 
     def graph_parameters(self, pretrained: bool = False) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
         """The routed graph's trainable parameters, named by dotted module path.
@@ -424,7 +427,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         for k, v in module.named_parameters():
                             yield name + "." + k, v
 
-    def named_module_args_dict(self) -> Iterator[tuple[str, Self, ModuleArgs]]:
+    def named_module_args_dict(self) -> Iterator[tuple[str, torch.nn.Module | None, ModuleArgs]]:
         for name, module in self._modules.items():
             yield name, module, self._modulesArgs[name]
             if isinstance(module, ModuleArgsDict):
@@ -435,7 +438,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         keys = keys.copy()
         for name, module, args in self.named_module_args_dict():
             requires_grad = args.requires_grad
-            if requires_grad is not None:
+            if requires_grad is not None and module is not None:
                 module.requires_grad_(requires_grad)
             if name in keys:
                 keys.remove(name)
@@ -499,7 +502,7 @@ class Network(ModuleArgsDict, ABC):
 
     def _apply_network(
         self,
-        name_function: Callable[[Self], str],
+        name_function: Callable[["Network"], str],
         networks: dict[str, "Network"],
         key: str,
         function: Callable,
@@ -632,7 +635,7 @@ class Network(ModuleArgsDict, ABC):
                 destination = hook_result
         return destination
 
-    def load_state_dict(self, state_dict: dict[str, torch.Tensor]):
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor]):  # type: ignore[override]  # always strict
         missing_keys: list[str] = []
         unexpected_keys: list[str] = []
         error_msgs: list[str] = []
@@ -728,7 +731,7 @@ class Network(ModuleArgsDict, ABC):
     @_function_network()
     def load(
         self,
-        state_dict: dict[str, dict[str, torch.Tensor] | int],
+        state_dict: dict[str, Any],
         init: bool = True,
         ema: bool = False,
         override_lr: float | None = None,
@@ -752,7 +755,7 @@ class Network(ModuleArgsDict, ABC):
                 name += "_EMA"
         if name in state_dict:
             value = state_dict[name]
-            model_state_dict_tmp = {}
+            model_state_dict_tmp: dict[str, torch.Tensor] = {}
             if isinstance(value, dict):
                 model_state_dict_tmp = {k.split(".")[-1]: v for k, v in value.items()}[self.get_name()]
             modules_name = self.get_mapping()
@@ -795,12 +798,74 @@ class Network(ModuleArgsDict, ABC):
             if isinstance(_nb_lr_update, int):
                 self._nb_lr_update = _nb_lr_update
 
+        restored = self._load_schedule_states(state_dict, state_key)
         if override_lr is not None:
             self._rebase_lr_local(override_lr)
         else:
             for scheduler in self.schedulers:
-                scheduler.last_epoch = self._nb_lr_update
+                if scheduler not in restored:
+                    # A checkpoint from before the schedulers' own state was saved: the counter
+                    # places a step schedule, not a plateau's history or a cooldown.
+                    scheduler.last_epoch = self._nb_lr_update
         self.initialized()
+
+    def _named_schedulers(self) -> Iterator[tuple[str, torch.optim.lr_scheduler.LRScheduler]]:
+        """Stable occurrence names within this network's ordered scheduler chain."""
+        occurrences: dict[str, int] = {}
+        for scheduler in self.schedulers:
+            name = type(scheduler).__name__
+            occurrences[name] = occurrences.get(name, 0) + 1
+            occurrence = occurrences[name]
+            yield name if occurrence == 1 else f"{name}#{occurrence}", scheduler
+
+    def schedule_states(self) -> dict[str, Any]:
+        """This network's scheduler/scaler state, with a distinct identity for each occurrence.
+
+        Version 1 keyed every scheduler by class alone, losing all but the last of a repeated
+        class. Single-class legacy entries remain readable; ambiguous repeated ones cannot be
+        restored exactly and fall back to the update count with a warning.
+        """
+        states: dict[str, Any] = {
+            "version": 2,
+            "schedulers": {name: scheduler.state_dict() for name, scheduler in self._named_schedulers()},
+        }
+        scaler = getattr(self, "scaler", None)
+        if scaler is not None and scaler.is_enabled():
+            states["scaler"] = scaler.state_dict()
+        return states
+
+    def _load_schedule_states(
+        self, state_dict: dict[str, Any], state_key: str
+    ) -> set[torch.optim.lr_scheduler.LRScheduler]:
+        """Restore the schedulers (and the scaler) saved under ``state_key``; the schedulers restored."""
+        states = state_dict.get(f"{state_key}_schedulers_state_dict")
+        restored: set[torch.optim.lr_scheduler.LRScheduler] = set()
+        if not isinstance(states, dict):
+            return restored
+        saved = states.get("schedulers", {})
+        named = list(self._named_schedulers())
+        ambiguous = {type(scheduler).__name__ for name, scheduler in named if "#" in name}
+        legacy = states.get("version", 1) < 2
+        for name, scheduler in named:
+            if legacy and type(scheduler).__name__ in ambiguous:
+                continue  # the old entry cannot identify which occurrence's state survived
+            state = saved.get(name)
+            if state is not None:
+                scheduler.load_state_dict(state)
+                restored.add(scheduler)
+        missing = [name for name, scheduler in named if scheduler not in restored]
+        if missing:
+            _log.warning(
+                "Checkpoint '%s' holds no unambiguous state for scheduler(s) %s: resumed from the update count, "
+                "which places a step schedule but not a plateau's history.",
+                state_key,
+                missing,
+            )
+        scaler = getattr(self, "scaler", None)
+        scaler_state = states.get("scaler")
+        if scaler is not None and scaler.is_enabled() and scaler_state:
+            scaler.load_state_dict(scaler_state)
+        return restored
 
     def _compute_channels_trace(
         self,
@@ -827,12 +892,8 @@ class Network(ModuleArgsDict, ABC):
                         v1._modulesArgs[k2]._isEnd = True
 
         for k, v in module.items():
-            if hasattr(v, "in_channels"):
-                if v.in_channels:
-                    in_channels = v.in_channels
-            if hasattr(v, "in_features"):
-                if v.in_features:
-                    in_channels = v.in_features
+            in_channels = getattr(v, "in_channels", None) or in_channels
+            in_channels = getattr(v, "in_features", None) or in_channels
             key = name + "." + k if name else k
 
             if gradient_checkpoints:
@@ -864,12 +925,8 @@ class Network(ModuleArgsDict, ABC):
             if v.__class__.__name__ == "ToFeatures":
                 out_is_channel = False
 
-            if hasattr(v, "out_channels"):
-                if v.out_channels:
-                    out_channels = v.out_channels
-            if hasattr(v, "out_features"):
-                if v.out_features:
-                    out_channels = v.out_features
+            out_channels = getattr(v, "out_channels", None) or out_channels
+            out_channels = getattr(v, "out_features", None) or out_channels
 
             module._modulesArgs[k].out_channels = out_channels
             module._modulesArgs[k].out_is_channel = out_is_channel
@@ -934,7 +991,7 @@ class Network(ModuleArgsDict, ABC):
         self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
     ) -> Iterator[tuple[str, torch.Tensor]]:
         if self.patch:
-            self.patch.load(inputs[0].shape[2:])
+            self.patch.load(list(inputs[0].shape[2:]))
             accumulators: dict[str, Accumulator] = {}
 
             patch_iterator = self.patch.disassemble(*inputs)
@@ -1001,13 +1058,13 @@ class Network(ModuleArgsDict, ABC):
                 if is_accumulated(name_tmp):
                     if name not in output_layer_patch_indexed:
                         network_name = accumulator_owner(name_tmp)
-                        module = self
-                        network = None
+                        module: torch.nn.Module = self
+                        network: Network | None = None
                         if network_name == "":
-                            network = module
+                            network = self
                         else:
                             for n in name.split("."):
-                                module = module[n]
+                                module = cast(ModuleArgsDict, module)[n]
                                 if isinstance(module, Network) and n == network_name:
                                     network = module
                                     break
@@ -1058,6 +1115,15 @@ class Network(ModuleArgsDict, ABC):
         criteria and patch, the output groups the measures address, and the channel trace the
         checkpoints are placed on."""
         self.init(autocast, state, group_dest)
+        if state != State.PREDICTION and all(network.optimizer is None for network in self.get_networks().values()):
+            # A YAML-catalog model with `optimizer: None` once trained an epoch with the backward
+            # skipped, a loss that never moved and a checkpoint written: the refusal names the key.
+            root = os.environ.get("KONFAI_ROOT", "Trainer")
+            raise ConfigError(
+                f"No optimizer resolved for '{self.get_name()}': nothing would train.",
+                f"Give '{root}.Model.{self.get_name()}.optimizer' (for instance "
+                "'optimizer: {name: AdamW}'), or remove the key to take the default.",
+            )
         self.init_outputs_group()
         self._compute_channels_trace(self, self.in_channels, gradient_checkpoints, gpu_checkpoints)
 
@@ -1074,7 +1140,7 @@ class Network(ModuleArgsDict, ABC):
 
                 self.outputsGroup.append(outputs_group)
 
-    def forward(
+    def forward(  # type: ignore[override]  # the graph consumes a BatchSample, not the block's tensors
         self,
         batch_sample: BatchSample,
         output_layers: list[str] = [],
@@ -1160,25 +1226,59 @@ class Network(ModuleArgsDict, ABC):
         if self.measure:
             self.measure.release_targets()
 
+    def steps_this_batch(self) -> bool:
+        """Whether this network's optimizer steps on the batch about to be run (its accumulation
+        window closes), read before ``forward`` so the DDP synchronisation can be decided for the
+        whole step."""
+        return (self._it + 1) % self.nb_batch_per_step == 0
+
+    def accumulation_sync(self, model: Any) -> AbstractContextManager[Any]:
+        """The DDP context the coming forward AND backward run under: ``no_sync`` when no network of
+        the graph steps on this batch (its gradients accumulate locally), the ordinary reduction
+        otherwise. DDP marks the gradients to reduce during ``forward``, so a ``no_sync`` entered
+        around the backward alone reduced every micro-batch, which is what accumulation exists
+        to avoid. A graph whose networks step at different cadences reduces whenever one of them
+        does: the others' accumulated gradients travel early, which changes nothing they compute."""
+        trained = [network for network in self.get_networks().values() if network.optimizer is not None]
+        if not trained or any(network.steps_this_batch() for network in trained):
+            return nullcontext()
+        no_sync = getattr(model, "no_sync", None)
+        return no_sync() if callable(no_sync) else nullcontext()
+
+    def backward(self, model: Any) -> dict[str, Any]:
+        """Backpropagate the graph, then step any optimizers waiting for DDP reductions.
+
+        A DDP bucket can span several nested networks. Stepping the first network before the
+        last one's backward completes uses local gradients and can clear the bucket's inputs.
+        Only distributed execution defers the steps; the ordinary per-network order is kept.
+        """
+        pending: list[Network] | None = [] if isinstance(model, torch.nn.parallel.DistributedDataParallel) else None
+        result = self._backward(pending)
+        if pending is not None:
+            for network in pending:
+                network._optimizer_step()
+        return result
+
+    def _optimizer_step(self) -> None:
+        assert self.scaler is not None and self.optimizer is not None  # nosec B101 - checked by _backward
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad(set_to_none=True)
+
     @_function_network()
-    def backward(self, model: Any):
+    def _backward(self, pending: list["Network"] | None):
         if self.measure:
             if self.scaler and self.optimizer:
                 self._requires_grad(list(self.measure.outputs_criterions.keys()))
-                should_step = (self._it + 1) % self.nb_batch_per_step == 0
-                sync_context = (
-                    model.no_sync()
-                    if hasattr(model, "no_sync") and callable(model.no_sync) and not should_step
-                    else nullcontext()
-                )
-                with sync_context:
-                    for loss in self.measure.get_loss():
-                        self.scaler.scale(loss / self.nb_batch_per_step).backward()
+                should_step = self.steps_this_batch()
+                for loss in self.measure.get_loss():
+                    self.scaler.scale(loss / self.nb_batch_per_step).backward()
 
                 if should_step:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    self.optimizer.zero_grad(set_to_none=True)
+                    if pending is None:
+                        self._optimizer_step()
+                    else:
+                        pending.append(self)
                 self._it += 1
 
     @_function_network()
@@ -1193,7 +1293,8 @@ class Network(ModuleArgsDict, ABC):
         if _scheduler:
             if _scheduler.__class__.__name__ == "ReduceLROnPlateau":
                 if self.measure:
-                    _scheduler.step(sum(self.measure.get_last_values(0).values()))
+                    plateau = cast(torch.optim.lr_scheduler.ReduceLROnPlateau, _scheduler)
+                    plateau.step(sum(self.measure.get_last_values(0).values()))
             else:
                 _scheduler.step()
 
@@ -1242,7 +1343,7 @@ class Network(ModuleArgsDict, ABC):
         return module
 
     @staticmethod
-    def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):
+    def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):  # type: ignore[override]  # a placement over the routed graph, not Module.to
         # `_counter` is a single-element box holding the next GPU index, shared by
         # reference through the recursion so model-parallel `isGPU_Checkpoint` splits
         # advance it. Each top-level call starts fresh at `device` so the counter never
@@ -1256,7 +1357,7 @@ class Network(ModuleArgsDict, ABC):
                 module._modulesArgs[k].gpu = str(get_device(_counter[0]))
                 if isinstance(v, ModuleArgsDict):
                     v = Network.to(v, _counter[0], _counter)
-                else:
+                elif v is not None:
                     v = v.to(get_device(_counter[0]))
         if isinstance(module, Network):
             if module.optimizer is not None:
@@ -1291,7 +1392,7 @@ class MinimalModel(Network):
 
     def load(
         self,
-        state_dict: dict[str, dict[str, torch.Tensor] | int],
+        state_dict: dict[str, Any],
         init: bool = True,
         ema: bool = False,
         override_lr: float | None = None,
@@ -1310,9 +1411,10 @@ class MinimalModel(Network):
         nb_batch_per_step=1,
         init_type="normal",
         init_gain=0.02,
+        in_channels: int = 1,
     ):
         super().__init__(
-            1,
+            in_channels,
             optimizer,
             schedulers,
             outputs_criterions,

@@ -25,6 +25,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any, TypedDict
+from zipfile import is_zipfile
 
 import psutil
 import torch
@@ -126,12 +127,32 @@ def _materialized_config(tree: dict, root: str) -> Path:
     from ruamel.yaml import YAML
 
     scratch = Path(tempfile.mkdtemp(prefix=f"konfai_{root.lower()}_"))
-    # The file must outlive the run (spawned ranks re-read it), not the process.
-    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+    register_scratch_config(scratch)
     path = scratch / f"{root}.yml"
     with path.open("w", encoding="utf-8") as file:
         YAML().dump(tree, file)
     return path
+
+
+#: The scratch config directories this process created and has not released, oldest first. A
+#: Python caller's workflow releases its own when it returns (``api._launch``); the CLI, one
+#: workflow per process, leaves them to the exit hook.
+_SCRATCH_CONFIGS: list[Path] = []
+
+
+def register_scratch_config(scratch: Path) -> None:
+    """A scratch config directory to remove: at the workflow's return, or at exit at the latest.
+    The file must outlive the run (spawned ranks re-read it), not the process."""
+    _SCRATCH_CONFIGS.append(scratch)
+
+
+def release_scratch_configs(mark: int) -> None:
+    """Remove the scratch directories registered since ``mark`` (the registry's length then)."""
+    while len(_SCRATCH_CONFIGS) > mark:
+        shutil.rmtree(_SCRATCH_CONFIGS.pop(), ignore_errors=True)
+
+
+atexit.register(release_scratch_configs, 0)
 
 
 def configure_workflow_environment(
@@ -231,7 +252,7 @@ def get_device(device: int):
     return device if torch.cuda.is_available() and 0 <= device < torch.cuda.device_count() else torch.device("cpu")
 
 
-def safe_torch_load(path_or_url: str | Path, map_location: Any) -> Any:
+def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = False) -> Any:
     """
     Load a checkpoint from a local path or an ``https://`` URL, preferring the
     safe ``weights_only=True`` deserializer.
@@ -241,14 +262,20 @@ def safe_torch_load(path_or_url: str | Path, map_location: Any) -> Any:
     ``https://`` checkpoint is untrusted and is loaded with ``weights_only=True``
     only: a payload crafted to fail the safe load must not trigger the
     arbitrary-code unpickler.
+
+    ``mmap=True`` maps the tensor storages of a local zip-format checkpoint on
+    demand. Legacy local files retain their ordinary load path; downloads keep
+    their safe-only contract. Release all returned tensors before deleting a
+    mapped file on platforms that require it.
     """
     source = str(path_or_url)
     if source.startswith("https://"):
         return torch.hub.load_state_dict_from_url(source, map_location=map_location, weights_only=True)
+    load_options = {"mmap": True} if mmap and is_zipfile(source) else {}
     try:
-        return torch.load(source, map_location=map_location, weights_only=True)
+        return torch.load(source, map_location=map_location, weights_only=True, **load_options)
     except Exception:
-        return torch.load(source, map_location=map_location, weights_only=False)  # nosec B614
+        return torch.load(source, map_location=map_location, weights_only=False, **load_options)  # nosec B614
 
 
 def is_interactive_session() -> bool:

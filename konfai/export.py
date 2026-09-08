@@ -34,11 +34,14 @@ from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
 from konfai.utils.errors import PredictorError
+
+if TYPE_CHECKING:
+    from konfai.network.network.network import ModuleArgsDict
 
 MANIFEST_VERSION = 2
 
@@ -51,6 +54,13 @@ def _require(module: str) -> ModuleType:
         raise PredictorError(
             f"ONNX export needs the optional dependency '{module}'. Install it with `pip install konfai[export]`.",
         ) from exc
+
+
+def _routed(model: torch.nn.Module) -> ModuleArgsDict:
+    """``model`` as the routed graph the export walks; refused without ``named_forward``."""
+    if not hasattr(model, "named_forward"):
+        raise PredictorError("export expects a KonfAI Network exposing `named_forward`.")
+    return cast("ModuleArgsDict", model)
 
 
 class _NamedHead(torch.nn.Module):
@@ -68,7 +78,7 @@ class _NamedHead(torch.nn.Module):
         fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     ) -> None:
         super().__init__()
-        self.net = net
+        self.net = _routed(net)
         self.output_module = output_module
         self.fold_pre = list(fold_pre or [])
 
@@ -85,12 +95,11 @@ class _NamedHead(torch.nn.Module):
 def list_output_modules(model: torch.nn.Module, example_input: torch.Tensor) -> list[tuple[str, tuple[int, ...]]]:
     """Return ``(dotted_name, shape)`` for every output of the routed graph, to discover the
     inference head to export."""
-    if not hasattr(model, "named_forward"):
-        raise PredictorError("export expects a KonfAI Network exposing `named_forward`.")
+    graph = _routed(model)
     model.eval()
     outputs: list[tuple[str, tuple[int, ...]]] = []
     with torch.no_grad():
-        for name, tensor in model.named_forward(example_input):
+        for name, tensor in graph.named_forward(example_input):
             outputs.append((name, tuple(tensor.shape)))
     return outputs
 
@@ -102,12 +111,11 @@ def select_inference_head(model: torch.nn.Module, example_input: torch.Tensor) -
     probability/regression head, so integer outputs are skipped. Pass ``output_module`` to target a
     specific head.
     """
-    if not hasattr(model, "named_forward"):
-        raise PredictorError("export expects a KonfAI Network exposing `named_forward`.")
+    graph = _routed(model)
     model.eval()
     head: str | None = None
     with torch.no_grad():
-        for name, tensor in model.named_forward(example_input):
+        for name, tensor in graph.named_forward(example_input):
             if torch.is_floating_point(tensor):
                 head = name
     if head is None:
@@ -184,7 +192,7 @@ def export_to_onnx(
     with torch.no_grad():
         torch.onnx.export(
             wrapper,
-            example_input,
+            (example_input,),
             str(onnx_path),
             opset_version=opset,
             input_names=[input_name],

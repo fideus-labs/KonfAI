@@ -18,6 +18,7 @@
 
 import ast
 import importlib
+import math
 from collections.abc import Callable
 from enum import Enum
 from typing import Any
@@ -111,12 +112,12 @@ class BlockConfig:
             bias=self.bias,
         )
 
-    def get_norm(self, channels: int, dim: int) -> torch.nn.Module:
+    def get_norm(self, channels: int, dim: int) -> torch.nn.Module | None:
         if self.norm is None:
             return None
         return get_norm(self.norm, channels, dim) if isinstance(self.norm, NormMode) else self.norm(channels)
 
-    def get_activation(self) -> torch.nn.Module:
+    def get_activation(self) -> torch.nn.Module | None:
         if self.activation is None:
             return None
         if isinstance(self.activation, str):
@@ -717,6 +718,10 @@ class ClipNormalize(torch.nn.Module):
         super().__init__()
         # Default to identity (no clip, zero mean, unit std): a checkpoint fills these, so a model
         # built before its checkpoint is loaded must pass its input through unchanged.
+        self.clip_min: torch.Tensor
+        self.clip_max: torch.Tensor
+        self.mean: torch.Tensor
+        self.std: torch.Tensor
         self.register_buffer("clip_min", torch.full((1,), float("-inf")))
         self.register_buffer("clip_max", torch.full((1,), float("inf")))
         self.register_buffer("mean", torch.zeros(1))
@@ -798,7 +803,7 @@ class LatentDistribution(network.ModuleArgsDict):
     class LatentDistributionLinear(torch.nn.Module):
         def __init__(self, shape: list[int], latent_dim: int) -> None:
             super().__init__()
-            self.linear = torch.nn.Linear(torch.prod(torch.tensor(shape)), latent_dim)
+            self.linear = torch.nn.Linear(math.prod(shape), latent_dim)
 
         def forward(self, tensor: torch.Tensor) -> torch.Tensor:
             return torch.unsqueeze(self.linear(tensor), 1)
@@ -806,7 +811,7 @@ class LatentDistribution(network.ModuleArgsDict):
     class LatentDistributionDecoder(torch.nn.Module):
         def __init__(self, shape: list[int], latent_dim: int) -> None:
             super().__init__()
-            self.linear = torch.nn.Linear(latent_dim, torch.prod(torch.tensor(shape)))
+            self.linear = torch.nn.Linear(latent_dim, math.prod(shape))
             self.shape = shape
 
         def forward(self, tensor: torch.Tensor) -> torch.Tensor:
