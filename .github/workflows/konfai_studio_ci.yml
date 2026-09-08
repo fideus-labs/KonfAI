@@ -20,8 +20,41 @@ on:
       - "pyproject.toml"
 
 jobs:
+  front:
+    # Built once: the React front does not change with the Python version the lanes below test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - name: Build the Studio front
+        # Vite emits into konfai_studio/web/ (vite.config.ts outDir); the trailing check keeps
+        # test_serves_the_built_frontend from silently skipping if that output path ever drifts.
+        run: |
+          cd studio/frontend
+          npm ci
+          npm run build
+          test -f ../konfai_studio/web/index.html
+      - name: Browser tests of the front
+        working-directory: studio/frontend
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:browser
+        env:
+          CI: "1"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: studio-front
+          path: studio/konfai_studio/web
+          if-no-files-found: error
+
   konfai_studio_ci:
     runs-on: ubuntu-latest
+    needs: front
     strategy:
       fail-fast: false
       matrix:
@@ -44,19 +77,12 @@ jobs:
             pyproject.toml
             studio/pyproject.toml
 
-      - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Take the Studio front the front job built
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          node-version: "20"
-
-      - name: Build the Studio front
-        # Vite emits into konfai_studio/web/ (vite.config.ts outDir); the trailing check keeps
-        # test_serves_the_built_frontend from silently skipping if that output path ever drifts.
-        run: |
-          cd studio/frontend
-          npm ci
-          npm run build
-          test -f ../konfai_studio/web/index.html
+          name: studio-front
+          path: studio/konfai_studio/web
+      - run: test -f studio/konfai_studio/web/index.html
 
       - name: Install core package
         # The CPU torch index: the default PyPI torch wheel bundles the multi-GB CUDA stack this

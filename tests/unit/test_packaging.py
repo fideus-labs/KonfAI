@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import sysconfig
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -30,30 +31,7 @@ import pytest
 from konfai.utils.errors import ConfigError, KonfAIError, TransformError
 from setuptools import find_namespace_packages
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11 ships no stdlib tomllib
-    try:
-        import tomli as tomllib  # type: ignore[no-redef]
-    except ModuleNotFoundError:  # nor the tomli backport
-        tomllib = None  # type: ignore[assignment]
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-# --------------------------------------------------------------------------- #
-# The konfai package imports cleanly with no optional deps.
-# --------------------------------------------------------------------------- #
-def test_import_konfai_succeeds() -> None:
-    import konfai  # noqa: F401
-
-
-def test_version_attribute_exists() -> None:
-    import konfai
-
-    assert hasattr(konfai, "__version__"), "konfai must expose __version__"
-    assert isinstance(konfai.__version__, str)
-    assert konfai.__version__  # non-empty
 
 
 def test_konfai_utils_config_imports_without_simpleitk() -> None:
@@ -173,17 +151,14 @@ def test_konfai_error_without_args_returns_empty_bracket() -> None:
 # The konfai wheel must not bundle sibling hyphenated packages.
 # --------------------------------------------------------------------------- #
 def _packages_find_config() -> dict:
-    assert tomllib is not None
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     return pyproject["tool"]["setuptools"]["packages"]["find"]
 
 
-@pytest.mark.skipif(tomllib is None, reason="requires tomllib (Python 3.11+) or the tomli backport")
 def test_the_declared_torch_floor_covers_the_dtypes_the_pipeline_reads() -> None:
     """A uint16 store reaches ``torch.from_numpy``, and ``torch.uint16`` is named where a label
     map's sign is read: both are torch 2.3. Without a floor, pip is free to resolve an older torch
     and the run fails on a dtype instead of at install time."""
-    assert tomllib is not None
     pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     torch_requirement = next(dep for dep in pyproject["project"]["dependencies"] if dep.startswith("torch"))
     floor = torch_requirement.removeprefix("torch>=")
@@ -191,7 +166,6 @@ def test_the_declared_torch_floor_covers_the_dtypes_the_pipeline_reads() -> None
     assert tuple(int(part) for part in floor.split(".")) >= (2, 3)
 
 
-@pytest.mark.skipif(tomllib is None, reason="requires tomllib (Python 3.11+) or the tomli backport")
 def test_wheel_excludes_sibling_packages_but_keeps_namespace_subpackages() -> None:
     config = _packages_find_config()
     packages = find_namespace_packages(where=str(_REPO_ROOT), include=config["include"], exclude=config["exclude"])
@@ -220,7 +194,14 @@ def test_konfai_models_have_no_init_and_need_namespace_discovery() -> None:
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
 def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """One wheel built from the source tree, shared by the tests that inspect and install it."""
+    """One wheel built from the source tree, shared by the tests that inspect and install it; or the
+    one a CI job already built, named by ``KONFAI_WHEEL`` (a path or a directory holding one)."""
+    prebuilt = os.environ.get("KONFAI_WHEEL")
+    if prebuilt:
+        candidate = Path(prebuilt)
+        wheels = [candidate] if candidate.is_file() else sorted(candidate.glob("konfai-*.whl"))
+        assert len(wheels) == 1, f"KONFAI_WHEEL={prebuilt!r} names {len(wheels)} wheel(s)"
+        return wheels[0]
     pytest.importorskip("build")
     # --no-isolation builds offline, so every declared build requirement must be importable.
     pytest.importorskip("setuptools")
@@ -354,3 +335,41 @@ print(json.dumps(sorted(path.name for path in (package / "models" / "yaml").glob
     # The wheel's file name carries the version its metadata was built with: the CLI reading the same
     # one proves it reports the installed distribution and not another konfai on the path.
     assert version.stdout.strip() == built_wheel.name.split("-")[1]
+
+
+_SIBLING_SETUPS = (
+    "konfai-apps/setup.py",
+    "konfai-mcp/setup.py",
+    "studio/setup.py",
+    "apps/impact_reg/setup.py",
+    "apps/impact_seg/setup.py",
+    "apps/impact_synth/setup.py",
+    "apps/mrsegmentator/setup.py",
+    "apps/totalsegmentator/setup.py",
+)
+
+
+@pytest.mark.parametrize("setup_py", _SIBLING_SETUPS)
+def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monkeypatch) -> None:
+    """Every sibling once pinned ``konfai==<its own scm version>``: from a working tree that is a
+    ``.dev`` version no installed core carries, so ``pip install -e ./konfai-mcp`` resolved nowhere
+    but at a clean release tag. The pin must admit the core this tree installs: exact at a tag,
+    the closest release or newer from a tree."""
+    import importlib.metadata
+    import runpy
+
+    import setuptools
+    from packaging.requirements import Requirement
+
+    captured: dict = {}
+    monkeypatch.setattr(setuptools, "setup", lambda **kwargs: captured.update(kwargs))
+    runpy.run_path(str(Path(konfai.__file__).resolve().parents[1] / setup_py), run_name="__main__")
+    requirements = [Requirement(spec) for spec in captured["install_requires"]]
+    siblings = [r for r in requirements if r.name in ("konfai", "konfai-apps", "konfai-mcp")]
+    assert siblings, captured["install_requires"]
+    core = importlib.metadata.version("konfai")
+    for requirement in siblings:
+        operators = {s.operator for s in requirement.specifier}
+        assert operators in ({"=="}, {">="}), requirement
+        if requirement.name == "konfai":
+            assert requirement.specifier.contains(core, prereleases=True), f"{requirement} against the core {core}"

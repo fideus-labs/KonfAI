@@ -16,6 +16,13 @@ examples/Synthesis/Task_1
 docs/build/
 .codex
 docs/_build/
+# Agent and editor tool state
+.serena/
+.planning/
+.impeccable/
+node_modules/
+# Local audit reports
+/KONFAI_*.md
 build/
 mcp-workspace/
 KonfAI_Workspaces/
