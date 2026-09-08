@@ -27,3 +27,5 @@ build/
 mcp-workspace/
 KonfAI_Workspaces/
 konfai-mcp/tests/fixtures/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
