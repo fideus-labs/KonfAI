@@ -16,6 +16,7 @@
 
 import asyncio
 import io
+import os
 import shutil
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -895,6 +896,7 @@ def test_cancellation_between_scheduling_and_worker_entry_prevents_launch(monkey
     assert not job.run_dir.exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
 def test_cancellation_during_process_creation_reaps_the_registered_process(monkeypatch, tmp_path):
     job = _make_job("cancel-during-spawn")
     job.run_dir = tmp_path

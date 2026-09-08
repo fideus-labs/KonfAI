@@ -1557,9 +1557,12 @@ class _JobResultResponse(FileResponse):
 
 
 def _process_group_exists(pgid: int) -> bool:
-    """Whether any member remains, even after the process-group leader has exited."""
+    """Whether any member remains, even after the process-group leader has exited (POSIX only)."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        return False
     try:
-        os.killpg(pgid, 0)
+        killpg(pgid, 0)
     except ProcessLookupError:
         return False
     return True

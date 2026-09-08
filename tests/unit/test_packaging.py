@@ -358,6 +358,7 @@ def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monke
     import importlib.metadata
     import runpy
 
+    pytest.importorskip("setuptools_scm")
     import setuptools
     from packaging.requirements import Requirement
 

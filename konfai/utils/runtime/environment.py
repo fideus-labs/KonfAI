@@ -271,7 +271,8 @@ def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = 
     source = str(path_or_url)
     if source.startswith("https://"):
         return torch.hub.load_state_dict_from_url(source, map_location=map_location, weights_only=True)
-    load_options = {"mmap": True} if mmap and is_zipfile(source) else {}
+    # Windows refuses to replace or delete a mapped file, which a BEST prune and a checkpoint rewrite do.
+    load_options = {"mmap": True} if mmap and sys.platform != "win32" and is_zipfile(source) else {}
     try:
         return torch.load(source, map_location=map_location, weights_only=True, **load_options)
     except Exception:

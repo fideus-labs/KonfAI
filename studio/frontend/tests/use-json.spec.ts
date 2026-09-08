@@ -18,9 +18,8 @@ test("a new query's data never shows under the old one, and a failure is an erro
 
   // Switch to the slow session: B's rows must not stand in for A's while A loads.
   await page.evaluate(() => (window as any).__mount("JsonProbe", { url: "/api/evaluations?session=A" }));
-  const during = await state();
-  expect(during.loading).toBe(true);
-  expect(during.data).toBeNull();
+  await expect.poll(async () => (await state()).loading).toBe(true);
+  expect((await state()).data).toBeNull();
   await expect.poll(async () => (await state()).data?.runs?.[0]?.run, { timeout: 5000 }).toBe("A");
 
   // Switch back to a slow A then to B before A answers: A's late answer never lands under B.
