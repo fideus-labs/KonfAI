@@ -513,6 +513,53 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
     assert "restart" in (payload["error"] or "")
 
 
+def _persisted_job_record(job_id: str, status: str, config_path: Path) -> str:
+    return json.dumps(
+        {
+            "job_id": job_id,
+            "session": "default",
+            "kind": "train",
+            "command": ["python", "-m", "konfai_mcp.runner", "TRAIN"],
+            "cwd": "/tmp/demo",
+            "log_path": "/tmp/demo.log",
+            "config_path": str(config_path),
+            "created_at": 1.0,
+            "status": status,
+            "pid": 4321,
+            "returncode": None,
+            "started_at": 1.5,
+            "finished_at": 2.0 if status == "done" else None,
+            "cancel_requested": False,
+            "error": None,
+            "run_name": "RUN_01",
+            "runtime_log_path": "/tmp/Statistics/RUN_01/log_0.txt",
+            "job_dir": None,
+            "manifest_path": None,
+            "recovered": False,
+        }
+    )
+
+
+def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_start(tmp_path: Path) -> None:
+    """A job that was over before this server started keeps the config edited since out of its record."""
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Trainer: {}\n", encoding="utf-8")
+    for job_id, status in (("finished_before", "done"), ("died_with_server", "running")):
+        layout.job_dir(job_id).mkdir(parents=True)
+        layout.job_state_path(job_id).write_text(_persisted_job_record(job_id, status, config_path), encoding="utf-8")
+        layout.job_manifest_path(job_id).write_text("{}", encoding="utf-8")
+
+    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+
+    assert registry.get("finished_before").status == "done"
+    assert json.loads(layout.job_manifest_path("finished_before").read_text(encoding="utf-8")) == {}
+    assert registry.get("died_with_server").status == "error"
+    manifest = json.loads(layout.job_manifest_path("died_with_server").read_text(encoding="utf-8"))
+    assert Path(manifest["resolved_config_snapshot"]).read_text(encoding="utf-8") == "Trainer: {}\n"
+
+
 def test_corrupt_job_record_does_not_block_server_start(tmp_path: Path) -> None:
     # A crash mid-write can leave a truncated job.json. The recovery loop reads every record at start,
     # so a single corrupt file must be skipped, not make JobRegistry construction fatal (dead server).

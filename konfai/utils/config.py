@@ -696,11 +696,17 @@ def _coerce_config_value(value: object, annotation: object, where: str) -> objec
     if origin in {list, tuple, Sequence}:
         if not isinstance(value, list | tuple):
             raise ConfigError(f"'{where}' expects a list, got '{value}'.")
-        element_type = args[0] if args else Any
-        return [
+        if origin is tuple and args and args[-1] is not Ellipsis:
+            if len(value) != len(args):
+                raise ConfigError(f"'{where}' expects {len(args)} values, got {len(value)}.")
+            element_types: list[object] = list(args)
+        else:
+            element_types = [args[0] if args else Any] * len(value)
+        items = [
             _coerce_config_value(item, element_type, f"Element {index} of '{where}'")
-            for index, item in enumerate(value)
+            for index, (item, element_type) in enumerate(zip(value, element_types, strict=True))
         ]
+        return tuple(items) if origin is tuple else items
     if origin is dict:
         if not isinstance(value, Mapping) or args[0] is not str or any(not isinstance(key, str) for key in value):
             raise ConfigError(f"'{where}' expects a mapping with string keys, got '{value}'.")

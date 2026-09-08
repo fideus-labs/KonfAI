@@ -621,6 +621,15 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
     )
 
 
+def test_a_live_model_token_is_released_when_the_run_returns() -> None:
+    model = object()
+    with api._registered_live_model(model) as token:
+        assert api.live_model(token) is model
+    assert token not in api._LIVE_MODELS
+    with pytest.raises(ConfigError, match="No live model"):
+        api.live_model(token)
+
+
 def test_a_live_model_refuses_several_ranks() -> None:
     with pytest.raises(ConfigError, match="one rank"):
         api.train_model(

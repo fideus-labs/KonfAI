@@ -1283,6 +1283,7 @@ def test_container_values_follow_scalar_coercion_and_preserve_union_types(
         (list[bool] | str, "['maybe']", "Element 0"),
         (list[int | float], "'12'", "expects a list"),
         (dict[str, bool], "[false]", "mapping with string keys"),
+        (tuple[int, str], "[1]", "expects 2 values"),
     ],
 )
 def test_invalid_container_values_are_refused_at_the_element(write_config, annotation, literal, location) -> None:
@@ -1293,3 +1294,21 @@ def test_invalid_container_values_are_refused_at_the_element(write_config, annot
     write_config(f"Root:\n  value: {literal}\n")
     with pytest.raises(ConfigError, match=location):
         apply_config("Root")(receive)()
+
+
+@pytest.mark.parametrize(
+    ("annotation", "literal", "expected"),
+    [
+        (tuple[int, ...], "[1, 2]", (1, 2)),
+        (tuple[int, str], "[1, a]", (1, "a")),
+        (list[int], "[1, 2]", [1, 2]),
+    ],
+)
+def test_a_tuple_annotation_binds_a_tuple(write_config, annotation, literal, expected) -> None:
+    def receive(value):
+        return value
+
+    receive.__annotations__["value"] = annotation
+    write_config(f"Root:\n  value: {literal}\n")
+    bound = apply_config("Root")(receive)()
+    assert bound == expected and type(bound) is type(expected)

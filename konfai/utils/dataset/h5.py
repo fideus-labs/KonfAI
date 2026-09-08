@@ -344,7 +344,8 @@ class H5File(AbstractFile):
         that grid reads each chunk once. ``None`` for a contiguous entry, what ``data_to_file``
         writes, where a read costs the bytes it covers. A region write (``open_data_stream``)
         chunks on its region, so a cache this run wrote answers the grain it was written in."""
-        dataset = cast(h5py.File, self.h5).get(name)
+        groups, _, entry = name.rpartition("/")
+        dataset = self._get_dataset(groups, entry)
         if not isinstance(dataset, h5py.Dataset) or dataset.chunks is None:
             return None
         return tuple(int(extent) for extent in dataset.chunks)

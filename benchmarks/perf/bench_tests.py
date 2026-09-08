@@ -41,7 +41,6 @@ import time
 from harness import REPO, fingerprint, machine_gate, write_result
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-_SUMMARY = re.compile(r"(?:(\d+) failed)?[, ]*(?:(\d+) passed)?[, ]*(?:(\d+) skipped)?.*? in ([0-9.]+)s")
 
 
 def run_pytest(target: list[str], *, pinned: bool, marker: str | None) -> dict[str, object]:
@@ -50,9 +49,10 @@ def run_pytest(target: list[str], *, pinned: bool, marker: str | None) -> dict[s
         env.pop(key, None)
     if pinned:
         env["OMP_NUM_THREADS"] = env["MKL_NUM_THREADS"] = "1"
-    argv = [sys.executable, "-m", "pytest", "-q", "-n", "auto", "--dist", "loadfile", "-p", "no:cacheprovider", *target]
-    if marker:
-        argv[6:6] = ["-m", marker]
+    # pyproject addopts carries -q already; a second one silences the summary line read below.
+    argv = [sys.executable, "-m", "pytest", "-n", "auto", "--dist", "loadfile", "-p", "no:cacheprovider"]
+    argv += ["-m", marker] if marker else []
+    argv += target
     before = resource.getrusage(resource.RUSAGE_CHILDREN)
     start = time.perf_counter()
     completed = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, check=False)
@@ -66,14 +66,15 @@ def run_pytest(target: list[str], *, pinned: bool, marker: str | None) -> dict[s
         if " in " in line and ("passed" in line or "failed" in line):
             summary = line.strip("= ")
             break
+    if summary is None:
+        raise RuntimeError(f"pytest printed no summary line, the counts cannot be read:\n{text[-1500:]}")
     counts = {"failed": 0, "passed": 0, "skipped": 0}
-    if summary:
-        for what in counts:
-            match = re.search(rf"(\d+) {what}", summary)
-            if match:
-                counts[what] = int(match.group(1))
-    # the -q summary line is not always the last line kept; the FAILED list is the ground truth
-    counts["failed"] = max(counts["failed"], len(failed))
+    for what in counts:
+        match = re.search(rf"(\d+) {what}", summary)
+        if match:
+            counts[what] = int(match.group(1))
+    # The FAILED list and the return code are the verdict; the summary line only carries the counts.
+    counts["failed"] = max(counts["failed"], len(failed), 1 if completed.returncode != 0 else 0)
     return {
         "argv": argv,
         "pinned": pinned,

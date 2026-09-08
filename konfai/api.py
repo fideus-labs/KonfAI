@@ -556,10 +556,15 @@ def live_model(token: str) -> object:
         ) from None
 
 
-def _register_live_model(model: object) -> str:
+@contextmanager
+def _registered_live_model(model: object) -> Iterator[str]:
+    """The token the run's config names, registered for the run only."""
     token = f"{type(model).__name__}-{id(model):x}"
     _LIVE_MODELS[token] = model
-    return token
+    try:
+        yield token
+    finally:
+        _LIVE_MODELS.pop(token, None)
 
 
 def _one_rank_inline(gpu: Sequence[int] | None) -> None:
@@ -642,77 +647,77 @@ def train_model(
     from konfai.utils.runtime import State
 
     _one_rank_inline(gpu)
-    token = _register_live_model(model)
-    losses = list(loss) if isinstance(loss, (list, tuple)) else [loss]
-    tree: dict[str, object] = {
-        "Trainer": {
-            "Model": {
-                "classpath": "konfai.api:live_model",
-                "live_model": {
-                    "token": token,
-                    "in_channels": in_channels,
-                    "dim": dim if dim is not None else sum(1 for extent in patch if int(extent) != 1),
-                    "optimizer": {"name": "AdamW", "lr": lr},
-                    "schedulers": None,
-                    "outputs_criterions": {
-                        "Model": {
-                            "targets_criterions": {
-                                targets: {
-                                    "criterions_loader": {
-                                        key: {"is_loss": True, **kwargs}  # type: ignore[dict-item]
-                                        for key, kwargs in _chain_tree(losses, _CRITERION_MODULES, "loss").items()
+    with _registered_live_model(model) as token:
+        losses = list(loss) if isinstance(loss, (list, tuple)) else [loss]
+        tree: dict[str, object] = {
+            "Trainer": {
+                "Model": {
+                    "classpath": "konfai.api:live_model",
+                    "live_model": {
+                        "token": token,
+                        "in_channels": in_channels,
+                        "dim": dim if dim is not None else sum(1 for extent in patch if int(extent) != 1),
+                        "optimizer": {"name": "AdamW", "lr": lr},
+                        "schedulers": None,
+                        "outputs_criterions": {
+                            "Model": {
+                                "targets_criterions": {
+                                    targets: {
+                                        "criterions_loader": {
+                                            key: {"is_loss": True, **kwargs}  # type: ignore[dict-item]
+                                            for key, kwargs in _chain_tree(losses, _CRITERION_MODULES, "loss").items()
+                                        }
                                     }
                                 }
                             }
-                        }
+                        },
+                        "ModelPatch": None,
                     },
-                    "ModelPatch": None,
                 },
-            },
-            "Dataset": {
-                "groups_src": _group_tree(inputs, targets, transforms),
-                "augmentations": (
-                    None
-                    if not augmentations
-                    else {
-                        "DataAugmentation_0": {
-                            "data_augmentations": _chain_tree(augmentations, _STAGE_MODULES, "augmentations"),
-                            "nb": 1,
+                "Dataset": {
+                    "groups_src": _group_tree(inputs, targets, transforms),
+                    "augmentations": (
+                        None
+                        if not augmentations
+                        else {
+                            "DataAugmentation_0": {
+                                "data_augmentations": _chain_tree(augmentations, _STAGE_MODULES, "augmentations"),
+                                "nb": 1,
+                            }
                         }
-                    }
-                ),
-                "Patch": _patch_tree(patch, None, 0),
-                "dataset_filenames": _dataset_filenames(datasets),
-                "batch_size": batch_size,
-                "validation": validation,
-                "shuffle": True,
-                "inline_augmentations": True,
-                "pin_memory": bool(gpu),
-            },
-            "train_name": name,
-            "manual_seed": manual_seed,
-            "epochs": epochs,
-            "autocast": autocast,
-            "channels_last": channels_last,
-            "save_checkpoint_mode": "BEST",
+                    ),
+                    "Patch": _patch_tree(patch, None, 0),
+                    "dataset_filenames": _dataset_filenames(datasets),
+                    "batch_size": batch_size,
+                    "validation": validation,
+                    "shuffle": True,
+                    "inline_augmentations": True,
+                    "pin_memory": bool(gpu),
+                },
+                "train_name": name,
+                "manual_seed": manual_seed,
+                "epochs": epochs,
+                "autocast": autocast,
+                "channels_last": channels_last,
+                "save_checkpoint_mode": "BEST",
+            }
         }
-    }
-    return _launch(
-        1,
-        lambda: build_train(
-            command=State.TRAIN,
-            model=None,
-            config=_config_copy(tree),
-            checkpoints_dir=checkpoints_dir,
-            statistics_dir=statistics_dir,
-            lr=None,
-        ),
-        lambda workflow: Path(os.environ["KONFAI_CHECKPOINTS_DIRECTORY"]) / workflow.name,
-        gpu=gpu,
-        cpu=1,
-        overwrite=overwrite,
-        quiet=quiet,
-    )
+        return _launch(
+            1,
+            lambda: build_train(
+                command=State.TRAIN,
+                model=None,
+                config=_config_copy(tree),
+                checkpoints_dir=checkpoints_dir,
+                statistics_dir=statistics_dir,
+                lr=None,
+            ),
+            lambda workflow: Path(os.environ["KONFAI_CHECKPOINTS_DIRECTORY"]) / workflow.name,
+            gpu=gpu,
+            cpu=1,
+            overwrite=overwrite,
+            quiet=quiet,
+        )
 
 
 def _live_checkpoint(model: object, scratch_root: Path) -> Path:
@@ -762,76 +767,78 @@ def predict_model(
     from konfai.utils.runtime.environment import register_scratch_config
 
     _one_rank_inline(gpu)
-    token = _register_live_model(model)
-    root, _, file_format = str(output).rpartition(":")
-    if not root or not file_format:
-        raise ConfigError(
-            f"'output' must name a dataset root and its format, as the YAML does: './Pred:mha' (got {output!r}).",
-            "The prediction is written into that root, one entry per case, under the given group.",
-        )
-    tree: dict[str, object] = {
-        "Predictor": {
-            "Model": {
-                "classpath": "konfai.api:live_model",
-                "live_model": {
-                    "token": token,
-                    "in_channels": in_channels,
-                    "dim": dim if dim is not None else sum(1 for extent in patch if int(extent) != 1),
-                    "outputs_criterions": None,
-                    "ModelPatch": None,
-                },
-            },
-            "Dataset": {
-                "groups_src": _group_tree(inputs, None, transforms),
-                "augmentations": None,
-                "Patch": _patch_tree(patch, overlap, 0),
-                "dataset_filenames": _dataset_filenames(datasets),
-                "batch_size": batch_size,
-            },
-            "outputs_dataset": {
-                "Model": {
-                    "OutputDataset": {
-                        "name_class": "OutputDataset",
-                        "before_reduction_transforms": None,
-                        "after_reduction_transforms": None,
-                        "final_transforms": (
-                            None
-                            if final_transforms is None
-                            else _chain_tree(final_transforms, _STAGE_MODULES, "final_transforms")
-                        ),
-                        "dataset_filename": f"{root}:{file_format}",
-                        "group": group,
-                        "same_as_group": f"{inputs}:{inputs}",
-                        "reduction": "Mean",
-                    }
-                }
-            },
-            "train_name": name,
-            "autocast": autocast,
-            "combine": "Mean",
-        }
-    }
-
-    def build() -> "DistributedObject":
-        if checkpoints is None:
-            scratch = Path(tempfile.mkdtemp(prefix="konfai_live_"))
-            register_scratch_config(scratch)
-            sources = [_live_checkpoint(model, scratch)]
-        else:
-            sources = (
-                [Path(checkpoints)] if isinstance(checkpoints, (str, Path)) else [Path(entry) for entry in checkpoints]
+    with _registered_live_model(model) as token:
+        root, _, file_format = str(output).rpartition(":")
+        if not root or not file_format:
+            raise ConfigError(
+                f"'output' must name a dataset root and its format, as the YAML does: './Pred:mha' (got {output!r}).",
+                "The prediction is written into that root, one entry per case, under the given group.",
             )
-        return build_predict(models=sources, prediction_file=_config_copy(tree), predictions_dir=predictions_dir)
+        tree: dict[str, object] = {
+            "Predictor": {
+                "Model": {
+                    "classpath": "konfai.api:live_model",
+                    "live_model": {
+                        "token": token,
+                        "in_channels": in_channels,
+                        "dim": dim if dim is not None else sum(1 for extent in patch if int(extent) != 1),
+                        "outputs_criterions": None,
+                        "ModelPatch": None,
+                    },
+                },
+                "Dataset": {
+                    "groups_src": _group_tree(inputs, None, transforms),
+                    "augmentations": None,
+                    "Patch": _patch_tree(patch, overlap, 0),
+                    "dataset_filenames": _dataset_filenames(datasets),
+                    "batch_size": batch_size,
+                },
+                "outputs_dataset": {
+                    "Model": {
+                        "OutputDataset": {
+                            "name_class": "OutputDataset",
+                            "before_reduction_transforms": None,
+                            "after_reduction_transforms": None,
+                            "final_transforms": (
+                                None
+                                if final_transforms is None
+                                else _chain_tree(final_transforms, _STAGE_MODULES, "final_transforms")
+                            ),
+                            "dataset_filename": f"{root}:{file_format}",
+                            "group": group,
+                            "same_as_group": f"{inputs}:{inputs}",
+                            "reduction": "Mean",
+                        }
+                    }
+                },
+                "train_name": name,
+                "autocast": autocast,
+                "combine": "Mean",
+            }
+        }
 
-    return _launch(
-        1,
-        build,
-        lambda workflow: Path(os.environ["KONFAI_PREDICTIONS_DIRECTORY"]) / workflow.name,
-        gpu=gpu,
-        cpu=1,
-        overwrite=overwrite,
-        quiet=quiet,
-    )
+        def build() -> "DistributedObject":
+            if checkpoints is None:
+                scratch = Path(tempfile.mkdtemp(prefix="konfai_live_"))
+                register_scratch_config(scratch)
+                sources = [_live_checkpoint(model, scratch)]
+            else:
+                sources = (
+                    [Path(checkpoints)]
+                    if isinstance(checkpoints, (str, Path))
+                    else [Path(entry) for entry in checkpoints]
+                )
+            return build_predict(models=sources, prediction_file=_config_copy(tree), predictions_dir=predictions_dir)
+
+        return _launch(
+            1,
+            build,
+            lambda workflow: Path(os.environ["KONFAI_PREDICTIONS_DIRECTORY"]) / workflow.name,
+            gpu=gpu,
+            cpu=1,
+            overwrite=overwrite,
+            quiet=quiet,
+        )
 
 
 # ------------------------------------------------------------------------------ MONAI BUNDLES

@@ -337,12 +337,12 @@ class JobRegistry:
             recovered=bool(payload.get("recovered", False)),
         )
 
-    def _persist_job(self, job: Job) -> None:
+    def _persist_job(self, job: Job, *, record_snapshot: bool = True) -> None:
         if self.workspace_layout is None:
             return
         job_dir = self.workspace_layout.job_dir(job.job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
-        if job.status in ("done", "error", "killed"):
+        if record_snapshot and job.status in ("done", "error", "killed"):
             self._record_resolved_config(job)
         state_path = self.workspace_layout.job_state_path(job.job_id)
         # Atomic write: a crash mid-write must not leave a truncated job.json, because the recovery loop
@@ -441,7 +441,8 @@ class JobRegistry:
                 manifest_path = self.workspace_layout.job_manifest_path(job.job_id)
                 if manifest_path.exists():
                     job.manifest_path = manifest_path
-            if job.status in self.active_states:
+            was_active = job.status in self.active_states
+            if was_active:
                 job.recovered = True
                 job.proc = None
                 if _pid_is_recovered_job(job.pid, job.proc_create_time):
@@ -458,7 +459,9 @@ class JobRegistry:
                     )
                     job.error = f"{job.error} {recovered_error}".strip() if job.error else recovered_error
             self.jobs[job.job_id] = job
-            self._persist_job(job)
+            # A job already over before this server started keeps the snapshot it has, or none:
+            # its config file may have been edited since the run.
+            self._persist_job(job, record_snapshot=was_active)
 
     def refresh(self, job: Job) -> None:
         with self.lock:

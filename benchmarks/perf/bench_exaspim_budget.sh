@@ -16,6 +16,10 @@ OUT=$HERE/results/$(hostname)
 mkdir -p "$OUT"
 cd "$BENCH" || exit 1
 NAME=$(grep -oE '^\s*name: .*' Resample.yml | head -1 | awk '{print $2}')
+if [ -z "$NAME" ]; then
+  echo "no 'name:' value in $BENCH/Resample.yml: refusing to clear Transforms/" >&2
+  exit 1
+fi
 for B in "$@"; do
   for REP in 1 2; do
     cp Resample.yml Resample_sweep.yml
