@@ -12,9 +12,18 @@ CASES = tuple(f"CASE_{index:03d}" for index in range(4))
 RUN = "CT_TWO_CLASSES"
 
 
+def _sitk():
+    try:
+        import SimpleITK as sitk
+    except ModuleNotFoundError as error:
+        raise ValueError("SimpleITK is not installed: pip install 'konfai[itk]'") from error
+    return sitk
+
+
 def prepare() -> None:
     import numpy as np
-    import SimpleITK as sitk
+
+    sitk = _sitk()
 
     root = Path("Dataset")
     if root.exists():
@@ -52,7 +61,8 @@ def checkpoint(directory: Path) -> Path:
 
 def verify() -> None:
     import numpy as np
-    import SimpleITK as sitk
+
+    sitk = _sitk()
 
     predictions = Path("Predictions") / RUN / "Dataset"
     found = {path.parent.name for path in predictions.glob("*/PRED.mha")}
@@ -107,7 +117,7 @@ def main() -> None:
         else:
             verify()
     except (ValueError, OSError, AssertionError, KeyError) as error:
-        parser.exit(1, f"Verification failed: {error}\n")
+        parser.exit(1, f"{args.command} failed: {error}\n")
 
 
 if __name__ == "__main__":

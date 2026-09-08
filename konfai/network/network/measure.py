@@ -214,7 +214,10 @@ class Measure:
         def loss_mean(self, n: int) -> float:
             """The nan-mean of the last ``n`` minimized values (the loss the criterion returned, lower
             is better whatever it reports), of the whole history for ``n <= 0``."""
-            return float(np.nanmean(_tail(self._losses, n))) if n > 0 else self._mean_loss.mean()
+            if n <= 0:
+                return self._mean_loss.mean()
+            tail = list(_tail(self._losses, n))
+            return float(np.nanmean(tail)) if tail else float("nan")
 
         def weights_mean(self, n: int) -> float:
             return float(np.nanmean(_tail(self._weight, n))) if n > 0 else self._mean_weight.mean()
@@ -488,10 +491,12 @@ class Measure:
                 window = max(record._values.maxlen or 0, entry["window"] or len(entry["values"]), 1)
                 record._values = deque(entry["values"], maxlen=window)
                 record._weight = deque(entry["weights"], maxlen=window)
-                record._losses = deque(entry.get("losses", entry["values"]), maxlen=window)
+                # A history without minimized losses (written before they were kept) restores none:
+                # a reported value is not what the criterion minimizes.
+                record._losses = deque(entry.get("losses", ()), maxlen=window)
                 record._mean.total, record._mean.count = entry["mean"]
                 record._mean_weight.total, record._mean_weight.count = entry["mean_weight"]
-                record._mean_loss.total, record._mean_loss.count = entry.get("mean_loss", entry["mean"])
+                record._mean_loss.total, record._mean_loss.count = entry.get("mean_loss", (0.0, 0))
                 record._recorded = entry["recorded"]
                 record._unread.clear()
                 record.reset_loss()

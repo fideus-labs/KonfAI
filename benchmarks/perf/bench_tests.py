@@ -63,7 +63,7 @@ def run_pytest(target: list[str], *, pinned: bool, marker: str | None) -> dict[s
     failed = sorted({line.split()[1] for line in text.splitlines() if line.startswith("FAILED ")})
     summary = None
     for line in reversed(text.splitlines()):
-        if " in " in line and ("passed" in line or "failed" in line):
+        if " in " in line and any(word in line for word in ("passed", "failed", "skipped")):
             summary = line.strip("= ")
             break
     if summary is None:

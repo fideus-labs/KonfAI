@@ -18,6 +18,7 @@
 Network.load_state_dict, Measure (loss records, backward, scheduler selection),
 and CriterionsLoader."""
 
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -482,6 +483,25 @@ def test_the_minimized_value_of_a_loss_is_what_selects_a_checkpoint() -> None:
         "CE": (1.0, pytest.approx(0.2), pytest.approx(0.2)),
     }
     assert sum(measure.get_last_losses(0).values()) == pytest.approx(0.3)
+
+
+def test_a_history_without_minimized_losses_restores_none() -> None:
+    # A checkpoint written before the minimized losses were kept has only the reported values, which
+    # are not what a Dice minimizes: the selection starts from the epochs after the resume.
+    dice = Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False)
+    dice.add(1.0, (torch.tensor(0.1), 0.9))
+    measure = _measure_of(dice)
+    assert measure.get_last_losses() == {"Dice": pytest.approx(0.1)}
+    state = measure.checkpoint_state()
+    for entry in state["records"][0].values():
+        del entry["losses"], entry["mean_loss"]
+
+    resumed = _measure_of(Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False))
+    resumed.load_checkpoint_state(state)
+
+    assert resumed.get_last_values() == {"Dice": pytest.approx(0.9)}
+    assert all(math.isnan(loss) for loss in resumed.get_last_losses().values())
+    assert math.isnan(sum(resumed.get_last_losses(0).values()))
 
 
 def _measure_of(*records: Measure.Loss) -> Measure:

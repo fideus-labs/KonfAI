@@ -481,6 +481,17 @@ def test_declared_support_files_land_in_the_bundle_and_the_manifest_lists_them(t
     assert (bundle / "assets" / "table.csv").is_file()
 
 
+def test_a_managed_helper_file_can_become_a_support_directory(tmp_path):
+    root = _support_workspace(tmp_path)
+    (root / "helper.py").write_text("SCALE = 1\n")
+
+    bundle = _assemble_with_support(root, {"helpers": "helper.py"})
+    assert (bundle / "helpers").read_text() == "SCALE = 1\n"
+
+    _assemble_with_support(root, {"helpers": "helpers"})
+    assert (bundle / "helpers" / "util.py").read_text() == "SCALE = 2\n"
+
+
 @pytest.mark.parametrize(
     "support_files, support_root, message",
     [
