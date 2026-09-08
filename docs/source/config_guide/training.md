@@ -52,53 +52,26 @@ the seed yourself. A save on an exceptional exit is named `crash_<date>.pt` and
 sits outside the `save_checkpoint_mode` pruning: never a contender for best,
 and yours to delete.
 
-New checkpoints distinguish completed epochs from intermediate snapshots using
-`resume.version: 1` and `resume.kind`. An eligible completed epoch stores
-`resume.next_epoch`: resuming a checkpoint written after epoch 2 starts epoch 3,
-without replaying epoch 2 or adding an initial validation pass. The optimizer,
-scheduler/scaler, update counters, EMA and early-stopping state are restored.
-Each rank's Python, NumPy and PyTorch generator states are restored after startup;
-CUDA generator states are included for GPU training.
-The bounded metric windows and running totals/counts are also restored per rank,
-including the historical mean read by `ReduceLROnPlateau`. Criterion-weight
-schedules shipped with KonfAI (`Constant`, `CosineAnnealing`) use the restored
-iteration counter; custom stateful criteria/schedules need their own state contract.
-
-With both `save_checkpoint_mode: BEST` and `ALL`, a separate `resume_latest.pt`
-keeps the latest eligible epoch boundary:
+A checkpoint written at the end of an epoch whose optimizer windows are all
+closed carries a continuation cursor: RESUME from it starts the next epoch with
+the optimizer, schedulers, scaler, EMA, early-stopping state, the metric
+windows and each rank's Python, NumPy, torch and CUDA generators restored, and
+runs no initial validation. The latest such checkpoint is also kept as
+`resume_latest.pt` in both `BEST` and `ALL` modes (in `BEST` it shares its
+storage with the dated file when they are the same epoch):
 
 ```bash
 konfai RESUME -y --config Config.yml \
   --model Checkpoints/SEG_BASELINE/resume_latest.pt
 ```
 
-In `BEST`, the best scored model remains the dated `.pt` file. It can refer to a
-different epoch from `resume_latest.pt`. These files share storage while they
-contain the same checkpoint; otherwise, plan for up to two checkpoints of disk
-space. `ALL` retains its dated checkpoints, including completed epochs even when
-the validation interval does not land on the final batch. `it_validation` still
-controls scored checkpoints within the epoch.
-
-Intermediate saves and crash saves contain model weights for prediction, but
-new-format `RESUME` refuses them because sample positions and pending gradients
-are not serialized. An epoch is eligible only when **every optimizer's gradient
-accumulation window has closed**. If an epoch ends with pending gradients, training
-continues with those gradients into the next epoch and emits a warning; it adds
-no optimizer step and retains the previous `resume_latest.pt`. For example,
-3 batches per epoch with `nb_batch_per_step: 2` produce eligible boundaries after
-epochs 2, 4, and so on. A run stopped before its first eligible boundary has no
-new-format continuation checkpoint. Choose a sufficient epoch count or a batch
-count/cadence that closes the windows. Checkpoints without the versioned cursor
-keep the historical behavior: their stored `epoch` is replayed, and exact
-continuation is not promised.
-
-Bit-for-bit continuation is tested on CPU with the same configuration and data,
-`num_workers: 0`, no augmented copies, and stochastic model operations using the
-saved global generators. The rank count and number of batches must match.
-DataLoader workers' RNG/cache state and augmentation draws/cache state are not
-serialized: those configurations still continue at `next_epoch`, with a warning
-that stochastic replay is not exact. Custom generators, changed data/configuration,
-and nondeterministic GPU kernels are also outside the exact-replay guarantee.
+A checkpoint saved mid-epoch, or at an epoch end that left an accumulation
+window open (`nb_batch_per_step` not dividing the batch count), holds weights
+for PREDICTION and is refused by RESUME. Continuation is bit for bit on CPU
+with `num_workers: 0` and no augmented copies, with the same rank count and
+batch count; DataLoader worker state and augmentation draws are not saved, so
+those runs continue at the next epoch with a warning that the replay is not
+exact. A checkpoint from before this format resumes at its stored `epoch`.
 
 You can also change the output directories:
 
@@ -126,7 +99,7 @@ konfai TRAIN -y --config Config.yml \
 | `ema_decay` | float | `0` | No | Enables exponential moving average tracking when greater than zero. |
 | `data_log` | list or null | `None` | No | TensorBoard logging directives for dataset groups or model outputs. |
 | `EarlyStopping` | mapping or null | `None` | No | Configures early stopping. |
-| `save_checkpoint_mode` | string | `BEST` | No | `BEST` keeps the best checkpoint, `ALL` keeps every saved checkpoint. |
+| `save_checkpoint_mode` | string | `BEST` | No | `BEST` keeps the checkpoint whose validation losses sum lowest (a Dice loss counts one minus its coefficient; a `ReduceLROnPlateau` schedule steps on the same sum), `ALL` keeps every save. |
 
 ## `Trainer.Model`
 

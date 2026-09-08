@@ -15,8 +15,10 @@ you are using to run the CLI.
 Reinstall with the exact interpreter you plan to use:
 
 ```bash
-python -m pip install -e .
+python -m pip install "konfai[imaging]"
 ```
+
+`-e ".[imaging]"` is the editable install from a checkout.
 
 ### `konfai-apps` or `konfai-apps-server` is missing
 
@@ -26,10 +28,10 @@ Both come from the standalone `konfai-apps` package:
 python -m pip install konfai-apps
 ```
 
-`konfai-cluster` is **not** in this category: it ships with the core package
-unconditionally, so it can never be missing. The `cluster` extra adds `submitit`,
-which is imported lazily at submission time: install `konfai[cluster]` if
-`konfai-cluster` fails when it submits, not because the command is absent.
+`konfai-cluster` ships with the core package. If its command is missing, check
+the active environment and its scripts directory on PATH. The `cluster` extra
+adds `submitit`, which is imported at submission time: install `konfai[cluster]`
+when submission reports that dependency missing.
 
 ### GPU works in Python but not in KonfAI
 

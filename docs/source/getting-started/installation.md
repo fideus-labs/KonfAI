@@ -18,12 +18,13 @@ python -c "import konfai; print(konfai.__version__)"
 konfai --help
 ```
 
-The shipped examples do not travel in the wheel, so run them from a checkout:
+The examples do not travel in the wheel. To install a checkout as a wheel and
+run its examples:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
-python -m pip install -e ".[imaging]"
+python -m pip install ".[imaging]"
 ```
 
 ## The extras
@@ -64,20 +65,16 @@ Python API under `konfai_apps`. Check them with `konfai-apps --help` and
 package itself; the `cluster` extra only adds `submitit`, which actual SLURM
 submission needs.
 
-Installing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
-`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a
-checkout** needs all three from that same checkout:
+When developing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
+`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`), install the
+three packages from the same checkout to exercise your local changes:
 
 ```bash
 python -m pip install -e . -e konfai-apps -e apps/impact_seg
 ```
 
-Each bundle pins `konfai==` and `konfai-apps==` at its own `setuptools_scm`
-version, and between release tags that version exists nowhere on PyPI. Install
-the app alone from a checkout and pip fails with *"Could not find a version that
-satisfies the requirement konfai==1.7.1.devNN"*. From PyPI
-(`pip install impact-seg-konfai`) it just works: a released bundle pins a
-released `konfai-apps`.
+At a release tag each bundle pins `konfai==` and `konfai-apps==` to that
+release; from a working tree the pin accepts the closest release or newer.
 
 ## Pixi
 
@@ -124,7 +121,8 @@ first, then KonfAI. For containers, see [Docker](#docker) below.
 
 - **`ModuleNotFoundError` after installing**: the install landed in a different
   environment than the one you are running. Reinstall with the same interpreter,
-  `python -m pip install -e .`.
+  `python -m pip install "konfai[imaging]"` (`-e ".[imaging]"` from a
+  checkout).
 - **PyTorch sees your GPU but KonfAI does not**: KonfAI goes through PyTorch
   device discovery and `CUDA_VISIBLE_DEVICES`. Check both with
   `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"`
@@ -143,5 +141,6 @@ The `docker run` examples above mount the current directory as `/workspace`:
 run them from the directory that contains your configs, data, and checkpoints.
 {doc}`../reference/cli` lists the flags used in the container commands.
 
-Next: {doc}`../quickstart` runs a real train, predict and evaluate loop in about
-seven minutes. {doc}`../reference/cli` lists every command and flag.
+Next: {doc}`../quickstart` trains, predicts and evaluates four synthetic CT
+volumes on CPU, then verifies the outputs. {doc}`../reference/cli` lists every
+command and flag.

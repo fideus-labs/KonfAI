@@ -466,12 +466,13 @@ whole-volume path and see exactly the tensor the foreign transform expects. Add 
 
 Two traps:
 
-- **A random per-voxel augmentation is not `POINTWISE`.** The kind is about the
-  voxel's position, not the arithmetic's shape. A field drawn per call is a
-  different field on every call, so overlapping patches sample unrelated fields
+- **A random per-voxel augmentation is `POINTWISE` only if its draw is a
+  function of the voxel's position.** The built-in `Noise` hashes a per-copy
+  seed with the absolute voxel position, so two reads of the same patch and
+  two overlapping patches see the same field. A field drawn per call is a
+  different field on every call: overlapping patches sample unrelated fields
   and the overlap blend suppresses the variance the augmentation exists to add.
-  The built-in `Noise` declares `WHOLE_VOLUME` for this reason. Declared
-  `POINTWISE`, two reads of the same patch return different values.
+  Such a draw declares `WHOLE_VOLUME`.
 - **Wrap the array transform, not the dict one.** A MONAI `*d` transform takes a
   dict and pairs image and label through its `keys`. `__call__` is handed one
   tensor and returns one tensor, so there is no dict for `keys` to select from.

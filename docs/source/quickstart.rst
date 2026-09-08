@@ -1,124 +1,121 @@
 Quickstart
 ==========
 
-In about seven minutes you will train a segmentation model on real pelvis CT
-scans, predict on them, and get a Dice score back. Everything runs from three
-YAML files that ship with the repository. You will not write a line of Python.
+Train, predict and evaluate a two-class segmentation on four tiny synthetic CT
+volumes. This first run uses one CPU, downloads no dataset and checks the files
+it produces. The labels are **0 = background, 1 = foreground**.
 
-If you would rather watch it happen cell by cell, open
-``examples/Segmentation/Segmentation_demo.ipynb``, or its Colab badge, and run
-everything. Same run, same result.
+Choose :doc:`usage/apps` to run an existing trained app,
+:doc:`usage/adopting-konfai` to bring your own model, or
+:doc:`examples/transform` to prepare a dataset without training.
 
-In a hurry, or without a GPU? :doc:`examples/transform` runs in about a minute on
-CPU and downloads nothing: it generates its own data, folds a cohort into one
-volume and draws augmented copies. It is dataset preparation, nothing to train
-first, so it is the shortest path to seeing KonfAI work.
+Install a wheel and copy the example
+------------------------------------
 
-Install
--------
-
-You need Python 3.11 or newer. Every command below works with ``--cpu 1``
-instead of ``--gpu 0``, but the training pass is a GPU-sized job: the five
-epochs take one to three minutes on a laptop GPU and about twenty minutes per
-epoch on a CPU. Without a GPU, start with :doc:`examples/transform` (one minute)
-and come back for the prediction and the evaluation, which run in seconds either way.
+Use Python 3.11 or newer. These commands use a POSIX shell; on Windows activate
+the virtual environment with ``.venv\Scripts\Activate.ps1`` and copy the
+directory with ``Copy-Item -Recurse``.
 
 .. code-block:: bash
 
    git clone https://github.com/fideus-labs/KonfAI.git
-   cd KonfAI
-   python -m pip install -e ".[imaging]"
+   python -m venv .venv
+   . .venv/bin/activate
+   python -m pip install "./KonfAI[itk]"
+   cp -r KonfAI/examples/Segmentation/TwoClasses konfai-first-run
+   cd konfai-first-run
+   konfai --version
 
-The examples live in the repository, which is why you clone it. For your own
-project later, ``pip install "konfai[imaging]"`` is enough. Keep the
-``[imaging]`` part: it brings SimpleITK, and without it the first data read
-fails.
+``pip`` installs a wheel built from that checkout, so the example and the
+package are the same revision. ``[itk]`` is the reader for the example's
+``.mha`` images.
 
-Check it worked:
+For a published installation in your own project, use
+``python -m pip install "konfai[itk]"``; if you copy examples from Git, select
+the release tag matching the installed version. See
+:doc:`getting-started/installation` for other readers and GPU setup.
 
-.. code-block:: bash
-
-   konfai --help
-
-Get the data
-------------
-
-Five pelvis CT cases with their reference segmentation, about 114 MB.
-
-.. code-block:: bash
-
-   cd examples/Segmentation
-   python -m pip install -U "huggingface_hub[cli]"
-   hf download VBoussot/konfai-demo \
-     --repo-type dataset \
-     --include "Segmentation/**" \
-     --local-dir Dataset
-   mv Dataset/Segmentation/* Dataset/
-   rmdir Dataset/Segmentation
-   rm -rf Dataset/.cache
-
-You should end up with one folder per case, each holding ``CT.mha`` and
-``SEG.mha``. ``CT`` is what the model reads, ``SEG`` is what it has to
-reproduce.
-
-Stay in this directory for the rest of the page. KonfAI resolves paths from
-where you launch it.
-
-Train, predict, evaluate
-------------------------
-
-Three commands, one config file each.
+Prepare four cases
+------------------
 
 .. code-block:: bash
 
-   konfai TRAIN      -y --gpu 0 --config Config.yml
-   konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/*.pt
-   konfai EVALUATION -y          --config Evaluation.yml
+   python quickstart.py prepare
 
-Training writes ``Checkpoints/SEG_BASELINE/`` and ``Statistics/SEG_BASELINE/``.
-Prediction writes ``Predictions/SEG_BASELINE/``. Evaluation writes
-``Evaluations/SEG_BASELINE/Metric_TRAIN.json``. If those folders appear, your
-install, your data and the whole pipeline agree with each other.
+This creates ``Dataset/CASE_000`` through ``CASE_003``, each containing
+``CT.mha`` and ``SEG.mha``. The images are 32 × 32 × 4 voxels with non-unit
+spacing and a rotated direction matrix, so the final check also exercises
+physical geometry. ``CASE_003`` is held out during training.
 
-The checkpoint is named after the moment it was written, so there is no fixed
-filename to type; the glob picks it up. Pass several checkpoints to ``--models``
-and they run as an ensemble.
+The three YAML files are short and complete enough to adapt:
 
-.. warning::
+* ``Config.yml``: a 2D UNet from the installed catalog, two output channels,
+  cross entropy and foreground Dice losses, twenty epochs (about seven seconds
+  on one CPU core).
+* ``Prediction.yml``: the same model parameters and CT normalization, with
+  the ``Argmax`` head written as the label image ``PRED.mha``.
+* ``Evaluation.yml``: ``PRED`` against ``SEG``, foreground label ``[1]``.
 
-   A run rewrites the config file you point it at, filling in every default it
-   resolved. That is how a run stays reproducible, but it means your YAML will
-   show a git diff afterwards. Work on a copy if you want the shipped template
-   untouched.
+Train, predict and evaluate
+---------------------------
 
-Look at what you got
---------------------
+Keep this directory as your working directory. One OpenMP thread is enough for
+volumes this small.
 
-Open ``Metric_TRAIN.json`` for the scores, and
-``Predictions/SEG_BASELINE/Dataset/`` for the segmentations themselves. The
-config KonfAI copied next to them is the exact recipe that produced them.
+.. code-block:: bash
 
-The score will be low: five epochs prove the pipeline works, they do not train a
-model. Raise ``epochs`` in ``Config.yml`` and run again.
+   export OMP_NUM_THREADS=1
+   konfai TRAIN -y --cpu 1 --config Config.yml
+   python quickstart.py checkpoint
+   konfai PREDICTION -y --cpu 1 --config Prediction.yml --models "$(python quickstart.py checkpoint)"
+   konfai EVALUATION -y --cpu 1 --config Evaluation.yml
+   python quickstart.py verify
 
-When something goes wrong
--------------------------
+On PowerShell, set ``$env:OMP_NUM_THREADS = "1"`` instead of ``export``; the
+checkpoint subexpression also works there.
 
-Most first runs fail for one of five reasons.
+``save_checkpoint_mode: BEST`` keeps one dated model and ``quickstart.py
+checkpoint`` prints its filename. ``resume_latest.pt`` is a training
+continuation and ``crash_*.pt`` an exceptional save, not models to predict
+with; several ``--models`` paths run an ensemble.
 
-- ``--gpu`` refuses your device id: KonfAI checks it against
-  ``CUDA_VISIBLE_DEVICES``. Use ``--cpu 1``.
-- It asks before overwriting a previous run: add ``-y``.
-- It cannot find a group: every case folder needs ``CT.mha`` and ``SEG.mha``,
-  named exactly as ``groups_src`` says.
-- Evaluation finds no predictions: ``Prediction.yml`` and ``Evaluation.yml``
-  must carry the same ``train_name``.
-- A metric or output name is rejected: those names are module paths in the
-  model graph. Start from a shipped example before inventing your own.
+A run writes its resolved defaults back into the YAML files. For another fresh
+run, copy the example to a new directory.
 
-Where to go next
+Check the result
 ----------------
 
-- :doc:`examples/index` to adapt one of the shipped workflows to your own data.
-- :doc:`config_guide/index` for what every key in the three YAML files does.
-- :doc:`config_guide/index` to understand the machinery you just ran.
+The final command fails unless all four predictions exist, their voxel sizes,
+spacing, origin and direction match both CT and SEG, their labels are finite
+0/1 values, and the four reported Dice values match a recalculation from the
+written segmentations. A successful report includes ``"verified_cases": 4``
+and ``"geometry": "matches CT and SEG"``, followed by the four actual Dice
+values. Inspect ``Predictions/CT_TWO_CLASSES/Dataset/`` and
+``Evaluations/CT_TWO_CLASSES/Metric_TRAIN.json`` for the files.
+
+The evaluation includes the three training cases and the one held-out case.
+Twenty epochs on procedural shapes reach a Dice of about 0.98, the held-out
+case included. The check passes on any Dice that agrees with the written files:
+it verifies the workflow, not accuracy on medical images.
+
+Adapt it to your CT and labels
+------------------------------
+
+Keep one case directory per CT/SEG pair. For two classes, map your target
+structure to ``1`` and background to ``0``. Then change:
+
+* ``dataset_filenames`` in all three configs and the prediction path in
+  ``Evaluation.yml`` when changing ``train_name``.
+* ``validation`` in ``Config.yml`` to your held-out case names.
+* CT preprocessing in **both** training and prediction. The synthetic recipe
+  divides intensities by 300; choose normalization appropriate for your data.
+* Model parameters in **both** configs. A different class count also requires
+  matching training/evaluation ``Dice.labels``.
+* ``patch_transforms: None`` on every group and the two
+  ``*_reduction_transforms: None`` on the output: an absent key defaults to a
+  ``Normalize`` to ``[-1, 1]``.
+
+The verifier knows these four cases; for your dataset, give it your case
+names. :doc:`examples/segmentation` describes the larger
+41-class pelvis example and its notebook; :doc:`config_guide/index` explains
+the configuration engine.

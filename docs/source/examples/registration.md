@@ -113,12 +113,13 @@ Statistics/REG_BASELINE/
 
 ### 2. Materialise the registered images
 
-Checkpoints are named after the moment they were written, and this example keeps
-only the best one, so a glob resolves to exactly one file:
+`SELECTED_MODEL.pt` is the dated file `BEST` kept under
+`Checkpoints/REG_BASELINE/`; `resume_latest.pt` is a training continuation, not
+a model to predict with.
 
 ```bash
 konfai PREDICTION -y --gpu 0 --config Prediction.yml \
-  --models Checkpoints/REG_BASELINE/*.pt
+  --models Checkpoints/REG_BASELINE/SELECTED_MODEL.pt
 ```
 
 For every case, prediction saves `MOVED.mha` under

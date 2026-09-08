@@ -134,8 +134,11 @@ there:
 Run a single test file:
 
 ```bash
-pixi run test -- tests/unit/test_config.py -v
+OMP_NUM_THREADS=1 pixi run --environment dev python -m pytest tests/unit/test_config.py -v
 ```
+
+`pixi run test` runs the whole suite; a single file goes through pytest
+directly.
 
 ### What CI runs
 

@@ -211,6 +211,6 @@ plane at a time.
 ## Next steps
 
 - {doc}`../reference/components/transforms`: every transform and argument
-- {doc}`../reference/components/transforms`: every augmentation and lifecycle detail
+- [Augmentations](../reference/components/transforms.md#augmentations): every augmentation and lifecycle detail
 - {doc}`segmentation`: use preprocessing and augmentation in a complete task
 - {doc}`../usage/apps`: reproduce registration, evaluation, uncertainty, and Slicer delivery

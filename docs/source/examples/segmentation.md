@@ -18,5 +18,5 @@ Dice labels together.
 
 Next steps:
 
-- {doc}`../quickstart`: this same example, walked step by step, with a success signal after each phase
+- {doc}`../quickstart`: a smaller two-class CPU example, with synthetic data and output verification
 - {doc}`../config_guide/training`: reference for the training-side configuration keys

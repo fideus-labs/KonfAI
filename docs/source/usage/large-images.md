@@ -182,9 +182,11 @@ compare.
 
 ## Patch streaming
 
-**KonfAI works out of core.** A case never has to fit in RAM: each patch's source
-region is read straight from the file, and the result is written slab by slab as
-it completes. Neither the input nor the output is ever held whole. A 16 GiB
+**A streamable chain works out of core.** A case never has to fit in RAM when
+every stage streams: each patch's source region is read straight from the file,
+and the result is written slab by slab as it completes. Neither the input nor the
+output is ever held whole. A stage that cannot stream takes the whole-volume
+path described below. A 16 GiB
 uncompressed volume trains at a peak of **0.46 GiB of host RAM**, stable across
 epochs, with VRAM equal to one batch. The bounded-memory claim is reproducible
 with one command, `python benchmarks/bench_streaming.py --gib 16 --budget 1`:
