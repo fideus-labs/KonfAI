@@ -62,13 +62,13 @@ Run tasks with `pixi run <task>`:
 
 | Task | Command | Description |
 | --- | --- | --- |
-| `test` | `pytest -q tests/` | Run the full test suite (about 6 min) |
-| `test-fast` | `pytest -q -m "not slow and not integration" tests/` | The iteration loop: skips the slow oracle and integration tests (about 1 min 40) |
+| `test` | `pytest -q -n auto --dist loadfile tests/` with `OMP_NUM_THREADS=1` | Run the full test suite (about 3 min on 24 cores; one torch thread per worker) |
+| `test-fast` | `pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/` with `OMP_NUM_THREADS=1` | The iteration loop: skips the slow oracle and integration tests (about 25 s on 24 cores) |
 | `test-cov` | `pytest --cov=konfai tests/` | Run tests with coverage report |
 | `lint` | `ruff check konfai konfai-apps/konfai_apps` | Lint the source tree |
 | `format` | `ruff format konfai konfai-apps/konfai_apps` | Auto-format source files |
 | `format-check` | `ruff format --check ...` | Check formatting without modifying files |
-| `typecheck` | `mypy konfai --ignore-missing-imports` | Static type checking |
+| `typecheck` | `python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio` | Static type checking of the four packages; the pre-commit hook and the CI `typecheck` job run the same command |
 | `build` | `python -m build` | Build sdist and wheel |
 | `test-apps` | `pytest -q konfai-apps/tests` | Run the konfai-apps test suite |
 | `check` | lint + format-check + test + test-apps | Full pre-push gate; run it once before finishing any change (needs konfai-apps installed) |

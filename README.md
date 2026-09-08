@@ -157,8 +157,8 @@ pip install konfai                # core only (bring your own data reader)
 ```
 
 `[imaging]` pulls SimpleITK / h5py / pydicom / zarr, needed to read `.mha`,
-`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`smp`, `ssim`, `fid`,
-`lpips`, `export`, `cluster`, …) and a reproducible Pixi setup, see the
+`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`smp`, `ssim`, `lpips`,
+`export`, `cluster`, …) and a reproducible Pixi setup, see the
 [installation guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html).
 
 ---
@@ -224,6 +224,28 @@ plot of the result, run every cell of
 The full walkthrough (predict, evaluate, what to inspect, common first issues,
 notebook entry points) lives in the
 [**Quickstart**](https://konfai.readthedocs.io/en/latest/quickstart.html).
+
+### Bring your model (no YAML)
+
+A model you already have goes through the same engine in two calls, the
+patching, the overlap blending, the streamed writes and the run record included:
+
+```python
+import konfai
+from monai.networks.nets import UNet
+from konfai.data.transform import TensorCast
+from konfai.metric.measure import CrossEntropyLoss
+
+model = UNet(spatial_dims=2, in_channels=1, out_channels=41, channels=(32, 64, 128, 256), strides=(2, 2, 2))
+checkpoints = konfai.train_model(model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
+                                 patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]})
+konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
+                     checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
+```
+
+[`examples/BringYourModel/BringYourModel_demo.ipynb`](https://github.com/fideus-labs/KonfAI/blob/main/examples/BringYourModel/BringYourModel_demo.ipynb)
+runs it on the demo data; a MONAI Bundle imports the same way
+(`konfai.import_bundle`), see [**Adopt from PyTorch/MONAI**](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html).
 
 ---
 
@@ -345,7 +367,7 @@ for what is shipped vs. in-progress.
 - [Large images](https://konfai.readthedocs.io/en/latest/usage/large-images.html): regional reads, fallback, and tuning
 - [Adopt from PyTorch/MONAI](https://konfai.readthedocs.io/en/latest/usage/adopting-konfai.html): reuse and tool choice
 - [Component catalogue](https://konfai.readthedocs.io/en/latest/reference/components/index.html): everything you can configure
-- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html): runnable Segmentation, Synthesis & Registration workflows, plus five published-app demos
+- [Examples](https://konfai.readthedocs.io/en/latest/examples/index.html): runnable Segmentation, Synthesis & Registration workflows, a model of your own in ten lines, a public 2.4 GB OME-Zarr read where it lives, plus five published-app demos
 
 🐳 **Docker:** `vboussot/konfai`,
 [guide](https://konfai.readthedocs.io/en/latest/usage/docker.html).

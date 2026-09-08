@@ -17,8 +17,11 @@ first, so it is the shortest path to seeing KonfAI work.
 Install
 -------
 
-You need Python 3.11 or newer. A GPU makes it faster, and every command below
-works with ``--cpu 1`` instead of ``--gpu 0``.
+You need Python 3.11 or newer. Every command below works with ``--cpu 1``
+instead of ``--gpu 0``, but the training pass is a GPU-sized job: the five
+epochs take one to three minutes on a laptop GPU and about twenty minutes per
+epoch on a CPU. Without a GPU, start with :doc:`examples/transform` (one minute)
+and come back for the prediction and the evaluation, which run in seconds either way.
 
 .. code-block:: bash
 

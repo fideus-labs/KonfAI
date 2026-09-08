@@ -123,6 +123,16 @@ subtree using the parameter's **type annotation** to decide how to convert it:
 - a nested configurable class: instantiated recursively by re-entering
   `apply_config` on the nested subtree
 
+Scalar conversion also applies inside typed lists and dictionaries, including
+container alternatives of a union. For example, quoted `"false"` becomes
+`False` in `bool`, `list[bool]`, `dict[str, bool]`, and `list[bool] | str`.
+A union first preserves a matching value and its element types: `0.25` stays
+a float in `int | float`, and `["001"]` stays a string list in
+`list[int] | list[str]`. Invalid elements are reported with their key or index.
+String sentinels such as `auto` remain strings when the union permits them;
+`None` remains available for optional values. Explicit YAML values remain in
+the resolved record and bind the same way when read again.
+
 Because the parameter *names* are the YAML keys, configuration keys should use
 the exact constructor argument names (typically `snake_case`). A missing key
 falls back to the parameter default, or to a `default|...` marker when one is

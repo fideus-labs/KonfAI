@@ -148,8 +148,8 @@ The log holds the same plan in full, one line per chain and per reason.
 of it | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only
 estimate | output dtype/channels assumed float32 / source channels until the first slab
   CT -> CT_iso: 120 case(s) -- 100 STREAM, 18 LOAD, 2 WHOLE-VOLUME, 0 SKIP (output already written)
-    (18 case(s)) LOAD: fits the per-rank budget (~0.42 GiB vs 7.45 GiB); streaming would read
-    ~2.0x the source
+    (18 case(s)) LOAD: fits the per-rank budget (~0.42 GiB vs 7.45 GiB); its source serves no
+    bounded region read, so a sweep would decode it whole per region
     (2 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an
     earlier stage changes the values -- the stored volume's statistic is not this stage's input.
     worst fallback case ~= 3.10 GiB vs per-rank budget 7.45 GiB
@@ -167,13 +167,12 @@ The verdicts, and each one is a fact about *your* run:
 
 - **STREAM**: the case is read and written region by region. Memory is one
   slab, whatever the volume's size.
-- **LOAD**: the case *could* stream, fits the budget, and streaming would
-  re-read the source (a halo re-reads its overlap, a regrid pulls each slab's
-  window through its map, a compressed store decodes the whole volume per
-  slab). Loading reads it once; the line prints the predicted factor. A choice,
-  not a fallback: `on_fallback` has nothing to say about it. Streaming is a
-  memory strategy: it is chosen when the case does not fit, or when it costs
-  nothing.
+- **LOAD**: the case *could* stream and fits the budget, but its store serves
+  no bounded region read (a gzipped NIfTI decodes the whole volume for every
+  region), so a sweep would read it once per region. Loading reads it once. A
+  choice, not a fallback: `on_fallback` has nothing to say about it. A store
+  that serves regions (mha, h5, OME-Zarr) always streams: a halo's overlap or
+  a regrid's window costs reads, never the route.
 - **WHOLE-VOLUME**: the case cannot stream and is assembled in memory, then
   written. Always correct, never bounded. The line says which stage refused and
   why.
@@ -679,6 +678,22 @@ bare name resolves against `konfai.data.transform` first **before** the
 `Expand` marker and against `konfai.data.augmentation` first **after** it, so
 `Flip: {f_prob: [0.33, 0.33, 0.33]}` past the marker is the draw. To force the
 other one, spell it out: `konfai.data.transform:Flip`.
+
+A chain can also be written as a YAML list, one stage per item, and then a class may appear any
+number of times:
+
+```yaml
+transforms:
+  - Clip: {min_value: -1000.0, max_value: 1000.0}
+  - Clip: {min_value: -200.0, max_value: 400.0}
+  - Clip: {min_value: -100.0, max_value: 300.0}
+  - Write: {dataset: ./Out:mha}
+```
+
+The list binds in its order under occurrence keys (`Clip`, `Clip#2`, `Clip#3`), which is how the
+resolved config the run writes back spells it; the suffix is the stage's identity in the config,
+not part of the class it names, so `konfai.data.transform:Clip#2` resolves like `Clip`. The mapping
+form keeps its two spellings (bare and module-qualified) as before.
 ```
 
 `pattern` is a `str.format` template and **both** tokens are required: `{name}`

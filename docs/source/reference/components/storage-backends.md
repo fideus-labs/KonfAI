@@ -43,9 +43,12 @@ A `dataset_filenames` entry may name a URI instead of a path:
 ```yaml
 Dataset:
   dataset_filenames:
-    - s3://aind-open-data/exaSPIM_822174_..._processed_...:omezarr
+    - s3://aind-open-data/exaSPIM_822174_2026-04-28_12-29-55_processed_2026-07-09_03-49-09:omezarr
 ```
 
+That asset is public: `FSSPEC_S3_ANON=true` in the environment reads it without an AWS
+account. The root holds `<case>/<group>.ome.zarr`, here `fusion2halves/SPIM.ome.zarr`
+(513 × 1331 × 1775 uint16 at level 0, 256³ chunks, four levels; `pip install konfai[s3]`).
 KonfAI adds no configuration key for credentials, because fsspec already has one.
 It merges `FSSPEC_<PROTO>_<KEY>` from the environment and `~/.config/fsspec/*.json`
 into every filesystem it builds, and botocore reads the usual `AWS_*` variables

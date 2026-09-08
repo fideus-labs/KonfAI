@@ -146,7 +146,7 @@ wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
 | --- | --- | --- |
 | **SlicerKonfAI** | ✅ External GUI | A [3D Slicer](https://github.com/vboussot/SlicerKonfAI) client of the `konfai-apps` CLI/server, covered by API, CLI, and JSON contract tests in the Apps package. |
 | **SlicerImpactReg** | ✅ External GUI | A dedicated 3D Slicer client for the complete `impact-reg-konfai` registration orchestrator. |
-| **ONNX export → `konfai-rs`** | 🧪 Experimental | `konfai/export.py` produces ONNX + a manifest for a planned portable (native/WASM) inference engine. Python-API-only, single static-shape head, feed-forward models only. See {doc}`../reference/python-api`. |
+| **ONNX export → `konfai-rs`** | 🧪 Experimental | `konfai/export.py` produces ONNX + a manifest for the portable (native/WASM) inference engine; KonfAI Studio ships a build of that engine in its deployment pane (`studio/frontend/src/konfai-rs/`, provenance in the README beside it). Python-API-only, single static-shape head, feed-forward models only. See {doc}`../reference/python-api`. |
 
 ```{note}
 **Trust model.** Resolving a `konfai-apps` app copies and imports its `.py`

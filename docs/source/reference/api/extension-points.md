@@ -198,9 +198,12 @@ called once, before a case's first region, with the contexts `stream_region` wil
 then be handed in that order, and the stage declares the windows it will read to
 the dataset holding them (`Dataset.plan_region_reads`), so a store that caches
 decoded chunks evicts by next use rather than by recency. A sweep declares its
-blocks; the patch route declares the case's patches in the DataLoader's own order,
-on the process that reads them. A hint: neither what is read nor its values depend
-on it.
+blocks where their decomposition is fixed (a cubic block, or no budget to grow
+under); a sweep whose regions grow with what they hold declares nothing, since
+its second region already deviates from any order declared at the first. The
+patch route declares the case's patches in the DataLoader's own order, on the
+process that reads them. A hint: neither what is read nor its values depend on
+it.
 
 What a declaration costs you:
 

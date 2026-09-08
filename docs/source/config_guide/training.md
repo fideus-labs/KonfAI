@@ -44,13 +44,61 @@ konfai RESUME -y --config Config.yml \
   --model Checkpoints/SEG_BASELINE/2026_08_03_02_36_00.pt
 ```
 
-A run is reproducible by default: the seed every preparation draw comes from
+A run preserves its preparation seed: the seed every preparation draw comes from
 (the train/validation split first) is recorded in
 `Statistics/<train_name>/Seed.txt`, and RESUME of an unseeded run reads it
 back, so resuming never re-splits the cohort. Set `manual_seed` only to pick
 the seed yourself. A save on an exceptional exit is named `crash_<date>.pt` and
 sits outside the `save_checkpoint_mode` pruning: never a contender for best,
 and yours to delete.
+
+New checkpoints distinguish completed epochs from intermediate snapshots using
+`resume.version: 1` and `resume.kind`. An eligible completed epoch stores
+`resume.next_epoch`: resuming a checkpoint written after epoch 2 starts epoch 3,
+without replaying epoch 2 or adding an initial validation pass. The optimizer,
+scheduler/scaler, update counters, EMA and early-stopping state are restored.
+Each rank's Python, NumPy and PyTorch generator states are restored after startup;
+CUDA generator states are included for GPU training.
+The bounded metric windows and running totals/counts are also restored per rank,
+including the historical mean read by `ReduceLROnPlateau`. Criterion-weight
+schedules shipped with KonfAI (`Constant`, `CosineAnnealing`) use the restored
+iteration counter; custom stateful criteria/schedules need their own state contract.
+
+With both `save_checkpoint_mode: BEST` and `ALL`, a separate `resume_latest.pt`
+keeps the latest eligible epoch boundary:
+
+```bash
+konfai RESUME -y --config Config.yml \
+  --model Checkpoints/SEG_BASELINE/resume_latest.pt
+```
+
+In `BEST`, the best scored model remains the dated `.pt` file. It can refer to a
+different epoch from `resume_latest.pt`. These files share storage while they
+contain the same checkpoint; otherwise, plan for up to two checkpoints of disk
+space. `ALL` retains its dated checkpoints, including completed epochs even when
+the validation interval does not land on the final batch. `it_validation` still
+controls scored checkpoints within the epoch.
+
+Intermediate saves and crash saves contain model weights for prediction, but
+new-format `RESUME` refuses them because sample positions and pending gradients
+are not serialized. An epoch is eligible only when **every optimizer's gradient
+accumulation window has closed**. If an epoch ends with pending gradients, training
+continues with those gradients into the next epoch and emits a warning; it adds
+no optimizer step and retains the previous `resume_latest.pt`. For example,
+3 batches per epoch with `nb_batch_per_step: 2` produce eligible boundaries after
+epochs 2, 4, and so on. A run stopped before its first eligible boundary has no
+new-format continuation checkpoint. Choose a sufficient epoch count or a batch
+count/cadence that closes the windows. Checkpoints without the versioned cursor
+keep the historical behavior: their stored `epoch` is replayed, and exact
+continuation is not promised.
+
+Bit-for-bit continuation is tested on CPU with the same configuration and data,
+`num_workers: 0`, no augmented copies, and stochastic model operations using the
+saved global generators. The rank count and number of batches must match.
+DataLoader workers' RNG/cache state and augmentation draws/cache state are not
+serialized: those configurations still continue at `next_epoch`, with a warning
+that stochastic replay is not exact. Custom generators, changed data/configuration,
+and nondeterministic GPU kernels are also outside the exact-replay guarantee.
 
 You can also change the output directories:
 
@@ -67,12 +115,12 @@ konfai TRAIN -y --config Config.yml \
 | `Model` | mapping | `ModelLoader()` | Yes | Selects and configures the model graph. |
 | `Dataset` | mapping | `DataTrain()` | Yes | Defines training data loading, transforms, augmentation, and patching. |
 | `train_name` | string | `TRAIN_01` | No | Names the run and its output folders. |
-| `manual_seed` | int or null | `None` | No | Picks the seed. `None` still runs seeded: a fresh TRAIN draws one, records it in `Statistics/<train_name>/Seed.txt`, and RESUME reads it back. |
+| `manual_seed` | int or null | `None` | No | Seeds training generators and preparation. With `None`, TRAIN still records its preparation seed in `Statistics/<train_name>/Seed.txt` for RESUME's cohort split; this does not promise deterministic GPU training. |
 | `epochs` | int | `100` | No | Number of training epochs. |
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
 | `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |
-| `autocast` | bool | `false` | No | Enables AMP during training. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases, one RTX PRO 5000) an epoch runs 11.7 s against 27.0 s in fp32. |
-| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). cuDNN picks its kernels by layout: with `autocast` the shipped Segmentation example predicts 1.25x faster, and the 3D UNet above trains an epoch in 10.0 s against 11.7 s; the kernels chosen differ, so labels can move at boundaries (3199 of 58.4 million voxels in fp32 on that example). |
+| `autocast` | bool | `false` | No | Enables AMP during training. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases, one RTX PRO 5000) an epoch runs 11.7 s against 27.0 s in fp32. The shipped Segmentation example trains with it on, with `channels_last`: 17.0 ms per step against 38.2 in fp32 (`benchmarks/perf/bench_train_step.py`). On a small 3D toy (64 cubed, batch 4, 1.4 M parameters) autocast alone was 49 % slower than fp32 and the pair 14 % faster; on SynthRAD 2025's UNet++ (2.5D, five slices of 320 squared, batch 32, 26 M parameters) a step goes 852 ms in fp32, 521 with autocast alone, 741 with `channels_last` alone and 387 with both (2.2x); on CURVAS's ResidualEncoderUNet (3D, nnU-Net style, 102 M parameters, batch 2 of 128x160x160) autocast alone is 2.0x (1244 to 617 ms, 17.6 to 9.6 GB) and `channels_last` costs 20 to 26 % with or without it (1532 ms alone, 779 with both). Turn `autocast` on; `channels_last` depends on the model, so measure it on yours with `benchmarks/perf/bench_train_step.py --model-classpath`. |
+| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). cuDNN picks its kernels by layout: with `autocast` the shipped Segmentation example predicts 1.25x faster and the 3D UNet above trains an epoch in 10.0 s against 11.7 s, while CURVAS's ResidualEncoderUNet trains 26 % slower with it (see `autocast`), so measure before turning it on; the kernels chosen differ, so labels can move at boundaries (3199 of 58.4 million voxels in fp32 on that example). |
 | `gradient_checkpoints` | list or null | `None` | No | Activates gradient checkpointing on selected modules. |
 | `gpu_checkpoints` | list or null | `None` | No | Pins selected modules to dedicated GPUs. |
 | `ema_decay` | float | `0` | No | Enables exponential moving average tracking when greater than zero. |

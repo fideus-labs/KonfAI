@@ -77,6 +77,16 @@ pixi run --environment dev python docs/scripts/generate_scale_gallery.py \
 The generator only calls `get_infos()` and `read_data_slice()`, never
 `read_data()`.
 
+The same specimen family is public, without a download: the fused volume of
+specimen `822174` is
+`s3://aind-open-data/exaSPIM_822174_2026-04-28_12-29-55_processed_2026-07-09_03-49-09/fusion2halves/SPIM.ome.zarr`
+(513 × 1331 × 1775 uint16, 256³ chunks, four levels, CC BY 4.0). With
+`pip install konfai[s3]` and `FSSPEC_S3_ANON=true`, a `dataset_filenames` entry
+naming the asset (the parent of `fusion2halves/`) with the `:omezarr` suffix
+streams it region by region as case `fusion2halves`, group `SPIM`, and the
+{doc}`../examples/large-images` notebook reads one coarse level and one native
+window of it.
+
 ## Tune in this order
 
 1. `memory_budget` first: `auto` decides from the dataset's size, an explicit
@@ -88,7 +98,11 @@ The generator only calls `get_infos()` and `read_data_slice()`, never
    difference is the wait on reads (0.2 s to 42.6 s); the chain itself stays
    between 3.1 and 4.6 s. A budget pays where reading costs, so it pays most on
    a compressed, remote or cache-cold store, and least on a small dataset the
-   operating system already holds in its page cache.
+   operating system already holds in its page cache. The sweep spends it by
+   measurement: the first region is priced against half of the budget, and
+   each region that holds under a third of it doubles the next, up to eight chunk
+   rows, so the height settles on what the run actually holds rather than on a
+   prediction of it.
 2. `patch_size`: leave an axis at `0` and KonfAI sizes it, taking the whole
    volume when it fits and shrinking on OOM. Otherwise pin the largest size your
    model and context need.
