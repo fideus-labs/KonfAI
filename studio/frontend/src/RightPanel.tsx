@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import Viewer from "./Viewer";
+import { Component, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazyWithRetry } from "./lazy";
+
+// The viewer (NiiVue) loads when first shown, not with the shell.
+const Viewer = lazyWithRetry(() => import("./Viewer"));
 import type { JobStream, LiveStatus, Point, RunFeed, Series } from "./useJobStream";
 import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
@@ -217,6 +220,17 @@ function SampleRow({ session, base, type, label, steps, onOpen }: { session: str
   );
 }
 
+function LoadError({ label, error, onRetry }: { label: string; error: string; onRetry: () => void }) {
+  return (
+    <div className="feed-sub" role="alert">
+      Could not load {label}: {error}.{" "}
+      <button className="tb-link" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
 // Thumbnails of what the model is producing (TensorBoard image summaries). Click enlarges.
 function Samples({
   session,
@@ -234,12 +248,13 @@ function Samples({
     const id = window.setInterval(() => setTick((t) => t + 1), 12000); // konfai writes sample images mid-run: pick them up as they land
     return () => window.clearInterval(id);
   }, []);
-  const { data } = useJson<{ previews?: Preview[] }>(
+  const { data, error } = useJson<{ previews?: Preview[] }>(
     `/api/previews?session=${encodeURIComponent(session)}&base=${encodeURIComponent(base)}`,
     [session, base, refresh, tick],
   );
   const previews = data?.previews ?? [];
 
+  if (error) return <LoadError label="model samples" error={error} onRetry={() => setTick((t) => t + 1)} />;
   if (previews.length === 0) return null;
   // One card per phase (Training / Validation), each assembling its outputs as labelled rows (CT, MR,
   // Head.Tanh) with a step-history slider. The montage's own tag becomes the row label; phase the card.
@@ -297,9 +312,10 @@ function EvaluationView({
   onHasData?: (has: boolean) => void;
   onOpenCase?: (run: string, caseName: string) => void;
 }) {
-  const { data, loading } = useJson<{ runs?: EvalRun[] }>(
+  const [retry, setRetry] = useState(0);
+  const { data, loading, error } = useJson<{ runs?: EvalRun[] }>(
     `/api/evaluations?session=${encodeURIComponent(session)}`,
-    [session, refresh],
+    [session, refresh, retry],
   );
   const runs: EvalRun[] = data?.runs ?? [];
   const loaded = !loading;
@@ -308,6 +324,7 @@ function EvaluationView({
     onHasData?.((data.runs ?? []).length > 0);
   }, [loading, data, onHasData]);
 
+  if (error) return <LoadError label="evaluation scores" error={error} onRetry={() => setRetry((n) => n + 1)} />;
   if (runs.length === 0) {
     if (hideWhenEmpty || !loaded) return null;
     return <div className="empty">no evaluation yet: run an evaluation and its scores will appear here.</div>;
@@ -535,7 +552,12 @@ function ExperimentView({
   const [note, setNote] = useState("");
   const [treeKey, setTreeKey] = useState(0);
   const [showVolume, setShowVolume] = useState(false);
+  const [viewerMounted, setViewerMounted] = useState(false);
   const [compareMode, setCompareMode] = useState(false); // when on, a tree volume fills the second pane
+  const viewerRequested = showVolume && visible !== false;
+  useEffect(() => {
+    if (viewerRequested) setViewerMounted(true);
+  }, [viewerRequested]);
 
   // The chat can ask for a comparison ("show me the sCT next to the real CT"): a second volume arriving
   // opens the compare pane by itself, rather than being loaded into a view nobody switched on.
@@ -748,20 +770,24 @@ function ExperimentView({
           )}
         </div>
         <div className="cfg-content">
-          {/* NiiVue stays mounted so it keeps its loaded volume across selections. */}
-          <div className={showVolume ? "exp-viewer" : "exp-viewer hidden"}>
-            <Viewer
-              path={volumePath}
-              onPathChange={onVolumePathChange}
-              comparePath={comparePath}
-              onComparePathChange={onComparePathChange}
-              compareMode={compareMode}
-              onCompareModeChange={(on) => {
-                setCompareMode(on);
-                if (!on) onComparePathChange?.(""); // leaving compare drops the second volume
-              }}
-            />
-          </div>
+          {/* Load NiiVue on the first visible volume request, then keep it across selections. */}
+          {(viewerRequested || viewerMounted) && (
+            <div className={showVolume ? "exp-viewer" : "exp-viewer hidden"}>
+              <Suspense fallback={<div className="v-failed">Loading the viewer…</div>}>
+                <Viewer
+                  path={volumePath}
+                  onPathChange={onVolumePathChange}
+                  comparePath={comparePath}
+                  onComparePathChange={onComparePathChange}
+                  compareMode={compareMode}
+                  onCompareModeChange={(on) => {
+                    setCompareMode(on);
+                    if (!on) onComparePathChange?.(""); // leaving compare drops the second volume
+                  }}
+                />
+              </Suspense>
+            </div>
+          )}
           {!showVolume && doc && (
             <div className="cfg-edit">
               <textarea
@@ -1200,10 +1226,11 @@ function LbDiff({ session, runs }: { session: string; runs: string[] }) {
 function Leaderboard({ session }: { session: string }) {
   const [splits, setSplits] = useState<string[]>(["TRAIN"]);
   const [split, setSplit] = useState("TRAIN");
+  const [retry, setRetry] = useState(0);
 
-  const { data, loading } = useJson<{ leaderboards?: Record<string, LbRow[]>; available_splits?: string[] }>(
+  const { data, loading, error } = useJson<{ leaderboards?: Record<string, LbRow[]>; available_splits?: string[] }>(
     `/api/leaderboard?session=${encodeURIComponent(session)}&split=${encodeURIComponent(split)}`,
-    [session, split],
+    [session, split, retry],
   );
   const boards = data?.leaderboards ?? {};
   const loaded = !loading;
@@ -1227,7 +1254,9 @@ function Leaderboard({ session }: { session: string }) {
           </span>
         )}
       </div>
-      {!loaded && metrics.length === 0 ? (
+      {error ? (
+        <LoadError label="the leaderboard" error={error} onRetry={() => setRetry((n) => n + 1)} />
+      ) : !loaded && metrics.length === 0 ? (
         // The board's own shape, greyed: a skeleton promises what is coming where "Loading…" promises nothing.
         <div className="lb-grid" aria-hidden="true">
           {[0, 1].map((k) => (

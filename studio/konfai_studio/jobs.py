@@ -27,6 +27,11 @@ router = APIRouter()
 
 _TERMINAL_STATUS = {"done", "error", "killed", "cancelled"}
 _LOG_BACKFILL = 32_000  # bytes: on connect, replay only the recent tail of a large log, not its full history
+_RUNTIME_BACKFILL = 2_000_000  # bytes: a run's metric log is replayed from here, not from byte zero
+_TICK_BYTES = 262_144  # new log bytes per subscriber pass, shared between console and runtime feeds
+_FEED_BYTES = 32_768  # one busy run cannot consume the entire pass
+_MAX_LOG_LINE = 65_536  # retained characters, including an unterminated trailing line
+_TRUNCATED_LINE = "[log line truncated] "
 _HOST_KEYS = ("memory_gb", "memory_percent", "memory_gpu_gb", "memory_gpu_percent", "cpu_percent")
 _MTIME_LIVE_WINDOW = 8.0  # a run log written this recently reads as live when no job record claims it
 #: Lowercase substrings that mark a ``[KonfAI]`` console line as routine startup chatter. A denylist,
@@ -208,32 +213,39 @@ def _live_status(job: dict[str, Any]) -> str:
     return status
 
 
-def _tail_start(path: Path) -> int:
+def _tail_start(path: Path, backfill: int = _LOG_BACKFILL) -> int:
     """Byte offset to begin following a log at: near the end of an already-large file (so a mid-run
-    (re)connect replays only its recent tail), **aligned to the next line start** so the first emitted
-    line is never a mid-line fragment."""
+    (re)connect replays only its recent ``backfill`` bytes), **aligned to the next line start** so the
+    first emitted line is never a mid-line fragment."""
     if not path.is_file():
         return 0
     size = path.stat().st_size
-    if size <= _LOG_BACKFILL:
+    if size <= backfill:
         return 0
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        handle.seek(size - _LOG_BACKFILL)
-        handle.readline()  # discard the partial line the byte-seek landed inside
-        return handle.tell()
+    with path.open("rb") as handle:
+        handle.seek(size - backfill)
+        partial = handle.readline(_MAX_LOG_LINE)  # never allocate an arbitrarily long partial line
+        return handle.tell() if partial.endswith(b"\n") else size
 
 
-def _tail_lines(path: Path, pos: int, buf: str) -> tuple[list[str], int, str]:
-    """Complete new lines appended to ``path`` since byte ``pos``. ``buf`` carries an incomplete trailing
-    line between reads so a read landing mid-line never yields a fragment. Returns (lines, new pos, new
-    buf). A missing file yields nothing; a truncated/rotated file is clamped."""
+def _tail_lines(path: Path, pos: int, buf: str, limit: int = _TICK_BYTES) -> tuple[list[str], int, str]:
+    """Complete new lines appended to ``path`` since byte ``pos``, at most ``limit`` bytes of them per
+    call (the rest waits for the next pass). ``buf`` carries an incomplete trailing line between reads
+    so a read landing mid-line never yields a fragment. Oversized lines retain their tail with an
+    explicit truncation marker. Returns (lines, new pos, new buf). A truncated file restarts its tail."""
     if not path.is_file():
         return [], pos, buf
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        handle.seek(min(pos, path.stat().st_size))
-        buf += handle.read()
+    with path.open("rb") as handle:
+        if pos > os.fstat(handle.fileno()).st_size:
+            pos, buf = 0, ""
+        handle.seek(pos)
+        buf += handle.read(limit).decode("utf-8", errors="replace")
         pos = handle.tell()
     parts = buf.split("\n")
+    parts = [
+        part if len(part) <= _MAX_LOG_LINE else _TRUNCATED_LINE + part[-(_MAX_LOG_LINE - len(_TRUNCATED_LINE)) :]
+        for part in parts
+    ]
     return parts[:-1], pos, parts[-1]  # last element is the (possibly empty) incomplete remainder
 
 
@@ -476,6 +488,7 @@ async def live(session: str = Query("default")) -> StreamingResponse:
         feeds: dict[str, dict[str, Any]] = {}  # log-path -> {run, kind, path, pos, buf, step}: one per run, kept
         announced: dict[str, tuple[str, str]] = {}  # run key -> the (status, base) last emitted for it
         idle_sent = False
+        next_feed = 0
 
         def state_of(run: str, kind: str, status: str, base: str = "") -> list[str]:
             """One run, one place that says where it stands. A run's tab is created by the ``run`` event
@@ -515,6 +528,7 @@ async def live(session: str = Query("default")) -> StreamingResponse:
             return out
 
         while True:
+            remaining_bytes = _TICK_BYTES
             # A quiet experiment sends nothing for minutes, so silence cannot be told from a stream that
             # died, and one that dies is invisible: the page keeps showing the last thing it saw. A ping
             # gives the client something to miss, so it can reconnect on its own.
@@ -560,7 +574,9 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                         }
                     )
             if cpath is not None:
-                lines, cpos, cbuf = _tail_lines(cpath, cpos, cbuf)
+                old_pos = cpos
+                lines, cpos, cbuf = _tail_lines(cpath, cpos, cbuf, limit=_FEED_BYTES)
+                remaining_bytes -= cpos - old_pos if cpos >= old_pos else _FEED_BYTES
                 for line in lines:
                     stripped = line.lstrip()
                     if not stripped or stripped[0] == "#" or stripped.startswith("[konfai-mcp]"):
@@ -587,19 +603,38 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                     yield frame
 
             # Every run of the experiment is followed as its own feed and kept: launching a prediction
-            # adds a run, it never clears the training runs. A newly-seen log replays from 0 so its curves
-            # rebuild on connect.
-            for log, run_name, run_kind, status, base in runs:
+            # adds a run, it never clears the training runs. A newly-seen log replays its recent tail
+            # (_RUNTIME_BACKFILL) so its curves rebuild on connect; a run's full history is what its
+            # Statistics/TensorBoard artifacts hold, not what one subscriber re-reads from byte zero.
+            # Rotate the first reader, so a large history cannot starve later runs. Initial alignment
+            # reads are bounded separately by _MAX_LOG_LINE and only occur when a feed is admitted.
+            start = next_feed % len(runs) if runs else 0
+            for offset in range(len(runs)):
+                if remaining_bytes <= 0:
+                    break
+                index = (start + offset) % len(runs)
+                log, run_name, run_kind, status, base = runs[index]
+                next_feed = (index + 1) % len(runs)
                 feed_key = str(log)
                 if feed_key not in feeds:
-                    feeds[feed_key] = {"run": run_name, "kind": run_kind, "path": log, "pos": 0, "buf": "", "step": 0}
+                    feeds[feed_key] = {
+                        "run": run_name,
+                        "kind": run_kind,
+                        "path": log,
+                        "pos": _tail_start(log, _RUNTIME_BACKFILL),
+                        "buf": "",
+                        "step": 0,
+                    }
                 feed = feeds[feed_key]
                 # The log path is the run's identity; the name discovered beside it can change under us
                 # (a second run of the same app renames the first). Everything this feed emits carries the
                 # name it was created with, so its metrics and its outcome land on the same tab.
                 for frame in state_of(feed["run"], feed["kind"], status, base):
                     yield frame
-                lines, feed["pos"], feed["buf"] = _tail_lines(feed["path"], feed["pos"], feed["buf"])
+                limit = min(_FEED_BYTES, remaining_bytes)
+                old_pos = feed["pos"]
+                lines, feed["pos"], feed["buf"] = _tail_lines(feed["path"], old_pos, feed["buf"], limit=limit)
+                remaining_bytes -= feed["pos"] - old_pos if feed["pos"] >= old_pos else limit
                 for line in lines:
                     events, feed["step"] = _runtime_events(line, feed["run"], feed["kind"], feed["step"])
                     for event in events:
