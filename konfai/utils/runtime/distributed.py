@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from functools import wraps
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
 import torch
@@ -136,8 +136,10 @@ class DistributedObject(ABC):
         models: dict[str, "Network"],
         n: int,
         sync: bool = True,
-    ) -> dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]]:
-        data = {}
+    ) -> dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]]:
+        """Per network, its loss and metric tables: criterion -> (weight, reported value, minimized value),
+        averaged over the ranks."""
+        data: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
         for label, model in models.items():
             for name, network in model.get_networks().items():
                 if network.measure is not None:
@@ -147,20 +149,21 @@ class DistributedObject(ABC):
                     )
         # `sync=False` skips the cross-rank all_gather: prediction shards whole cases per rank with unequal
         # batch counts, so a per-batch collective would hang once the shortest shard stops calling it.
-        outputs = synchronize_data(world_size, gpu, data) if sync else [data]
-        result: dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]] = {}
+        outputs: list[Any] = synchronize_data(world_size, gpu, data) if sync else [data]
+        result: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
         if global_rank == 0:
             for output in outputs:
-                for k, v in output.items():
-                    for t in range(len(v)):
-                        for u, n in v[t].items():
-                            if k not in result:
-                                result[k] = ({}, {})
-                            if u not in result[k][t]:
-                                result[k][t][u] = (n[0], 0)  # type: ignore[index]
-                            result[k][t][u] = (
-                                result[k][t][u][0],
-                                result[k][t][u][1] + n[1] / world_size,  # type: ignore[index]
+                for k, tables in output.items():
+                    if k not in result:
+                        result[k] = ({}, {})
+                    for table, entries in zip(result[k], tables, strict=True):
+                        for u, entry in entries.items():
+                            triple = cast(tuple[float, float, float], entry)
+                            weight, reported, minimized = table.get(u, (triple[0], 0.0, 0.0))
+                            table[u] = (
+                                weight,
+                                reported + triple[1] / world_size,
+                                minimized + triple[2] / world_size,
                             )
         return result
 

@@ -378,7 +378,7 @@ class _Trainer:
         self._auto_patched = auto_patched
         #: The iteration of the last save: an exit at the same iteration has nothing new to record.
         self._saved_at_it = it
-        self._loss_keys: set[str] = set()
+        self._loss_score: dict[str, float] = {}
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
         self.data_log = DataLog.parse(data_log)
@@ -683,9 +683,7 @@ class _Trainer:
                             if isinstance(self.early_stopping, EarlyStopping) and self.early_stopping.monitor:
                                 score = self.early_stopping.get_score(loss)
                             else:
-                                score = self.early_stopping.get_score(
-                                    {key: loss[key] for key in self._loss_keys if key in loss}
-                                )
+                                score = self.early_stopping.get_score(self._loss_score)
                             stop = self.early_stopping(score)
 
                             if batch_index + 1 == len(self.dataloader_training):
@@ -1061,17 +1059,16 @@ class _Trainer:
                     )
 
         loss = {}
-        loss_keys: set[str] = set()
+        minimized: dict[str, float] = {}
         for name, network in self.model.module.get_networks().items():
             if network.measure is not None and name in measures:
-                losses = {k: v[1] for k, v in measures[name][0].items()}
-                loss_keys.update(losses)
-                loss.update(losses)
+                minimized.update({k: v[2] for k, v in measures[name][0].items()})
+                loss.update({k: v[1] for k, v in measures[name][0].items()})
                 loss.update({k: v[1] for k, v in measures[name][1].items()})
-        # Remember which keys are losses (always minimise) vs metrics (direction varies), so
-        # default checkpoint/early-stop selection scores on the losses only: summing a
-        # maximise-metric (e.g. Dice) into a minimised score would keep the worst model.
-        self._loss_keys = loss_keys
+        # The default selection scores the losses by what they minimized, not by what they report:
+        # a Dice loss reports the coefficient, so summing that with a cross entropy kept the epoch
+        # with the worst overlap. A metric's direction varies and only an explicit monitor reads it.
+        self._loss_score = minimized
         return loss
 
     @torch.no_grad()

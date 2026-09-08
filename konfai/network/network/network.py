@@ -361,10 +361,13 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                             )
 
                     if self._modulesArgs[name].isCheckpoint:
-                        out = checkpoint(
-                            module,
-                            *[branchs[i] for i in self._modulesArgs[name].in_branch],
-                            use_reentrant=False,
+                        out = cast(
+                            torch.Tensor,
+                            checkpoint(
+                                module,
+                                *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                use_reentrant=False,
+                            ),
                         )
                         for ob in self._modulesArgs[name].out_branch:
                             branchs[ob] = out
@@ -1294,7 +1297,8 @@ class Network(ModuleArgsDict, ABC):
             if _scheduler.__class__.__name__ == "ReduceLROnPlateau":
                 if self.measure:
                     plateau = cast(torch.optim.lr_scheduler.ReduceLROnPlateau, _scheduler)
-                    plateau.step(sum(self.measure.get_last_values(0).values()))
+                    # The minimized values, not the reported ones: a Dice loss reports the coefficient.
+                    plateau.step(sum(self.measure.get_last_losses(0).values()))
             else:
                 _scheduler.step()
 

@@ -883,12 +883,12 @@ def test_an_override_lr_wins_over_the_restored_scheduler() -> None:
 
 def test_the_amp_scaler_state_rides_the_checkpoint() -> None:
     net, _scheduler, ctx = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
-    net.scaler = torch.amp.GradScaler("cuda", enabled=True, init_scale=4096.0)
+    net.scaler = torch.amp.GradScaler("cpu", enabled=True, init_scale=4096.0)
     states = net.schedule_states()
     assert states["scaler"]["scale"] == 4096.0
 
     resumed, _s, _c = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
-    resumed.scaler = torch.amp.GradScaler("cuda", enabled=True)
+    resumed.scaler = torch.amp.GradScaler("cpu", enabled=True)
     resumed.load({**ctx["state_dict"], f"{resumed.get_name()}_schedulers_state_dict": states}, init=False)
     assert resumed.scaler.get_scale() == 4096.0
 
@@ -1081,3 +1081,37 @@ def test_latest_resume_copy_fallback_is_atomic_and_never_truncates_a_prior_link(
     assert old.read_bytes() == stale.read_bytes() == original
     assert _read_for_resume(latest).it == (1 if copy_fails else 2)
     assert not list(latest.parent.glob(".resume-*"))
+
+
+def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monkeypatch) -> None:
+    # A Dice loss reports the coefficient on the boards and minimizes one minus it. The default
+    # selection once summed the reported values, so a cross entropy of 0.2 plus a Dice of 0.9 read
+    # worse than 0.7 plus 0.3, and BEST kept the early epoch (a two-class CT: Dice 0 at prediction).
+    from types import SimpleNamespace
+
+    from konfai.utils.runtime import DistributedObject
+
+    class _Module(_DummyModelModule):
+        @staticmethod
+        def get_networks() -> dict[str, object]:
+            return {"Net": SimpleNamespace(measure=SimpleNamespace(set_window=lambda n: None), optimizer=None)}
+
+    model = _DummyModel()
+    model.module = _Module()
+    trainer = _build_trainer(tmp_path, monkeypatch, ["2026_01_01_00_00_00"], model=model)
+    trainer.tb = SimpleNamespace(add_scalars=lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        DistributedObject,
+        "get_measure",
+        staticmethod(
+            lambda *args, **kwargs: {
+                "Net": ({"CE": (1.0, 0.2, 0.2), "Dice": (1.0, 0.9, 0.1)}, {"MAE": (1.0, 5.0, 5.0)})
+            }
+        ),
+    )
+
+    reported = trainer._train_log({})
+
+    assert reported == {"CE": 0.2, "Dice": 0.9, "MAE": 5.0}  # what the boards and the description show
+    assert trainer._loss_score == {"CE": 0.2, "Dice": pytest.approx(0.1)}  # what selects the checkpoint
+    assert trainer.early_stopping.get_score(trainer._loss_score) == pytest.approx(0.3)

@@ -283,7 +283,7 @@ class _Predictor:
             # non-zero rank never enters a cross-rank collective the unequal shards would deadlock on.
             return
 
-        measures: dict[str, tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]] = {}
+        measures: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
         if self._has_runtime_measures:
             measures = DistributedObject.get_measure(
                 1,

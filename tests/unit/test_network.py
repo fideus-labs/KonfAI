@@ -451,8 +451,10 @@ def test_loss_add_summarises_dict_metric_payload() -> None:
     record.add(1.0, (torch.tensor([0.7]), {"1": 0.6, "2": 0.8, "3": float("nan")}))
 
     # The dict is summarised to a scalar (nan-mean of 0.6 and 0.8), and the logging mean is safe.
-    assert isinstance(record._unread[-1], float)
-    assert record._unread[-1] == pytest.approx(0.7)
+    reported, minimized = record._unread[-1]
+    assert isinstance(reported, float)
+    assert reported == pytest.approx(0.7)
+    assert minimized.item() == pytest.approx(0.7)
     assert _measure_of(record).get_last_values() == {"Dice": pytest.approx(0.7)}
 
 
@@ -460,7 +462,26 @@ def test_loss_add_keeps_plain_scalar_metric() -> None:
     # A regular (tensor, float) metric is unchanged.
     record = Measure.Loss("MSE", "out", "tgt", 0, is_loss=False, accumulation=False)
     record.add(1.0, (torch.tensor([0.5]), 0.5))
-    assert record._unread[-1] == pytest.approx(0.5)
+    assert record._unread[-1][0] == pytest.approx(0.5)
+
+
+def test_the_minimized_value_of_a_loss_is_what_selects_a_checkpoint() -> None:
+    # A Dice loss reports the coefficient (the board's number) and minimizes one minus it. The
+    # selection score once summed the reported value with a cross entropy, so a better overlap
+    # read as a worse score and BEST kept an early epoch.
+    dice = Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False)
+    entropy = Measure.Loss("CE", "out", "tgt", 0, is_loss=True, accumulation=False)
+    dice.add(1.0, (torch.tensor(0.1), 0.9))
+    entropy.add(1.0, torch.tensor(0.2))
+    measure = _measure_of(dice, entropy)
+
+    assert measure.get_last_values() == {"Dice": pytest.approx(0.9), "CE": pytest.approx(0.2)}
+    assert measure.get_last_losses() == {"Dice": pytest.approx(0.1), "CE": pytest.approx(0.2)}
+    assert measure.format_loss(True, 1) == {
+        "Dice": (1.0, pytest.approx(0.9), pytest.approx(0.1)),
+        "CE": (1.0, pytest.approx(0.2), pytest.approx(0.2)),
+    }
+    assert sum(measure.get_last_losses(0).values()) == pytest.approx(0.3)
 
 
 def _measure_of(*records: Measure.Loss) -> Measure:
@@ -475,8 +496,9 @@ def test_loss_add_does_not_read_a_loss_off_its_device() -> None:
     record = _loss_record()
     record.add(1.0, torch.tensor([3.0], requires_grad=True))
 
-    kept = record._unread[-1]
+    kept, minimized = record._unread[-1]
     assert isinstance(kept, torch.Tensor) and not kept.requires_grad
+    assert isinstance(minimized, torch.Tensor) and not minimized.requires_grad
     assert len(record._values) == 0 and record.recorded == 1
 
     assert _measure_of(record).get_last_values() == {"l": 3.0}
@@ -502,12 +524,12 @@ def test_measure_reads_every_unread_value_in_one_transfer(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch, "cat", counting_cat)
     measure = _measure_of(loss, metric)
 
-    assert measure.format_loss(True, 3) == {"l": (1.0, 1.0)}
-    assert transfers == [5]
+    assert measure.format_loss(True, 3) == {"l": (1.0, 1.0, 1.0)}
+    assert transfers == [11]  # five reported tensors and the six minimized ones, one transfer
     assert list(loss._values) == [0.0, 1.0, 2.0]
     assert list(metric._values) == [10.0, 11.5, 12.0]
     assert measure.get_last_values(3) == {"l": 1.0, "m": pytest.approx(33.5 / 3)}
-    assert transfers == [5]  # nothing was left unread: no second transfer
+    assert transfers == [11]  # nothing was left unread: no second transfer
 
 
 def test_whole_history_mean_is_a_running_mean_and_the_window_is_bounded() -> None:
@@ -525,7 +547,7 @@ def test_whole_history_mean_is_a_running_mean_and_the_window_is_bounded() -> Non
     assert measure.get_last_values(0) == {"l": pytest.approx(np.nanmean(values))}
     assert measure.get_last_weights(0) == {"l": 3.0}
     assert len(record._values) == 3 and len(record._weight) == 3 and record.recorded == 7
-    assert measure.format_loss(True, 2) == {"l": (5.5, 12.0)}
+    assert measure.format_loss(True, 2) == {"l": (5.5, 12.0, 12.0)}
     assert measure.format_loss(True, 8) == {}  # fewer than 8 recorded, exactly as before
 
 
