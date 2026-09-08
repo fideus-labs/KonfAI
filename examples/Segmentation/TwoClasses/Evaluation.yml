@@ -1,0 +1,26 @@
+Evaluator:
+  train_name: CT_TWO_CLASSES
+  metrics:
+    PRED:
+      targets_criterions:
+        SEG:
+          criterions_loader:
+            Dice:
+              labels: [1]
+  Dataset:
+    dataset_filenames:
+    - ./Dataset:a:mha
+    - ./Predictions/CT_TWO_CLASSES/Dataset:i:mha
+    groups_src:
+      PRED:
+        groups_dest:
+          PRED:
+            transforms:
+              TensorCast: {dtype: uint8, inverse: false}
+      SEG:
+        groups_dest:
+          SEG:
+            transforms:
+              TensorCast: {dtype: uint8, inverse: false}
+    validation: None  # Report all four cases together; CASE_003 was held out during TRAIN.
+    num_workers: 0
