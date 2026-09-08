@@ -432,7 +432,14 @@ def assemble_bundle(
 
     Validates that ``app.json`` has the required keys and that its ``models`` list (if
     present) matches the provided checkpoints; fills ``models`` from the checkpoints
-    otherwise. Returns the bundle directory.
+    otherwise. Two checkpoints (or two configs) that would land under one bundle filename are
+    refused before anything is written: a flat copy kept the last one and the manifest named both.
+
+    The export is assembled in a staging directory beside the bundle before its files are replaced. An
+    existing bundle keeps the files the export does not write (a user's notes, an icon), except the
+    checkpoints its previous ``app.json`` declared and the new export does not: those are the
+    previous export's, and left in place they were what the default inference picked up.
+    Returns the bundle directory.
     """
     metadata: dict[str, Any] = json.loads(Path(app_json).read_text())
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
@@ -440,28 +447,78 @@ def assemble_bundle(
         raise AppMetadataError(f"app.json is missing required keys: {', '.join(missing)}")
 
     checkpoint_names = [Path(c).name for c in checkpoints]
+    config_names = [Path(c).name for c in configs]
+    for kind, names in (("checkpoints", checkpoint_names), ("configs", config_names)):
+        colliding = sorted({item for item in names if names.count(item) > 1})
+        if colliding:
+            raise AppMetadataError(
+                f"Two {kind} would land under the same bundle filename {colliding} and overwrite each other. "
+                "Rename them (fold0_best.pt, fold1_best.pt) before packaging."
+            )
     declared = [str(m) for m in metadata.get("models", [])]
     if declared and sorted(declared) != sorted(checkpoint_names):
         raise AppMetadataError(
             f"app.json 'models' {declared} does not match the provided checkpoints {checkpoint_names}",
         )
-
-    bundle = Path(out_dir) / name
-    bundle.mkdir(parents=True, exist_ok=True)
-
     if not declared:
         metadata["models"] = checkpoint_names
-    (bundle / "app.json").write_text(json.dumps(metadata, indent=2))
 
-    for config in configs:
-        shutil.copy(config, bundle / Path(config).name)
-    for checkpoint in checkpoints:
-        shutil.copy(checkpoint, bundle / Path(checkpoint).name)
-    if model_py is not None:
-        shutil.copy(model_py, bundle / "Model.py")
-    if requirements is not None:
-        shutil.copy(requirements, bundle / "requirements.txt")
+    bundle = Path(out_dir) / name
+    staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        (staging / "app.json").write_text(json.dumps(metadata, indent=2))
+        for config in configs:
+            shutil.copy(config, staging / Path(config).name)
+        for checkpoint in checkpoints:
+            shutil.copy(checkpoint, staging / Path(checkpoint).name)
+        if model_py is not None:
+            shutil.copy(model_py, staging / "Model.py")
+        if requirements is not None:
+            shutil.copy(requirements, staging / "requirements.txt")
+        _replace_bundle(staging, bundle, metadata["models"])
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return bundle
+
+
+def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
+    """Move the staged export over ``bundle``: a fresh bundle is the staging directory renamed; an
+    existing one takes every staged file and loses the checkpoints its previous ``app.json``
+    declared that ``models`` no longer does."""
+    if not bundle.exists():
+        staging.rename(bundle)
+        return
+    previous: list[str] = []
+    try:
+        previous = [str(m) for m in json.loads((bundle / "app.json").read_text()).get("models", [])]
+    except (OSError, ValueError):
+        pass
+    obsolete: list[Path] = []
+    retained = {(bundle / name).resolve() for name in models}
+    for name in previous:
+        if name in models:
+            continue
+        target = bundle / name
+        if Path(name).is_absolute() or not target.resolve().is_relative_to(bundle.resolve()):
+            raise AppMetadataError(
+                f"Previous app.json declares checkpoint {name!r} outside the bundle; "
+                "correct its models list before replacing this export."
+            )
+        if target.resolve() in retained:
+            continue  # './model.pt' and 'model.pt' can name the same retained checkpoint.
+        if target.is_file():
+            obsolete.append(target)
+    for staged in staging.iterdir():
+        target = bundle / staged.name
+        if target.is_dir():
+            shutil.rmtree(target)
+        staged.replace(target)
+    staging.rmdir()
+    for target in obsolete:
+        target.unlink()
 
 
 def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
@@ -724,6 +781,7 @@ def export_portable_into_bundle(
             extra_manifest["blend"] = blend
 
         models: list[dict[str, Any]] = []
+        portable_assets: set[Path] = set()
         onnx_path = bundle / "model.onnx"
         for checkpoint in selected:
             model = ModelLoader(classpath).get_model(train=False)
@@ -760,6 +818,9 @@ def export_portable_into_bundle(
                 model_filename="model.onnx" if not ensemble else f"{fold_id}.onnx",
                 write_manifest=not ensemble,
             )
+            portable_assets.add(onnx_path)
+            if not ensemble:
+                portable_assets.add(bundle / "manifest.json")
             models.append({"id": fold_id, "manifest": manifest})
 
         # A config with an auxiliary mask group (a nested KonfAIInference model + a Mask on the output) is a
@@ -770,15 +831,17 @@ def export_portable_into_bundle(
                 name: {**_export_nested_model(bundle, name, g["inference"]), "ops": g["ops"]}
                 for name, g in aux_groups.items()
             }
+            portable_assets.update(bundle / f"{name}.onnx" for name in aux)
             program = _assemble_masked_tta_program(
                 models, _tta_passes(config, root), aux, _mask_specs(config, root), reduce=ensemble_reduction
             )
             program_path = bundle / "program.json"
             program_path.write_text(json.dumps(program, indent=2))
-            return program_path
+            portable_assets.add(program_path)
+            return _declare_portable_assets(bundle, program_path, portable_assets)
 
         if not ensemble:
-            return onnx_path
+            return _declare_portable_assets(bundle, onnx_path, portable_assets)
 
         program = assemble_program(
             models,
@@ -787,7 +850,8 @@ def export_portable_into_bundle(
         )
         program_path = bundle / "program.json"
         program_path.write_text(json.dumps(program, indent=2))
-        return program_path
+        portable_assets.add(program_path)
+        return _declare_portable_assets(bundle, program_path, portable_assets)
     finally:
         sys.path.remove(str(bundle))
         config_path.write_text(config_snapshot)
@@ -796,6 +860,26 @@ def export_portable_into_bundle(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _declare_portable_assets(bundle: Path, artifact: Path, produced: set[Path]) -> Path:
+    """Record in the bundle's ``app.json`` the files only the portable runtime consumes (the ONNX
+    models, the manifest and the program), so a native run does not copy them into its workspace
+    (``download_inference``). Only artifacts this export produced receive a role: a custom native
+    app can already depend on another ONNX file. The core exporter returns self-contained models
+    and removes their external-data sidecars. Returns ``artifact`` unchanged."""
+    metadata_path = bundle / "app.json"
+    if not metadata_path.exists():
+        return artifact
+    portable = {path.resolve().relative_to(bundle.resolve()).as_posix() for path in produced if path.is_file()}
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return artifact
+    declared = [str(name) for name in metadata.get("portable_assets", [])]
+    metadata["portable_assets"] = sorted(set(declared) | set(portable))
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+    return artifact
 
 
 def export_onnx_into_bundle(
