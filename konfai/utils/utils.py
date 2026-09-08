@@ -40,6 +40,9 @@ def env_flag(name: str, default: bool) -> bool:
     return value.lower() not in ("0", "false")
 
 
+_OCCURRENCE = re.compile(r"#\d+$")
+
+
 def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
     """Import the module a classpath names and return it with the name to take from it.
 
@@ -48,6 +51,9 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     from the kind's own package, and the dots between them lead there: ``Dice`` is that package's
     own, ``segmentation.UNet.UNet`` is under two of its subpackages.
     """
+    # A chain spelled as a list binds its stages under occurrence keys (`Clip`, `Clip#2`, `Clip#3`):
+    # the suffix is the stage's identity in the config, not part of the class it names.
+    classpath = classpath.rsplit("#", 1)[0] if _OCCURRENCE.search(classpath) else classpath
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])
         name = classpath.split(":")[-1]
@@ -294,6 +300,7 @@ def get_patch_slices_from_shape(
             "Both must have the same number of dimensions (e.g., 3D patch for 3D volume).",
         )
     slices: list[list[slice]] = []
+    overlap: np.ndarray | list[int]
     if overlap_tmp is None:
         if has_free_axis:
             # Free axes are new territory (no config predates them), so they take the modern default:

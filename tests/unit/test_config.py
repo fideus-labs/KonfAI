@@ -1166,3 +1166,130 @@ def test_a_shipped_config_resolves_to_the_same_bytes_under_the_block_as_per_cont
     per_context = _bind_shipped_config(relative, tmp_path / "per_context", False, monkeypatch)
     strict_block = _bind_shipped_config(relative, tmp_path / "strict_block", True, monkeypatch)
     assert strict_block == per_context
+
+
+class _Coerced:
+    def __init__(
+        self,
+        flag: bool | int = 0,
+        ratio: float | str = "auto",
+        flags: list[bool] = [],
+        count: int | None = None,
+        on: bool = False,
+    ) -> None:
+        self.flag, self.ratio, self.flags, self.count, self.on = flag, ratio, flags, count, on
+
+
+@pytest.mark.parametrize(
+    ("yaml", "expected"),
+    [
+        ("flag: 'false'", {"flag": False}),  # bool("false") once bound True through the union path
+        ("flag: 'true'", {"flag": True}),
+        ("flag: 3", {"flag": 3}),
+        ("flag: '3'", {"flag": 3}),
+        ("ratio: '1.5'", {"ratio": "1.5"}),  # a quoted number IS a str member's value: kept as given
+        ("ratio: 1.5", {"ratio": 1.5}),
+        ("ratio: auto", {"ratio": "auto"}),
+        ("flags: ['yes', 0, true]", {"flags": [True, False, True]}),
+        ("count: '7'", {"count": 7}),
+        ("count: None", {"count": None}),
+        ("on: 'off'", {"on": False}),
+    ],
+)
+def test_scalar_coercion_reads_the_same_on_every_binding_path(write_config, yaml: str, expected: dict) -> None:
+    """A quoted boolean, an integral string, a list element and a union member go through one
+    coercion: the plain path parsed ``"false"`` as False while the union path took ``bool("false")``."""
+    write_config(f"Root:\n  {yaml}\n")
+    bound = apply_config("Root")(_Coerced)()
+    for key, value in expected.items():
+        got = getattr(bound, key)
+        assert got == value and isinstance(got, type(value)) and isinstance(got, bool) is isinstance(value, bool)
+
+
+class _Engines:
+    def __init__(self, engines: dict[str, _Engine] = {}) -> None:
+        self.engines = engines
+
+
+def test_a_chain_spelled_as_a_list_binds_under_occurrence_keys(write_config) -> None:
+    """A mapping keys a chain by class name, so one class could appear at most twice (bare and
+    module-qualified). The list spelling has no such limit: each item binds under its name, a
+    repeated one under Name#2, Name#3, in the list's order, and the resolved tree holds that mapping."""
+    path = write_config("Root:\n  engines:\n    - _Engine: {rate: 1.0}\n    - _Engine: {rate: 2.0}\n    - _Engine\n")
+    bound = apply_config("Root")(_Engines)()
+    assert list(bound.engines) == ["_Engine", "_Engine#2", "_Engine#3"]
+    assert [engine.rate for engine in bound.engines.values()] == [1.0, 2.0, 0.5]
+    resolved = path.read_text(encoding="utf-8")
+    assert "_Engine#3:" in resolved and "- _Engine" not in resolved
+
+
+def test_a_list_item_that_is_not_one_stage_is_refused(write_config) -> None:
+    write_config("Root:\n  engines:\n    - _Engine: {rate: 1.0}\n      Other: {}\n")
+    with pytest.raises(ConfigError, match=r"Entry [01] of 'Root\.engines'"):
+        apply_config("Root")(_Engines)()
+
+
+def test_an_occurrence_suffix_is_dropped_when_the_class_is_resolved() -> None:
+    from konfai.utils.utils import get_module
+
+    module, name = get_module("Clip#3", "konfai.data.transform")
+    assert name == "Clip" and hasattr(module, "Clip")
+    module, name = get_module("konfai.data.transform:Clip#12", "konfai.data.augmentation")
+    assert name == "Clip" and module.__name__ == "konfai.data.transform"
+
+
+@pytest.mark.parametrize(
+    ("annotation", "literal", "expected"),
+    [
+        (dict[str, bool], "{enabled: 'false', other: yes}", {"enabled": False, "other": True}),
+        (list[bool] | str, "['false', 'on']", [False, True]),
+        (str | list[bool], "['false', 'on']", [False, True]),
+        (dict[str, bool] | str, "{enabled: 'false'}", {"enabled": False}),
+        (dict[str, list[bool]], "{flags: ['off', 'yes']}", {"flags": [False, True]}),
+        (dict[str, float | int], "{ratio: 0.25, count: 3}", {"ratio": 0.25, "count": 3}),
+        (list[int] | list[str], "['001', '2']", ["001", "2"]),
+        (list[int] | list[float], "[0.25, 1.5]", [0.25, 1.5]),
+        (list[bool | None], "['false', None, null]", [False, None, None]),
+        (dict[str, bool | None], "{enabled: 'false', other: None}", {"enabled": False, "other": None}),
+        (list[bool] | str, "auto", "auto"),
+    ],
+)
+def test_container_values_follow_scalar_coercion_and_preserve_union_types(
+    write_config, annotation: object, literal: str, expected: object
+) -> None:
+    def receive(value):
+        return value
+
+    receive.__annotations__["value"] = annotation
+    path = write_config(f"Root:\n  value: {literal}\n")
+    before = _load_tree(path)
+    value = apply_config("Root")(receive)()
+    assert value == expected
+    if isinstance(value, dict) and "count" in value:
+        assert type(value["count"]) is int
+    # Explicit values stay in the record; re-reading it applies the same conversion.
+    assert _load_tree(path) == before
+    resolved = path.read_bytes()
+    assert apply_config("Root")(receive)() == expected
+    assert path.read_bytes() == resolved
+
+
+@pytest.mark.parametrize(
+    ("annotation", "literal", "location"),
+    [
+        (dict[str, bool], "{enabled: 'maybe'}", "value.enabled"),
+        (dict[str, int], "{count: true}", "value.count"),
+        (dict[str, str], "{name: [a, b]}", "value.name"),
+        (list[bool] | str, "['maybe']", "Element 0"),
+        (list[int | float], "'12'", "expects a list"),
+        (dict[str, bool], "[false]", "mapping with string keys"),
+    ],
+)
+def test_invalid_container_values_are_refused_at_the_element(write_config, annotation, literal, location) -> None:
+    def receive(value):
+        return value
+
+    receive.__annotations__["value"] = annotation
+    write_config(f"Root:\n  value: {literal}\n")
+    with pytest.raises(ConfigError, match=location):
+        apply_config("Root")(receive)()

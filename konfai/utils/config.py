@@ -158,6 +158,45 @@ class _SharedTree:
 _shared_trees: list[_SharedTree] = []
 
 
+def _occurrence_mapping(entries: list, where: str) -> dict:
+    """A chain written as a YAML list (``- Clip: {...}``, ``- Clip: {...}``) as the mapping the
+    binder reads: each stage under its class name, a repeated class under ``Name#2``, ``Name#3``
+    (the suffix is the stage's identity here; :func:`get_module` drops it when resolving the
+    class). Application order is the list's. The mapping form keeps its two spellings (bare and
+    module-qualified) as before."""
+    mapping: dict = {}
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        kwargs: object
+        if isinstance(entry, str):
+            name, kwargs = entry, {}
+        elif isinstance(entry, collections.abc.Mapping) and len(entry) == 1:
+            ((name, kwargs),) = entry.items()
+            name = str(name)
+        else:
+            raise ConfigError(
+                f"Entry {index} of '{where}' is not a stage: a list chain holds one 'Name: {{...}}' per item.",
+                "Write one stage per item ('- Clip: {min_value: 0}'), or the mapping form.",
+            )
+        seen[name] = seen.get(name, 0) + 1
+        mapping[name if seen[name] == 1 else f"{name}#{seen[name]}"] = kwargs if kwargs is not None else {}
+    return mapping
+
+
+def _normalize_chain_lists(tree: object, keys: Sequence[str]) -> None:
+    """Along ``keys``, a list where a block is walked (a chain spelled as a YAML list) becomes its
+    occurrence mapping, in place, so the contexts opened under it and the write-back read one
+    tree. A context is only ever opened at an object's level, never at a list-valued parameter's."""
+    node = tree
+    for index, key in enumerate(keys):
+        if not isinstance(node, collections.abc.MutableMapping) or key not in node:
+            return
+        child = node[key]
+        if isinstance(child, list):
+            child = node[key] = _occurrence_mapping(child, ".".join(keys[: index + 1]))
+        node = child
+
+
 def _shared_tree(filename: Path) -> _SharedTree | None:
     for shared in reversed(_shared_trees):
         if shared.filename == filename:
@@ -302,6 +341,7 @@ class Config:
         self.data = self._shared.tree if self._shared is not None else _load_tree(self.filename)
         self.config = self.data
 
+        _normalize_chain_lists(self.data, self.keys)
         for index, key in enumerate(self.keys):
             if self.config is not None and not isinstance(self.config, collections.abc.Mapping):
                 raise ConfigError(
@@ -330,6 +370,9 @@ class Config:
             _merge_into(self._shared.tree, subtree)
             return
         data = _load_tree(self.filename)
+        # The file still spells a chain as a list until this write: merged as a list it would be
+        # replaced by the one entry a nested context folds back, and the others lost.
+        _normalize_chain_lists(data, self.keys)
         _merge_into(data, subtree)
         _write_tree(self.filename, data)
 
@@ -508,6 +551,29 @@ def _unwrap_optional(annotation) -> tuple[Any, bool]:
     return annotation, False
 
 
+def _value_matches_annotation(value: object, annotation: object) -> bool:
+    """Whether a union member accepts the value, including its container elements, without coercion."""
+    if annotation is Any:
+        return True
+    origin, args = get_origin(annotation), get_args(annotation)
+    if origin in {Union, types.UnionType}:
+        return any(_value_matches_annotation(value, member) for member in args)
+    if origin in {list, tuple, Sequence}:
+        return isinstance(value, origin) and all(
+            _value_matches_annotation(item, args[0] if args else Any) for item in value
+        )
+    if origin is dict:
+        return isinstance(value, Mapping) and all(
+            _value_matches_annotation(key, args[0]) and _value_matches_annotation(item, args[1])
+            for key, item in value.items()
+        )
+    if not isinstance(annotation, type):
+        return False
+    if isinstance(value, bool) and annotation in {int, float}:
+        return False
+    return isinstance(value, annotation)
+
+
 def _convert_union_sequence_value(
     value: object,
     valid_types: tuple[type | object, ...],
@@ -518,18 +584,10 @@ def _convert_union_sequence_value(
     # list[...] member is never a `type`, so a list value could otherwise never bind through it.
     if value not in (None, "None"):
         for candidate_type in valid_types:
-            origin = get_origin(candidate_type)
-            if origin is not None:
-                # A typing-only origin (Literal, Annotated, ...) is not a class: isinstance would raise.
-                if isinstance(origin, type) and isinstance(value, origin):
-                    return value
-            elif isinstance(candidate_type, type) and candidate_type not in (type(None), types.NoneType):
-                # bool subclasses int: only a bool member accepts a bool, never int/float.
-                matched = candidate_type is bool if isinstance(value, bool) else isinstance(value, candidate_type)
-                if matched:
-                    return value
+            if _value_matches_annotation(value, candidate_type):
+                return value
 
-    if isinstance(value, Mapping):
+    if isinstance(value, Mapping) and not any(get_origin(member) is dict for member in valid_types):
         # No member of these unions can hold a mapping, and the coercion loop must not see one:
         # `str` is a member of most of them, `str(mapping)` never fails, and a block bound as its
         # own repr fails far from here, on whatever that text then selects. This key is the last
@@ -550,10 +608,16 @@ def _convert_union_sequence_value(
                 if value in (None, "None"):
                     return None
                 continue
+            if get_origin(candidate_type) in {list, tuple, Sequence, dict}:
+                return _coerce_config_value(value, candidate_type, param_name)
             if not isinstance(candidate_type, type):
                 continue
             if candidate_type is _tensor_type():
                 converted = value if isinstance(value, candidate_type) else sys.modules["torch"].tensor(value)
+            elif candidate_type in {int, float, bool, str}:
+                if isinstance(value, Mapping | list | tuple):
+                    continue
+                converted = _coerce_config_value(value, candidate_type, param_name)
             else:
                 converted = candidate_type(value)
             break
@@ -610,6 +674,47 @@ def _parse_bool(value: object) -> bool:
     raise TypeError("unsupported boolean value")
 
 
+def _coerce_scalar(value: object, target: type) -> object:
+    """``value`` as the scalar type ``target``: the one coercion every binding path uses (a plain
+    parameter, a list element, a union member), so a quoted ``"false"`` reads False wherever a
+    bool is expected and never ``bool("false") == True``. Raises ValueError/TypeError when the
+    value is not that type's."""
+    if target is bool:
+        return _parse_bool(value)
+    if isinstance(value, bool) and target in (int, float):
+        raise TypeError("a boolean is not a number")
+    return target(value)
+
+
+def _coerce_config_value(value: object, annotation: object, where: str) -> object:
+    """Convert a typed container's values using the scalar and union rules of ordinary parameters."""
+    if annotation is Any or annotation is _tensor_type():
+        return value
+    origin, args = get_origin(annotation), get_args(annotation)
+    if origin in {Union, types.UnionType}:
+        return _convert_union_sequence_value(value, args, where)
+    if origin in {list, tuple, Sequence}:
+        if not isinstance(value, list | tuple):
+            raise ConfigError(f"'{where}' expects a list, got '{value}'.")
+        element_type = args[0] if args else Any
+        return [
+            _coerce_config_value(item, element_type, f"Element {index} of '{where}'")
+            for index, item in enumerate(value)
+        ]
+    if origin is dict:
+        if not isinstance(value, Mapping) or args[0] is not str or any(not isinstance(key, str) for key in value):
+            raise ConfigError(f"'{where}' expects a mapping with string keys, got '{value}'.")
+        return {key: _coerce_config_value(item, args[1], f"{where}.{key}") for key, item in value.items()}
+    if annotation in {int, float, bool, str}:
+        try:
+            if value is None or isinstance(value, Mapping | list | tuple):
+                raise TypeError("expected a scalar")
+            return _coerce_scalar(value, annotation)
+        except (ValueError, TypeError) as exc:
+            raise ConfigError(f"{where} is not a {annotation.__name__}: '{value}'.") from exc
+    raise ConfigError(f"'{where}' is annotated {annotation}, which the config cannot bind.")
+
+
 def _bind_primitive(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
     value = config.get_value(param.name, param.default)
     if annotation in {int, float, bool, str} and value is not None:
@@ -622,7 +727,7 @@ def _bind_primitive(config: Config, param: inspect.Parameter, annotation, sectio
                 f"Write it as a single value ('{param.name}: <{annotation.__name__}>').",
             )
         try:
-            value = _parse_bool(value) if annotation is bool else annotation(value)
+            value = _coerce_scalar(value, annotation)
         except (ValueError, TypeError) as exc:
             raise ConfigError(
                 f"Invalid value '{value}' for field '{param.name}' "
@@ -652,35 +757,7 @@ def _bind_sequence(config: Config, param: inspect.Parameter, annotation, section
     values: Any = config.get_value(param.name, param.default)
     if values is None:
         return None
-    args_annotation = get_args(annotation)
-    elem_type = args_annotation[0] if args_annotation else Any
-    if get_origin(elem_type) in {Union, types.UnionType}:
-        return [_convert_union_sequence_value(value, get_args(elem_type), param.name) for value in values]
-    if elem_type is Any or elem_type is _tensor_type():
-        return values
-    if isinstance(elem_type, type) and elem_type in {int, str, bool, float}:
-        if not isinstance(values, list | tuple):
-            raise ConfigError(
-                f"Parameter '{section_key}.{param.name}' expects a list of {elem_type.__name__}, got '{values}'.",
-                f"Spell it as a YAML list ('{param.name}: [a, b]' or one '- item' per line).",
-            )
-        converted = []
-        for index, value in enumerate(values):
-            if value is None or isinstance(value, Mapping | list | tuple):
-                raise ConfigError(
-                    f"Element {index} of '{section_key}.{param.name}' is not a {elem_type.__name__}: '{value}'."
-                )
-            try:
-                converted.append(_parse_bool(value) if elem_type is bool else elem_type(value))
-            except (TypeError, ValueError) as exc:
-                raise ConfigError(
-                    f"Element {index} of '{section_key}.{param.name}' is not a {elem_type.__name__}: '{value}'."
-                ) from exc
-        return converted
-    raise ConfigError(
-        f"Parameter '{section_key}.{param.name}' is annotated {annotation}, which the config cannot bind.",
-        _CONFIG_SUPPORTED_TYPES_MESSAGE,
-    )
+    return _coerce_config_value(values, annotation, f"{section_key}.{param.name}")
 
 
 def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key: str) -> object:
@@ -692,8 +769,22 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
             _CONFIG_SUPPORTED_TYPES_MESSAGE,
         )
     values: Any = config.get_value(param.name, param.default)
-    if values is None or value_type in {int, str, bool, float, Any}:
+    if values is None or value_type is Any:
         return values
+    if value_type in {int, str, bool, float} or get_origin(value_type) in {
+        Union,
+        types.UnionType,
+        list,
+        tuple,
+        Sequence,
+        dict,
+    }:
+        return _coerce_config_value(values, annotation, f"{section_key}.{param.name}")
+    if isinstance(values, list):
+        # The list spelling of a chain: bound under occurrence keys, and the level's copy holds the
+        # mapping, so the write-back and the nested contexts read one tree.
+        values = _occurrence_mapping(values, f"{section_key}.{param.name}")
+        config.config[param.name] = values
     try:
         return {
             value: apply_config(f"{section_key}.{param.name}.{_escape_key_component(value)}")(value_type)()
