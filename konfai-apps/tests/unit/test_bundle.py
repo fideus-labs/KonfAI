@@ -481,6 +481,20 @@ def test_declared_support_files_land_in_the_bundle_and_the_manifest_lists_them(t
     assert (bundle / "assets" / "table.csv").is_file()
 
 
+def test_two_spellings_of_one_obsolete_file_unlink_it_once(tmp_path):
+    root = _support_workspace(tmp_path)
+    (root / "helper.py").write_text("SCALE = 1\n")
+    bundle = _assemble_with_support(root, {"helpers": "helper.py"})
+    meta = json.loads((bundle / "app.json").read_text())
+    meta["support_files"] = ["helpers", "assets/../helpers"]
+    (bundle / "app.json").write_text(json.dumps(meta))
+
+    _assemble_with_support(root, {"assets/table.csv": "assets/table.csv"})
+
+    assert not (bundle / "helpers").exists()
+    assert (bundle / "assets" / "table.csv").is_file()
+
+
 def test_a_managed_helper_file_can_become_a_support_directory(tmp_path):
     root = _support_workspace(tmp_path)
     (root / "helper.py").write_text("SCALE = 1\n")

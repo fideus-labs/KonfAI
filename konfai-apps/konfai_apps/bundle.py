@@ -595,7 +595,7 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
         pass
     staged_files = sorted(path for path in staging.rglob("*") if path.is_file())
     retained = {(bundle / path.relative_to(staging)).resolve() for path in staged_files}
-    obsolete: list[Path] = []
+    obsolete: dict[Path, Path] = {}  # by resolved path: two spellings of one file unlink once
     for name in sorted(set(previous)):
         target = bundle / name
         if Path(name).is_absolute() or not target.resolve().is_relative_to(bundle.resolve()):
@@ -606,8 +606,8 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
         if target.resolve() in retained:
             continue  # './model.pt' and 'model.pt' can name the same retained checkpoint.
         if target.is_file():
-            obsolete.append(target)
-    removable = {path.resolve() for path in obsolete}
+            obsolete.setdefault(target.resolve(), target)
+    removable = set(obsolete)
     # Preflight the entire update: never write through a destination's symlink or replace a user's
     # file or directory. A managed file this export no longer declares may become a directory.
     for staged in staged_files:
@@ -621,7 +621,7 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
                 raise AppMetadataError(f"Bundle destination parent is not a directory: {part}")
         if target.is_dir():
             raise AppMetadataError(f"Bundle destination is a directory, not a file: {target}")
-    for target in obsolete:
+    for target in obsolete.values():
         target.unlink()
     for staged in sorted(staged_files, key=lambda path: path.name == "app.json"):
         target = bundle / staged.relative_to(staging)
