@@ -485,7 +485,7 @@ def test_declared_support_files_land_in_the_bundle_and_the_manifest_lists_them(t
     "support_files, support_root, message",
     [
         ({"helpers": "../outside"}, "workspace", "relative path below"),
-        ({"helpers": "/etc"}, "workspace", "relative path below"),
+        ({"helpers": "<anchor>outside"}, "workspace", "relative path below"),
         ({"../up": "helpers"}, "workspace", "relative path below"),
         ({"helpers": "helpers"}, None, "support_root is required"),
         ({"helpers": "missing"}, "workspace", "Cannot read support path"),
@@ -496,6 +496,8 @@ def test_support_files_outside_their_root_are_refused_before_anything_is_written
 ):
     root = _support_workspace(tmp_path)
     out = root.parent / "out"
+    # An absolute path of the host: "/x" is relative on Windows, where the anchor is a drive.
+    support_files = {k: v.replace("<anchor>", tmp_path.anchor) for k, v in support_files.items()}
 
     with pytest.raises(AppMetadataError, match=message):
         assemble_bundle(
