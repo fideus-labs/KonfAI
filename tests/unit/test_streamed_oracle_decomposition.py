@@ -82,6 +82,8 @@ def test_the_budget_is_what_decides_how_many_regions_a_sweep_cuts(
     """The matrix's decomposition axis, asserted where it can be seen: the same case, the same
     stage, three budgets, three decompositions, and the same bytes out of all three."""
     dataset = oracle_cases[MAIN]
+    # No instrument: the decomposition the BUDGET decides, before the growth reads what a region held.
+    monkeypatch.setattr("konfai.data.patching.manager.open_held_meter", lambda device: None)
     results = [
         sweep(dataset, "Intensity", Clip(-200.0, 300.0), tmp_path / route.name, route, monkeypatch) for route in ROUTES
     ]
@@ -92,3 +94,22 @@ def test_the_budget_is_what_decides_how_many_regions_a_sweep_cuts(
     assert 1 < counts[1] < counts[2] == rows, f"the budgets gave {counts} regions for {rows} rows"
     for result in results[1:]:
         np.testing.assert_array_equal(result.array, results[0].array)
+
+
+def test_regions_that_grow_along_the_sweep_land_the_same_bytes(
+    oracle_cases: dict[str, Dataset], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The growth is one more decomposition, and the same claim holds of it: regions that double
+    from one row while the instrument reads them under half the budget write what the undecomposed
+    case writes, and fewer regions than the rows the budget alone would have cut."""
+    from konfai.data.patching import HeldMeter
+
+    dataset = oracle_cases[MAIN]
+    monkeypatch.setattr("konfai.data.patching.manager.open_held_meter", lambda device: HeldMeter(lambda: 1, 0))
+    rows = int(dataset.get_infos("Intensity", CASE_NAME)[0][1])
+    whole, grown = (
+        sweep(dataset, "Intensity", Clip(-200.0, 300.0), tmp_path / route.name, route, monkeypatch)
+        for route in (ROUTES[0], ROUTES[2])
+    )
+    assert whole.regions == 1 and 1 < grown.regions < rows, f"{grown.regions} regions for {rows} rows"
+    np.testing.assert_array_equal(grown.array, whole.array)

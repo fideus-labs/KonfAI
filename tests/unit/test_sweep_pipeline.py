@@ -416,7 +416,6 @@ def test_a_pipelined_sweep_holds_no_more_blocks_than_the_height_rule_prices(
     depth = 1
     monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 3)
     monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: depth)
-    monkeypatch.setattr("konfai.data.patching.budget._SWEEP_MAX_DEPTH", depth)  # the budget-bound case: no free blocks
     lock = threading.Lock()
     counts = {"handed": 0, "written": 0, "peak": 0}
     read = DatasetManager._read_streamed_region
@@ -482,3 +481,60 @@ def test_the_publish_is_charged_to_the_write_and_to_the_wait_for_it(
     wall = SWEEP_CLOCK.spent("sweep")
     named = sum(SWEEP_CLOCK.spent(phase) for phase in ("chain", "fetch", "wait(read)", "wait(write)"))
     assert wall - named < 0.2, "the publish was charged to 'other'"
+
+
+def test_the_sweep_line_says_where_the_regions_height_went() -> None:
+    """A run says what the growth decided, not only what it took: the regions first to last as
+    runs of equal heights, and the most one of them was measured to hold."""
+    from konfai.utils.clock import SweepClock
+
+    clock = SweepClock()
+    clock._spent = {"sweep": 5.0, "chain": 4.0, "read": 1.0, "write": 1.0}
+    for rows, held in ((64, 100 << 20), (64, 120 << 20), (128, 300 << 20), (256, None), (256, 900 << 20)):
+        clock.region(rows, held)
+
+    assert clock.regions_line() == " | 5 region(s) of 64 -> 128 -> 256 row(s), peak held 0.88 GiB"
+    assert clock.report().endswith(
+        "| stages read 1.0 s, write 1.0 s | 5 region(s) of 64 -> 128 -> 256 row(s), peak held 0.88 GiB"
+    )
+    unmeasured = SweepClock()
+    unmeasured.region(8, None)
+    assert unmeasured.regions_line() == " | 1 region(s) of 8 row(s), unmeasured"
+    assert SweepClock().regions_line() == ""
+
+
+def test_a_region_the_device_cannot_hold_halves_the_rest_and_the_bytes_stand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A device chain answers an OutOfMemoryError with half the height, from the region that
+    failed: its writes never happened, the ones before it stand, and the output is the sequential
+    sweep's byte for byte. Driven without a card: the chain device is only read for its type."""
+    import torch
+
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 4)
+    monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: 0)
+    rng = np.random.default_rng(0)
+    source = Dataset(tmp_path / "src", "mha")
+    volume = (rng.random((1, 14, 10, 8)) * 100).astype(np.float32)
+    source.write("CT", "CASE_000", volume, _attributes())
+    manager = _manager(source, [Clip(min_value=10.0, max_value=90.0), Save(f"{tmp_path / 'out'}:h5")], tmp_path)
+    monkeypatch.setattr("konfai.data.patching.manager.device_signals_oom", lambda device: True)
+    heights: list[int] = []
+    apply = DatasetManager._apply_streamed_region
+
+    def failing_once(self, source_, spans, tensor, *args, **kwargs):  # type: ignore[no-untyped-def]
+        rows = spans[-1][0].stop - spans[-1][0].start
+        heights.append(rows)
+        if rows >= 4 and heights.count(4) == 2:  # the second 4-row region does not fit the card
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory (simulated)")
+        return apply(self, source_, spans, tensor, *args, **kwargs)
+
+    monkeypatch.setattr(DatasetManager, "_apply_streamed_region", failing_once)
+    SWEEP_CLOCK.reset()
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
+
+    written = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")[0]
+    np.testing.assert_array_equal(written, np.clip(volume, 10.0, 90.0))
+    assert heights[:3] == [4, 4, 2], f"the failed region is cut again at half the height: {heights}"
+    assert 4 not in heights[2:], "and the rest never grow back past the height that failed"
+    assert "4 -> 2" in SWEEP_CLOCK.regions_line()

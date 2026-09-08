@@ -56,9 +56,11 @@ from konfai.data.transform import Save, split_expand
 from konfai.utils import uri
 from konfai.utils.budget import (
     budget_share,
+    clear_resident_floor,
     format_bytes,
     node_local_ranks,
-    peak_resident_bytes,
+    record_resident_floor,
+    run_peak_resident_bytes,
     set_per_rank_budget,
     sweep_share,
 )
@@ -626,23 +628,17 @@ class Transformer(DistributedObject):
             )
         return destinations
 
-    #: Streaming re-reads at most this much of the source before a case that FITS the budget is
-    #: loaded whole instead. At ~1x the two routes read the same bytes and streaming holds one slab
-    #: where the load holds the case, so streaming wins the tie; past it the re-reads are the cost.
-    _STREAM_WORTH_FACTOR = 1.5
-
     def _route(self, engine: CaseMaterializer, budget_bytes: float) -> tuple[Verdict, str | None]:
-        """``STREAM`` or ``LOAD``. A case whose working set exceeds the budget streams; one that fits
-        streams while streaming is no dearer than loading (``predicted_stream_read_factor``), and
-        is loaded past that. Expand copies are not routed here: they share one read pass."""
+        """``STREAM`` or ``LOAD``. A case streams unless its source serves no bounded region read,
+        so that every region of a sweep would decode the store whole, and it fits the budget: that
+        one is read once, whole. A fact of the store, not a prediction of the chain's reads. Expand
+        copies are not routed here: they share one read pass."""
         working_set = engine.fallback_working_set_bytes()
-        if working_set <= budget_bytes:
-            factor = engine.predicted_stream_read_factor(0, apply_augmentations=False)
-            if factor is not None and factor > self._STREAM_WORTH_FACTOR:
-                return Verdict.LOAD, (
-                    f"fits the per-rank budget (~{format_bytes(working_set)} vs"
-                    f" {format_bytes(budget_bytes)}); streaming would read ~{factor:.1f}x the source"
-                )
+        if working_set <= budget_bytes and engine.reads_its_source_whole(0, apply_augmentations=False):
+            return Verdict.LOAD, (
+                f"fits the per-rank budget (~{format_bytes(working_set)} vs {format_bytes(budget_bytes)});"
+                " its source serves no bounded region read, so a sweep would decode it whole per region"
+            )
         return Verdict.STREAM, None
 
     @staticmethod
@@ -1012,7 +1008,7 @@ class Transformer(DistributedObject):
         SIZED for, which is not the same number: the sizing solves for a share of the budget, so a
         chain holding more than it was priced at shows up here and nowhere else.
         """
-        peak = peak_resident_bytes()
+        peak = run_peak_resident_bytes()
         if peak is None:
             return None
         # The RANK's whole figure, not the share left for the work. The peak is this process's
@@ -1039,55 +1035,64 @@ class Transformer(DistributedObject):
         chain_device = torch.device(f"cuda:{device}") if isinstance(device, int) else device
         started = time.monotonic()
         SWEEP_CLOCK.reset()
-        items = self._work_items()
-        shard = self._shards[global_rank]
-        counts: Counter[Verdict] = Counter()
-        # 'error' holds at run time too: a fallback the plan could not see (a sweep that fails, a
-        # field bound exceeded) raises at that case instead of quietly costing a volume.
-        allow_fallback = self.on_fallback != "error"
+        # What a region is measured above: the process as it stands before its first case, so the
+        # pages one region frees and the next reuses count as the resident bytes they are. The
+        # run's own, released with it (the closing line below reads the peak first).
+        record_resident_floor()
+        try:
+            items = self._work_items()
+            shard = self._shards[global_rank]
+            counts: Counter[Verdict] = Counter()
+            # 'error' holds at run time too: a fallback the plan could not see (a sweep that fails, a
+            # field bound exceeded) raises at that case instead of quietly costing a volume.
+            allow_fallback = self.on_fallback != "error"
 
-        def description() -> str:
-            return (
-                f"Transform : {counts[Verdict.STREAM]} streamed | {counts[Verdict.LOAD]} loaded"
-                f" | {counts[Verdict.REDUCE]} reduced"
-                f" | {counts[Verdict.WHOLE_VOLUME]} whole-volume | {counts[Verdict.SKIP]} skipped"
-            )
+            def description() -> str:
+                return (
+                    f"Transform : {counts[Verdict.STREAM]} streamed | {counts[Verdict.LOAD]} loaded"
+                    f" | {counts[Verdict.REDUCE]} reduced"
+                    f" | {counts[Verdict.WHOLE_VOLUME]} whole-volume | {counts[Verdict.SKIP]} skipped"
+                )
 
-        failed: list[tuple[str, str, str]] = []
-        with tqdm.tqdm(total=len(shard), desc=description(), ncols=0) as progress:
-            for item in (items[position] for position in shard):
-                try:
-                    counts.update(self._run_item(item, chain_device, allow_fallback, progress))
-                except Exception as error:  # one case's failure is not the shard's: keep going, list it
-                    failed.append((item.group_dest, item.label, f"{type(error).__name__}: {error}"))
-                    progress.write(
-                        f"[KonfAI] case '{item.label}' ({item.group_dest}) FAILED: {type(error).__name__}: {error}"
-                    )
-                progress.set_description(description())
-                progress.update(1)
-        # No collective: each rank reports its own shard (one line for the usual single rank).
-        written = sum(counts.values()) - counts[Verdict.SKIP]
-        resume = f", {counts[Verdict.SKIP]} already written (--overwrite recomputes)" if counts[Verdict.SKIP] else ""
-        who = f"rank {global_rank}/{world_size} " if world_size > 1 else ""
-        print(
-            f"[KonfAI] {who}done in {time.monotonic() - started:.1f} s: {written} written"
-            f" ({counts[Verdict.STREAM]} streamed, {counts[Verdict.LOAD]} loaded,"
-            f" {counts[Verdict.WHOLE_VOLUME]} whole-volume, {counts[Verdict.REDUCE]} reduced){resume}"
-            + (f", {len(failed)} FAILED" if failed else "")
-            + f" -> outputs in {self.transform_path / 'outputs.json'}"
-        )
-        clock = SWEEP_CLOCK.report()
-        if clock is not None:
-            print(clock)
-        held = self._held_line()
-        if held is not None:
-            print(f"[KonfAI] {who}{held}")
-        if failed:
-            listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
-            raise TransformerError(
-                f"{len(failed)} of {len(shard)} work item(s) failed on {who or 'this rank '}:\n{listed}",
-                "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
+            failed: list[tuple[str, str, str]] = []
+            with tqdm.tqdm(total=len(shard), desc=description(), ncols=0) as progress:
+                for item in (items[position] for position in shard):
+                    try:
+                        counts.update(self._run_item(item, chain_device, allow_fallback, progress))
+                    except Exception as error:  # one case's failure is not the shard's: keep going, list it
+                        failed.append((item.group_dest, item.label, f"{type(error).__name__}: {error}"))
+                        progress.write(
+                            f"[KonfAI] case '{item.label}' ({item.group_dest}) FAILED: {type(error).__name__}: {error}"
+                        )
+                    progress.set_description(description())
+                    progress.update(1)
+            # No collective: each rank reports its own shard (one line for the usual single rank).
+            written = sum(counts.values()) - counts[Verdict.SKIP]
+            resume = (
+                f", {counts[Verdict.SKIP]} already written (--overwrite recomputes)" if counts[Verdict.SKIP] else ""
             )
+            who = f"rank {global_rank}/{world_size} " if world_size > 1 else ""
+            print(
+                f"[KonfAI] {who}done in {time.monotonic() - started:.1f} s: {written} written"
+                f" ({counts[Verdict.STREAM]} streamed, {counts[Verdict.LOAD]} loaded,"
+                f" {counts[Verdict.WHOLE_VOLUME]} whole-volume, {counts[Verdict.REDUCE]} reduced){resume}"
+                + (f", {len(failed)} FAILED" if failed else "")
+                + f" -> outputs in {self.transform_path / 'outputs.json'}"
+            )
+            clock = SWEEP_CLOCK.report()
+            if clock is not None:
+                print(clock)
+            held = self._held_line()
+            if held is not None:
+                print(f"[KonfAI] {who}{held}")
+            if failed:
+                listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
+                raise TransformerError(
+                    f"{len(failed)} of {len(shard)} work item(s) failed on {who or 'this rank '}:\n{listed}",
+                    "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
+                )
+        finally:
+            clear_resident_floor()
 
     def _run_item(
         self, item: WorkItem, chain_device: torch.device, allow_fallback: bool, progress: tqdm.tqdm

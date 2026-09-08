@@ -213,19 +213,45 @@ def test_a_chain_that_widens_the_channel_axis_is_priced_on_what_it_lands(tmp_pat
     assert after < before * classes  # the pulled regions did not widen with it
 
 
-def test_the_sizing_takes_the_tallest_region_the_budget_holds(tmp_path: Path) -> None:
-    """The budget is spent, not halved and spent: what the chosen block holds fits, and one row more
-    does not."""
+def test_the_first_region_is_the_tallest_under_half_of_the_budget(tmp_path: Path) -> None:
+    """The budget is a ceiling the regions grow towards, not a target the first one is cut to: the
+    first region is the tallest whose price holds inside half of it, and one row more does not."""
     source, _volume = _sheared_fixture(tmp_path)
     manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
-    budget = _priced(manager, (), 5)
+    budget = _priced(manager, (), 5) * 2
     manager.set_memory_budget(float(budget))
 
     rows = manager._sweep_tile(list(LANDING), 1)[0]
-    assert _priced(manager, (), rows) <= budget < _priced(manager, (), rows + 1)
+    assert _priced(manager, (), rows) <= budget / 2 < _priced(manager, (), rows + 1)
 
 
-def test_a_regrid_pays_for_what_it_pulls_and_not_for_what_it_lands(tmp_path: Path) -> None:
+def test_the_regions_grow_by_doubling_while_they_hold_under_a_third_of_the_budget() -> None:
+    """The rule every route grows by: a region measured under a third of the budget doubles the next,
+    one over the budget halves it, never above the cap and never below the first, so every region
+    starts on a multiple of the first and the output's chunk grid is never straddled."""
+    growth = budget_module.RegionGrowth(rows=8, cap=64, budget_bytes=1000.0)
+    assert growth.after(300) == 16 and growth.after(333) == 32 and growth.after(334) == 32, "a third is the line"
+    assert growth.after(200) == 64 and growth.after(1) == 64, "the cap"
+    assert growth.after(1001) == 32 and growth.after(2000) == 16 and growth.after(5000) == 8, "over halves"
+    assert growth.after(9999) == 8, "and never below the first"
+    assert growth.after(None) == 8, "an instrument that went quiet leaves the height"
+    assert budget_module.RegionGrowth(rows=8, cap=64, budget_bytes=None).after(1) == 8, "no budget, no growth"
+
+    # A pipelined sweep holds depth + 2 regions in flight: that many must have run at a height
+    # before a reading says what it costs, so the height doubles only once they have.
+    settled = budget_module.RegionGrowth(rows=8, cap=64, budget_bytes=1000.0, settle=3)
+    assert [settled.after(100) for _ in range(7)] == [8, 8, 16, 16, 16, 32, 32]
+    assert settled.after(2000) == 16 and settled.after(100) == 16, "a halving restarts the count"
+
+
+@pytest.fixture
+def two_core_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rank that owns two cores, so the sweep queues a read-ahead: the price, and the text of the
+    refusal, depend on the share (``rank_cpu_share``), and the test suite pins one thread per worker."""
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+
+
+def test_a_regrid_pays_for_what_it_pulls_and_not_for_what_it_lands(tmp_path: Path, two_core_rank: None) -> None:
     """The bytes a region costs are the source's box under the chain's maps, so the same budget buys
     a resample onto a sheared grid a smaller block than it buys a chain that reads where it lands."""
     source, _volume = _sheared_fixture(tmp_path)
@@ -234,14 +260,16 @@ def test_a_regrid_pays_for_what_it_pulls_and_not_for_what_it_lands(tmp_path: Pat
     pointwise = _manager(source, [Save(f"{tmp_path / 'flat'}:h5")])
     plans = _sweep_plans(regrid)
     budget = float(_priced(pointwise, (), 8))
-    regrid.set_memory_budget(budget)
-    pointwise.set_memory_budget(budget)
+    depth = _sweep_pipeline_depth()
 
     assert _priced(regrid, plans, 8) > _priced(pointwise, (), 8), "the shear pulls more than it lands"
-    assert _block_voxels(regrid, plans) < _block_voxels(pointwise, ())
+    sheared, flat = regrid._chain_sizer(list(LANDING), 1, plans), pointwise._chain_sizer(list(LANDING), 1, ())
+    bought = sheared._tallest(budget, depth, sheared.sweep_shape)
+    assert bought is not None
+    assert np.prod(sheared.sweep_shape(bought)) < np.prod(flat._slab(flat._tallest(budget, depth, flat._slab) or 1))
 
 
-def test_a_budget_that_only_fits_without_the_queue_gives_the_queue_up(tmp_path: Path) -> None:
+def test_a_budget_that_only_fits_without_the_queue_gives_the_queue_up(tmp_path: Path, two_core_rank: None) -> None:
     """The read-ahead is bought, not owed. A sweep that cannot afford it stops buying it.
 
     Three source regions are resident with a queue and one without, so a chain whose stage buffers
@@ -266,10 +294,10 @@ def test_a_budget_that_only_fits_without_the_queue_gives_the_queue_up(tmp_path: 
     assert manager.sweep_block_bytes(list(LANDING), 1, plans, found, 0) <= manager._sweep_budget_bytes
 
     # And the run walks the depth the sizing solved for, or it holds what it was never priced for.
-    assert manager._sweep_depth(list(LANDING), 1, plans, found) == 0
+    assert manager._chain_sizer(list(LANDING), 1, plans).sweep_depth(found) == 0
 
 
-def test_a_budget_no_region_fits_refuses_with_both_figures(tmp_path: Path) -> None:
+def test_a_budget_no_region_fits_refuses_with_both_figures(tmp_path: Path, two_core_rank: None) -> None:
     """A budget one row of the landing does not fit is not a one-row sweep: it is a refusal naming
     the budget and what the smallest region holds, so the reader knows what to raise it to."""
     source, _volume = _sheared_fixture(tmp_path)
@@ -334,30 +362,24 @@ def test_an_axis_whose_only_small_divisor_is_a_sliver_is_left_alone() -> None:
     assert chunks == (1, 128, 641, 641)
 
 
-def test_the_device_ceiling_prices_what_a_region_pulls_and_holds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A GPU raises the region height as its free memory allows, and free memory is the whole price.
-
-    Counted as one landed plane per resident region, the ceiling ignored the source box a REGRID
-    pulls and the buffers the widest stage declares: a chain resampling through a sheared grid was
-    given a region the device could not hold, and where no host budget was declared nothing else
-    bounded it.
+def test_the_device_is_not_a_ceiling_of_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GPU chain is bounded the way a host chain is: by the budget, which the workflow caps at
+    what the card can give this process (``device_capped_budget``), and by what the regions then
+    hold on the allocator. The sizing itself reads nothing off the device: a ceiling read at
+    sizing time moved with how much the process had already reserved (47 rows under 4.99 GiB in
+    one run, 65 under 11.58 GiB in the next, same fold, same idle card).
     """
     monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", ROWS)
     source, _volume = _sheared_fixture(tmp_path)
     resample = Resample(reference="TARGET", reference_group="GRID", reference_dataset=f"{tmp_path / 'ref'}:h5")
     manager = _manager(source, [resample, Save(f"{tmp_path / 'out'}:h5")])
     plans = _sweep_plans(manager)
-    free = 4 * _priced(manager, plans, 2 * ROWS)  # a quarter of it is what a region of 2 x ROWS holds
+    on_host = manager._sweep_tile(list(LANDING), 1, plans)
     monkeypatch.setattr(manager, "_chain_device", torch.device("cuda"), raising=False)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: (free, free))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: pytest.fail("the sizing read the device"))
 
-    tile = manager._sweep_tile(list(LANDING), 1, plans)  # no host budget: the device is the only ceiling
-    held = manager.sweep_block_bytes(list(LANDING), 1, plans, tile, _sweep_pipeline_depth())
-
-    assert held <= free * 0.25, "the region the device was given does not fit the device"
-    assert held > _priced(manager, plans, ROWS), "and the device still buys a taller region than the host default"
+    assert manager._sweep_tile(list(LANDING), 1, plans) == on_host, "no budget: the unit, on a device too"
+    assert np.prod(on_host) <= ROWS * LANDING[1] * LANDING[2]
 
 
 # ---------------------------------------------------------------- what a chunked store really costs
@@ -417,9 +439,9 @@ def test_the_sizing_lands_on_the_store_grid_when_a_block_fits(tmp_path: Path, mo
     manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")])
     _chunked(monkeypatch, (16, 128, 128))
     manager._read_granularity = budget_module._UNRESOLVED
-    manager.set_memory_budget(float(_priced(manager, (), 20)))
+    manager.set_memory_budget(float(_priced(manager, (), 20)) * 2)  # half of it holds 20 rows: one block and a bit
 
-    assert manager._sweep_tile(list(LANDING), 1)[0] % 16 == 0
+    assert manager._sweep_tile(list(LANDING), 1)[0] == 16
 
 
 def test_a_region_read_is_charged_only_for_what_the_block_grid_adds(

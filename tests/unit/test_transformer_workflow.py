@@ -1158,9 +1158,9 @@ def test_the_plan_reads_no_voxel_for_a_global_statistic(tmp_path: Path, monkeypa
     scans: list[str] = []
     real = dataset_module.Dataset.read_data_statistics
 
-    def counted(self, group, name, channels=None):
+    def counted(self, group, name, channels=None, keys=None):
         scans.append(name)
-        return real(self, group, name, channels)
+        return real(self, group, name, channels, keys)
 
     monkeypatch.setattr(dataset_module.Dataset, "read_data_statistics", counted)
     workflow = _build(tmp_path)
@@ -1391,7 +1391,7 @@ def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
     plan = workflow.compute_plan()
     entry = next(entry for entry in plan.entries if entry.case == "CASE_000")
     assert entry.verdict == "LOAD"
-    assert "x the source" in (entry.reason or "")
+    assert "no bounded region read" in (entry.reason or "")
     assert not plan.fallback_entries  # a choice, not a fallback: on_fallback has nothing to refuse
 
     workflow.setup(1)
@@ -1723,17 +1723,17 @@ _SNAPSHOT_REPORT = """\
 [KonfAI] plan over 2 rank(s) | per-rank budget 160.00 KiB ('163840b', per rank: x2 = 320.00 KiB on the node) | held beside the regions: engine ~32.00 MiB, decoded-chunk cache up to 24.00 KiB (under the 256.00 MiB floor: a region touching more OME-Zarr chunks than it holds decodes them again) | fallback working set = case x 4 B x (2 + the widest stage's own buffers), headers-only estimate | output dtype/channels assumed float32 / source channels until the first slab
 [KonfAI] 1 case(s) of 'CT' are DROPPED: the run keeps the cases every groups_src shares, minus what 'subset' excludes.
   CT -> A (Clip -> Write <tmp>/out_a:h5): 3 case(s) -- 1 STREAM, 1 LOAD, 0 WHOLE-VOLUME, 1 SKIP (output already written)
-    (1 case(s)) LOAD: fits the per-rank budget (~144.00 KiB vs 160.00 KiB); streaming would read ~2.0x the source
+    (1 case(s)) LOAD: fits the per-rank budget (~144.00 KiB vs 160.00 KiB); its source serves no bounded region read, so a sweep would decode it whole per region
   CT -> B (Clip -> Standardize -> Write <tmp>/out_b:h5): 3 case(s) -- 0 STREAM, 0 LOAD, 3 WHOLE-VOLUME, 0 SKIP (output already written)
     (3 case(s)) WHOLE-VOLUME: stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.
     worst fallback case ~= 144.00 KiB vs per-rank budget 160.00 KiB
   CT -> C (Clip -> Expand -> Brightness -> Write <tmp>/out_c:h5): EXPAND 3 case(s) -> 9 cop(ies): 5 STREAM (shared read pass), 1 STREAM (own pass), 0 WHOLE-VOLUME, 3 SKIP (copy already written)
     (1 cop(ies)) own pass: the only copy of this case still to write; a shared pass with one member is its own sweep.
   CT -> D (Clip -> Reduce -> Write <tmp>/out_d:h5): REDUCE 3 case(s) -> 1 output 'atlas': REDUCE
-    4.5 resident region(s) of 3 row(s) = 0.00 GiB  (incremental accumulator)
-    reads: 1 of 3 member(s) sit on nii.gz, which decodes the whole volume behind every region read: 3 decodes per member (one per region), 3 in all
+    4.5 resident region(s) of 1 row(s) = 0.00 GiB  (incremental accumulator)
+    reads: 1 of 3 member(s) sit on nii.gz, which decodes the whole volume behind every region read: 8 decodes per member (one per region), 8 in all
     put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first
-    peak ~= 66.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
+    peak ~= 22.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
     cases: CASE_000, CASE_001, CASE_002
   CT -> E (Clip -> Standardize -> Reduce -> Write <tmp>/out_e:h5): REDUCE 3 case(s) -> 1 output 'atlas': REFUSED
     case 'CASE_000': stage 1 'Standardize' needs whole-volume statistics, but an earlier stage changes the values: the stored volume's statistic is not this stage's input.

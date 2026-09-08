@@ -41,14 +41,11 @@ from konfai.data.patching import (
     FALLBACK_INFLIGHT_FACTOR,
     AugmentedStage,
     DatasetManager,
-    SweepSegment,
 )
 from konfai.data.patching.stage import _ReadStagePlan, _stage_name
 from konfai.data.patching.sweep import (
     _PendingSweep,
-    _pull_block_voxels,
     _stage_failures_explained,
-    _sweep_targets,
     _SweepMember,
 )
 from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
@@ -59,7 +56,7 @@ from konfai.utils.errors import PatchError
 
 class Verdict(StrEnum):
     """What the plan says of an entry, and what the run then does with it: one vocabulary. The engine
-    answers STREAM, LOAD (the plan's choice: the case fits and streaming would re-read the source) or
+    answers STREAM, LOAD (the plan's choice: the case fits and its source serves no bounded region read) or
     WHOLE_VOLUME (the fallback); SKIP, REDUCE and REFUSED are the workflow's."""
 
     STREAM = "STREAM"
@@ -458,28 +455,16 @@ class CaseMaterializer:
         copy, and the widest stage's own buffers, all sized on the largest intermediate."""
         return int(self.peak_case_bytes() * (FALLBACK_INFLIGHT_FACTOR + self.manager.working_multiple()))
 
-    def predicted_stream_read_factor(self, a: int = 0, apply_augmentations: bool = False) -> float | None:
-        """About how many times the streamed route reads the source (a halo re-reads its overlap, a
-        regrid pulls each slab's window, a store without bounded reads decodes the volume once per
-        slab), from the plan's own pull maps: the number the route is chosen with. ``None`` when the
-        chain cannot stream."""
+    def reads_its_source_whole(self, a: int = 0, apply_augmentations: bool = False) -> bool | None:
+        """Whether a sweep of this case would decode its stored source whole for every region: the
+        store serves no bounded region read (a gzipped NIfTI). ``None`` when the chain cannot
+        stream. A Save cache the run has still to write lands on a region-write store, and every
+        one of those serves bounded reads, so it never counts."""
         segments = self.manager.sweep_segments(a, apply_augmentations)
         if segments is None:
             return None
-        # Priced by the dominant segment: a max, not a sum -- the segments read different stores,
-        # and one that re-reads is the cost either way.
-        factors = [self._segment_read_factor(segment) for segment in segments]
-        return max(factors) if factors else 1.0
-
-    def _segment_read_factor(self, segment: SweepSegment) -> float:
-        """One segment's reads over its source's voxels, block by block through the plan's own pulls."""
-        tile = self.manager.sizer_for(segment).sweep_tile()
-        targets = list(_sweep_targets(segment.landing, tile))
-        # A source that is not on disk yet is a Save cache this run sweeps first, onto a store that
-        # serves region writes, and every such store serves bounded reads: priced as bounded, not
-        # as the pessimistic answer a missing entry gets.
-        dataset, group, entry = segment.dataset, segment.group, segment.entry
-        if dataset.is_dataset_exist(group, entry) and not dataset.bounded_region_reads(group, entry):
-            return float(max(1, len(targets)))  # every block decodes the whole store
-        read = sum(_pull_block_voxels(segment.landing, tile, segment.plans))
-        return float(read) / float(max(1, int(np.prod(segment.source_shape[1:], dtype=np.int64))))
+        return any(
+            segment.dataset.is_dataset_exist(segment.group, segment.entry)
+            and not segment.dataset.bounded_region_reads(segment.group, segment.entry)
+            for segment in segments
+        )
