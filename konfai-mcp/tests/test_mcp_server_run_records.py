@@ -74,6 +74,16 @@ def test_run_records_diffs_comparison_and_curves(
             assert record_data["job"]["job_id"] == second_payload["job_id"]
             assert record_data["manifest"]["environment"]["python"]
             assert "FAKE_RUN" in record_data["config_snapshots"]["Config.yml"]
+            assert record_data["config_snapshots_meta"]["Config.yml"]["truncated"] is False
+
+            # The first job's record holds the configuration that produced IT (epochs: 1), kept at its
+            # completion, not the session file as edited since (epochs: 2).
+            earlier = (
+                await client.call_tool("export_run_record", {"job_id": first_payload["job_id"]})
+            ).structured_content
+            assert earlier["resolved_config_source"] == "job snapshot at completion"
+            assert "epochs: 1" in earlier["resolved_config"] and "epochs: 2" not in earlier["resolved_config"]
+            assert "epochs: 2" in earlier["current_config_preview"]
 
             diff = await client.call_tool(
                 "diff_run_configs",

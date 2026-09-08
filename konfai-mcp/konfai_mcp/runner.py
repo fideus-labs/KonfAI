@@ -26,6 +26,7 @@ import tempfile
 import time
 import traceback
 import warnings
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty
@@ -108,46 +109,47 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
     entry = importlib.import_module("konfai_mcp.runner")._subprocess_entry
     # The child's stdio sink. Created here so the path survives a child that dies before saying anything.
     output = Path(tempfile.mkdtemp(prefix="konfai-mcp-")) / "subprocess.log"
-    process = context.Process(target=entry, args=(queue, target, kwargs, str(output)), daemon=True)
-    process.start()
+    process: Any = None
     result: dict[str, Any] | None = None
-    while result is None:
-        try:
-            result = queue.get(timeout=0.5)
-        except Empty:
-            if deadline is not None and time.monotonic() > deadline and process.is_alive():
-                process.terminate()
-                process.join(5)
-                if process.is_alive():
-                    process.kill()
-                    process.join(5)
-                raise TimeoutError(
-                    f"Isolated subprocess '{target}' exceeded {timeout_s:.0f}s and was terminated. "
-                    "Raise KONFAI_MCP_SUBPROCESS_TIMEOUT if this is a large model, or simplify the config."
-                ) from None
-            if not process.is_alive():
-                try:
-                    result = queue.get(timeout=0.5)
-                except Empty:
-                    result = {
-                        "ok_transport": False,
-                        "error": (
-                            f"The isolated subprocess died with exit code {process.exitcode} before returning "
-                            "a result (native crash or OOM)."
-                        ),
-                    }
-    # Bounded join: the result is already in hand, so the child should exit near-instantly. If it wedged
-    # during teardown (e.g. a native/CUDA context that will not exit), an unbounded join would hang the
-    # server thread forever (exactly what the timeout above exists to prevent), so escalate to
-    # terminate/kill instead, matching the timeout branch.
-    process.join(10)
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
-        if process.is_alive():
-            process.kill()
-            process.join(5)
-    printed = _drain(output)
+    # One lifetime for the child, its queue and its output directory: every exit path below (a
+    # result, a timeout, a death) goes through the finally, so a timed-out validation leaves no
+    # process, descriptor or directory behind.
+    try:
+        process = context.Process(target=entry, args=(queue, target, kwargs, str(output)), daemon=True)
+        process.start()
+        while result is None:
+            try:
+                result = queue.get(timeout=0.5)
+            except Empty:
+                if deadline is not None and time.monotonic() > deadline and process.is_alive():
+                    _stop(process)
+                    printed = _tail(output)
+                    raise TimeoutError(
+                        f"Isolated subprocess '{target}' exceeded {timeout_s:.0f}s and was terminated. "
+                        "Raise KONFAI_MCP_SUBPROCESS_TIMEOUT if this is a large model, or simplify the config."
+                        + (f"\n\nSubprocess output (tail):\n{printed}" if printed else "")
+                    ) from None
+                if not process.is_alive():
+                    try:
+                        result = queue.get(timeout=0.5)
+                    except Empty:
+                        result = {
+                            "ok_transport": False,
+                            "error": (
+                                f"The isolated subprocess died with exit code {process.exitcode} before returning "
+                                "a result (native crash or OOM)."
+                            ),
+                        }
+        # Bounded join: the result is already in hand, so the child should exit near-instantly. If it
+        # wedged during teardown (e.g. a native/CUDA context that will not exit), an unbounded join would
+        # hang the server thread forever (exactly what the timeout above exists to prevent).
+        process.join(10)
+        printed = _tail(output)
+    finally:
+        if process is not None:
+            _stop(process)
+        queue.close()
+        shutil.rmtree(output.parent, ignore_errors=True)
     if not result.get("ok_transport"):
         # The child's own output is where a native crash or an OOM leaves its only trace: the traceback
         # says the process died, this says what it was saying when it did.
@@ -156,41 +158,69 @@ def run_api_in_subprocess(target: str, kwargs: dict[str, Any], timeout_s: float 
     return result["payload"]
 
 
-@contextmanager
-def preserved_config(config_path: Path):
-    """Keep the authored config bytes across a child that builds a workflow from them.
+def _stop(process: Any) -> None:
+    """Terminate, then kill, a child still alive; bounded joins so a wedged teardown cannot hang the server."""
+    if not process.is_alive():
+        return
+    process.terminate()
+    process.join(5)
+    if process.is_alive():
+        process.kill()
+        process.join(5)
 
-    Building materializes every default into the file, and the child puts it back in its own
-    ``finally``: which a timeout kill (SIGTERM) never reaches. Only the parent is guaranteed to
-    outlive the child, so the snapshot belongs on this side of the spawn.
+
+@contextmanager
+def scratch_config(source: Path, scratch_path: str | None = None) -> Iterator[Path]:
+    """A copy of the authored config beside it, for a child that builds a workflow from it.
+
+    Building materializes every default into the file it reads: the child reads this copy, byte
+    for byte the author's (CRLF included), placed in the same directory so a model YAML named by a
+    relative path and the workspace's own modules resolve as they would for the original. The
+    original is never written, so an edit made while the child runs is kept, and there is nothing
+    to restore when a timeout kills the child. The copy goes on exit; :func:`discard_scratch_configs`
+    is the parent's sweep for a copy a killed child left.
     """
-    backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
+    copy = Path(scratch_path) if scratch_path is not None else _scratch_path(source)
+    shutil.copyfile(source, copy)
     try:
-        yield
+        yield copy
     finally:
-        if backup is not None and config_path.is_file() and config_path.read_text(encoding="utf-8") != backup:
-            # Written aside then renamed, like the restore in validate_workflow_api: this is the last
-            # guard on the file, so a write that fails part-way must leave the config KonfAI rewrote
-            # rather than a fragment of the authored one.
-            staging = config_path.with_name(f".{config_path.name}.{uuid4().hex}.tmp")
-            try:
-                staging.write_text(backup, encoding="utf-8")
-                os.replace(staging, config_path)
-            except OSError:
-                staging.unlink(missing_ok=True)
-                raise
+        copy.unlink(missing_ok=True)
+
+
+def _scratch_path(source: Path) -> Path:
+    return source.with_name(f".{source.name}.validate-{uuid4().hex}.yml")
+
+
+@contextmanager
+def discard_scratch_configs(source: Path) -> Iterator[Path]:
+    """Reserve one child copy and remove only that copy, even if the child is killed.
+
+    Pass the yielded path as ``scratch_path`` to the child entrypoint. Concurrent validations of
+    the same authored file own different paths and cannot remove each other's live input.
+    """
+    copy = _scratch_path(source)
+    try:
+        yield copy
+    finally:
+        copy.unlink(missing_ok=True)
 
 
 _OUTPUT_TAIL = 4000  # enough for a traceback and the lines around it, short enough to hand to an agent
 
 
-def _drain(output: Path) -> str:
-    """The tail of the child's captured stdio, then remove it. '' when it printed nothing."""
+def _tail(output: Path) -> str:
+    """The tail of the child's captured stdio: read from near the end of the file, never whole (a
+    verbose failing child once handed the parent its entire output to keep 4,000 characters of it).
+    '' when it printed nothing."""
     try:
-        text = output.read_text(encoding="utf-8", errors="replace").strip()
+        with output.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 4 * _OUTPUT_TAIL))
+            text = handle.read().decode("utf-8", errors="replace").strip()
     except OSError:
         text = ""
-    shutil.rmtree(output.parent, ignore_errors=True)
     return text[-_OUTPUT_TAIL:]
 
 
@@ -231,10 +261,12 @@ def _apply_single_process_patches() -> None:
     import konfai.utils.runtime.distributed as konfai_runtime
 
     konfai_runtime.setup_gpu = lambda world_size, rank=None, process_group=True: (0, 0)  # type: ignore[assignment,misc]
-    konfai_runtime.mp.spawn = (  # type: ignore[assignment]
-        lambda fn, nprocs, args=(), join=True, daemon=False, start_method="spawn": fn(0, *args)
-    )
-    konfai_trainer.dist.barrier = lambda: None  # type: ignore[assignment]
+
+    def spawn_inline(fn, args=(), nprocs=1, join=True, daemon=False, start_method="spawn"):
+        return fn(0, *args)
+
+    konfai_runtime.mp.spawn = spawn_inline
+    konfai_trainer.dist.barrier = lambda: None  # type: ignore[assignment,misc]
 
 
 def _build_workflow(
@@ -736,34 +768,33 @@ def plan_transform_api(
     config: str,
     cpu: int = 1,
     overwrite: bool = False,
+    scratch_path: str | None = None,
 ) -> dict[str, Any]:
     """Child entrypoint for the TRANSFORM dry-run: plan every case, write nothing.
 
     The plan is the workflow's own verdict, not a prediction (it opens and removes a real
     region-write on each destination), so it is the one thing an agent should read before launching
     a job that writes a dataset. Runs in a spawn child like every other workflow API: the config is
-    rewritten in place by KonfAI's own binder, so its bytes are snapshotted and restored.
+    rewritten in place by KonfAI's own binder, so it reads a scratch copy beside the original.
     """
     from konfai.transformer import Transformer, build_transform
 
     config_path = Path(config).resolve()
-    config_backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
     workspace = Path(workspace_dir).resolve()
-    with _runtime_context(cwd=workspace, env_updates={"KONFAI_VERBOSE": "False"}):
+    with (
+        _runtime_context(cwd=workspace, env_updates={"KONFAI_VERBOSE": "False"}),
+        scratch_config(config_path, scratch_path) as scratch,
+    ):
         _ensure_local_imports()
         _purge_workspace_modules(workspace)
-        try:
-            workflow = cast(
-                Transformer,
-                build_transform(
-                    transform_file=config_path,
-                    transforms_dir=(workspace / "Transforms").resolve(),
-                ),
-            )
-            plan = workflow.compute_plan(max(1, int(cpu)), bool(overwrite))
-        finally:
-            if config_backup is not None:
-                config_path.write_text(config_backup, encoding="utf-8")
+        workflow = cast(
+            Transformer,
+            build_transform(
+                transform_file=scratch,
+                transforms_dir=(workspace / "Transforms").resolve(),
+            ),
+        )
+        plan = workflow.compute_plan(max(1, int(cpu)), bool(overwrite))
     counts: dict[str, int] = {}
     for entry in plan.entries:
         counts[entry.verdict] = counts.get(entry.verdict, 0) + 1
@@ -802,6 +833,7 @@ def validate_workflow_api(
     single_process: bool = False,
     validate_root: str | None = None,
     collect_model_outputs: bool = False,
+    scratch_path: str | None = None,
 ) -> dict[str, Any]:
     """Child entrypoint that builds (and optionally sets up / one-steps) a workflow, and puts back what it touched.
 
@@ -840,12 +872,14 @@ def validate_workflow_api(
     }
 
     # Building a workflow runs KonfAI with KONFAI_CONFIG_MODE='Done', whose Config.__exit__ rewrites
-    # the config file in place (materialising every default). Validation must be side-effect-free on
-    # the agent's authored config, so snapshot its bytes and restore them afterwards.
+    # the config file it reads (materialising every default). Validation is side-effect-free on the
+    # agent's authored config because it reads a scratch copy beside it, never the original.
     config_path = Path(config).resolve()
-    config_backup = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
 
-    with _runtime_context(cwd=Path(workspace_dir).resolve(), env_updates=env_updates):
+    with (
+        _runtime_context(cwd=Path(workspace_dir).resolve(), env_updates=env_updates),
+        scratch_config(config_path, scratch_path) as scratch,
+    ):
         _ensure_local_imports()
         # Runs in the spawn subprocess (never the server process): purge cached workspace imports so an
         # edited Model.py/Loss.py is re-imported fresh instead of silently validating stale code.
@@ -857,7 +891,7 @@ def validate_workflow_api(
             if workflow == "train":
                 workflow_object = build_train(
                     command=State.TRAIN,
-                    config=Path(config).resolve(),
+                    config=scratch,
                     checkpoints_dir=validate_checkpoints,
                     statistics_dir=validate_statistics,
                 )
@@ -867,17 +901,17 @@ def validate_workflow_api(
                     dummy_model.write_text("konfai-mcp validation placeholder\n", encoding="utf-8")
                 workflow_object = build_predict(
                     models=[Path(model).resolve() for model in (models or [str(dummy_model)])],
-                    prediction_file=Path(config).resolve(),
+                    prediction_file=scratch,
                     predictions_dir=validate_predictions,
                 )
             elif workflow == "evaluation":
                 workflow_object = build_evaluate(
-                    evaluations_file=Path(config).resolve(),
+                    evaluations_file=scratch,
                     evaluations_dir=validate_evaluations,
                 )
             elif workflow == "transform":
                 workflow_object = build_transform(
-                    transform_file=Path(config).resolve(),
+                    transform_file=scratch,
                     transforms_dir=validate_transforms,
                 )
             else:
@@ -911,27 +945,3 @@ def validate_workflow_api(
                 "error": str(exc),
                 "traceback": traceback.format_exc(),
             }
-        finally:
-            # Restore the authored config so validation never mutates the file it validated.
-            if config_backup is not None:
-                try:
-                    # Atomic restore: an OSError mid-write must not truncate the author's config. Write a
-                    # sibling temp file and rename it into place (mirrors server_jobs._persist_job).
-                    tmp = config_path.with_name(f".{config_path.name}.{uuid4().hex}.tmp")
-                    try:
-                        tmp.write_text(config_backup, encoding="utf-8")
-                        os.replace(tmp, config_path)
-                    except OSError:
-                        tmp.unlink(missing_ok=True)
-                        raise
-                except OSError as restore_exc:
-                    # The side-effect-free invariant is broken: KonfAI already rewrote the config with all
-                    # defaults materialised and the author's bytes could not be put back. Never swallow
-                    # this silently: a "success" payload would then hide a mutated config on disk.
-                    warnings.warn(
-                        f"Failed to restore the validated config at {config_path}: {restore_exc}. The file "
-                        "was left rewritten by KonfAI (defaults materialised, not the authored bytes).",
-                        stacklevel=2,
-                    )
-                    if "payload" in locals() and isinstance(payload, dict):
-                        payload["config_restore_failed"] = str(restore_exc)

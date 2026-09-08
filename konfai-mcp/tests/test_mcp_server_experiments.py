@@ -109,6 +109,26 @@ def test_default_prediction_checkpoint_is_scoped_to_the_run(tmp_path: Path) -> N
     assert service.discover_model_paths() == [run_b_ckpt]
 
 
+def test_continuation_is_reserved_for_resume_within_its_run(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    checkpoints = service.workspace_layout.checkpoints_dir()
+    run_a = checkpoints / "RUN_A"
+    run_b = checkpoints / "RUN_B"
+    run_a.mkdir(parents=True)
+    run_b.mkdir()
+    best = run_a / "best.pt"
+    continuation = run_a / "resume_latest.pt"
+    latest = run_b / "legacy.pt"
+    for path, timestamp in [(continuation, 1000), (best, 2000), (latest, 3000)]:
+        path.write_bytes(b"checkpoint")
+        os.utime(path, (timestamp, timestamp))
+
+    assert service.discover_model_paths(run_name="RUN_A") == [best]
+    assert service.discover_model_paths(run_name="RUN_A", for_resume=True) == [continuation]
+    assert service.discover_model_paths(limit=10, for_resume=True) == [latest, continuation]
+    assert service.discover_model_paths(limit=10) == [latest, best]
+
+
 def test_extensionless_dicom_series_directory_is_detected(tmp_path: Path) -> None:
     # PACS exports store DICOM slices with no extension; a suffix-only scan misses them. The magic-byte
     # sniff must classify such a directory as a dicom group, without false-positiving on a plain folder.

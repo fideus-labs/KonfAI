@@ -342,6 +342,8 @@ class JobRegistry:
             return
         job_dir = self.workspace_layout.job_dir(job.job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
+        if job.status in ("done", "error", "killed"):
+            self._record_resolved_config(job)
         state_path = self.workspace_layout.job_state_path(job.job_id)
         # Atomic write: a crash mid-write must not leave a truncated job.json, because the recovery loop
         # json.loads every record at server start, one half-written file would otherwise be fatal. Write
@@ -378,6 +380,30 @@ class JobRegistry:
             manifest.update(extra_manifest)
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
         job.manifest_path = manifest_path
+
+    def _record_resolved_config(self, job: Job) -> None:
+        """Once, when the job ends: the config as the run left it (KonfAI writes every default back
+        into the file it reads), kept under the job so an edit made afterwards does not pass for the
+        configuration that produced the run. The manifest names the copy under
+        ``resolved_config_snapshot``; a job that predates this records nothing."""
+        if self.workspace_layout is None or job.manifest_path is None or not job.manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(job.manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if "resolved_config_snapshot" in manifest or not job.config_path.exists():
+            return
+        target = self.workspace_layout.job_configs_dir(job.job_id) / "resolved" / job.config_path.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(job.config_path.read_bytes())
+        manifest["resolved_config_snapshot"] = str(target)
+        tmp_path = job.manifest_path.with_name(f".{job.manifest_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_path, job.manifest_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
     def _snapshot_configs(self, job: Job) -> dict[str, str]:
         if self.workspace_layout is None:

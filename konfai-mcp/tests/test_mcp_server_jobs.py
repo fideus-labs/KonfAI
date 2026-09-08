@@ -618,10 +618,12 @@ def test_manifest_failure_marks_job_terminal_not_stuck_queued(tmp_path: Path) ->
     assert statuses == {"error"}
 
 
+@pytest.mark.parametrize("has_continuation", [False, True])
 def test_run_resume_and_failed_job_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
+    has_continuation: bool,
 ) -> None:
     monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
@@ -642,6 +644,11 @@ def test_run_resume_and_failed_job_payload(
             checkpoint = workspace / "Checkpoints" / "FAKE_RUN" / "epoch_0000.pt"
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             checkpoint.write_text("checkpoint", encoding="utf-8")
+            if has_continuation:
+                checkpoint = checkpoint.parent / "resume_latest.pt"
+                checkpoint.write_text("continuation", encoding="utf-8")
+                # Even a newer non-boundary scored checkpoint must not displace the cursor.
+                os.utime(checkpoint, (1000, 1000))
 
             resumed = await client.call_tool("run_resume", {"lr": 0.0005})
             resumed_payload = resumed.structured_content
@@ -711,6 +718,7 @@ def test_run_resume_weights_only_strips_to_model(
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             # A full training checkpoint: Model weights beside the counters/optimizer a plain RESUME restores.
             torch.save({"Model": {"w": torch.zeros(2)}, "epoch": 9, "it": 900, "optimizer": {"state": {}}}, checkpoint)
+            torch.save({"Model": {"w": torch.ones(2)}, "epoch": 10}, checkpoint.parent / "resume_latest.pt")
 
             # A URL cannot be stripped to weights: weights_only demands a local checkpoint.
             with pytest.raises(Exception, match="local checkpoint"):
@@ -725,7 +733,9 @@ def test_run_resume_weights_only_strips_to_model(
             assert resume_from.parent == workspace
             from konfai.utils.runtime import safe_torch_load
 
-            assert set(safe_torch_load(resume_from, "cpu")) == {"Model"}
+            warm_start = safe_torch_load(resume_from, "cpu")
+            assert set(warm_start) == {"Model"}
+            assert torch.equal(warm_start["Model"]["w"], torch.zeros(2))
 
     asyncio.run(scenario())
 

@@ -879,7 +879,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             return blocked
 
         with (
-            mcp_runner.preserved_config(config_path),
+            mcp_runner.discard_scratch_configs(config_path) as scratch,
             tempfile.TemporaryDirectory(prefix=f"konfai_mcp_validate_{normalized_workflow}_") as tmp_dir,
         ):
             # Isolated spawn child: agent-authored code never executes in the server process and
@@ -891,6 +891,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                     "level": level,
                     "workspace_dir": str(workspace),
                     "config": str(config_path),
+                    "scratch_path": str(scratch),
                     "models": resolved_models or None,
                     "validate_root": tmp_dir,
                     "collect_model_outputs": collect_model_outputs,
@@ -1045,23 +1046,33 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         return None
 
     @staticmethod
-    def _newest_checkpoints(root: Path, limit: int) -> list[Path]:
+    def _newest_checkpoints(root: Path, limit: int, *, for_resume: bool = False) -> list[Path]:
         if not root.exists():
             return []
+        paths = [*root.rglob("*.pt"), *root.rglob("*.pth")]
+        continuations = {path.parent: path for path in paths if path.name == "resume_latest.pt"}
+        if for_resume:
+            # Within each run the continuation is authoritative, even when a newer scored or
+            # crash checkpoint stopped with pending gradients. Across runs keep newest first.
+            paths = list(continuations.values()) + [path for path in paths if path.parent not in continuations]
+        else:
+            paths = [path for path in paths if path.name != "resume_latest.pt"]
         candidates = sorted(
-            [*root.rglob("*.pt"), *root.rglob("*.pth")],
+            paths,
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
         return candidates[:limit]
 
-    def discover_model_paths(self, limit: int = 1, run_name: str | None = None) -> list[Path]:
+    def discover_model_paths(
+        self, limit: int = 1, run_name: str | None = None, *, for_resume: bool = False
+    ) -> list[Path]:
         # Scope to Checkpoints/<run_name> when a run is named: globbing the whole Checkpoints tree returns
         # the newest checkpoint across ALL runs, so in a sweep run B's prediction would silently use run
         # C's weights (whichever trained last). Fall back to the global newest only when no run is known.
         checkpoints = self.workspace_layout.checkpoints_dir()
         root = checkpoints / run_name if run_name else checkpoints
-        return self._newest_checkpoints(root, limit)
+        return self._newest_checkpoints(root, limit, for_resume=for_resume)
 
     def active_jobs(self) -> list[Job]:
         return self.job_registry.active()

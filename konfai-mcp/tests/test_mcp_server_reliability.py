@@ -259,13 +259,14 @@ def test_mcp_server_timeout_cancel_and_live_metrics_are_stable(
 
 
 @pytest.mark.usefixtures("workspace_root")
-def test_validate_restores_config_when_subprocess_times_out(
+def test_validate_leaves_the_authored_config_alone_when_the_subprocess_times_out(
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    # The child restores the authored config in its own finally, but a timeout SIGTERMs it before that
-    # runs. Simulate a child that mutated the config (KonfAI rewrites it in place) and was then killed:
-    # the parent must restore the authored bytes regardless.
+    # The child builds the workflow from a scratch copy beside the authored config and removes it in
+    # its own finally, which a timeout SIGTERM never reaches. Simulate a child that left its copy
+    # (KonfAI rewrote THAT file) and was then killed: the authored file is untouched, and the tool
+    # sweeps the copy on its way out.
 
     mcp_server = load_mcp_server()
     client_cls = fastmcp.Client
@@ -273,8 +274,8 @@ def test_validate_restores_config_when_subprocess_times_out(
     authored = MINIMAL_TRAIN
 
     def fake_subprocess(target: str, kwargs: dict, *args, **more):  # type: ignore[no-untyped-def]
-        config_path = Path(kwargs["config"])
-        config_path.write_text("Trainer:\n  train_name: FAKE_RUN\n  materialised_default: 42\n", encoding="utf-8")
+        leftover = Path(kwargs["scratch_path"])
+        leftover.write_text("Trainer:\n  train_name: FAKE_RUN\n  materialised_default: 42\n", encoding="utf-8")
         raise TimeoutError("Isolated subprocess exceeded its deadline and was terminated.")
 
     async def scenario() -> None:
@@ -285,12 +286,15 @@ def test_validate_restores_config_when_subprocess_times_out(
             )
             assert config_path.read_text(encoding="utf-8").strip() == authored
 
+            concurrent = config_path.with_name(".Config.yml.validate-other-active.yml")
+            concurrent.write_text(authored, encoding="utf-8")
             monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", fake_subprocess)
             with pytest.raises(Exception, match=r"deadline|terminated|Timeout"):
                 await client.call_tool("validate_config_semantics", {"workflow": "train"})
 
-            # The parent-side finally restored the authored config despite the child being killed.
             assert config_path.read_text(encoding="utf-8").strip() == authored
+            assert list(config_path.parent.glob(".Config.yml.validate-*.yml")) == [concurrent]
+            assert concurrent.read_text(encoding="utf-8") == authored
 
     asyncio.run(scenario())
 
