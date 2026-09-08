@@ -671,6 +671,17 @@ def main_apps() -> None:
     bundle_p.add_argument("--checkpoint", nargs="+", required=True, help="Checkpoint .pt file(s): CV_0.pt CV_1.pt …")
     bundle_p.add_argument("--model-py", help="Optional custom Model.py to include.")
     bundle_p.add_argument(
+        "--support-file",
+        action="append",
+        default=[],
+        metavar="DESTINATION=SOURCE",
+        help="Explicit helper file/package/asset directory mapping; paths are relative, directories copy recursively. Repeat for more paths.",
+    )
+    bundle_p.add_argument(
+        "--support-root",
+        help="Source root required with --support-file; imports are not recursively discovered.",
+    )
+    bundle_p.add_argument(
         "--requirements", help="Optional requirements.txt; if omitted, a draft is derived from Model.py imports."
     )
     bundle_p.add_argument(

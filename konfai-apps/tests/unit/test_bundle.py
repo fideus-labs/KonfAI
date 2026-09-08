@@ -435,3 +435,124 @@ def test_repackaging_preserves_a_checkpoint_declared_with_a_relative_prefix(tmp_
 
     assert (bundle / "current.pt").read_bytes() == b"replacement weights"
     assert json.loads((bundle / "app.json").read_text())["models"] == ["current.pt"]
+
+
+def _support_workspace(tmp_path):
+    root = tmp_path / "workspace"
+    (root / "helpers").mkdir(parents=True)
+    (root / "helpers" / "__init__.py").write_text("")
+    (root / "helpers" / "util.py").write_text("SCALE = 2\n")
+    (root / "assets").mkdir()
+    (root / "assets" / "table.csv").write_text("a,b\n")
+    (root / "Prediction.yml").write_text("Predictor: {}\n")
+    (root / "CV_0.pt").write_bytes(b"weights")
+    _write(root / "app.json", VALID_META)
+    return root
+
+
+def _assemble_with_support(root, support_files):
+    return assemble_bundle(
+        "Seg",
+        root.parent / "out",
+        root / "app.json",
+        [str(root / "Prediction.yml")],
+        [str(root / "CV_0.pt")],
+        support_files=support_files,
+        support_root=root,
+    )
+
+
+def test_declared_support_files_land_in_the_bundle_and_the_manifest_lists_them(tmp_path):
+    root = _support_workspace(tmp_path)
+
+    bundle = _assemble_with_support(root, {"helpers": "helpers", "assets/table.csv": "assets/table.csv"})
+
+    assert (bundle / "helpers" / "util.py").read_text() == "SCALE = 2\n"
+    assert (bundle / "assets" / "table.csv").read_text() == "a,b\n"
+    meta = json.loads((bundle / "app.json").read_text())
+    assert meta["support_files"] == ["assets/table.csv", "helpers/__init__.py", "helpers/util.py"]
+
+    # Repackaging without the helpers removes the files the previous export managed, and keeps the
+    # user's own notes beside them.
+    (bundle / "NOTES.md").write_text("mine\n")
+    _assemble_with_support(root, {"assets/table.csv": "assets/table.csv"})
+    assert not (bundle / "helpers").exists() or not any((bundle / "helpers").iterdir())
+    assert (bundle / "NOTES.md").read_text() == "mine\n"
+    assert (bundle / "assets" / "table.csv").is_file()
+
+
+@pytest.mark.parametrize(
+    "support_files, support_root, message",
+    [
+        ({"helpers": "../outside"}, "workspace", "relative path below"),
+        ({"helpers": "/etc"}, "workspace", "relative path below"),
+        ({"../up": "helpers"}, "workspace", "relative path below"),
+        ({"helpers": "helpers"}, None, "support_root is required"),
+        ({"helpers": "missing"}, "workspace", "Cannot read support path"),
+    ],
+)
+def test_support_files_outside_their_root_are_refused_before_anything_is_written(
+    tmp_path, support_files, support_root, message
+):
+    root = _support_workspace(tmp_path)
+    out = root.parent / "out"
+
+    with pytest.raises(AppMetadataError, match=message):
+        assemble_bundle(
+            "Seg",
+            out,
+            root / "app.json",
+            [str(root / "Prediction.yml")],
+            [str(root / "CV_0.pt")],
+            support_files=support_files,
+            support_root=None if support_root is None else root,
+        )
+    assert not out.exists()
+
+
+def test_a_symlink_escaping_the_support_root_is_refused(tmp_path):
+    root = _support_workspace(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("no\n")
+    (root / "helpers" / "leak.txt").symlink_to(secret)
+
+    with pytest.raises(AppMetadataError, match="escapes support_root"):
+        _assemble_with_support(root, {"helpers": "helpers"})
+
+
+def test_bundle_cli_maps_support_files_and_drops_local_packages_from_the_requirements_draft(tmp_path, capsys):
+    from konfai_apps.bundle import run_bundle_cli
+
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\nfrom helpers.util import SCALE\n")
+
+    run_bundle_cli(
+        {
+            "name": "Seg",
+            "out": str(root.parent / "out"),
+            "app_json": str(root / "app.json"),
+            "config": [str(root / "Prediction.yml")],
+            "checkpoint": [str(root / "CV_0.pt")],
+            "model_py": str(root / "Model.py"),
+            "support_file": ["helpers=helpers"],
+            "support_root": str(root),
+        }
+    )
+
+    bundle = root.parent / "out" / "Seg"
+    assert (bundle / "helpers" / "util.py").is_file()
+    drafted = (bundle / "requirements.txt").read_text().split()
+    assert "einops" in drafted and "helpers" not in drafted  # a declared local package is not a PyPI dependency
+
+    with pytest.raises(AppMetadataError, match="DESTINATION=SOURCE"):
+        run_bundle_cli(
+            {
+                "name": "Seg",
+                "out": str(root.parent / "out"),
+                "app_json": str(root / "app.json"),
+                "config": [str(root / "Prediction.yml")],
+                "checkpoint": [str(root / "CV_0.pt")],
+                "support_file": ["helpers"],
+                "support_root": str(root),
+            }
+        )

@@ -260,6 +260,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "reusable app. It gathers the session's checkpoints "
         "and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + "
         "checkpoint + optional Model.py/requirements) that describe_app / run_app_infer / import_app can consume. "
+        "Declare local helper packages and assets with support_files (bundle-relative destination -> "
+        "workspace-relative source); folders copy recursively, with no recursive import discovery. "
         "It does not train, and it does not upload the bundle anywhere. "
         "Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). "
         "Next: describe_app or run_app_infer on the produced bundle."

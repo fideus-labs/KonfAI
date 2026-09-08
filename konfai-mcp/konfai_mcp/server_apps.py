@@ -37,7 +37,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -893,6 +892,7 @@ class AppService:
         onnx: bool = False,
         onnx_patch_size: list[int] | None = None,
         onnx_in_channels: int | None = None,
+        support_files: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Package a session's trained model into a resolvable app bundle via ``assemble_bundle``.
 
@@ -912,6 +912,16 @@ class AppService:
 
         bundle_name = self.workspace_layout.sanitize_name(name)
         out_dir = Path(output).expanduser() if output else (self.workspace_layout.workspace_dir() / "AppBundles")
+        session_dir = self.workspace_layout.workspace_dir().resolve()
+        for source in (support_files or {}).values():
+            self.workspace_layout.resolve_workspace_relative_path(source)
+        planned_support = self._referenced_support_file_sources(
+            resolved_configs, out_dir / bundle_name, protected={"Model.py"} if model_py else None
+        )
+        for destination, declared in bundle.resolve_support_files(support_files, session_dir).items():
+            if destination in planned_support and planned_support[destination] != declared:
+                raise ValueError(f"Declared support file conflicts with a config reference: {destination!r}.")
+            planned_support[destination] = declared
         metadata = {
             "display_name": display_name,
             "description": description,
@@ -940,23 +950,19 @@ class AppService:
                 resolved_checkpoints,
                 model_py=str(Path(model_py).expanduser()) if model_py else None,
                 requirements=str(Path(requirements).expanduser()) if requirements else None,
+                support_files={name: str(source.relative_to(session_dir)) for name, source in planned_support.items()},
+                support_root=session_dir,
             )
         finally:
             Path(tmp_app_json).unlink(missing_ok=True)
 
-        # Copy every support file the config references by classpath (e.g. the UNet.yml YAML model, a local
-        # Model.py/Loss.py). assemble_bundle copies the configs + model_py but NOT the files they reference,
-        # so a YAML-model bundle would fail at resolve with 'Could not read model YAML file'.
-        copied_support = self._copy_referenced_support_files(
-            resolved_configs, bundle_path, protected={"Model.py"} if model_py else None
-        )
         self._normalize_bundled_prediction_configs(bundle_path, resolved_configs)
 
         result: dict[str, Any] = {
             "bundle_path": str(bundle_path),
             "checkpoints": [Path(path).name for path in resolved_checkpoints],
             "configs": [Path(path).name for path in resolved_configs],
-            "support_files": copied_support,
+            "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
             "next_actions": ["describe_app", "run_app_infer", "import_app"],
@@ -1171,13 +1177,13 @@ class AppService:
             for value in node:
                 cls._rename_group_references(value, renames)
 
-    def _copy_referenced_support_files(
+    def _referenced_support_file_sources(
         self, config_paths: list[str], bundle_path: Path, protected: set[str] | None = None
-    ) -> list[str]:
-        """Copy config-referenced model/support files (classpath: X.yml, local File:Class -> File.py) into the bundle.
+    ) -> dict[str, Path]:
+        """Plan direct config references before the assembler validates and stages the whole bundle.
 
-        Copies unconditionally so repackaging under the same name picks up edited session files;
-        ``protected`` names (e.g. an explicitly passed model_py already placed as Model.py) are skipped.
+        No import dependency discovery: helpers/assets are explicit ``support_files`` declarations.
+        ``protected`` names (an explicitly passed model_py already placed as Model.py) are skipped.
         """
         session_dir = self.workspace_layout.workspace_dir().resolve()
         wanted: dict[str, Path] = {}
@@ -1206,13 +1212,7 @@ class AppService:
                         f"Different configs reference different support files named {relative!r}; rename them."
                     )
                 wanted[relative] = src
-        copied: list[str] = []
-        for relative, src in sorted(wanted.items()):
-            dst = bundle_path / relative
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src, dst)
-            copied.append(relative)
-        return copied
+        return dict(sorted(wanted.items()))
 
     @staticmethod
     def _referenced_support_files(text: str, session_dir: Path) -> set[str]:

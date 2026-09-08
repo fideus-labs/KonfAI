@@ -1701,6 +1701,16 @@ def package_app_from_session(
     onnx_in_channels: Annotated[
         int | None, Field(description="Input channel count for the ONNX export's dummy input.")
     ] = None,
+    support_files: Annotated[
+        dict[str, str] | None,
+        Field(
+            description=(
+                "Explicit bundle-relative destination -> workspace-relative source mappings for helper files, "
+                "packages or asset directories, e.g. {'helpers': 'helpers', 'assets': 'assets'}. Directories copy "
+                "recursively; escaping paths/symlinks and collisions are refused. Imports are not discovered recursively."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Package a session-trained model into a resolvable KonfAI app bundle (optionally with ONNX)."""
     return APP_SERVICE.package_from_session(
@@ -1718,6 +1728,7 @@ def package_app_from_session(
         onnx=onnx,
         onnx_patch_size=onnx_patch_size,
         onnx_in_channels=onnx_in_channels,
+        support_files=support_files,
     )
 
 

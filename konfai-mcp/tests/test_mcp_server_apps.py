@@ -1093,3 +1093,27 @@ def test_packaging_support_path_cannot_write_above_the_bundle(tmp_path: Path) ->
             checkpoints=[str(checkpoints / "first.pt")],
         )
     assert not (workspace / "AppBundles" / "Network.yml").exists()
+
+
+def test_package_from_session_ships_declared_support_files_beside_config_references(tmp_path: Path) -> None:
+    layout, workspace, _ = _packaging_session(tmp_path)
+    (workspace / "helpers").mkdir()
+    (workspace / "helpers" / "__init__.py").write_text("", encoding="utf-8")
+    (workspace / "helpers" / "util.py").write_text("SCALE = 2\n", encoding="utf-8")
+    (workspace / "UNet.yml").write_text("modules: []\n", encoding="utf-8")
+    (workspace / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: UNet.yml\n", encoding="utf-8")
+
+    result = AppService(workspace_layout=layout).package_from_session(
+        name="Helpers", display_name="h", description="h", support_files={"helpers": "helpers"}
+    )
+
+    bundle = Path(result["bundle_path"])
+    assert result["support_files"] == ["UNet.yml", "helpers/__init__.py", "helpers/util.py"]
+    assert (bundle / "helpers" / "util.py").read_text(encoding="utf-8") == "SCALE = 2\n"
+    assert (bundle / "UNet.yml").is_file()
+    assert json.loads((bundle / "app.json").read_text(encoding="utf-8"))["support_files"] == result["support_files"]
+
+    with pytest.raises(ValueError, match="escapes"):
+        AppService(workspace_layout=layout).package_from_session(
+            name="Escape", display_name="h", description="h", support_files={"helpers": "../elsewhere"}
+        )

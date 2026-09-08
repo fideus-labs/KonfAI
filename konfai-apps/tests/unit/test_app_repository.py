@@ -1221,3 +1221,55 @@ def test_native_inference_leaves_the_declared_portable_assets_in_the_repository(
     _models, _prediction, assets = repo.download_inference(1, [], "Prediction.yml")
     names = {name for name, _path in assets}
     assert "lookup.json" in names and not names & {"model.onnx", "model.onnx.data"}
+
+
+def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspace(tmp_path: Path) -> None:
+    # The relocatable-bundle contract: the helper package declared at export time reaches the run
+    # workspace with the rest of the bundle, and Model.py imports it in a process that knows
+    # nothing of the workspace the bundle was packaged from.
+    import subprocess
+
+    from konfai_apps.bundle import assemble_bundle
+
+    source = tmp_path / "source"
+    (source / "helpers").mkdir(parents=True)
+    (source / "helpers" / "__init__.py").write_text("")
+    (source / "helpers" / "util.py").write_text("SCALE = 3\n", encoding="utf-8")
+    (source / "Model.py").write_text("from helpers.util import SCALE\n\nVALUE = SCALE * 2\n", encoding="utf-8")
+    (source / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: Model:Net\n", encoding="utf-8")
+    (source / "CV_0.pt").write_bytes(b"weights")
+    (source / "app.json").write_text(
+        json.dumps(
+            {"display_name": "Demo", "description": "Demo", "short_description": "Demo", "tta": 0, "mc_dropout": 0}
+        ),
+        encoding="utf-8",
+    )
+    bundle = assemble_bundle(
+        "Relocatable",
+        tmp_path / "bundles",
+        source / "app.json",
+        [str(source / "Prediction.yml")],
+        [str(source / "CV_0.pt")],
+        model_py=str(source / "Model.py"),
+        support_files={"helpers": "helpers"},
+        support_root=source,
+    )
+
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(bundle.parent, bundle.name)
+    _, _, codes = repo.download_inference(1, [], "Prediction.yml")
+    assert {name for name, _ in codes} >= {"Model.py", "helpers/__init__.py", "helpers/util.py"}
+
+    workspace = tmp_path / "run"
+    workspace.mkdir()
+    for name, path in codes:  # what install_inference does with the same list
+        (workspace / name).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / name).write_bytes(path.read_bytes())
+    completed = subprocess.run(
+        [sys.executable, "-c", "import Model; print(Model.VALUE)"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert completed.stdout.strip() == "6"
