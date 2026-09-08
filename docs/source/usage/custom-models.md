@@ -81,8 +81,8 @@ Trainer:
     classpath: Model:UNetpp5
     UNetpp5:
       ...                 # the model's own arguments, decorated or not
-    outputs_criterions:
-      ...
+      outputs_criterions:
+        ...
 ```
 
 In the current codebase:
@@ -710,6 +710,8 @@ class TrimmedMean(Reduction):
     working_multiple = 4.0 # the stacked float copy plus the reduction buffers
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        if len(tensors) < 3:
+            raise ValueError("TrimmedMean needs at least three members")
         stack = torch.stack([tensor.float() for tensor in tensors])
         trimmed = stack.sum(dim=0) - stack.amax(dim=0) - stack.amin(dim=0)
         return trimmed / (len(tensors) - 2)
