@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -118,7 +119,8 @@ def test_mmap_opt_in_preserves_legacy_and_trusted_object_loading(
     monkeypatch.setattr(runtime_module.torch, "load", spy)
     loaded = safe_torch_load(checkpoint, "cpu", mmap=True)
 
-    assert calls == [(True, zip_format)] + ([(False, zip_format)] if custom_object else [])
+    mapped = zip_format and sys.platform != "win32"
+    assert calls == [(True, mapped)] + ([(False, mapped)] if custom_object else [])
     assert torch.equal(loaded["weight"], state["weight"])
     assert loaded["loss"] == 0.25
     if custom_object:

@@ -18,6 +18,7 @@
 
 import gc
 import os
+import sys
 import weakref
 from collections import Counter
 from pathlib import Path
@@ -118,7 +119,20 @@ def test_disabled_or_oversized_path_cache_loads_without_retaining(tmp_path, monk
     assert composite._state_cache_bytes == 0 and not composite._state_cache
 
 
-@pytest.mark.parametrize("replacement", ["in_place", "atomic", "preserved_mtime"])
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "in_place",
+        "atomic",
+        pytest.param(
+            "preserved_mtime",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32",
+                reason="Windows st_ctime is the creation time: the rewrite keeps every stat field",
+            ),
+        ),
+    ],
+)
 def test_single_member_reloads_when_its_file_changes(tmp_path, monkeypatch, replacement) -> None:
     composite = ModelComposite(PayloadNet(), Mean())
     paths = _paths(tmp_path, 1)
