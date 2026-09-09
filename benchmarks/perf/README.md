@@ -97,7 +97,7 @@ baseline.
 
 A bench states two kinds of results. Its **facts** carry their expected value: the streamed route
 wrote the voxels of the whole-volume route (`differing_voxels_whole_vs_stream == 0`), the transform
-equals the plain loop to float32 rounding (`max_abs_diff_konfai_vs_naive <= 1e-6`), the plan's held peak stayed
+equals the plain loop to float32 rounding (`max_abs_diff_konfai_vs_naive <= 1e-6`), the sweep's held peak stayed
 within its budget, no test failed. `facts.py RUN.json` checks them on any machine and needs no
 baseline. Its **times and memory** compare to `baselines/<machine>.json` through `compare.py`,
 within one machine class (`harness.machine_class`: `KONFAI_PERF_MACHINE`, else the host name) and

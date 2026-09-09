@@ -285,9 +285,14 @@ def main() -> None:
         fact("attrs_equal_konfai_vs_naive", check.get("attrs_equal", False), 1),
     ]
     for row in sweep_rows:
-        held = [line for line in row["plan"] if "held " in line]
+        # The sweep's held peak is what the plan sizes against the budget; the process RSS also carries
+        # the interpreter's floor, which no budget compresses.
+        held = [re.search(r"peak held ([0-9.]+) GiB", line) for line in row["plan"]]
+        peaks = [float(m.group(1)) for m in held if m]
         tag = f"{row['budget_gib']:g}".replace(".", "p")
-        result["facts"].append(fact(f"within_budget_b{tag}", bool(held) and held[-1].endswith("within"), 1))
+        result["facts"].append(
+            fact(f"sweep_peak_gib_b{tag}", max(peaks) if peaks else float("nan"), row["budget_gib"], "<=")
+        )
 
     prof_path = scratch / "transform.prof"
     in_fresh_process(
