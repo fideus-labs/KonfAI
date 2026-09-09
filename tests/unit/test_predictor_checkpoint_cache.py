@@ -149,6 +149,9 @@ def test_single_member_reloads_when_its_file_changes(tmp_path, monkeypatch, repl
         torch.save(_payload(9.0), path)
         if replacement == "preserved_mtime":
             os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        elif path.stat().st_mtime_ns == before.st_mtime_ns:
+            # A rewrite inside the file system's timestamp tick (Windows): the next tick tells it apart.
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
     assert composite._model_for_index(0).scale == 9
     assert reads[str(path)] == 2
 
