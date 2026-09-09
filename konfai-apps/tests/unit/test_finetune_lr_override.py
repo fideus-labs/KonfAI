@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from multipart_support import decode_multipart
 
 # Before importing anything that pulls in FastAPI (app_server): a module-level import runs at collection,
 # so pytestmark would skip too late and collection would error when FastAPI is absent.
@@ -188,6 +189,7 @@ def test_fine_tune_writes_the_run_to_artifacts_root(monkeypatch: pytest.MonkeyPa
         produced = Path(args[8]) / data["Trainer"]["train_name"]
         produced.mkdir(parents=True, exist_ok=True)
         torch.save({"epoch": 0, "it": 5, "loss": 0.0, "Model": {}}, produced / "out.pt")
+        torch.save({"epoch": 1, "it": 10, "loss": 2.0, "Model": {}}, produced / "resume_latest.pt")
 
     monkeypatch.setattr("konfai.trainer.train", fake_train)
     monkeypatch.setattr(app_module.KonfAIApp, "symlink", staticmethod(lambda *a, **k: None))
@@ -215,6 +217,7 @@ def test_fine_tune_writes_the_run_to_artifacts_root(monkeypatch: pytest.MonkeyPa
     assert captured["checkpoints"] == session_root / "Checkpoints"
     assert captured["statistics"] == session_root / "Statistics"
     assert (bundle / "CV_0.pt").is_file()  # the fine-tuned checkpoint still lands in the bundle
+    assert torch.load(bundle / "CV_0.pt", weights_only=True)["loss"] == 0.0
 
 
 def test_local_fine_tune_copies_subpackage_support_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -298,8 +301,9 @@ def test_remote_client_fine_tune_sends_lr_in_data(monkeypatch: pytest.MonkeyPatc
 
     captured: dict = {}
 
-    def fake_post(url, files, data, headers, timeout):  # type: ignore[no-untyped-def]
-        return _FakePostResponse(captured, list(files), dict(data))
+    def fake_post(url, data, headers, timeout):  # type: ignore[no-untyped-def]
+        files, form = decode_multipart(data)
+        return _FakePostResponse(captured, files, form)
 
     monkeypatch.setattr(app_module.requests, "post", fake_post)
     monkeypatch.setattr(app_module.KonfAIAppClient, "stream_logs", lambda self, job_id: None)
@@ -314,7 +318,7 @@ def test_remote_client_fine_tune_sends_lr_in_data(monkeypatch: pytest.MonkeyPatc
 
     client.fine_tune(dataset=dataset_dir, output=tmp_path / "out", lr=0.03)
 
-    assert captured["data"]["lr"] == 0.03
+    assert float(captured["data"]["lr"]) == 0.03  # a form field travels as text
 
 
 def test_server_fine_tune_cmd_adds_lr_when_provided() -> None:

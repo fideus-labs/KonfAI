@@ -264,6 +264,8 @@ KonfAI
    examples/visual-gallery
    examples/transform
    examples/segmentation
+   examples/bring-your-model
+   examples/large-images
    examples/registration
    examples/synthesis
 

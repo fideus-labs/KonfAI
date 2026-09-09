@@ -75,7 +75,9 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 
 
-def _invert_via_displacement_field(transform: sitk.Transform, image: sitk.Image) -> sitk.DisplacementFieldTransform:
+def _invert_via_displacement_field(
+    transform: sitk.Transform, image: sitk.Image | None
+) -> sitk.DisplacementFieldTransform:
     if image is None:
         raise TransformError(
             "Inverting a non-linear transform requires a reference image to sample the displacement field, "
@@ -97,7 +99,7 @@ def _copy_transform(transform_cls: type[sitk.Transform], transform: sitk.Transfo
 
 
 def _open_transform(
-    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
+    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image | None = None
 ) -> list[sitk.Transform]:
     _require_simpleitk()
     transforms: list[sitk.Transform] = []
@@ -129,7 +131,7 @@ def _open_transform(
 
 
 def compose_transform(
-    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image = None
+    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image | None = None
 ) -> sitk.CompositeTransform:
     transforms = _open_transform(transform_files, image)
     result = sitk.CompositeTransform(transforms)
@@ -151,11 +153,10 @@ def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) ->
 
     data = sitk.GetArrayViewFromImage(mask)  # a view: the mask is read for its shape and its labels, not held
     border = np.where(np.isin(data, label))
-    box = []
+    box: list[list[Any]] = []
     for w, dilatation, s in zip(border, dilatations, data.shape, strict=False):
         box.append([max(np.min(w) - dilatation, 0), min(np.max(w) + dilatation, s)])
-    box = np.asarray(box)
-    return box
+    return np.asarray(box)
 
 
 def _linear_map(transform: sitk.Transform) -> AffineMap:

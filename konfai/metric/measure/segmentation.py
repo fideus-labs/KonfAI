@@ -53,6 +53,26 @@ class Dice(Criterion):
         return tensor.dtype not in (torch.bool, torch.uint8, torch.uint16, torch.uint32, torch.uint64)
 
     @staticmethod
+    def _bin_index(tensor: torch.Tensor) -> torch.Tensor:
+        """``tensor`` in a dtype ``bincount`` takes: a bool map as uint8, a float map (NaN voxels
+        to be masked by the caller) and the wide unsigned maps as int64. ``bincount`` has no kernel
+        for uint16/uint32/uint64 on the CPU, and uint16 is what a label map is often stored as. A
+        uint64 label past the int64 range has no bin: refused, not wrapped."""
+        if tensor.dtype is torch.bool:
+            return tensor.to(torch.uint8)
+        if tensor.is_floating_point() or tensor.dtype in (torch.uint16, torch.uint32):
+            return tensor.to(torch.int64)
+        if tensor.dtype is torch.uint64:
+            index = tensor.view(torch.int64)
+            if bool((index < 0).any()):
+                raise MeasureError(
+                    "A uint64 label map holds a label above 2^63-1, which no bin can count.",
+                    "Relabel the map (labels are small integers) or store it as uint32/int64.",
+                )
+            return index
+        return tensor
+
+    @staticmethod
     def _bins(maps: list[torch.Tensor], labels: list[int] | None) -> tuple[list[torch.Tensor], int, int, int]:
         """The maps as bin indices, the offset a bin carries (label = bin + offset), the NaN bin (1
         when there is one, at index 0, else 0) and the bins to count.
@@ -65,8 +85,7 @@ class Dice(Criterion):
         nan_masks = [torch.isnan(tensor).flatten() if tensor.is_floating_point() else None for tensor in maps]
         indices = []
         for tensor, nan_mask in zip(maps, nan_masks, strict=True):
-            dtype = torch.uint8 if tensor.dtype is torch.bool else torch.int64 if nan_mask is not None else tensor.dtype
-            index = tensor.to(dtype).flatten()
+            index = Dice._bin_index(tensor).flatten()
             if nan_mask is not None:
                 index = index.masked_fill_(nan_mask, 0)  # a whole number, so the minimum below is a label's
             indices.append(index)

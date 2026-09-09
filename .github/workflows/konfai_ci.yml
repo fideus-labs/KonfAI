@@ -24,15 +24,24 @@ on:
       - "examples/Transform/**"
       - "pyproject.toml"
       - "README.md"
+  schedule:
+    - cron: "17 3 * * 1" # the full OS x Python matrix, weekly
+  workflow_dispatch:
 
 jobs:
   konfai_ci:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # A pull request runs the representative lanes: every Python on Linux, and the OS-sensitive
+      # paths (process groups, paths, mmap, packaging) once each on Windows and macOS. A push to
+      # main, the weekly schedule and a manual run cover the full matrix.
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "windows-latest", "macos-latest"]') }}
         python-version: ["3.11", "3.12", "3.13"]
+        include: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '[{"os": "windows-latest", "python-version": "3.12"}, {"os": "macos-latest", "python-version": "3.12"}]' || '[]') }}
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -57,6 +66,10 @@ jobs:
 
       - name: Run pytest
         # Same xdist mode as the pixi `test` task; loadfile keeps per-file session fixtures on one worker.
+        # One torch thread per worker: every worker otherwise spins the runner's core count of intra-op
+        # threads against the others (measured 8x slower on 24 cores).
+        env:
+          OMP_NUM_THREADS: "1"
         run: |
           pytest -q -n auto --dist loadfile tests
 
@@ -81,6 +94,30 @@ jobs:
 
       - name: Run ruff lint
         run: ruff check konfai konfai-apps/konfai_apps tests
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run mypy
+        # The same command as the pixi `typecheck` task ([tool.mypy] governs).
+        run: |
+          python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio
 
   format:
     runs-on: ubuntu-latest
@@ -164,10 +201,13 @@ jobs:
         run: python -m build --sdist --wheel
 
       - name: Verify the wheel ships and installs the model catalog and the CLI
-        # The wheel contract lives in one place: the slow tests build their own wheel, check it
-        # against the source tree and install it NON-editable in a fresh venv (the test job's
-        # editable install hides PEP 420/package-data breakage).
+        # The wheel contract lives in one place: the slow tests check the wheel built above against
+        # the source tree and install it NON-editable in a fresh venv (the test job's editable
+        # install hides PEP 420/package-data breakage). KONFAI_WHEEL points them at that wheel
+        # instead of building a second one.
         run: pytest tests/unit/test_packaging.py -m slow
+        env:
+          KONFAI_WHEEL: dist
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

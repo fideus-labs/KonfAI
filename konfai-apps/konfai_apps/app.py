@@ -236,6 +236,32 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
     return found
 
 
+def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
+    """The request body of a remote submission, encoded as it is sent.
+
+    ``requests.post(files=...)`` reads every file whole to build the multipart body before the
+    first byte leaves: a client chose the remote mode because it is small, and a 4 GiB volume then
+    held 4 GiB of it. The encoder reads each file in chunks as the connection takes them, so the
+    peak is a buffer whatever the files weigh, and it still knows its length (no chunked transfer:
+    the server sees a plain ``Content-Length``). Field order is the one ``requests`` sent: the
+    scalars first, then the files; a list value is repeated under its name, ``None`` is dropped.
+    """
+    from requests_toolbelt import MultipartEncoder
+
+    fields: list[tuple[str, Any]] = []
+    for key, value in data.items():
+        if value is None:
+            continue
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            fields.append((key, item if isinstance(item, (str, bytes)) else str(item)))
+    for key, value in files:
+        # A bare handle is sent under its file's name, as ``requests`` sent it.
+        fields.append(
+            (key, value if isinstance(value, tuple) else (os.path.basename(getattr(value, "name", key)), value))
+        )
+    return MultipartEncoder(fields=fields)
+
+
 class AbstractKonfAIApp:
     """Common base class for local and remote KonfAI App runners."""
 
@@ -587,11 +613,11 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     connect_timeout = 60
                     read_timeout: int = 600
 
+                    body = _multipart_body(files, data)
                     with requests.post(
                         f"{self.remote_server.get_url()}/apps/{self.app}/{func.__name__}",
-                        files=files,
-                        data=data,
-                        headers=self.remote_server.get_headers(),
+                        data=body,
+                        headers={**self.remote_server.get_headers(), "Content-Type": body.content_type},
                         timeout=(connect_timeout, read_timeout),
                     ) as r:
                         if r.status_code == 401:
@@ -1567,7 +1593,10 @@ class KonfAIApp(AbstractKonfAIApp):
                 )
 
                 produced_dir = art_root / "Checkpoints" / train_name
-                produced = sorted(produced_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+                produced = sorted(
+                    (path for path in produced_dir.glob("*.pt") if path.name != "resume_latest.pt"),
+                    key=lambda p: p.stat().st_mtime,
+                )
                 if not produced:
                     raise AppRepositoryError(
                         f"Fine-tuning of '{checkpoint_name}' produced no checkpoint in '{produced_dir}'."

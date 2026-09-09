@@ -57,7 +57,7 @@ from .guide import (
     TOOL_DESCRIPTIONS,
 )
 from .metrics_service import top_level_metrics
-from .runner import preserved_config
+from .runner import discard_scratch_configs
 from .runner import run_api_in_subprocess as _run_api_in_subprocess
 from .server_apps import AppService
 from .server_experiments import SessionService
@@ -1701,6 +1701,16 @@ def package_app_from_session(
     onnx_in_channels: Annotated[
         int | None, Field(description="Input channel count for the ONNX export's dummy input.")
     ] = None,
+    support_files: Annotated[
+        dict[str, str] | None,
+        Field(
+            description=(
+                "Explicit bundle-relative destination -> workspace-relative source mappings for helper files, "
+                "packages or asset directories, e.g. {'helpers': 'helpers', 'assets': 'assets'}. Directories copy "
+                "recursively; escaping paths/symlinks and collisions are refused. Imports are not discovered recursively."
+            )
+        ),
+    ] = None,
 ) -> dict[str, Any]:
     """Package a session-trained model into a resolvable KonfAI app bundle (optionally with ONNX)."""
     return APP_SERVICE.package_from_session(
@@ -1718,6 +1728,7 @@ def package_app_from_session(
         onnx=onnx,
         onnx_patch_size=onnx_patch_size,
         onnx_in_channels=onnx_in_channels,
+        support_files=support_files,
     )
 
 
@@ -2180,11 +2191,36 @@ def export_run_record(
     manifest: dict[str, Any] = {}
     if job.manifest_path is not None and job.manifest_path.exists():
         manifest = json.loads(read_text(job.manifest_path))
-    snapshots = {
-        name: read_text_range(Path(path), max_chars=40000)["content"]
+    # Bounded previews, each with what the bound cut: a 50,000-character config once came back as
+    # 40,000 with nothing saying so. The path is where the whole artifact is.
+    previews = {
+        name: read_text_range(Path(path), max_chars=40000)
         for name, path in (manifest.get("config_snapshots") or {}).items()
         if Path(path).exists()
     }
+    snapshots = {name: preview["content"] for name, preview in previews.items()}
+    snapshots_meta = {
+        name: {
+            "truncated": preview["truncated"],
+            "total_bytes": preview["total_bytes"],
+            "path": manifest["config_snapshots"][name],
+        }
+        for name, preview in previews.items()
+    }
+    # The configuration that produced the run is the job's own copy at completion, never the
+    # session file re-read now: that file is the author's and may hold a later edit.
+    resolved_snapshot = manifest.get("resolved_config_snapshot")
+    if resolved_snapshot and Path(resolved_snapshot).exists():
+        resolved_preview = read_text_range(Path(resolved_snapshot), max_chars=40000)
+        resolved_config: str | None = resolved_preview["content"]
+        resolved_source = "job snapshot at completion"
+        resolved_meta: dict[str, Any] = {
+            "truncated": resolved_preview["truncated"],
+            "total_bytes": resolved_preview["total_bytes"],
+            "path": resolved_snapshot,
+        }
+    else:
+        resolved_config, resolved_source, resolved_meta = None, "not recorded: the job predates resolved snapshots", {}
     resolved_run = job.run_name or run_name
     metrics: dict[str, Any] = {}
     if resolved_run:
@@ -2198,7 +2234,12 @@ def export_run_record(
         "job": _job_payload(job),
         "manifest": manifest,
         "config_snapshots": snapshots,
-        "resolved_config": (
+        "config_snapshots_meta": snapshots_meta,
+        "resolved_config": resolved_config,
+        "resolved_config_source": resolved_source,
+        "resolved_config_meta": resolved_meta,
+        # The session's file as it stands NOW: a preview, not provenance.
+        "current_config_preview": (
             read_text_range(job.config_path, max_chars=40000)["content"] if job.config_path.exists() else None
         ),
         "metrics": metrics,
@@ -2725,13 +2766,12 @@ def run_resume(
         # Prefer the configured run's own checkpoints over the globally newest one, so a sweep
         # does not silently resume run A from run B's checkpoint.
         run_name = SESSION.configured_run_name("train", config_path)
-        run_dir = WORKSPACE_LAYOUT.checkpoints_dir() / run_name if run_name is not None else None
         run_checkpoints = (
-            sorted(run_dir.glob("*.pt"), key=lambda path: path.stat().st_mtime, reverse=True)
-            if run_dir is not None and run_dir.exists()
+            SESSION.discover_model_paths(limit=1, run_name=run_name, for_resume=not weights_only)
+            if run_name is not None
             else []
         )
-        discovered = run_checkpoints or SESSION.discover_model_paths(limit=1)
+        discovered = run_checkpoints or SESSION.discover_model_paths(limit=1, for_resume=not weights_only)
         resolved_model = discovered[0] if discovered else None
     if resolved_model is None:
         raise ValueError("No checkpoint found to resume from. Provide model explicitly or run run_train first.")
@@ -3136,12 +3176,13 @@ def plan_transform(
     blocked = SESSION.workflow_blocker("transform")
     if blocked is not None:
         return blocked
-    with preserved_config(config_path):
+    with discard_scratch_configs(config_path) as scratch:
         return _run_api_in_subprocess(
             "konfai_mcp.runner:plan_transform_api",
             {
                 "workspace_dir": str(SESSION.workspace_dir()),
                 "config": str(config_path),
+                "scratch_path": str(scratch),
                 "cpu": max(1, int(cpu or 1)),
                 "overwrite": bool(overwrite),
             },

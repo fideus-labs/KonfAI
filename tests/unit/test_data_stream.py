@@ -581,6 +581,25 @@ def test_a_backup_orphaned_by_a_killed_writer_is_served_again(tmp_path: Path, fi
     assert Dataset(tmp_path / "store", file_format).is_dataset_exist("CT", "CASE_001")  # and it stays back
 
 
+def test_the_chunk_grain_of_a_recovered_h5_entry_is_answered(tmp_path: Path, monkeypatch) -> None:
+    """A sweep is priced on the grain of the entry it reads, and a recovered backup is that entry."""
+    h5py = pytest.importorskip("h5py")
+    from konfai.utils.dataset.staging import _replaced_name
+
+    dataset = Dataset(tmp_path / "store", "h5")
+    dataset.write("CT", "CASE_001", _volume(), _image_attributes())
+    with h5py.File(tmp_path / "store.h5", "r+") as handle:
+        source = handle["CT/CASE_001"]
+        chunked = handle["CT"].create_dataset("chunked", data=source[...], chunks=(1, 2, 5, 4))
+        chunked.attrs.update(source.attrs)
+        del handle["CT/CASE_001"]
+        handle["CT"].move("chunked", _replaced_name("CASE_001"))
+    monkeypatch.setattr("konfai.utils.dataset.staging._writer_is_dead", lambda pid: True)
+
+    with pytest.warns(UserWarning, match="killed between moving the entry aside"):
+        assert Dataset(tmp_path / "store", "h5").read_granularity("CT", "CASE_001") == (1, 2, 5, 4)
+
+
 def test_the_listing_names_a_case_whose_only_version_is_an_orphaned_backup(tmp_path: Path, monkeypatch) -> None:
     """A listing that hid what the probe and the read recover would name fewer cases than the store
     serves, and a run walking the listing would skip that case without a word."""

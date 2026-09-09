@@ -31,7 +31,28 @@ def _release_version() -> str:
     return get_version(root=str(_ROOT), tag_regex=r"^v(?P<version>.*)$", local_scheme="no-local-version")
 
 
-# konfai-mcp is pinned to the exact release version -- Studio drives it over stdio and imports its
+def _sibling(name: str, version: str) -> str:
+    """The family ships in lockstep: at a release tag the sibling is pinned to the exact version.
+    From a working tree (a ``.dev`` version) the pin is the closest release or newer, so
+    ``pip install -e`` resolves against the core installed beside it; the publish workflow
+    builds at the tag, where the pin is exact."""
+    if ".dev" not in version:
+        return f"{name}=={version}"
+    try:
+        from setuptools_scm import get_version
+
+        floor = get_version(
+            root=str(_ROOT),
+            tag_regex=r"^v(?P<version>.*)$",
+            version_scheme=lambda scm_version: str(scm_version.tag),
+            local_scheme="no-local-version",
+        )
+    except Exception:  # no git history to read a tag from: the dev version's own floor
+        floor = version
+    return f"{name}>={floor}"
+
+
+# konfai-mcp is pinned to the exact release version at a tag -- Studio drives it over stdio and imports its
 # internals (konfai_mcp.live_parse), so the two ship in lockstep, like the apps/* bundles pin konfai.
 _version = _release_version()
 
@@ -40,7 +61,7 @@ setup(
         "fastapi>=0.110",
         "uvicorn[standard]>=0.29",  # [standard] pulls websockets -- the integrated terminal socket
         "fastmcp>=2.4",
-        f"konfai-mcp=={_version}",
+        _sibling("konfai-mcp", _version),
         "claude-agent-sdk>=0.2",  # default brain: the Claude Code subscription
         "pywinpty>=2.0; sys_platform == 'win32'",  # Windows ConPTY for the terminal (POSIX uses pty)
     ]

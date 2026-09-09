@@ -721,7 +721,7 @@ class Flatten(Transform):
         super().__init__()
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        return [np.prod(np.asarray(shape))]
+        return [int(np.prod(np.asarray(shape)))]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.flatten()

@@ -18,6 +18,7 @@
 Network.load_state_dict, Measure (loss records, backward, scheduler selection),
 and CriterionsLoader."""
 
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -451,8 +452,10 @@ def test_loss_add_summarises_dict_metric_payload() -> None:
     record.add(1.0, (torch.tensor([0.7]), {"1": 0.6, "2": 0.8, "3": float("nan")}))
 
     # The dict is summarised to a scalar (nan-mean of 0.6 and 0.8), and the logging mean is safe.
-    assert isinstance(record._unread[-1], float)
-    assert record._unread[-1] == pytest.approx(0.7)
+    reported, minimized = record._unread[-1]
+    assert isinstance(reported, float)
+    assert reported == pytest.approx(0.7)
+    assert minimized.item() == pytest.approx(0.7)
     assert _measure_of(record).get_last_values() == {"Dice": pytest.approx(0.7)}
 
 
@@ -460,7 +463,45 @@ def test_loss_add_keeps_plain_scalar_metric() -> None:
     # A regular (tensor, float) metric is unchanged.
     record = Measure.Loss("MSE", "out", "tgt", 0, is_loss=False, accumulation=False)
     record.add(1.0, (torch.tensor([0.5]), 0.5))
-    assert record._unread[-1] == pytest.approx(0.5)
+    assert record._unread[-1][0] == pytest.approx(0.5)
+
+
+def test_the_minimized_value_of_a_loss_is_what_selects_a_checkpoint() -> None:
+    # A Dice loss reports the coefficient (the board's number) and minimizes one minus it. The
+    # selection score once summed the reported value with a cross entropy, so a better overlap
+    # read as a worse score and BEST kept an early epoch.
+    dice = Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False)
+    entropy = Measure.Loss("CE", "out", "tgt", 0, is_loss=True, accumulation=False)
+    dice.add(1.0, (torch.tensor(0.1), 0.9))
+    entropy.add(1.0, torch.tensor(0.2))
+    measure = _measure_of(dice, entropy)
+
+    assert measure.get_last_values() == {"Dice": pytest.approx(0.9), "CE": pytest.approx(0.2)}
+    assert measure.get_last_losses() == {"Dice": pytest.approx(0.1), "CE": pytest.approx(0.2)}
+    assert measure.format_loss(True, 1) == {
+        "Dice": (1.0, pytest.approx(0.9), pytest.approx(0.1)),
+        "CE": (1.0, pytest.approx(0.2), pytest.approx(0.2)),
+    }
+    assert sum(measure.get_last_losses(0).values()) == pytest.approx(0.3)
+
+
+def test_a_history_without_minimized_losses_restores_none() -> None:
+    # A checkpoint written before the minimized losses were kept has only the reported values, which
+    # are not what a Dice minimizes: the selection starts from the epochs after the resume.
+    dice = Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False)
+    dice.add(1.0, (torch.tensor(0.1), 0.9))
+    measure = _measure_of(dice)
+    assert measure.get_last_losses() == {"Dice": pytest.approx(0.1)}
+    state = measure.checkpoint_state()
+    for entry in state["records"][0].values():
+        del entry["losses"], entry["mean_loss"]
+
+    resumed = _measure_of(Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False))
+    resumed.load_checkpoint_state(state)
+
+    assert resumed.get_last_values() == {"Dice": pytest.approx(0.9)}
+    assert all(math.isnan(loss) for loss in resumed.get_last_losses().values())
+    assert math.isnan(sum(resumed.get_last_losses(0).values()))
 
 
 def _measure_of(*records: Measure.Loss) -> Measure:
@@ -475,8 +516,9 @@ def test_loss_add_does_not_read_a_loss_off_its_device() -> None:
     record = _loss_record()
     record.add(1.0, torch.tensor([3.0], requires_grad=True))
 
-    kept = record._unread[-1]
+    kept, minimized = record._unread[-1]
     assert isinstance(kept, torch.Tensor) and not kept.requires_grad
+    assert isinstance(minimized, torch.Tensor) and not minimized.requires_grad
     assert len(record._values) == 0 and record.recorded == 1
 
     assert _measure_of(record).get_last_values() == {"l": 3.0}
@@ -502,12 +544,12 @@ def test_measure_reads_every_unread_value_in_one_transfer(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch, "cat", counting_cat)
     measure = _measure_of(loss, metric)
 
-    assert measure.format_loss(True, 3) == {"l": (1.0, 1.0)}
-    assert transfers == [5]
+    assert measure.format_loss(True, 3) == {"l": (1.0, 1.0, 1.0)}
+    assert transfers == [11]  # five reported tensors and the six minimized ones, one transfer
     assert list(loss._values) == [0.0, 1.0, 2.0]
     assert list(metric._values) == [10.0, 11.5, 12.0]
     assert measure.get_last_values(3) == {"l": 1.0, "m": pytest.approx(33.5 / 3)}
-    assert transfers == [5]  # nothing was left unread: no second transfer
+    assert transfers == [11]  # nothing was left unread: no second transfer
 
 
 def test_whole_history_mean_is_a_running_mean_and_the_window_is_bounded() -> None:
@@ -525,7 +567,7 @@ def test_whole_history_mean_is_a_running_mean_and_the_window_is_bounded() -> Non
     assert measure.get_last_values(0) == {"l": pytest.approx(np.nanmean(values))}
     assert measure.get_last_weights(0) == {"l": 3.0}
     assert len(record._values) == 3 and len(record._weight) == 3 and record.recorded == 7
-    assert measure.format_loss(True, 2) == {"l": (5.5, 12.0)}
+    assert measure.format_loss(True, 2) == {"l": (5.5, 12.0, 12.0)}
     assert measure.format_loss(True, 8) == {}  # fewer than 8 recorded, exactly as before
 
 
@@ -1180,3 +1222,99 @@ def test_channels_last_lays_out_every_weight_and_every_input_of_its_rank() -> No
     for name in before:
         torch.testing.assert_close(after[name], before[name], rtol=1e-5, atol=1e-6)
     assert _channels_last(torch.zeros(3)).dim() == 1
+
+
+# ---- a TRAIN whose networks resolve no optimizer ----
+
+
+class _NoOptimizerNet(Network):
+    def __init__(self) -> None:
+        super().__init__(in_channels=1, optimizer=None, dim=2)
+        self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+
+def test_bind_refuses_a_train_whose_networks_resolve_no_optimizer() -> None:
+    """A YAML-catalog model with `optimizer: None` once trained an epoch with the backward skipped,
+    a loss that never moved and a checkpoint written: exit 0."""
+    from konfai.utils.runtime import State
+
+    with pytest.raises(ConfigError, match=r"Model\._NoOptimizerNet\.optimizer"):
+        _NoOptimizerNet().bind(False, State.TRAIN, [])
+    _NoOptimizerNet().bind(False, State.PREDICTION, [])  # nothing trains: nothing to refuse
+
+
+def test_bind_accepts_a_composite_whose_nested_network_owns_the_optimizer() -> None:
+    from konfai.utils.runtime import State
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("Sub", _NoOptimizerNet())
+
+    root = Root()
+    sub = cast(Network, root["Sub"])
+    sub.optimizer = torch.optim.SGD(sub.parameters(), lr=0.1)  # what its own loader would build
+    root.bind(False, State.TRAIN, [])
+
+
+# ---- DDP synchronisation across an accumulation window ----
+
+
+class _NoSyncModel:
+    """A stand-in for the DDP wrapper: records when ``no_sync`` is entered."""
+
+    def __init__(self) -> None:
+        self.entered = 0
+
+    def no_sync(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def context():
+            self.entered += 1
+            yield
+
+        return context()
+
+
+def test_accumulation_sync_spans_the_step_and_skips_the_reduction_off_the_boundary() -> None:
+    """DDP marks the gradients to reduce in ``forward``: a ``no_sync`` around the backward alone
+    reduced every micro-batch. The context is decided before the forward, and holds only when no
+    network of the graph steps on this batch."""
+
+    class LeafA(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2, nb_batch_per_step=2)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class LeafB(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2, nb_batch_per_step=3)
+            self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("A", LeafA())
+            self.add_module("B", LeafB())
+
+    root = Root()
+    a, b = cast(Network, root["A"]), cast(Network, root["B"])
+    for leaf in (a, b):
+        leaf.optimizer = torch.optim.SGD(leaf.parameters(), lr=0.1)
+    ddp = _NoSyncModel()
+
+    entered: list[bool] = []
+    for it in range(6):
+        a._it = b._it = it
+        before = ddp.entered
+        with root.accumulation_sync(ddp):
+            pass
+        entered.append(ddp.entered > before)
+    # A steps on it 1, 3, 5; B on 2, 5: only it 0 and 4 accumulate everywhere, so only they skip.
+    assert entered == [True, False, False, False, True, False]
+
+    untrained = Root()  # no optimizer anywhere: nothing accumulates, the ordinary context
+    with untrained.accumulation_sync(ddp):
+        pass
+    assert ddp.entered == 2

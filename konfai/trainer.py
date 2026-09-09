@@ -18,14 +18,18 @@
 
 import math
 import os
+import random
 import shutil
 import signal
+import tempfile
 import threading
+import warnings
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import tqdm
@@ -47,7 +51,7 @@ from konfai import (
     konfai_state,
     statistics_directory,
 )
-from konfai.data.data_manager import BatchSample, DataTrain
+from konfai.data.data_manager import BatchSample, DatasetIter, DataTrain
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils import vram
 from konfai.utils.clock import SweepClock, startup_clock
@@ -68,6 +72,49 @@ from konfai.utils.runtime import (
     seed_all,
     synchronize_data,
 )
+
+
+def _checkpoint_score(path: Path, default: float) -> float:
+    """Read only the score, releasing mapped storages before BEST prunes files."""
+    state = safe_torch_load(path, torch.device("cpu"), mmap=True)
+    return float(state.get("loss", default))
+
+
+def _ddp_kwargs(model: Network, local_rank: int, size: int) -> dict[str, Any]:
+    """DDP options compatible with the graph's gradient accumulation cadence.
+
+    Static-graph DDP cannot start its first backward inside ``no_sync``. An accumulating
+    network needs the ordinary reducer; graphs stepping every batch keep the static fast path.
+    """
+    accumulates = any(
+        network.optimizer is not None and network.nb_batch_per_step > 1 for network in model.get_networks().values()
+    )
+    options: dict[str, Any] = {"static_graph": not accumulates}
+    if len(cuda_visible_devices()) and size == 1:
+        options.update({"device_ids": [local_rank], "output_device": local_rank})
+    return options
+
+
+def _checkpoint_rng() -> dict[str, Any]:
+    """Keep generator states in weights-only-loadable primitives and tensors."""
+    numpy = cast(tuple[Any, ...], np.random.get_state())
+    return {
+        "python": random.getstate(),
+        "numpy": (numpy[0], numpy[1].tolist(), numpy[2], numpy[3], numpy[4]),
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() and cuda_visible_devices() else None,
+    }
+
+
+def _restore_checkpoint_rng(states: dict[str, Any]) -> None:
+    random.setstate(states["python"])
+    numpy = states["numpy"]
+    np.random.set_state((numpy[0], np.asarray(numpy[1], dtype=np.uint32), numpy[2], numpy[3], numpy[4]))
+    torch.set_rng_state(states["torch"])
+    if states["cuda"] is not None:
+        if len(states["cuda"]) != torch.cuda.device_count():
+            raise TrainerError("RESUME requires the same CUDA device count to restore its saved generators.")
+        torch.cuda.set_rng_state_all(states["cuda"])
 
 
 class EarlyStoppingBase:
@@ -188,6 +235,11 @@ def _on_host(value: Any) -> Any:
     return value
 
 
+def _dataset(loader: DataLoader) -> DatasetIter:
+    """The loader's ``DatasetIter``: ``DataLoader`` types it as a bare ``Dataset``."""
+    return cast(DatasetIter, loader.dataset)
+
+
 class _CheckpointWriter:
     """Serialises one checkpoint at a time on a thread of its own. ``submit`` first joins the previous
     write, so at most one is in flight; a failure on the thread is raised by the next ``join``, on the
@@ -215,6 +267,11 @@ class _CheckpointWriter:
         if self._error is not None:
             error, self._error = self._error, None
             raise error
+
+
+def _ema_network(model_ema: AveragedModel) -> Network:
+    """The ``Network`` an EMA averages: ``AveragedModel`` types its copy as a bare ``Module``."""
+    return cast(Network, model_ema.module)
 
 
 class _Trainer:
@@ -255,11 +312,12 @@ class _Trainer:
         it_lr_update: int | None,
         it: int,
         model: Model,
-        model_ema: AveragedModel,
+        model_ema: AveragedModel | None,
         config_snapshot: Path,
         dataloader_training: DataLoader,
         dataloader_validation: DataLoader | None = None,
         auto_patched: bool = False,
+        resume_state: dict[str, Any] | None = None,
     ) -> None:
         self.world_size = world_size
         self.global_rank = global_rank
@@ -276,6 +334,22 @@ class _Trainer:
         self.autocast = autocast
         self.model_ema = model_ema
         self.early_stopping = EarlyStoppingBase() if early_stopping is None else early_stopping
+        self._resume_state = resume_state
+        self._epoch_complete = False
+        self._deferred_score: float | None = None
+        self._resume_cursor: dict[str, Any] = {
+            "version": 1,
+            "kind": "unavailable",
+            "reason": "The epoch has not completed; its sample cursor and pending gradients were not saved.",
+        }
+        if resume_state is not None:
+            if resume_state["world_size"] != world_size:
+                raise TrainerError("RESUME requires the same number of training ranks as its epoch checkpoint.")
+            if resume_state["batches_per_epoch"] != len(dataloader_training):
+                raise TrainerError("RESUME requires the same number of training batches per epoch.")
+            if isinstance(self.early_stopping, EarlyStopping) and resume_state.get("early_stopping"):
+                for key, value in resume_state["early_stopping"].items():
+                    setattr(self.early_stopping, key, value)
 
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
@@ -304,7 +378,7 @@ class _Trainer:
         self._auto_patched = auto_patched
         #: The iteration of the last save: an exit at the same iteration has nothing new to record.
         self._saved_at_it = it
-        self._loss_keys: set[str] = set()
+        self._loss_score: dict[str, float] = {}
         if self.global_rank == 0 and self.save_checkpoint_mode == "BEST":
             self._initialize_best_checkpoint_state()
         self.data_log = DataLog.parse(data_log)
@@ -331,7 +405,7 @@ class _Trainer:
         """The widest window the logs read from a criterion's history: the training window or the
         validation pass. Everything older is only read as a running mean (ReduceLROnPlateau)."""
         validation = len(self.dataloader_validation) if self.dataloader_validation is not None else 0
-        models = [self.model.module] + ([self.model_ema.module] if self.model_ema is not None else [])
+        models = [self.model.module] + ([_ema_network(self.model_ema)] if self.model_ema is not None else [])
         for model in models:
             for network in model.get_networks().values():
                 if network.measure is not None:
@@ -349,12 +423,13 @@ class _Trainer:
         if not path.exists():
             return
 
-        all_checkpoints = sorted(p for p in path.glob("*.pt") if not p.name.startswith("crash_"))
+        all_checkpoints = sorted(
+            p for p in path.glob("*.pt") if not p.name.startswith("crash_") and p.name != "resume_latest.pt"
+        )
         best_loss = self.early_stopping.worst_score
         best_ckpt: Path | None = None
         for checkpoint_path in all_checkpoints:
-            state_dict = safe_torch_load(checkpoint_path, torch.device("cpu"))
-            checkpoint_loss = float(state_dict.get("loss", self.early_stopping.worst_score))
+            checkpoint_loss = _checkpoint_score(checkpoint_path, self.early_stopping.worst_score)
             if not math.isfinite(checkpoint_loss):
                 checkpoint_loss = self.early_stopping.worst_score
             if self.early_stopping.is_better(checkpoint_loss, best_loss):
@@ -397,11 +472,42 @@ class _Trainer:
         if sigusr1 is not None:
             with suppress(ValueError, OSError):  # signals only install on the main thread
                 signal.signal(sigusr1, lambda *_: setattr(self, "_validate_now", True))
-        self.dataloader_training.dataset.load("Train")
+        _dataset(self.dataloader_training).load("Train")
         if self.dataloader_validation is not None:
-            self.dataloader_validation.dataset.load("Validation")
-            if State[konfai_state()] != State.TRAIN:
+            _dataset(self.dataloader_validation).load("Validation")
+            if State[konfai_state()] != State.TRAIN and self._resume_state is None:
                 self._validate()
+
+        if self._resume_state is not None:
+            if self.model_ema is not None:
+                for name, network in _ema_network(self.model_ema).get_networks().items():
+                    if name in self._resume_state.get("ema_iterations", {}):
+                        network._it = self._resume_state["ema_iterations"][name]
+            limits = self._resume_state.get("replay_limits", []) + self._replay_limits()
+            if limits and self.global_rank == 0:
+                warnings.warn(
+                    "RESUME continues at next_epoch, but exact stochastic replay is not guaranteed: "
+                    + "; ".join(sorted(set(limits))),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            measure_states = self._resume_state.get("measure_by_rank")
+            if measure_states is not None:
+                for kind, networks in measure_states[self.global_rank].items():
+                    model = (
+                        self.model.module
+                        if kind == "Model"
+                        else (_ema_network(self.model_ema) if self.model_ema is not None else None)
+                    )
+                    if model is None:
+                        continue
+                    for name, network in model.get_networks().items():
+                        if network.measure is not None and name in networks:
+                            network.measure.load_checkpoint_state(networks[name])
+            _restore_checkpoint_rng(self._resume_state["rng_by_rank"][self.global_rank])
+
+        if self.early_stopping.is_stopped():
+            return
 
         with tqdm.tqdm(
             iterable=range(self.epoch, self.epochs),
@@ -412,9 +518,96 @@ class _Trainer:
         ) as epoch_tqdm:
             for self.epoch in epoch_tqdm:
                 self.train()
+                if self._epoch_complete:
+                    if not self.early_stopping.is_stopped():
+                        _dataset(self.dataloader_training).reset_augmentation("Train")
+                    self._save_epoch_boundary()
                 if self.early_stopping.is_stopped():
                     break
-                self.dataloader_training.dataset.reset_augmentation("Train")
+
+    def _replay_limits(self) -> list[str]:
+        limits = []
+        for name, loader in (("training", self.dataloader_training), ("validation", self.dataloader_validation)):
+            if loader is None:
+                continue
+            if getattr(loader, "num_workers", 0):
+                limits.append(f"{name} DataLoader worker RNG/cache state is not serialized")
+            if getattr(getattr(loader, "dataset", None), "has_augmented_samples", False):
+                limits.append(f"{name} augmentation draws/cache state is not serialized")
+        return limits
+
+    def _save_epoch_boundary(self) -> None:
+        """Publish a continuation cursor only after every optimizer finishes its accumulation window.
+
+        Every rank contributes its generator state. No extra optimizer step/zeroing is introduced to
+        make a boundary eligible: an incomplete window stays live for the next ordinary batch.
+        """
+        pending = [
+            name
+            for name, network in self.model.module.get_networks().items()
+            if network.optimizer is not None
+            and (
+                network._it % network.nb_batch_per_step
+                or any(
+                    parameter.grad is not None
+                    for group in network.optimizer.param_groups
+                    for parameter in group["params"]
+                )
+            )
+        ]
+        models = {"Model": self.model.module}
+        if self.model_ema is not None:
+            models["Model_EMA"] = _ema_network(self.model_ema)
+        measure_states = {
+            kind: {
+                name: network.measure.checkpoint_state()
+                for name, network in model.get_networks().items()
+                if network.measure is not None
+            }
+            for kind, model in models.items()
+        }
+        local = {"rng": _checkpoint_rng(), "pending": pending, "measures": measure_states}
+        ranks: list[Any] = [local]
+        if dist.is_initialized():
+            ranks = [None] * self.world_size
+            dist.all_gather_object(ranks, local)
+        if any(rank["pending"] for rank in ranks):
+            self._resume_cursor = {
+                "version": 1,
+                "kind": "unavailable",
+                "reason": "The epoch ended with pending accumulated gradients, which are not serialized. "
+                "Use a later epoch checkpoint where all optimizer accumulation windows close.",
+            }
+            if self.global_rank == 0:
+                warnings.warn(
+                    "Epoch checkpoint cannot RESUME: accumulation windows are still open. "
+                    "No extra optimizer step was taken. Train through a later epoch whose batch count "
+                    "closes every nb_batch_per_step window, or use a prior eligible epoch checkpoint.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+        else:
+            self._resume_cursor = {
+                "version": 1,
+                "kind": "epoch_boundary",
+                "next_epoch": self.epoch + 1,
+                "world_size": self.world_size,
+                "batches_per_epoch": len(self.dataloader_training),
+                "rng_by_rank": [rank["rng"] for rank in ranks],
+                "measure_by_rank": [rank["measures"] for rank in ranks],
+                "ema_iterations": (
+                    {name: network._it for name, network in _ema_network(self.model_ema).get_networks().items()}
+                    if self.model_ema is not None
+                    else {}
+                ),
+                "replay_limits": self._replay_limits(),
+                "early_stopping": (
+                    {key: getattr(self.early_stopping, key) for key in ("counter", "best_score", "early_stop")}
+                    if isinstance(self.early_stopping, EarlyStopping)
+                    else None
+                ),
+            }
+        self.checkpoint_save(self._deferred_score)
 
     def train(self) -> None:
         """
@@ -425,11 +618,18 @@ class _Trainer:
         - loss logging and checkpoint saving
         - validation at configurable iteration interval
         """
+        self._epoch_complete = False
+        self._deferred_score = None
+        self._resume_cursor = {
+            "version": 1,
+            "kind": "unavailable",
+            "reason": "The epoch has not completed; its sample cursor and pending gradients were not saved.",
+        }
         self.model.train()
         self.model.module.set_state(NetState.TRAIN)
         if self.model_ema is not None:
             self.model_ema.eval()
-            self.model_ema.module.set_state(NetState.TRAIN)
+            _ema_network(self.model_ema).set_state(NetState.TRAIN)
 
         clock = SweepClock()
         with (
@@ -442,15 +642,18 @@ class _Trainer:
                 ncols=0,
             ) as batch_iter,
         ):
-            for _, batch_sample in batch_iter:
+            for batch_index, batch_sample in batch_iter:
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    with clock.phase("forward"):
-                        self.model(batch_sample, clock=clock)
-                    with clock.phase("backward+step"):
-                        self.model.module.backward(self.model)
+                    # Forward and backward under one DDP context: a micro-batch that steps no
+                    # optimizer accumulates locally, the one that closes the window reduces.
+                    with self.model.module.accumulation_sync(self.model):
+                        with clock.phase("forward"):
+                            self.model(batch_sample, clock=clock)
+                        with clock.phase("backward+step"):
+                            self.model.module.backward(self.model)
                     if self.model_ema is not None:
                         with clock.phase("ema"):
-                            self.model_ema.update_parameters(self.model)
+                            self.model_ema.update_parameters(self.model.module)
                     self.it += 1
 
                     validate_now, pending = self._poll_live_requests()
@@ -480,12 +683,14 @@ class _Trainer:
                             if isinstance(self.early_stopping, EarlyStopping) and self.early_stopping.monitor:
                                 score = self.early_stopping.get_score(loss)
                             else:
-                                score = self.early_stopping.get_score(
-                                    {key: loss[key] for key in self._loss_keys if key in loss}
-                                )
-                            with clock.phase("checkpoint"):
-                                self.checkpoint_save(score)
+                                score = self.early_stopping.get_score(self._loss_score)
                             stop = self.early_stopping(score)
+
+                            if batch_index + 1 == len(self.dataloader_training):
+                                self._deferred_score = score
+                            else:
+                                with clock.phase("checkpoint"):
+                                    self.checkpoint_save(score)
 
                             # Stop once the schedulers have decayed the learning rate to zero:
                             # no further optimisation is possible, so end the run cleanly.
@@ -496,7 +701,10 @@ class _Trainer:
 
                         if self._broadcast_stop(stop):
                             self.early_stopping.stop()
+                            self._epoch_complete = batch_index + 1 == len(self.dataloader_training)
                             break
+
+                    self._epoch_complete = batch_index + 1 == len(self.dataloader_training)
 
                 if self.it % self._LIVE_POLL_INTERVAL == 0:
                     with clock.phase("telemetry"):
@@ -526,20 +734,20 @@ class _Trainer:
         return f"[KonfAI] epoch {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
 
     @torch.no_grad()
-    def _validate(self) -> float:
+    def _validate(self) -> dict[str, float]:
         """
         Executes the validation phase, evaluates loss and metrics.
         Updates model states and resets augmentation for validation set.
 
         Returns:
-            float: Validation loss.
+            dict[str, float]: Validation losses and metrics; empty off rank 0 or without a validation set.
         """
         if self.dataloader_validation is None:
-            return 0
+            return {}
         self.model.eval()
         self.model.module.set_state(NetState.PREDICTION)
         if self.model_ema is not None:
-            self.model_ema.module.set_state(NetState.PREDICTION)
+            _ema_network(self.model_ema).set_state(NetState.PREDICTION)
 
         batch_sample: BatchSample = {}
         with tqdm.tqdm(
@@ -556,13 +764,13 @@ class _Trainer:
 
                 if i % self._LIVE_POLL_INTERVAL == 0:
                     batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}", refresh=False)
-        self.dataloader_validation.dataset.reset_augmentation("Validation")
+        _dataset(self.dataloader_validation).reset_augmentation("Validation")
         if dist.is_initialized():
             dist.barrier()
         self.model.train()
         self.model.module.set_state(NetState.TRAIN)
         if self.model_ema is not None:
-            self.model_ema.module.set_state(NetState.TRAIN)
+            _ema_network(self.model_ema).set_state(NetState.TRAIN)
         return self._validation_log(batch_sample)
 
     def _broadcast_from_master(self, value: Any) -> Any:
@@ -694,10 +902,11 @@ class _Trainer:
             "it": self.it,
             "loss": checkpoint_loss,
             "Model": self.model.module.network_states(),
+            "resume": self._resume_cursor,
         }
 
         if self.model_ema is not None:
-            save_dict["Model_EMA"] = self.model_ema.module.network_states()
+            save_dict["Model_EMA"] = _ema_network(self.model_ema).network_states()
             save_dict["Model_EMA_n_averaged"] = int(self.model_ema.n_averaged)
 
         save_dict.update(
@@ -721,6 +930,13 @@ class _Trainer:
                 if network.optimizer is not None
             }
         )
+        save_dict.update(
+            {
+                f"{name}_schedulers_state_dict": network.schedule_states()
+                for name, network in self.model.module.get_networks().items()
+                if network.optimizer is not None
+            }
+        )
 
         snapshot = _on_host(save_dict)
 
@@ -731,6 +947,19 @@ class _Trainer:
             staging = save_path.with_name(f"{save_path.name}.{os.getpid()}.tmp")
             torch.save(snapshot, staging)
             os.replace(staging, save_path)
+            if not crash and snapshot["resume"]["kind"] == "epoch_boundary":
+                # The newest dated save may be intermediate or a crash even in ALL mode.
+                # Keep an explicit latest continuation, sharing storage with its dated file.
+                latest = path / "resume_latest.pt"
+                # A reused name could be a stale hard link left by a crashed process:
+                # truncating it in the copy fallback would also truncate its old BEST inode.
+                with tempfile.TemporaryDirectory(prefix=".resume-", dir=path) as temporary:
+                    resume_staging = Path(temporary) / "checkpoint.pt"
+                    try:
+                        os.link(save_path, resume_staging)
+                    except OSError:
+                        shutil.copyfile(save_path, resume_staging)
+                    os.replace(resume_staging, latest)
             if self.save_checkpoint_mode == "BEST" and not crash:
                 self._update_best_checkpoint(save_path, checkpoint_loss)
 
@@ -741,7 +970,7 @@ class _Trainer:
         self,
         type_log: str,
         batch_sample: BatchSample,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, float]:
         """
         Logs losses, metrics and optionally images to TensorBoard.
 
@@ -750,11 +979,11 @@ class _Trainer:
             batch_item (dict): Dictionary of BatchItem from current batch.
 
         Returns:
-            dict[str, float] | None: Dictionary of aggregated losses and metrics if rank == 0.
+            dict[str, float]: Dictionary of aggregated losses and metrics on rank 0; empty on the other ranks.
         """
         models: dict[str, Network] = {"": self.model.module}
         if self.model_ema is not None:
-            models["_EMA"] = self.model_ema.module
+            models["_EMA"] = _ema_network(self.model_ema)
 
         measures = DistributedObject.get_measure(
             self.world_size,
@@ -769,7 +998,7 @@ class _Trainer:
         )
         # get_measure gathers across ranks, so every rank calls it; only rank 0 writes and reports.
         if self.global_rank != 0:
-            return None
+            return {}
 
         images_log = []
         if len(self.data_log):
@@ -786,7 +1015,9 @@ class _Trainer:
 
         for label, model in models.items():
             for name, network in model.get_networks().items():
-                if network.measure is None:
+                # EMA has no training forward, so its first validation has not produced a
+                # measurement yet. The collector omits such empty windows.
+                if network.measure is None or f"{name}{label}" not in measures:
                     continue
                 # Losses and metrics take the same pair of boards: the measured value, and the
                 # weight that scaled it into the total.
@@ -828,17 +1059,16 @@ class _Trainer:
                     )
 
         loss = {}
-        loss_keys: set[str] = set()
+        minimized: dict[str, float] = {}
         for name, network in self.model.module.get_networks().items():
-            if network.measure is not None:
-                losses = {k: v[1] for k, v in measures[name][0].items()}
-                loss_keys.update(losses)
-                loss.update(losses)
+            if network.measure is not None and name in measures:
+                minimized.update({k: v[2] for k, v in measures[name][0].items()})
+                loss.update({k: v[1] for k, v in measures[name][0].items()})
                 loss.update({k: v[1] for k, v in measures[name][1].items()})
-        # Remember which keys are losses (always minimise) vs metrics (direction varies), so
-        # default checkpoint/early-stop selection scores on the losses only: summing a
-        # maximise-metric (e.g. Dice) into a minimised score would keep the worst model.
-        self._loss_keys = loss_keys
+        # The default selection scores the losses by what they minimized, not by what they report:
+        # a Dice loss reports the coefficient, so summing that with a cross entropy kept the epoch
+        # with the worst overlap. A metric's direction varies and only an explicit monitor reads it.
+        self._loss_score = minimized
         return loss
 
     @torch.no_grad()
@@ -935,6 +1165,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self.channels_last = channels_last
         self.epochs = epochs
         self.epoch = 0
+        self._resume_state: dict[str, Any] | None = None
         self.override_lr: float | None = None
         self.early_stopping = early_stopping
         self.it = 0
@@ -943,7 +1174,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         with startup_clock().phase("model"):
             self.model = model.get_model(train=True)
         self.ema_decay = ema_decay
-        self.model_ema: torch.optim.swa_utils.AveragedModel | None = None
+        self.model_ema: AveragedModel | None = None
         self.data_log = data_log
 
         self.gradient_checkpoints = gradient_checkpoints
@@ -1029,7 +1260,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             if self.ema_decay > 0:
                 self.model_ema = AveragedModel(self.model, **self._ema_update())
                 if state_dict is not None:
-                    self.model_ema.module.load(state_dict, init=False, ema=True)
+                    _ema_network(self.model_ema).load(state_dict, init=False, ema=True)
                     if "Model_EMA_n_averaged" in state_dict:
                         self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
 
@@ -1053,7 +1284,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
     def set_lr(self, lr: float | None) -> None:
         self.override_lr = lr
 
-    def _load(self) -> dict[str, dict[str, torch.Tensor]]:
+    def _load(self) -> dict[str, Any]:
         """
         Loads a previously saved checkpoint from local disk or URL.
 
@@ -1065,13 +1296,34 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         else:
             raise ValueError(f"Invalid model path entry: {self.path_to_model}")
 
-        if "epoch" in state_dict:
+        self._resume_state = None
+        if "resume" in state_dict:
+            cursor = state_dict["resume"]
+            if not isinstance(cursor, dict) or cursor.get("version") != 1:
+                raise TrainerError("Unsupported checkpoint resume cursor version.")
+            if cursor.get("kind") != "epoch_boundary":
+                raise TrainerError(
+                    "This checkpoint cannot continue training: " + str(cursor.get("reason", "no epoch boundary")),
+                    "Select a completed-epoch checkpoint with no pending gradients. "
+                    "This checkpoint's model weights remain usable for PREDICTION.",
+                )
+            next_epoch = cursor.get("next_epoch")
+            if type(next_epoch) is not int or next_epoch < 0:
+                raise TrainerError("Invalid next_epoch in checkpoint resume cursor.")
+            if not isinstance(cursor.get("rng_by_rank"), list) or len(cursor["rng_by_rank"]) != cursor.get(
+                "world_size"
+            ):
+                raise TrainerError("Invalid rank generator states in checkpoint resume cursor.")
+            self.epoch = next_epoch
+            self._resume_state = cursor
+        elif "epoch" in state_dict:
+            # Old integers meant the epoch being executed. Never reinterpret them as next_epoch.
             self.epoch = state_dict["epoch"]
         if "it" in state_dict:
             self.it = state_dict["it"]
         return state_dict
 
-    def _ema_update(self) -> dict[str, Callable]:
+    def _ema_update(self) -> dict[str, Any]:
         """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn``, one ``_foreach_lerp_``
         per device and dtype."""
         return {"multi_avg_fn": get_ema_multi_avg_fn(self.ema_decay)}
@@ -1098,16 +1350,13 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         if self.channels_last:
             Network.set_channels_last(model)
         if dist.is_initialized():
-            ddp_kwargs: dict[str, object] = {"static_graph": True}
-            if len(cuda_visible_devices()) and self.size == 1:
-                ddp_kwargs.update({"device_ids": [local_rank], "output_device": local_rank})
-            model = DDP(model, **ddp_kwargs)
+            model = DDP(model, **_ddp_kwargs(model, local_rank, self.size))
         else:
             model = Model(model)
         if self.model_ema is not None:
-            self.model_ema.module = Network.to(self.model_ema.module, local_rank * self.size)
+            self.model_ema.module = Network.to(_ema_network(self.model_ema), local_rank * self.size)
             if self.channels_last:
-                Network.set_channels_last(self.model_ema.module)
+                Network.set_channels_last(_ema_network(self.model_ema))
         device = local_rank * self.size if len(cuda_visible_devices()) else None
         if self._presize_free_axes():
             dataloaders = self.dataset.get_data(world_size)[0][global_rank]
@@ -1128,11 +1377,13 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
                     self.it_validation,
                     self.it_lr_update,
                     self.it,
-                    model,
+                    cast(Model, model),  # DDP stands in for Model: the same module/train/eval/call surface
                     self.model_ema,
                     self.config_namefile,
-                    *dataloaders,
+                    dataloaders[0],
+                    dataloaders[1] if len(dataloaders) > 1 else None,
                     auto_patched=self._vram_patch_template is not None,
+                    resume_state=self._resume_state,
                 ) as t:
                     t.run()
                 return

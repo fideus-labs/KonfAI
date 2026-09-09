@@ -1,0 +1,131 @@
+{
+  "apps": [
+    {
+      "name": "totalsegmentator",
+      "konfai": [
+        "totalsegmentator-konfai",
+        "segment",
+        "total",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0",
+        "-q"
+      ],
+      "original": [
+        "{venv}/bin/TotalSegmentator",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}/total.nii.gz",
+        "--ml",
+        "-q"
+      ],
+      "cases": {
+        "S": "~/.cache/konfai-bench/apps/in/ct_S.nii.gz",
+        "M": "~/.cache/konfai-bench/apps/in/ct_M.nii.gz",
+        "L": "~/.cache/konfai-bench/apps/in/ct_L.nii.gz"
+      }
+    },
+    {
+      "name": "mrsegmentator",
+      "konfai": [
+        "mrsegmentator-konfai",
+        "segment",
+        "-f",
+        "5",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0",
+        "-q"
+      ],
+      "original": [
+        "{venv}/bin/mrsegmentator",
+        "-i",
+        "{input}",
+        "--outdir",
+        "{output}"
+      ],
+      "cases": {
+        "S": "~/.cache/konfai-bench/apps/in/mr_S.nii.gz",
+        "M": "~/.cache/konfai-bench/apps/in/mr_M.nii.gz",
+        "L": "~/.cache/konfai-bench/apps/in/mr_L.nii.gz"
+      }
+    },
+    {
+      "name": "impact_seg",
+      "konfai": [
+        "impact-seg-konfai",
+        "segment",
+        "body",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0",
+        "-q"
+      ],
+      "cases": {
+        "S": "~/.cache/konfai-bench/apps/in/ct_S.nii.gz",
+        "M": "~/.cache/konfai-bench/apps/in/ct_M.nii.gz",
+        "L": "~/.cache/konfai-bench/apps/in/ct_L.nii.gz"
+      }
+    },
+    {
+      "name": "impact_synth",
+      "konfai": [
+        "impact-synth-konfai",
+        "synthesize",
+        "MR",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0",
+        "-q"
+      ],
+      "cases": {
+        "S": "~/.cache/konfai-bench/apps/in/mr_S.nii.gz",
+        "M": "~/.cache/konfai-bench/apps/in/mr_M.nii.gz",
+        "L": "~/.cache/konfai-bench/apps/in/mr_L.nii.gz"
+      }
+    },
+    {
+      "name": "impact_reg",
+      "konfai": [
+        "impact-reg-konfai",
+        "register",
+        "FireANTs_SyN",
+        "-f",
+        "{fixed}",
+        "-m",
+        "{moving}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0"
+      ],
+      "cases": {
+        "S": {
+          "fixed": "~/.cache/konfai-bench/apps/in/ct_S.nii.gz",
+          "moving": "~/.cache/konfai-bench/apps/in/mr_S.nii.gz"
+        },
+        "M": {
+          "fixed": "~/.cache/konfai-bench/apps/in/ct_M.nii.gz",
+          "moving": "~/.cache/konfai-bench/apps/in/mr_M.nii.gz"
+        },
+        "L": {
+          "fixed": "~/.cache/konfai-bench/apps/in/ct_L.nii.gz",
+          "moving": "~/.cache/konfai-bench/apps/in/mr_L.nii.gz"
+        }
+      }
+    }
+  ]
+}

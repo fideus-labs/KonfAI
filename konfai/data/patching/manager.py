@@ -19,6 +19,7 @@
 
 import contextlib
 import copy
+import queue
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Any, cast
@@ -28,10 +29,12 @@ import torch
 
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.patching.budget import (
-    _PLATEAU_READ_MARGIN,
     _STREAM_STAT_KEYS,
     _STREAM_STATS,
     _UNRESOLVED,
+    RegionGrowth,
+    device_signals_oom,
+    open_held_meter,
 )
 from konfai.data.patching.grid import DatasetPatch
 from konfai.data.patching.sizer import SegmentSizer
@@ -57,8 +60,8 @@ from konfai.data.patching.sweep import (
     _open_sweep_stream,
     _PatchStreamSource,
     _PendingSweep,
-    _plateau_rows,
     _ReadAhead,
+    _RegionPlan,
     _shares_h5_file,
     _stage_failure,
     _sweep_header,
@@ -78,6 +81,7 @@ from konfai.data.transform import (
     stat_seed_valid,
 )
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, PatchError
 from konfai.utils.utils import env_flag
 
@@ -171,6 +175,10 @@ class DatasetManager:
         self.data_augmentations_list = data_augmentations_list
         self._patch_stream_sources: dict[tuple[int, bool], _PatchStreamSource | None] = {}
         self._stream_refusals: dict[tuple[int, bool], str] = {}
+        # The copies whose plan resolved and whose every segment fits the budget: the answer the
+        # loader asks for every patch, memoised beside the refusals (measured 270-440 us a patch
+        # without it, 15 us with: the sizer re-priced the sweep on every read of a cached dataset).
+        self._stream_ok: set[tuple[int, bool]] = set()
         self._stream_evolved: dict[tuple[int, bool], Attribute] = {}
         self._stream_attributes_persisted: set[int] = set()
         # Whose chain state the stages' per-case records hold: the stream source last re-folded
@@ -197,13 +205,13 @@ class DatasetManager:
         self._read_granularity: object = _UNRESOLVED
         # Per-segment store grains, keyed by (store, group, entry): a segment past a Save boundary
         # reads its own store, never the raw source's (SegmentSizer's whole reason to exist).
-        self._granularities: dict[tuple[str, str, str], tuple[int, ...] | None] = {}
+        self._granularities: dict[tuple[str, str, int | None, str, str], tuple[int, ...] | None] = {}
         #: One walk of a decomposition per (decomposition, plans), shared by every sizer this
         #: manager builds, keyed with the plans held beside the answer so no identity under the
         #: key can be reused (:meth:`SegmentSizer.block_reads`).
         self._block_reads: dict[tuple, tuple[tuple, BlockReads]] = {}
         self._chain_device: torch.device | None = None
-        self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None], dict[str, float]] = {}
+        self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None, bool], dict[str, float]] = {}
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
         # existence probe answers "not written", and without this ledger every copy of an Expand chain
         # would re-sweep the same shared pre-Expand cache once per copy.
@@ -227,6 +235,7 @@ class DatasetManager:
         self._records_source = None
         self._patch_stream_sources.clear()
         self._stream_refusals.clear()
+        self._stream_ok.clear()
         self._stream_evolved.clear()
         self._stream_attributes_persisted.clear()
         self.total_augmentations = 0
@@ -313,7 +322,7 @@ class DatasetManager:
     def _load(self, pre_transform: list[Transform]):
         self.cache_attributes = copy.deepcopy(self.cache_attributes_bak)
         i = len(pre_transform)
-        data = None
+        data: np.ndarray | None = None
         for transform_function in reversed(pre_transform):
             if isinstance(transform_function, Save):
                 dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
@@ -326,13 +335,14 @@ class DatasetManager:
         if i == 0:
             data, _ = self.dataset.read_data(self.group_src, self.name)
 
-        data = torch.from_numpy(data)
+        assert data is not None  # nosec B101 - a Save short-circuits the loop or i reaches 0
+        tensor = torch.from_numpy(data)
         if self._chain_device is not None:
-            data = data.to(self._chain_device)
+            tensor = tensor.to(self._chain_device)
 
         if len(pre_transform):
-            data = self._apply_chain(data, pre_transform[i:], self.cache_attributes[0], self.name)
-        self.data.append(data)
+            tensor = self._apply_chain(tensor, pre_transform[i:], self.cache_attributes[0], self.name)
+        self.data.append(tensor)
 
         for i in range(len(self.cache_attributes) - 1):
             self.cache_attributes[i + 1].update(self.cache_attributes[0])
@@ -445,17 +455,26 @@ class DatasetManager:
         source_group: str,
         source_entry: str,
         channels: list[int] | None,
+        keys: Iterable[str] | None = None,
     ) -> dict[str, float]:
         """Read (and memoise) the whole-volume statistics of one on-disk group for this case.
 
         ``read_data_statistics`` scans the stored volume without materialising it, but it is still a
         full pass: memoise it per (dataset, group, entry, channels) so a per-patch consumer (whose
         ``inverse()`` pops the seeded keys back out of the cache attribute at prediction time) does
-        not re-scan the volume once per patch.
+        not re-scan the volume once per patch. ``keys`` is what the stage asked for (the public
+        ``min``/``max_per_channel``/... names): a request without a moment is scanned for its
+        extrema only, in the stored dtype.
         """
-        key = (source_dataset, source_group, source_entry, tuple(channels) if channels is not None else None)
+        selected = tuple(channels) if channels is not None else None
+        # A scan that folded the moments serves every request; an extrema-only one serves only
+        # the extrema, and is kept under its own key beside a later full one.
+        full = (source_dataset, source_group, source_entry, selected, True)
+        key = full if needs_moments(keys) else (source_dataset, source_group, source_entry, selected, False)
+        if full in self._disk_statistics:
+            return self._disk_statistics[full]
         if key not in self._disk_statistics:
-            self._disk_statistics[key] = source_dataset.read_data_statistics(source_group, source_entry, channels)
+            self._disk_statistics[key] = source_dataset.read_data_statistics(source_group, source_entry, channels, keys)
         return self._disk_statistics[key]
 
     def _require_statistics(self) -> None:
@@ -480,7 +499,9 @@ class DatasetManager:
         missing_stats = [key for key in required_stats if key not in cache_attribute]
         if not missing_stats:
             return
-        stats = self._read_disk_statistics(source_dataset, source_group, source_entry, channels)
+        stats = self._read_disk_statistics(
+            source_dataset, source_group, source_entry, channels, [_STREAM_STATS[key] for key in missing_stats]
+        )
         for key in missing_stats:
             value = stats.get(_STREAM_STATS[key])
             if value is None:
@@ -914,14 +935,18 @@ class DatasetManager:
         not a chain that streams, and routing it away here is what makes the whole-volume pass
         price and refuse it before a byte is written, instead of the sweep meeting it at its first
         slab. The whole-volume fallback stays available, but neither refusal is silent."""
+        key = (a, apply_augmentations)
+        if key in self._stream_ok:
+            return None
         segments = self.sweep_segments(a, apply_augmentations)
         if segments is None:
-            return self._stream_refusals.get((a, apply_augmentations), "the chain cannot stream.")
+            return self._stream_refusals.get(key, "the chain cannot stream.")
         try:
             for segment in segments:
                 self.sizer_for(segment).sweep_tile()
         except DatasetManagerError as refusal:
             return str(refusal.args[0])
+        self._stream_ok.add(key)
         return None
 
     @property
@@ -1015,6 +1040,7 @@ class DatasetManager:
         self._rewrite_saves = rewrite
         self._patch_stream_sources.clear()
         self._stream_refusals.clear()
+        self._stream_ok.clear()
         self._stream_evolved.clear()
         self._swept_entries.clear()
         self._sweep_failure = None
@@ -1054,6 +1080,7 @@ class DatasetManager:
     def _invalidate_stream_plans(self) -> None:
         self._patch_stream_sources.clear()
         self._stream_refusals.clear()
+        self._stream_ok.clear()
         self._stream_evolved.clear()
 
     def _materialize_save(self, sweep: _PendingSweep) -> bool:
@@ -1132,47 +1159,83 @@ class DatasetManager:
             tuple(source.stages),
             self._entry_granularity(source.dataset, source.group, source.entry),
         )
-        tile = sizer.sweep_tile()
-        targets = list(_sweep_targets(spatial, tile))
+        tile, growth = sizer.start()
+        if tile[0] != growth.rows:
+            # A cube: its bands grow in multiples of the cube's own height, not of the rows the
+            # cube was sized from, so every band starts on the output's chunk grid.
+            growth = RegionGrowth(tile[0], growth.cap, growth.budget_bytes)
         depth = sizer.sweep_depth(tile)
         if any(_shares_h5_file(source.dataset, member.sweep.destination) for member in members):
             # The h5 backend holds a per-file lock for a stream's whole life, on the thread that
             # opened it: a read of that file from any other thread waits for the close that the
             # read itself stands in the way of. One thread, where the lock re-enters.
             depth = 0
+        # The regions in flight at once: what must have run at a height before its cost is known.
+        growth.settle = depth + 2
         # Reading ahead means the reading thread must touch no stage of the chain, so the pull maps
-        # are folded here, before it starts. A stage that sizes its window from the data it reads
-        # (a displacement field: the sizing read IS the sampling read) cannot be folded ahead, and
-        # that chain reads where it samples.
-        pulls = (
-            []
-            if any(plan.run_pull is not None for plan in source.stage_plans)
-            else [self._region_spans(source, target) for target in targets]
-        )
-        ahead = depth if pulls else 0
-        if pulls:
-            self._declare_region_reads([(source, spans) for spans in pulls])
-        # A member's tail reads on the landing, whose regions are the targets: known whether or not
-        # the prefix folds its own pulls ahead.
-        for member in members:
-            for stage, plan in zip(member.stages, member.stage_plans, strict=True):
-                stage.plan_region_reads(self.name, [plan.region_context(target, target) for target in targets])
+        # are folded on this thread, a few regions ahead of the reader. A stage that sizes its
+        # window from the data it reads (a displacement field: the sizing read IS the sampling
+        # read) cannot be folded ahead, and that chain reads where it samples.
+        folds_ahead = not any(plan.run_pull is not None for plan in source.stage_plans)
+        ahead = depth if folds_ahead else 0
         sweeps = {member.key: member.sweep for member in members}
         headers: dict[Any, Attribute] = {}
         writer = RegionWriter(lambda key, block, header: _open_sweep_stream(sweeps[key], block, spatial, tile, header))
 
-        def regions() -> Iterator[tuple[int, list[list[slice]], torch.Tensor, Attribute]]:
-            for index, target in enumerate(targets):
-                spans = pulls[index] if pulls else self._region_spans(source, target)
+        # The regions, cut one at a time as the growth decides their height, and handed to the
+        # reader with their pulls already folded: this thread cuts, the reader reads.
+        regions_plan = _RegionPlan(spatial, tile, growth)
+        # The stores and the stages are told the reads to come only where the decomposition is
+        # fixed, which is a sweep with no budget to grow under: declared at the first height, a
+        # growing sweep deviates at its second band and the store keeps what it used last from
+        # there on.
+        if not growth.budget_bytes:
+            hinted = list(_sweep_targets(spatial, tile))
+            if folds_ahead:
+                self._declare_region_reads([(source, self._region_spans(source, target)) for target in hinted])
+            for member in members:
+                for stage, plan in zip(member.stages, member.stage_plans, strict=True):
+                    stage.plan_region_reads(self.name, [plan.region_context(target, target) for target in hinted])
+        pending: queue.Queue = queue.Queue()
+        exhausted = False
+
+        def cut_next() -> None:
+            nonlocal exhausted
+            if exhausted:
+                return
+            target = regions_plan.next_target()
+            if target is None:
+                exhausted = True
+                pending.put(None)
+                return
+            pending.put((target, self._region_spans(source, target) if folds_ahead else None))
+
+        for _ in range(ahead + 2):
+            cut_next()
+
+        def regions() -> Iterator[tuple[tuple[slice, ...], list[list[slice]], torch.Tensor, Attribute]]:
+            while True:
+                item = pending.get()
+                if item is None:
+                    return
+                target, spans = item
+                if spans is None:
+                    spans = self._region_spans(source, target)
                 with SWEEP_CLOCK.phase("read"):
                     tensor, attributes = self._read_streamed_region(source, spans)
-                yield index, spans, tensor, attributes
+                yield target, spans, tensor, attributes
 
+        # What the regions HOLD, read by the instrument this route has: the allocator on a device,
+        # the process's resident peak on the host. The growth reads it after every region.
+        meter = open_held_meter(self._chain_device) if growth.budget_bytes else None
         write, landing = _WriteBehind(writer, depth), _HostLanding()
-        try:
+        current: tuple[slice, ...] | None = None
+
+        def consume() -> set[Any]:
+            nonlocal current
             with SWEEP_CLOCK.phase("sweep"), _ReadAhead(regions(), ahead) as blocks:
-                for index, spans, tensor, attributes in SWEEP_CLOCK.waiting("wait(read)", blocks):
-                    target = targets[index]
+                for index, (target, spans, tensor, attributes) in enumerate(SWEEP_CLOCK.waiting("wait(read)", blocks)):
+                    current = target
                     with SWEEP_CLOCK.phase("chain"):
                         tensor, region_attribute, keys_before = self._apply_streamed_region(
                             source,
@@ -1216,14 +1279,44 @@ class DatasetManager:
                             write.write(
                                 member.key, (slice(0, int(block.shape[0])), *target), block, headers[member.key]
                             )
+                    held = meter.held() if meter is not None else None
+                    SWEEP_CLOCK.region(target[0].stop - target[0].start, held)
+                    growth.after(held)
+                    cut_next()
                 # The publish is a write too (an OME-Zarr pyramid is derived here), and it is waited for.
                 with SWEEP_CLOCK.phase("wait(write)"):
-                    written = write.close()
+                    return write.close()
+
+        try:
+            while True:
+                try:
+                    written = consume()
+                    break
+                except torch.cuda.OutOfMemoryError:
+                    # A region the device could not hold: cut the rest at half the height and read
+                    # again from the one that failed (its writes never happened). The host has no
+                    # such signal (the kernel kills), and one row that does not fit is the end.
+                    pending.put(None)  # the reader is released before the read-ahead drains
+                    if not device_signals_oom(self._chain_device) or growth.rows <= 1 or current is None:
+                        raise
+                    failed_rows = current[0].stop - current[0].start
+                    rows = growth.halve_below_first()
+                    torch.cuda.empty_cache()
+                    print(
+                        f"[KonfAI] '{self.name}': out of device memory on a {failed_rows}-row region;"
+                        f" the rest are cut to {rows} row(s).",
+                        flush=True,
+                    )
+                    regions_plan.rewind(current[0].start)
+                    pending, exhausted = queue.Queue(), False
+                    for _ in range(ahead + 2):
+                        cut_next()
             for key in written:
                 sweep = sweeps[key]
                 self._swept_entries.add((str(sweep.destination.filename), sweep.group, sweep.entry))
             return written, None
         except BaseException as exception:
+            pending.put(None)  # a reader waiting for a region is released before the queue is drained
             write.abort(exception)
             if not isinstance(exception, Exception):
                 raise  # an interrupt is not a sweep failure: no fallback, and no .tmp left behind
@@ -1247,12 +1340,6 @@ class DatasetManager:
         warnings.warn(f"{self._sweep_failure} Falling back to the whole-volume path.", stacklevel=3)
         return False
 
-    def _sweep_depth(
-        self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int]
-    ) -> int:
-        """:meth:`SegmentSizer.sweep_depth` of the whole declared chain against the raw source."""
-        return self._chain_sizer(spatial, channels, plans).sweep_depth(tile)
-
     def read_granularity(self) -> tuple[int, ...] | None:
         """The stored block this case's source reads are served in, spatial axes only, or ``None``
         when a read costs what it asks for. Read from the store's metadata once per case."""
@@ -1260,31 +1347,6 @@ class DatasetManager:
             granularity = self.dataset.read_granularity(self.group_src, self.name)
             self._read_granularity = None if granularity is None else tuple(granularity[1:])
         return cast(tuple[int, ...] | None, self._read_granularity)
-
-    def read_plateau_rows(self, spatial: list[int], tolerance: float = _PLATEAU_READ_MARGIN, a: int = 0) -> int | None:
-        """The shortest region height whose decomposition already reads what the tallest one reads,
-        within ``tolerance``: the point past which taller regions buy no fewer source voxels.
-
-        Closed form, from the chain's own pull maps (:func:`_pull_block_voxels`): no voxel is read.
-        A region shorter than this re-reads source its neighbours already pulled; a taller one reads
-        the same and only holds more, which is why this is a CAP a budget may lower and never a
-        target a budget should raise. ``None`` when the chain cannot stream, where there is no
-        decomposition to price.
-
-        Never below :meth:`_sweep_rows`: a chain that pulls exactly what it lands (POINTWISE) has a
-        flat curve whose plateau starts at one row, and one-row regions pay every fixed per-region
-        cost for one row of work.
-        """
-        segments = self.sweep_segments(a, apply_augmentations=False)
-        if not segments:
-            return None
-        segment = segments[-1]
-        plateau = _plateau_rows(spatial, segment.plans, tolerance)
-        if plateau is None:
-            return None
-        sizer = self.sizer_for(segment._replace(landing=[int(extent) for extent in spatial]))
-        floor = sizer.sweep_rows()
-        return max(plateau, min(floor, int(spatial[0])))
 
     def region_reads(self, rows: int, a: int = 0) -> "BlockReads | None":
         """What a decomposition into ``rows``-row regions costs this chain in source voxels.
@@ -1445,6 +1507,16 @@ class DatasetManager:
 
         return self._get_streamed_region_data(index, a, stream_source, is_input)
 
+    def _region_target(self, index: int, a: int, is_input: bool) -> tuple[slice, ...]:
+        """The spatial window the region chain replays for patch ``index`` of copy ``a``: the read
+        plan's own slices, which widen the grid slot by the halo AND by the 2.5D slice context
+        (``extend_slice``). The context must come from the volume: ``_finalize_stream_patch``
+        reflects and concatenates the plan on what this hands back, and a slot alone gave it one
+        slice where the model expects ``extend_slice + 1``."""
+        plan = self.patch.get_read_plan(self.shapes[a], index, a, is_input)
+        spatial = len(self.patch.get_patch_slices(a)[index])
+        return tuple(plan.data_slices[len(plan.data_slices) - spatial :])
+
     def _finalize_stream_patch(self, tensor: torch.Tensor, index: int, a: int, is_input: bool) -> torch.Tensor:
         """Pad a streamed patch to ``patch_size`` through the same read plan the whole-volume path
         applies, so a border patch the overlap tiling left narrower is byte-identical between the
@@ -1476,7 +1548,7 @@ class DatasetManager:
         which a Save sweep drives with slab targets instead of patch targets)."""
         if self._expand is not None and self._records_source is not stream_source:
             self._refold_copy_records(a, stream_source)
-        target_slices = tuple(self.patch.read_slices(a, index, self.shapes[a]))
+        target_slices = self._region_target(index, a, is_input)
         # Each patch re-runs the chain from the state the whole-volume pass started from: the case as
         # stored (plus planned stats), never the live attribute: that one carries the chain's own
         # output.
@@ -1561,7 +1633,7 @@ class DatasetManager:
             plan = self.patch.get_read_plan(stream_source.shape, index, a, is_input)
             region = plan.data_slices[len(plan.data_slices) - (len(stream_source.shape) - 1) :]
             return [list(region) for _ in range(len(stream_source.stage_plans) + 1)]
-        return self._region_spans(stream_source, tuple(self.patch.read_slices(a, index, self.shapes[a])))
+        return self._region_spans(stream_source, self._region_target(index, a, is_input))
 
     def _declare_region_reads(self, reads: Sequence[tuple[_PatchStreamSource, list[list[slice]]]]) -> None:
         """Tell the stores, and the stages, the region reads about to happen in the order they will.

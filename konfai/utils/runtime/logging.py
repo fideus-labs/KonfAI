@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import TextIO, cast
 
 import numpy as np
-import torch
 
 try:
     from torch.utils.tensorboard.writer import SummaryWriter
@@ -82,8 +81,7 @@ def _log_images_format(array: np.ndarray) -> np.ndarray:
     result = []
     for n in range(array.shape[0]):
         result.append(_log_image_format(array[n]))
-    result = np.stack(result, axis=0)
-    return result
+    return np.stack(result, axis=0)
 
 
 def _log_video_format(array: np.ndarray) -> np.ndarray:
@@ -122,12 +120,10 @@ class DataLog(Enum):
             parsed[target.replace(":", ".")] = (cls[strategy], int(count))
         return parsed
 
-    def __call__(self, tb: SummaryWriter, name: str, layer: torch.Tensor, it: int):
+    def __call__(self, tb: "SummaryWriter | NullSummaryWriter", name: str, layer: np.ndarray, it: int):
         if self == DataLog.SIGNAL:
-            return [
+            for b in range(layer.shape[0]):
                 tb.add_scalars(name, _log_signal_format(layer[b, :, 0]), layer.shape[0] * it + b)
-                for b in range(layer.shape[0])
-            ]
         elif self == DataLog.IMAGE:
             return tb.add_image(name, _log_image_format(layer[0]), it)
         elif self == DataLog.IMAGES:

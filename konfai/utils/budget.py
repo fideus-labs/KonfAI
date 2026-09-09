@@ -181,6 +181,19 @@ def peak_resident_bytes() -> int | None:
     return _status_bytes("VmHWM")
 
 
+#: The highest ``VmHWM`` read before a reset: what a run's closing line adds back, so a scope's
+#: reset (a region measured for the growth) never makes the run report less than it held.
+_peak_before_resets = 0
+
+
+def run_peak_resident_bytes() -> int | None:
+    """The most this process has held resident over the whole run, across every
+    :func:`reset_resident_peak`: the figure a run's closing line reports, where
+    :func:`peak_resident_bytes` reads the scope since the last reset."""
+    peak = peak_resident_bytes()
+    return None if peak is None else max(peak, _peak_before_resets)
+
+
 def reset_resident_peak() -> bool:
     """Set this process's resident high-water mark back to what it holds now, so the next reading of
     :func:`peak_resident_bytes` is a peak over one scope rather than over the whole run.
@@ -191,16 +204,50 @@ def reset_resident_peak() -> bool:
     write and no page-table scan. ``False`` where the kernel does not offer it, and a caller that
     gets ``False`` has no per-step peak and should not pretend otherwise.
     """
+    global _peak_before_resets
+    peak = peak_resident_bytes()
     try:
         Path("/proc/self/clear_refs").write_text("5")
     except OSError:
         return False
+    if peak is not None:
+        _peak_before_resets = max(_peak_before_resets, peak)
     return True
 
 
 def resident_bytes() -> int | None:
     """What this process holds resident right now (``VmRSS``), or ``None`` where the kernel does not say."""
     return _status_bytes("VmRSS")
+
+
+#: The resident set a workflow recorded before its first case: what its regions are measured above.
+_resident_floor: int | None = None
+
+
+def record_resident_floor() -> int | None:
+    """Record what this process holds resident now as the run's floor (:func:`resident_floor`).
+
+    Called by a workflow after its setup and before its first case, so a region is measured above
+    the interpreter, the libraries and the workflow's own objects, and never above the pages an
+    earlier region freed and this one reuses: those are resident, and the budget is about what is
+    resident. Measured above where a scope started instead, a region reusing a predecessor's pages
+    read as holding nothing.
+    """
+    global _resident_floor
+    _resident_floor = resident_bytes()
+    return _resident_floor
+
+
+def resident_floor() -> int | None:
+    """The run's recorded resident floor, ``None`` when no workflow is holding one in this process."""
+    return _resident_floor
+
+
+def clear_resident_floor() -> None:
+    """Forget the recorded floor: a workflow's own, released when it ends, so the next workflow in
+    the same process (a notebook) measures above its own floor or above where its scopes start."""
+    global _resident_floor
+    _resident_floor = None
 
 
 def _status_bytes(field: str) -> int | None:
@@ -325,6 +372,30 @@ def _cpu_quota(directory: Path, v2: bool) -> float | None:
     return quota_us / period_us
 
 
+_cpu_quota_cores: dict[tuple[str, str], int | None] = {}
+
+
+def forget_cgroup_cpu_ceiling() -> None:
+    """Drop the memoised CPU quota, so the next :func:`available_cpus` reads the cgroup again."""
+    _cpu_quota_cores.clear()
+
+
+def _cgroup_cpu_ceiling() -> int | None:
+    """The tightest CPU quota over this process's cpu cgroup and its ancestors, in cores; ``None``
+    when unbounded. Read once per process: the cgroup a process sits in does not move, and the
+    walk opens a file per ancestor, which a caller on every patch paid 300,000 times an epoch."""
+    key = (_PROC_SELF_CGROUP, _CGROUP_ROOT)
+    if key not in _cpu_quota_cores:
+        ceiling: int | None = None
+        for directory, v2 in _cpu_cgroup_paths():
+            quota = _cpu_quota(directory, v2)
+            if quota is not None:
+                cores = max(1, math.ceil(quota))
+                ceiling = cores if ceiling is None else min(ceiling, cores)
+        _cpu_quota_cores[key] = ceiling
+    return _cpu_quota_cores[key]
+
+
 def available_cpus() -> int:
     """The cores this process may actually run on: the tighter of its affinity mask and its cgroup
     CPU quota (v2 ``cpu.max``, v1 ``cpu.cfs_quota_us``/``cpu.cfs_period_us``, over its ancestors).
@@ -334,10 +405,9 @@ def available_cpus() -> int:
         cores = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         cores = os.cpu_count() or 1
-    for directory, v2 in _cpu_cgroup_paths():
-        quota = _cpu_quota(directory, v2)
-        if quota is not None:
-            cores = min(cores, max(1, math.ceil(quota)))
+    ceiling = _cgroup_cpu_ceiling()
+    if ceiling is not None:
+        cores = min(cores, ceiling)
     return max(1, cores)
 
 

@@ -1160,3 +1160,116 @@ def test_export_copies_a_yaml_model_and_it_resolves(tmp_path: Path, monkeypatch:
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
     model = ModelLoader("UNetSeg.yml").get_model(train=False)
     assert isinstance(model, Network)
+
+
+def _write_app_with_two_checkpoints(root: Path, declare: bool) -> Path:
+    app_root = root / "apps" / "Repacked"
+    app_root.mkdir(parents=True)
+    metadata = {
+        "display_name": "Repacked",
+        "description": "d",
+        "short_description": "s",
+        "tta": 0,
+        "mc_dropout": 0,
+    }
+    if declare:
+        metadata["models"] = ["new.pt"]
+    (app_root / "app.json").write_text(json.dumps(metadata))
+    (app_root / "Prediction.yml").write_text("Predictor: {}\n")
+    (app_root / "first.pt").write_bytes(b"first")
+    (app_root / "new.pt").write_bytes(b"new")
+    return app_root
+
+
+def test_default_inference_takes_the_checkpoints_app_json_declares(tmp_path: Path, monkeypatch) -> None:
+    """A repackaged bundle can hold the previous export's checkpoint beside the declared one; the
+    default inference once enumerated the .pt files and picked the old one."""
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
+    app_root = _write_app_with_two_checkpoints(tmp_path, declare=True)
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    models_path, _prediction, _codes = repo.download_inference(1, [], "Prediction.yml")
+    assert [path.name for path in models_path] == ["new.pt"]
+    with pytest.raises(app_repository_module.AppRepositoryError, match="declares 1"):
+        repo.download_inference(2, [], "Prediction.yml")
+
+
+def test_legacy_metadata_without_models_still_enumerates_the_checkpoints(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
+    app_root = _write_app_with_two_checkpoints(tmp_path, declare=False)
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    models_path, _prediction, _codes = repo.download_inference(2, [], "Prediction.yml")
+    assert sorted(path.name for path in models_path) == ["first.pt", "new.pt"]
+
+
+def test_native_inference_leaves_the_declared_portable_assets_in_the_repository(tmp_path: Path, monkeypatch) -> None:
+    """A bundle that also ships its ONNX export copied model.onnx and its tensor data into every
+    native run's workspace; the files app.json declares under portable_assets are the portable
+    runtime's and stay behind. A bundle that declares none keeps the inclusive contract."""
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
+    app_root = _write_app_with_two_checkpoints(tmp_path, declare=True)
+    (app_root / "model.onnx").write_bytes(b"onnx")
+    (app_root / "model.onnx.data").write_bytes(b"tensors")
+    (app_root / "lookup.json").write_text("{}")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    _models, _prediction, assets = repo.download_inference(1, [], "Prediction.yml")
+    assert {name for name, _path in assets} >= {"model.onnx", "model.onnx.data", "lookup.json"}
+
+    metadata = json.loads((app_root / "app.json").read_text())
+    metadata["portable_assets"] = ["model.onnx", "model.onnx.data"]
+    (app_root / "app.json").write_text(json.dumps(metadata))
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    _models, _prediction, assets = repo.download_inference(1, [], "Prediction.yml")
+    names = {name for name, _path in assets}
+    assert "lookup.json" in names and not names & {"model.onnx", "model.onnx.data"}
+
+
+def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspace(tmp_path: Path) -> None:
+    # The relocatable-bundle contract: the helper package declared at export time reaches the run
+    # workspace with the rest of the bundle, and Model.py imports it in a process that knows
+    # nothing of the workspace the bundle was packaged from.
+    import subprocess
+
+    from konfai_apps.bundle import assemble_bundle
+
+    source = tmp_path / "source"
+    (source / "helpers").mkdir(parents=True)
+    (source / "helpers" / "__init__.py").write_text("")
+    (source / "helpers" / "util.py").write_text("SCALE = 3\n", encoding="utf-8")
+    (source / "Model.py").write_text("from helpers.util import SCALE\n\nVALUE = SCALE * 2\n", encoding="utf-8")
+    (source / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: Model:Net\n", encoding="utf-8")
+    (source / "CV_0.pt").write_bytes(b"weights")
+    (source / "app.json").write_text(
+        json.dumps(
+            {"display_name": "Demo", "description": "Demo", "short_description": "Demo", "tta": 0, "mc_dropout": 0}
+        ),
+        encoding="utf-8",
+    )
+    bundle = assemble_bundle(
+        "Relocatable",
+        tmp_path / "bundles",
+        source / "app.json",
+        [str(source / "Prediction.yml")],
+        [str(source / "CV_0.pt")],
+        model_py=str(source / "Model.py"),
+        support_files={"helpers": "helpers"},
+        support_root=source,
+    )
+
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(bundle.parent, bundle.name)
+    _, _, codes = repo.download_inference(1, [], "Prediction.yml")
+    assert {name for name, _ in codes} >= {"Model.py", "helpers/__init__.py", "helpers/util.py"}
+
+    workspace = tmp_path / "run"
+    workspace.mkdir()
+    for name, path in codes:  # what install_inference does with the same list
+        (workspace / name).parent.mkdir(parents=True, exist_ok=True)
+        (workspace / name).write_bytes(path.read_bytes())
+    completed = subprocess.run(
+        [sys.executable, "-c", "import Model; print(Model.VALUE)"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    assert completed.stdout.strip() == "6"

@@ -17,11 +17,13 @@
 """Performance hot-path contracts: each fast path must stay byte-identical to its reference."""
 
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import konfai.utils.dataset as dataset_module
+import numpy as np
 import torch
 from konfai.data.patching import Accumulator
+from konfai.data.reduction import Mean
+from konfai.network.network import Network
 from konfai.predictor import ModelComposite
 from konfai.utils.dataset import Attribute, Dataset
 
@@ -47,37 +49,41 @@ def test_accumulator_is_full_counts_without_rescanning():
     assert acc.is_full() is False
 
 
-def test_ensemble_reads_each_checkpoint_once_across_batches():
+def test_ensemble_reads_each_checkpoint_once_across_batches(tmp_path, monkeypatch):
     """P1: a local-path ensemble reads/unpickles each checkpoint once, not once per batch."""
-    mc = ModelComposite.__new__(ModelComposite)
-    mc._base_model_name = "Model"
-    mc._state_sources = [Path("/fake/ckpt_0.pt"), Path("/fake/ckpt_1.pt"), Path("/fake/ckpt_2.pt")]
-    mc._loaded_state_index = None
-    mc._state_cache = {}
-    mc._get_model = lambda: MagicMock()
+    model = Network(in_channels=1, dim=2)
+    model.add_module("Conv", torch.nn.Conv2d(1, 1, 1, bias=False))
+    paths = [tmp_path / f"ckpt_{i}.pt" for i in range(4)]
+    for index, path in enumerate(paths):
+        with torch.no_grad():
+            model["Conv"].weight.fill_(index)
+        torch.save({"Model": model.network_states()}, path)
+    mc = ModelComposite(model, Mean())
+    read = mc._read_state_source
 
     reads: list[str] = []
 
-    def fake_read(src):
+    def counted_read(src):
         reads.append(str(src))
-        return {"w": str(src)}
+        return read(src)
 
-    mc._read_state_source = fake_read
+    monkeypatch.setattr(mc, "_read_state_source", counted_read)
+    mc.load(paths[:3])
 
     # Four forward passes, each looping over all three sub-models (as forward() does).
     for _batch in range(4):
         for idx in range(3):
-            mc._ensure_model_loaded(idx)
+            loaded = mc._ensure_model_loaded(idx)
+            assert torch.equal(loaded["Conv"].weight, torch.full_like(loaded["Conv"].weight, idx))
 
     assert len(reads) == 3, f"expected 3 disk reads (one per index), got {len(reads)}"
-    # Compare via str(Path(...)) so the expected separators match the platform
-    # (the reads store str(src); Windows renders these with backslashes).
-    assert set(reads) == {str(Path(f"/fake/ckpt_{i}.pt")) for i in range(3)}
+    assert set(reads) == {str(path) for path in paths[:3]}
 
     # load() must invalidate the stale cache when the sources change.
-    mc.load([Path("/other.pt")])
+    mc.load([paths[3]])
     assert 1 not in mc._state_cache and 2 not in mc._state_cache
-    assert mc._state_cache.get(0) == {"w": str(Path("/other.pt"))}
+    assert torch.equal(mc._get_model()["Conv"].weight, torch.full_like(model["Conv"].weight, 3))
+    assert reads[-1] == str(paths[3]) and len(reads) == 4
 
 
 def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
@@ -91,6 +97,9 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
     ds._infos_cache = {}
     ds._case_paths = {}
     ds._root_seen = False
+    ds.case_facts = {}
+    ds.scale_factors = None
+    ds.downsample_method = None
     monkeypatch.setattr(ds, "exists_on_disk", lambda: True)
 
     opens = {"n": 0}
@@ -111,6 +120,9 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
         def is_exist(self, groups, name):
             return True
 
+        def data_to_file(self, entry, data, attributes):
+            pass
+
     monkeypatch.setattr(dataset_module.Dataset, "File", _FakeFile)
 
     first = ds.get_infos("g", "n")
@@ -124,10 +136,11 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
     third = ds.get_infos("g", "n")
     assert third[0] == [4, 5, 6]
 
-    # A write invalidates the cache (mirrors get_names).
-    ds._infos_cache.clear()  # write() calls this
+    # A write invalidates the cache (mirrors get_names): through the public write, not by hand.
+    ds.write("g", "n", np.zeros((1, 4, 5, 6), np.float32), Attribute({"Spacing": "1.0 1.0 1.0"}))
+    opened = opens["n"]
     ds.get_infos("g", "n")
-    assert opens["n"] == 2, "after invalidation the header is read again"
+    assert opens["n"] == opened + 1, "after a write the header is read again"
 
 
 def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_path, monkeypatch):

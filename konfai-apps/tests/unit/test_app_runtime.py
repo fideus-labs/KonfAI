@@ -25,6 +25,7 @@ import pytest
 import SimpleITK as sitk
 from konfai.utils.errors import AppMetadataError
 from konfai_apps.app_repository import DataEntry, VolumeType, _parse_input_default
+from multipart_support import decode_multipart
 
 
 def test_run_distributed_app_uses_requested_workspace_and_restores_cwd(
@@ -436,8 +437,9 @@ class _FakePostResponse:
 def _stub_remote_submission(monkeypatch: pytest.MonkeyPatch) -> dict:
     captured: dict = {}
 
-    def fake_post(url, files, data, headers, timeout):  # type: ignore[no-untyped-def]
-        return _FakePostResponse(captured, list(files), dict(data))
+    def fake_post(url, data, headers, timeout):  # type: ignore[no-untyped-def]
+        files, form = decode_multipart(data)
+        return _FakePostResponse(captured, files, form)
 
     monkeypatch.setattr(app_module.requests, "post", fake_post)
     monkeypatch.setattr(app_module.KonfAIAppClient, "stream_logs", lambda self, job_id: None)
@@ -575,9 +577,10 @@ def test_run_remote_job_packs_dataset_directory_as_single_zip(
         def __exit__(self, *exc: object) -> bool:
             return False
 
-    def fake_post(url, files, data, headers, timeout):  # type: ignore[no-untyped-def]
-        captured["files"] = [(field, Path(handle.name).name, handle.read()) for field, handle in files]
-        captured["data"] = dict(data)
+    def fake_post(url, data, headers, timeout):  # type: ignore[no-untyped-def]
+        files, form = decode_multipart(data)
+        captured["files"] = [(field, name, handle.read()) for field, (name, handle) in files]
+        captured["data"] = form
         return _Resp()
 
     monkeypatch.setattr(app_module.requests, "post", fake_post)

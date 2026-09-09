@@ -1,0 +1,30 @@
+name: perf_nightly
+
+# The performance gate, nightly, on a self-hosted runner with the GPU (a shared GitHub runner gives
+# times within 2x of themselves). Register the runner on the machine that holds the baseline
+# (benchmarks/perf/baselines/<host>.json) with the labels below; nothing runs until one exists.
+on:
+  schedule:
+    - cron: "7 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  perf_check:
+    runs-on: [self-hosted, linux, gpu, konfai-perf]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: The series, compared to this host's baseline
+        # The gate refuses a busy machine (load, power profile, GPU) rather than timing on it; a
+        # refusal fails the job, and the nightly then says the machine was not quiet, not that the
+        # code regressed.
+        run: pixi run perf-check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: perf-results
+          path: benchmarks/perf/results
+          if-no-files-found: ignore

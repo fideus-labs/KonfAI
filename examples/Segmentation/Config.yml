@@ -42,7 +42,7 @@ Trainer:
                   start: 0
                   stop: None
                   accumulation: false
-                  labels: None  # None = every label present in the patch
+                  labels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]  # Given, so no per-step scan of the reference for its labels
       optimizer:  # Optimizer used to update model weights during training
         name: AdamW
         lr: 0.001
@@ -117,14 +117,15 @@ Trainer:
     shuffle_window: None
     memory_budget: None
     num_workers: None
-    pin_memory: false
+    pin_memory: true  # Page-locked batches: the upload to the GPU does not block the step
     prefetch_factor: None
     persistent_workers: None
   train_name: SEG_BASELINE  # Training name; drives the output folder structure
   manual_seed: 32
   epochs: 5  # Demo-sized, so the example finishes in minutes. Raise it (100+) to train for real.
   it_validation: None  # Validate once per epoch
-  autocast: false
+  autocast: true  # Mixed precision: 1.9x per step on this example (benchmarks/perf/bench_train_step.py)
+  channels_last: true  # With autocast, 2.25x per step against fp32 in the default layout (same bench)
   gradient_checkpoints: None
   gpu_checkpoints: None
   ema_decay: 0

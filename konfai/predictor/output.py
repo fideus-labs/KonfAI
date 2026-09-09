@@ -21,9 +21,10 @@ import os
 import queue
 import threading
 import warnings
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from types import EllipsisType
 from typing import cast
 
 import numpy as np
@@ -257,10 +258,8 @@ class OutputDataset(Dataset, NeedDevice):
         self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
-        # Reusable page-locked staging buffer for the per-patch GPU->CPU offload. Prediction
-        # accumulators keep every patch of a case until assembly, so patches cannot share one CPU
-        # tensor; a single pinned buffer (one patch) stages each device patch instead, which is
-        # copied into a fresh pageable tensor for storage. See ``_offload_to_cpu``.
+        # One reusable page-locked buffer for GPU->CPU offload. Accumulators consume it synchronously
+        # into their own storage; callers retaining a CPU patch use ``_offload_to_cpu`` instead.
         self._pin_buffer: torch.Tensor | None = None
         # Per-CASE blend device, decided once at the case's first patch (see ``_accumulate_device``):
         # CUDA when the full combined volume of EVERY augmentation fits VRAM (blend on GPU, no per-patch
@@ -342,35 +341,46 @@ class OutputDataset(Dataset, NeedDevice):
     _PINNED_OFFLOAD_MIN_BYTES = 64 * 1024 * 1024
 
     def _offload_to_cpu(self, layer: torch.Tensor) -> torch.Tensor:
-        """Move a device patch to CPU, staging through a reusable pinned buffer for a faster copy.
+        """Return a CPU patch whose storage is independent of the reusable offload buffer.
 
-        Prediction accumulators hold every patch of a case until assembly, so patches cannot reuse a
-        single CPU tensor. A pageable ``layer.detach().cpu()`` on a large multi-class patch is a slow,
-        fully synchronous PCIe copy; a page-locked staging buffer makes it DMA-fast, and the result is
-        copied into a fresh pageable tensor so the one-patch pinned buffer can be reused (capping pinned
-        host RAM at a single patch). Bit-identical to ``layer.detach().cpu()``; falls back to it for
-        non-CUDA or small patches, or when the host cannot allocate page-locked memory.
+        Large CUDA patches stage through pinned memory, then copy into owned pageable storage.
+        Small/non-CUDA patches and a failed pinned allocation retain ``layer.detach().cpu()`` behavior.
+        The synchronous accumulator uses :meth:`_borrow_cpu_patch` to avoid that second copy.
+        """
+        with self._borrow_cpu_patch(layer) as patch:
+            if patch is not self._pin_buffer:
+                return patch
+            out = torch.empty(patch.shape, dtype=patch.dtype)
+            out.copy_(patch)
+            return out
+
+    @contextmanager
+    def _borrow_cpu_patch(self, layer: torch.Tensor) -> Iterator[torch.Tensor]:
+        """Lend one CPU patch until this context exits, for synchronous accumulation only.
+
+        The blocking CUDA copy completes before yielding. The caller must finish consuming the patch
+        within the context: the next offload may overwrite its storage. Accumulator.add_layer copies
+        or blends into owned storage, and StreamingAccumulator returns slabs cloned from that storage.
         """
         detached = layer.detach()
         if (
             detached.device.type != "cuda"
             or detached.numel() * detached.element_size() < self._PINNED_OFFLOAD_MIN_BYTES
         ):
-            return detached.cpu()
+            yield detached.cpu()
+            return
         buffer = self._pin_buffer
         if buffer is None or buffer.shape != detached.shape or buffer.dtype != detached.dtype:
             try:
                 buffer = torch.empty(detached.shape, dtype=detached.dtype, pin_memory=True)
             except RuntimeError:  # host cannot lock this much memory -> plain pageable copy
                 self._pin_buffer = None
-                return detached.cpu()
+                yield detached.cpu()
+                return
             self._pin_buffer = buffer
-        # Blocking copy into page-locked memory (fast DMA), then a CPU->CPU copy into a fresh pageable
-        # tensor so the pinned buffer is free to stage the next patch.
+        # Blocking copy: CPU accumulation must see completed host data before the buffer is lent.
         buffer.copy_(detached)
-        out = torch.empty(detached.shape, dtype=detached.dtype)
-        out.copy_(buffer)
-        return out
+        yield buffer
 
     def prepare(self, name_layer: str) -> None:
         konfai_args = f"{konfai_root()}.outputs_dataset.{name_layer}.OutputDataset"
@@ -422,7 +432,7 @@ class OutputDataset(Dataset, NeedDevice):
             self.patch_combine = None
         self.nb_data_augmentation = nb_data_augmentation
 
-    def to(self, device: torch.device):
+    def to(self, device: int):
         super().to(device)
         for transform in [*self.before_reduction_transforms, *self.after_reduction_transforms, *self.final_transforms]:
             transform.to(device)
@@ -585,7 +595,8 @@ class OutputDataset(Dataset, NeedDevice):
         # otherwise offload each patch to CPU so its device memory is released after post-processing.
         if target.type == "cpu":
             if layer.device.type != "cpu":
-                layer = self._offload_to_cpu(layer)
+                with self._borrow_cpu_patch(layer) as cpu_patch:
+                    return accumulator.add_layer(index_patch, cpu_patch) or []
         elif str(layer.device) != str(target):
             layer = layer.to(target)
         try:
@@ -599,7 +610,8 @@ class OutputDataset(Dataset, NeedDevice):
                 raise
             self._accum_device[index_dataset] = torch.device("cpu")
             torch.cuda.empty_cache()
-            return accumulator.add_layer(index_patch, self._offload_to_cpu(layer)) or []
+            with self._borrow_cpu_patch(layer) as cpu_patch:
+                return accumulator.add_layer(index_patch, cpu_patch) or []
 
     def _advance_stream(
         self,
@@ -901,7 +913,8 @@ class OutputDataset(Dataset, NeedDevice):
         pipe = plan.stages[cast(int, plan.pipe_start) :]
         name = self.names[index]
 
-        probe = block[(Ellipsis, *([slice(0, 1)] * len(in_shape)))].clone()
+        corner: tuple[EllipsisType | slice, ...] = (Ellipsis, *([slice(0, 1)] * len(in_shape)))
+        probe = block[corner].clone()
         walking = Attribute(attr0)
         shapes = [list(in_shape)]
         kinds: list[LocalityKind] = []

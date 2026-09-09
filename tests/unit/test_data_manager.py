@@ -796,6 +796,26 @@ def test_destination_groups_with_disagreeing_grids_are_refused_at_prepare(tmp_pa
         dataset.prepare()
 
 
+def test_a_one_pass_source_holds_two_cases_whatever_its_batch_size(tmp_path: Path) -> None:
+    """Prediction serves a case's patches in order and never reads it again: a FIFO sized on the
+    batch kept batch_size + 1 whole cases loaded, and a cohort's RAM grew by a case per case."""
+    pytest.importorskip("SimpleITK")
+    store = Dataset(tmp_path / "Dataset", "mha")
+    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    groups = {"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})}
+
+    prediction = DataPrediction(
+        augmentations=None,
+        dataset_filenames=[f"{tmp_path / 'Dataset'}:mha"],
+        groups_src=groups,
+        patch=DatasetPatch(patch_size=[4, 4], overlap=None),
+        subset=PredictionSubset(),
+        batch_size=28,
+    )
+
+    assert prediction._buffer_size == 2
+
+
 # --------------------------------------------------------------------------------------
 # WindowedCaseSampler - locality-aware training order, worker sharding, buffer hit rate
 # --------------------------------------------------------------------------------------

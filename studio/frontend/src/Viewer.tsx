@@ -37,18 +37,42 @@ function Canvas({ path, onDims, onReady }: { path: string | null; onDims?: (d: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const loadSeqRef = useRef(0);
+  const loadChainRef = useRef<Promise<unknown>>(Promise.resolve());
+
   useEffect(() => {
     const nv = nvRef.current;
     if (!nv || !path) return;
     const name = path.split("/").pop() || "volume.nii.gz";
+    const seq = ++loadSeqRef.current;
     setFailed("");
-    nv.loadVolumes([{ url: `/files/volume?path=${encodeURIComponent(path)}`, name }])
-      .then(() => onDims?.(dimsLabel(nv)))
-      .catch(() => {
-        // Leaving the previous volume on screen under a name that failed reads as a successful load.
-        for (const loaded of [...nv.volumes]) nv.removeVolume(loaded);
-        onDims?.("");
-        setFailed(name);
+    // Loads run one after another on a single chain, and only the latest request applies its
+    // outcome: NiiVue mutates its volume list as a load resolves, so a request that finished after
+    // a newer one put its volume on screen under the newer name, and its failure cleared the newer
+    // selection. A request superseded before it started is never fetched.
+    // A file the reader cannot parse is reported through NiiVue's error handler, and the load
+    // promise may never settle: the handler fails this request, when it is still the latest.
+    const fail = () => {
+      if (seq !== loadSeqRef.current) return;
+      // Leaving the previous volume on screen under a name that failed reads as a successful load.
+      for (const loaded of [...nv.volumes]) nv.removeVolume(loaded);
+      onDims?.("");
+      setFailed(name);
+    };
+    nv.onError = fail;
+    loadChainRef.current = loadChainRef.current
+      .catch(() => undefined)
+      .then(() => {
+        if (seq !== loadSeqRef.current) return;
+        return nv
+          .loadVolumes([{ url: `/files/volume?path=${encodeURIComponent(path)}`, name }])
+          .then(() => {
+            // NiiVue reports a file it cannot read through its error handler and resolves all the
+            // same: a load that landed no volume under the requested name failed.
+            if (!nv.volumes.some((v) => v.name === name)) throw new Error(`no volume loaded from ${name}`);
+            if (seq === loadSeqRef.current) onDims?.(dimsLabel(nv));
+          })
+          .catch(fail);
       });
   }, [path, onDims]);
 

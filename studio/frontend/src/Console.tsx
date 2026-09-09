@@ -7,8 +7,8 @@ import "@xterm/xterm/css/xterm.css";
 
 // The bottom drawer is a real login shell rooted at the workspace: run nvidia-smi, activate an env,
 // inspect files. The job log lives in the Live tab now, so this is a general-purpose terminal.
-export default function Console() {
-  const [open, setOpen] = useState(false);
+export default function Console({ initialOpen = false }: { initialOpen?: boolean }) {
+  const [open, setOpen] = useState(initialOpen);
   const [connected, setConnected] = useState(false);
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -52,8 +52,12 @@ export default function Console() {
   // Teardown only when the whole app unmounts.
   useEffect(
     () => () => {
+      if (wsRef.current) wsRef.current.onclose = null;
       wsRef.current?.close();
       termRef.current?.dispose();
+      wsRef.current = null;
+      termRef.current = null;
+      fitRef.current = null;
     },
     [],
   );
@@ -76,10 +80,14 @@ export default function Console() {
   return (
     <section className={open ? "console open" : "console"}>
       <div className="console-head" onClick={() => setOpen((o) => !o)}>
-        <button className="ctab on">Terminal</button>
+        <button className="ctab on" aria-expanded={open}>
+          Terminal
+        </button>
         {open && <span className={connected ? "cst running" : "cst"}>{connected ? "connected" : "…"}</span>}
         <span className="cbar-spacer" />
-        <button className="toggle">{open ? "▾" : "▸"}</button>
+        <button className="toggle" aria-label={open ? "Collapse terminal" : "Open terminal"} aria-expanded={open}>
+          {open ? "▾" : "▸"}
+        </button>
       </div>
       <div className="term-host" ref={hostRef} style={{ display: open ? "block" : "none" }} />
     </section>

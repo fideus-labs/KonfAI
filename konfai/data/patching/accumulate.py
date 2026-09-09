@@ -120,7 +120,14 @@ class Accumulator:
             # The kept regions partition the volume: nothing to weight, nothing to sum. Writing the box
             # this patch owns IS the operation, and it is what carries a discrete output through,
             # where a weighting would invent values between its classes.
-            box = self._kept_box(patch_slice)
+            # Cut to the patch's in-volume part like the data above: the last patch of an axis is
+            # padded past the volume, and its kept run may end in that padding. The whole-volume
+            # buffer clipped that implicitly; the streaming window, wider than the volume's tail,
+            # does not, and wrote a [1, 4] destination from a [3] source.
+            box = [
+                slice(min(b.start, d.stop - d.start), min(b.stop, d.stop - d.start))
+                for d, b in zip(dest, self._kept_box(patch_slice), strict=True)
+            ]
             kept = [slice(d.start + b.start, d.start + b.stop) for d, b in zip(dest, box, strict=True)]
             result[(*lead, *kept)] = data[(*lead, *box)]
         else:

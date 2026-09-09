@@ -33,7 +33,6 @@ from typing import cast
 import numpy as np
 import pytest
 import torch
-from konfai.data import patching
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.augmentation import Flip as FlipAugmentation
 from konfai.data.materialize import CaseMaterializer
@@ -411,17 +410,17 @@ def test_the_predicted_read_factor_prices_the_route_not_the_answer(streaming_dat
         )
 
     bounded = manager(streaming_dataset_stub(volume))
-    assert CaseMaterializer(bounded).predicted_stream_read_factor(0) == pytest.approx(1.0)
+    assert CaseMaterializer(bounded).reads_its_source_whole(0) is False
 
     class _Unbounded(streaming_dataset_stub):
         def bounded_region_reads(self, group_src: str, name: str) -> bool:
             return False
 
-    # A budget that holds one row and no more cuts the sweep into 8 one-row slabs, each decoding
-    # the whole store.
+    # Every region of a sweep decodes the whole store: a fact of the store, whatever the budget.
     unbounded = manager(_Unbounded(volume))
+    assert CaseMaterializer(unbounded).reads_its_source_whole(0) is True
     unbounded.set_memory_budget(_one_row_budget(unbounded))
-    assert CaseMaterializer(unbounded).predicted_stream_read_factor(0) == pytest.approx(8.0)
+    assert CaseMaterializer(unbounded).reads_its_source_whole(0) is True
 
 
 def test_global_stat_after_float_cast_still_streams_and_matches(build_streaming_manager) -> None:
@@ -635,34 +634,3 @@ def test_statistics_streams_off_the_seeded_case_numbers(streaming_dataset_stub) 
     assert float(attribute["ImageMean"]) == pytest.approx(float(volume.mean()), rel=1e-6)
     assert float(attribute["ImageStd"]) == pytest.approx(float(volume.std(ddof=1)), rel=1e-6)
     assert stub.full_reads == 0 and stub.stats_reads == 1
-
-
-def test_the_read_factor_grows_as_the_budget_cuts_finer_slabs(streaming_dataset_stub) -> None:
-    """Streaming finer never reads less: the monotonicity the route's pricing rests on.
-
-    A halo chain re-reads its overlap at every slab boundary, so the factor sits near 1 when one
-    slab covers the volume and grows as the budget shrinks the slabs. This restates, on the
-    estimator the verdict actually uses, the property the deleted ``read_amplification`` pinned.
-    """
-    volume = np.zeros((1, 32, 16, 16), dtype=np.float32)
-    manager = DatasetManager(
-        index=0,
-        group_src="CT",
-        group_dest="CT",
-        name="CASE_000",
-        dataset=cast(Dataset, streaming_dataset_stub(volume)),
-        patch=DatasetPatch([8, 16, 16]),
-        transforms=[Dilate(2)],
-        data_augmentations_list=[],
-    )
-    one_row = _one_row_budget(manager)
-    factors = []
-    for budget in (None, 8 * one_row, 3 * one_row, one_row):
-        manager.set_memory_budget(budget)
-        factors.append(CaseMaterializer(manager).predicted_stream_read_factor(0))
-    # The ~1.0 first factor holds only while the no-budget sweep covers the volume in ONE slab;
-    # a smaller default cap would split it and re-read the Dilate halo at each boundary.
-    assert patching.SWEEP_SLAB_ROWS >= volume.shape[1], "the first factor's premise moved"
-    assert factors[0] == pytest.approx(1.0, abs=0.2)  # one slab: the whole source, once
-    assert factors == sorted(factors), f"the factor must be monotone in fineness, got {factors}"
-    assert factors[-1] > 2.0

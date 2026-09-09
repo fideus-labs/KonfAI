@@ -30,7 +30,7 @@ operator can accumulate.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -46,9 +46,10 @@ from konfai.data.patching import (
     open_held_meter,
     save_destination,
 )
+from konfai.data.patching.budget import _START_SHARE, GROWTH_CAP_UNITS, RegionGrowth, device_signals_oom
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
-from konfai.utils.budget import budget_share, format_bytes
+from konfai.utils.budget import budget_share
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
 from konfai.utils.errors import ReductionError
@@ -316,6 +317,8 @@ class CaseReduction:
     #: The budget the last fit sized against, in host bytes: what a run-time device re-cap re-fits.
     _budget_bytes: float | None = field(init=False, default=None)
     _kept_folds: list | None = field(init=False, default=None, repr=False, compare=False)
+    #: The caller's ceiling on the region height, when it named one.
+    _cap: int | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         if not self.managers:
@@ -328,28 +331,22 @@ class CaseReduction:
         check_post_stages(self.post, self.reduce.output)
 
     def fit_budget(self, budget_bytes: float | None, cap: int | None = None) -> None:
-        """Size the regions so the resident ones fit ``budget_bytes``.
+        """Size the FIRST region so the resident ones fit ``budget_bytes``; the rest follow what
+        the regions hold (:meth:`_folds`).
 
         The default region height is safe for one case and not for N: a reduction holds one region
         PER CASE, so the constant that bounds a per-case sweep is off by the number of cases here.
-        Half the budget, because the write buffer lives alongside the peak the plan prices.
+        The first region starts at ``_START_SHARE`` of the regions' share (the price is a model,
+        and the recorded incident is a first region at 1.5x its price on a host that kills before
+        anything is measured); ``cap`` bounds the growth, ``GROWTH_CAP_UNITS`` slabs by default.
         Below one row nothing fits; the plan then reports a peak above the budget and the workflow
         refuses, which is the only honest answer: there is no whole-volume path to fall back to.
-
-        THE BUDGET IS A CEILING, NOT A TARGET. ``cap`` defaults to the shortest region that already
-        reads what the whole volume reads (``DatasetManager.read_plateau_rows``, closed form from
-        the chain's pull maps): past it a taller region pulls no fewer source voxels and only holds
-        more. A FIXED cap was wrong in the other direction -- 64 rows however much memory the run
-        was given made a cohort measured at 0.11 GiB against a 59.60 GiB budget re-sweep every
-        source per 64 rows, which is what a chain resampling through a field pays for, since a
-        region's source window is not the region. The plateau is neither: it is where that
-        re-sweeping stops, per chain, and the budget may still lower it. What is spent stays
-        declared: half a budget the caller named, or ``auto``, which measures the node.
 
         The budget also goes to the cases' own managers, because a chain crossing a ``Save`` sweeps
         that cache when first read, and ``read_region`` carries no budget of its own.
         """
         self._budget_bytes = budget_bytes
+        self._cap = None if cap is None else max(1, int(cap))
         # THE REMAINDER, not the whole figure. A member's chain holds what it holds WHILE the fold
         # is holding its regions -- its own sweeps fire from inside the fold loop, when the operator
         # already has earlier members in its buffer -- so handing it the full budget six lines above
@@ -360,9 +357,6 @@ class CaseReduction:
         if not budget_bytes or budget_bytes <= 0:
             return
         plan = self.plan()
-        # Past the plateau a taller region reads no less and holds more, so that is the ceiling
-        # when the caller names none; a chain that cannot price one falls back to the output height.
-        ceiling = int(cap) if cap is not None else self._plateau_rows(plan)
         # What the fold's own share leaves the regions: the folds it keeps live beside them, for the
         # whole write pass, so they come out of the same half rather than out of nothing. Decided
         # here and not at the stat pass, because the regions cannot be sized against a decision that
@@ -370,39 +364,46 @@ class CaseReduction:
         allowance = budget_share("regions", budget_bytes) or 0.0
         if self.keeps_folds(plan):
             allowance -= self._folded_output_bytes(plan)
-        self.slab_rows = self._tallest_affordable(plan, ceiling, allowance)
+        self.slab_rows = self._start_rows(plan, allowance)
 
-    def _tallest_affordable(self, plan: ReductionPlan, ceiling: int, allowance: float) -> int:
-        """The tallest region up to ``ceiling`` whose PRICED plan fits ``allowance``.
+    def _cap_rows(self, spatial: Sequence[int]) -> int:
+        """The tallest region the growth reaches: the caller's cap, else ``GROWTH_CAP_UNITS`` slabs,
+        and the output's own height at most."""
+        cap = self._cap if self._cap is not None else GROWTH_CAP_UNITS * SWEEP_SLAB_ROWS
+        return max(1, min(int(spatial[0]), cap))
+
+    def _start_rows(self, plan: ReductionPlan, allowance: float) -> int:
+        """Where the growth starts: the tallest height up to the cap whose PRICED plan fits
+        ``_START_SHARE`` of ``allowance``, failing that ``allowance`` itself; one row when nothing
+        fits.
 
         Bisected on the price itself rather than extrapolated from one height, because none of what
         a region costs scales with its rows: a chain's source window is not its region (a halo is a
         constant, a rotated map's box grows with the diagonal), and what a chunked store decodes
-        does not fall with the height at all -- below one stored block the same blocks are decoded
-        whatever the region asks for. A straight line through one sample sized a fold at 2.6x the
-        budget it printed.
-
-        One row when nothing fits: the plan then reports a peak above the budget and the workflow
-        refuses, which is the only honest answer, there being no whole-volume path to fall back to.
+        does not fall with the height at all. A straight line through one sample sized a fold at
+        2.6x the budget it printed.
         """
-        ceiling = max(1, int(ceiling))
-        if self._priced_peak(plan, ceiling) <= allowance:
-            return ceiling
-        low, high = 1, ceiling
-        while low < high:
-            middle = (low + high + 1) // 2
-            if self._priced_peak(plan, middle) <= allowance:
-                low = middle
-            else:
-                high = middle - 1
-        return low
+        ceiling = self._cap_rows(plan.spatial)
+        for share in (_START_SHARE, 1.0):
+            allowed = allowance * share
+            if self._priced_peak(plan, 1) > allowed:
+                continue
+            low, high = 1, ceiling
+            while low < high:
+                middle = (low + high + 1) // 2
+                if self._priced_peak(plan, middle) <= allowed:
+                    low = middle
+                else:
+                    high = middle - 1
+            return low
+        return 1
 
     def _priced_peak(self, plan: ReductionPlan, rows: int) -> int:
         """What ``plan`` prices at ``rows``, leaving the height the sizing is working from alone.
 
         Only the read fields depend on the height, so only they are recomputed per probe: the rest
         of the plan (refusal walks, filesystem stats, channel maps) is height-independent, and a
-        bisection re-deriving all of it once put 96% of plan time into the members' geometry walks.
+        sizing re-deriving all of it once put 96% of plan time into the members' geometry walks.
         """
         held = self.slab_rows
         try:
@@ -424,32 +425,6 @@ class CaseReduction:
             return False
         regions = budget_share("regions", self._budget_bytes)
         return regions is not None and self._folded_output_bytes(plan) <= regions * _KEPT_FOLDS_SHARE_OF_REGIONS
-
-    def _plateau_rows(self, plan: ReductionPlan) -> int:
-        """The tallest region worth cutting: the WORST member's plateau, because one chain still
-        re-reading paces the fold whatever the others do.
-
-        Never below ``SWEEP_SLAB_ROWS``, the floor the sweep applies for the same reason: a chain
-        that pulls exactly what it lands (every stage POINTWISE) has a FLAT read curve, so its
-        plateau is one row -- and one-row regions pay every fixed per-region cost for one row of
-        work. Measured: a ``Clip`` before the fold sized the regions at 1 row without this floor.
-
-        And never the WHOLE VOLUME when no member can price one. A chain with no stage before the
-        fold has no segment to read a pull map from, so every member answers None -- and answering
-        the output's own height there made the ceiling depend on something that is not a property
-        of the data: the same cohort, the same budget and the same voxels read gave 512 rows with
-        no stage and 64 with one value-neutral ``Clip`` in front, an eightfold difference from a
-        stage that changes nothing. Unpriced reads get the floor, like flat ones: it is the same
-        ignorance, and the conservative answer to it is the same.
-
-        The whole-volume answer was also the one place the run-time probe could not help. At full
-        height a fold has exactly ONE region, and :meth:`_refit_to_measurement` only ever cuts the
-        ones after the first: the net was disarmed exactly where the most was held.
-        """
-        heights = [manager.read_plateau_rows(plan.spatial) for manager in self.managers]
-        measured = [height for height in heights if height is not None]
-        floor = min(int(SWEEP_SLAB_ROWS), int(plan.spatial[0]))
-        return max(max(measured), floor) if measured else floor
 
     # ---------------------------------------------------------------- planning
 
@@ -631,100 +606,53 @@ class CaseReduction:
         with _awaited("read"):
             return manager.read_region(region).unsqueeze(0)
 
-    # What the first region's measurement leaves for the rest, as the predictor's accumulation gate
-    # keeps a reserve for the same reason (Predictor._ACCUMULATE_MARGIN): the measurement is of the
-    # region that just ran, and the next one meets an allocator in a different state.
-    _MEASURED_MARGIN = 0.9
-    #: The probe's share of the planned height. The probe is the one region that runs BEFORE any
-    #: measurement can bound it, so it is the one region that must not be able to kill the run on
-    #: its own. At the planned height it could: a fold over registration fields held 1.42x, 1.47x
-    #: and 1.50x what its first region was allowed at three budgets, and at an `auto` budget of 77
-    #: GiB that first region reached 90 GiB resident on a 122 GiB host, and the host went down
-    #: before the probe could read anything. The host gives no OutOfMemoryError to catch: the
-    #: kernel kills. A quarter-height probe overshooting by the same 1.5x holds 0.4 of the budget,
-    #: which is survivable, and the ratio it measures is the same one -- the halo does not shrink
-    #: with the region, so a short region over-holds by MORE than a tall one, and a refit from it
-    #: is conservative. Its price is one extra region: seconds, on a fold of minutes.
-    _PROBE_SHARE = 0.25
+    def _folds(self, spatial: list[int]):
+        """Every region's fold, in order, the height following what the regions HOLD.
 
-    def _folds(self, spatial: list[int], measure: bool = False):
-        """Every region's fold, in order: the loop both passes share.
+        The first region is the one the sizing priced (:meth:`fit_budget`); every one after it is
+        cut by :class:`RegionGrowth` from what the last one held, read by the instrument the route
+        has (:func:`open_held_meter`: the allocator on a device, the resident peak on the host).
+        What the plan priced is a model, and a model of what a chain holds has to be right about
+        every stage, every store and every bridge it crosses; what the region actually held is a
+        fact, and it costs one counter read on work the fold had to do anyway.
 
-        With ``measure``, the FIRST region is also the probe. What the plan priced is a model, and a
-        model of what a chain holds has to be right about every stage, every store and every bridge
-        it crosses; what the region actually held is a fact, and it costs one counter read on work
-        the fold had to do anyway. The remaining regions are then cut against the fact.
-
-        Only ever SHORTER. A taller region than the plan allowed would be a promise the plan never
-        made, and the first region has already been folded at the planned height: this can correct
-        an optimistic price, never spend a budget the sizing declined to spend.
+        Judged against the declaration LESS the chunk cache's share, because that is what the
+        reading covers: the meter does not count the decoded-chunk cache (it outlives the region),
+        so the cache's bytes come off the other side of the comparison too.
         """
-        # A refit needs a declared budget to judge against; without one the short probe would only
-        # shorten the first region for a no-op.
-        start, refitted = 0, not (measure and self._budget_bytes)
+        budget = self._budget_bytes if self._budget_bytes and self._budget_bytes > 0 else None
+        allowed = None if budget is None else budget - (budget_share("cache", budget) or 0.0)
+        growth = RegionGrowth(self.slab_rows, self._cap_rows(spatial), allowed)
+        meter = self._open_meter() if allowed else None
+        device = self.managers[0]._chain_device if self.managers else None
+        start = 0
         while start < int(spatial[0]):
-            # The probe is SHORT. Every later region is cut against what it measured; the probe
-            # itself is cut against nothing, so it is sized so that its own overshoot cannot
-            # reach the host's limit (_PROBE_SHARE).
-            rows = self.slab_rows if refitted else max(1, int(self.slab_rows * self._PROBE_SHARE))
-            stop = min(start + rows, int(spatial[0]))
+            stop = min(start + growth.rows, int(spatial[0]))
             region = (slice(start, stop), *(slice(0, extent) for extent in spatial[1:]))
-            # Only around the region that is actually the probe. The host meter RESETS the
-            # process's resident high-water mark to take its reading, and that mark is what the
-            # run's closing line reports: resetting it before every region would leave that line
-            # describing the last region instead of the run, which is the one thing it exists to
-            # say honestly.
-            meter = None if refitted else self._open_meter()
-            yield region, self._fold(region)
-            if not refitted:
-                refitted = True
-                self._refit_to_measurement(meter, stop - start, spatial)
+            try:
+                folded = self._fold(region)
+            except torch.cuda.OutOfMemoryError:
+                # A region the device could not hold: half the height, this region again. The host
+                # has no such signal, and one row that does not fit is the end.
+                if not device_signals_oom(device) or growth.rows <= 1:
+                    raise
+                rows = growth.halve_below_first()
+                torch.cuda.empty_cache()
+                print(
+                    f"[Reduce] '{self.reduce.output}': out of device memory on a {stop - start}-row region;"
+                    f" the rest are cut to {rows} row(s).",
+                    flush=True,
+                )
+                continue
+            yield region, folded
+            held = meter.held() if meter is not None else None
+            SWEEP_CLOCK.region(stop - start, held)
+            growth.after(held)
             start = stop
 
     def _open_meter(self) -> HeldMeter | None:
-        """What will read the probe region, chosen by the route it runs on."""
+        """What will read the regions, chosen by the route they run on."""
         return open_held_meter(self.managers[0]._chain_device if self.managers else None)
-
-    def _refit_to_measurement(self, meter: HeldMeter | None, rows: int, spatial: list[int]) -> None:
-        """Cut the remaining regions against what the first one HELD, when that is more than the
-        declaration allows. The reading is a high-water mark over the region that just ran, so it
-        bounds the next one from above, exactly as the predictor's gate reads a forward's transient
-        from the batch that just ran (:meth:`Predictor._accumulate_device`).
-
-        Against the whole declaration LESS the chunk cache's share, because that is what the
-        reading covers. A share is how a height is chosen and what must not be exceeded is the
-        declaration -- but the meter no longer counts the decoded-chunk cache (it outlives the
-        region, and charging the region for it cut every region after the probe), so the cache's
-        bytes have to come off the other side of the comparison too. Judged against the whole
-        budget, a reading that excludes the cache lets the cache be spent twice: once inside the
-        allowance, and again by the cache itself. This exists to prevent a kill, not to shave
-        bytes. The probe is a short region (_PROBE_SHARE), so what it held is scaled to
-        the planned height before it is judged: a probe that held its share of the budget says the
-        full region would hold the budget, and a probe that held more says the full region would
-        be the kill this exists to prevent. Only ever shorter: a probe that came in under its
-        share does not talk the fold into a taller region than the plan allowed.
-        """
-        del spatial
-        held = meter.held() if meter is not None else None
-        if held is None or not self._budget_bytes or self._budget_bytes <= 0 or rows <= 0 or held <= 0:
-            return
-        cache = budget_share("cache", self._budget_bytes) or 0.0
-        allowed = (float(self._budget_bytes) - cache) * self._MEASURED_MARGIN
-        # What the FULL region would hold, from what the probe held: the halo is a fixed cost the
-        # probe paid in full, so scaling by height over-estimates, which is the safe direction.
-        projected = held * (self.slab_rows / float(rows))
-        if projected <= allowed:
-            return
-        fitted = max(1, int(self.slab_rows * allowed / projected))
-        if fitted >= self.slab_rows:
-            return
-        print(
-            f"[Reduce] '{self.reduce.output}': a {rows}-row probe held {format_bytes(held)}, so the planned"
-            f" {self.slab_rows} row(s) would hold {format_bytes(projected)} of the {format_bytes(allowed)}"
-            f" allowed -- the rest are cut to {fitted} row(s).",
-            flush=True,
-        )
-        self.slab_rows = fitted
 
     def _apply_post(self, block: torch.Tensor, attribute: Attribute, rank: int) -> np.ndarray:
         scope = Attribute(attribute)
@@ -760,11 +688,9 @@ class CaseReduction:
             # subtracted them by), and the write pass then only applies the post stages. Otherwise
             # the second pass re-folds, as before: correctness never depends on the keep.
             self._kept_folds = [] if self.keeps_folds(plan) else None
-            # The run's FIRST region happens here, so the probe must too: an unmeasured full-height
-            # stat pass is exactly the unbounded first allocation _PROBE_SHARE exists to prevent.
-            # The region is kept beside its fold because a mid-pass refit changes slab_rows: regions
-            # re-derived from the final height would misalign with folds cut at the earlier one.
-            for region, folded in self._folds(plan.spatial, measure=True):
+            # The region is kept beside its fold: the growth changes the height along the pass, so
+            # regions re-derived at any one height would misalign with the folds cut at another.
+            for region, folded in self._folds(plan.spatial):
                 statistics.update(folded)
                 if self._kept_folds is not None:
                     self._kept_folds.append((region, folded.cpu()))
@@ -856,9 +782,7 @@ class CaseReduction:
         # they are; otherwise every region is folded here, once.
         kept = self._kept_folds
         self._kept_folds = None
-        # A stat pass already probed and refit these regions; measuring again would only reset the
-        # high-water mark the run's closing line reports.
-        folds = iter(kept) if kept is not None else self._folds(spatial, measure=not plan.stat_pass)
+        folds = iter(kept) if kept is not None else self._folds(spatial)
         writer = RegionWriter(lambda _key, array, header: self._open_stream(spatial, array, header))
         try:
             for region, folded in folds:

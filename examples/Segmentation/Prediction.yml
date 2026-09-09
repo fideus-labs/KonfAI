@@ -65,6 +65,6 @@ Predictor:
   train_name: SEG_BASELINE
   manual_seed: 32
   gpu_checkpoints: None
-  autocast: false
+  autocast: true  # Mixed precision, as the model was trained
   combine: Mean
   data_log: None

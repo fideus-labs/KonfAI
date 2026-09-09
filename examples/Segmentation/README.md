@@ -7,9 +7,11 @@ own data: a 2D slice-wise UNet, patch-based training, 41 classes.
 
 **To just run it**, open `Segmentation_demo.ipynb` and run every cell: it fetches
 the data, trains, predicts, evaluates and plots the result, about 7 minutes on a
-GPU. The [quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html)
-does the same from the command line. This page is for what comes after: changing
-it into your experiment.
+GPU. For a first CPU run without downloading a dataset, use the
+two-class recipe under `TwoClasses/`, walked through in the
+[quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html). It verifies
+the written labels, physical geometry and per-case Dice. This page explains how
+to adapt the larger pelvis example.
 
 ## The files
 
@@ -52,8 +54,8 @@ mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Datas
    everywhere: `Checkpoints/SEG_BASELINE/`, `Predictions/SEG_BASELINE/`,
    `Evaluations/SEG_BASELINE/`. The three configs must agree on it, or
    evaluation will not find the predictions.
-2. `nb_class`, and `Dice.labels` in `Evaluation.yml` to the labels you care
-   about.
+2. `nb_class` in both `Config.yml` and `Prediction.yml`, and `Dice.labels` in
+   both the training loss and `Evaluation.yml` to the labels you care about.
 3. Patch size and batch size, to your GPU.
 4. The preprocessing transforms, to your modality.
 5. Model channels and the scheduler, once the rest works.

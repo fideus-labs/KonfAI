@@ -37,7 +37,6 @@ The contract, and how it differs from the CLI:
   rewrite.
 """
 
-import atexit
 import importlib
 import json
 import os
@@ -55,6 +54,7 @@ import numpy as np
 from konfai.utils.errors import ConfigError
 
 if TYPE_CHECKING:
+    from konfai.bundle import BundleImport
     from konfai.transformer import TransformPlan
     from konfai.utils.catalog import Component
     from konfai.utils.runtime import DistributedObject
@@ -101,6 +101,20 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
             _ACTIVE.release()
 
 
+@contextmanager
+def _workflow_scope(ranks: int) -> Iterator[None]:
+    """Own build-time RNG draws and scratch files until execution and result extraction finish."""
+    from konfai.utils.runtime.distributed import preserved_rng
+    from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, release_scratch_configs
+
+    with _one_workflow_at_a_time(ranks), preserved_rng():
+        mark = len(_SCRATCH_CONFIGS)
+        try:
+            yield
+        finally:
+            release_scratch_configs(mark)
+
+
 def _launch(
     ranks: int,
     build: "Callable[[], DistributedObject]",
@@ -120,7 +134,7 @@ def _launch(
     from konfai.utils.clock import restart_startup_clock
     from konfai.utils.runtime import execute_distributed_object
 
-    with _one_workflow_at_a_time(ranks):
+    with _workflow_scope(ranks):
         with restart_startup_clock().phase("build"):  # this call's own clock, not the previous workflow's
             workflow = build()
         execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
@@ -200,24 +214,27 @@ def _stage_entry(stage: object, default_modules: tuple[str, ...], where: str) ->
 def _chain_tree(stages: object, default_modules: tuple[str, ...], where: str) -> dict[str, object]:
     """A chain (a sequence of stages), as the mapping the config tree holds, in order.
 
-    The tree is a mapping, so two stages of the same class need distinct spellings: the second
-    occurrence is written module-qualified (which resolves to the same class); a third has no
-    spelling left and is refused: the YAML file has the same limit.
+    The tree is a mapping keyed by class name: the second occurrence of a class is written
+    module-qualified (which resolves to the same class), and from the third on under an occurrence
+    key (``Clip#3``), the identity a list-spelled chain binds under; the resolver drops the suffix.
+    An already-qualified classpath keeps its module in every occurrence key.
     """
     if isinstance(stages, Mapping):  # a chain already spelled as its tree
         return {str(key): _yaml_safe(value, f"{where}.{key}") for key, value in stages.items()}
     tree: dict[str, object] = {}
+    occurrences: dict[str, int] = {}
     for index, stage in enumerate(_stage_sequence(stages, where)):
-        name, kwargs = _stage_entry(stage, default_modules, f"{where}[{index}]")
-        if name in tree and ":" not in name:
-            name = _qualified_spelling(stage, name, default_modules)
-        if name in tree:
-            raise ConfigError(
-                f"'{where}' holds three stages spelled '{name.split(':')[-1]}'; the tree is a"
-                " mapping and has two spellings (bare and module-qualified), not three.",
-                "Split the chain around a Save/Write boundary, or subclass the stage under a distinct name.",
-            )
-        tree[name] = kwargs
+        classpath, kwargs = _stage_entry(stage, default_modules, f"{where}[{index}]")
+        occurrences[classpath] = occurrences.get(classpath, 0) + 1
+        key = classpath
+        if key in tree and ":" not in classpath:
+            key = _qualified_spelling(stage, classpath, default_modules)
+        if key in tree:
+            key = f"{classpath}#{occurrences[classpath]}"
+            while key in tree:
+                occurrences[classpath] += 1
+                key = f"{classpath}#{occurrences[classpath]}"
+        tree[key] = kwargs
     return tree
 
 
@@ -365,7 +382,7 @@ def plan_transform(
     from konfai.transformer import plan_transform as _plan_transform
 
     ranks = len(gpu or []) or cpu
-    with _one_workflow_at_a_time(ranks):
+    with _workflow_scope(ranks):
         return _plan_transform(
             transform_file=tree,
             transforms_dir=transforms_dir,
@@ -463,16 +480,383 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
 
     Reading a KonfAI config resolves and REWRITES it: the record the workspace keeps. A tree is
     passed through; a caller's FILE is not this call's to rewrite, so the write-back lands on a
-    scratch copy instead (removed at exit, like :func:`_materialized_config`'s).
+    scratch copy instead (released when the API call returns).
+
+    Both land in a scratch directory, and a model YAML named by a relative path resolves next to
+    the config file that names it (``ModelLoader._yaml_path``): so the path is made absolute here,
+    against the caller's file for a file and the working directory for a tree, or the shipped
+    examples' ``classpath: UNet.yml`` would be looked for in the scratch directory.
     """
     if isinstance(config, Mapping):
         # Through _yaml_safe so the documented sweep idiom (np.float64 learning rates from
         # np.logspace, Path values) fails as a named refusal here, not a raw ruamel error at dump.
-        return _yaml_safe(dict(config), "config")  # type: ignore[return-value]
+        tree = _yaml_safe(dict(config), "config")
+        _anchor_model_paths(tree, Path.cwd())
+        return tree  # type: ignore[return-value]
+    from ruamel.yaml import YAML
+
+    from konfai.utils.runtime.environment import register_scratch_config
+
     source = Path(config)
     scratch = Path(tempfile.mkdtemp(prefix="konfai_config_"))
-    atexit.register(shutil.rmtree, scratch, ignore_errors=True)
-    return Path(shutil.copy2(source, scratch / source.name))
+    register_scratch_config(scratch)
+    copy = scratch / source.name
+    yaml = YAML()
+    yaml.width = 4096  # a long absolute path stays on its line
+    with source.open("r", encoding="utf-8") as file:
+        tree = yaml.load(file)
+    if _anchor_model_paths(tree, source.resolve().parent):
+        with copy.open("w", encoding="utf-8") as file:
+            yaml.dump(tree, file)
+    else:
+        shutil.copy2(source, copy)
+    return copy
+
+
+def _anchor_model_paths(tree: object, base: Path) -> bool:
+    """Make every relative model-YAML ``classpath`` under ``tree`` absolute against ``base``;
+    whether any changed. The catalog spelling (``default|Name.yml``) is not a path."""
+    changed = False
+    if isinstance(tree, dict):
+        classpath = tree.get("classpath")
+        if (
+            isinstance(classpath, str)
+            and "|" not in classpath
+            and Path(classpath).suffix.lower() in {".yaml", ".yml"}
+            and not Path(classpath).is_absolute()
+        ):
+            tree["classpath"] = str((base / classpath).resolve())
+            changed = True
+        for value in tree.values():
+            changed = _anchor_model_paths(value, base) or changed
+    elif isinstance(tree, list):
+        for value in tree:
+            changed = _anchor_model_paths(value, base) or changed
+    return changed
+
+
+# ------------------------------------------------------------------------- BRING YOUR MODEL
+
+#: The models Python callers built and handed to a workflow, by the token their config names.
+_LIVE_MODELS: dict[str, object] = {}
+
+
+def live_model(token: str) -> object:
+    """The model a caller built in Python and registered under ``token`` (:func:`train_model`,
+    :func:`predict_model`). The classpath ``konfai.api:live_model`` names it in the run's config,
+    so the run record says a live model was trained, by its token; the model itself lives in the
+    process that registered it, which is why such a run stays on one rank, inline."""
+    try:
+        return _LIVE_MODELS[token]
+    except KeyError:
+        raise ConfigError(
+            f"No live model is registered under '{token}'.",
+            "A config naming 'konfai.api:live_model' runs in the process that built the model, through"
+            " konfai.train_model / konfai.predict_model; it cannot be replayed from its file alone.",
+        ) from None
+
+
+@contextmanager
+def _registered_live_model(model: object) -> Iterator[str]:
+    """The token the run's config names, registered for the run only."""
+    token = f"{type(model).__name__}-{id(model):x}"
+    _LIVE_MODELS[token] = model
+    try:
+        yield token
+    finally:
+        _LIVE_MODELS.pop(token, None)
+
+
+def _one_rank_inline(gpu: Sequence[int] | None) -> None:
+    from konfai.utils.utils import env_flag
+
+    if len(gpu or []) > 1 or not env_flag("KONFAI_INLINE_SINGLE_RANK", True):
+        raise ConfigError(
+            "A model built in Python runs on one rank, in this process.",
+            "Spawned ranks are fresh interpreters that cannot see the object: give at most one GPU and"
+            " leave KONFAI_INLINE_SINGLE_RANK on. For several GPUs, spell the model as a classpath.",
+        )
+
+
+def _group_tree(inputs: str, targets: str | None, transforms: Mapping[str, object] | None) -> dict[str, object]:
+    """The ``groups_src`` block of a run that feeds ``inputs`` to the model and scores ``targets``."""
+    transforms = dict(transforms or {})
+    tree: dict[str, object] = {}
+    for group, is_input in ((inputs, True), (targets, False)):
+        if group is None:
+            continue
+        chain = transforms.get(group)
+        tree[group] = {
+            "groups_dest": {
+                group: {
+                    "transforms": None if chain is None else _chain_tree(chain, _STAGE_MODULES, f"transforms.{group}"),
+                    "patch_transforms": None,
+                    "is_input": is_input,
+                }
+            }
+        }
+    return tree
+
+
+def _patch_tree(patch: Sequence[int], overlap: int | None, pad_value: float) -> dict[str, object]:
+    return {
+        "patch_size": [int(extent) for extent in patch],
+        "overlap": overlap,
+        "pad_value": pad_value,
+        "extend_slice": 0,
+    }
+
+
+def train_model(
+    model: object,
+    datasets: str | Path | Sequence[str | Path],
+    *,
+    inputs: str,
+    targets: str,
+    loss: object,
+    patch: Sequence[int],
+    epochs: int = 1,
+    batch_size: int = 1,
+    lr: float = 1e-3,
+    dim: int | None = None,
+    in_channels: int = 1,
+    transforms: Mapping[str, object] | None = None,
+    augmentations: Sequence[object] | None = None,
+    validation: float | str | None = 0.2,
+    autocast: bool = False,
+    channels_last: bool = False,
+    name: str = "MODEL",
+    manual_seed: int | None = None,
+    gpu: Sequence[int] | None = None,
+    quiet: bool = False,
+    overwrite: bool = False,
+    checkpoints_dir: Path | str = Path("./Checkpoints"),
+    statistics_dir: Path | str = Path("./Statistics"),
+) -> Path:
+    """Train a model built in Python (any ``nn.Module`` with one tensor in and one out) on a KonfAI
+    dataset; return the checkpoint workspace.
+
+    Ten lines, no YAML: the model is registered for this process and the config tree KonfAI would
+    read is built from the arguments (``inputs`` and ``targets`` are the dataset's groups, ``loss``
+    a criterion object or a list of them, ``augmentations`` a list of draws applied to every case,
+    ``patch`` the patch the model is fed, ``dim`` its spatial rank: the patch's non-unit axes by default, so a 2D model fed ``[1, 256, 256]`` slices is 2D).
+    The workspace keeps the resolved config as every run does; it names the model by its token, and
+    a RESUME must come from this same process. One rank, inline.
+    """
+    from konfai.trainer import build_train
+    from konfai.utils.runtime import State
+
+    _one_rank_inline(gpu)
+    with _registered_live_model(model) as token:
+        losses = list(loss) if isinstance(loss, (list, tuple)) else [loss]
+        tree: dict[str, object] = {
+            "Trainer": {
+                "Model": {
+                    "classpath": "konfai.api:live_model",
+                    "live_model": {
+                        "token": token,
+                        "in_channels": in_channels,
+                        "dim": dim if dim is not None else sum(1 for extent in patch if int(extent) != 1),
+                        "optimizer": {"name": "AdamW", "lr": lr},
+                        "schedulers": None,
+                        "outputs_criterions": {
+                            "Model": {
+                                "targets_criterions": {
+                                    targets: {
+                                        "criterions_loader": {
+                                            key: {"is_loss": True, **kwargs}  # type: ignore[dict-item]
+                                            for key, kwargs in _chain_tree(losses, _CRITERION_MODULES, "loss").items()
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "ModelPatch": None,
+                    },
+                },
+                "Dataset": {
+                    "groups_src": _group_tree(inputs, targets, transforms),
+                    "augmentations": (
+                        None
+                        if not augmentations
+                        else {
+                            "DataAugmentation_0": {
+                                "data_augmentations": _chain_tree(augmentations, _STAGE_MODULES, "augmentations"),
+                                "nb": 1,
+                            }
+                        }
+                    ),
+                    "Patch": _patch_tree(patch, None, 0),
+                    "dataset_filenames": _dataset_filenames(datasets),
+                    "batch_size": batch_size,
+                    "validation": validation,
+                    "shuffle": True,
+                    "inline_augmentations": True,
+                    "pin_memory": bool(gpu),
+                },
+                "train_name": name,
+                "manual_seed": manual_seed,
+                "epochs": epochs,
+                "autocast": autocast,
+                "channels_last": channels_last,
+                "save_checkpoint_mode": "BEST",
+            }
+        }
+        return _launch(
+            1,
+            lambda: build_train(
+                command=State.TRAIN,
+                model=None,
+                config=_config_copy(tree),
+                checkpoints_dir=checkpoints_dir,
+                statistics_dir=statistics_dir,
+                lr=None,
+            ),
+            lambda workflow: Path(os.environ["KONFAI_CHECKPOINTS_DIRECTORY"]) / workflow.name,
+            gpu=gpu,
+            cpu=1,
+            overwrite=overwrite,
+            quiet=quiet,
+        )
+
+
+def _live_checkpoint(model: object, scratch_root: Path) -> Path:
+    """The weights a live model holds, written as the checkpoint KonfAI's loader reads: under the
+    ``Model`` entry, by the wrapper's name, each key under the module the wrapper adds."""
+    import torch
+
+    state = {"Model": {"live_model": {f"Model.{key}": value for key, value in model.state_dict().items()}}}  # type: ignore[attr-defined]
+    path = scratch_root / "live_model.pt"
+    torch.save(state, path)
+    return path
+
+
+def predict_model(
+    model: object,
+    datasets: str | Path | Sequence[str | Path],
+    *,
+    inputs: str,
+    patch: Sequence[int],
+    output: str | Path,
+    checkpoints: Path | str | Sequence[Path | str] | None = None,
+    group: str = "PRED",
+    dim: int | None = None,
+    in_channels: int = 1,
+    overlap: int | None = None,
+    batch_size: int = 1,
+    transforms: Mapping[str, object] | None = None,
+    final_transforms: object = None,
+    autocast: bool = False,
+    name: str = "MODEL",
+    gpu: Sequence[int] | None = None,
+    quiet: bool = False,
+    overwrite: bool = False,
+    predictions_dir: Path | str = Path("./Predictions"),
+) -> Path:
+    """Predict with a model built in Python over a KonfAI dataset, patch by patch with overlap
+    blending, the output written slab by slab next to each case; return the workspace.
+
+    ``checkpoints`` are KonfAI checkpoints of this model (what :func:`train_model` wrote); left
+    ``None``, the weights the module holds in memory are used, so a model loaded any other way
+    (a library's pretrained weights, a foreign checkpoint) predicts as it stands. ``output`` is a
+    dataset root the way the YAML spells one (``./Pred:mha``), relative to the run's workspace
+    (``Predictions/<name>/``) unless absolute; the prediction lands under ``group`` with the input's
+    own geometry. One rank, inline.
+    """
+    from konfai.predictor import build_predict
+    from konfai.utils.runtime.environment import register_scratch_config
+
+    _one_rank_inline(gpu)
+    with _registered_live_model(model) as token:
+        root, _, file_format = str(output).rpartition(":")
+        if not root or not file_format:
+            raise ConfigError(
+                f"'output' must name a dataset root and its format, as the YAML does: './Pred:mha' (got {output!r}).",
+                "The prediction is written into that root, one entry per case, under the given group.",
+            )
+        tree: dict[str, object] = {
+            "Predictor": {
+                "Model": {
+                    "classpath": "konfai.api:live_model",
+                    "live_model": {
+                        "token": token,
+                        "in_channels": in_channels,
+                        "dim": dim if dim is not None else sum(1 for extent in patch if int(extent) != 1),
+                        "outputs_criterions": None,
+                        "ModelPatch": None,
+                    },
+                },
+                "Dataset": {
+                    "groups_src": _group_tree(inputs, None, transforms),
+                    "augmentations": None,
+                    "Patch": _patch_tree(patch, overlap, 0),
+                    "dataset_filenames": _dataset_filenames(datasets),
+                    "batch_size": batch_size,
+                },
+                "outputs_dataset": {
+                    "Model": {
+                        "OutputDataset": {
+                            "name_class": "OutputDataset",
+                            "before_reduction_transforms": None,
+                            "after_reduction_transforms": None,
+                            "final_transforms": (
+                                None
+                                if final_transforms is None
+                                else _chain_tree(final_transforms, _STAGE_MODULES, "final_transforms")
+                            ),
+                            "dataset_filename": f"{root}:{file_format}",
+                            "group": group,
+                            "same_as_group": f"{inputs}:{inputs}",
+                            "reduction": "Mean",
+                        }
+                    }
+                },
+                "train_name": name,
+                "autocast": autocast,
+                "combine": "Mean",
+            }
+        }
+
+        def build() -> "DistributedObject":
+            if checkpoints is None:
+                scratch = Path(tempfile.mkdtemp(prefix="konfai_live_"))
+                register_scratch_config(scratch)
+                sources = [_live_checkpoint(model, scratch)]
+            else:
+                sources = (
+                    [Path(checkpoints)]
+                    if isinstance(checkpoints, (str, Path))
+                    else [Path(entry) for entry in checkpoints]
+                )
+            return build_predict(models=sources, prediction_file=_config_copy(tree), predictions_dir=predictions_dir)
+
+        return _launch(
+            1,
+            build,
+            lambda workflow: Path(os.environ["KONFAI_PREDICTIONS_DIRECTORY"]) / workflow.name,
+            gpu=gpu,
+            cpu=1,
+            overwrite=overwrite,
+            quiet=quiet,
+        )
+
+
+# ------------------------------------------------------------------------------ MONAI BUNDLES
+
+
+def import_bundle(bundle: "Path | str", **options: object) -> "BundleImport":
+    """A MONAI Bundle's network and weights as a KonfAI ``Model`` block and checkpoint
+    (:func:`konfai.bundle.import_bundle`)."""
+    from konfai.bundle import import_bundle as _import_bundle
+
+    return _import_bundle(bundle, **options)  # type: ignore[arg-type]
+
+
+def export_bundle(model: object, example_input: object, out: "Path | str", **options: object) -> Path:
+    """A loaded KonfAI network's inference head as a MONAI Bundle (:func:`konfai.bundle.export_bundle`)."""
+    from konfai.bundle import export_bundle as _export_bundle
+
+    return _export_bundle(model, example_input, out, **options)  # type: ignore[arg-type]
 
 
 # ------------------------------------------------------------------------- PREDICTION / TRAINING

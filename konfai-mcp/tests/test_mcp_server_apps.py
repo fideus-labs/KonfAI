@@ -337,11 +337,16 @@ def test_export_app_copies_bundle(tmp_path: Path) -> None:
         _service(tmp_path).export_app("localhost:8000:MyApp", str(tmp_path / "x"))
 
 
-def test_package_from_session_builds_bundle(tmp_path: Path) -> None:
+@pytest.mark.parametrize("nested_run", [False, True])
+def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) -> None:
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
-    (workspace / "Checkpoints" / "run").mkdir(parents=True)
-    (workspace / "Checkpoints" / "run" / "model.pt").write_bytes(b"")
+    checkpoint_dir = workspace / "Checkpoints"
+    if nested_run:
+        checkpoint_dir /= "run"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "model.pt").write_bytes(b"")
+    (checkpoint_dir / "resume_latest.pt").write_bytes(b"continuation-only")
     (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
 
     result = AppService(workspace_layout=layout).package_from_session(
@@ -353,6 +358,7 @@ def test_package_from_session_builds_bundle(tmp_path: Path) -> None:
     assert (bundle / "app.json").exists()
     assert (bundle / "Prediction.yml").exists()
     assert (bundle / "model.pt").exists()
+    assert not (bundle / "resume_latest.pt").exists()
     assert result["checkpoints"] == ["model.pt"]
     assert result["next_actions"] == ["describe_app", "run_app_infer", "import_app"]
     meta = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
@@ -924,3 +930,190 @@ def test_prepare_infer_rejects_unequal_channel_counts(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="mismatched case counts"):
         # The pairing check runs before the trust gate, so an un-gated call still reports it.
         _app_service(tmp_path).prepare_infer(ref=_local_app(tmp_path), inputs=[[a, b], [c]])
+
+
+def _packaging_session(tmp_path: Path) -> tuple[WorkspaceLayout, Path, Path]:
+    layout = WorkspaceLayout(tmp_path / "workspaces")
+    workspace = layout.workspace_dir()
+    checkpoints = workspace / "Checkpoints" / "run"
+    checkpoints.mkdir(parents=True)
+    (checkpoints / "first.pt").write_bytes(b"first checkpoint")
+    return layout, workspace, checkpoints
+
+
+def test_package_from_session_finds_a_quoted_model_yaml(tmp_path: Path) -> None:
+    """``classpath: "UNet.yml"`` names the same file as the bare spelling; a regex over the text
+    missed the quotes and the bundle shipped without its model."""
+    layout, workspace, _ = _packaging_session(tmp_path)
+    (workspace / "UNet.yml").write_text("modules: []\n", encoding="utf-8")
+    (workspace / "Prediction.yml").write_text('Predictor:\n  Model:\n    classpath: "UNet.yml"\n', encoding="utf-8")
+
+    result = AppService(workspace_layout=layout).package_from_session(name="Quoted", display_name="q", description="q")
+
+    assert result["support_files"] == ["UNet.yml"]
+    assert (Path(result["bundle_path"]) / "UNet.yml").read_text(encoding="utf-8") == "modules: []\n"
+
+
+def test_package_from_session_makes_a_companion_mask_an_input_and_renames_its_references(tmp_path: Path) -> None:
+    """A mask a Clip reads (is_input: false) is a file the app must be given: it was advertised as
+    an output, and when it was a network input the rename to Volume_i left ``Clip.mask: MASK``."""
+    from konfai_mcp.server_support import YAML_SAFE, yaml_dump_content
+
+    layout, workspace, checkpoints = _packaging_session(tmp_path)
+    config = {
+        "Predictor": {
+            "Dataset": {
+                "dataset_filenames": ["/data/Dataset:a:mha"],
+                "groups_src": {
+                    "MR": {"groups_dest": {"MR": {"is_input": True, "transforms": {"Clip": {"mask": "MASK"}}}}},
+                    "MASK": {"groups_dest": {"MASK": {"is_input": False}}},
+                },
+            },
+            "outputs_dataset": {"Head": {"OutputDataset": {"group": "PRED", "same_as_group": "MR:MR"}}},
+        }
+    }
+    (workspace / "Prediction.yml").write_text(yaml_dump_content(config), encoding="utf-8")
+
+    result = AppService(workspace_layout=layout).package_from_session(
+        name="Companion", display_name="c", description="c", checkpoints=[str(checkpoints / "first.pt")]
+    )
+
+    assert result["inputs"] == ["MASK", "MR"] and result["outputs"] == ["PRED"]
+    dataset = YAML_SAFE.load((Path(result["bundle_path"]) / "Prediction.yml").read_text(encoding="utf-8"))["Predictor"]
+    assert list(dataset["Dataset"]["groups_src"]) == ["Volume_0", "Volume_1"]
+    assert dataset["Dataset"]["groups_src"]["Volume_0"]["groups_dest"]["MR"]["transforms"]["Clip"]["mask"] == "Volume_1"
+    assert dataset["outputs_dataset"]["Head"]["OutputDataset"]["same_as_group"] == "Volume_0:MR"
+
+
+def test_a_repackaged_bundle_serves_the_newly_declared_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    """Repackaging under the same name once left the previous checkpoint on disk, and the default
+    inference enumerated it ahead of the one app.json declared."""
+    from konfai_apps.app_repository import LocalAppRepositoryFromDirectory
+
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
+    layout, workspace, checkpoints = _packaging_session(tmp_path)
+    (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
+    service = AppService(workspace_layout=layout)
+    service.package_from_session(
+        name="Repack", display_name="r", description="r", checkpoints=[str(checkpoints / "first.pt")]
+    )
+    (checkpoints / "new.pt").write_bytes(b"new checkpoint")
+    result = service.package_from_session(
+        name="Repack", display_name="r", description="r", checkpoints=[str(checkpoints / "new.pt")]
+    )
+
+    bundle = Path(result["bundle_path"])
+    assert sorted(path.name for path in bundle.glob("*.pt")) == ["new.pt"]
+    downloaded, _config, _assets = LocalAppRepositoryFromDirectory(bundle.parent, bundle.name).download_inference(
+        1, [], "Prediction.yml"
+    )
+    assert [path.name for path in downloaded] == ["new.pt"]
+
+
+@pytest.mark.parametrize("chain", ["before_reduction_transforms", "after_reduction_transforms", "final_transforms"])
+@pytest.mark.parametrize("ordered", [False, True])
+def test_packaging_renames_output_companion_references(tmp_path: Path, chain: str, ordered: bool) -> None:
+    from konfai_mcp.server_support import YAML_SAFE, yaml_dump_content
+
+    layout, workspace, checkpoints = _packaging_session(tmp_path)
+    stage = {"Mask": {"path": "MASK", "value_outside": -1024}}
+    config = {
+        "Predictor": {
+            "Dataset": {
+                "groups_src": {
+                    "MR": {"groups_dest": {"MR": {"is_input": True}}},
+                    "MASK": {"groups_dest": {"MASK": {"is_input": False}}},
+                }
+            },
+            "outputs_dataset": {
+                "Head": {
+                    "OutputDataset": {
+                        "group": "PRED",
+                        "same_as_group": "MR:MR",
+                        chain: [stage] if ordered else stage,
+                    }
+                }
+            },
+        }
+    }
+    source = workspace / "Prediction.yml"
+    source.write_text(yaml_dump_content(config), encoding="utf-8")
+    original = source.read_bytes()
+    result = AppService(workspace_layout=layout).package_from_session(
+        name="OutputCompanion", display_name="out", description="out", checkpoints=[str(checkpoints / "first.pt")]
+    )
+    predictor = YAML_SAFE.load((Path(result["bundle_path"]) / "Prediction.yml").read_text())["Predictor"]
+    output = predictor["outputs_dataset"]["Head"]["OutputDataset"]
+    rewritten = output[chain][0] if ordered else output[chain]
+    assert rewritten["Mask"]["path"] == "Volume_1"
+    assert rewritten["Mask"]["value_outside"] == -1024
+    assert output["same_as_group"] == "Volume_0:MR" and output["group"] == "PRED"
+    assert predictor["Dataset"]["groups_src"]["Volume_1"]["groups_dest"]["MASK"]["is_input"] is False
+    assert source.read_bytes() == original
+
+
+def test_packaging_resolves_explicit_config_model_yaml_beside_that_config(tmp_path: Path) -> None:
+    layout, workspace, checkpoints = _packaging_session(tmp_path)
+    source_dir = workspace / "experiment"
+    model = source_dir / "models" / "Network.yml"
+    model.parent.mkdir(parents=True)
+    model.write_text("name: right-model\nmodules: []\n")
+    # An identically named model in the session root must not override the config-relative one.
+    wrong = workspace / "models" / "Network.yml"
+    wrong.parent.mkdir()
+    wrong.write_text("name: wrong-model\nmodules: []\n")
+    config = source_dir / "Prediction.yml"
+    config.write_text('Predictor:\n  Model:\n    classpath: "models/Network.yml"\n')
+    result = AppService(workspace_layout=layout).package_from_session(
+        name="Relative",
+        display_name="relative",
+        description="relative",
+        configs=[str(config)],
+        checkpoints=[str(checkpoints / "first.pt")],
+    )
+    assert result["support_files"] == ["models/Network.yml"]
+    bundle = Path(result["bundle_path"])
+    assert (bundle / "models" / "Network.yml").read_bytes() == model.read_bytes()
+    assert 'classpath: "models/Network.yml"' in (bundle / "Prediction.yml").read_text()
+
+
+def test_packaging_support_path_cannot_write_above_the_bundle(tmp_path: Path) -> None:
+    layout, workspace, checkpoints = _packaging_session(tmp_path)
+    source_dir = workspace / "experiment"
+    source_dir.mkdir()
+    (workspace / "Network.yml").write_text("modules: []\n")
+    config = source_dir / "Prediction.yml"
+    config.write_text('Predictor:\n  Model:\n    classpath: "../Network.yml"\n')
+    with pytest.raises(ValueError, match="escape the bundle"):
+        AppService(workspace_layout=layout).package_from_session(
+            name="Relative",
+            display_name="relative",
+            description="relative",
+            configs=[str(config)],
+            checkpoints=[str(checkpoints / "first.pt")],
+        )
+    assert not (workspace / "AppBundles" / "Network.yml").exists()
+
+
+def test_package_from_session_ships_declared_support_files_beside_config_references(tmp_path: Path) -> None:
+    layout, workspace, _ = _packaging_session(tmp_path)
+    (workspace / "helpers").mkdir()
+    (workspace / "helpers" / "__init__.py").write_text("", encoding="utf-8")
+    (workspace / "helpers" / "util.py").write_text("SCALE = 2\n", encoding="utf-8")
+    (workspace / "UNet.yml").write_text("modules: []\n", encoding="utf-8")
+    (workspace / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: UNet.yml\n", encoding="utf-8")
+
+    result = AppService(workspace_layout=layout).package_from_session(
+        name="Helpers", display_name="h", description="h", support_files={"helpers": "helpers"}
+    )
+
+    bundle = Path(result["bundle_path"])
+    assert result["support_files"] == ["UNet.yml", "helpers/__init__.py", "helpers/util.py"]
+    assert (bundle / "helpers" / "util.py").read_text(encoding="utf-8") == "SCALE = 2\n"
+    assert (bundle / "UNet.yml").is_file()
+    assert json.loads((bundle / "app.json").read_text(encoding="utf-8"))["support_files"] == result["support_files"]
+
+    with pytest.raises(ValueError, match="escapes"):
+        AppService(workspace_layout=layout).package_from_session(
+            name="Escape", display_name="h", description="h", support_files={"helpers": "../elsewhere"}
+        )

@@ -46,9 +46,9 @@ silently, so verify with a clean **non-editable** install, not an editable one.
 
 Each run writes a **workspace** keyed by `train_name` (`name` for TRANSFORM): `Checkpoints/`, `Statistics/` (TensorBoard + the resolved-config snapshot), `Predictions/`, `Evaluations/` (metric JSON), `Transforms/` (per-rank logs opening with the plan, the config copy, `outputs.json`, but **not the transformed data**, which lands wherever each `Write:` points, in the user's own tree). `Dataset/` is the *input* data directory, not a run output.
 
-**Python API.** The workflows are also callables: `konfai.transform` / `plan_transform` / `evaluate` / `predict` / `train` (`api.py`, lazily re-exported from `konfai`). Same engine, two spellings: a chain is a list of live stage objects or the equivalent dict tree. The contract: a designed refusal raises `KonfAIError` (only the CLI catches), results come back structured (`TransformResult`/`EvaluationResult`), the `KONFAI_*` environment is restored around every call, one workflow per process (lock), and **a caller's config FILE is copied to scratch, so the write-back never lands on it**.
+**Python API.** The workflows are also callables: `konfai.transform` / `plan_transform` / `evaluate` / `predict` / `train` (`api.py`, lazily re-exported from `konfai`). Same engine, two spellings: a chain is a list of live stage objects or the equivalent dict tree. The contract: a designed refusal raises `KonfAIError` (only the CLI catches), results come back structured (`TransformResult`/`EvaluationResult`), the `KONFAI_*` environment is restored around every call, one workflow per process (lock), and **a caller's config FILE is copied to scratch, so the write-back never lands on it** (a model YAML named by a relative path is made absolute against the caller's file first, or the working directory for a tree; the scratch is released when the call returns).
 
-**Conventions.** Arrays are **channel-first** `[C,(Z),Y,X]`; geometry/spacing is **`(x,y,z)`** (SimpleITK). `Attribute` geometry keys are `Origin`/`Spacing`/`Direction`. In `Resample`, a `spacing`/`shape` value **≤ 0 is the keep-this-axis sentinel** (that axis keeps the source's own density/extent).
+**Conventions.** Arrays are **channel-first** `[C,(Z),Y,X]`; geometry/spacing is **`(x,y,z)`** (SimpleITK). A chain (`transforms:`, `patch_transforms:`, criteria) is a mapping keyed by class name (a repeated class is spelled module-qualified the second time) or a YAML list of one-entry mappings, which binds in order under occurrence keys (`Clip`, `Clip#2`, `Clip#3`); `get_module` drops the suffix when it resolves the class. `Attribute` geometry keys are `Origin`/`Spacing`/`Direction`. In `Resample`, a `spacing`/`shape` value **≤ 0 is the keep-this-axis sentinel** (that axis keeps the source's own density/extent).
 
 **Network graph.** `add_module(name, module, in_branch=[...], out_branch=[...], alias=...)` wires a string-keyed branch register (branch `'0'` = input; execution = insertion order). **Named module outputs are referenceable in YAML**: an `outputs_criterions` key is a module's dotted path like `UNetBlock_0:Head:Softmax` (the `:`/`.` separators are load-bearing). `out_branch:[-1]` marks a terminal/deep-supervision head; `alias` lists are positional and load-bearing for pretrained-weight remapping.
 
@@ -81,7 +81,7 @@ A separate package layered on KonfAI's **public** API (core never imports it). A
 
 ## 5b. MCP server (`konfai-mcp`)
 
-A third independent package (depends only on KonfAI's public API) exposing a **FastMCP** server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. On `main` since v1.6.0 and published to PyPI by the release workflow. Jobs run in a **`spawn`** subprocess (training may init CUDA); `validate_config_semantics` and `run_component_smoke_test` run in a **spawn subprocess** (never in the server process), are side-effect-free (config bytes are snapshotted/restored **in the parent**, so the restore survives a subprocess timeout kill), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_external_dependency`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
+A third package exposing a **FastMCP** server. It depends on KonfAI's public API and, for validation, on two core internals: `konfai_mcp.runner` imports `konfai.trainer`/`konfai.network.network` builders and patches the single-process runtime (`_apply_single_process_patches`), which is why the sibling pins are exact at a release tag (a range only from a working tree). It exposes the server so an LLM agent can inspect a dataset → author YAML → run train/predict/evaluate → monitor jobs → compare runs → iterate. On `main` since v1.6.0 and published to PyPI by the release workflow. Jobs run in a **`spawn`** subprocess (training may init CUDA); `validate_config_semantics` and `run_component_smoke_test` run in a **spawn subprocess** (never in the server process), are side-effect-free (the child reads a **scratch copy placed beside the config**, so the original is never written, an edit made meanwhile survives, and the parent sweeps a copy a killed child left), and re-import edited workspace code; discovery is via `list_components` / `describe_extension_points` / `describe_config_schema` / `check_external_dependency`. Tests: `pip install -e ./konfai-mcp` then `python -m pytest konfai-mcp/tests` (the segmentation E2E needs the imaging extra).
 
 **Working on the MCP server, how to validate a change:**
 
@@ -120,12 +120,12 @@ A third independent package (depends only on KonfAI's public API) exposing a **F
 ## 6. Running things
 
 ```bash
-pixi run check                                                    # lint + format-check + core tests + apps tests (run ONCE before finalising)
+pixi run check                                                    # lint + format-check + core tests + apps tests (run ONCE before finalising); the test tasks pin OMP_NUM_THREADS=1 (8x faster on 24 cores)
 pixi run test                                                     # core unit + integration (tests/), ~6 min (pytest-xdist), not an iteration loop
 pixi run test-fast                                                # dev loop (~1m40): skips slow oracle + integration tests
 pixi run --environment dev typecheck                              # mypy konfai
 pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate)
-pip install -e ./konfai-mcp  && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate)
+pip install -e ./konfai-mcp  && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
 ```
 
 The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run `konfai-apps/tests` or `konfai-mcp/tests`; install those packages first (they pull their own runtime deps), exactly as their CI does. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
@@ -141,7 +141,7 @@ whole matrix releases in lockstep. `konfai-studio` is the one exception to the p
 job runs `npm ci && npm run build` first (its React front is git-ignored) and then `python -m build --wheel`
 (wheel-only, because the sdist file-finder would drop the built `web/`).
 
-Before tagging: `pixi run check` green; both sibling suites green; and, because the test job only exercises
+Before tagging: `pixi run check` green; both sibling suites green; `pixi run perf-check` within its thresholds on a quiet machine (or the regression named in the release notes); and, because the test job only exercises
 the **source tree**, confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`
 by installing it **non-editable** in a clean venv (an editable install hides PEP 420 / `package-data` breakage).
 
@@ -213,7 +213,8 @@ Three, and only three, places decide trust. Keep them honest:
 - **A green `validate_*` proves little**: its default level `instantiate` runs no train step; only
   `level='train_step'` does a real forward+backward.
 - **`transform_shape()` must be exact**: patch planning trusts it, a wrong prediction corrupts reassembly.
-- **Reading a config mutates it**, so snapshot bytes before any validation that builds a workflow.
+- **Reading a config mutates it**, so build from a scratch copy beside it (what konfai-mcp's validation does), never from the author's file.
+- **The mirrors-mypy pre-commit hook cannot type-check this code**: it runs in an environment of its own, without torch, and reads every torch attribute as `Any | None` (199 errors on a tree mypy passes). The hook is a `local` one running the dev environment's mypy, the same command as `pixi run typecheck` and the CI job; keep it that way.
 - **Adding a workflow kind**: in konfai-mcp this is one `WorkflowSpec` entry + two `Literal` aliases
   (drift-tested, see §5b); in core it still touches several maps (`main.py` `_COMMANDS`/`_INIT_TARGETS`,
   `State`, api.py). Prefer extending the descriptor tables over scattering new registries.
@@ -221,13 +222,30 @@ Three, and only three, places decide trust. Keep them honest:
   (lossy `int` won). Fixed; pinned by
   `test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`. Any new union-typed
   config key still needs a test.
-- **Nested-`Network` save/load use different key coordinates**: `checkpoint_save` writes dotted paths,
-  `Network.load` looks up bare class names, so composite models (GAN family) silently lose optimizer/scheduler
-  state on RESUME until fixed. Any change near `get_networks()`/`load` must keep the two in agreement.
-- **Per-epoch augmentation redraws never reach persistent DataLoader workers**: `persistent_workers=True`
-  (the `num_workers>0` default) freezes inline augmentations at their first-epoch draw.
-- **The train/val split is drawn from the unseeded global RNG at `Trainer.__init__`** (before per-rank
-  seeding), so `manual_seed` does not cover it and RESUME re-splits.
+- **A model YAML named by a relative path resolves next to the config file that names it**
+  (`ModelLoader._yaml_path`). The Python API copies a config file to scratch before reading it (the
+  write-back must not land on the caller's file), so `_config_copy` makes such a classpath absolute
+  first; a new entry point that materializes a config elsewhere must do the same. Pinned by
+  `test_api.py::test_a_relative_model_yaml_is_anchored_to_the_config_files_directory`.
+- **The sibling packages pin `konfai==<their own scm version>`**, which from a working tree is a
+  `.dev` version no installed core carries. `setup.py:_sibling` pins the closest release or newer
+  from a tree and the exact version at a tag; keep that helper when adding a package. Pinned by
+  `test_packaging.py::test_sibling_pins_resolve_against_the_core_of_this_tree`.
+
+Fixed, pinned by a test (do not re-fix; the guide once listed them as open):
+
+- The one-pass case FIFO: prediction and evaluation hold the case being finished and the next one,
+  whatever the batch size (the training-sized `batch_size + 1` kept whole cases loaded, a case per case
+  of RAM growth on a cohort)
+  (`test_data_manager.py::test_a_one_pass_source_holds_two_cases_whatever_its_batch_size`).
+- Nested-`Network` optimizer/scheduler state on RESUME: `checkpoint_save` and `Network.load` both use
+  the dotted `get_networks()` key (`test_network.py::test_load_restores_nested_network_optimizer_and_counters`).
+- Inline augmentation redraws under persistent DataLoader workers: the loader forces
+  `persistent_workers=False` when inline augmentation is active
+  (`test_data_manager.py::test_inline_augmentations_disable_persistent_workers`).
+- The train/val split seed: drawn from `manual_seed`, else the `Seed.txt` the TRAIN run recorded on
+  RESUME, else a fresh draw recorded for the next RESUME
+  (`test_trainer.py::test_resume_reuses_the_recorded_split_seed`).
 - **A `Prediction.yml` that preprocesses a group differently from the `Config.yml` it trained on is
   silent**: the run succeeds and only the output is wrong. The Synthesis example shipped with
   `Standardize(mask: None)` in training against `Standardize(mask: MASK)` plus an extra input `Mask`
@@ -243,3 +261,12 @@ Three, and only three, places decide trust. Keep them honest:
 - **Code:** line length 120 (Ruff); type annotations on new public functions; Apache-2.0 SPDX header on every new source file; prefer `pathlib.Path`; use the error classes in `utils/errors.py` (do not invent exceptions); import-guard heavy optional deps (`SimpleITK`/`h5py`/`pydicom`/`zarr`), failing at point-of-use with an install hint, not at import.
 - **Commits:** Conventional Commits (`cz check`): `type(scope): subject`, imperative, < 72 chars. No AI-agent branding (`claude`/`codex`/"generated by/with") and no AI co-author trailers.
 - **For agents:** read before editing; keep diffs small (one logical change per PR, no unrelated reformats); **iterate cheaply, verify once**: while developing run only the per-module test file you touched (`pytest tests/unit/test_<module>.py`), then `pixi run test-fast` (~1m40); reserve the full `pixi run check` (and the apps suite if you touched `konfai-apps`) for one final pass before finalising, because the full suite takes ~6 min and re-running it per edit adds up fast; no new runtime dependency without an explicit request + a matching `pyproject.toml` update in the same commit; update docs and `tests/unit/test_config.py` when changing config binding; do not skip pre-commit with `--no-verify`.
+
+## Code navigation
+
+Prefer efficient code retrieval over broad file reads.
+
+- Use CocoIndex Code for conceptual or semantic code search.
+- Use Serena for symbols, references, declarations, and symbolic refactoring.
+- Prefer targeted reads over entire files.
+- Do not repeatedly search or reread code already understood.

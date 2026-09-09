@@ -31,15 +31,37 @@ def _release_version() -> str:
     return get_version(root=str(_ROOT), tag_regex=r"^v(?P<version>.*)$", local_scheme="no-local-version")
 
 
+def _sibling(name: str, version: str) -> str:
+    """The family ships in lockstep: at a release tag the sibling is pinned to the exact version.
+    From a working tree (a ``.dev`` version) the pin is the closest release or newer, so
+    ``pip install -e`` resolves against the core installed beside it; the publish workflow
+    builds at the tag, where the pin is exact."""
+    if ".dev" not in version:
+        return f"{name}=={version}"
+    try:
+        from setuptools_scm import get_version
+
+        floor = get_version(
+            root=str(_ROOT),
+            tag_regex=r"^v(?P<version>.*)$",
+            version_scheme=lambda scm_version: str(scm_version.tag),
+            local_scheme="no-local-version",
+        )
+    except Exception:  # no git history to read a tag from: the dev version's own floor
+        floor = version
+    return f"{name}>={floor}"
+
+
 _version = _release_version()
 
 # ``requests`` and ``huggingface_hub`` are declared here, not inherited: konfai core no longer
 # depends on either.
 setup(
     install_requires=[
-        f"konfai=={_version}",
+        _sibling("konfai", _version),
         "SimpleITK",
         "requests",
+        "requests-toolbelt",
         "huggingface_hub",
         "fastapi",
         "uvicorn",

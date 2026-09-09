@@ -252,7 +252,9 @@ def test_checkpoint_save_returns_before_the_file_lands_and_the_file_equals_the_l
     optimizer = torch.optim.AdamW(net.parameters())
     net(torch.ones(1, 3)).sum().backward()
     optimizer.step()
-    network = SimpleNamespace(optimizer=optimizer, _it=4, _nb_lr_update=2, measure=None)
+    network = SimpleNamespace(
+        optimizer=optimizer, _it=4, _nb_lr_update=2, measure=None, schedule_states=lambda: {"schedulers": {}}
+    )
     module = SimpleNamespace(network_states=net.state_dict, get_networks=lambda: {"Net": network})
     trainer = _build_trainer(tmp_path, monkeypatch, ["stamp"], model=SimpleNamespace(module=module))
 
@@ -276,6 +278,7 @@ def test_checkpoint_save_returns_before_the_file_lands_and_the_file_equals_the_l
             "it": 0,
             "loss": 0.5,
             "Model": net.state_dict(),
+            "resume": trainer._resume_cursor,
             "Net_optimizer_state_dict": optimizer.state_dict(),
             "Net_it": 4,
             "Net_nb_lr_update": 2,
@@ -745,3 +748,370 @@ def test_a_score_that_is_not_finite_is_no_score(mode: str) -> None:
     legacy = float("inf")
     read_back = early_stopping.worst_score if not math.isfinite(legacy) else legacy
     assert not early_stopping.is_better(read_back, 0.5)
+
+
+# ---- RESUME: the schedulers' and the scaler's own state ----
+
+
+def _plateau_net() -> tuple[_LeafNet, torch.optim.lr_scheduler.ReduceLROnPlateau]:
+    net = _LeafNet()
+    net.optimizer = _fresh_optimizer()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(net.optimizer, factor=0.1, patience=1)
+    net.schedulers = {scheduler: 0}
+    net._it = 0
+    net._nb_lr_update = 0
+    return net, scheduler
+
+
+def test_resume_restores_a_plateau_schedulers_history() -> None:
+    """A plateau scheduler's decision rests on its history (best value, bad epochs), which no
+    update count reconstructs: uninterrupted and resumed runs must decide the same step."""
+    uninterrupted, scheduler = _plateau_net()
+    scheduler.step(1.0)
+    scheduler.step(2.0)
+    saved = {
+        f"{uninterrupted.get_name()}_optimizer_state_dict": uninterrupted.optimizer.state_dict(),
+        f"{uninterrupted.get_name()}_nb_lr_update": 2,
+        f"{uninterrupted.get_name()}_schedulers_state_dict": uninterrupted.schedule_states(),
+    }
+    scheduler.step(3.0)  # the second bad epoch: the plateau reduces
+    assert uninterrupted.optimizer.param_groups[0]["lr"] == pytest.approx(_CONFIG_LR * 0.1)
+
+    resumed, resumed_scheduler = _plateau_net()
+    resumed.load(saved, init=False, ema=False)
+    assert resumed_scheduler.best == 1.0 and resumed_scheduler.num_bad_epochs == 1
+    resumed_scheduler.step(3.0)
+    assert resumed.optimizer.param_groups[0]["lr"] == pytest.approx(_CONFIG_LR * 0.1)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_repeated_scheduler_states_survive_a_serialized_checkpoint(tmp_path: Path, nested: bool) -> None:
+    def make():
+        leaf = _LeafNet()
+        leaf.optimizer = _fresh_optimizer()
+        first = torch.optim.lr_scheduler.StepLR(leaf.optimizer, step_size=2, gamma=0.5)
+        second = torch.optim.lr_scheduler.StepLR(leaf.optimizer, step_size=7, gamma=0.8)
+        leaf.schedulers = {first: 3, second: 5}
+        root = Network() if nested else leaf
+        if nested:
+            root.add_module("Inner", leaf)
+        return root, leaf, (first, second)
+
+    source, leaf, schedulers = make()
+    for index in range(4):
+        leaf.optimizer.step()
+        schedulers[0].step()
+        if index % 2:
+            schedulers[1].step()
+    checkpoint = {}
+    for name, network in source.get_networks().items():
+        if network.optimizer is not None:
+            checkpoint[f"{name}_optimizer_state_dict"] = network.optimizer.state_dict()
+            checkpoint[f"{name}_schedulers_state_dict"] = network.schedule_states()
+    path = tmp_path / "checkpoint.pt"
+    torch.save(checkpoint, path)
+
+    resumed, resumed_leaf, resumed_schedulers = make()
+    resumed.load(torch.load(path, weights_only=True), init=False)
+    assert [scheduler.state_dict() for scheduler in resumed_schedulers] == [
+        scheduler.state_dict() for scheduler in schedulers
+    ]
+    for network, chain in [(leaf, schedulers), (resumed_leaf, resumed_schedulers)]:
+        network.optimizer.step()
+        for scheduler in chain:
+            scheduler.step()
+    assert resumed_leaf.optimizer.param_groups[0]["lr"] == leaf.optimizer.param_groups[0]["lr"]
+
+
+def test_legacy_single_scheduler_state_still_restores_its_history() -> None:
+    source, scheduler = _plateau_net()
+    scheduler.step(1.0)
+    scheduler.step(2.0)
+    legacy = {
+        f"{source.get_name()}_schedulers_state_dict": {"schedulers": {"ReduceLROnPlateau": scheduler.state_dict()}}
+    }
+    resumed, restored = _plateau_net()
+    resumed.load(legacy, init=False)
+    restored.step(3.0)
+    assert resumed.optimizer.param_groups[0]["lr"] == pytest.approx(_CONFIG_LR * 0.1)
+
+
+def test_legacy_repeated_scheduler_state_warns_without_overwriting_the_chain(caplog) -> None:
+    net = _LeafNet()
+    net.optimizer = _fresh_optimizer()
+    first = torch.optim.lr_scheduler.StepLR(net.optimizer, step_size=2, gamma=0.5)
+    second = torch.optim.lr_scheduler.StepLR(net.optimizer, step_size=7, gamma=0.8)
+    net.schedulers = {first: 3, second: 5}
+    legacy = {
+        f"{net.get_name()}_nb_lr_update": 4,
+        f"{net.get_name()}_schedulers_state_dict": {"schedulers": {"StepLR": second.state_dict()}},
+    }
+    with caplog.at_level("WARNING"):
+        net.load(legacy, init=False)
+    assert [(scheduler.step_size, scheduler.gamma, scheduler.last_epoch) for scheduler in net.schedulers] == [
+        (2, 0.5, 4),
+        (7, 0.8, 4),
+    ]
+    assert any("unambiguous" in record.getMessage() and "StepLR#2" in record.getMessage() for record in caplog.records)
+
+
+def test_a_checkpoint_without_scheduler_state_falls_back_to_the_update_count(caplog) -> None:
+    net, scheduler, ctx = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
+    with caplog.at_level("WARNING"):
+        net.load(ctx["state_dict"], init=False, ema=False)
+    assert scheduler.last_epoch == _NB_LR_UPDATE
+    assert not caplog.records  # a legacy checkpoint holds no scheduler entry at all: nothing to warn about
+
+    partial = dict(ctx["state_dict"])
+    partial[f"{net.get_name()}_schedulers_state_dict"] = {"schedulers": {}}
+    with caplog.at_level("WARNING"):
+        net.load(partial, init=False, ema=False)
+    assert any("StepLR" in record.getMessage() for record in caplog.records)
+
+
+def test_an_override_lr_wins_over_the_restored_scheduler() -> None:
+    net, scheduler, ctx = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
+    scheduler.step()
+    scheduler.step()
+    state = dict(ctx["state_dict"])
+    state[f"{net.get_name()}_schedulers_state_dict"] = net.schedule_states()
+
+    net.load(state, init=False, ema=False, override_lr=0.02)
+    assert scheduler.last_epoch == 0
+    assert net.optimizer.param_groups[0]["lr"] == 0.02
+
+
+def test_the_amp_scaler_state_rides_the_checkpoint() -> None:
+    net, _scheduler, ctx = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
+    net.scaler = torch.amp.GradScaler("cpu", enabled=True, init_scale=4096.0)
+    states = net.schedule_states()
+    assert states["scaler"]["scale"] == 4096.0
+
+    resumed, _s, _c = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
+    resumed.scaler = torch.amp.GradScaler("cpu", enabled=True)
+    resumed.load({**ctx["state_dict"], f"{resumed.get_name()}_schedulers_state_dict": states}, init=False)
+    assert resumed.scaler.get_scale() == 4096.0
+
+    # A run resumed with autocast off keeps a disabled scaler: nothing to restore, nothing raised.
+    plain, _s, _c = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
+    plain.scaler = torch.amp.GradScaler("cuda", enabled=False)
+    plain.load({**ctx["state_dict"], f"{plain.get_name()}_schedulers_state_dict": states}, init=False)
+    assert "scaler" not in plain.schedule_states()
+
+
+# ---- the recorded split seed ----
+
+
+def test_resume_reuses_the_recorded_split_seed(tmp_path: Path, monkeypatch) -> None:
+    """RESUME rebuilds the split the checkpoint trained on from the seed the TRAIN run recorded
+    (``Statistics/<run>/Seed.txt``, spelled as ``setup`` writes it); ``manual_seed`` wins over it,
+    and without a record the draw is fresh."""
+    monkeypatch.setattr(trainer_module, "statistics_directory", lambda: tmp_path)
+
+    class _Seeded:
+        name = "RUN"
+        _resolve_split_seed = Trainer._resolve_split_seed
+        _recorded_split_seed = Trainer._recorded_split_seed
+
+        def __init__(self, manual_seed: int | None) -> None:
+            self.manual_seed = manual_seed
+
+    unseeded = _Seeded(None)
+    assert unseeded._recorded_split_seed() is None
+    (tmp_path / "RUN").mkdir()
+    (tmp_path / "RUN" / "Seed.txt").write_text("1234\n")
+
+    assert unseeded._resolve_split_seed(State.RESUME) == 1234
+    assert _Seeded(7)._resolve_split_seed(State.RESUME) == 7
+    assert unseeded._resolve_split_seed(State.TRAIN) != 1234  # a TRAIN never reads a record
+    (tmp_path / "RUN" / "Seed.txt").write_text("not a seed\n")
+    assert unseeded._recorded_split_seed() is None
+
+
+def _read_for_resume(path: Path) -> Trainer:
+    trainer = Trainer.__new__(Trainer)
+    trainer.path_to_model = str(path)
+    trainer.epoch = 0
+    trainer.it = 0
+    trainer._load()
+    return trainer
+
+
+def test_epoch_cursor_is_explicit_and_old_epoch_integers_keep_their_meaning(tmp_path: Path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["epoch"])
+    trainer.save_checkpoint_mode = "ALL"
+    trainer.epoch = 3
+    trainer.it = 12
+    trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    path = tmp_path / "Checkpoints/RUN/epoch.pt"
+    resumed = _read_for_resume(path)
+    assert (resumed.epoch, resumed.it) == (4, 12)
+    assert resumed._resume_state["kind"] == "epoch_boundary"
+    checkpoint = torch.load(path, weights_only=True)
+    del checkpoint["resume"]
+    legacy = tmp_path / "legacy.pt"
+    torch.save(checkpoint, legacy)
+    old = _read_for_resume(legacy)
+    assert (old.epoch, old.it) == (3, 12)
+    assert old._resume_state is None
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_intermediate_and_crash_checkpoints_refuse_an_ambiguous_resume(tmp_path: Path, monkeypatch, crash) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["partial"])
+    trainer.checkpoint_save(1.0, crash=crash)
+    trainer._checkpoint_writer.join()
+    path = next((tmp_path / "Checkpoints/RUN").glob("*.pt"))
+    with pytest.raises(TrainerError, match="epoch has not completed"):
+        _read_for_resume(path)
+    assert "Model" in torch.load(path, weights_only=True)
+
+
+def test_rng_checkpoint_restores_python_numpy_and_torch_without_unsafe_pickle(tmp_path: Path, monkeypatch) -> None:
+    import random
+
+    import numpy as np
+    from konfai.utils.runtime import preserved_rng
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    with preserved_rng():
+        state = trainer_module._checkpoint_rng()
+        path = tmp_path / "rng.pt"
+        torch.save(state, path)
+        expected = (random.random(), np.random.rand(4), torch.rand(4))
+        trainer_module._restore_checkpoint_rng(torch.load(path, weights_only=True))
+        actual = (random.random(), np.random.rand(4), torch.rand(4))
+        assert expected[0] == actual[0]
+        np.testing.assert_array_equal(expected[1], actual[1])
+        torch.testing.assert_close(expected[2], actual[2], rtol=0, atol=0)
+
+
+def test_pending_accumulation_keeps_prior_best_resume_and_never_steps_or_clears_gradients(
+    tmp_path, monkeypatch
+) -> None:
+    network = _LeafNet()
+    network.optimizer = _fresh_optimizer()
+    network.nb_batch_per_step = 2
+    trainer = _build_trainer(
+        tmp_path, monkeypatch, ["clean", "pending", "later"], model=SimpleNamespace(module=network)
+    )
+    parameter = network.optimizer.param_groups[0]["params"][0]
+    network._it = 2
+    trainer.it = 2
+    trainer._deferred_score = 1.0
+    trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    latest = tmp_path / "Checkpoints/RUN/resume_latest.pt"
+    assert _read_for_resume(latest).it == 2
+
+    network._it = 3
+    trainer.it = 3
+    parameter.grad = torch.tensor([7.0])
+    with pytest.warns(RuntimeWarning, match="No extra optimizer step"):
+        trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    assert _read_for_resume(latest).it == 2
+    torch.testing.assert_close(parameter.grad, torch.tensor([7.0]), rtol=0, atol=0)
+    torch.testing.assert_close(parameter, torch.zeros(1), rtol=0, atol=0)
+    assert network._it == 3
+
+    network.optimizer.step()  # the next ordinary batch completes the accumulation window
+    network.optimizer.zero_grad(set_to_none=True)
+    network._it = 4
+    trainer.it = 4
+    trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    assert _read_for_resume(latest).it == 4
+    # The best scored weights remain old, while resume_latest holds the latest eligible state.
+    scored = [p for p in latest.parent.glob("*.pt") if p.name != latest.name]
+    assert len(scored) == 1
+    assert torch.load(scored[0], weights_only=True)["it"] == 2
+
+
+def test_best_bootstrap_keeps_the_independent_latest_resume_file(tmp_path, monkeypatch) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["best", "later"])
+    trainer._deferred_score = 1.0
+    trainer.it = 1
+    trainer._save_epoch_boundary()
+    trainer.it = 2
+    trainer._deferred_score = 2.0
+    trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    latest = tmp_path / "Checkpoints/RUN/resume_latest.pt"
+    assert latest.is_file()
+    resumed = _build_trainer(tmp_path, monkeypatch, ["unused"])
+    assert resumed._best_checkpoint_path.name == "best.pt"
+    assert latest.is_file()
+    assert _read_for_resume(latest).it == 2
+
+
+@pytest.mark.parametrize("copy_fails", [False, True])
+def test_latest_resume_copy_fallback_is_atomic_and_never_truncates_a_prior_link(tmp_path, monkeypatch, copy_fails):
+    trainer = _build_trainer(tmp_path, monkeypatch, ["old", "new"])
+    trainer.it = 1
+    trainer._deferred_score = 1.0
+    trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    latest = tmp_path / "Checkpoints/RUN/resume_latest.pt"
+    old = latest.parent / "old.pt"
+    stale = latest.parent / f"resume_latest.pt.{trainer_module.os.getpid()}.tmp"
+    trainer_module.os.link(old, stale)
+    original = old.read_bytes()
+
+    def unavailable_link(*args):
+        raise OSError("hard links unavailable")
+
+    monkeypatch.setattr(trainer_module.os, "link", unavailable_link)
+    if copy_fails:
+
+        def broken_copy(source, destination):
+            Path(destination).write_bytes(b"partial write")
+            raise OSError("copy interrupted")
+
+        monkeypatch.setattr(trainer_module.shutil, "copyfile", broken_copy)
+    trainer.it = 2
+    trainer._deferred_score = 2.0
+    trainer._save_epoch_boundary()
+    if copy_fails:
+        with pytest.raises(OSError, match="copy interrupted"):
+            trainer._checkpoint_writer.join()
+    else:
+        trainer._checkpoint_writer.join()
+    assert old.read_bytes() == stale.read_bytes() == original
+    assert _read_for_resume(latest).it == (1 if copy_fails else 2)
+    assert not list(latest.parent.glob(".resume-*"))
+
+
+def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monkeypatch) -> None:
+    # A Dice loss reports the coefficient on the boards and minimizes one minus it. The default
+    # selection once summed the reported values, so a cross entropy of 0.2 plus a Dice of 0.9 read
+    # worse than 0.7 plus 0.3, and BEST kept the early epoch (a two-class CT: Dice 0 at prediction).
+    from types import SimpleNamespace
+
+    from konfai.utils.runtime import DistributedObject
+
+    class _Module(_DummyModelModule):
+        @staticmethod
+        def get_networks() -> dict[str, object]:
+            return {"Net": SimpleNamespace(measure=SimpleNamespace(set_window=lambda n: None), optimizer=None)}
+
+    model = _DummyModel()
+    model.module = _Module()
+    trainer = _build_trainer(tmp_path, monkeypatch, ["2026_01_01_00_00_00"], model=model)
+    trainer.tb = SimpleNamespace(add_scalars=lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        DistributedObject,
+        "get_measure",
+        staticmethod(
+            lambda *args, **kwargs: {
+                "Net": ({"CE": (1.0, 0.2, 0.2), "Dice": (1.0, 0.9, 0.1)}, {"MAE": (1.0, 5.0, 5.0)})
+            }
+        ),
+    )
+
+    reported = trainer._train_log({})
+
+    assert reported == {"CE": 0.2, "Dice": 0.9, "MAE": 5.0}  # what the boards and the description show
+    assert trainer._loss_score == {"CE": 0.2, "Dice": pytest.approx(0.1)}  # what selects the checkpoint
+    assert trainer.early_stopping.get_score(trainer._loss_score) == pytest.approx(0.3)

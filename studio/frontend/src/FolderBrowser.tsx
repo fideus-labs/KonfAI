@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 // Navigate the compute node's filesystem to pick a folder (or, with onPickFile, a file).
 // Data/outputs never leave the machine: the browser only points Studio at what already lives here.
@@ -29,6 +29,22 @@ export default function FolderBrowser({
   // path is the one thing a user already has: they can paste it. Navigation keeps this in step.
   const [typed, setTyped] = useState(start);
   const [reload, setReload] = useState(0); // Enter on the path always re-reads, even for the same path
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const pathRef = useRef<HTMLInputElement>(null);
+  const titleId = useId();
+
+  // The browser keeps focus in the modal and makes the rest of the page inert. Restore the opener
+  // on every unmount, including a file/folder pick, without reopening when a callback changes.
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current!;
+    const opener = document.activeElement;
+    dialog.showModal();
+    pathRef.current?.focus();
+    return () => {
+      dialog.close();
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
+  }, []);
 
   useEffect(() => {
     // The previous listing is invalidated before the request: keeping it would let the primary
@@ -66,11 +82,25 @@ export default function FolderBrowser({
   }, [path, reload]);
 
   return (
-    <div className="modal-back" onClick={onClose}>
+    <dialog
+      ref={dialogRef}
+      className="modal-back"
+      aria-labelledby={titleId}
+      closedby="any"
+      onClick={onClose}
+      onCancel={(e) => {
+        e.preventDefault(); // the owner closes by unmounting, just as Cancel and a pick do
+        onClose();
+      }}
+    >
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">{title}</div>
+        <div className="modal-head" id={titleId}>
+          {title}
+        </div>
         <input
+          ref={pathRef}
           className="modal-path"
+          aria-label="Folder path"
           value={typed}
           spellCheck={false}
           placeholder="/path/to/a/folder"
@@ -82,7 +112,7 @@ export default function FolderBrowser({
             setReload((n) => n + 1);
           }}
         />
-        {error && <div className="modal-err">{error}</div>}
+        {error && <div className="modal-err" role="alert">{error}</div>}
         <div className="modal-list">
           {parent && (
             <button className="dir up" onClick={() => setPath(parent)}>
@@ -115,6 +145,6 @@ export default function FolderBrowser({
           )}
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

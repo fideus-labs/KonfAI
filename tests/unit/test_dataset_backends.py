@@ -81,3 +81,23 @@ def test_a_compressed_store_declares_no_grain_because_it_serves_no_bounded_regio
     dataset = Dataset(str(tmp_path / "Dataset"), "mha")
     assert dataset.read_granularity("CT", "CASE_000") is None
     assert not dataset.bounded_region_reads("CT", "CASE_000")
+
+
+def test_a_chunked_h5_entry_declares_its_chunk_and_a_contiguous_one_declares_none(tmp_path: "Path") -> None:
+    """An HDF5 hyperslab decodes every chunk it touches whole, so a chunked entry (a third-party
+    store, or a cache a region write chunked on its region) declares its chunk as the grain a sweep
+    is cut on; what ``Dataset.write`` stores is contiguous and declares none: a read costs the
+    bytes it covers."""
+    import h5py
+    import numpy as np
+    from konfai.utils.dataset import Attribute, Dataset
+
+    store = tmp_path / "Dataset.h5"
+    with h5py.File(store, "w") as file:
+        file.create_dataset("CT/CHUNKED", data=np.zeros((1, 128, 16, 16), np.float32), chunks=(1, 64, 16, 16))
+    dataset = Dataset(str(store), "h5")
+    dataset.write("CT", "PLAIN", np.zeros((1, 8, 16, 16), np.float32), Attribute())
+
+    assert dataset.read_granularity("CT", "CHUNKED") == (1, 64, 16, 16)
+    assert dataset.read_granularity("CT", "PLAIN") is None
+    assert dataset.bounded_region_reads("CT", "CHUNKED")

@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from konfai.data import augmentation
 from konfai.data.patching import ModelPatch
+from konfai.models.python.generation import gan
 from konfai.models.python.segmentation import NestedUNet, UNet
 from konfai.network import blocks, network
 from konfai.utils.dataset import Attribute
@@ -29,22 +30,9 @@ from konfai.utils.errors import ConfigError
 
 
 class Discriminator(network.Network):
-    class DiscriminatorNLayers(network.ModuleArgsDict):
-        def __init__(self, channels: list[int], strides: list[int], dim: int) -> None:
-            super().__init__()
-            block_config = partial(
-                blocks.BlockConfig,
-                kernel_size=4,
-                padding=1,
-                bias=False,
-                activation=partial(torch.nn.LeakyReLU, negative_slope=0.2, inplace=True),
-                norm_mode=blocks.NormMode.SYNCBATCH,
-            )
-            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides, strict=False)):
-                self.add_module(
-                    f"Layer_{i}",
-                    blocks.ConvBlock(in_channels, out_channels, [block_config(stride=stride)], dim),
-                )
+    # The blocks this family shares with the plain GAN are that module's, under the nested classpaths
+    # published configs spell; the ones that differ (the head's pooling, the time embedding) stay here.
+    DiscriminatorNLayers = gan.Discriminator.DiscriminatorNLayers
 
     class DiscriminatorHead(network.ModuleArgsDict):
         def __init__(self, channels: int, dim: int) -> None:
@@ -195,7 +183,7 @@ class DiscriminatorADA(network.Network):
             self.names = []
             self.p = 0
 
-        def set_measure(self, measure: network.Measure, names: list[str]):
+        def set_measure(self, measure: network.Measure | None, names: list[str]):
             self.measure = measure
             self.names = names
 
@@ -242,7 +230,7 @@ class DiscriminatorADA(network.Network):
 
             corruptions = {
                 augmentation.Noise(1): 1,
-                augmentation.CutOUT(0.5, 1, -1): 0.3,
+                augmentation.CutOUT(0.5, 1): 0.3,
             }
             self.data_augmentations.update({cast(augmentation.DataAugmentation, k): v for k, v in corruptions.items()})
 
@@ -252,14 +240,14 @@ class DiscriminatorADA(network.Network):
 
         def forward(self, tensor: torch.Tensor, prob: torch.Tensor) -> torch.Tensor:
             self._set_p(prob.item())
-            out = tensor
+            out = list(tensor)
             for aug in self.data_augmentations.keys():
                 aug.state_init(
                     None,
-                    [tensor.shape[2:]] * tensor.shape[0],
+                    [list(tensor.shape[2:])] * tensor.shape[0],
                     [Attribute()] * tensor.shape[0],
                 )
-                out = aug("", 0, list(out))
+                out = aug("", 0, out)
             return torch.cat([data.unsqueeze(0) for data in out], 0)
 
     class DiscriminatorBlock(network.ModuleArgsDict):
@@ -316,43 +304,16 @@ class DiscriminatorADA(network.Network):
         )
 
     def initialized(self):
-        self["DiscriminatorModel"]["Prob"].set_measure(
+        cast(DiscriminatorADA.UpdateP, self.get_submodule("DiscriminatorModel.Prob")).set_measure(
             self.measure,
             ["Discriminator_B.DiscriminatorModel.Head.Conv:None:PatchGanLoss"],
         )
 
 
 class GeneratorV1(network.Network):
-    class GeneratorStem(network.ModuleArgsDict):
-        def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
-            super().__init__()
-            self.add_module(
-                "ConvBlock",
-                blocks.ConvBlock(
-                    in_channels,
-                    out_channels,
-                    block_configs=[blocks.BlockConfig(bias=False, activation="ReLU", norm_mode="SYNCBATCH")],
-                    dim=dim,
-                ),
-            )
+    GeneratorStem = gan.Generator.GeneratorStem
 
-    class GeneratorHead(network.ModuleArgsDict):
-        def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
-            super().__init__()
-            self.add_module(
-                "ConvBlock",
-                blocks.ConvBlock(
-                    in_channels,
-                    in_channels,
-                    block_configs=[blocks.BlockConfig(bias=False, activation="ReLU", norm_mode="SYNCBATCH")],
-                    dim=dim,
-                ),
-            )
-            self.add_module(
-                "Conv",
-                blocks.get_torch_module("Conv", dim)(in_channels, out_channels, kernel_size=1, bias=False),
-            )
-            self.add_module("Tanh", torch.nn.Tanh())
+    GeneratorHead = gan.Generator.GeneratorHead
 
     class GeneratorDownSample(network.ModuleArgsDict):
         def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
@@ -374,22 +335,7 @@ class GeneratorV1(network.Network):
                 ),
             )
 
-    class GeneratorUpSample(network.ModuleArgsDict):
-        def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
-            super().__init__()
-            self.add_module(
-                "ConvBlock",
-                blocks.ConvBlock(
-                    in_channels,
-                    out_channels,
-                    block_configs=[blocks.BlockConfig(bias=False, activation="ReLU", norm_mode="SYNCBATCH")],
-                    dim=dim,
-                ),
-            )
-            self.add_module(
-                "Upsample",
-                torch.nn.Upsample(scale_factor=2, mode="bilinear" if dim < 3 else "trilinear"),
-            )
+    GeneratorUpSample = gan.Generator.GeneratorUpSample
 
     class GeneratorEncoder(network.ModuleArgsDict):
         def __init__(self, channels: list[int], dim: int) -> None:

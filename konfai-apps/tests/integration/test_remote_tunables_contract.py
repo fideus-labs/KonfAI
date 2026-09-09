@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from multipart_support import decode_multipart
 
 # Before importing anything that pulls in FastAPI (app_server, the TestClient): a module-level import runs
 # at collection, so pytestmark would skip too late and collection would error when FastAPI is absent.
@@ -120,12 +121,12 @@ def remote_stack(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     with TestClient(app_server.app) as test_client:
 
-        def fake_post(url, files=None, data=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
-            # requests omits None-valued form fields; httpx would send them as empty strings.
-            form = {k: v for k, v in (data or {}).items() if v is not None}
-            response = test_client.post(
-                urllib.parse.urlparse(url).path, files=files or [], data=form, headers=headers or {}
-            )
+        def fake_post(url, data=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
+            # The client streams one multipart body; the test client re-encodes the fields it
+            # carries under a boundary of its own, so the client's Content-Type must not travel.
+            files, form = decode_multipart(data)
+            forwarded = {k: v for k, v in (headers or {}).items() if k.lower() != "content-type"}
+            response = test_client.post(urllib.parse.urlparse(url).path, files=files, data=form, headers=forwarded)
             recorded["posts"].append({"data": form, "response": response})
             return _ProxyResponse(response)
 
@@ -223,8 +224,8 @@ def test_ops_without_tunables_send_no_options_field(remote_stack: dict, tmp_path
 def test_no_tunables_keeps_old_server_compatibility(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     posts: list[dict] = []
 
-    def old_server_post(url, files=None, data=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
-        posts.append(dict(data or {}))
+    def old_server_post(url, data=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
+        posts.append(decode_multipart(data)[1])
         return _StubServerResponse({"job_id": "job-1"})  # pre-options server: no accepted_options
 
     monkeypatch.setattr(app_module.requests, "post", old_server_post)

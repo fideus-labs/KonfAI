@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
+from threading import RLock
 from typing import Annotated, TypeVar, cast
 
 import konfai
@@ -39,6 +40,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HT
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from konfai.utils.errors import AppMetadataError, AppRepositoryError
+from starlette.types import Receive, Scope, Send
 
 from .app_repository import get_app_repository_info
 from .remote_options import parse_remote_options, remote_options_to_cli_args
@@ -419,6 +421,15 @@ class Job:
     assigned_gpus: list[int] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    #: Set by kill_job on a job that has no process yet (queued, waiting for a GPU): the orchestration
+    #: stops before launching it and releases what it had acquired.
+    cancelled: bool = False
+    #: The result and workspace are kept until this time; a download renews the lease.
+    retain_until: float | None = None
+    #: Serialize cancellation with process creation and terminal-state publication.
+    lifecycle_lock: RLock = field(default_factory=RLock, repr=False, compare=False)
+    active_downloads: int = 0
+    expired: bool = False
 
 
 @dataclass
@@ -493,6 +504,8 @@ async def acquire_gpus(job: Job, requested: list[int]) -> list[int]:
     if len(requested) == 0:
         job.status = "waiting"
         while True:
+            if job.cancelled:
+                raise JobCancelled()
             for gid, sem in SERVER_STATE.gpu_semaphores.items():
                 if sem.locked() is False:
                     await sem.acquire()
@@ -504,9 +517,28 @@ async def acquire_gpus(job: Job, requested: list[int]) -> list[int]:
     for gid in gpus:
         if gid not in SERVER_STATE.gpu_semaphores:
             raise HTTPException(400, f"Unknown GPU id: {gid}")
+    acquired: list[int] = []
     for gid in gpus:
-        await SERVER_STATE.gpu_semaphores[gid].acquire()
+        semaphore = SERVER_STATE.gpu_semaphores[gid]
+        while True:
+            if job.cancelled:
+                release_gpus(acquired)  # a cancel while waiting on the second GPU gives the first back
+                raise JobCancelled()
+            try:
+                await asyncio.wait_for(semaphore.acquire(), timeout=0.1)
+                break
+            except TimeoutError:
+                continue
+        acquired.append(gid)
     return gpus
+
+
+class JobCancelled(Exception):
+    """The job was killed while it was still waiting for a GPU: nothing to launch."""
+
+
+RESULT_RETENTION_S = float(os.environ.get("KONFAI_APPS_RESULT_RETENTION", "600"))
+"""Seconds a finished job's result and workspace are kept, renewed by every download that starts."""
 
 
 def release_gpus(gpus: list[int]) -> None:
@@ -786,46 +818,57 @@ def _run_job_sync(
     cmd : list[str]
         Fully resolved command line to execute.
     """
-    job.status = "running"
-    emit_log(job, f"[KonfAI-Apps] Starting job in: {job.run_dir}")
-
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(job.run_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-            start_new_session=True,
-        )  # nosec B603
-        job.proc = proc
+        with job.lifecycle_lock:
+            if job.cancelled:
+                return
+            job.status = "running"
+            emit_log(job, f"[KonfAI-Apps] Starting job in: {job.run_dir}")
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(job.run_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                start_new_session=True,
+            )  # nosec B603
+            job.proc = proc
         if proc.stdout:
             for line in proc.stdout:
                 emit_log(job, line.rstrip("\n"))
 
         rc = proc.wait()
-        if rc != 0:
-            job.status = "error"
-            job.error = f"Subprocess failed (exit code {rc})"
-            emit_log(job, f"__ERROR__ {job.error}")
-            emit_log(job, "__DONE__")
-            return
+        with job.lifecycle_lock:
+            if job.cancelled:
+                return
+            if rc != 0:
+                job.status = "error"
+                job.error = f"Subprocess failed (exit code {rc})"
+                emit_log(job, f"__ERROR__ {job.error}")
+                emit_log(job, "__DONE__")
+                return
 
         zip_base = job.run_dir / "result"
         zip_file = shutil.make_archive(str(zip_base), "zip", root_dir=job.output_dir)
         job.zip_path = Path(zip_file)
 
-        job.status = "done"
-        emit_log(job, f"Result zip created: {job.zip_path}")
-        emit_log(job, "__DONE__")
+        with job.lifecycle_lock:
+            if job.cancelled:
+                return
+            job.status = "done"
+            emit_log(job, f"Result zip created: {job.zip_path}")
+            emit_log(job, "__DONE__")
 
     except Exception as e:
-        job.status = "error"
-        job.error = str(e)
-        emit_log(job, f"__ERROR__ {job.error}")
-        emit_log(job, "__DONE__")
+        with job.lifecycle_lock:
+            if job.cancelled:
+                return
+            job.status = "error"
+            job.error = str(e)
+            emit_log(job, f"__ERROR__ {job.error}")
+            emit_log(job, "__DONE__")
 
 
 async def start_job(job: Job, cmd: list[str], requested_gpus: list[int] | None):
@@ -867,15 +910,27 @@ async def start_job(job: Job, cmd: list[str], requested_gpus: list[int] | None):
             if gpus:
                 cmd2 += ["--gpu"] + [str(i) for i in gpus]
 
+        if job.cancelled:
+            raise JobCancelled()
         await asyncio.to_thread(_run_job_sync, job, cmd2)
 
+    except JobCancelled:
+        pass  # kill_job already marked it and told the log stream
     finally:
         if gpus:
             release_gpus(gpus)
 
         job.finished_at = time.time()
-
-        await asyncio.sleep(120)
+        # The lease: a download that starts renews it, so a slow or late client is not cut off at a
+        # fixed 120 s after completion as it once was.
+        job.retain_until = job.finished_at + RESULT_RETENTION_S
+        while True:
+            with job.lifecycle_lock:
+                remaining = job.retain_until - time.time()
+                if remaining <= 0 and job.active_downloads == 0:
+                    job.expired = True
+                    break
+            await asyncio.sleep(min(max(remaining, 0.1), 5.0))
 
         shutil.rmtree(job.run_dir, ignore_errors=True)
 
@@ -1474,7 +1529,43 @@ def job_result(job_id: str):
     if job.status != "done" or not job.zip_path.exists():
         return JSONResponse(status_code=202, content={"job_id": job.job_id, "status": job.status})
 
-    return FileResponse(str(job.zip_path), media_type="application/zip", filename="result.zip")
+    with job.lifecycle_lock:
+        if job.expired:
+            raise HTTPException(410, "Result retention expired")
+        if job.retain_until is not None:
+            job.retain_until = max(job.retain_until, time.time() + RESULT_RETENTION_S)
+    return _JobResultResponse(job)
+
+
+class _JobResultResponse(FileResponse):
+    """Hold the result throughout the actual ASGI transfer, including disconnect cleanup."""
+
+    def __init__(self, job: Job):
+        super().__init__(str(job.zip_path), media_type="application/zip", filename="result.zip")
+        self.job = job
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        with self.job.lifecycle_lock:
+            if self.job.expired:
+                raise HTTPException(410, "Result retention expired")
+            self.job.active_downloads += 1
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with self.job.lifecycle_lock:
+                self.job.active_downloads -= 1
+
+
+def _process_group_exists(pgid: int) -> bool:
+    """Whether any member remains, even after the process-group leader has exited (POSIX only)."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        return False
+    try:
+        killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 @protected.post("/jobs/{job_id}/kill")
@@ -1487,7 +1578,7 @@ def kill_job(job_id: str):
 
     1. Sends SIGTERM to the entire process group
     2. Waits briefly for graceful shutdown
-    3. Sends SIGKILL if the process is still alive
+    3. Sends SIGKILL if any process-group member remains
     4. Marks the job as killed
     5. Emits termination markers in the log stream
 
@@ -1503,30 +1594,38 @@ def kill_job(job_id: str):
     """
     job = get_job_or_404(job_id)
 
-    proc = job.proc
-    if proc is None or proc.poll() is not None:
-        return {"job_id": job.job_id, "status": job.status, "message": "Job not running"}
-
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-
-        # brief grace period, then SIGKILL
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            if proc.poll() is not None:
-                break
-            time.sleep(0.05)
-
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
-
+    with job.lifecycle_lock:
+        if job.status in {"done", "error", "killed"}:
+            return {"job_id": job.job_id, "status": job.status, "message": "Job not running"}
+        proc = job.proc
+        # Creation and registration hold this same lock: cancellation either prevents launch or
+        # owns a registered process to terminate. Publish cancellation before waiting for its exit.
+        job.cancelled = True
         job.status = "killed"
         job.error = "Killed by user"
         emit_log(job, "__ERROR__ Killed by user")
         emit_log(job, "__DONE__")
-
+    if proc is None:
         return {"job_id": job.job_id, "status": "killed", "message": "Kill requested"}
 
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+
+        # The leader can exit first while a descendant still owns CUDA or stdout. Reap the
+        # leader when possible, but decide escalation from the whole group's existence.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            proc.poll()
+            if not _process_group_exists(proc.pid):
+                break
+            time.sleep(0.05)
+
+        if _process_group_exists(proc.pid):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+        return {"job_id": job.job_id, "status": "killed", "message": "Kill requested"}
+    except ProcessLookupError:
+        return {"job_id": job.job_id, "status": "killed", "message": "Process exited during cancellation"}
     except Exception as e:
         raise HTTPException(500, f"Failed to kill job: {e}") from e
 

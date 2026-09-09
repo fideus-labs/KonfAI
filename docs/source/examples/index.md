@@ -19,7 +19,9 @@ configured. They are KonfAI {doc}`Apps <../usage/apps>`.
 **The other three are the framework itself**: a YAML config, the `konfai` CLI,
 and nothing else. They are what you copy for your own experiment, and the pages
 below document them. Their training runs are deliberately short, so the scores
-demonstrate the pipeline rather than the method.
+demonstrate the pipeline rather than the method. A fourth,
+{doc}`bring-your-model`, is the same engine without the YAML: a MONAI `UNet`
+trained and run through `konfai.train_model` and `konfai.predict_model`.
 
 Both tiers use the public demo data on Hugging Face: `VBoussot/konfai-demo` ships
 a `Segmentation/` subset (pelvis CT, 41-label reference: also the source
@@ -135,6 +137,8 @@ paths relative to the current working directory.
 ## Next steps
 
 - {doc}`segmentation`: the smallest end-to-end run; start here
+- {doc}`bring-your-model`: a model you already have, no YAML
+- {doc}`large-images`: a 2.4 GB public OME-Zarr read where it lives, chunk by chunk
 - {doc}`registration`: train, materialise, and evaluate a fixed/moving image workflow
 - {ref}`gallery-registration`: inspect a separate real IMPACT-Reg App execution
 - {doc}`../concepts/configuration`: understand the YAML the examples are built from

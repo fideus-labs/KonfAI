@@ -513,6 +513,53 @@ def test_job_registry_recovers_persisted_active_jobs(tmp_path: Path) -> None:
     assert "restart" in (payload["error"] or "")
 
 
+def _persisted_job_record(job_id: str, status: str, config_path: Path) -> str:
+    return json.dumps(
+        {
+            "job_id": job_id,
+            "session": "default",
+            "kind": "train",
+            "command": ["python", "-m", "konfai_mcp.runner", "TRAIN"],
+            "cwd": "/tmp/demo",
+            "log_path": "/tmp/demo.log",
+            "config_path": str(config_path),
+            "created_at": 1.0,
+            "status": status,
+            "pid": 4321,
+            "returncode": None,
+            "started_at": 1.5,
+            "finished_at": 2.0 if status == "done" else None,
+            "cancel_requested": False,
+            "error": None,
+            "run_name": "RUN_01",
+            "runtime_log_path": "/tmp/Statistics/RUN_01/log_0.txt",
+            "job_dir": None,
+            "manifest_path": None,
+            "recovered": False,
+        }
+    )
+
+
+def test_the_resolved_config_snapshot_is_taken_when_the_job_ends_not_at_every_start(tmp_path: Path) -> None:
+    """A job that was over before this server started keeps the config edited since out of its record."""
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Trainer: {}\n", encoding="utf-8")
+    for job_id, status in (("finished_before", "done"), ("died_with_server", "running")):
+        layout.job_dir(job_id).mkdir(parents=True)
+        layout.job_state_path(job_id).write_text(_persisted_job_record(job_id, status, config_path), encoding="utf-8")
+        layout.job_manifest_path(job_id).write_text("{}", encoding="utf-8")
+
+    registry = JobRegistry({"queued", "running"}, workspace_layout=layout)
+
+    assert registry.get("finished_before").status == "done"
+    assert json.loads(layout.job_manifest_path("finished_before").read_text(encoding="utf-8")) == {}
+    assert registry.get("died_with_server").status == "error"
+    manifest = json.loads(layout.job_manifest_path("died_with_server").read_text(encoding="utf-8"))
+    assert Path(manifest["resolved_config_snapshot"]).read_text(encoding="utf-8") == "Trainer: {}\n"
+
+
 def test_corrupt_job_record_does_not_block_server_start(tmp_path: Path) -> None:
     # A crash mid-write can leave a truncated job.json. The recovery loop reads every record at start,
     # so a single corrupt file must be skipped, not make JobRegistry construction fatal (dead server).
@@ -618,10 +665,12 @@ def test_manifest_failure_marks_job_terminal_not_stuck_queued(tmp_path: Path) ->
     assert statuses == {"error"}
 
 
+@pytest.mark.parametrize("has_continuation", [False, True])
 def test_run_resume_and_failed_job_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
+    has_continuation: bool,
 ) -> None:
     monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
     monkeypatch.setenv("KONFAI_MCP_FAKE_SLEEP_S", "0.05")
@@ -642,6 +691,11 @@ def test_run_resume_and_failed_job_payload(
             checkpoint = workspace / "Checkpoints" / "FAKE_RUN" / "epoch_0000.pt"
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             checkpoint.write_text("checkpoint", encoding="utf-8")
+            if has_continuation:
+                checkpoint = checkpoint.parent / "resume_latest.pt"
+                checkpoint.write_text("continuation", encoding="utf-8")
+                # Even a newer non-boundary scored checkpoint must not displace the cursor.
+                os.utime(checkpoint, (1000, 1000))
 
             resumed = await client.call_tool("run_resume", {"lr": 0.0005})
             resumed_payload = resumed.structured_content
@@ -711,6 +765,7 @@ def test_run_resume_weights_only_strips_to_model(
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             # A full training checkpoint: Model weights beside the counters/optimizer a plain RESUME restores.
             torch.save({"Model": {"w": torch.zeros(2)}, "epoch": 9, "it": 900, "optimizer": {"state": {}}}, checkpoint)
+            torch.save({"Model": {"w": torch.ones(2)}, "epoch": 10}, checkpoint.parent / "resume_latest.pt")
 
             # A URL cannot be stripped to weights: weights_only demands a local checkpoint.
             with pytest.raises(Exception, match="local checkpoint"):
@@ -725,7 +780,9 @@ def test_run_resume_weights_only_strips_to_model(
             assert resume_from.parent == workspace
             from konfai.utils.runtime import safe_torch_load
 
-            assert set(safe_torch_load(resume_from, "cpu")) == {"Model"}
+            warm_start = safe_torch_load(resume_from, "cpu")
+            assert set(warm_start) == {"Model"}
+            assert torch.equal(warm_start["Model"]["w"], torch.zeros(2))
 
     asyncio.run(scenario())
 

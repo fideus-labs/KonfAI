@@ -84,6 +84,18 @@ def _kib(field):
             return int(line.split()[1])
     return 0
 
+
+def _resident_peak_kib():
+    """The kernel's high-water mark, and what a route read off it before resetting it to measure a
+    region: the run's peak, whatever a scope reset along the way."""
+    try:
+        from konfai.utils.budget import run_peak_resident_bytes
+
+        peak = run_peak_resident_bytes()
+    except Exception:
+        peak = None
+    return max(_kib("VmHWM"), 0 if peak is None else peak // 1024)
+
 '''
 
 _EPILOGUE = """
@@ -97,7 +109,7 @@ print("@@" + json.dumps({
     "outcome": outcome,
     "detail": detail,
     "address_space_kib": _kib("VmPeak"),
-    "resident_kib": _kib("VmHWM"),
+    "resident_kib": _resident_peak_kib(),
 }))
 """
 

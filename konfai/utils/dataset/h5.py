@@ -338,6 +338,18 @@ class H5File(AbstractFile):
         # touches (a third-party chunked store): never the whole volume.
         return True
 
+    def read_granularity(self, name: str) -> tuple[int, ...] | None:
+        """The chunk a chunked entry is stored in (``C[Z]YX``): a hyperslab decodes every chunk it
+        touches whole, so a window costs the chunk-aligned hull that covers it, and a sweep cut on
+        that grid reads each chunk once. ``None`` for a contiguous entry, what ``data_to_file``
+        writes, where a read costs the bytes it covers. A region write (``open_data_stream``)
+        chunks on its region, so a cache this run wrote answers the grain it was written in."""
+        groups, _, entry = name.rpartition("/")
+        dataset = self._get_dataset(groups, entry)
+        if not isinstance(dataset, h5py.Dataset) or dataset.chunks is None:
+            return None
+        return tuple(int(extent) for extent in dataset.chunks)
+
     def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         dataset = self._require_dataset(groups, name)
         data = np.asarray(dataset[slices])

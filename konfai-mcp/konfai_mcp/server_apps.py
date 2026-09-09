@@ -37,7 +37,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -893,6 +892,7 @@ class AppService:
         onnx: bool = False,
         onnx_patch_size: list[int] | None = None,
         onnx_in_channels: int | None = None,
+        support_files: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Package a session's trained model into a resolvable app bundle via ``assemble_bundle``.
 
@@ -912,6 +912,16 @@ class AppService:
 
         bundle_name = self.workspace_layout.sanitize_name(name)
         out_dir = Path(output).expanduser() if output else (self.workspace_layout.workspace_dir() / "AppBundles")
+        session_dir = self.workspace_layout.workspace_dir().resolve()
+        for source in (support_files or {}).values():
+            self.workspace_layout.resolve_workspace_relative_path(source)
+        planned_support = self._referenced_support_file_sources(
+            resolved_configs, out_dir / bundle_name, protected={"Model.py"} if model_py else None
+        )
+        for destination, declared in bundle.resolve_support_files(support_files, session_dir).items():
+            if destination in planned_support and planned_support[destination] != declared:
+                raise ValueError(f"Declared support file conflicts with a config reference: {destination!r}.")
+            planned_support[destination] = declared
         metadata = {
             "display_name": display_name,
             "description": description,
@@ -940,23 +950,19 @@ class AppService:
                 resolved_checkpoints,
                 model_py=str(Path(model_py).expanduser()) if model_py else None,
                 requirements=str(Path(requirements).expanduser()) if requirements else None,
+                support_files={name: str(source.relative_to(session_dir)) for name, source in planned_support.items()},
+                support_root=session_dir,
             )
         finally:
             Path(tmp_app_json).unlink(missing_ok=True)
 
-        # Copy every support file the config references by classpath (e.g. the UNet.yml YAML model, a local
-        # Model.py/Loss.py). assemble_bundle copies the configs + model_py but NOT the files they reference,
-        # so a YAML-model bundle would fail at resolve with 'Could not read model YAML file'.
-        copied_support = self._copy_referenced_support_files(
-            resolved_configs, bundle_path, protected={"Model.py"} if model_py else None
-        )
         self._normalize_bundled_prediction_configs(bundle_path, resolved_configs)
 
         result: dict[str, Any] = {
             "bundle_path": str(bundle_path),
             "checkpoints": [Path(path).name for path in resolved_checkpoints],
             "configs": [Path(path).name for path in resolved_configs],
-            "support_files": copied_support,
+            "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
             "next_actions": ["describe_app", "run_app_infer", "import_app"],
@@ -997,10 +1003,14 @@ class AppService:
             if run_dirs:
                 # Default to the NEWEST run only: a session often holds several runs, and sweeping
                 # them all silently ships foreign experiments' checkpoints in one bundle.
-                checkpoints = sorted(str(path) for path in run_dirs[-1].rglob("*.pt"))
+                checkpoints = sorted(
+                    str(path) for path in run_dirs[-1].rglob("*.pt") if path.name != "resume_latest.pt"
+                )
             else:
                 checkpoints = (
-                    sorted(str(path) for path in checkpoints_dir.rglob("*.pt")) if checkpoints_dir.exists() else []
+                    sorted(str(path) for path in checkpoints_dir.rglob("*.pt") if path.name != "resume_latest.pt")
+                    if checkpoints_dir.exists()
+                    else []
                 )
         resolved = [str(Path(path).expanduser()) for path in checkpoints]
         if not resolved:
@@ -1066,12 +1076,13 @@ class AppService:
         groups_src = dataset.get("groups_src") if isinstance(dataset, dict) else None
         for group, spec in (groups_src or {}).items() if isinstance(groups_src, dict) else []:
             slot = {"display_name": group, "volume_type": self._volume_type_for(group), "required": True}
-            if self._spec_is_input(spec):
+            if prediction is not None:
+                # Every source group a prediction reads is a file the app must be given: a companion
+                # mask a Clip or Standardize reads (is_input: false) as much as the network's input.
                 # Only a Prediction.yml makes the bundle runnable: app.json inputs drive
                 # has_capabilities.inference, so a train-only bundle must not advertise them.
-                if prediction is not None:
-                    inputs[group] = slot
-            else:
+                inputs[group] = slot
+            elif not self._spec_is_input(spec):
                 # A non-input group in a train/eval config is the produced target (what a from-scratch model makes).
                 outputs.setdefault(group, slot)
         outputs_dataset = body.get("outputs_dataset")
@@ -1119,18 +1130,13 @@ class AppService:
             renames: dict[str, str] = {}
             groups_src = dataset.get("groups_src")
             if isinstance(groups_src, dict):
-                renames = {
-                    group: f"Volume_{index}"
-                    for index, group in enumerate(g for g, spec in groups_src.items() if self._spec_is_input(spec))
-                }
-                clobbered = set(renames.values()) & (set(groups_src) - set(renames))
-                if clobbered:
-                    raise ValueError(
-                        f"Cannot package '{bundled.name}': the app contract renames input groups to Volume_0..n, "
-                        f"but non-input group(s) {sorted(clobbered)} already use those names. Rename them in the "
-                        "session config or pass configs=[...] explicitly."
-                    )
-                dataset["groups_src"] = {renames.get(group, group): spec for group, spec in groups_src.items()}
+                # Every source group is staged as Volume_i, in the order app.json lists the inputs
+                # (_derive_app_io walks the same mapping): a companion mask included, and the stage
+                # parameters that name it follow, or a Clip would read a group the bundle no longer has.
+                renames = {group: f"Volume_{index}" for index, group in enumerate(groups_src)}
+                dataset["groups_src"] = {renames[group]: spec for group, spec in groups_src.items()}
+                for spec in dataset["groups_src"].values():
+                    self._rename_group_references(spec, renames)
             filenames = dataset.get("dataset_filenames")
             if isinstance(filenames, list) and filenames:
                 # Keep each entry's accessor/format token (staging symlinks inputs with their original
@@ -1145,6 +1151,9 @@ class AppService:
             outputs_dataset = predictor.get("outputs_dataset") if isinstance(predictor, dict) else None
             for spec in outputs_dataset.values() if isinstance(outputs_dataset, dict) else []:
                 output = spec.get("OutputDataset") if isinstance(spec, dict) else None
+                if isinstance(output, dict):
+                    for chain in ("before_reduction_transforms", "after_reduction_transforms", "final_transforms"):
+                        self._rename_group_references(output.get(chain), renames)
                 same_as = output.get("same_as_group") if isinstance(output, dict) else None
                 if isinstance(same_as, str) and isinstance(output, dict):
                     src, sep, dest = same_as.partition(":")
@@ -1152,41 +1161,93 @@ class AppService:
                         output["same_as_group"] = renames[src] + sep + dest
             bundled.write_text(yaml_dump_content(data), encoding="utf-8")
 
-    def _copy_referenced_support_files(
-        self, config_paths: list[str], bundle_path: Path, protected: set[str] | None = None
-    ) -> list[str]:
-        """Copy config-referenced model/support files (classpath: X.yml, local File:Class -> File.py) into the bundle.
+    #: Stage parameters that name a companion source group: what a rename of the groups must follow.
+    _GROUP_REFERENCE_KEYS = ("mask", "path", "reference_group", "field_group")
 
-        Copies unconditionally so repackaging under the same name picks up edited session files;
-        ``protected`` names (e.g. an explicitly passed model_py already placed as Model.py) are skipped.
+    @classmethod
+    def _rename_group_references(cls, node: Any, renames: dict[str, str]) -> None:
+        """Rewrite, in place, every known stage parameter under ``node`` whose value is a renamed group."""
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in cls._GROUP_REFERENCE_KEYS and isinstance(value, str) and value in renames:
+                    node[key] = renames[value]
+                else:
+                    cls._rename_group_references(value, renames)
+        elif isinstance(node, list):
+            for value in node:
+                cls._rename_group_references(value, renames)
+
+    def _referenced_support_file_sources(
+        self, config_paths: list[str], bundle_path: Path, protected: set[str] | None = None
+    ) -> dict[str, Path]:
+        """Plan direct config references before the assembler validates and stages the whole bundle.
+
+        No import dependency discovery: helpers/assets are explicit ``support_files`` declarations.
+        ``protected`` names (an explicitly passed model_py already placed as Model.py) are skipped.
         """
         session_dir = self.workspace_layout.workspace_dir().resolve()
-        wanted: set[str] = set()
+        wanted: dict[str, Path] = {}
         for config_path in config_paths:
+            source_config = Path(config_path).resolve()
             try:
-                text = Path(config_path).read_text(encoding="utf-8")
+                text = source_config.read_text(encoding="utf-8")
             except OSError:
                 continue
-            # classpath: UNet.yml or sub/UNet.yml (the YAML model builder file), session-relative
-            wanted.update(re.findall(r"classpath:\s*([\w./-]+\.ya?ml)\b", text))
-            # local File:Class references (e.g. Loss:MyWrapper) -> File.py living in the session
-            for file_stem in re.findall(r"\b([A-Za-z]\w*):[A-Za-z]\w*\b", text):
-                candidate = f"{file_stem}.py"
-                if (session_dir / candidate).exists():
-                    wanted.add(candidate)
-        copied: list[str] = []
-        for relative in sorted(wanted):
-            if relative in (protected or set()):
-                continue
-            src = (session_dir / relative).resolve()
-            # Containment: a classpath like ../shared/UNet.yml must not read outside the session.
-            if not src.is_relative_to(session_dir) or not src.is_file():
-                continue
-            dst = bundle_path / relative
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src, dst)
-            copied.append(relative)
-        return copied
+            for relative in self._referenced_support_files(text, session_dir):
+                if relative in (protected or set()):
+                    continue
+                # ModelLoader anchors a model YAML next to the config that names it. Python imports
+                # still use the workspace root, as the workflow does, regardless of config location.
+                base = source_config.parent if Path(relative).suffix.lower() in {".yml", ".yaml"} else session_dir
+                src = (base / relative).resolve()
+                if not src.is_relative_to(session_dir) or not src.is_file():
+                    continue
+                if not (bundle_path / relative).resolve().is_relative_to(bundle_path.resolve()):
+                    raise ValueError(
+                        f"Support path {relative!r} would escape the bundle. "
+                        "Place the model below its config directory and reference it with a relative path."
+                    )
+                if relative in wanted and wanted[relative] != src:
+                    raise ValueError(
+                        f"Different configs reference different support files named {relative!r}; rename them."
+                    )
+                wanted[relative] = src
+        return dict(sorted(wanted.items()))
+
+    @staticmethod
+    def _referenced_support_files(text: str, session_dir: Path) -> set[str]:
+        """The session-relative files a config names: a YAML model (``classpath: UNet.yml``, quoted
+        or not: read from the parsed tree, keys included, where a regex over the text missed the
+        quoted spelling) and the ``File.py`` of a local ``File:Class`` reference. The catalog
+        spelling ``default|Name.yml`` is not a file of the session."""
+        from .server_support import YAML_SAFE
+
+        scalars: list[str] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    walk(key)
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+            elif isinstance(node, str):
+                scalars.append(node)
+
+        try:
+            walk(YAML_SAFE.load(text))
+        except Exception:  # a config YAML cannot parse: its tokens, as the text holds them
+            scalars = re.findall(r"[\w./:-]+", text)
+        wanted: set[str] = set()
+        for scalar in scalars:
+            value = scalar.strip()
+            if re.fullmatch(r"[\w./-]+\.ya?ml", value):
+                wanted.add(value)
+            reference = re.fullmatch(r"([A-Za-z]\w*):[A-Za-z]\w*", value)
+            if reference and (session_dir / f"{reference.group(1)}.py").exists():
+                wanted.add(f"{reference.group(1)}.py")
+        return wanted
 
     def register_app_source(self, ref: str) -> dict[str, Any]:
         """Append an app reference (app id or bare HF ``repo_id``) to the workspace catalogue file."""

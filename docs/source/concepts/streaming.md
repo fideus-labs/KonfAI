@@ -271,8 +271,10 @@ lowers the height below the default. Everything else is independent of the
 slabbing: the same chain writes the same bytes under any budget.
 
 The same holds across slab heights. A `TRANSFORM` sweep cuts a case into slabs
-whose height follows the memory budget, so it depends on the machine (64 rows
-without a budget, fewer under a tight or `auto` one). A pointwise, halo,
+whose height follows the memory budget, so it depends on the machine: the first
+slab is priced against half of the budget, and each slab that holds under a
+third of it doubles the next, up to eight chunk rows (64 rows, unchanged, without
+a budget). A pointwise, halo,
 orientation or crop chain and an axis-aligned `Resample` write the same bytes at
 8 rows as at 64; only the non-separable linear resample above can differ, and by
 that same 1e-5. An OME-Zarr store's chunk layout does follow the slab, so the

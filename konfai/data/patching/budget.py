@@ -18,11 +18,11 @@
 """What a sweep may hold: the constants it is priced with, the device cap, the held-memory meter."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
-from konfai.utils.budget import peak_resident_bytes, reset_resident_peak, resident_bytes
+from konfai.utils.budget import peak_resident_bytes, reset_resident_peak, resident_bytes, resident_floor
 
 #: The whole-volume statistics every store can serve (``Dataset.read_data_statistics``), by the key a
 #: GLOBAL_STAT stage declares: what the plan checks against without reading a voxel, and what the
@@ -40,10 +40,9 @@ _STREAM_STATS = {
 }
 _STREAM_STAT_KEYS = frozenset(_STREAM_STATS)
 
-# Rows per Save-sweep region: what bounds the materialization to a window while the composed region
-# reads stay chunk-friendly. A declared memory_budget can only LOWER the height (see
-# DatasetManager._sweep_rows); this constant is the cap and the no-budget default on a CPU. The
-# VOLUME it allows is what DatasetManager._sweep_tile then shapes into the block actually read.
+# The unit a region grows by on a store without a block grid, and the height a sweep keeps without
+# a budget: with one, the first region is priced (SegmentSizer.growth) and the next ones follow
+# what the last held (RegionGrowth), up to GROWTH_CAP_UNITS of it.
 SWEEP_SLAB_ROWS = 64
 
 
@@ -73,18 +72,25 @@ _UNRESOLVED = _Unresolved()
 # (a bare Write), 8 (Gradient), 11 (Resample), 27 (Resample then Gradient). A floor the sizing cannot
 # lower, so the TRANSFORM plan's header states it instead of leaving it to be found in a resident set.
 SWEEP_ENGINE_FLOOR_BYTES = 32 << 20
-#: The most blocks a sweep keeps in flight, whatever the budget leaves room for: past a second
-#: one the jitter it absorbs is already absorbed (DatasetManager._sweep_depth).
-_SWEEP_MAX_DEPTH = 3
-#: The region height cap when the chain runs on a GPU (bounded by free device memory as well).
-_SWEEP_SLAB_ROWS_DEVICE = 256
-#: How far above the floor a decomposition's reads may sit for its height to count as the plateau
-#: (:func:`_plateau_rows`). Measured on the prep's appearance fold, a native volume resampled
-#: through a field onto a 514x1331x1775 grid, reads against height as a multiple of the floor:
-#: 5 rows 1.79x, 10 1.40, 20 1.19, 41 1.09, 82 1.05, 169 1.02, 514 1.00. The curve is a knee, so
-#: anything from a few per cent to a tenth names the same height; five was measured to hold the
-#: fold at 17.4 GiB where an uncapped one held 28.7, for 56.9 -> 58.4 s of wall clock.
-_PLATEAU_READ_MARGIN = 0.05
+#: How many units a region grows to at most, a unit being the store's block along the sweep axis
+#: (``SWEEP_SLAB_ROWS`` on a store without one). Measured on a 2 GiB h5 volume chunked at 64
+#: rows (``benchmarks/perf/bench_transform.py``, 2026-09-07): the wall halves from a sub-chunk
+#: region to four-to-eight chunk rows (15.6 -> 7.6 s) and is flat past that; on the 513-row
+#: ExaSPIM store chunked at 256 rows the knee sits at one chunk row (24 s under 1 GiB, 5.9 s
+#: under 8 GiB, flat at 16), and a region under the chunk runs, slower, where a refusal would not.
+GROWTH_CAP_UNITS = 8
+#: The share of the budget the first region is priced against. The price is a model of what a
+#: chain holds, and the worst overshoot on record is a first region at 1.5x its price (a fold over
+#: registration fields), on a host that kills without a MemoryError: from a half, that lands at
+#: 0.75 of the budget, and the growth finds the rest in one doubling. An eighth was measured to
+#: cost a 513-row store two of its three regions (12.2 s against 5.9 under 8 GiB).
+_START_SHARE = 0.5
+#: A region measured under this share of the budget doubles the next. A third, not a half: what
+#: a doubled region holds is not double (the landing buffers, the chain's temporaries and the
+#: allocator's slack grow with it), measured at 2.4x on a 2 GiB h5 sweep whose 128-row regions
+#: held 0.42 GiB and whose 256-row ones held 1.00; doubled from under a third, the next lands under
+#: the budget at that ratio. One measured over the budget halves the next.
+_GROW_BELOW = 1.0 / 3.0
 #: How much less a cubic block must read for the sweep to take it (``DatasetManager._sweep_tile``).
 #: A sheared map measures 0.61 on a 513x1331x1776 rigid+affine; an unsheared one, the margin alone.
 _SWEEP_TILE_MARGIN = 0.8
@@ -99,6 +105,66 @@ _SWEEP_ELEMENT_BYTES = 4
 #: the run it describes is worse than no plan.
 FALLBACK_INFLIGHT_FACTOR = 2
 CASE_ELEMENT_BYTES = 4
+
+
+@dataclass
+class RegionGrowth:
+    """The height of the regions a route cuts, decided by what the last one HELD.
+
+    The price starts the first region small (``_START_SHARE``); every region measured under a third of
+    the budget doubles the next, one measured over the budget halves it, never above ``cap`` and
+    never below the first, so every region starts on a multiple of the first and the output's
+    chunk grid, cut on the first, is never straddled. Without a budget, or without an instrument
+    to read, the height stands.
+    """
+
+    rows: int
+    cap: int
+    budget_bytes: float | None
+    #: Regions measured at the current height before it may double again: a pipelined sweep holds
+    #: ``depth + 2`` regions in flight, and a reading taken before that many have run at a height
+    #: says what the previous height cost. Doubled twice on such readings, a sweep of a 2 GiB
+    #: volume reached 340-row regions and 1.52 GiB held under a 1 GiB budget before the meter
+    #: caught up, and the high-water mark then held it at the first height for the rest.
+    settle: int = 1
+    first: int = field(init=False)
+    _at_height: int = field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        self.rows = max(1, int(self.rows))
+        self.cap = max(self.rows, int(self.cap))
+        self.settle = max(1, int(self.settle))
+        self.first = self.rows
+
+    def halve_below_first(self) -> int:
+        """Half the height, the first region's included: the answer to a region the device could not
+        hold at all (an OutOfMemoryError), where the measured rule only ever halves down to the
+        first. The new height is the floor from here on."""
+        self.rows = max(1, self.rows // 2)
+        self.first, self._at_height = self.rows, 0
+        return self.rows
+
+    def after(self, held: int | None) -> int:
+        """The height of the regions cut after one that held ``held`` bytes."""
+        budget = self.budget_bytes
+        self._at_height += 1
+        if held is None or not budget or budget <= 0:
+            return self.rows
+        if held > budget:
+            rows = max(self.first, self.rows // 2)
+        elif held < budget * _GROW_BELOW and self.rows < self.cap and self._at_height >= self.settle:
+            rows = min(self.cap, self.rows * 2)
+        else:
+            rows = self.rows
+        if rows != self.rows:
+            self.rows, self._at_height = rows, 0
+        return self.rows
+
+
+def device_signals_oom(device: "torch.device | None") -> bool:
+    """Whether a region ``device`` cannot hold is a catchable ``OutOfMemoryError``: a CUDA device
+    raises one, the host gets no signal (the kernel kills). What the halve-on-OOM retry asks."""
+    return device is not None and device.type == "cuda"
 
 
 def device_capped_budget(budget_bytes: float | None, device: "torch.device | None") -> float | None:
@@ -132,7 +198,9 @@ class HeldMeter:
     A GPU chain has the device allocator, which counts what is in use; a host chain has the kernel's
     resident high-water mark, which counts what the allocator is sitting on as well -- and that is
     the better figure of the two here, since the kernel kills on resident memory. Both answer the
-    same question, so a caller asks one thing and never branches on which it got.
+    same question, so a caller asks one thing and never branches on which it got. On the host the
+    baseline is the run's resident floor when the workflow recorded one
+    (:func:`~konfai.utils.budget.record_resident_floor`), else where the scope started.
     """
 
     _peak: Callable[[], int | None]
@@ -169,7 +237,10 @@ def open_held_meter(device: "torch.device | None") -> HeldMeter | None:
         return HeldMeter(device_peak, baseline)
     if not reset_resident_peak():
         return None
-    resident = resident_bytes()
+    # Above the run's resident floor where the workflow recorded one, else above where the scope
+    # starts: a region reusing the pages an earlier one freed holds them all the same, and only
+    # a baseline taken before any region was read counts them.
+    resident = resident_floor() if resident_floor() is not None else resident_bytes()
     if resident is None:
         return None
     # THE CACHE IS NOT THE SCOPE'S. A host peak is the whole process's high-water mark, and the

@@ -44,6 +44,67 @@ criterions_loader:
 An ordinary `torch.nn.Module` is wrapped for execution and exposes its final
 output. Choose this route first when the existing forward is all you need.
 
+## Bring your model: ten lines, no YAML
+
+A model you already built in Python trains and predicts on a KonfAI dataset
+through two calls, with the patching, the overlap blending, the streamed
+writes and the run record of every other run:
+
+```python
+import konfai, torch
+from konfai.metric.measure import CrossEntropyLoss
+from konfai.data.transform import TensorCast
+
+model = torch.nn.Sequential(torch.nn.Conv2d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(16, 2, 1))
+checkpoints = konfai.train_model(
+    model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
+    patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]},
+)
+konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
+                     checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
+```
+
+`inputs` and `targets` are the dataset's groups; `patch` is what the model is
+fed, its non-unit axes deciding whether the model is 2D or 3D; `transforms`
+and `augmentations` take the same objects the YAML would name. The workspace
+keeps the resolved config as every run does, with the model named by a token
+(`konfai.api:live_model`): the object lives in this process, so such a run
+stays on one rank and cannot be resumed from another process. A relative
+`output` lands under the run's workspace (`Predictions/<name>/`), an absolute
+one where it says. Left without
+`checkpoints`, `predict_model` writes the weights the module holds in memory
+as a checkpoint for the run, so a model loaded any other way (a library's
+pretrained weights, a foreign checkpoint) predicts as it stands. For several
+GPUs, or to resume, spell the model as a classpath and use the YAML route.
+
+## MONAI Bundles, both ways
+
+A [MONAI Bundle](https://docs.monai.io/en/stable/mb_specification.html) (the
+model zoo's format: `metadata.json`, `configs/inference.json`, `models/model.pt`)
+imports as the `Model` block of a `Prediction.yml` plus a KonfAI checkpoint:
+
+```python
+imported = konfai.import_bundle("./spleen_ct_segmentation")
+imported.classpath        # 'monai.networks.nets:UNet'
+imported.arguments        # the class's arguments, every @reference of the bundle resolved
+imported.checkpoint       # models/konfai_model.pt, what `konfai PREDICTION --models` takes
+imported.model_tree()     # the Model block, ready for a config tree or a Prediction.yml
+imported.untranslated     # the bundle's preprocessing and inferer, reported, not translated
+```
+
+The bundle's preprocessing and inferer are MONAI transforms on MONAI's runtime:
+spell the equivalent KonfAI stages under `transforms:` (`Standardize`,
+`Resample`, `Clip`, and the `Patch` block for the sliding window). The other
+way, a loaded KonfAI network's inference head becomes a bundle any MONAI
+runtime loads (`models/model.ts`, traced, with its `metadata.json` and an
+`inference.json`):
+
+```python
+konfai.export_bundle(network, torch.zeros(1, 1, 96, 96, 96), "./my_bundle", name="my_model")
+```
+
+Both need the `monai` extra (`pip install konfai[monai]`).
+
 ## When you need named internal outputs
 
 KonfAI `Network` objects are routed graphs. Names supplied to `add_module()`

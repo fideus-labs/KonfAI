@@ -697,3 +697,102 @@ def test_the_sse_encoder_never_emits_a_token_json_does_not_define(tmp_path: Path
 
     assert "NaN" not in frame and "Infinity" not in frame
     assert json.loads(frame[6:]) == {"values": {"a": None, "b": None, "c": 1.5}, "list": [None, 2]}
+
+
+def test_a_feed_reads_a_bounded_slice_per_pass_and_a_new_log_from_its_recent_tail(tmp_path: Path) -> None:
+    """A subscriber once read a newly discovered runtime log from byte zero, whole, in the request
+    loop; every feed now starts within the recent tail and reads at most _TICK_BYTES per pass, the
+    rest on the next."""
+    from konfai_studio.jobs import _RUNTIME_BACKFILL, _tail_lines, _tail_start
+
+    log = tmp_path / "run.log"
+    lines = [f"line {index:07d}" for index in range(20000)]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    size = log.stat().st_size
+
+    got, pos, buf = _tail_lines(log, 0, "", limit=1000)
+    assert 0 < len(got) < len(lines) and pos <= 1000 and "\n" not in buf
+    rest, pos, buf = _tail_lines(log, pos, buf, limit=size)
+    assert got + rest == lines and pos == size and buf == ""
+
+    start = _tail_start(log, 5000)
+    assert size - 5000 <= start < size
+    assert _tail_lines(log, start, "", limit=size)[0][0].startswith("line ")  # aligned to a line start
+    assert _tail_start(log, _RUNTIME_BACKFILL) == 0  # a small log replays whole
+
+
+def test_unterminated_log_lines_keep_a_bounded_tail_then_recover(tmp_path):
+    from konfai_studio.jobs import _MAX_LOG_LINE, _TICK_BYTES, _tail_lines
+
+    log = tmp_path / "run.log"
+    log.write_bytes(b"x" * (_TICK_BYTES * 3))
+    pos, buf = 0, ""
+    for _ in range(3):
+        lines, pos, buf = _tail_lines(log, pos, buf)
+        assert not lines and len(buf) <= _MAX_LOG_LINE
+    with log.open("ab") as handle:
+        handle.write(b"\nvalid next line\n")
+    lines, pos, buf = _tail_lines(log, pos, buf)
+    assert lines[0].startswith("[log line truncated]")
+    assert lines[1] == "valid next line" and buf == ""
+
+
+def test_truncating_a_followed_log_discards_its_old_partial_line(tmp_path):
+    from konfai_studio.jobs import _tail_lines
+
+    log = tmp_path / "run.log"
+    log.write_text("old incomplete line" * 50)
+    _, pos, buf = _tail_lines(log, 0, "")
+    log.write_text("new line\n")
+    lines, pos, buf = _tail_lines(log, pos, buf)
+    assert lines == ["new line"] and not buf
+
+
+def test_many_runtime_logs_share_a_budget_and_all_eventually_advance(tmp_path, monkeypatch):
+    from konfai_studio import jobs
+
+    session = tmp_path / "sessions" / "exp"
+    runs = []
+    for index in range(20):
+        log = session / "Statistics" / str(index) / "log_0.txt"
+        log.parent.mkdir(parents=True)
+        log.write_text("x" * jobs._TICK_BYTES)
+        runs.append((log, str(index), "train", "running", ""))
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path))
+    monkeypatch.setattr(jobs, "_all_jobs", lambda name: [])
+    monkeypatch.setattr(jobs, "_discover_session_runs", lambda name, records: runs)
+    original = jobs._tail_lines
+    tick_reads = []
+    seen = set()
+    consumed = 0
+
+    def read(path, pos, buf, limit=jobs._TICK_BYTES):
+        nonlocal consumed
+        lines, new_pos, new_buf = original(path, pos, buf, limit)
+        consumed += new_pos - pos
+        seen.add(path)
+        return lines, new_pos, new_buf
+
+    async def sleep(delay):
+        nonlocal consumed
+        tick_reads.append(consumed)
+        consumed = 0
+        if len(tick_reads) == 4:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(jobs, "_tail_lines", read)
+    monkeypatch.setattr(jobs.asyncio, "sleep", sleep)
+
+    async def drain():
+        response = await jobs.live(session="exp")
+        try:
+            async for _ in response.body_iterator:
+                pass
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await response.body_iterator.aclose()
+
+    asyncio.run(drain())
+    assert len(tick_reads) == 4 and max(tick_reads) <= jobs._TICK_BYTES
+    assert seen == {run[0] for run in runs}

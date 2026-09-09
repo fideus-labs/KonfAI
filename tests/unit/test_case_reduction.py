@@ -44,6 +44,7 @@ from konfai.data.patching import (
     HeldMeter,
     open_held_meter,
 )
+from konfai.data.patching.budget import GROWTH_CAP_UNITS
 from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
 from konfai.data.transform import (
     Clip,
@@ -882,21 +883,14 @@ def test_a_budget_no_region_fits_is_refused_rather_than_cut_to_one_row(tmp_path:
     assert resampled.plan().peak_bytes > 4096, "the peak must exceed the budget for the refusal to fire"
 
 
-def test_a_generous_budget_stops_at_the_plateau_and_never_below_the_slab_floor(tmp_path: Path) -> None:
-    """The budget is a CEILING, not a target: past the height where a chain reads no fewer source
-    voxels, a taller region only holds more, so the sizing stops there however much memory it is
-    given. And never below the per-region floor: a chain that pulls exactly what it lands has a
-    flat read curve whose plateau starts at one row, and one-row regions pay every fixed cost of a
-    region for one row of work.
-    """
-    # Clip, not a Resample: a resample's taps reach a halo, so its read curve is not flat and its
-    # plateau is not one row. A POINTWISE stage is the case the floor exists for.
+def test_a_generous_budget_starts_at_the_slab_and_the_growth_takes_it_from_there(tmp_path: Path) -> None:
+    """The budget is a CEILING the regions grow towards, not a target the first one is cut to: a
+    generous budget starts the fold at the slab (the unit of the ladder), and the regions after it
+    follow what the first one held. Never one-row regions on a chain that pulls exactly what it
+    lands: those pay every fixed cost of a region for one row of work."""
     engine = _run(tmp_path, [Clip(0.0, 50.0)], Reduce(operator="Mean", output="t"), [])[0]
     engine.fit_budget(64 * (1 << 30))  # far more than this cohort could ever hold
-    assert engine.slab_rows >= min(SWEEP_SLAB_ROWS, engine.plan().spatial[0]), (
-        "an identity resample pulls what it lands, so its plateau is one row: the floor is what"
-        " keeps the sizing off one-row regions"
-    )
+    assert engine.slab_rows == min(SWEEP_SLAB_ROWS, engine.plan().spatial[0])
 
 
 def test_a_field_resample_prices_the_field_window_its_case_actually_holds(tmp_path: Path) -> None:
@@ -933,109 +927,93 @@ def test_a_field_resample_prices_the_field_window_its_case_actually_holds(tmp_pa
     assert warp.case_working_multiple("NEVER_SEEN") == warp.working_multiple
 
 
-def _engine_for_refit(tmp_path: Path, budget: float, rows: int) -> CaseReduction:
+def _engine_at(tmp_path: Path, budget: float | None, rows: int) -> CaseReduction:
     engine = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [])[0]
     engine._budget_bytes = budget
     engine.slab_rows = rows
-    for manager in engine.managers:
-        manager.set_chain_device(torch.device("cuda:0"))
     return engine
 
 
-def test_the_probe_is_short_so_its_own_overshoot_cannot_be_the_kill(tmp_path: Path) -> None:
-    """The one region no measurement can bound is the probe, because it runs before any.
-
-    At the planned height a probe over registration fields held 1.5x its allowance three times
-    out of three, and at an `auto` budget of 77 GiB on a 122 GiB host the probe alone reached 90
-    GiB and the host went down with nothing measured. The host gives nothing to catch: the kernel
-    kills. So the probe walks a quarter of the planned height, and every region after it walks
-    what the projection allows.
-    """
-    engine = _run(tmp_path / "probe", [], Reduce(operator="Mean", output="t"), [])[0]
-    engine._budget_bytes = 1 << 30
-    engine.slab_rows = 100
-    walked = []
+def _walk(engine: CaseReduction, spatial: list[int], readings: list[int | None]) -> list[int]:
+    """The heights ``_folds`` cuts when the meter answers ``readings`` in turn, the last repeated."""
+    walked: list[int] = []
     engine._fold = lambda region: walked.append(region[0].stop - region[0].start) or torch.zeros(1)  # type: ignore[method-assign]
-    engine._open_meter = lambda: HeldMeter(lambda: 1, 0)  # type: ignore[method-assign]
-    list(engine._folds([1000, 10, 6], measure=True))
-    assert walked[0] == int(100 * CaseReduction._PROBE_SHARE), "the probe is a quarter of the planned height"
-    assert all(rows == 100 for rows in walked[1:-1]), "and the rest walk the planned height once it fits"
-    assert sum(walked) == 1000, "every row is folded exactly once"
+    answers = iter(readings)
+    state = {"last": readings[-1]}
+
+    def held() -> int | None:
+        state["last"] = next(answers, state["last"])
+        return state["last"]
+
+    engine._open_meter = lambda: HeldMeter(held, 0)  # type: ignore[method-assign]
+    list(engine._folds(spatial))
+    return walked
 
 
-def test_the_first_region_is_the_probe_and_only_ever_shortens_the_rest(tmp_path: Path) -> None:
-    """What the plan priced is a model; what the first region held is a fact.
+def _allowed(budget: float) -> float:
+    """What the fold's regions are judged against: the declaration less the chunk cache's share,
+    since the meter does not count the cache (it outlives the region)."""
+    return budget - (budget_share("cache", budget) or 0.0)
 
-    The model has to be right about every stage, every store and every bridge the chain crosses,
-    and this work found it wrong at all three. The measurement costs one counter read on a region
-    the fold had to compute anyway, and it bounds the next region from above because a high-water
-    mark does -- the same reading Predictor._accumulate_device makes of the batch that just ran.
 
-    Driven through a HeldMeter built on a chosen reading, so the arithmetic is exercised on both
-    routes at once: which instrument answered is the meter's business and not the fold's.
-    """
-    budget = 1 << 30
-    # Less the cache's share: the meter does not count the decoded-chunk cache, so the comparison
-    # does not offer it either -- see test_the_allowance_leaves_the_chunk_cache_its_share.
-    allowed = (budget - (budget_share("cache", budget) or 0.0)) * CaseReduction._MEASURED_MARGIN
+def test_a_region_under_a_third_of_the_budget_doubles_the_next_up_to_the_cap(tmp_path: Path) -> None:
+    """What the plan priced is a model; what a region held is a fact, and it costs one counter read
+    on work the fold had to do anyway. The first region is the priced start; every region measured
+    under a third of the budget doubles the next, up to ``GROWTH_CAP_UNITS`` slabs; every row is folded
+    exactly once."""
+    budget = float(1 << 30)
+    walked = _walk(_engine_at(tmp_path, budget, 8), [2000, 10, 6], [int(_allowed(budget) * 0.1)])
 
-    def engine_holding(name: str, held: int) -> CaseReduction:
-        engine = _run(tmp_path / name, [], Reduce(operator="Mean", output="t"), [])[0]
-        engine._budget_bytes = budget
-        engine.slab_rows = 100
-        return engine
+    assert walked[:7] == [8, 16, 32, 64, 128, 256, 512]
+    assert max(walked) == GROWTH_CAP_UNITS * SWEEP_SLAB_ROWS, "the cap"
+    assert sum(walked) == 2000
 
-    # A full-height probe that held twice what the declaration allows: the rest are cut to half.
-    engine = engine_holding("over", 0)
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 2), 0), 100, [1000, 10, 6])
-    assert engine.slab_rows == 50
 
-    # A QUARTER-height probe that held half the allowance: scaled to the planned height that is
-    # twice the allowance, and the rest are cut to half. The probe is short so that its own
-    # overshoot cannot reach the host; what it measures is projected before it is judged.
-    engine = engine_holding("short-probe", 0)
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.5), 0), 25, [1000, 10, 6])
-    assert engine.slab_rows == 50
+def test_a_region_over_the_budget_halves_the_next_and_never_below_the_first(tmp_path: Path) -> None:
+    """The mirror of the doubling: a region measured over the budget halves the next, down to the
+    first at most, so every region still starts on a multiple of the first and the output's chunk
+    grid, cut on the first, is never straddled. Between a third and whole, the height stands."""
+    budget = float(1 << 30)
+    low, over, between = int(_allowed(budget) * 0.1), int(_allowed(budget) * 2), int(_allowed(budget) * 0.7)
+    walked = _walk(_engine_at(tmp_path, budget, 8), [1000, 10, 6], [low, low, over, over, over, between])
 
-    # Held less than the declaration: nothing moves. A measurement is never a licence to spend a
-    # budget the sizing declined to spend, and the region that set the peak has already run.
-    engine = engine_holding("under", 0)
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.25), 0), 100, [1000, 10, 6])
-    assert engine.slab_rows == 100, "a region that fits must not make the next one taller"
-    # ... and a short probe under ITS share does not either, once projected.
-    engine = engine_holding("under-short", 0)
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 0.2), 0), 25, [1000, 10, 6])
-    assert engine.slab_rows == 100
+    assert walked[:7] == [8, 16, 32, 16, 8, 8, 8]
 
-    # The baseline is subtracted: the same peak over a higher starting point held less.
-    engine = engine_holding("baseline", 0)
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 2), int(allowed * 1.9)), 100, [1000, 10, 6])
-    assert engine.slab_rows == 100
 
-    # Never below one row, however badly the first region overshot.
-    engine = engine_holding("tiny", 0)
-    engine.slab_rows = 4
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 10_000), 0), 4, [1000, 10, 6])
-    assert engine.slab_rows == 1
+def test_the_growth_is_judged_against_the_budget_less_the_chunk_cache_share(tmp_path: Path) -> None:
+    """The meter's reading and the figure it is judged against must cover the same bytes. The meter
+    does not count the decoded-chunk cache, so judged against the whole budget the cache would be
+    spent twice: once inside what the regions may fill, and again by the cache itself."""
+    budget = float(1 << 30)
+    cache = budget_share("cache", budget) or 0.0
+    assert cache > 0, "the fixture only says anything where the cache has a share"
 
-    # An instrument that went quiet, and no instrument at all, both leave the planned height.
-    engine = engine_holding("blind", 0)
-    engine._refit_to_measurement(HeldMeter(lambda: None, 0), 100, [1000, 10, 6])
-    assert engine.slab_rows == 100
-    engine._refit_to_measurement(None, 100, [1000, 10, 6])
-    assert engine.slab_rows == 100
+    over = int(budget - cache / 2)  # under the whole budget, over the allowance
+    assert _walk(_engine_at(tmp_path, budget, 8), [100, 10, 6], [over])[:3] == [8, 8, 8], "over: never taller"
+    under_third = int((budget - cache) * 0.32)
+    assert _walk(_engine_at(tmp_path / "third", budget, 8), [100, 10, 6], [under_third])[:3] == [8, 16, 32]
+    just_over_third = int((budget - cache) * 0.34)
+    assert _walk(_engine_at(tmp_path / "over", budget, 8), [100, 10, 6], [just_over_third])[:3] == [8, 8, 8]
 
-    # No budget declared: nothing bounds anything, so nothing is re-fitted.
-    engine = engine_holding("none", 0)
-    engine._budget_bytes = 0.0
-    engine._refit_to_measurement(HeldMeter(lambda: int(allowed * 8), 0), 100, [1000, 10, 6])
-    assert engine.slab_rows == 100
+
+def test_no_budget_and_no_instrument_both_leave_the_height(tmp_path: Path) -> None:
+    """Nothing bounds a fold without a budget, so nothing grows it; an instrument that went quiet,
+    or a kernel without one, leaves the priced height too."""
+    assert _walk(_engine_at(tmp_path / "none", 0.0, 8), [100, 10, 6], [1])[:3] == [8, 8, 8]
+    assert _walk(_engine_at(tmp_path / "quiet", float(1 << 30), 8), [100, 10, 6], [None])[:3] == [8, 8, 8]
+    engine = _engine_at(tmp_path / "blind", float(1 << 30), 8)
+    engine._open_meter = lambda: None  # type: ignore[method-assign]
+    walked: list[int] = []
+    engine._fold = lambda region: walked.append(region[0].stop - region[0].start) or torch.zeros(1)  # type: ignore[method-assign]
+    list(engine._folds([100, 10, 6]))
+    assert walked[:3] == [8, 8, 8]
 
 
 def test_a_host_chain_gets_a_meter_and_a_kernel_without_one_gets_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """A host chain has no allocator counter, and the kernel's resident peak is the meter it does
     have. A kernel that offers no reset gets no meter at all, rather than a run-long peak read as
     if it were one region's."""
+    monkeypatch.setattr("konfai.data.patching.budget.resident_floor", lambda: None)  # no workflow holds a floor
     monkeypatch.setattr("konfai.data.patching.budget.reset_resident_peak", lambda: True)
     monkeypatch.setattr("konfai.data.patching.budget.resident_bytes", lambda: 1_000_000)
     monkeypatch.setattr("konfai.data.patching.budget.peak_resident_bytes", lambda: 1_500_000)
@@ -1044,33 +1022,6 @@ def test_a_host_chain_gets_a_meter_and_a_kernel_without_one_gets_none(monkeypatc
 
     monkeypatch.setattr("konfai.data.patching.budget.reset_resident_peak", lambda: False)
     assert open_held_meter(None) is None
-
-
-def test_the_allowance_leaves_the_chunk_cache_its_share(tmp_path: Path) -> None:
-    """The meter's reading and the figure it is judged against must cover the same bytes.
-
-    The meter stopped counting the decoded-chunk cache (it outlives the region, and charging the
-    region for it cut every region after the probe). Judged against the whole budget, a reading
-    that excludes the cache would let the cache be spent twice: once inside the allowance the
-    regions may fill, and again by the cache itself -- which is how a run held 1.09x what it
-    declared. The allowance comes down by exactly the cache's share.
-    """
-    budget = 1 << 30
-    engine = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [])[0]
-    engine._budget_bytes = budget
-    engine.slab_rows = 100
-
-    cache = budget_share("cache", budget) or 0.0
-    assert cache > 0, "the fixture only says anything where the cache has a share"
-    # A probe holding just under the OLD allowance (the whole budget) and above the new one.
-    held = int((budget - cache / 2) * CaseReduction._MEASURED_MARGIN)
-    engine._refit_to_measurement(HeldMeter(lambda: held, 0), 100, [1000, 10, 6])
-    assert engine.slab_rows < 100, "a region filling the cache's share as well is cut"
-
-    engine.slab_rows = 100
-    fits = int((budget - cache) * CaseReduction._MEASURED_MARGIN)
-    engine._refit_to_measurement(HeldMeter(lambda: fits, 0), 100, [1000, 10, 6])
-    assert engine.slab_rows == 100, "a region inside the allowance keeps the height the plan chose"
 
 
 def test_a_host_meter_does_not_charge_the_scope_for_the_chunk_cache_it_filled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1085,6 +1036,7 @@ def test_a_host_meter_does_not_charge_the_scope_for_the_chunk_cache_it_filled(mo
     from konfai.utils import ome_zarr
 
     cache = ome_zarr._DecodedChunkCache(1 << 30)
+    monkeypatch.setattr("konfai.data.patching.budget.resident_floor", lambda: None)  # no workflow holds a floor
     monkeypatch.setattr(ome_zarr, "_CHUNK_CACHE", cache)
     monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: True)
     monkeypatch.setattr(patching_module, "resident_bytes", lambda: 1_000_000)
@@ -1140,14 +1092,10 @@ def test_the_folds_a_stat_pass_keeps_come_out_of_the_regions_share(tmp_path: Pat
     assert not engine.keeps_folds(engine.plan())
 
 
-def test_the_stat_pass_is_the_measured_pass_and_the_write_pass_replays_kept_folds(tmp_path: Path) -> None:
-    """The run's FIRST region is the probe wherever it happens.
-
-    A stat pass at full height was exactly the unbounded first allocation _PROBE_SHARE exists to
-    prevent (90 GiB resident on a 122 GiB host, kernel kill, nothing measured). And the regions a
-    stat pass keeps must travel beside their folds: a mid-pass refit changes ``slab_rows``, so
-    regions re-derived at the final height would misalign with folds cut at the earlier one.
-    """
+def test_the_write_pass_replays_the_folds_the_stat_pass_kept(tmp_path: Path) -> None:
+    """The run's regions are cut once, in the stat pass, at the heights the growth decided; the
+    regions a stat pass keeps travel beside their folds, so the write pass replays them and folds
+    nothing, whatever height the growth reached along the way."""
     from konfai.data.transform import Standardize
 
     engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="t"), [Standardize()])
@@ -1157,21 +1105,19 @@ def test_the_stat_pass_is_the_measured_pass_and_the_write_pass_replays_kept_fold
     engine.fit_budget(output / (BUDGET_SHARES["regions"] * _KEPT_FOLDS_SHARE_OF_REGIONS * 0.99))
     plan = engine.plan()
     assert engine.keeps_folds(plan)
-    engine.slab_rows = 4
+    engine.slab_rows = 2
 
-    meters: list[int] = []
-    engine._open_meter = lambda: meters.append(1) or HeldMeter(lambda: 1, 0)  # type: ignore[method-assign]
+    engine._open_meter = lambda: HeldMeter(lambda: 1, 0)  # type: ignore[method-assign]  # every region holds nothing: grow
     folded_regions: list[tuple[slice, ...]] = []
     original_fold = engine._fold
     engine._fold = lambda region: folded_regions.append(region) or original_fold(region)  # type: ignore[method-assign]
 
     engine._write_folds(plan)
 
-    assert meters == [1], "the stat pass runs the run's first region, so it is the one measured pass"
     heights = [region[0].stop - region[0].start for region in folded_regions]
-    assert heights[0] == 1, "the run's first region is the probe: short"
-    assert heights[1] == 4, "and the rest walk the planned height"
-    assert sum(heights) == plan.spatial[0], "every row folded exactly once: the write pass replays kept folds"
+    assert heights[0] == 2, "the first region is the priced start"
+    assert heights[1] == 4, "and the growth doubled the next"
+    assert sum(heights) == plan.spatial[0], "every row folded exactly once: the write pass replays the kept folds"
 
 
 def test_a_value_neutral_stage_does_not_decide_the_region_height(tmp_path: Path) -> None:
@@ -1232,3 +1178,34 @@ def test_a_fold_is_judged_against_the_share_its_height_was_solved_for(tmp_path: 
     plan = SimpleNamespace(budget_bytes=budget)
     assert TransformPlan.ceiling_for(plan, Verdict.REDUCE) < engine.plan().peak_bytes
     assert TransformPlan.ceiling_for(plan, Verdict.WHOLE_VOLUME) == budget
+
+
+def test_a_region_the_device_cannot_fold_is_folded_again_at_half_the_height(tmp_path: Path) -> None:
+    """The fold's answer to an OutOfMemoryError: the same region again at half the height, the rest
+    at that height, every row folded once. Driven without a card: the chain device is only read
+    for its type, and the host gets no such signal (the kernel kills)."""
+    engine = _engine_at(tmp_path, float(1 << 30), 8)
+    for manager in engine.managers:
+        manager._chain_device = torch.device("cuda")  # read for its type only: no card is touched
+    walked: list[int] = []
+    tripped = {"done": False}
+
+    def fold(region):  # type: ignore[no-untyped-def]
+        rows = region[0].stop - region[0].start
+        if rows == 8 and not tripped["done"]:
+            tripped["done"] = True
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory (simulated)")
+        walked.append(rows)
+        return torch.zeros(1)
+
+    engine._fold = fold  # type: ignore[method-assign]
+    engine._open_meter = lambda: HeldMeter(lambda: 1 << 40, 0)  # type: ignore[method-assign]  # over the budget: no growth
+    list(engine._folds([100, 10, 6]))
+
+    assert walked[:3] == [4, 4, 4], "the failed region is folded again at half the height"
+    assert sum(walked) == 100 and max(walked) == 4
+
+    host = _engine_at(tmp_path / "host", float(1 << 30), 8)
+    host._fold = lambda region: (_ for _ in ()).throw(torch.cuda.OutOfMemoryError("simulated"))  # type: ignore[method-assign]
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        list(host._folds([100, 10, 6]))

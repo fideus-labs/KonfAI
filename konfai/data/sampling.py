@@ -579,7 +579,8 @@ def gather_separable(
         """``tensor.index_select(array_axis + 1, index)``, spelled as an index: the same copy of the
         same voxels. index_select on an inner axis walks a scalar loop on the host (measured 0.5 to
         1.5 s against 9 ms for the index on a [1, 256, 256, 256] float32, 0.3 ms either way on CUDA)."""
-        return tensor[(*[slice(None)] * (array_axis + 1), index)]
+        taps_index: tuple[slice | torch.Tensor, ...] = (*[slice(None)] * (array_axis + 1), index)
+        return tensor[taps_index]
 
     out = source if mode == "nearest" else source.type(sampling_dtype(source))
     for array_axis in range(rank) if blend is None else blend:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -60,7 +60,9 @@ from konfai.utils.dataset.statistics import (
     _statistics_chunk_length,
     _statistics_plane_elements,
     _update_pieces,
+    _update_running_extrema,
     _update_running_statistics,
+    needs_moments,
 )
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.utils import (
@@ -413,7 +415,10 @@ class Dataset:
         """The stored block reads of ``(groups, name)`` are served in, or ``None`` when a read costs
         exactly what it asks for. What a decomposition is sized and aligned against."""
         with contextlib.suppress(Exception):
-            return self._resolve_entry(groups, name, lambda file, _group, entry: file.read_granularity(entry))
+            # The entry's path INSIDE the file: a single-file store (h5) keys it by its group as well.
+            return self._resolve_entry(
+                groups, name, lambda file, group, entry: file.read_granularity(f"{group}/{entry}" if group else entry)
+            )
         return None
 
     def plan_region_reads(self, groups: str, name: str, windows: Sequence[tuple[slice, ...]]) -> None:
@@ -517,13 +522,18 @@ class Dataset:
         groups: str,
         name: str,
         channels: list[int] | None = None,
+        keys: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Min/max/mean/std of one entry, over the volume and per channel (``channels`` restricts
-        both to those), folded over :meth:`iter_data_blocks`: the volume is never held."""
+        both to those), folded over :meth:`iter_data_blocks`: the volume is never held. ``keys``
+        names the statistics the caller reads (``min``, ``max_per_channel``, ...): a request
+        without a mean or std is folded in the stored dtype with one min and one max per block,
+        and its other figures are not computed. ``None`` computes the four."""
+        update = _update_running_statistics if needs_moments(keys) else _update_running_extrema
         state = None
         for block in self.iter_data_blocks(groups, name)():
             for piece in _update_pieces(block if channels is None else block[channels]):
-                state = _update_running_statistics(state, piece)
+                state = update(state, piece)
         return _finalize_running_statistics(state)
 
     def read_transform(self, group: str, name: str) -> sitk.Transform:

@@ -21,7 +21,7 @@ import math
 from collections import deque
 from collections.abc import Iterator
 from itertools import islice
-from typing import Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -31,6 +31,10 @@ from konfai.network.network.base import strip_accumulated
 from konfai.network.network.loaders import CriterionsAttr, TargetCriterionsLoader
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError, MeasureError
+
+if TYPE_CHECKING:
+    from konfai.metric.measure.base import CriterionWithInit
+    from konfai.network.network.network import ModuleArgsDict
 
 
 class LabelledValues(NamedTuple):
@@ -164,14 +168,19 @@ class Measure:
             # the whole-history consumers read the running means instead, so nothing grows with the run.
             self._weight: deque[float] = deque()
             self._values: deque[float] = deque()
+            # The minimized quantity beside the reported one: a Dice loss reports the coefficient
+            # (higher is better) and minimizes one minus it. Checkpoint selection and a plateau
+            # schedule read this window, the boards read ``_values``.
+            self._losses: deque[float] = deque()
             self._mean = _RunningNanMean()
             self._mean_weight = _RunningNanMean()
+            self._mean_loss = _RunningNanMean()
             self._recorded = 0
             # Values recorded but not yet in ``_values``: a loss is kept as its 0-d tensor (a
             # per-label metric as its LabelledValues), because reading it inside the forward stalls
             # the CPU on the whole graph before backward is enqueued. The consumers read them in one
-            # transfer per device (``Measure._materialize``).
-            self._unread: list[float | torch.Tensor | LabelledValues] = []
+            # transfer per device (``Measure._materialize``), the loss tensor beside each value.
+            self._unread: list[tuple[float | torch.Tensor | LabelledValues, torch.Tensor]] = []
 
         def reset_loss(self) -> None:
             self._loss.clear()
@@ -190,14 +199,25 @@ class Measure:
                 return
             self._values = deque(self._values, maxlen=n)
             self._weight = deque(self._weight, maxlen=n)
+            self._losses = deque(self._losses, maxlen=n)
 
-        def _record(self, value: float) -> None:
+        def _record(self, value: float, loss: float) -> None:
             self._values.append(value)
             self._mean.add(value)
+            self._losses.append(loss)
+            self._mean_loss.add(loss)
 
         def values_mean(self, n: int) -> float:
             """The nan-mean of the last ``n`` values, of the whole history for ``n <= 0``."""
             return float(np.nanmean(_tail(self._values, n))) if n > 0 else self._mean.mean()
+
+        def loss_mean(self, n: int) -> float:
+            """The nan-mean of the last ``n`` minimized values (the loss the criterion returned, lower
+            is better whatever it reports), of the whole history for ``n <= 0``."""
+            if n <= 0:
+                return self._mean_loss.mean()
+            tail = list(_tail(self._losses, n))
+            return float(np.nanmean(tail)) if tail else float("nan")
 
         def weights_mean(self, n: int) -> float:
             return float(np.nanmean(_tail(self._weight, n))) if n > 0 else self._mean_weight.mean()
@@ -215,7 +235,7 @@ class Measure:
                 true_value = result.value
 
             self._loss.append((weight, result.loss if self.is_loss else result.loss.detach()))
-            self._unread.append(true_value)
+            self._unread.append((true_value, result.loss.detach()))
             self._weight.append(weight)
             self._mean_weight.add(weight)
             self._recorded += 1
@@ -268,7 +288,7 @@ class Measure:
     def release_targets(self) -> None:
         self._targets.clear()
 
-    def init(self, model: torch.nn.Module, group_dest: list[str]) -> None:
+    def init(self, model: "ModuleArgsDict", group_dest: list[str]) -> None:
         outputs_group_rename = {}
 
         modules = []
@@ -302,7 +322,9 @@ class Measure:
                     # the CriterionsAttr value: indexing the dict here would always read False and
                     # silently skip graph-rewiring criteria such as KLDivergence.
                     if getattr(criterion, "accepts_init", False):
-                        outputs_group_rename[output_group] = criterion.init(model, output_group, target_group)
+                        outputs_group_rename[output_group] = cast("CriterionWithInit", criterion).init(
+                            model, output_group, target_group
+                        )
 
         outputs_criterions_bak = self.outputs_criterions.copy()
         for old, new in outputs_group_rename.items():
@@ -406,20 +428,22 @@ class Measure:
         records = [record for _, record in self._records() if record._unread]
         tensors: dict[torch.device, list[torch.Tensor]] = {}
         for record in records:
-            for value in record._unread:
+            for value, loss in record._unread:
                 tensor = value.values if isinstance(value, LabelledValues) else value
                 if isinstance(tensor, torch.Tensor):
                     tensors.setdefault(tensor.device, []).append(tensor.reshape(-1))
+                tensors.setdefault(loss.device, []).append(loss.reshape(-1))
         read = {device: iter(torch.cat(batch).tolist()) for device, batch in tensors.items()}
         for record in records:
-            for value in record._unread:
+            for value, loss in record._unread:
                 if isinstance(value, LabelledValues):
                     values = list(islice(read[value.values.device], value.values.numel()))
-                    record._record(float(np.nanmean(values)) if values else float("nan"))
+                    reported = float(np.nanmean(values)) if values else float("nan")
                 elif isinstance(value, torch.Tensor):
-                    record._record(next(read[value.device]))
+                    reported = next(read[value.device])
                 else:
-                    record._record(value)
+                    reported = value
+                record._record(reported, float(np.nanmean(list(islice(read[loss.device], loss.numel())))))
             record._unread.clear()
 
     def set_window(self, n: int) -> None:
@@ -427,6 +451,55 @@ class Measure:
         will read. Grows only; without a call the history is unbounded."""
         for _, record in self._records():
             record.set_window(n)
+
+    def checkpoint_state(self) -> dict[str, Any]:
+        """Scalar history for logs and plateau schedules, bounded by the declared logging window.
+
+        Running means retain their totals/counts; gradients and device tensors are never serialized.
+        """
+        self._materialize()
+        return {
+            "version": 1,
+            "records": {
+                group: {
+                    name: {
+                        "values": [float(value) for value in record._values],
+                        "weights": [float(weight) for weight in record._weight],
+                        "losses": [float(loss) for loss in record._losses],
+                        "window": record._values.maxlen,
+                        "mean": (float(record._mean.total), record._mean.count),
+                        "mean_weight": (float(record._mean_weight.total), record._mean_weight.count),
+                        "mean_loss": (float(record._mean_loss.total), record._mean_loss.count),
+                        "recorded": record._recorded,
+                    }
+                    for name, record in records.items()
+                }
+                for group, records in self._loss.items()
+            },
+        }
+
+    def load_checkpoint_state(self, state: dict[str, Any]) -> None:
+        """Restore scalar histories into the same configured criteria, preserving a widened window."""
+        if state.get("version") != 1 or state["records"].keys() != self._loss.keys():
+            raise MeasureError("RESUME measure history does not match the configured criterion groups.")
+        for group, records in self._loss.items():
+            saved = state["records"][group]
+            if saved.keys() != records.keys():
+                raise MeasureError("RESUME measure history does not match the configured criteria.")
+            for name, record in records.items():
+                entry = saved[name]
+                window = max(record._values.maxlen or 0, entry["window"] or len(entry["values"]), 1)
+                record._values = deque(entry["values"], maxlen=window)
+                record._weight = deque(entry["weights"], maxlen=window)
+                # A history without minimized losses (written before they were kept) restores none:
+                # a reported value is not what the criterion minimizes.
+                record._losses = deque(entry.get("losses", ()), maxlen=window)
+                record._mean.total, record._mean.count = entry["mean"]
+                record._mean_weight.total, record._mean_weight.count = entry["mean_weight"]
+                record._mean_loss.total, record._mean_loss.count = entry.get("mean_loss", (0.0, 0))
+                record._recorded = entry["recorded"]
+                record._unread.clear()
+                record.reset_loss()
 
     def _read(self, n: int) -> Iterator[tuple[str, "Measure.Loss"]]:
         """The records given at least ``n`` values, every value read off its device, and the window
@@ -442,9 +515,15 @@ class Measure:
     def get_last_weights(self, n: int = 1) -> dict[str, float]:
         return {name: record.weights_mean(n) for name, record in self._read(n)}
 
-    def format_loss(self, is_loss: bool, n: int) -> dict[str, tuple[float, float]]:
+    def get_last_losses(self, n: int = 1) -> dict[str, float]:
+        """The minimized value per criterion, lower is better whatever the criterion reports: what a
+        plateau schedule steps on and what selects a checkpoint."""
+        return {name: record.loss_mean(n) for name, record in self._read(n)}
+
+    def format_loss(self, is_loss: bool, n: int) -> dict[str, tuple[float, float, float]]:
+        """Per criterion: the mean weight, the reported value (the board's), the minimized value."""
         return {
-            name: (record.weights_mean(n), record.values_mean(n))
+            name: (record.weights_mean(n), record.values_mean(n), record.loss_mean(n))
             for name, record in self._read(n)
             if record.is_loss == is_loss
         }

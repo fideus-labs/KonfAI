@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -118,7 +119,7 @@ class Flow(network.ModuleArgsDict):
             ),
         )
         self["Head"].weight = Parameter(torch.distributions.Normal(0, 1e-5).sample(self["Head"].weight.shape))
-        self["Head"].bias = Parameter(torch.zeros(self["Head"].bias.shape))
+        self["Head"].bias = Parameter(torch.zeros(dim))
 
         if int_steps > 0 and int_downsize > 1:
             self.add_module("DownSample", ResizeTransform(int_downsize))
@@ -165,8 +166,9 @@ class Rigid(network.ModuleArgsDict):
     def init(self, init_type: str, init_gain: float) -> None:
         # Zero parameters are the identity transform: the skew generator is zero, so its exponential
         # is the identity rotation, and the translation is zero.
-        self["Head"].weight.data.fill_(0)
-        self["Head"].bias.data.zero_()
+        head = cast(torch.nn.Linear, self["Head"])
+        head.weight.data.fill_(0)
+        head.bias.data.zero_()
 
 
 class MaskFlow(torch.nn.Module):
@@ -187,6 +189,8 @@ class SpatialTransformer(torch.nn.Module):
     displacement field ``[B, dim, *size]`` added to the identity grid.
     """
 
+    grid: torch.Tensor
+
     def __init__(self, size: list[int], rigid: bool = False) -> None:
         super().__init__()
         self.rigid = rigid
@@ -205,7 +209,7 @@ class SpatialTransformer(torch.nn.Module):
                 src,
                 # align_corners must match between grid generation and sampling (and the
                 # non-rigid path below, which also samples with align_corners=True).
-                F.affine_grid(rigid_affine(flow, self.dim), src.size(), align_corners=True),
+                F.affine_grid(rigid_affine(flow, self.dim), list(src.size()), align_corners=True),
                 align_corners=True,
                 mode="bilinear",
             )

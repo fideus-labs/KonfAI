@@ -153,6 +153,15 @@ Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body C
 
 Single-model body segmentation keeps **system RAM ~1.6 GB**. The thin 2-D patches never fill the card, so inference stays compute-bound (~7 s, largely batch-independent). Inference scales with the case size.
 
+Measured on the S/M/L cases of `benchmarks/perf/bench_apps.py` (2026-09-09, `body`, default
+ensemble, same GPU). Peak RAM = process-tree resident set; peak VRAM = over baseline.
+
+| Case (voxels) | Time | Peak RAM | Peak VRAM |
+|---|---|---|---|
+| **S** (240 × 220 × 200) | **2.9 s** | 1.6 GB | 1.6 GB |
+| **M** (249 × 246 × 246) | **3.3 s** | 1.7 GB | 3.9 GB |
+| **L** (512 × 512 × 531) | **7.8 s** | 2.2 GB | 18.9 GB |
+
 ---
 
 ## 🔗 Links

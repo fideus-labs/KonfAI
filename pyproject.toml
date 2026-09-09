@@ -66,6 +66,8 @@ omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
 export = ["onnx", "onnxruntime", "onnxscript"]
+# MONAI Bundles (konfai.bundle) and the MONAI networks the docs wrap (monai.networks.nets:UNet).
+monai = ["monai"]
 all = [
   "konfai[itk]",
   "konfai[hdf5]",
@@ -159,15 +161,16 @@ twine = "*"
 submitit = "*"
 
 [tool.pixi.feature.dev.tasks]
-test = { cmd = "pytest -q -n auto --dist loadfile tests/", description = "Run the test suite" }
-test-fast = { cmd = 'pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/', description = "Run the test suite without slow oracle and integration tests" }
-test-apps = { cmd = "pytest -q konfai-apps/tests", description = "Run the konfai-apps test suite" }
-test-cov = { cmd = "pytest -n auto --dist loadfile --cov=konfai --cov-report=term-missing tests/", description = "Run tests with coverage" }
+test = { cmd = "pytest -q -n auto --dist loadfile tests/", env = { OMP_NUM_THREADS = "1" }, description = "Run the test suite (one torch thread per worker: 8x faster on a 24-core box)" }
+test-fast = { cmd = 'pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/', env = { OMP_NUM_THREADS = "1" }, description = "Run the test suite without slow oracle and integration tests" }
+test-apps = { cmd = "pytest -q konfai-apps/tests", env = { OMP_NUM_THREADS = "1" }, description = "Run the konfai-apps test suite" }
+test-cov = { cmd = "pytest -n auto --dist loadfile --cov=konfai --cov-report=term-missing tests/", env = { OMP_NUM_THREADS = "1" }, description = "Run tests with coverage" }
 lint = { cmd = "ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio apps tests", description = "Lint source code" }
 format = { cmd = "ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio apps tests", description = "Format source code" }
 format-check = { cmd = "ruff format --check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio apps tests", description = "Check formatting without modifying files" }
 typecheck = { cmd = "python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio", description = "Type-check all packages ([tool.mypy] governs; real stubs in use)" }
 build = { cmd = "python -m build", description = "Build sdist and wheel" }
+perf-check = { cmd = "python benchmarks/perf/perf_check.py", env = { OMP_NUM_THREADS = "1" }, description = "Run the perf series on a quiet machine and compare it to this host's committed baseline (benchmarks/perf/baselines)" }
 check = { depends-on = ["lint", "format-check", "test", "test-apps"], description = "Run all quality checks" }
 
 # ---------------------------------------------------------------------------

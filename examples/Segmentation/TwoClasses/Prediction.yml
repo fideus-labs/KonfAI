@@ -1,0 +1,36 @@
+Predictor:
+  train_name: CT_TWO_CLASSES
+  autocast: false
+  Model:
+    classpath: default|UNet.yml
+    UNet:
+      parameters:
+        dim: 2
+        channels: [1, 4, 8, 16, 32]
+        nb_class: 2
+  Dataset:
+    dataset_filenames: [./Dataset:a:mha]
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Standardize: {mean: [0], std: [300], inverse: false}
+            patch_transforms: None
+            is_input: true
+    Patch:
+      patch_size: [1, 32, 32]
+    batch_size: 4
+    num_workers: 0
+    pin_memory: false
+    augmentations: None
+  outputs_dataset:
+    UNetBlock_0:Head:Argmax:
+      OutputDataset:
+        dataset_filename: Dataset:mha
+        group: PRED
+        same_as_group: CT:CT
+        before_reduction_transforms: None
+        after_reduction_transforms: None
+        final_transforms:
+          TensorCast: {dtype: uint8, inverse: false}

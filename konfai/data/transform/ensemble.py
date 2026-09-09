@@ -83,11 +83,12 @@ class SegmentationDisagreement(Transform):
 
         # per-voxel disagreement = 1 - (frequency of majority label / number of valid segmentations)
         unique_labels = torch.unique(tensors)
-        counts = []
+        label_counts: list[torch.Tensor] = []
         for label in unique_labels:
-            counts.append(((tensors == label) & valid).sum(dim=0))
+            label_counts.append(((tensors == label) & valid).sum(dim=0))
 
-        counts = torch.stack(counts, dim=0)  # [L, ...]
+        counts = torch.stack(label_counts, dim=0)  # [L, ...]
+        del label_counts  # the per-label counts live in the stack now: L volumes-worth given back
         max_count = counts.max(dim=0).values
         valid_count = valid.sum(dim=0)
 

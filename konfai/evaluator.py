@@ -20,7 +20,7 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, evaluations_directory, konfai_root
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
+from konfai.metric.measure.base import Criterion
 from konfai.network.network import build_configured_criterions
 from konfai.network.network.measure import CriterionResult
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
@@ -70,10 +71,14 @@ class CriterionsLoader:
     ) -> None:
         self.criterions_loader = criterions_loader
 
-    def get_criterions(self, output_group: str, target_group: str) -> dict[torch.nn.Module, Any]:
-        return build_configured_criterions(
-            self.criterions_loader,
-            f"{konfai_root()}.metrics.{output_group}.targets_criterions.{target_group}",
+    def get_criterions(self, output_group: str, target_group: str) -> dict[Criterion, Any]:
+        # Scored through the Criterion contract (get_name, partial_metric); the builder types a bare Module.
+        return cast(
+            dict[Criterion, Any],
+            build_configured_criterions(
+                self.criterions_loader,
+                f"{konfai_root()}.metrics.{output_group}.targets_criterions.{target_group}",
+            ),
         )
 
 
@@ -96,7 +101,7 @@ class TargetCriterionsLoader:
     ) -> None:
         self.targets_criterions = targets_criterions
 
-    def get_targets_criterions(self, output_group: str) -> dict[str, dict[torch.nn.Module, Any]]:
+    def get_targets_criterions(self, output_group: str) -> dict[str, dict[Criterion, Any]]:
         """
         Retrieve the criterion modules and their attributes for a specific output group.
 
@@ -564,14 +569,17 @@ class Evaluator(DistributedObject):
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
                     reads_halo = core is not None and int(getattr(metric, "halo", 0)) > 0
                     with self._clock.phase(metric.get_name()), torch.no_grad():
+                        # Criterion declares neither the halo's core= nor partial_map: the reducible hooks.
                         state = (
-                            metric.partial_metric(*tensors, core=core) if reads_halo else metric.partial_metric(*cored)
+                            cast(Any, metric).partial_metric(*tensors, core=core)
+                            if reads_halo
+                            else metric.partial_metric(*cored)
                         )
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
                     if getattr(metric, "dataset", None) and hasattr(metric, "partial_map"):
                         with self._clock.phase(metric.get_name()), torch.no_grad():
-                            patch_map = metric.partial_map(*cored).squeeze(0)
+                            patch_map = cast(Any, metric).partial_map(*cored).squeeze(0)
                         with self._clock.phase("map"):
                             self._write_map_patch(
                                 (output_group, target_group, index),
@@ -700,7 +708,7 @@ class Evaluator(DistributedObject):
                 else f"Metric {label} : "
             )
 
-        self._iter_dataset = dataloader.dataset
+        self._iter_dataset = cast(DatasetIter, dataloader.dataset)
         self._clock = SweepClock()
         # Per-case persistence: what an interrupted run already scored is read back and skipped,
         # and every case scored from here on is appended to this rank's own case file as it

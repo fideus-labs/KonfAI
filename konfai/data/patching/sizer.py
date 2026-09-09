@@ -24,7 +24,7 @@ at zero. A :class:`SegmentSizer` is constructed per segment from explicit inputs
 only read the segment's own facts -- and it needs no dataset fixture to be tested.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -32,7 +32,12 @@ import torch
 
 from konfai.data.patching import budget
 from konfai.data.patching import sweep as sweep_module
-from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES, _SWEEP_SLAB_ROWS_DEVICE, _SWEEP_TILE_MARGIN
+from konfai.data.patching.budget import (
+    _START_SHARE,
+    _SWEEP_ELEMENT_BYTES,
+    _SWEEP_TILE_MARGIN,
+    RegionGrowth,
+)
 from konfai.data.patching.stage import Stage, _ReadStagePlan
 from konfai.data.patching.sweep import (
     BlockReads,
@@ -106,10 +111,10 @@ class SegmentSizer:
     def block_reads(self, tile: Sequence[int]) -> BlockReads:
         """What a decomposition of the landing into ``tile`` reads, walked once and kept.
 
-        The sizing asks the same question of the same decomposition many times over -- the shape
-        search prices each candidate and then judges its reads, the height search bisects, and the
-        plateau walks a ladder -- and every one of those goes through the chain's pull maps, which
-        for a ``Resample`` is real geometry per block. Keyed by the decomposition AND by the plans
+        The sizing asks the same question of the same decomposition several times over -- the shape
+        rule prices the slab and the cube, the ladder is priced height by height -- and every one
+        of those goes through the chain's pull maps, which for a ``Resample`` is real geometry per
+        block. Keyed by the decomposition AND by the plans
         that map it, whose tuple is held so no identity is reused under the key.
         """
         key = (tuple(self.spatial), tuple(tile), tuple(id(plan) for plan in self.plans), self.granularity)
@@ -170,175 +175,117 @@ class SegmentSizer:
         the plans' own pull maps, and the cube wins only by ``_SWEEP_TILE_MARGIN``: the decomposition
         is also the shape a store gets chunked in. Without plans, the slab.
         """
-        from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE
-
-        spatial = self.spatial
-        slab = [min(int(rows), int(spatial[0])), *(int(extent) for extent in spatial[1:])]
-        voxels = int(rows) * int(np.prod(spatial[1:], dtype=np.int64))
-        cube = _cubic_tile(spatial, voxels, CHUNK_SPATIAL_TILE)
+        slab, cube = self._slab(rows), self._cube(rows)
         if cube == slab or not self.plans:
             return slab
         cheaper = self.decomposition_reads(cube) <= (self.decomposition_reads(slab) * _SWEEP_TILE_MARGIN)
         return cube if cheaper else slab
 
-    def grid_rows(self, cap: int) -> list[int]:
-        """The heights that land on the store's block grid, up to ``cap``.
+    def unit_rows(self) -> int:
+        """What a region grows by: the store's block along the sweep axis, else ``SWEEP_SLAB_ROWS``.
+        A region a whole number of blocks tall reads each stored block once; one that straddles the
+        grid decodes both blocks it touches, for every region."""
+        block = int(self.granularity[0]) if self.granularity is not None else 1
+        return block if block > 1 else int(budget.SWEEP_SLAB_ROWS)
 
-        A decomposition aligned to the grid reads each stored block exactly once; one that straddles
-        reads both blocks it touches, for every region, and holds the larger hull. There are only a
-        handful of such heights under any cap, so they are worth trying outright rather than hoping
-        a search over every height finds them.
-        """
-        if self.granularity is None:
-            return []
-        block = max(1, int(self.granularity[0]))
-        # A grain of one row is met by every height, so there is no shortlist to try: a store banded
-        # along its leading axis (a memmap) says its grain on the axes BELOW, and enumerating every
-        # height here would hand the search the whole range one at a time.
-        if block <= 1:
-            return []
-        return list(range(block, int(cap) + 1, block))
+    def cap_rows(self) -> int:
+        """The tallest region the growth reaches: ``GROWTH_CAP_UNITS`` units, the landing at most."""
+        units = budget.GROWTH_CAP_UNITS * max(self.unit_rows(), int(budget.SWEEP_SLAB_ROWS))
+        return max(1, min(int(self.spatial[0]), units))
 
-    def rows_within(self, depth: int | None, budget_bytes: float, cap: int) -> int:
-        """The tallest region up to ``cap`` rows whose priced block holds inside ``budget_bytes``,
-        ``1`` when none does: the one search both ceilings (the rank's budget, the device's free
-        memory) are answered by."""
-        depth = sweep_module._sweep_pipeline_depth() if depth is None else depth
-        low, high = 1, max(1, int(cap))
+    def _priced(self, rows: int, depth: int) -> int:
+        return self.sweep_block_bytes(self.sweep_shape(rows), depth)
+
+    def _slab(self, rows: int) -> list[int]:
+        return [min(int(rows), int(self.spatial[0])), *(int(extent) for extent in self.spatial[1:])]
+
+    def _cube(self, rows: int) -> list[int]:
+        from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE
+
+        voxels = int(rows) * int(np.prod(self.spatial[1:], dtype=np.int64))
+        return _cubic_tile(self.spatial, voxels, CHUNK_SPATIAL_TILE)
+
+    def _tallest(self, allowance: float, depth: int, shape: Callable[[int], list[int]]) -> int | None:
+        """The tallest height up to the cap whose priced block, in ``shape``, holds inside
+        ``allowance``; ``None`` when one row does not. Bisected on the price itself: none of what a
+        region costs scales with its rows (a halo is a constant, a rotated map's box grows with
+        the diagonal, a chunked store decodes whole blocks whatever the height)."""
+        if self.sweep_block_bytes(shape(1), depth) > allowance:
+            return None
+        low, high = 1, self.cap_rows()
         while low < high:
             middle = (low + high + 1) // 2
-            if self.sweep_block_bytes(self.sweep_shape(middle), depth) <= budget_bytes:
+            if self.sweep_block_bytes(shape(middle), depth) <= allowance:
                 low = middle
             else:
                 high = middle - 1
         return low
 
-    def best_tile(self, depth: int, budget_bytes: float, candidates: Sequence[int]) -> list[int]:
-        """The affordable candidate whose decomposition reads the least, the first one otherwise.
+    def start(self, depth: int | None = None) -> tuple[list[int], RegionGrowth]:
+        """The block the first region covers and how the regions grow from it (:class:`RegionGrowth`).
 
-        The search bisects on the height, which asks the price to rise with it. It does not: a
-        stored block is decoded whole, so the price steps rather than climbs, and the shape rule
-        may answer a cube at one height and a slab at the next. Bisection lands somewhere
-        affordable, not on the best region the budget buys.
+        The shape is decided at the height the whole budget buys (:meth:`sweep_shape`: the slab, or
+        the cube where a sheared map makes it pull less), because the shape is a fact of the pull
+        geometry and not of the memory. A slab then starts at the tallest height whose price holds
+        inside ``_START_SHARE`` of the budget, snapped down to a whole number of the store's blocks
+        when one fits, and grows from there; a cube starts where the budget's own price puts it,
+        since it cannot grow across the plane and would pay a small start for the whole case
+        (measured: 84 cubes of 256^3 against 37 slabs, +25 % of wall on a 513-row store under 8
+        GiB). Without a budget the unit stands, as it always did. The budget is what a sweep may
+        HOLD, so it is the priced block (:meth:`sweep_block_bytes`) that is held to it, never the
+        landed rows alone.
 
-        Judged on reads and not on landed voxels, because that is what the sweep spends: a region
-        that lands a few more rows by straddling the store's grid reads both blocks it touches, for
-        every region of the case. Ties go to the taller block, which pays the per-region costs
-        fewer times.
-        """
-        best: list[int] | None = None
-        best_reads = 0
-        for rows in candidates:
-            tile = self.sweep_shape(rows)
-            if self.sweep_block_bytes(tile, depth) > budget_bytes:
-                continue
-            reads = self.decomposition_reads(tile)
-            taller = best is not None and np.prod(tile, dtype=np.int64) > np.prod(best, dtype=np.int64)
-            if best is None or reads < best_reads or (reads == best_reads and taller):
-                best, best_reads = tile, reads
-        return best if best is not None else self.sweep_shape(candidates[0])
-
-    def sweep_rows(self, depth: int | None = None) -> int:
-        """The tallest region the sweep will cut whatever the budget: ``budget.SWEEP_SLAB_ROWS`` on
-        a CPU, taller on a GPU as its free memory allows. What the budget then affords is
-        :meth:`sweep_tile`'s.
-
-        The device's share is held to the SAME price as everything else (:meth:`sweep_block_bytes`),
-        which counts the source a region pulls and what the widest stage allocates on top of it.
-        """
-        cap = max(1, int(budget.SWEEP_SLAB_ROWS))
-        # Never below the store's own block: a region shorter than one reads it whole regardless
-        # (the hull is what a chunked read decodes), so cutting under it buys no memory back and
-        # only reads the same bytes again for the next region.
-        if self.granularity is not None:
-            cap = max(cap, int(self.granularity[0]))
-        if self.device is not None and self.device.type == "cuda":
-            # On a GPU the transfers and launches per region are the cost: taller regions, as far as
-            # a quarter of the free device memory allows (measured +10-20 % at 500^3 over 64 rows).
-            free_bytes, _total = torch.cuda.mem_get_info(self.device)
-            cap = max(cap, self.rows_within(depth, free_bytes * 0.25, _SWEEP_SLAB_ROWS_DEVICE))
-        return cap
-
-    def tile_within(self, depth: int, budget_bytes: float | None) -> tuple[list[int], int]:
-        """The best block a sweep of ``depth`` can afford, and what it holds: the search alone.
-
-        No refusal and no fallback, because two callers ask it two different questions -- whether a
-        deeper queue still buys the same block (:meth:`keeps_the_block`) and what to do when none
-        of them fits (:meth:`sweep_tile`) -- and a search that answered either for them would
-        answer the other one wrong.
-        """
-        cap = self.sweep_rows(depth)
-        if not budget_bytes or budget_bytes <= 0:
-            return self.sweep_shape(cap), 0
-        # The bisection never takes one row as affordable: the caller answers for it. What it finds
-        # is then judged against the store's own heights, because the price steps rather than climbs
-        # and bisection lands somewhere affordable, not on the best region the budget buys.
-        low = self.rows_within(depth, budget_bytes, cap)
-        tile = self.best_tile(depth, budget_bytes, [low, *self.grid_rows(cap)])
-        return tile, self.sweep_block_bytes(tile, depth)
-
-    def keeps_the_block(self, tile: list[int], depth: int) -> bool:
-        """Whether a queue of ``depth`` both affords ``tile`` and still picks it.
-
-        Asked of the search and not of :meth:`sweep_tile`, which falls back to no queue at all: a
-        depth that cannot hold the block would come back holding it, and every depth would look
-        affordable.
-        """
-        budget_bytes = self.budget_bytes
-        found, held = self.tile_within(depth, budget_bytes)
-        return found == tile and (not budget_bytes or budget_bytes <= 0 or held <= budget_bytes)
-
-    def sweep_depth(self, tile: list[int]) -> int:
-        """How many blocks to keep in flight, raised only while that changes nothing but the clock.
-
-        A deeper queue absorbs the jitter between stages of uneven cost, and it is paid in resident
-        blocks, which the sizing takes out of the block. Raised only while the block it allows is
-        still ``tile``: a smaller block is a different decomposition, which re-chunks the output
-        (the tile IS the store's chunk shape) and, on a map that does not factorise, moves the
-        written values. Where the block is bounded by something other than the budget, the extra
-        blocks are free, and the cap is what bounds them: on a 513x1331x1776 sweep in 40 blocks, a
-        second block in flight recovers 0.5 s of a 6.7 s run and a third recovers none.
-        """
-        depth = sweep_module._sweep_pipeline_depth()
-        # DOWN BEFORE UP. `tile` may be the one the sizing found only after giving the queue up
-        # (:meth:`sweep_tile`), and a run that kept the queue anyway would hold what the sizing was
-        # never told about -- the budget's whole promise, lost to a default nobody revisited.
-        while depth and not self.keeps_the_block(tile, depth):
-            depth -= 1
-        while depth and depth < budget._SWEEP_MAX_DEPTH and self.keeps_the_block(tile, depth + 1):
-            depth += 1
-        return depth
-
-    def sweep_tile(self, depth: int | None = None) -> list[int]:
-        """The block one sweep region covers: the tallest the cap allows that still holds inside the
-        budget, in the shape that pulls the least (:meth:`sweep_shape`).
-
-        The budget is what a sweep may HOLD, so it is the priced block (:meth:`sweep_block_bytes`)
-        that is held to it, never the landed rows alone: a REGRID pulling eight source voxels per
-        landed one, or a stage declaring eight volumes-worth of buffers, costs what it costs. The
-        search is over the height, because that is the one free parameter of the decomposition.
+        A budget one row does not fit is a refusal naming both figures, with the read-ahead given
+        up first: the queue is the one part of the price the sizing chose, and a sweep about to
+        refuse has no clock to buy with it.
         """
         depth = sweep_module._sweep_pipeline_depth() if depth is None else depth
         budget_bytes = self.budget_bytes
-        tile, held = self.tile_within(depth, budget_bytes)
-        if not budget_bytes or budget_bytes <= 0 or held <= budget_bytes:
-            return tile
-        # THE READ-AHEAD IS THE ONE PART OF THE PRICE THE SIZING CHOSE. Everything else in the block
-        # is what the chain must hold to run at all; the queue is bought, and what it buys is wall
-        # clock (sweep_depth: half a second of a 6.7 s run). A sweep about to refuse has no clock to
-        # buy, so it gives the queue up and asks once more. Three source regions resident become one,
-        # which is a quarter to a third of the block on a chain whose stage buffers dominate -- a
-        # narrow band, and inside it the difference is running against not running.
-        serial = None
-        if depth > 0:
-            candidate, serial = self.tile_within(0, budget_bytes)
-            if serial <= budget_bytes:
-                return candidate
-        raise DatasetManagerError(
-            f"'{self.case}': no region of '{self.group}' fits the per-rank memory budget"
-            f" ({format_bytes(budget_bytes)}): the smallest one this chain can sweep holds"
-            f" {format_bytes(held)}"
-            + (f", and {format_bytes(serial)} with the read-ahead given up" if serial is not None else "")
-            + ".",
-            "Raise 'memory_budget'.",
-        )
+        cap = self.cap_rows()
+        if not budget_bytes or budget_bytes <= 0:
+            rows = min(self.unit_rows(), cap)
+            return self.sweep_shape(rows), RegionGrowth(rows, cap, None)
+        full = self._tallest(budget_bytes, depth, self.sweep_shape)
+        if full is None:
+            held = self.sweep_block_bytes(self.sweep_shape(1), depth)
+            serial = self.sweep_block_bytes(self.sweep_shape(1), 0) if depth > 0 else None
+            if serial is not None and serial <= budget_bytes:
+                return self.sweep_shape(1), RegionGrowth(1, cap, budget_bytes)
+            raise DatasetManagerError(
+                f"'{self.case}': no region of '{self.group}' fits the per-rank memory budget"
+                f" ({format_bytes(budget_bytes)}): the smallest one this chain can sweep holds"
+                f" {format_bytes(held)}"
+                + (f", and {format_bytes(serial)} with the read-ahead given up" if serial is not None else "")
+                + ".",
+                "Raise 'memory_budget'.",
+            )
+        if self.sweep_shape(full) != self._slab(full):
+            return self._cube(full), RegionGrowth(full, cap, budget_bytes)
+        rows = self._tallest(budget_bytes * _START_SHARE, depth, self._slab) or full
+        block = int(self.granularity[0]) if self.granularity is not None else 1
+        if 1 < block and rows < block <= full:
+            # A region under one stored block holds the block's decoded hull all the same and only
+            # lands less of it: where a whole block fits the budget, the block is the start.
+            rows = block
+        if 1 < block <= rows:
+            rows -= rows % block  # a whole number of blocks reads each stored block once
+        return self._slab(rows), RegionGrowth(rows, cap, budget_bytes)
+
+    def growth(self, depth: int | None = None) -> RegionGrowth:
+        return self.start(depth)[1]
+
+    def sweep_depth(self, tile: list[int]) -> int:
+        """How many blocks the sweep keeps in flight beside the one it transforms: the rank's
+        pipeline depth while the priced block still holds inside the budget with it, none
+        otherwise. The queue is bought, and a sweep that cannot afford it stops buying it: three
+        source regions resident become one, a quarter to a third of the block on a chain whose
+        stage buffers do not dominate."""
+        depth = sweep_module._sweep_pipeline_depth()
+        budget_bytes = self.budget_bytes
+        if not depth or not budget_bytes or budget_bytes <= 0:
+            return depth
+        return depth if self.sweep_block_bytes(tile, depth) <= budget_bytes else 0
+
+    def sweep_tile(self, depth: int | None = None) -> list[int]:
+        """The block the first region covers (:meth:`start`): the chunk the output is cut in."""
+        return self.start(depth)[0]

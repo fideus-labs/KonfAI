@@ -77,7 +77,9 @@ class StreamingDatasetStub:
         del group_src, name
         self.declared.extend(tuple(window) for window in windows)
 
-    def read_data_statistics(self, group_src: str, name: str, channels: list[int] | None = None) -> dict[str, float]:
+    def read_data_statistics(
+        self, group_src: str, name: str, channels: list[int] | None = None, keys: object = None
+    ) -> dict[str, float]:
         self.stats_reads += 1
         data = self.volume if channels is None else self.volume[channels]
         return {

@@ -37,17 +37,17 @@ repos:
       - id: ruff-format
         files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|studio/konfai_studio/|tests/)
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.0
+  # mypy runs in the dev environment, where torch and the imaging stack are installed: the mirrors-mypy
+  # hook type-checks in an environment of its own, without them, and reads every torch attribute as
+  # Any | None. Same command as the pixi `typecheck` task and the CI job.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - types-requests
+        name: mypy
+        entry: pixi run --environment dev python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio
+        language: system
+        pass_filenames: false
         files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|studio/konfai_studio/)
-
-          - --check-untyped-defs
-          - --install-types
-          - --non-interactive
 
   - repo: https://github.com/PyCQA/bandit
     rev: 1.8.6

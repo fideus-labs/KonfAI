@@ -1,0 +1,54 @@
+Trainer:
+  train_name: CT_TWO_CLASSES
+  manual_seed: 32
+  epochs: 20
+  save_checkpoint_mode: BEST
+  autocast: false
+  Model:
+    classpath: default|UNet.yml
+    UNet:
+      parameters:
+        dim: 2
+        channels: [1, 4, 8, 16, 32]
+        nb_class: 2  # 0 = background, 1 = foreground
+      outputs_criterions:
+        UNetBlock_0:Head:Conv:
+          targets_criterions:
+            SEG:
+              criterions_loader:
+                CrossEntropyLoss:
+                  is_loss: true
+        UNetBlock_0:Head:Softmax:
+          targets_criterions:
+            SEG:
+              criterions_loader:
+                Dice:
+                  is_loss: true
+                  labels: [1]
+      optimizer:
+        name: AdamW
+        lr: 0.01
+  Dataset:
+    dataset_filenames: [./Dataset:a:mha]
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Standardize: {mean: [0], std: [300], inverse: false}
+            patch_transforms: None
+            is_input: true
+      SEG:
+        groups_dest:
+          SEG:
+            transforms:
+              TensorCast: {dtype: int64, inverse: false}
+            patch_transforms: None
+            is_input: false
+    Patch:
+      patch_size: [1, 32, 32]
+    batch_size: 4
+    num_workers: 0
+    pin_memory: false
+    validation: [CASE_003]
+    augmentations: None

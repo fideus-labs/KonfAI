@@ -20,6 +20,9 @@ on:
       - "tests/assets/Workflows/**"
       - "pyproject.toml"
       - "README.md"
+  schedule:
+    - cron: "37 3 * * 1" # the full OS x Python matrix, weekly
+  workflow_dispatch:
 
 jobs:
   konfai_apps_ci:
@@ -39,9 +42,14 @@ jobs:
 
     strategy:
       fail-fast: false
+      # Representative lanes on a pull request, the full matrix on main, weekly and by hand
+      # (see konfai_ci.yml).
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["ubuntu-latest", "windows-latest", "macos-latest"]') }}
         python-version: ["3.11", "3.12", "3.13"]
+        include: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '[{"os": "windows-latest", "python-version": "3.12"}, {"os": "macos-latest", "python-version": "3.12"}]' || '[]') }}
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

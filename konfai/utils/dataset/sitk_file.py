@@ -27,6 +27,7 @@ import re
 import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
@@ -289,7 +290,7 @@ class SitkFile(AbstractFile):
             max_len = max(len(v) for v in datas)
             data = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
         elif path.endswith(".fcsv"):
-            data = read_landmarks(Path(path))
+            data = cast(np.ndarray, read_landmarks(Path(path)))
         elif path.endswith(".xml"):
             with open(path, "rb") as xml_file:
                 root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
@@ -306,12 +307,8 @@ class SitkFile(AbstractFile):
             vtk_reader = vtk.vtkPolyDataReader()
             vtk_reader.SetFileName(path)
             vtk_reader.Update()
-            data = []
             points = vtk_reader.GetOutput().GetPoints()
-            num_points = points.GetNumberOfPoints()
-            for i in range(num_points):
-                data.append(list(points.GetPoint(i)))
-            data = np.asarray(data)
+            data = np.asarray([list(points.GetPoint(i)) for i in range(points.GetNumberOfPoints())])
         elif path.endswith(".npy"):
             data = np.load(path)
         else:

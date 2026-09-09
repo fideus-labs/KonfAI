@@ -16,9 +16,12 @@
 
 import asyncio
 import io
+import os
 import shutil
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -810,3 +813,162 @@ def test_get_app_info_reports_finetunable(monkeypatch: pytest.MonkeyPatch) -> No
 
     result = app_server.get_app_info("demo/app")
     assert result["finetunable"] is True
+
+
+def test_kill_job_cancels_a_job_still_waiting_for_a_gpu() -> None:
+    """A waiting job has no process: kill_job answered "Job not running" and left it eligible to
+    run when a GPU freed up."""
+    job = _make_job("waiting-1", status="waiting")
+    app_server.SERVER_STATE.jobs[job.job_id] = job
+    try:
+        response = app_server.kill_job(job.job_id)
+    finally:
+        app_server.SERVER_STATE.jobs.pop(job.job_id, None)
+    assert response["status"] == "killed" and job.cancelled and job.status == "killed"
+
+
+def test_a_cancel_while_waiting_on_the_second_gpu_gives_the_first_back() -> None:
+    async def scenario() -> tuple[bool, bool]:
+        app_server.SERVER_STATE.gpu_semaphores = {0: asyncio.Semaphore(1), 1: asyncio.Semaphore(1)}
+        await app_server.SERVER_STATE.gpu_semaphores[1].acquire()  # GPU 1 is busy
+        job = _make_job("explicit-1")
+        task = asyncio.create_task(app_server.acquire_gpus(job, [0, 1]))
+        await asyncio.sleep(0.25)  # GPU 0 acquired, waiting on GPU 1
+        held_while_waiting = app_server.SERVER_STATE.gpu_semaphores[0].locked()
+        job.cancelled = True
+        with pytest.raises(app_server.JobCancelled):
+            await task
+        return held_while_waiting, app_server.SERVER_STATE.gpu_semaphores[0].locked()
+
+    held_while_waiting, held_after = asyncio.run(scenario())
+    assert held_while_waiting and not held_after
+    app_server.SERVER_STATE.gpu_semaphores = {}
+
+
+def test_start_job_skips_a_cancelled_job_and_keeps_the_result_for_the_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launched: list[str] = []
+    monkeypatch.setattr(app_server, "_run_job_sync", lambda job, cmd: launched.append(job.job_id))
+    monkeypatch.setattr(app_server, "RESULT_RETENTION_S", 0.0)
+    job = _make_job("cancelled-1", status="killed")
+    job.cancelled = True
+    job.run_dir = tmp_path / "run"
+    job.run_dir.mkdir()
+    app_server.SERVER_STATE.jobs[job.job_id] = job
+    asyncio.run(app_server.start_job(job, ["konfai-apps"], None))
+    assert launched == [] and job.status == "killed" and job.finished_at is not None
+    assert not job.run_dir.exists() and job.job_id not in app_server.SERVER_STATE.jobs
+
+
+def test_a_download_renews_the_retention_lease(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(app_server, "RESULT_RETENTION_S", 600.0)
+    job = _make_job("done-1", status="done")
+    job.zip_path = tmp_path / "result.zip"
+    job.zip_path.write_bytes(b"zip")
+    job.retain_until = 1.0  # about to expire
+    app_server.SERVER_STATE.jobs[job.job_id] = job
+    try:
+        app_server.job_result(job.job_id)
+    finally:
+        app_server.SERVER_STATE.jobs.pop(job.job_id, None)
+    assert job.retain_until > app_server.time.time() + 500
+
+
+def test_cancellation_between_scheduling_and_worker_entry_prevents_launch(monkeypatch, tmp_path):
+    job = _make_job("cancel-at-worker")
+    job.run_dir = tmp_path / "run"
+    job.run_dir.mkdir()
+    app_server.SERVER_STATE.jobs[job.job_id] = job
+    monkeypatch.setattr(app_server, "RESULT_RETENTION_S", 0)
+
+    async def cancelled_to_thread(function, *args):
+        assert app_server.kill_job(job.job_id)["status"] == "killed"
+        function(*args)
+
+    def forbidden_launch(*args, **kwargs):
+        pytest.fail("cancelled work was launched")
+
+    monkeypatch.setattr(app_server.asyncio, "to_thread", cancelled_to_thread)
+    monkeypatch.setattr(app_server.subprocess, "Popen", forbidden_launch)
+    asyncio.run(app_server.start_job(job, ["not-executed"], None))
+    assert job.status == "killed" and job.cancelled
+    assert not job.run_dir.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="process groups are POSIX")
+def test_cancellation_during_process_creation_reaps_the_registered_process(monkeypatch, tmp_path):
+    job = _make_job("cancel-during-spawn")
+    job.run_dir = tmp_path
+    entered, release, terminated = Event(), Event(), Event()
+    app_server.SERVER_STATE.jobs[job.job_id] = job
+
+    def wait():
+        assert terminated.wait(5)
+        return -15
+
+    proc = SimpleNamespace(pid=12345, stdout=[], wait=wait, poll=lambda: -15 if terminated.is_set() else None)
+
+    def launch(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return proc
+
+    monkeypatch.setattr(app_server.subprocess, "Popen", launch)
+    monkeypatch.setattr(app_server.os, "killpg", lambda pid, sig: terminated.set())
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            worker = pool.submit(app_server._run_job_sync, job, ["not-executed"])
+            assert entered.wait(5)
+            killer = pool.submit(app_server.kill_job, job.job_id)
+            release.set()
+            assert killer.result(timeout=6)["status"] == "killed"
+            worker.result(timeout=6)
+        assert terminated.is_set() and job.status == "killed" and job.cancelled
+    finally:
+        release.set()
+        terminated.set()
+        app_server.SERVER_STATE.jobs.pop(job.job_id, None)
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_active_download_keeps_workspace_until_response_finishes(monkeypatch, tmp_path, disconnect):
+    job = _make_job("slow-download", status="done")
+    job.run_dir = tmp_path / "run"
+    job.run_dir.mkdir()
+    job.zip_path = job.run_dir / "result.zip"
+    job.zip_path.write_bytes(b"result")
+    app_server.SERVER_STATE.jobs[job.job_id] = job
+    monkeypatch.setattr(app_server, "RESULT_RETENTION_S", 0)
+
+    async def scenario():
+        transferring, finish = asyncio.Event(), asyncio.Event()
+
+        async def transfer(self, scope, receive, send):
+            transferring.set()
+            await finish.wait()
+            assert job.zip_path.exists()
+            if disconnect:
+                raise RuntimeError("client disconnected")
+
+        async def completed_worker(function, *args):
+            await transferring.wait()
+
+        monkeypatch.setattr(app_server.FileResponse, "__call__", transfer)
+        monkeypatch.setattr(app_server.asyncio, "to_thread", completed_worker)
+        response = app_server.job_result(job.job_id)
+        download = asyncio.create_task(response({}, None, None))
+        cleanup = asyncio.create_task(app_server.start_job(job, ["not-executed"], None))
+        await transferring.wait()
+        await asyncio.sleep(0.15)
+        assert not cleanup.done() and job.run_dir.exists() and job.active_downloads == 1
+        finish.set()
+        if disconnect:
+            with pytest.raises(RuntimeError, match="client disconnected"):
+                await download
+        else:
+            await download
+        await asyncio.wait_for(cleanup, timeout=2)
+        assert job.active_downloads == 0 and not job.run_dir.exists()
+
+    asyncio.run(scenario())

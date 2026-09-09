@@ -35,25 +35,27 @@ Pretrained models are automatically downloaded from [Hugging Face Hub](https://h
 
 ### 🔬 Performance comparison
 
-Same input, same weights (5-fold ensemble), same PyTorch build (cu13.0), single
-**NVIDIA RTX PRO 5000 (24 GB)**. Peak RAM = process-tree resident set; peak VRAM = over baseline.
+Same input, the five folds ensembled on both sides (`-f 5`), same PyTorch build
+(2.12.1, cu13.0), single **NVIDIA RTX PRO 5000 (24 GB)**, MRSegmentator 2.0.0. Peak RAM =
+process-tree resident set; peak VRAM = over baseline. Measured with
+`benchmarks/perf/bench_apps.py` (2026-09-09).
 
 | Case (voxels) | Tool | Time | Peak RAM | Peak VRAM |
 |---|---|---|---|---|
-| **S** (249 × 246 × 246) | **KonfAI** | **14 s** | **6.0 GB** | 13.0 GB |
-| | Original | 26 s | 8.6 GB | 3.7 GB |
-| **M** (533 × 390 × 177) | **KonfAI** | **25 s** | **7.5 GB** | 15.7 GB |
-| | Original | 65 s | 14.6 GB | 5.3 GB |
-| **L** (512 × 512 × 531) | **KonfAI** | **120 s** | **6.2 GB** | 16.7 GB |
-| | Original | 192 s | 37.5 GB | 14.6 GB |
+| **S** (248 × 246 × 141) | **KonfAI** | **15 s** | **5.2 GB** | 18.2 GB |
+| | Original | 19 s | 7.2 GB | 3.0 GB |
+| **M** (249 × 246 × 246) | **KonfAI** | **21 s** | **5.3 GB** | 16.3 GB |
+| | Original | 24 s | 8.5 GB | 3.8 GB |
+| **L** (512 × 512 × 531) | **KonfAI** | **86 s** | **6.9 GB** | 20.6 GB |
+| | Original | 143 s | 37.4 GB | 14.9 GB |
 
 ### 📈 Key observations
 
-- **1.6–2.6× faster** whole-body inference, **1.4–6.0× less host RAM**.
+- **1.2–1.7× faster**, **1.4–5.4× less host RAM**; the gap widens with the volume.
 - The GPU-resident accumulator trades **more VRAM** for the speed and low host RAM,
   while streaming keeps it **bounded**: on the **large** case host RAM stays at
-  **6.2 GB** where the original grows to **37.5 GB**.
-- **Byte-identical** to KonfAI's own CPU reassembly path.
+  **6.9 GB** where the original grows to **37.4 GB**.
+- The default `-f 2` ensembles two folds and runs faster than the table.
 
 ---
 

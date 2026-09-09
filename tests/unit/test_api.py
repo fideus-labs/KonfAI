@@ -323,3 +323,363 @@ def test_list_components_names_the_config_vocabulary() -> None:
 def test_list_components_refuses_an_unknown_kind() -> None:
     with pytest.raises(ConfigError, match="component kind"):
         api.list_components("optimizers")
+
+
+# ------------------------------------------------------------- a model YAML named by a relative path
+
+
+def test_a_relative_model_yaml_is_anchored_to_the_config_files_directory(tmp_path: Path) -> None:
+    """The copy lives in a scratch directory, and a relative model YAML resolves next to the
+    config file that names it: anchored here, or the shipped examples' ``classpath: UNet.yml``
+    would be looked for in the scratch directory."""
+    (tmp_path / "UNet.yml").write_text("name: UNet\n", encoding="utf-8")
+    source = tmp_path / "Config.yml"
+    source.write_text("Trainer:\n  Model:\n    classpath: UNet.yml  # the shipped spelling\n", encoding="utf-8")
+    copy = api._config_copy(source)
+    assert f"classpath: {tmp_path.resolve() / 'UNet.yml'}" in Path(copy).read_text(encoding="utf-8")
+    assert "Trainer:\n  Model:\n    classpath: UNet.yml" in source.read_text(encoding="utf-8")  # untouched
+
+
+def test_a_tree_anchors_a_relative_model_yaml_to_the_working_directory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    tree = api._config_copy({"Predictor": {"Model": {"classpath": "nets/UNet.yml"}}})
+    assert tree["Predictor"]["Model"]["classpath"] == str(tmp_path.resolve() / "nets" / "UNet.yml")
+
+
+def test_catalog_absolute_and_class_spellings_are_left_alone(tmp_path: Path) -> None:
+    tree = {
+        "Trainer": {
+            "Model": {"classpath": "default|UNet.yml"},
+            "Other": {"classpath": str(tmp_path / "abs.yml")},
+            "Class": {"classpath": "Model:MyNet"},
+        }
+    }
+    assert api._config_copy(dict(tree)) == tree
+    source = tmp_path / "Prediction.yml"
+    source.write_text("Predictor:\n  Model:\n    classpath: default|UNet.yml\n", encoding="utf-8")
+    assert Path(api._config_copy(source)).read_bytes() == source.read_bytes()
+
+
+def test_a_call_releases_its_scratch_config_and_restores_the_callers_rng(
+    cohort: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tree is materialized under a scratch directory a spawned rank re-reads; it was removed at
+    interpreter exit only, so a notebook's thousandth call held a thousand. And building a workflow
+    draws (the split, the init): the caller's generators come back as they were."""
+    import random
+    import tempfile
+
+    from konfai.utils.runtime.environment import _SCRATCH_CONFIGS
+
+    monkeypatch.chdir(cohort)
+    scratch_root = Path(tempfile.gettempdir())
+    before = {p.name for p in scratch_root.glob("konfai_transformer_*")}
+    random.seed(3)
+    torch.manual_seed(5)
+    states = (random.getstate(), torch.get_rng_state().clone(), np.random.get_state()[1].copy())
+    registered = len(_SCRATCH_CONFIGS)
+
+    api.transform(
+        "SCOPED",
+        "./Raw:mha",
+        {"CT": {"CT": [Write(dataset="./OutScoped:mha")]}},
+        transforms_dir=cohort / "Transforms",
+        quiet=True,
+    )
+
+    assert {p.name for p in scratch_root.glob("konfai_transformer_*")} == before
+    assert len(_SCRATCH_CONFIGS) == registered
+    assert random.getstate() == states[0]
+    assert torch.equal(torch.get_rng_state(), states[1])
+    assert np.array_equal(np.random.get_state()[1], states[2])
+
+
+def test_a_third_stage_of_one_class_is_spelled_by_occurrence() -> None:
+    tree = api._chain_tree(
+        [Clip(min_value=0.0), Clip(max_value=1.0), Clip(min_value=0.5)], api._STAGE_MODULES, "chains.CT.CT"
+    )
+    assert list(tree) == ["Clip", "konfai.data.transform:Clip", "Clip#3"]
+
+
+def test_three_clips_run_as_one_chain(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third occurrence once refused with 'split the chain'; it binds under Clip#3 and runs in
+    order: three nested clips equal the innermost."""
+    monkeypatch.chdir(cohort)
+    api.transform(
+        "THREE",
+        "./Raw:mha",
+        {
+            "CT": {
+                "CT": [
+                    Clip(min_value=-100.0, max_value=100.0),
+                    Clip(min_value=-50.0, max_value=80.0),
+                    Clip(min_value=-20.0, max_value=60.0),
+                    Write(dataset="./OutThree:mha"),
+                ]
+            }
+        },
+        transforms_dir=cohort / "Transforms",
+        quiet=True,
+    )
+    api.transform(
+        "ONE",
+        "./Raw:mha",
+        {"CT": {"CT": [Clip(min_value=-20.0, max_value=60.0), Write(dataset="./OutOne:mha")]}},
+        transforms_dir=cohort / "Transforms",
+        quiet=True,
+    )
+    for case in ("P000", "P001"):
+        three = sitk.GetArrayFromImage(sitk.ReadImage(str(cohort / "OutThree" / case / "CT.mha")))
+        one = sitk.GetArrayFromImage(sitk.ReadImage(str(cohort / "OutOne" / case / "CT.mha")))
+        np.testing.assert_array_equal(three, one)
+
+
+@pytest.mark.parametrize("live_objects", [False, True])
+def test_repeated_qualified_stages_preserve_their_module_and_application_order(
+    cohort: Path, monkeypatch: pytest.MonkeyPatch, live_objects: bool
+) -> None:
+    import sys
+    from types import ModuleType
+
+    modules = [ModuleType("first_clip_module"), ModuleType("second_clip_module")]
+    for module in modules:
+        module.Clip = type("Clip", (Clip,), {"__module__": module.__name__})
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    kwargs = [{"min_value": -100.0}, {"max_value": 80.0}, {"min_value": -20.0}, {"max_value": 60.0}]
+    stages = [
+        modules[index % 2].Clip(**arguments) if live_objects else {f"{modules[index % 2].__name__}:Clip": arguments}
+        for index, arguments in enumerate(kwargs)
+    ]
+    output = cohort / "Qualified"
+    api.transform(
+        "QUALIFIED",
+        f"{cohort / 'Raw'}:mha",
+        {"CT": {"CT": [*stages, Write(dataset=f"{output}:mha")]}},
+        transforms_dir=cohort / "Transforms",
+        quiet=True,
+    )
+    for case in ("P000", "P001"):
+        source = sitk.GetArrayFromImage(sitk.ReadImage(str(cohort / "Raw" / case / "CT.mha")))
+        predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(output / case / "CT.mha")))
+        np.testing.assert_array_equal(predicted, np.clip(source, -20.0, 60.0))
+
+
+@pytest.mark.parametrize("workflow", ["plan", "predict"])
+@pytest.mark.parametrize("missing_input", [False, True])
+def test_plans_and_live_predictions_release_scratch_on_success_and_failure(
+    cohort: Path, monkeypatch: pytest.MonkeyPatch, workflow: str, missing_input: bool
+) -> None:
+    import random
+    import tempfile
+
+    from konfai.utils.runtime.environment import _SCRATCH_CONFIGS
+
+    created: list[Path] = []
+    mkdtemp = tempfile.mkdtemp
+
+    def tracked_mkdtemp(*args, **kwargs):
+        path = Path(mkdtemp(*args, **kwargs))
+        if path.name.startswith("konfai_"):
+            created.append(path)
+        return str(path)
+
+    monkeypatch.setattr(tempfile, "mkdtemp", tracked_mkdtemp)
+    source = f"{cohort / ('Missing' if missing_input else 'Raw')}:mha"
+    output = cohort / "ScopedOutput"
+    model = torch.nn.Conv3d(1, 1, 1)
+    states = (random.getstate(), np.random.get_state(), torch.get_rng_state().clone())
+    registered = len(_SCRATCH_CONFIGS)
+
+    def call():
+        if workflow == "plan":
+            return api.plan_transform(
+                "SCOPED_PLAN",
+                source,
+                {"CT": {"CT": [Write(dataset=f"{output}:mha")]}},
+                transforms_dir=cohort / "Transforms",
+                quiet=True,
+            )
+        return api.predict_model(
+            model,
+            source,
+            inputs="CT",
+            patch=[6, 7, 8],
+            output=f"{output}:mha",
+            predictions_dir=cohort / "Predictions",
+            quiet=True,
+        )
+
+    if missing_input:
+        with pytest.raises(KonfAIError, match="Group source 'CT'"):
+            call()
+    else:
+        result = call()
+        assert result is not None
+        if workflow == "predict":
+            predicted = sitk.ReadImage(str(output / "P000" / "PRED.mha"))
+            assert predicted.GetSize() == (8, 7, 6)
+    assert created, "the workflow exercised its actual scratch-config path"
+    assert not any(path.exists() for path in created)
+    assert len(_SCRATCH_CONFIGS) == registered
+    assert random.getstate() == states[0]
+    assert np.array_equal(np.random.get_state()[1], states[1][1])
+    assert torch.equal(torch.get_rng_state(), states[2])
+
+
+def test_released_scratch_does_not_accumulate_exit_callbacks(tmp_path: Path) -> None:
+    import atexit
+
+    from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, register_scratch_config, release_scratch_configs
+
+    before = atexit._ncallbacks()
+    for index in range(3):
+        scratch = tmp_path / str(index)
+        scratch.mkdir()
+        mark = len(_SCRATCH_CONFIGS)
+        register_scratch_config(scratch)
+        release_scratch_configs(mark)
+        assert not scratch.exists()
+    assert atexit._ncallbacks() == before
+
+
+# ------------------------------------------------------------------------------ bring your model
+
+
+def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ten-line path: an ``nn.Module`` with one tensor in and one out, a dataset root, the
+    groups it reads and scores, a loss, a patch. Trained one epoch on the CPU, then predicted twice:
+    from the checkpoint the training wrote, and from the weights the module holds in memory."""
+    from konfai.data.transform import TensorCast
+    from konfai.metric.measure import CrossEntropyLoss
+
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(3)
+    for case in ("P000", "P001"):
+        _write_case(tmp_path / "Raw" / case / "CT.mha", rng.normal(0.0, 100.0, (4, 8, 8)).astype(np.float32))
+        _write_case(tmp_path / "Raw" / case / "SEG.mha", rng.integers(0, 2, (4, 8, 8)).astype(np.uint8))
+    model = torch.nn.Sequential(torch.nn.Conv2d(1, 4, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(4, 2, 1))
+
+    checkpoints = api.train_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        targets="SEG",
+        loss=CrossEntropyLoss(),
+        patch=[1, 8, 8],
+        epochs=1,
+        batch_size=2,
+        transforms={"SEG": [TensorCast(dtype="int64")]},
+        validation=0.5,
+        name="TEN_LINES",
+        manual_seed=1,
+        checkpoints_dir=tmp_path / "Checkpoints",
+        statistics_dir=tmp_path / "Statistics",
+        quiet=True,
+    )
+    saved = sorted(checkpoints.glob("*.pt"))
+    assert checkpoints == tmp_path / "Checkpoints" / "TEN_LINES" and saved, "one epoch wrote a checkpoint"
+    record = (tmp_path / "Statistics" / "TEN_LINES" / "Trainer.yml").read_text(encoding="utf-8")
+    assert "konfai.api:live_model" in record, (
+        "the run record names the live model, as every run keeps its resolved config"
+    )
+
+    workspace = api.predict_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        patch=[1, 8, 8],
+        output="./Pred:mha",
+        checkpoints=saved[-1],
+        name="TEN_LINES",
+        predictions_dir=tmp_path / "Predictions",
+        quiet=True,
+    )
+    assert workspace == tmp_path / "Predictions" / "TEN_LINES"
+    # A relative output root lands under the run's workspace, as it does for every prediction.
+    predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Pred" / "P000" / "PRED.mha")))
+    assert predicted.shape == (4, 8, 8, 2), "the two logit channels, as a vector image on the case's grid"
+
+    # No checkpoint named: the weights the module holds are what predicts, written as one for the run.
+    live_workspace = api.predict_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        patch=[1, 8, 8],
+        output=f"{tmp_path / 'PredLive'}:mha",  # absolute: written where it says
+        name="TEN_LINES_LIVE",
+        predictions_dir=tmp_path / "Predictions",
+        quiet=True,
+    )
+    assert live_workspace == tmp_path / "Predictions" / "TEN_LINES_LIVE"
+    live = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "PredLive" / "P000" / "PRED.mha")))
+    assert live.shape == predicted.shape
+    (
+        np.testing.assert_allclose(live, predicted, rtol=1e-5, atol=1e-5),
+        "the checkpoint holds the weights the module holds",
+    )
+
+
+def test_a_live_model_token_is_released_when_the_run_returns() -> None:
+    model = object()
+    with api._registered_live_model(model) as token:
+        assert api.live_model(token) is model
+    assert token not in api._LIVE_MODELS
+    with pytest.raises(ConfigError, match="No live model"):
+        api.live_model(token)
+
+
+def test_a_live_model_refuses_several_ranks() -> None:
+    with pytest.raises(ConfigError, match="one rank"):
+        api.train_model(
+            torch.nn.Identity(), "./Raw:mha", inputs="CT", targets="SEG", loss=[], patch=[1, 8, 8], gpu=[0, 1]
+        )
+
+
+def test_a_monai_unet_trains_and_predicts_through_the_same_ten_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The library model the adoption page promises: MONAI's UNet, untouched, through train_model
+    and predict_model."""
+    monai_nets = pytest.importorskip("monai.networks.nets")
+    from konfai.data.transform import TensorCast
+    from konfai.metric.measure import CrossEntropyLoss
+
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(5)
+    for case in ("P000", "P001"):
+        _write_case(tmp_path / "Raw" / case / "CT.mha", rng.normal(0.0, 100.0, (4, 16, 16)).astype(np.float32))
+        _write_case(tmp_path / "Raw" / case / "SEG.mha", rng.integers(0, 3, (4, 16, 16)).astype(np.uint8))
+    model = monai_nets.UNet(spatial_dims=2, in_channels=1, out_channels=3, channels=(4, 8, 16), strides=(2, 2))
+
+    checkpoints = api.train_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        targets="SEG",
+        loss=CrossEntropyLoss(),
+        patch=[1, 16, 16],
+        epochs=1,
+        batch_size=2,
+        transforms={"SEG": [TensorCast(dtype="int64")]},
+        validation=0.5,
+        name="MONAI",
+        manual_seed=1,
+        checkpoints_dir=tmp_path / "Checkpoints",
+        statistics_dir=tmp_path / "Statistics",
+        quiet=True,
+    )
+    workspace = api.predict_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        patch=[1, 16, 16],
+        output="./Pred:mha",
+        checkpoints=sorted(checkpoints.glob("*.pt"))[-1],
+        name="MONAI",
+        predictions_dir=tmp_path / "Predictions",
+        quiet=True,
+    )
+    predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Pred" / "P001" / "PRED.mha")))
+    assert predicted.shape == (4, 16, 16, 3)

@@ -87,6 +87,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default|Default": OutputDatasetLoader()},
         data_log: list[str] | None = None,
         check_training_transforms: bool = True,
+        checkpoint_cache_gib: float = 1.0,
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
             raise ConfigError("Predictor requires KONFAI_CONFIG_MODE='Done' before initialization.")
@@ -106,6 +107,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.autocast = autocast
         self.channels_last = channels_last
         self.check_training_transforms = check_training_transforms
+        self.checkpoint_cache_gib = checkpoint_cache_gib
         with startup_clock().phase("model"):
             self.model = model.get_model(train=False)
         self.it = 0
@@ -216,7 +218,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                     " case(s) already written -> skipped (--overwrite recomputes)."
                 )
 
-        self.model_composite = ModelComposite(self.model, self.combine)
+        self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
         if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
             # A model WITH weights but no checkpoint would run with random weights and silently produce
             # garbage: refuse it. A WEIGHTLESS model (0 parameters, e.g. a classical/optimisation engine
@@ -309,8 +311,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         Resolve checkpoint sources for ensemble prediction.
 
         This method handles both remote and local model sources:
-        - If the model path is a URL (starting with "https://"), it eagerly downloads and loads the state dict
-          once because re-fetching it every batch would be prohibitively slow.
+        - A URL remains a reloadable source: torch.hub keeps its download on disk, while the
+          composite's bounded host cache decides which deserialized weights stay resident.
         - If the model path is local:
             - it keeps only the checkpoint path and lets `ModelComposite` stream weights into a single model
               instance during prediction to reduce memory pressure.
@@ -321,15 +323,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         Raises:
             Exception: If a model path does not exist or cannot be loaded.
         """
-        state_dicts = []
+        state_dicts: list[dict[str, Any] | Path | str] = []
         for path_to_model in self.path_to_models:
             if isinstance(path_to_model, str) and path_to_model.startswith("https://"):
-                try:
-                    state_dicts.append(
-                        torch.hub.load_state_dict_from_url(url=path_to_model, map_location="cpu", check_hash=True)
-                    )
-                except Exception as exc:
-                    raise Exception(f"Model : {path_to_model} does not exist !") from exc
+                state_dicts.append(path_to_model)
             elif Path(path_to_model).exists():
                 state_dicts.append(Path(path_to_model))
             else:

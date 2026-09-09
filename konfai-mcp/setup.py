@@ -31,15 +31,36 @@ def _release_version() -> str:
     return get_version(root=str(_ROOT), tag_regex=r"^v(?P<version>.*)$", local_scheme="no-local-version")
 
 
-# konfai and konfai-apps are pinned to the exact release version: runner.py imports core internals
-# (konfai.transformer, konfai.network.network) whose layout moves between minor releases, so the
-# family ships in lockstep, like the apps/* bundles pin konfai and studio pins konfai-mcp.
+def _sibling(name: str, version: str) -> str:
+    """The family ships in lockstep: at a release tag the sibling is pinned to the exact version.
+    From a working tree (a ``.dev`` version) the pin is the closest release or newer, so
+    ``pip install -e`` resolves against the core installed beside it; the publish workflow
+    builds at the tag, where the pin is exact."""
+    if ".dev" not in version:
+        return f"{name}=={version}"
+    try:
+        from setuptools_scm import get_version
+
+        floor = get_version(
+            root=str(_ROOT),
+            tag_regex=r"^v(?P<version>.*)$",
+            version_scheme=lambda scm_version: str(scm_version.tag),
+            local_scheme="no-local-version",
+        )
+    except Exception:  # no git history to read a tag from: the dev version's own floor
+        floor = version
+    return f"{name}>={floor}"
+
+
+# konfai and konfai-apps are pinned to the exact release version at a tag: runner.py imports core
+# internals (konfai.transformer, konfai.network.network) whose layout moves between minor releases, so
+# the family ships in lockstep, like the apps/* bundles pin konfai and studio pins konfai-mcp.
 _version = _release_version()
 
 setup(
     install_requires=[
-        f"konfai=={_version}",
-        f"konfai-apps=={_version}",
+        _sibling("konfai", _version),
+        _sibling("konfai-apps", _version),
         # >= 2.10.2 for stateless streamable HTTP (stateless_http/json_response run
         # kwargs and the FASTMCP_STATELESS_HTTP setting) per MCP spec rev 2025-03-26.
         "fastmcp>=2.10.2",

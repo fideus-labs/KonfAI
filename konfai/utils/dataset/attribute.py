@@ -216,7 +216,7 @@ def as_channel_first(data: np.ndarray, attributes: Attribute) -> np.ndarray:
     return data
 
 
-def data_to_image(data: np.ndarray, attributes: Attribute) -> sitk.Image:
+def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sitk.Image:
     """Convert a NumPy array and KonfAI attributes into a SimpleITK image."""
     if isinstance(data, torch.Tensor):
         # Accept a torch tensor on any device: SimpleITK works on host arrays, so a SITK-backed transform

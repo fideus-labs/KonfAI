@@ -484,6 +484,7 @@ class LocalAppRepository(AppRepositoryInfo):
 
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
+        self._portable_assets: list[str] = [str(name) for name in app_repository_metadata.get("portable_assets", [])]
 
         # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-.pt files
         # are all downloaded above, so resolving it here costs nothing.
@@ -916,7 +917,20 @@ class LocalAppRepository(AppRepositoryInfo):
                 filenames = self._refreshed_filenames() or filenames
             for name in name_of_models:
                 models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
+        elif self._checkpoints_name:
+            # The manifest is authoritative for the default: a repackaged bundle can still hold the
+            # previous export's checkpoint beside the declared one, and enumeration picked it up.
+            declared = [str(name) for name in self._checkpoints_name]
+            if any(self._find_repo_filename(name, filenames, suffix=".pt") is None for name in declared):
+                filenames = self._refreshed_filenames() or filenames
+            if len(declared) < number_of_model:
+                raise AppRepositoryError(
+                    f"Expected {number_of_model} model files (.pt), but app.json declares {len(declared)}: {declared}."
+                )
+            for name in declared[:number_of_model]:
+                models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
         else:
+            # Legacy metadata that declares no models: every .pt the repository holds, in listing order.
             models_to_download = available_models
             remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
             if remote_filenames is not None:
@@ -933,9 +947,13 @@ class LocalAppRepository(AppRepositoryInfo):
 
         # Make every bundle asset (custom .py, elastix parameter maps, lookup tables, …) available in
         # the run workspace, as documented ("files can live in the app directory and will be available
-        # at runtime"). Model checkpoints (.pt) are handled separately via ``models_path``.
+        # at runtime"). Model checkpoints (.pt) are handled separately via ``models_path``, and the
+        # files app.json declares under "portable_assets" (an ONNX export and its tensor data) are the
+        # portable runtime's: the native path does not copy them. A bundle that declares none keeps
+        # the inclusive contract, since its assets' consumers are unknown.
+        portable = set(self._portable_assets)
         for filename in filenames:
-            if not filename.endswith(".pt"):
+            if not filename.endswith(".pt") and filename not in portable:
                 codes_path.append((filename, self._download(filename)))
 
         self._install_requirements(filenames)

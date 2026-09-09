@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, Suspense, useEffect, useRef, useState } from "react";
 import AppZoo, { type StudioApp } from "./AppZoo";
-import Deploy from "./Deploy";
 import Chat, { clearChat } from "./Chat";
-import Console from "./Console";
+import { lazyWithRetry } from "./lazy";
 import FolderBrowser from "./FolderBrowser";
 import Login from "./Login";
 import RightPanel from "./RightPanel";
@@ -12,6 +11,11 @@ import { useJobStream } from "./useJobStream";
 import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
 import { jobState } from "./status";
+
+// The deployment pane (ONNX Runtime) and the terminal (xterm) load when first shown: their bundles
+// are not part of what a chat session pays to start.
+const Deploy = lazyWithRetry(() => import("./Deploy"));
+const Console = lazyWithRetry(() => import("./Console"));
 import { type SessionUi, patchSession, replaceSessionField } from "./sessionState";
 
 type Gpu = {
@@ -235,6 +239,7 @@ function Studio({ remote }: { remote: boolean }) {
   const [appsLoading, setAppsLoading] = useState(true);
   const [zooOpen, setZooOpen] = useState(false);
   const [deployApp, setDeployApp] = useState<StudioApp | null>(null);
+  const [terminalRequested, setTerminalRequested] = useState(false);
 
   function refreshApps() {
     setAppsLoading(true);
@@ -822,7 +827,27 @@ function Studio({ remote }: { remote: boolean }) {
               onReload={() => bumpRun(active)}
             />
           </div>
-          <Console />
+          {terminalRequested ? (
+            <Suspense fallback={
+              <section className="console">
+                <div className="console-head" role="status">Opening terminal…</div>
+              </section>
+            }>
+              <Console initialOpen />
+            </Suspense>
+          ) : (
+            <section className="console">
+              <div className="console-head">
+                <button className="ctab on" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
+                  Terminal
+                </button>
+                <span className="cbar-spacer" />
+                <button className="toggle" aria-label="Open terminal" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
+                  ▸
+                </button>
+              </div>
+            </section>
+          )}
         </div>
       </div>
 
@@ -944,7 +969,11 @@ function Studio({ remote }: { remote: boolean }) {
         />
       )}
 
-      {deployApp && <Deploy app={deployApp} onClose={() => setDeployApp(null)} />}
+      {deployApp && (
+        <Suspense fallback={null}>
+          <Deploy app={deployApp} onClose={() => setDeployApp(null)} />
+        </Suspense>
+      )}
 
       {toast && (
         <div className="toast" onClick={() => setToast("")}>

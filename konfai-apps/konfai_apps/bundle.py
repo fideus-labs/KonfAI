@@ -30,7 +30,7 @@ import random
 import shutil
 import sys
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from konfai.utils.errors import AppMetadataError
@@ -419,6 +419,77 @@ def assemble_program(models: list[dict[str, Any]], *, reduce: str, classes: list
     return {"steps": chain, "output": "output"}
 
 
+def _support_relative(value: str, role: str) -> Path:
+    """One portable relative name, never a traversal or a Windows drive on a POSIX host."""
+    path = Path(value)
+    if (
+        not value
+        or path.is_absolute()
+        or PureWindowsPath(value).drive
+        or "\\" in value
+        or ".." in path.parts
+        or path == Path(".")
+    ):
+        raise AppMetadataError(f"Invalid {role} {value!r}: use a relative path below its declared root.")
+    return path
+
+
+def resolve_support_files(
+    support_files: dict[str, str] | None,
+    support_root: str | Path | None,
+) -> dict[str, Path]:
+    """Plan explicitly declared files/directories without importing code or following imports.
+
+    Keys are bundle-relative destinations; values are paths below the required source root.
+    Directories expand deterministically. In-root symlinks are copied as regular files, while
+    escaping links, cycles and special files are refused before anything is written.
+    """
+    if not support_files:
+        return {}
+    if support_root is None:
+        raise AppMetadataError("support_root is required when support_files are declared.")
+    root = Path(support_root).expanduser().resolve(strict=True)
+    if not root.is_dir():
+        raise AppMetadataError(f"Support root is not a directory: {root}")
+    planned: dict[str, Path] = {}
+
+    def visit(source: Path, destination: Path, ancestors: set[Path]) -> None:
+        try:
+            resolved = source.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise AppMetadataError(f"Cannot read support path {source}: {error}") from error
+        if not resolved.is_relative_to(root):
+            raise AppMetadataError(f"Support path {source} escapes support_root {root}.")
+        if resolved.is_dir():
+            if resolved in ancestors:
+                raise AppMetadataError(f"Support directory cycle at {source}.")
+            for child in sorted(resolved.iterdir()):
+                visit(child, destination / child.name, ancestors | {resolved})
+        elif resolved.is_file():
+            name = destination.as_posix()
+            if name in planned and planned[name] != resolved:
+                raise AppMetadataError(f"Different support files would overwrite {name!r}.")
+            planned[name] = resolved
+        else:
+            raise AppMetadataError(f"Support path is not a regular file or directory: {source}")
+
+    for destination, source in sorted(support_files.items()):
+        visit(
+            root / _support_relative(source, "support source"),
+            _support_relative(destination, "support destination"),
+            set(),
+        )
+    _check_file_layout(planned)
+    return dict(sorted(planned.items()))
+
+
+def _check_file_layout(files: dict[str, Any]) -> None:
+    for name in files:
+        for parent in Path(name).parents:
+            if parent.as_posix() in files:
+                raise AppMetadataError(f"Bundle paths collide: {parent.as_posix()!r} is both a file and a directory.")
+
+
 def assemble_bundle(
     name: str,
     out_dir: str | Path,
@@ -427,12 +498,24 @@ def assemble_bundle(
     checkpoints: list[str],
     model_py: str | None = None,
     requirements: str | None = None,
+    support_files: dict[str, str] | None = None,
+    support_root: str | Path | None = None,
 ) -> Path:
     """Assemble ``<out_dir>/<name>/`` in the standard app-bundle layout.
 
     Validates that ``app.json`` has the required keys and that its ``models`` list (if
     present) matches the provided checkpoints; fills ``models`` from the checkpoints
-    otherwise. Returns the bundle directory.
+    otherwise. Two checkpoints (or two configs) that would land under one bundle filename are
+    refused before anything is written: a flat copy kept the last one and the manifest named both.
+
+    The export is assembled in a staging directory beside the bundle before its files are replaced. An
+    existing bundle keeps the files the export does not write (a user's notes, an icon), except the
+    checkpoints its previous ``app.json`` declared and the new export does not: those are the
+    previous export's, and left in place they were what the default inference picked up.
+    ``support_files`` explicitly maps bundle-relative destinations to files/directories below
+    ``support_root`` (required with this option). Only these paths are copied; imports and asset
+    references are not recursively inferred. The manifest records the expanded managed files.
+    Returns the bundle directory.
     """
     metadata: dict[str, Any] = json.loads(Path(app_json).read_text())
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
@@ -440,28 +523,111 @@ def assemble_bundle(
         raise AppMetadataError(f"app.json is missing required keys: {', '.join(missing)}")
 
     checkpoint_names = [Path(c).name for c in checkpoints]
+    config_names = [Path(c).name for c in configs]
+    for kind, names in (("checkpoints", checkpoint_names), ("configs", config_names)):
+        colliding = sorted({item for item in names if names.count(item) > 1})
+        if colliding:
+            raise AppMetadataError(
+                f"Two {kind} would land under the same bundle filename {colliding} and overwrite each other. "
+                "Rename them (fold0_best.pt, fold1_best.pt) before packaging."
+            )
     declared = [str(m) for m in metadata.get("models", [])]
     if declared and sorted(declared) != sorted(checkpoint_names):
         raise AppMetadataError(
             f"app.json 'models' {declared} does not match the provided checkpoints {checkpoint_names}",
         )
-
-    bundle = Path(out_dir) / name
-    bundle.mkdir(parents=True, exist_ok=True)
-
     if not declared:
         metadata["models"] = checkpoint_names
-    (bundle / "app.json").write_text(json.dumps(metadata, indent=2))
 
-    for config in configs:
-        shutil.copy(config, bundle / Path(config).name)
-    for checkpoint in checkpoints:
-        shutil.copy(checkpoint, bundle / Path(checkpoint).name)
+    if _support_relative(name, "bundle name").name != name:
+        raise AppMetadataError("Bundle name must be a single directory name.")
+    support = resolve_support_files(support_files, support_root)
+    files: dict[str, Path | None] = {"app.json": None}
+
+    def add(destination: str, source: str | Path) -> None:
+        path = Path(source).resolve(strict=True)
+        if destination in files and files[destination] != path:
+            raise AppMetadataError(f"Different bundle files would overwrite {destination!r}.")
+        files[destination] = path
+
+    for source in [*configs, *checkpoints]:
+        add(Path(source).name, source)
     if model_py is not None:
-        shutil.copy(model_py, bundle / "Model.py")
+        add("Model.py", model_py)
     if requirements is not None:
-        shutil.copy(requirements, bundle / "requirements.txt")
+        add("requirements.txt", requirements)
+    for destination, planned in support.items():
+        add(destination, planned)
+    _check_file_layout(files)
+    metadata["support_files"] = sorted(support)
+    bundle = Path(out_dir) / name
+    staging = bundle.with_name(f".{name}.staging-{os.getpid()}")
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        (staging / "app.json").write_text(json.dumps(metadata, indent=2))
+        for destination, staged in files.items():
+            if staged is not None:
+                target = staging / destination
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(staged, target)
+        _replace_bundle(staging, bundle, metadata["models"])
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return bundle
+
+
+def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
+    """Move the staged export over ``bundle``: a fresh bundle is the staging directory renamed; an
+    existing one takes every staged file and loses the checkpoints its previous ``app.json``
+    declared that ``models`` no longer does."""
+    if not bundle.exists():
+        staging.rename(bundle)
+        return
+    previous: list[str] = []
+    try:
+        old_metadata = json.loads((bundle / "app.json").read_text())
+        previous = [str(m) for m in old_metadata.get("models", [])] + [
+            str(path) for path in old_metadata.get("support_files", [])
+        ]
+    except (OSError, ValueError):
+        pass
+    staged_files = sorted(path for path in staging.rglob("*") if path.is_file())
+    retained = {(bundle / path.relative_to(staging)).resolve() for path in staged_files}
+    obsolete: dict[Path, Path] = {}  # by resolved path: two spellings of one file unlink once
+    for name in sorted(set(previous)):
+        target = bundle / name
+        if Path(name).is_absolute() or not target.resolve().is_relative_to(bundle.resolve()):
+            raise AppMetadataError(
+                f"Previous app.json declares managed file {name!r} outside the bundle; "
+                "correct its models/support_files lists before replacing this export."
+            )
+        if target.resolve() in retained:
+            continue  # './model.pt' and 'model.pt' can name the same retained checkpoint.
+        if target.is_file():
+            obsolete.setdefault(target.resolve(), target)
+    removable = set(obsolete)
+    # Preflight the entire update: never write through a destination's symlink or replace a user's
+    # file or directory. A managed file this export no longer declares may become a directory.
+    for staged in staged_files:
+        target = bundle / staged.relative_to(staging)
+        for part in [target, *target.parents]:
+            if part == bundle:
+                break
+            if part.is_symlink():
+                raise AppMetadataError(f"Bundle destination contains a symlink: {part}")
+            if part != target and part.exists() and not part.is_dir() and part.resolve() not in removable:
+                raise AppMetadataError(f"Bundle destination parent is not a directory: {part}")
+        if target.is_dir():
+            raise AppMetadataError(f"Bundle destination is a directory, not a file: {target}")
+    for target in obsolete.values():
+        target.unlink()
+    for staged in sorted(staged_files, key=lambda path: path.name == "app.json"):
+        target = bundle / staged.relative_to(staging)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staged.replace(target)
+    shutil.rmtree(staging)
 
 
 def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
@@ -724,6 +890,7 @@ def export_portable_into_bundle(
             extra_manifest["blend"] = blend
 
         models: list[dict[str, Any]] = []
+        portable_assets: set[Path] = set()
         onnx_path = bundle / "model.onnx"
         for checkpoint in selected:
             model = ModelLoader(classpath).get_model(train=False)
@@ -760,6 +927,9 @@ def export_portable_into_bundle(
                 model_filename="model.onnx" if not ensemble else f"{fold_id}.onnx",
                 write_manifest=not ensemble,
             )
+            portable_assets.add(onnx_path)
+            if not ensemble:
+                portable_assets.add(bundle / "manifest.json")
             models.append({"id": fold_id, "manifest": manifest})
 
         # A config with an auxiliary mask group (a nested KonfAIInference model + a Mask on the output) is a
@@ -770,15 +940,17 @@ def export_portable_into_bundle(
                 name: {**_export_nested_model(bundle, name, g["inference"]), "ops": g["ops"]}
                 for name, g in aux_groups.items()
             }
+            portable_assets.update(bundle / f"{name}.onnx" for name in aux)
             program = _assemble_masked_tta_program(
                 models, _tta_passes(config, root), aux, _mask_specs(config, root), reduce=ensemble_reduction
             )
             program_path = bundle / "program.json"
             program_path.write_text(json.dumps(program, indent=2))
-            return program_path
+            portable_assets.add(program_path)
+            return _declare_portable_assets(bundle, program_path, portable_assets)
 
         if not ensemble:
-            return onnx_path
+            return _declare_portable_assets(bundle, onnx_path, portable_assets)
 
         program = assemble_program(
             models,
@@ -787,7 +959,8 @@ def export_portable_into_bundle(
         )
         program_path = bundle / "program.json"
         program_path.write_text(json.dumps(program, indent=2))
-        return program_path
+        portable_assets.add(program_path)
+        return _declare_portable_assets(bundle, program_path, portable_assets)
     finally:
         sys.path.remove(str(bundle))
         config_path.write_text(config_snapshot)
@@ -796,6 +969,26 @@ def export_portable_into_bundle(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _declare_portable_assets(bundle: Path, artifact: Path, produced: set[Path]) -> Path:
+    """Record in the bundle's ``app.json`` the files only the portable runtime consumes (the ONNX
+    models, the manifest and the program), so a native run does not copy them into its workspace
+    (``download_inference``). Only artifacts this export produced receive a role: a custom native
+    app can already depend on another ONNX file. The core exporter returns self-contained models
+    and removes their external-data sidecars. Returns ``artifact`` unchanged."""
+    metadata_path = bundle / "app.json"
+    if not metadata_path.exists():
+        return artifact
+    portable = {path.resolve().relative_to(bundle.resolve()).as_posix() for path in produced if path.is_file()}
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return artifact
+    declared = [str(name) for name in metadata.get("portable_assets", [])]
+    metadata["portable_assets"] = sorted(set(declared) | set(portable))
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+    return artifact
 
 
 def export_onnx_into_bundle(
@@ -823,6 +1016,14 @@ def export_onnx_into_bundle(
 
 def run_bundle_cli(args: dict[str, Any]) -> None:
     """Entry point for the ``konfai-apps bundle`` subcommand."""
+    support: dict[str, str] = {}
+    for declaration in args.get("support_file", []):
+        if "=" not in declaration:
+            raise AppMetadataError("--support-file expects DESTINATION=SOURCE, both relative paths.")
+        destination, source = declaration.split("=", 1)
+        if destination in support and support[destination] != source:
+            raise AppMetadataError(f"Conflicting --support-file mappings for {destination!r}.")
+        support[destination] = source
     bundle = assemble_bundle(
         name=args["name"],
         out_dir=args["out"],
@@ -831,12 +1032,20 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         checkpoints=args["checkpoint"],
         model_py=args.get("model_py"),
         requirements=args.get("requirements"),
+        support_files=support,
+        support_root=args.get("support_root"),
     )
     print(f"Bundle assembled at {bundle}")
 
     # If no requirements.txt was provided, draft one from the custom Model.py imports.
     if not args.get("requirements") and (bundle / "Model.py").exists():
         drafted = derive_requirements([bundle / "Model.py"])
+        # A declared local package is not a PyPI dependency. Requirements remain a reviewed draft;
+        # packaging deliberately does not execute code to discover dependencies.
+        local_modules = {path.stem for path in bundle.glob("*.py")} | {
+            path.name for path in bundle.iterdir() if path.is_dir()
+        }
+        drafted = [name for name in drafted if name.replace("-", "_") not in local_modules]
         if drafted:
             (bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
             print(f"Drafted requirements.txt (review!): {', '.join(drafted)}")

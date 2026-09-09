@@ -269,3 +269,317 @@ def test_transform_manifest_refuses_an_unportable_transform():
     config = {"Predictor": {"Dataset": {"g": {"transforms": {"SomeCustomTransform": {"x": 1}}}}, "outputs_dataset": {}}}
     with pytest.raises(AppMetadataError, match="no portable runtime op"):
         _transform_manifest(config, "Predictor")
+
+
+def test_colliding_bundle_filenames_are_refused_before_anything_is_written(tmp_path):
+    """fold0/best.pt and fold1/best.pt flattened to one best.pt: the second overwrote the first and
+    app.json named both."""
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    (tmp_path / "fold0").mkdir()
+    (tmp_path / "fold1").mkdir()
+    (tmp_path / "fold0" / "best.pt").write_bytes(b"zero")
+    (tmp_path / "fold1" / "best.pt").write_bytes(b"one")
+    with pytest.raises(AppMetadataError, match=r"best\.pt"):
+        assemble_bundle(
+            "MR",
+            tmp_path / "out",
+            app_json,
+            [str(config)],
+            [str(tmp_path / "fold0/best.pt"), str(tmp_path / "fold1/best.pt")],
+        )
+    assert not (tmp_path / "out" / "MR").exists()
+    assert not list((tmp_path / "out").glob(".MR.staging-*")) if (tmp_path / "out").exists() else True
+
+
+def test_a_repackaged_bundle_drops_the_previous_checkpoint_and_keeps_user_files(tmp_path):
+    """The second export into an existing bundle left the first checkpoint beside the new one, and
+    the default inference enumerated the old one. The previous manifest's checkpoints go; a file the
+    export does not manage stays."""
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    first = tmp_path / "first.pt"
+    first.write_bytes(b"first")
+    bundle = assemble_bundle("MR", tmp_path / "out", app_json, [str(config)], [str(first)])
+    (bundle / "notes.txt").write_text("mine\n")
+
+    new = tmp_path / "new.pt"
+    new.write_bytes(b"new")
+    assert assemble_bundle("MR", tmp_path / "out", app_json, [str(config)], [str(new)]) == bundle
+    assert sorted(path.name for path in bundle.glob("*.pt")) == ["new.pt"]
+    assert json.loads((bundle / "app.json").read_text())["models"] == ["new.pt"]
+    assert (bundle / "notes.txt").read_text() == "mine\n"
+    assert not list((tmp_path / "out").glob(".MR.staging-*"))
+
+
+@pytest.mark.parametrize("reference_kind", ["parent", "absolute", "symlink"])
+def test_repackaging_refuses_previous_checkpoints_outside_the_bundle(tmp_path, reference_kind):
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor: {}\n")
+    checkpoint = tmp_path / "new.pt"
+    checkpoint.write_bytes(b"new")
+    bundle = tmp_path / "out" / "MR"
+    bundle.mkdir(parents=True)
+    neighbor = bundle.parent / "neighbor.pt"
+    neighbor.write_bytes(b"must survive")
+    previous = "../neighbor.pt" if reference_kind == "parent" else str(neighbor)
+    if reference_kind == "symlink":
+        (bundle / "old.pt").symlink_to(neighbor)
+        previous = "old.pt"
+    manifest = json.dumps({**VALID_META, "models": [previous]})
+    (bundle / "app.json").write_text(manifest)
+    (bundle / "Prediction.yml").write_text("old config\n")
+
+    with pytest.raises(AppMetadataError, match="outside the bundle"):
+        assemble_bundle("MR", bundle.parent, app_json, [str(config)], [str(checkpoint)])
+
+    assert neighbor.read_bytes() == b"must survive"
+    assert (bundle / "app.json").read_text() == manifest
+    assert (bundle / "Prediction.yml").read_text() == "old config\n"
+    assert not (bundle / "new.pt").exists()
+    assert not list(bundle.parent.glob(".MR.staging-*"))
+
+
+def test_portable_asset_roles_preserve_other_native_onnx_dependencies(tmp_path, monkeypatch):
+    from konfai_apps.app_repository import LocalAppRepositoryFromDirectory
+    from konfai_apps.bundle import _declare_portable_assets
+
+    monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
+    bundle = tmp_path / "MR"
+    bundle.mkdir()
+    metadata = {**VALID_META, "models": ["best.pt"], "portable_assets": ["legacy.onnx.data"]}
+    (bundle / "app.json").write_text(json.dumps(metadata))
+    (bundle / "Prediction.yml").write_text("Predictor: {}\n")
+    for name in (
+        "best.pt",
+        "model.onnx",
+        "model.onnx.data",
+        "manifest.json",
+        "legacy.onnx.data",
+        "native_auxiliary.onnx",
+    ):
+        (bundle / name).write_bytes(name.encode())
+    produced = {bundle / name for name in ("model.onnx", "model.onnx.data", "manifest.json")}
+
+    assert _declare_portable_assets(bundle, bundle / "model.onnx", produced) == bundle / "model.onnx"
+    roles = json.loads((bundle / "app.json").read_text())["portable_assets"]
+    assert roles == ["legacy.onnx.data", "manifest.json", "model.onnx", "model.onnx.data"]
+    _, _, assets = LocalAppRepositoryFromDirectory(bundle.parent, bundle.name).download_inference(
+        1, [], "Prediction.yml"
+    )
+    assert "native_auxiliary.onnx" in {name for name, _ in assets}
+    assert not set(roles) & {name for name, _ in assets}
+
+
+@pytest.mark.parametrize("ensemble", [False, True])
+def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, ensemble):
+    from types import SimpleNamespace
+
+    import konfai.export as exporter
+    import konfai.network.network as network
+    import konfai.utils.runtime as runtime
+    from konfai_apps.bundle import export_portable_into_bundle
+
+    metadata = {**VALID_META, "portable_assets": ["previous.onnx"]}
+    (tmp_path / "app.json").write_text(json.dumps(metadata))
+    (tmp_path / "native_auxiliary.onnx").write_bytes(b"required by native custom code")
+    (tmp_path / "manifest.json").write_text("previous native manifest")
+    config = {
+        "Predictor": {
+            "Model": {"classpath": "Probe"},
+            "outputs_dataset": {
+                "Head": {"OutputDataset": {"after_reduction_transforms": {"InferenceStack": {"mode": "mean"}}}},
+            },
+        }
+    }
+    (tmp_path / "Prediction.yml").write_text(json.dumps(config))
+    model = SimpleNamespace(eval=lambda: None, load=lambda *args, **kwargs: None)
+    monkeypatch.setattr(network, "ModelLoader", lambda _: SimpleNamespace(get_model=lambda **kwargs: model))
+    monkeypatch.setattr(runtime, "safe_torch_load", lambda *args: {})
+
+    def export_stub(_model, directory, _example, _head, **kwargs):
+        path = directory / kwargs["model_filename"]
+        path.write_bytes(b"exported portable model")
+        manifest = {"model": path.name, "input": {"channels": 1}, "output": {"channels": 1}}
+        if kwargs["write_manifest"]:
+            (directory / "manifest.json").write_text(json.dumps(manifest))
+        return path, manifest
+
+    monkeypatch.setattr(exporter, "export_to_onnx", export_stub)
+    result = export_portable_into_bundle(
+        tmp_path,
+        checkpoints=["fold0.pt", "fold1.pt"] if ensemble else None,
+        patch_size=[4, 4],
+        in_channels=1,
+        output_module="Head",
+    )
+    expected = {"fold0.onnx", "fold1.onnx", "program.json"} if ensemble else {"model.onnx", "manifest.json"}
+    assert result.name == ("program.json" if ensemble else "model.onnx")
+    assert set(json.loads((tmp_path / "app.json").read_text())["portable_assets"]) == expected | {"previous.onnx"}
+    assert (tmp_path / "native_auxiliary.onnx").read_bytes() == b"required by native custom code"
+
+
+def test_repackaging_preserves_a_checkpoint_declared_with_a_relative_prefix(tmp_path):
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    source = tmp_path / "current.pt"
+    source.write_bytes(b"replacement weights")
+    bundle = tmp_path / "out" / "MR"
+    bundle.mkdir(parents=True)
+    (bundle / "app.json").write_text(json.dumps({**VALID_META, "models": ["./current.pt"]}))
+    (bundle / "current.pt").write_bytes(b"old weights")
+
+    assemble_bundle("MR", bundle.parent, app_json, [], [str(source)])
+
+    assert (bundle / "current.pt").read_bytes() == b"replacement weights"
+    assert json.loads((bundle / "app.json").read_text())["models"] == ["current.pt"]
+
+
+def _support_workspace(tmp_path):
+    root = tmp_path / "workspace"
+    (root / "helpers").mkdir(parents=True)
+    (root / "helpers" / "__init__.py").write_text("")
+    (root / "helpers" / "util.py").write_text("SCALE = 2\n")
+    (root / "assets").mkdir()
+    (root / "assets" / "table.csv").write_text("a,b\n")
+    (root / "Prediction.yml").write_text("Predictor: {}\n")
+    (root / "CV_0.pt").write_bytes(b"weights")
+    _write(root / "app.json", VALID_META)
+    return root
+
+
+def _assemble_with_support(root, support_files):
+    return assemble_bundle(
+        "Seg",
+        root.parent / "out",
+        root / "app.json",
+        [str(root / "Prediction.yml")],
+        [str(root / "CV_0.pt")],
+        support_files=support_files,
+        support_root=root,
+    )
+
+
+def test_declared_support_files_land_in_the_bundle_and_the_manifest_lists_them(tmp_path):
+    root = _support_workspace(tmp_path)
+
+    bundle = _assemble_with_support(root, {"helpers": "helpers", "assets/table.csv": "assets/table.csv"})
+
+    assert (bundle / "helpers" / "util.py").read_text() == "SCALE = 2\n"
+    assert (bundle / "assets" / "table.csv").read_text() == "a,b\n"
+    meta = json.loads((bundle / "app.json").read_text())
+    assert meta["support_files"] == ["assets/table.csv", "helpers/__init__.py", "helpers/util.py"]
+
+    # Repackaging without the helpers removes the files the previous export managed, and keeps the
+    # user's own notes beside them.
+    (bundle / "NOTES.md").write_text("mine\n")
+    _assemble_with_support(root, {"assets/table.csv": "assets/table.csv"})
+    assert not (bundle / "helpers").exists() or not any((bundle / "helpers").iterdir())
+    assert (bundle / "NOTES.md").read_text() == "mine\n"
+    assert (bundle / "assets" / "table.csv").is_file()
+
+
+def test_two_spellings_of_one_obsolete_file_unlink_it_once(tmp_path):
+    root = _support_workspace(tmp_path)
+    (root / "helper.py").write_text("SCALE = 1\n")
+    bundle = _assemble_with_support(root, {"helpers": "helper.py"})
+    meta = json.loads((bundle / "app.json").read_text())
+    meta["support_files"] = ["helpers", "assets/../helpers"]
+    (bundle / "app.json").write_text(json.dumps(meta))
+
+    _assemble_with_support(root, {"assets/table.csv": "assets/table.csv"})
+
+    assert not (bundle / "helpers").exists()
+    assert (bundle / "assets" / "table.csv").is_file()
+
+
+def test_a_managed_helper_file_can_become_a_support_directory(tmp_path):
+    root = _support_workspace(tmp_path)
+    (root / "helper.py").write_text("SCALE = 1\n")
+
+    bundle = _assemble_with_support(root, {"helpers": "helper.py"})
+    assert (bundle / "helpers").read_text() == "SCALE = 1\n"
+
+    _assemble_with_support(root, {"helpers": "helpers"})
+    assert (bundle / "helpers" / "util.py").read_text() == "SCALE = 2\n"
+
+
+@pytest.mark.parametrize(
+    "support_files, support_root, message",
+    [
+        ({"helpers": "../outside"}, "workspace", "relative path below"),
+        ({"helpers": "<anchor>outside"}, "workspace", "relative path below"),
+        ({"../up": "helpers"}, "workspace", "relative path below"),
+        ({"helpers": "helpers"}, None, "support_root is required"),
+        ({"helpers": "missing"}, "workspace", "Cannot read support path"),
+    ],
+)
+def test_support_files_outside_their_root_are_refused_before_anything_is_written(
+    tmp_path, support_files, support_root, message
+):
+    root = _support_workspace(tmp_path)
+    out = root.parent / "out"
+    # An absolute path of the host: "/x" is relative on Windows, where the anchor is a drive.
+    support_files = {k: v.replace("<anchor>", tmp_path.anchor) for k, v in support_files.items()}
+
+    with pytest.raises(AppMetadataError, match=message):
+        assemble_bundle(
+            "Seg",
+            out,
+            root / "app.json",
+            [str(root / "Prediction.yml")],
+            [str(root / "CV_0.pt")],
+            support_files=support_files,
+            support_root=None if support_root is None else root,
+        )
+    assert not out.exists()
+
+
+def test_a_symlink_escaping_the_support_root_is_refused(tmp_path):
+    root = _support_workspace(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("no\n")
+    (root / "helpers" / "leak.txt").symlink_to(secret)
+
+    with pytest.raises(AppMetadataError, match="escapes support_root"):
+        _assemble_with_support(root, {"helpers": "helpers"})
+
+
+def test_bundle_cli_maps_support_files_and_drops_local_packages_from_the_requirements_draft(tmp_path, capsys):
+    from konfai_apps.bundle import run_bundle_cli
+
+    root = _support_workspace(tmp_path)
+    (root / "Model.py").write_text("import einops\nfrom helpers.util import SCALE\n")
+
+    run_bundle_cli(
+        {
+            "name": "Seg",
+            "out": str(root.parent / "out"),
+            "app_json": str(root / "app.json"),
+            "config": [str(root / "Prediction.yml")],
+            "checkpoint": [str(root / "CV_0.pt")],
+            "model_py": str(root / "Model.py"),
+            "support_file": ["helpers=helpers"],
+            "support_root": str(root),
+        }
+    )
+
+    bundle = root.parent / "out" / "Seg"
+    assert (bundle / "helpers" / "util.py").is_file()
+    drafted = (bundle / "requirements.txt").read_text().split()
+    assert "einops" in drafted and "helpers" not in drafted  # a declared local package is not a PyPI dependency
+
+    with pytest.raises(AppMetadataError, match="DESTINATION=SOURCE"):
+        run_bundle_cli(
+            {
+                "name": "Seg",
+                "out": str(root.parent / "out"),
+                "app_json": str(root / "app.json"),
+                "config": [str(root / "Prediction.yml")],
+                "checkpoint": [str(root / "CV_0.pt")],
+                "support_file": ["helpers"],
+                "support_root": str(root),
+            }
+        )

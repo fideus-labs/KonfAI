@@ -34,9 +34,26 @@ class SweepClock:
 
     def __init__(self) -> None:
         self._spent: dict[str, float] = {}
+        self._regions: list[tuple[int, int | None]] = []
 
     def reset(self) -> None:
         self._spent = {}
+        self._regions = []
+
+    def region(self, rows: int, held: int | None) -> None:
+        """One region swept: its height, and what the run held after it where an instrument read it."""
+        self._regions.append((int(rows), held))
+
+    def regions_line(self) -> str:
+        """The regions the sweeps cut, first to last, and the most one of them was measured to hold:
+        what the growth decided, so a run says where its height went and not only what it took."""
+        if not self._regions:
+            return ""
+        heights = [rows for rows, _ in self._regions]
+        held = [bytes_ for _, bytes_ in self._regions if bytes_ is not None]
+        path = " -> ".join(str(rows) for rows, _ in _runs(heights))
+        peak = f", peak held {max(held) / 2**30:.2f} GiB" if held else ", unmeasured"
+        return f" | {len(heights)} region(s) of {path} row(s){peak}"
 
     def spent(self, name: str) -> float:
         return self._spent.get(name, 0.0)
@@ -73,8 +90,19 @@ class SweepClock:
         parts = " + ".join(f"{phase} {value:.1f}" for phase, value in named.items())
         return (
             f"[KonfAI] sweep {wall:.1f} s = {parts} + other {wall - sum(named.values()):.1f}"
-            f" | stages read {self.spent('read'):.1f} s, write {self.spent('write'):.1f} s"
+            f" | stages read {self.spent('read'):.1f} s, write {self.spent('write'):.1f} s" + self.regions_line()
         )
+
+
+def _runs(values: list[int]) -> list[tuple[int, int]]:
+    """``values`` as (value, count) runs of equal neighbours: 64, 64, 128, 128, 128 -> (64, 2), (128, 3)."""
+    runs: list[tuple[int, int]] = []
+    for value in values:
+        if runs and runs[-1][0] == value:
+            runs[-1] = (value, runs[-1][1] + 1)
+        else:
+            runs.append((value, 1))
+    return runs
 
 
 class StartupClock:

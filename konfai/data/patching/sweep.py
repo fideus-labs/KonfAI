@@ -29,7 +29,7 @@ from typing import Any, NamedTuple
 import numpy as np
 import torch
 
-from konfai.data.patching.budget import _PLATEAU_READ_MARGIN
+from konfai.data.patching.budget import RegionGrowth
 from konfai.data.patching.stage import Stage, _ReadStagePlan
 from konfai.data.transform import (
     Save,
@@ -264,37 +264,45 @@ def _pull_block_voxels(spatial: list[int], tile: Sequence[int], plans: Sequence[
     return (_span_voxels(span) for span in _pull_block_spans(spatial, tile, plans))
 
 
-def _plateau_rows(
-    spatial: list[int], plans: Sequence["_ReadStagePlan"], tolerance: float = _PLATEAU_READ_MARGIN
-) -> int | None:
-    """The shortest region height whose decomposition already reads what the tallest one reads,
-    within ``tolerance``: the height past which taller regions pull no fewer source voxels.
+class _RegionPlan:
+    """The regions a sweep cuts, handed out one at a time so the height can follow the growth.
 
-    Closed form, from the chain's own pull maps (:func:`_pull_block_voxels`): no voxel is read, so
-    it is answerable at plan time for any chain, whatever the YAML declares. ``None`` when nothing
-    pulls (no plans), where every height reads the same and the question does not arise.
-
-    This is a CAP, never a target: below it a region re-reads what its neighbour already pulled,
-    above it the reads are the same and only the working set grows. What a budget then affords is
-    the caller's to search for, downward.
+    The landing is swept in bands along the sweep axis, each band cut on the tile's trailing grid
+    (one block per band for a slab, a grid of cubes for a cube). A band is as tall as the growth
+    says when it starts, in whole multiples of the first, so every region starts on the chunk grid
+    the output was cut on and the trailing grid never moves: growing one axis of a cube re-cuts
+    nothing, where growing all three would no longer partition the landing.
     """
-    if not plans:
-        return None
-    total = max(1, int(spatial[0]))
-    floor = sum(_pull_block_voxels(spatial, [total, *spatial[1:]], plans))
-    if floor <= 0:
-        return None
-    allowed = floor * (1.0 + max(0.0, float(tolerance)))
-    # Geometric, so the scan costs O(log) evaluations however tall the volume is.
-    height, ladder = max(1, total // 256), []
-    while height < total:
-        ladder.append(height)
-        height = max(height + 1, int(height * 1.5))
-    ladder.append(total)
-    for candidate in ladder:
-        if sum(_pull_block_voxels(spatial, [candidate, *spatial[1:]], plans)) <= allowed:
-            return candidate
-    return total
+
+    def __init__(self, spatial: Sequence[int], tile: Sequence[int], growth: RegionGrowth) -> None:
+        self.spatial = [int(extent) for extent in spatial]
+        self.tile = [int(extent) for extent in tile]
+        self.growth = growth
+        self._cursor = 0
+        self._band: Iterator[tuple[slice, ...]] = iter(())
+
+    def rewind(self, start: int) -> None:
+        """Cut again from ``start`` (a band's first row): what a sweep does after a region the device
+        could not hold, at the height the growth was cut to."""
+        self._cursor = int(start)
+        self._band = iter(())
+
+    def next_target(self) -> tuple[slice, ...] | None:
+        """The next region, ``None`` past the last: a new band opens at the growth's CURRENT
+        height, so a height decided after one region is cut is the height of the bands cut after it."""
+        target = next(self._band, None)
+        if target is not None:
+            return target
+        if self._cursor >= self.spatial[0]:
+            return None
+        start, stop = self._cursor, min(self._cursor + self.growth.rows, self.spatial[0])
+        band = [stop - start, *self.spatial[1:]]
+        self._band = (
+            (slice(start + block[0].start, start + block[0].stop), *block[1:])
+            for block in _sweep_targets(band, [band[0], *self.tile[1:]])
+        )
+        self._cursor = stop
+        return next(self._band)
 
 
 def _sweep_pipeline_depth() -> int:

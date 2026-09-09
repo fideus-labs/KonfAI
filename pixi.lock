@@ -2260,6 +2260,7 @@ packages:
   - onnx ; extra == 'export'
   - onnxruntime ; extra == 'export'
   - onnxscript ; extra == 'export'
+  - monai ; extra == 'monai'
   - konfai[itk] ; extra == 'all'
   - konfai[hdf5] ; extra == 'all'
   - konfai[monitoring] ; extra == 'all'

@@ -74,11 +74,19 @@ def test_pretrained_from_defaults_to_none_when_the_config_is_silent(write_config
     assert loader.get_model(train=True, konfai_args="Root.Model").pretrained_source is None
 
 
-@pytest.mark.parametrize("wrap", [False, True], ids=["raw-state-dict", "checkpoint-dict"])
-def test_a_fresh_train_load_starts_from_the_reference_weights(write_config, tmp_path: Path, wrap: bool) -> None:
-    """The config route end to end: TRAIN's ``load({}, init=True)`` seeds the graph exactly."""
+@pytest.mark.parametrize(
+    "wrap", [None, "state_dict", "network_weights"], ids=["raw-state-dict", "checkpoint-dict", "nnunet"]
+)
+def test_a_fresh_train_load_starts_from_the_reference_weights(write_config, tmp_path: Path, wrap: str | None) -> None:
+    """The config route end to end: TRAIN's ``load({}, init=True)`` seeds the graph exactly, from a
+    raw state dict, a checkpoint wrapping it under ``state_dict``, or an nnU-Net checkpoint (its
+    weights under ``network_weights``, the optimizer and the plans beside them)."""
     reference = torch.nn.Conv2d(1, 2, 3, padding=1)
-    state = {"state_dict": reference.state_dict()} if wrap else reference.state_dict()
+    state = reference.state_dict()
+    if wrap == "state_dict":
+        state = {"state_dict": state}
+    elif wrap == "network_weights":
+        state = {"network_weights": state, "optimizer_state": {}, "init_args": {}, "current_epoch": 3}
     torch.save(state, tmp_path / "ref.pt")
     loader = _bound_loader(
         write_config,

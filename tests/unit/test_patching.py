@@ -994,3 +994,36 @@ def test_a_pickled_manager_hands_every_copy_the_grid_it_was_counted_on(streaming
     assert restored.shapes == manager.shapes
     for a in copies:
         assert (restored.patch.get_sweep_axis(a), restored.patch.get_patch_slices(a)) == reference[a]
+
+
+@pytest.mark.parametrize(
+    "shape, patch, overlap",
+    [
+        ([13], [6], 4),  # five patches, the last padded past the volume by three
+        ([9, 11], [6, 6], 4),  # the last patch of each axis truncated
+        ([13, 7, 9], [6, 4, 4], [4, 2, 2]),
+    ],
+)
+def test_trim_streams_a_padded_final_patch_like_the_whole_volume(shape, patch, overlap):
+    """The kept run of a padded final patch may end in the padding, past the volume. The whole
+    volume buffer clipped that implicitly; the streaming window, wider than the volume's tail,
+    once wrote a [1, 4] destination from a [3] source and failed at the last patch."""
+    labels = torch.randint(0, 5, (2, *shape)).float()
+    slices = get_patch_slices_from_shape(patch, shape, overlap)
+    patches = _padded_patches(labels, slices, patch)
+
+    def _trim():
+        combine = Trim()
+        combine.set_patch_config(patch, overlap)
+        return combine
+
+    whole = Accumulator(slices, patch, patch_combine=_trim(), batch=False)
+    streaming = StreamingAccumulator(slices, patch, patch_combine=_trim(), batch=False)
+    slabs = []
+    for index, tensor in enumerate(patches):
+        whole.add_layer(index, tensor.clone())
+        slabs += streaming.add_layer(index, tensor.clone())
+    slabs += streaming.finalize()
+
+    assert torch.equal(whole.assemble(), labels)
+    assert torch.equal(torch.cat([tensor for _, tensor in slabs], dim=1), labels)
