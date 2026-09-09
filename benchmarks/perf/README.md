@@ -42,7 +42,8 @@ transform bench here reuses the former.
 | What does the framework add over a plain loop, and how does the region height matter? | `bench_transform.py` | `bench_streaming.py` reused, a 25-line numpy+h5py baseline, a budget sweep, `cProfile` share of the statistics scan | s/GiB over the naive loop, peak RSS, wall vs budget curve, the scan's share |
 | How long is the test suite, and what does the thread pin do? | `bench_tests.py` | `pytest` wall and CPU-seconds, `OMP_NUM_THREADS` 1 vs unset | test-fast pinned/unpinned, CPU-s, failures |
 | Chunked store, region height (2026-09-07, quiet: 1G 18.8 s, 2G 11.2 s, 4G 8.1 s, 8G 5.5 s, 16G 5.5 s; before the growth 24.5 / 17.5 / 8.7 / 5.9 / 7 s) | `bench_exaspim_budget.sh` | wall, peak RSS, the sweep clock, three slices against a reference | a 513x1331x1775 uint16 OME-Zarr chunked at 256^3 resampled through an ITK transform, one run per budget (`KONFAI_EXASPIM_BENCH` names the bench directory, which is not in the tree) |
-| Not covered yet (next) | | | multi-GPU DDP (needs two cards), the apps with real weights (each app's own bench entry), the data path in isolation (`__getitem__` per patch), backend read/write high-water marks |
+| The apps against the tools they wrap, same input, torch and GPU | `bench_apps.py` | wall, whole-tree peak RSS, GPU memory added, the labels the output carries | one run per case (S/M/L) per tool after a warm-up; a manifest names the apps, the two command lines and the cases (`apps_manifest.example.json` is the shape; the inputs are not in the tree), the originals run in their own venv (`--venv`) |
+| Not covered yet (next) | | | multi-GPU DDP (needs two cards), the data path in isolation (`__getitem__` per patch), backend read/write high-water marks |
 
 ## Traps the harness knows about
 
