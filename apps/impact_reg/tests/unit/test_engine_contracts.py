@@ -87,6 +87,17 @@ def test_fireants_linear_method_reaches_the_engine() -> None:
         assert net["Registration"]._engine._linear_method == method
 
 
+def test_fireants_moments_init_reaches_the_engine() -> None:
+    # The seed decides where the rigid starts, and a value that stops at RegistrationNet leaves the
+    # engine on 'cof', which aligns frames: a pair the caller centred is then pulled apart by the
+    # difference between the two subjects' offsets from their own frames.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    for seed in ("cof", "com", "none"):
+        net = RegistrationNet(moments_init=seed)
+        assert net["Registration"]._engine._moments_init == seed
+
+
 def test_fireants_refuses_an_unknown_linear_method() -> None:
     # Every unrecognised value would otherwise fall through to the rigid-then-affine branch, so a
     # typo registers with a stage the caller did not ask for and returns a plausible result. The
