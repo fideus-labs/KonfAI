@@ -2,15 +2,60 @@
   "apps": [
     {
       "name": "totalsegmentator",
-      "konfai": ["totalsegmentator-konfai", "segment", "total", "-i", "{input}", "-o", "{output}", "--gpu", "0", "-q"],
-      "original": ["{venv}/bin/TotalSegmentator", "-i", "{input}", "-o", "{output}/total.nii.gz", "--ml", "-q"],
-      "cases": {"S": "~/.cache/konfai-bench/apps/in/ct_S.nii.gz", "M": "~/.cache/konfai-bench/apps/in/ct_M.nii.gz", "L": "~/.cache/konfai-bench/apps/in/ct_L.nii.gz"}
+      "konfai": [
+        "totalsegmentator-konfai",
+        "segment",
+        "total",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0",
+        "-q"
+      ],
+      "original": [
+        "{venv}/bin/TotalSegmentator",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}/total.nii.gz",
+        "--ml",
+        "-q"
+      ],
+      "cases": {
+        "S": "~/.cache/konfai-bench/apps/in/ct_S.nii.gz",
+        "M": "~/.cache/konfai-bench/apps/in/ct_M.nii.gz",
+        "L": "~/.cache/konfai-bench/apps/in/ct_L.nii.gz"
+      }
     },
     {
       "name": "mrsegmentator",
-      "konfai": ["mrsegmentator-konfai", "segment", "-i", "{input}", "-o", "{output}", "--gpu", "0", "-q"],
-      "original": ["{venv}/bin/mrsegmentator", "-i", "{input}", "--outdir", "{output}"],
-      "cases": {"S": "~/.cache/konfai-bench/apps/in/mr_S.nii.gz", "M": "~/.cache/konfai-bench/apps/in/mr_M.nii.gz", "L": "~/.cache/konfai-bench/apps/in/mr_L.nii.gz"}
+      "konfai": [
+        "mrsegmentator-konfai",
+        "segment",
+        "-f",
+        "5",
+        "-i",
+        "{input}",
+        "-o",
+        "{output}",
+        "--gpu",
+        "0",
+        "-q"
+      ],
+      "original": [
+        "{venv}/bin/mrsegmentator",
+        "-i",
+        "{input}",
+        "--outdir",
+        "{output}"
+      ],
+      "cases": {
+        "S": "~/.cache/konfai-bench/apps/in/mr_S.nii.gz",
+        "M": "~/.cache/konfai-bench/apps/in/mr_M.nii.gz",
+        "L": "~/.cache/konfai-bench/apps/in/mr_L.nii.gz"
+      }
     }
   ]
 }

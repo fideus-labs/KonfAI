@@ -36,26 +36,27 @@ It provides **fast and efficient inference** for segmentation tasks, including o
 
 ### 🔬 Performance comparison
 
-Same input, same weights (Datasets 291–295, 1.5 mm, 5-model `total`), same PyTorch
-build (cu13.0), single **NVIDIA RTX PRO 5000 (24 GB)**. Peak RAM = process-tree
-resident set; peak VRAM = over baseline.
+Same input, same weights (Datasets 291–295, 1.5 mm, 5-model `total`), same PyTorch build
+(2.12.1, cu13.0), single **NVIDIA RTX PRO 5000 (24 GB)**, TotalSegmentator 2.18.0. Peak RAM =
+process-tree resident set; peak VRAM = over baseline. Measured with
+KonfAI's `benchmarks/perf/bench_apps.py` (2026-09-09).
 
 | Case (voxels) | Tool | Time | Peak RAM | Peak VRAM |
 |---|---|---|---|---|
-| **S** (240 × 220 × 200) | **KonfAI** | **12 s** | **6.0 GB** | 12.0 GB |
-| | Original | 35 s | 21 GB | 3.7 GB |
-| **M** (533 × 390 × 177) | **KonfAI** | **17 s** | **6.5 GB** | 12.9 GB |
-| | Original | 61 s | 26.5 GB | 5.1 GB |
-| **L** (512 × 512 × 531) | **KonfAI** | **314 s** | **19.3 GB** | **10.4 GB** |
-| | Original | 459 s | 51.8 GB | 23.3 GB |
+| **S** (240 × 220 × 200) | **KonfAI** | **7.6 s** | **5.0 GB** | 12.3 GB |
+| | Original | 29.9 s | 22.6 GB | 3.3 GB |
+| **M** (249 × 246 × 246) | **KonfAI** | **17.7 s** | **5.2 GB** | 15.4 GB |
+| | Original | 58.3 s | 25.2 GB | 7.1 GB |
+| **L** (512 × 512 × 531) | **KonfAI** | **212 s** | **17.6 GB** | **10.6 GB** |
+| | Original | 377 s | 47.9 GB | 23.1 GB |
 
 ### 📈 Key observations
 
-- **1.5–3.6× faster** whole-body inference across sizes, **2.7–4.1× less host RAM**.
+- **1.8–3.9× faster** whole-body inference across sizes, **2.7–4.8× less host RAM**.
 - KonfAI trades **more VRAM on small/medium cases** (larger patches, GPU accumulation)
   for the speed-up, while it stays inside a 24 GB card.
-- On **large** cases the streaming reassembly **bounds VRAM** (10.4 GB) where the
-  original nears the card limit (23.3 GB / 24 GB), so KonfAI is then lighter on **both**
+- On **large** cases the streaming reassembly **bounds VRAM** (10.6 GB) where the
+  original nears the card limit (23.1 GB / 24 GB), so KonfAI is then lighter on **both**
   RAM and VRAM.
 
 ---
