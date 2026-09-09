@@ -123,6 +123,15 @@ Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body M
 
 Single-model sCT keeps **system RAM ~2 GB**. The plan leaves memory headroom: a larger batch saturates the card and slows inference (batch 48 → ~22 GB). A full **5-model ensemble** runs in ~82 s. Inference scales with the case size.
 
+Measured on the S/M/L cases of `benchmarks/perf/bench_apps.py` (2026-09-09, `MR`, default
+ensemble, same GPU). Peak RAM = process-tree resident set; peak VRAM = over baseline.
+
+| Case (voxels) | Time | Peak RAM | Peak VRAM |
+|---|---|---|---|
+| **S** (248 × 246 × 141) | **16.5 s** | 2.7 GB | 12.9 GB |
+| **M** (249 × 246 × 246) | **24.6 s** | 2.7 GB | 12.8 GB |
+| **L** (512 × 512 × 531) | **166 s** | 4.9 GB | 13.5 GB |
+
 ---
 
 ## 🔗 Links

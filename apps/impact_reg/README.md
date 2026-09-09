@@ -154,6 +154,21 @@ impact-reg-konfai register --help
 
 ---
 
+## ⚡ Performance
+
+Measured on the CT/MR pairs of `benchmarks/perf/bench_apps.py` (2026-09-09, preset `FireANTs_SyN`,
+single **NVIDIA RTX PRO 5000 (24 GB)**). Peak RAM = process-tree resident set; peak VRAM = over baseline.
+
+| Case (voxels) | Time | Peak RAM | Peak VRAM |
+|---|---|---|---|
+| **S** (240 × 220 × 200 on 248 × 246 × 141) | **91 s** | 5.9 GB | 15.5 GB |
+| **M** (249 × 246 × 246, both) | **108 s** | 6.3 GB | 16.0 GB |
+| **L** (512 × 512 × 531, both) | out of memory on 24 GB | | |
+
+The elastix presets stream out of core; the FireANTs presets hold the pair on the card.
+
+---
+
 ## 📦 Notes
 
 - Available presets are resolved dynamically from the published IMPACT-Reg preset database.

@@ -2,7 +2,8 @@
 """The apps against the tools they wrap, on the same input, torch and GPU.
 
 A manifest names the apps: for each, the KonfAI command line, the original tool's command line and
-the cases (``S``/``M``/``L`` files). Both commands read ``{input}`` and write under ``{output}``; the
+the cases (``S``/``M``/``L`` files). Both commands read the case (``{input}``, or the names a mapping case declares, ``{fixed}`` and
+``{moving}``) and write under ``{output}``; the
 original runs in its own environment (``{venv}``), the app in this one. One run per case per tool,
 after a warm-up on the smallest case so the weights are on disk and the kernels compiled.
 
@@ -54,19 +55,29 @@ def _labels(directory: Path) -> dict[str, Any]:
     return summary
 
 
-def _argv(template: list[str], *, input_path: Path, output: Path, venv: Path | None) -> list[str]:
-    fields = {"input": str(input_path), "output": str(output), "venv": str(venv) if venv else ""}
-    return [part.format(**fields) for part in template]
+def _case_fields(case: str | dict[str, str]) -> dict[str, str]:
+    """A case is one file (``{input}``) or a mapping of named files (``{fixed}``, ``{moving}``)."""
+    if isinstance(case, str):
+        return {"input": str(Path(case).expanduser())}
+    return {key: str(Path(value).expanduser()) for key, value in case.items()}
 
 
 def _run(
-    name: str, tool: str, template: list[str], input_path: Path, work: Path, venv: Path | None, log_dir: Path
+    name: str,
+    tool: str,
+    template: list[str],
+    size: str,
+    case: str | dict[str, str],
+    work: Path,
+    venv: Path | None,
+    log_dir: Path,
 ) -> dict:
-    output = work / f"{name}-{tool}-{input_path.stem}"
+    output = work / f"{name}-{tool}-{size}"
     shutil.rmtree(output, ignore_errors=True)
     output.mkdir(parents=True)
-    argv = _argv(template, input_path=input_path, output=output, venv=venv)
-    run = run_cli(argv, cwd=work, log_path=log_dir / f"{name}-{tool}-{input_path.stem}.log")
+    fields = {**_case_fields(case), "output": str(output), "venv": str(venv) if venv else ""}
+    argv = [part.format(**fields) for part in template]
+    run = run_cli(argv, cwd=work, log_path=log_dir / f"{name}-{tool}-{size}.log")
     result = {
         "argv": argv,
         "returncode": run.returncode,
@@ -77,7 +88,7 @@ def _run(
         "tail": run.output[-800:],
     }
     print(
-        f"[perf] {name} {tool} {input_path.stem}: {run.wall_s:.1f} s, {run.peak_rss_gib:.2f} GiB RSS, "
+        f"[perf] {name} {tool} {size}: {run.wall_s:.1f} s, {run.peak_rss_gib:.2f} GiB RSS, "
         f"+{result['gpu_delta_mib']} MiB GPU, rc {run.returncode}"
     )
     return result
@@ -115,14 +126,14 @@ def main() -> None:
     for app in selected:
         wanted = args.tools.split(",")
         tools = {tool: app[tool] for tool in ("konfai", "original") if tool in wanted and app.get(tool)}
-        cases = {size: Path(app["cases"][size]).expanduser() for size in sizes if size in app["cases"]}
+        cases = {size: app["cases"][size] for size in sizes if size in app["cases"]}
         entry: dict[str, Any] = {}
         for tool, template in tools.items():
             if not args.no_warmup and cases:
-                smallest = cases[min(cases, key=SIZES.index)]
-                _run(app["name"], f"{tool}-warmup", template, smallest, work, args.venv, log_dir)
-            for size, path in cases.items():
-                entry[f"{tool}_{size}"] = run = _run(app["name"], tool, template, path, work, args.venv, log_dir)
+                smallest = min(cases, key=SIZES.index)
+                _run(app["name"], f"{tool}-warmup", template, smallest, cases[smallest], work, args.venv, log_dir)
+            for size, case in cases.items():
+                entry[f"{tool}_{size}"] = run = _run(app["name"], tool, template, size, case, work, args.venv, log_dir)
                 if run["returncode"] == 0:
                     metrics[f"{app['name']}_{tool}_{size}_wall_s"] = run["wall_s"]
                     metrics[f"{app['name']}_{tool}_{size}_peak_rss_gib"] = run["peak_rss_gib"]
