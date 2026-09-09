@@ -2,11 +2,16 @@ name: perf_nightly
 
 # The performance gate, nightly, on a self-hosted runner with the GPU (a shared GitHub runner gives
 # times within 2x of themselves). Register the runner on the machine that holds the baseline
-# (benchmarks/perf/baselines/<host>.json) with the labels below; nothing runs until one exists.
+# (benchmarks/perf/baselines/<machine>.json) with the labels below; nothing runs until one exists.
+# A regression opens an issue; evidence the gate cannot use (a busy machine) fails the job only.
 on:
   schedule:
     - cron: "7 2 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   perf_check:
@@ -20,11 +25,40 @@ jobs:
       - name: The series, compared to this host's baseline
         # The gate refuses a busy machine (load, power profile, GPU) rather than timing on it; a
         # refusal fails the job, and the nightly then says the machine was not quiet, not that the
-        # code regressed.
-        run: pixi run perf-check
+        # code regressed. Exit 1 is a regression, exit 2 is evidence the gate cannot use.
+        id: check
+        shell: bash
+        run: |
+          set +e
+          pixi run perf-check | tee perf-nightly.md
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: perf-results
-          path: benchmarks/perf/results
+          path: |
+            perf-nightly.md
+            benchmarks/perf/results
           if-no-files-found: ignore
+      - name: Open an issue on a regression
+        if: always() && steps.check.outputs.status == '1'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const fs = require("node:fs");
+            const report = fs.readFileSync("perf-nightly.md", "utf8").slice(-60000);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly perf: regression on ${context.sha.slice(0, 8)}`,
+              body: [
+                `The nightly series on ${context.sha} regressed against this host's committed baseline.`,
+                "",
+                `[Run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                "",
+                report,
+              ].join("\n"),
+              labels: ["benchmark", "regression"],
+            });

@@ -76,6 +76,35 @@ def test_incomplete_or_incomparable_measurements_cannot_certify_a_release(tmp_pa
     assert completed.returncode == 2, completed.stdout
 
 
+def facts(tmp_path, doc):
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(doc))
+    return subprocess.run([sys.executable, str(PERF / "facts.py"), str(path)], capture_output=True, text=True)
+
+
+def test_a_violated_fact_fails_whatever_the_machine(tmp_path):
+    doc = result()
+    doc["benches"]["predict"]["result"]["facts"] = [
+        {"name": "differing_voxels_whole_vs_stream", "value": 3.0, "expect": 0.0, "op": "=="},
+        {"name": "geometry_identical_whole_vs_stream", "value": 1.0, "expect": 1.0, "op": "=="},
+    ]
+    completed = facts(tmp_path, doc)
+    assert completed.returncode == 1, completed.stdout
+    assert "VIOLATED" in completed.stdout and "1 violation(s) over 2" in completed.stdout
+
+
+def test_facts_that_hold_pass_and_a_failed_bench_is_a_violation(tmp_path):
+    doc = result()
+    doc["benches"]["predict"]["result"]["facts"] = [{"name": "max_abs_diff", "value": 0.0, "expect": 0.0, "op": "<="}]
+    assert facts(tmp_path, doc).returncode == 0
+    doc["benches"]["transform"] = {"status": "failed", "returncode": 1}
+    assert facts(tmp_path, doc).returncode == 1
+
+
+def test_a_run_without_facts_cannot_pass(tmp_path):
+    assert facts(tmp_path, result()).returncode == 2
+
+
 def test_comparable_equal_results_including_zero_time_pass(tmp_path):
     baseline = result()
     baseline["benches"]["predict"]["result"]["metrics"]["startup_s"] = 0

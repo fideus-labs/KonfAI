@@ -117,12 +117,25 @@ def versions() -> dict[str, str]:
     return out
 
 
+def machine_class() -> str:
+    """The name a baseline is keyed by: ``KONFAI_PERF_MACHINE``, the GitHub runner image (``gha-ubuntu24``)
+    on Actions, the host name otherwise. Timings compare within one class only."""
+    explicit = os.environ.get("KONFAI_PERF_MACHINE")
+    if explicit:
+        return explicit
+    if os.environ.get("GITHUB_ACTIONS"):
+        image = os.environ.get("ImageOS") or os.environ.get("RUNNER_OS", "runner").lower()
+        return f"gha-{image}"
+    return platform.node()
+
+
 def fingerprint(*, import_versions: bool = True) -> dict[str, Any]:
     """Everything a number needs beside it to be comparable with another number."""
     load1, load5, load15 = os.getloadavg()
     return {
         "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "host": platform.node(),
+        "machine": machine_class(),
         "git": git_revision(),
         "versions": versions() if import_versions else {},
         "cpu": {"model": cpu_model(), "count": os.cpu_count(), "affinity": len(os.sched_getaffinity(0))},

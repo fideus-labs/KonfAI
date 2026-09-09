@@ -38,6 +38,7 @@ import subprocess
 import sys
 import time
 
+from facts import fact
 from harness import REPO, fingerprint, machine_gate, write_result
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -125,6 +126,7 @@ def main() -> None:
         metrics["full_pinned_failed"] = float(full["failed"])  # type: ignore[arg-type]
 
     result["metrics"] = metrics
+    result["facts"] = [fact(f"{name}_failed", value, 0) for name, value in metrics.items() if name.endswith("_failed")]
     result["headline"] = (
         f"test-fast pinned {metrics['testfast_pinned_wall_s']} s ({metrics['testfast_pinned_cpu_s']} CPU-s, "
         f"{int(metrics['testfast_pinned_failed'])} failed)"

@@ -1,0 +1,87 @@
+name: perf_pr_gate
+
+# The facts of the benchmark series on every pull request touching the framework or the benches: the
+# streamed route wrote the voxels of the whole-volume route, the transform equals the plain loop
+# to float32 rounding, the plan's held peak stayed within its budget. A fact has its expected value in the run
+# itself, so it needs no baseline and holds on any machine. Times are reported in the sticky
+# comment, never gated here: a shared runner is not the machine class the baselines were taken on.
+on:
+  pull_request:
+    paths:
+      - "konfai/**"
+      - "benchmarks/perf/**"
+      - "pyproject.toml"
+      - ".github/workflows/perf_pr_gate.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the dev environment (CPU torch)
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
+
+      # --force: the load gate is for a dev box; a runner's load is recorded beside the numbers.
+      # The prediction lane runs synthetic 256^3 cases with a seeded random model: the identity of
+      # the two routes needs no trained checkpoint and no data to download.
+      - name: The CPU lanes of the series
+        run: python benchmarks/perf/run_all.py --only startup,transform,predict --cpu --synthetic --force
+
+      # After a failed lane too: run_all writes its series first, and the failed bench is a violated fact.
+      - name: The facts
+        if: always()
+        shell: bash
+        run: |
+          run="$(find benchmarks/perf/results -name '*-all.json' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+          if [ -z "$run" ] || [ ! -f "$run" ]; then
+            echo "no series result under benchmarks/perf/results" >&2
+            exit 1
+          fi
+          set +e
+          python benchmarks/perf/facts.py "$run" > facts.md
+          status=$?
+          set -e
+          {
+            echo "### perf facts (exit $status)"
+            echo
+            cat facts.md
+            echo
+            echo "<details><summary>times on this runner, reported only</summary>"
+            echo
+            cat "${run%.json}.md"
+            echo
+            echo "</details>"
+          } > perf-report.md
+          exit "$status"
+
+      - name: The report, as one sticky comment
+        if: always()
+        continue-on-error: true # a fork's token cannot comment
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        with:
+          header: perf-facts
+          path: perf-report.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: perf-pr-gate
+          path: |
+            perf-report.md
+            benchmarks/perf/results
+          if-no-files-found: ignore

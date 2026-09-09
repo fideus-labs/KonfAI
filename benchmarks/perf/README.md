@@ -62,6 +62,8 @@ transform bench here reuses the former.
 ## Running
 
 ```bash
+# the facts of a run, on any machine (no baseline needed)
+pixi run --environment dev python benchmarks/perf/facts.py results/<host>/<run>.json
 # one bench, on a quiet machine (the gate refuses otherwise)
 pixi run --environment dev python benchmarks/perf/bench_train_step.py
 # everything, sequentially, into results/<host>/<stamp>-<sha>.json + .md
@@ -90,6 +92,26 @@ A result is `{"bench", "fingerprint", "result"}`. Compare two results only when 
 agree on the commit's dirty flag, the GPU, the power profile and the thread pin, and both load
 averages were under the gate. A `--force` result carries `"gate_warnings"`: it is a diagnostic, not a
 baseline.
+
+## Facts and times
+
+A bench states two kinds of results. Its **facts** carry their expected value: the streamed route
+wrote the voxels of the whole-volume route (`differing_voxels_whole_vs_stream == 0`), the transform
+equals the plain loop to float32 rounding (`max_abs_diff_konfai_vs_naive <= 1e-6`), the plan's held peak stayed
+within its budget, no test failed. `facts.py RUN.json` checks them on any machine and needs no
+baseline. Its **times and memory** compare to `baselines/<machine>.json` through `compare.py`,
+within one machine class (`harness.machine_class`: `KONFAI_PERF_MACHINE`, else the host name) and
+only when the fingerprints agree. `perf-check` runs the facts first, then the comparison.
+
+In CI:
+
+- `perf_pr_gate`: on every pull request touching `konfai/` or the benches, the CPU lanes
+  (`startup`, `transform`, `predict --synthetic`: random 256^3 cases and a seeded random model
+  through the Python API, so the two routes' identity is checked at scale with nothing to
+  download) run on a GitHub runner and `facts.py` gates them; the times are in the sticky comment,
+  reported only.
+- `perf_nightly`: the whole series with the GPU on the self-hosted runner that holds its own
+  baseline, facts then times; a regression opens an issue, a busy machine fails the job without one.
 
 ## The numbers this folder was built to pin (audit of 2026-09-06, quiet machine, performance profile)
 

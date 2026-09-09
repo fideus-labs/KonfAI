@@ -141,7 +141,7 @@ whole matrix releases in lockstep. `konfai-studio` is the one exception to the p
 job runs `npm ci && npm run build` first (its React front is git-ignored) and then `python -m build --wheel`
 (wheel-only, because the sdist file-finder would drop the built `web/`).
 
-Before tagging: `pixi run check` green; both sibling suites green; `pixi run perf-check` within its thresholds on a quiet machine (or the regression named in the release notes); and, because the test job only exercises
+Before tagging: `pixi run check` green; both sibling suites green; `pixi run perf-check` within its thresholds on a quiet machine (or the regression named in the release notes; the facts of the series, voxel identity and exact differences, also gate every pull request on a GitHub runner, see `benchmarks/perf/README.md`); and, because the test job only exercises
 the **source tree**, confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`
 by installing it **non-editable** in a clean venv (an editable install hides PEP 420 / `package-data` breakage).
 
