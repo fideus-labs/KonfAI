@@ -118,7 +118,7 @@ export rules. You have two options:
 The YAML catalog includes architectures validated at documented equivalence
 levels against MONAI, torchvision, nnU-Net's
 `dynamic_network_architectures`, and segmentation-models-pytorch. Consult
-{doc}`../concepts/yaml-model-builder` before assuming checkpoint compatibility:
+{doc}`../reference/components/models` before assuming checkpoint compatibility:
 some entries are weight-exact, while others are only structurally validated.
 
 ## Loading existing weights
@@ -175,7 +175,7 @@ the next layer.
 - Lightning's ecosystem and maturity for arbitrary training-loop patterns;
 - a general spatial dependency compiler for every custom transform;
 - proof of universal speedups over these tools: the tracked harness
-  ({doc}`benchmarks`) reproduces the bounded-memory claim and pins the app
+  ({doc}`large-images`) reproduces the bounded-memory claim and pins the app
   tables' protocol, but the comparisons are per app and per case, not a
   general claim.
 
@@ -190,6 +190,6 @@ registries and do not evaluate arbitrary imports.
 ## Next steps
 
 - {doc}`custom-models`: implementation contracts and complete examples
-- {doc}`../concepts/yaml-model-builder`: graph schema and compatibility table
+- {doc}`../reference/components/models`: graph schema and compatibility table
 - {doc}`large-images`: regional I/O and memory trade-offs
 - {doc}`apps`: package a stable workflow

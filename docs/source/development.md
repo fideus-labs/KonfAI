@@ -134,8 +134,11 @@ there:
 Run a single test file:
 
 ```bash
-pixi run test -- tests/unit/test_config.py -v
+OMP_NUM_THREADS=1 pixi run --environment dev python -m pytest tests/unit/test_config.py -v
 ```
+
+`pixi run test` runs the whole suite; a single file goes through pytest
+directly.
 
 ### What CI runs
 
@@ -221,7 +224,11 @@ updating the docs:
 - prefer code-backed statements
 - call out behavior inferred from code when needed
 - avoid documenting private helpers unless they are essential extension points
-- update cross-links when you rename or move pages
+- update cross-links when you rename or move pages, and add the old URL to
+  `_REDIRECTS` in `docs/source/conf.py` so it keeps resolving
+- the site is deliberately small (about thirty pages): extend an existing
+  page before adding one, and give every published number the script that
+  produced it
 
 ## Packaging and release
 
@@ -298,6 +305,6 @@ forbidden commit branding, coding norms, checks, and project-specific pitfalls.
 
 ## Next steps
 
-- {doc}`concepts/index`: how the config engine, data pipeline, and model graph fit together before you change them.
+- {doc}`config_guide/index`: how the config engine, data pipeline, and model graph fit together before you change them.
 - {doc}`examples/index`: the shipped workflows to run when validating a change end-to-end.
 - {doc}`reference/api/index`: the curated API surface your extensions and fixes build against.

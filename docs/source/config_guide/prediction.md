@@ -22,11 +22,12 @@ folder written by training:
 
 ```bash
 konfai PREDICTION -y --gpu 0 --config Prediction.yml \
-  --models Checkpoints/SEG_BASELINE/*.pt
+  --models Checkpoints/SEG_BASELINE/SELECTED_MODEL.pt
 ```
 
-Checkpoints are named after the moment they were written, so there is no fixed
-filename to type; the glob picks up whatever training kept.
+`SELECTED_MODEL.pt` is the dated file `BEST` kept in that directory.
+`resume_latest.pt` (a training continuation) and `crash_*.pt` are not models to
+predict with, and several `--models` paths run an ensemble.
 
 You can also pass multiple checkpoints:
 
@@ -73,47 +74,24 @@ missing cases. `-y`/`--overwrite` recomputes everything.
 
 ### Checkpoint memory
 
-One model instance runs every ensemble member in turn. Its host checkpoint cache
-defaults to **1 GiB per prediction process**, independently of the dataset memory
-budget. Five folds totalling approximately 0.5 GiB of weights therefore fit;
-each file is deserialized once while unchanged. Set the limit in the actual
-prediction config:
+One model instance runs the ensemble members in turn and keeps their
+deserialized checkpoints in a host cache of `checkpoint_cache_gib` (1 GiB per
+prediction process by default, independent of the dataset budget):
 
 ```yaml
 Predictor:
   checkpoint_cache_gib: 1.0
 ```
 
-The budget counts whole tensor storage allocations, including the allocation
-behind a small view, plus their Python containers and metadata. Shared storage
-within one checkpoint is counted once; sharing across checkpoints can be charged
-more than once. The stock loader keeps `Model`, dropping unused `Model_EMA` and
-optimizer state both from the cache and from dictionary sources. To predict EMA
-weights, export them under `Model`; an EMA-only checkpoint is refused. Custom loaders retain
-their own format. A custom object with no measurable retained size bypasses the
-cache when loaded from a file.
-
-Compatible local checkpoints are memory-mapped: inference touches the weight
-pages without first reading all optimizer tensors. Legacy serialization uses
-the regular loader. A mapping can span the complete file in virtual address
-space; the budget charges the retained tensor storages, not that virtual span.
-
-When the ensemble exceeds the limit, members that fit stay cached and other
-members load on demand. A large cyclic ensemble therefore keeps its cache hits
-instead of evicting every member on every batch. A changed cached file is
-invalidated; if its replacement has grown, the least recently used reloadable
-entries make room. Local file identity, size and nanosecond modification/change
-times are checked before using even the currently loaded single member. URLs
-use torch.hub's disk download cache and are treated as immutable during the run.
-
-`0` works for file paths and URLs. In-memory dictionaries cannot be reloaded
-after eviction: their retained payload reserves space in the same budget, and
-must fit it. Otherwise pass `.pt` paths or increase the limit. Treat supplied
-dictionaries as immutable until the next `load(...)` call. There is no implicit
-disk spill. This is a retained checkpoint budget, **not a process RSS limit**:
-the active model, a transient checkpoint being deserialized, tensor allocator
-reservations, and dataset/output buffers have separate costs. Multiple ranks
-each have their own limit.
+The budget counts the tensor storages a checkpoint retains (a view charges its
+whole allocation) plus their containers; only the `Model` entry is kept, the
+optimizer and `Model_EMA` entries are dropped, and an EMA-only checkpoint is
+refused. Local files are memory-mapped, so a load touches the weight pages
+only. Members that fit stay cached across batches and the others load on
+demand; a file that changed on disk is reloaded. In-memory checkpoints must
+fit the budget, since they cannot be reloaded. `0` disables the cache for
+files and URLs. The active model, a checkpoint being deserialized and the data
+buffers are outside this budget, and each rank has its own.
 
 ## `Predictor.Model`
 
@@ -297,7 +275,7 @@ See:
 ## Next steps
 
 - {doc}`evaluation`: to score the written predictions against ground truth.
-- {doc}`../concepts/datasets`: the shared `dataset_filenames`, `groups_src`,
+- {doc}`index`: the shared `dataset_filenames`, `groups_src`,
   and `subset` conventions.
-- {doc}`../concepts/model-graph`: how the model output paths referenced by
+- {doc}`../reference/components/models`: how the model output paths referenced by
   `outputs_dataset` are named.

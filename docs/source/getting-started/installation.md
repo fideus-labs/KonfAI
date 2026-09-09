@@ -18,12 +18,13 @@ python -c "import konfai; print(konfai.__version__)"
 konfai --help
 ```
 
-The shipped examples do not travel in the wheel, so run them from a checkout:
+The examples do not travel in the wheel. To install a checkout as a wheel and
+run its examples:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
-python -m pip install -e ".[imaging]"
+python -m pip install ".[imaging]"
 ```
 
 ## The extras
@@ -45,7 +46,7 @@ everything, `[dev]` adds the test, lint and docs tooling.
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `ssim` | `scikit-image` | the `SSIM` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
-| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../reference/python-api` |
+| `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
 | `all` | everything above, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |
 | `dev` | pytest, ruff, mypy, sphinx, … | working on KonfAI itself |
@@ -64,20 +65,16 @@ Python API under `konfai_apps`. Check them with `konfai-apps --help` and
 package itself; the `cluster` extra only adds `submitit`, which actual SLURM
 submission needs.
 
-Installing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
-`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`) **from a
-checkout** needs all three from that same checkout:
+When developing one of the bundled apps (`apps/impact_seg`, `apps/impact_synth`,
+`apps/impact_reg`, `apps/mrsegmentator`, `apps/totalsegmentator`), install the
+three packages from the same checkout to exercise your local changes:
 
 ```bash
 python -m pip install -e . -e konfai-apps -e apps/impact_seg
 ```
 
-Each bundle pins `konfai==` and `konfai-apps==` at its own `setuptools_scm`
-version, and between release tags that version exists nowhere on PyPI. Install
-the app alone from a checkout and pip fails with *"Could not find a version that
-satisfies the requirement konfai==1.7.1.devNN"*. From PyPI
-(`pip install impact-seg-konfai`) it just works: a released bundle pins a
-released `konfai-apps`.
+At a release tag each bundle pins `konfai==` and `konfai-apps==` to that
+release; from a working tree the pin accepts the closest release or newer.
 
 ## Pixi
 
@@ -118,13 +115,14 @@ pytest -q tests/
 KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
 drivers and CUDA version. If your PyTorch already matches your machine, there is
 nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
-first, then KonfAI. For containers, see {doc}`../usage/docker`.
+first, then KonfAI. For containers, see [Docker](#docker) below.
 
 ## If something is missing
 
 - **`ModuleNotFoundError` after installing**: the install landed in a different
   environment than the one you are running. Reinstall with the same interpreter,
-  `python -m pip install -e .`.
+  `python -m pip install "konfai[imaging]"` (`-e ".[imaging]"` from a
+  checkout).
 - **PyTorch sees your GPU but KonfAI does not**: KonfAI goes through PyTorch
   device discovery and `CUDA_VISIBLE_DEVICES`. Check both with
   `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"`
@@ -134,5 +132,15 @@ first, then KonfAI. For containers, see {doc}`../usage/docker`.
   "not found" means the environment mismatch of the first bullet. Install
   `konfai[cluster]` only when submission fails on a missing `submitit`.
 
-Next: {doc}`../quickstart` runs a real train, predict and evaluate loop in about
-seven minutes. {doc}`../reference/cli` lists every command and flag.
+
+```{include} ../../../docker/README.md
+:heading-offset: 1
+```
+
+The `docker run` examples above mount the current directory as `/workspace`:
+run them from the directory that contains your configs, data, and checkpoints.
+{doc}`../reference/cli` lists the flags used in the container commands.
+
+Next: {doc}`../quickstart` trains, predicts and evaluates four synthetic CT
+volumes on CPU, then verifies the outputs. {doc}`../reference/cli` lists every
+command and flag.

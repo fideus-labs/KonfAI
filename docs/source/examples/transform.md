@@ -26,4 +26,4 @@ fold instead of refusing it.
   writing an ITK transform or an OME-Zarr pyramid.
 - {doc}`../config_guide/transform`: every key, every refusal, and the eleven
   worked configs the test suite runs.
-- {doc}`../concepts/streaming`: what decides whether a chain streams.
+- {doc}`../usage/large-images`: what decides whether a chain streams.

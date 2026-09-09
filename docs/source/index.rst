@@ -14,7 +14,7 @@ KonfAI
            <p class="kf-lede">
              KonfAI is a declarative medical-imaging execution engine. It connects regional data access,
              patch execution, inspectable PyTorch graphs, training, prediction, evaluation, and medical-image
-             outputs through one reproducible workflow &mdash; then packages it for people, services, or agents.
+             outputs through one reproducible workflow, then packages it for people, services, or agents.
            </p>
            <div class="kf-cta">
              <a class="kf-btn kf-btn-primary" href="quickstart.html">Run your first workflow &rarr;</a>
@@ -115,10 +115,10 @@ KonfAI
          </div>
          <div class="kf-lfoot">
            <span>Same engine underneath: reflection reads the root key and builds
-                 <code>Model &middot; Dataset &middot; Losses &middot; Optimizer</code> &mdash;
+                 <code>Model &middot; Dataset &middot; Losses &middot; Optimizer</code>.
                  <code>Transformer:</code> builds a <code>Dataset</code> and nothing else.</span>
            <span>Every output folder is keyed by <code>train_name</code> (<code>name</code> under
-                 <code>Transformer:</code>) &mdash; keep it consistent across the files.</span>
+                 <code>Transformer:</code>): keep it consistent across the files.</span>
          </div>
        </div>
 
@@ -126,8 +126,8 @@ KonfAI
          <div class="kf-pillar kf-h-teal">
            <span class="tag">Reflection</span>
            <h3>Config by reflection</h3>
-           <p>A callable's signature is read and its arguments are built from the YAML it owns
-              &mdash; recursively. Reading a config resolves and rewrites it, so a run leaves a
+           <p>A callable's signature is read and its arguments are built from the YAML it owns,
+              recursively. Reading a config resolves and rewrites it, so a run leaves a
               complete record.</p>
          </div>
          <div class="kf-pillar kf-h-steel">
@@ -139,7 +139,7 @@ KonfAI
          <div class="kf-pillar kf-h-violet">
            <span class="tag">Models</span>
            <h3>Declarative graphs</h3>
-           <p>Networks are routed <code>add_module</code> graphs &mdash; a Python class, or an
+           <p>Networks are routed <code>add_module</code> graphs: a Python class, or an
               entire model written as a <code>.yml</code>. Named outputs are addressable from YAML.</p>
          </div>
        </div>
@@ -157,15 +157,15 @@ KonfAI
            <span class="intent">Start</span>
            <h3>Your first run</h3>
            <p>Install, download the demo dataset, then train, predict and evaluate the shipped
-              segmentation baseline &mdash; step by step.</p>
+              segmentation baseline, step by step.</p>
            <span class="go">Quickstart &rarr;</span>
          </a>
-         <a class="kf-nextcard kf-h-violet" href="concepts/index.html">
+         <a class="kf-nextcard kf-h-violet" href="config_guide/index.html">
            <span class="intent">Understand</span>
            <h3>The config model</h3>
            <p>How YAML becomes Python objects, classpaths, named module outputs, and the
               rewrite-on-read behaviour.</p>
-           <span class="go">Core concepts &rarr;</span>
+           <span class="go">Configuration &rarr;</span>
          </a>
          <a class="kf-nextcard kf-h-steel" href="usage/large-images.html">
            <span class="intent">Scale</span>
@@ -190,21 +190,21 @@ KonfAI
            <span class="intent">Ship</span>
            <h3>Run or ship an app</h3>
            <p>Run a published app with one command, or package your own workflow behind
-              <code>konfai-apps</code> &mdash; local, HuggingFace, or an HTTP server.</p>
+              <code>konfai-apps</code>: local, HuggingFace, or an HTTP server.</p>
            <span class="go">Apps &amp; API &rarr;</span>
          </a>
          <a class="kf-nextcard kf-h-amber" href="usage/mcp.html">
            <span class="intent">Automate</span>
            <h3>Drive it with an agent</h3>
            <p>An MCP server lets an LLM inspect data, write &amp; validate configs, run
-              train/predict/evaluate &mdash; and <em>use, fine-tune, or package apps</em>.</p>
+              train/predict/evaluate, and <em>use, fine-tune, or package apps</em>.</p>
            <span class="go">Agents &amp; MCP &rarr;</span>
          </a>
          <a class="kf-nextcard kf-h-violet" href="usage/studio.html">
            <span class="intent">Converse</span>
            <h3>Chat through a run</h3>
            <p>KonfAI Studio is a chat UI over the MCP server: point it at a dataset and
-              inspect, train, predict, evaluate, and compare &mdash; from the conversation,
+              inspect, train, predict, evaluate, and compare, from the conversation,
               on your own machine, with your own LLM.</p>
            <span class="go">KonfAI Studio &rarr;</span>
          </a>
@@ -218,16 +218,16 @@ KonfAI
          <div class="kf-doclinks">
            <a class="kf-h-teal" href="quickstart.html">Quickstart</a>
            <a class="kf-h-violet" href="examples/index.html">Examples</a>
-           <a class="kf-h-steel" href="usage/index.html">Guides</a>
+           <a class="kf-h-steel" href="usage/adopting-konfai.html">Adopting KonfAI</a>
            <a class="kf-h-amber" href="usage/making-data.html">Making datasets</a>
-           <a class="kf-h-teal" href="config_guide/index.html">Config guide</a>
-           <a class="kf-h-teal" href="reference/components/index.html">Components</a>
-           <a class="kf-h-violet" href="concepts/index.html">Concepts</a>
+           <a class="kf-h-steel" href="usage/large-images.html">Large images</a>
+           <a class="kf-h-teal" href="config_guide/index.html">Configuration</a>
+           <a class="kf-h-teal" href="reference/components/models.html">Components</a>
            <a class="kf-h-coral" href="usage/apps.html">Apps &amp; API server</a>
            <a class="kf-h-amber" href="usage/mcp.html">Agents &amp; MCP</a>
            <a class="kf-h-violet" href="usage/studio.html">KonfAI Studio</a>
            <a class="kf-h-steel" href="reference/cli.html">CLI reference</a>
-           <a class="kf-h-steel" href="usage/python-workflows.html">Python workflows</a>
+           <a class="kf-h-steel" href="usage/python-api.html">Python API</a>
            <a class="kf-h-amber" href="troubleshooting.html">Troubleshooting</a>
          </div>
        </div>
@@ -246,7 +246,6 @@ KonfAI
 
    </div>
 
-
 .. toctree::
    :maxdepth: 1
    :caption: Getting started
@@ -264,8 +263,6 @@ KonfAI
    examples/visual-gallery
    examples/transform
    examples/segmentation
-   examples/bring-your-model
-   examples/large-images
    examples/registration
    examples/synthesis
 
@@ -274,21 +271,18 @@ KonfAI
    :caption: Guides
    :hidden:
 
-   Overview <usage/index>
    usage/adopting-konfai
    usage/making-data
-   usage/python-workflows
    usage/large-images
+   usage/python-api
    usage/custom-models
-   usage/benchmarks
-   usage/docker
 
 .. toctree::
    :maxdepth: 1
    :caption: Config guide
    :hidden:
 
-   Overview <config_guide/index>
+   Configuration <config_guide/index>
    config_guide/training
    config_guide/prediction
    config_guide/evaluation
@@ -299,26 +293,10 @@ KonfAI
    :caption: Components
    :hidden:
 
-   Overview <reference/components/index>
    reference/components/models
    reference/components/losses-metrics
    reference/components/transforms
-   reference/components/augmentations
-   reference/components/schedulers
    reference/components/storage-backends
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Concepts
-   :hidden:
-
-   Overview <concepts/index>
-   concepts/configuration
-   concepts/datasets
-   concepts/streaming
-   concepts/model-graph
-   concepts/yaml-model-builder
-   concepts/execution-flow
 
 .. toctree::
    :maxdepth: 1
@@ -328,17 +306,13 @@ KonfAI
    usage/apps
    usage/mcp
    usage/studio
-   ecosystem/index
 
 .. toctree::
    :maxdepth: 1
    :caption: Reference
    :hidden:
 
-   Overview <reference/index>
    reference/cli
-   reference/environment
-   reference/python-api
    reference/app-server-api
    reference/api/index
 

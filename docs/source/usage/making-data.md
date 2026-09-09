@@ -175,7 +175,7 @@ konfai.transform("template", "./Cohorte:mha",
 ```
 
 `konfai.plan_transform(...)` takes the same arguments and returns the plan
-without running anything. See {doc}`python-workflows`.
+without running anything. See {doc}`python-api`.
 
 ## Next steps
 
@@ -184,4 +184,4 @@ without running anything. See {doc}`python-workflows`.
 - {doc}`../config_guide/transform`: every key, every refusal, and the
   cardinality rules in full.
 - {doc}`../reference/components/transforms`: the catalogue of stages.
-- {doc}`../concepts/streaming`: what decides whether a chain streams.
+- {doc}`large-images`: what decides whether a chain streams.

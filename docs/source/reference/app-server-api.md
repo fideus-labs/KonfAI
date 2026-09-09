@@ -3,7 +3,7 @@
 The `konfai-apps-server` command launches a FastAPI server
 (`konfai_apps.app_server:app`) that exposes packaged apps as **remote,
 asynchronous jobs**. This page is the complete endpoint contract. Start the
-server with {doc}`cli` and drive it with the {doc}`python-api` (`KonfAIAppClient`)
+server with {doc}`cli` and drive it with the {doc}`../usage/python-api` (`KonfAIAppClient`)
 or plain HTTP.
 
 ## Authentication
@@ -22,7 +22,7 @@ The server speaks **plain HTTP**: the token and the uploaded medical volumes
 travel unencrypted. Terminate TLS with a reverse proxy before exposing it beyond
 localhost, and keep the `--apps` allowlist tightly scoped (it is the trust
 boundary that stops a token holder from making the resolver fetch arbitrary
-repos). See {doc}`python-api`.
+repos). See {doc}`../usage/python-api`.
 ```
 
 ## Endpoints
@@ -141,6 +141,6 @@ curl -X POST -H "Authorization: Bearer $TOKEN" $BASE/jobs/$JOB/kill
 
 ## Next steps
 
-- {doc}`python-api`: `KonfAIAppClient` wraps all of this for you
+- {doc}`../usage/python-api`: `KonfAIAppClient` wraps all of this for you
 - {doc}`cli`: `konfai-apps-server` options
 - {doc}`../usage/apps`: what an app is and how to run the server day-to-day

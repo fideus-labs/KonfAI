@@ -118,16 +118,14 @@ _LLMS_BASE_URL = "https://konfai.readthedocs.io/en/latest"
 #: (section, source file, published page) in reading order.
 _LLMS_PAGES = [
     ("Getting started", "quickstart.rst", "quickstart.html"),
+    ("Config guide", "config_guide/index.md", "config_guide/index.html"),
     ("Config guide", "config_guide/training.md", "config_guide/training.html"),
     ("Config guide", "config_guide/prediction.md", "config_guide/prediction.html"),
     ("Config guide", "config_guide/evaluation.md", "config_guide/evaluation.html"),
     ("Config guide", "config_guide/transform.md", "config_guide/transform.html"),
-    ("Components", "reference/components/index.md", "reference/components/index.html"),
     ("Components", "reference/components/models.md", "reference/components/models.html"),
     ("Components", "reference/components/losses-metrics.md", "reference/components/losses-metrics.html"),
     ("Components", "reference/components/transforms.md", "reference/components/transforms.html"),
-    ("Components", "reference/components/augmentations.md", "reference/components/augmentations.html"),
-    ("Components", "reference/components/schedulers.md", "reference/components/schedulers.html"),
     ("Components", "reference/components/storage-backends.md", "reference/components/storage-backends.html"),
     ("Reference", "reference/cli.md", "reference/cli.html"),
 ]
@@ -165,5 +163,65 @@ def _write_llms_txt(app, exception):
     (outdir / "llms-full.txt").write_text("".join(full_parts), encoding="utf-8")
 
 
+# ---------------------------------------------------------------------------
+# Redirects for pages that were merged into others. The old URL keeps working:
+# a stub at the old path forwards to the page that holds the content now.
+# Add an entry here whenever a page moves.
+# ---------------------------------------------------------------------------
+
+_REDIRECTS = {
+    "concepts/index.html": "config_guide/index.html",
+    "concepts/configuration.html": "config_guide/index.html",
+    "concepts/datasets.html": "config_guide/index.html#the-dataset-block",
+    "concepts/execution-flow.html": "config_guide/index.html#four-files-four-commands",
+    "concepts/streaming.html": "usage/large-images.html#patch-streaming",
+    "concepts/model-graph.html": "reference/components/models.html#model-graph-and-output-naming",
+    "concepts/yaml-model-builder.html": "reference/components/models.html#declarative-yaml-model-graphs",
+    "usage/index.html": "index.html",
+    "usage/python-workflows.html": "usage/python-api.html",
+    "usage/docker.html": "getting-started/installation.html#docker",
+    "usage/benchmarks.html": "usage/large-images.html#reproducing-the-numbers",
+    "reference/index.html": "reference/cli.html",
+    "reference/python-api.html": "usage/python-api.html#apps-the-konfai-apps-package",
+    "reference/environment.html": "reference/cli.html#environment-variables",
+    "reference/api/workflows.html": "usage/python-api.html#signatures",
+    "reference/api/apps.html": "usage/python-api.html#app-signatures",
+    "reference/api/configuration.html": "reference/api/index.html#configuration-api",
+    "reference/api/data.html": "reference/api/index.html#data-api",
+    "reference/api/models.html": "reference/api/index.html#models-api",
+    "reference/api/extension-points.html": "usage/custom-models.html",
+    "reference/components/index.html": "reference/components/models.html",
+    "reference/components/augmentations.html": "reference/components/transforms.html#augmentations",
+    "reference/components/schedulers.html": "reference/components/losses-metrics.html#schedulers",
+    "ecosystem/index.html": "usage/apps.html#the-ecosystem-around-an-app",
+    "examples/bring-your-model.html": "examples/index.html#bring-your-model",
+    "examples/large-images.html": "examples/index.html#large-images",
+}
+
+
+def _write_redirects(app, exception):
+    if exception is not None or app.builder.name != "html":
+        return
+    from pathlib import Path as _Path
+
+    outdir = _Path(app.outdir)
+    for old, new in _REDIRECTS.items():
+        target, _, anchor = new.partition("#")
+        href = os.path.relpath(target, os.path.dirname(old) or ".").replace(os.sep, "/")
+        if anchor:
+            href += "#" + anchor
+        stub = outdir / old
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text(
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+            f'<meta http-equiv="refresh" content="0; url={href}">\n'
+            f'<link rel="canonical" href="{_LLMS_BASE_URL}/{new}">\n'
+            "<title>This page moved</title>\n</head>\n<body>\n"
+            f'<p>This page moved to <a href="{href}">{new}</a>.</p>\n</body>\n</html>\n',
+            encoding="utf-8",
+        )
+
+
 def setup(app):
     app.connect("build-finished", _write_llms_txt)
+    app.connect("build-finished", _write_redirects)

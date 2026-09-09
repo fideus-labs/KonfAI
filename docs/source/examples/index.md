@@ -20,7 +20,7 @@ configured. They are KonfAI {doc}`Apps <../usage/apps>`.
 and nothing else. They are what you copy for your own experiment, and the pages
 below document them. Their training runs are deliberately short, so the scores
 demonstrate the pipeline rather than the method. A fourth,
-{doc}`bring-your-model`, is the same engine without the YAML: a MONAI `UNet`
+[Bring your model](#bring-your-model), is the same engine without the YAML: a MONAI `UNet`
 trained and run through `konfai.train_model` and `konfai.predict_model`.
 
 Both tiers use the public demo data on Hugging Face: `VBoussot/konfai-demo` ships
@@ -49,6 +49,8 @@ MR / CT / body mask).
 - {doc}`segmentation`
 - {doc}`registration`
 - {doc}`synthesis`
+- [Bring your model](#bring-your-model), below
+- [Large images](#large-images), below
 
 ## What they produce
 
@@ -134,12 +136,44 @@ cd examples/Synthesis
 That matters because the shipped YAML files refer to local modules and dataset
 paths relative to the current working directory.
 
+```{include} ../../../examples/BringYourModel/README.md
+:heading-offset: 1
+```
+
+The three framework examples are YAML configs run by the `konfai` CLI. This one
+is the other spelling: a model that already exists in Python (MONAI's `UNet`,
+built as MONAI builds it) goes through `konfai.train_model` and
+`konfai.predict_model`, and everything else is the same engine: the patch
+sampling, the overlap-blended reassembly, the streamed writes, the checkpoint
+format and the run record (`Statistics/MONAI_UNET/Trainer.yml`, the resolved
+config the run would have read). The calls are documented in
+{doc}`../usage/adopting-konfai` (Bring your model) and {doc}`../usage/python-api`;
+`tests/unit/test_api.py` runs the same two calls on a synthetic cohort and on a
+MONAI UNet, so the notebook's claim is pinned by a test.
+
+A live model runs on one rank, in the process that built it: several GPUs, and
+a RESUME from another process, need the model spelled as a classpath
+(`monai.networks.nets:UNet`) in a `Config.yml`, which is the {doc}`segmentation`
+route. `Statistics/MONAI_UNET/Trainer.yml` is a starting point for that file:
+it is the config the ten lines built.
+
+```{include} ../../../examples/LargeImages/README.md
+:heading-offset: 1
+```
+
+The other examples fetch their data first. This one reads a 2.4 GB volume that
+stays on a public S3 bucket: the pyramid's metadata, a coarse level as an
+overview, one native-resolution window (one chunk), then a `TRANSFORM` that
+streams a level to a local HDF5 under a memory budget, region by region along
+the chunk grid. It is the {doc}`../usage/large-images` guide run for real, on a
+store anyone can reach, with `FSSPEC_S3_ANON=true` standing in for credentials;
+{doc}`../reference/components/storage-backends` documents the `:omezarr`
+backend, its selectors and its URI support.
+
 ## Next steps
 
 - {doc}`segmentation`: the smallest end-to-end run; start here
-- {doc}`bring-your-model`: a model you already have, no YAML
-- {doc}`large-images`: a 2.4 GB public OME-Zarr read where it lives, chunk by chunk
 - {doc}`registration`: train, materialise, and evaluate a fixed/moving image workflow
 - {ref}`gallery-registration`: inspect a separate real IMPACT-Reg App execution
-- {doc}`../concepts/configuration`: understand the YAML the examples are built from
+- {doc}`../config_guide/index`: understand the YAML the examples are built from
 - {doc}`../usage/custom-models`: the step after Synthesis's local `classpath` modules

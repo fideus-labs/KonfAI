@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Every scheduler documented in docs/source/reference/components/schedulers.md instantiates and
+"""Every scheduler documented in docs/source/reference/components/losses-metrics.md instantiates and
 steps once: a torch signature change (LambdaLR dropped ``verbose``) otherwise ships as a
 config-reachable crash that no test sees."""
 
