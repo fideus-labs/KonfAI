@@ -16,17 +16,10 @@
 
 """Load pretrained weights from an external architecture into a KonfAI graph.
 
-A KonfAI catalog model (``konfai/models/yaml``) is often weight-exact to a reference implementation
-(a MONAI or torchvision model) but uses different module names, so its ``state_dict`` keys do not
-match the external checkpoint. ``transfer_weights_by_execution_order`` bridges the two by pairing
-parametric leaf modules in **forward-execution order** instead of by name: both models are run once
-with hooks that record the order their weighted leaves execute, and the ordered lists are copied
-position-by-position with a shape check. This is the mechanism that lets a MONAI-trained checkpoint
-drive a KonfAI graph, so the network gains KonfAI's named-output supervision (deep supervision,
-feature-level losses) on top of the reference's pretrained weights.
-
-It is deliberately strict: a mismatched leaf count or shape raises, so a non-equivalent pair fails
-loudly instead of silently mis-loading half a network.
+``transfer_weights_by_execution_order`` pairs parametric leaf modules in forward-execution order
+instead of by name: both models are run once with hooks that record the order their weighted leaves
+execute, and the ordered lists are copied position-by-position with a shape check. A mismatched leaf
+count or shape raises.
 """
 
 from __future__ import annotations
@@ -45,12 +38,8 @@ if TYPE_CHECKING:
 
 
 def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[[], object]) -> list[torch.nn.Module]:
-    """Return the model's weighted leaf modules in the order their forward runs, via forward hooks.
-
-    Leaf = a module with no children that owns parameters directly (Conv, Linear, norm, ...). Ordering
-    by execution rather than by ``state_dict`` key is what makes the pairing robust to a reference that
-    registers its norm/activation before its conv (pre-activation), where key order != run order.
-    """
+    """Return the model's weighted leaf modules (no children, parameters or buffers of their own) in
+    the order their forward runs, via forward hooks."""
     order: list[torch.nn.Module] = []
     seen: set[int] = set()
 
@@ -62,15 +51,13 @@ def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[
     handles = []
     for module in model.modules():
         is_leaf = next(module.children(), None) is None
-        # A leaf may own only buffers (a non-affine BatchNorm/InstanceNorm with running stats), whose
-        # tensors _untraced_tensors would otherwise flag as uncovered and wrongly refuse the transfer.
+        # A leaf may own only buffers (a non-affine norm with running stats).
         if is_leaf and (
             next(module.parameters(recurse=False), None) is not None
             or next(module.buffers(recurse=False), None) is not None
         ):
             handles.append(module.register_forward_hook(hook))
-    # Snapshot per-module modes: model.train(root_mode) would force every descendant into the
-    # root's mode and lose frozen/eval-only submodules.
+    # Per-module modes are restored one by one: model.train(root_mode) would lose eval-only submodules.
     training_states = {module: module.training for module in model.modules()}
     model.eval()
     try:
@@ -85,13 +72,8 @@ def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[
 
 
 def _untraced_tensors(model: torch.nn.Module, leaves: list[torch.nn.Module]) -> list[str]:
-    """Return the names of the model's parameters/buffers that no traced leaf owns.
-
-    Two shapes escape the leaf trace: a module that owns parameters *and* has children (torch's
-    ``MultiheadAttention`` holds ``in_proj_weight`` beside its ``out_proj`` child) is never a leaf, and
-    a leaf the forward does not reach is never hooked. Their tensors would be skipped, so the caller
-    must refuse the transfer instead of reporting success on a partial load.
-    """
+    """Return the names of the model's parameters/buffers that no traced leaf owns: a module that owns
+    parameters and has children (``MultiheadAttention``), or a leaf the forward does not reach."""
     covered: set[int] = set()
     for leaf in leaves:
         covered.update(id(tensor) for tensor in leaf.parameters())
@@ -110,24 +92,19 @@ def transfer_weights_by_execution_order(
 ) -> int:
     """Fill every parameter and buffer of ``target`` from ``source`` by execution-order leaf pairing.
 
-    ``target`` is the KonfAI model receiving the weights; ``source`` is the external reference whose
-    pretrained checkpoint you want to reuse. ``target_forward`` / ``source_forward`` are zero-argument
-    callables that each run one forward pass (e.g. ``lambda: list(net.named_forward(x))`` for a KonfAI
-    Network, ``lambda: monai_model(x)`` for the reference). Returns the number of leaves transferred.
+    ``target`` is the KonfAI model receiving the weights; ``source`` is the external reference.
+    ``target_forward`` / ``source_forward`` are zero-argument callables that each run one forward pass
+    (``lambda: list(net.named_forward(x))``, ``lambda: monai_model(x)``). Returns the number of leaves
+    transferred.
 
     Every ``target`` tensor is written or the call raises; ``source`` tensors its forward does not reach
-    (an unused deep-supervision head) have no counterpart to feed and are ignored.
-
-    Raises ``ConfigError`` when the two graphs are not weight-exact: a target tensor no traced leaf
-    owns, a different number of weighted leaves, or a paired leaf whose local ``state_dict`` (its own
-    weight/bias/buffers) does not match in keys or shapes. That is intentional: silently loading a
-    mismatched network is worse than failing.
+    (an unused deep-supervision head) are ignored. Raises ``ConfigError`` when the two graphs are not
+    weight-exact: a target tensor no traced leaf owns, a different number of weighted leaves, or a
+    paired leaf whose local ``state_dict`` does not match in keys or shapes.
     """
     target_leaves = _parametric_leaves_in_execution_order(target, target_forward)
     source_leaves = _parametric_leaves_in_execution_order(source, source_forward)
-    # Only the target is required to be fully covered: an untraced target tensor would silently keep its
-    # random init. An untraced *source* tensor is a branch this configuration does not run (nnU-Net's
-    # unused deep-supervision heads) and has no target counterpart to feed, so it is correctly ignored.
+    # Only the target must be fully covered; an untraced source tensor is a branch this forward does not run.
     untraced = _untraced_tensors(target, target_leaves)
     if untraced:
         raise ConfigError(
@@ -145,10 +122,8 @@ def transfer_weights_by_execution_order(
             "Weight transfer requires a weight-exact architecture; check that hyperparameters "
             "(channels/depth/dim) match the reference and that both forwards ran on the same input.",
         )
-    # A tensor tied across two target leaves would be written twice by the per-leaf loads below, so the
-    # earlier leaf would silently end up with the later leaf's source weights. state_dict(keep_vars=True)
-    # yields the live parameters AND persistent buffers: exactly what load_state_dict writes, so a tied
-    # buffer is caught as well. Refuse rather than mis-load.
+    # A tensor tied across two target leaves would be written twice by the per-leaf loads: refused.
+    # state_dict(keep_vars=True) yields the live parameters and persistent buffers, what load_state_dict writes.
     seen_tensors: dict[int, str] = {}
     for leaf in target_leaves:
         for tensor_name, tensor in leaf.state_dict(keep_vars=True).items():
@@ -180,13 +155,11 @@ class PretrainedFrom:
     """The ``Model.pretrained_from`` config block: seed a model from an external reference checkpoint.
 
     ``builder`` names the reference class (``monai.networks.nets:UNet``), ``args`` its constructor
-    arguments, and ``checkpoint`` its trained weights: a raw ``state_dict`` file, or a checkpoint
-    dict holding one under ``state_dict``. When a fresh TRAIN initialises the model,
-    :func:`transfer_weights_by_execution_order` fills every tensor from the reference or raises; a
-    checkpoint load (RESUME, PREDICTION) carries its own weights and is never overridden. The
-    transfer runs both forwards on a synthetic input shaped from the model's own channels and
-    spatial rank; ``input_shape`` overrides its spatial extent when the derived one (the model's
-    patch size, else its downsampling multiple) does not fit the graph.
+    arguments, and ``checkpoint`` its trained weights: a raw ``state_dict`` file, or a checkpoint dict
+    holding one under ``state_dict``. A fresh TRAIN fills every tensor from the reference or raises; a
+    checkpoint load (RESUME, PREDICTION) carries its own weights and is never overridden. ``input_shape``
+    overrides the synthetic input's spatial extent (the model's patch size, else its downsampling
+    multiple) when the derived one does not fit the graph.
     """
 
     def __init__(
@@ -227,8 +200,7 @@ class PretrainedFrom:
             raise ConfigError(
                 f"Model.pretrained_from.checkpoint: cannot load '{self.checkpoint}'.", str(error)
             ) from error
-        # A wrapped checkpoint: Lightning and most trainers under "state_dict", nnU-Net under
-        # "network_weights" (its checkpoint_final.pth carries the optimizer and the plans beside it).
+        # A wrapped checkpoint: "state_dict" (Lightning and most trainers), "network_weights" (nnU-Net).
         if isinstance(state, dict):
             for key in ("state_dict", "network_weights"):
                 if key in state and isinstance(state[key], dict):
@@ -244,7 +216,7 @@ class PretrainedFrom:
         return reference.eval()
 
     def _example_input(self, model: Network) -> torch.Tensor:
-        # The transfer only needs shapes and execution order, so any input the graph accepts will do.
+        # Any input the graph accepts will do.
         if self.input_shape is not None:
             spatial = [int(size) for size in self.input_shape]
         elif (

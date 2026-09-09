@@ -64,19 +64,15 @@ from konfai.utils.runtime import (
 )
 from konfai.utils.utils import env_flag, get_module, split_path_spec
 
-#: This rank's prediction loop, phase by phase, summed over the cases it ran: the unit the line
-#: at the end of a run accounts for (see ``_prediction_report``).
+#: This rank's prediction loop, phase by phase, summed over the cases it ran (see ``_prediction_report``).
 PREDICTION_CLOCK = SweepClock()
 
 
 class _AsyncWriter:
     """A background thread owning one output dataset's disk writes, in submission order.
 
-    The prediction loop otherwise waits on every device-to-host copy and destination write between
-    two forwards; submitting them here overlaps that tail with the next batch. The queue is bounded,
-    so a slow destination back-pressures the loop instead of buffering the run; the first failure is
-    kept, later operations drain unexecuted, and the failure re-raises at the next submission and at
-    ``close``: a run never ends with a write silently missing.
+    The queue is bounded, so a slow destination back-pressures the loop. The first failure is kept and
+    re-raised at the next submission and at ``close``; later operations drain unexecuted.
     """
 
     _CAPACITY = 4
@@ -153,23 +149,20 @@ class _FinalizeStage:
 @dataclass(frozen=True)
 class _StreamPlan:
     """How one case streams: the post-reduction stages, split into a per-slab pointwise prefix, a
-    streamed pipe of region and pointwise stages, and (past what streaming can honour) a
-    whole-volume tail.
+    streamed pipe of region and pointwise stages, and a whole-volume tail.
 
-    ``to_sink`` streams straight into a region-write ``DataStream``; ``pipe_start`` is the first
-    region stage (``None`` when the chain is pointwise throughout), and the pipe runs from there to
-    the end: region stages compose, so their number is not limited. Without ``to_sink`` the prefix
-    streams into a post-reduction buffer and ``stages[tail_start:]`` runs once on it (the chain
-    split). The invariants: ``to_sink`` implies no tail, and a pipe implies ``to_sink``: a tail
-    swallows the region stages, so the buffer always sits on the accumulator grid.
+    ``to_sink`` streams straight into a region-write ``DataStream``; ``pipe_start`` is the first region
+    stage (``None`` when the chain is pointwise throughout) and the pipe runs from there to the end.
+    Without ``to_sink`` the prefix streams into a post-reduction buffer and ``stages[tail_start:]``
+    runs once on it. Invariants: ``to_sink`` implies no tail, a pipe implies ``to_sink``, and the
+    buffer sits on the accumulator grid.
     """
 
     stages: list[_FinalizeStage]
     pipe_start: int | None
     tail_start: int
     to_sink: bool
-    # Prefix stages whose declaration is SLAB: per-voxel value maps with a per-region side effect,
-    # run through ``Transform.stream_slab`` so they learn where each slab sits.
+    # Prefix stages declared SLAB: run through ``Transform.stream_slab`` so they learn where each slab sits.
     slab_stages: frozenset[int] = frozenset()
 
     @property
@@ -188,10 +181,8 @@ class _StreamPlan:
 class _RegionState:
     """One case's live streamed pipe: its slab scheduler and the geometry its closures share.
 
-    ``shapes[i]`` is the spatial shape between pipe stage ``i - 1`` and ``i`` (``shapes[0]`` the
-    accumulator's, ``shapes[-1]`` the written image's); a pointwise stage leaves it unchanged, so the
-    per-stage region bookkeeping folds through the same list the pull map composes over. The pipe's
-    stages themselves live in the ``produce``/``pull`` closures the stream was built on.
+    ``shapes[i]`` is the spatial shape between pipe stage ``i - 1`` and ``i``: ``shapes[0]`` the
+    accumulator's, ``shapes[-1]`` the written image's.
     """
 
     shapes: list[list[int]]
@@ -200,11 +191,8 @@ class _RegionState:
     attribute: Attribute | None = None
 
 
-# Streaming pays per-slab work (the pipe traversal, region writes, the TTA aligner); when the
-# assembled accumulators of all copies are below this fraction of allocatable memory (a 2.5D case),
-# holding them whole costs nothing and the case takes the whole-volume path.
-# KONFAI_STREAM_WORTH_THRESHOLD overrides the fraction (tests set 0 to exercise the streamed
-# machinery on toy volumes). See OutputDataset._worth_streaming.
+# Below this fraction of allocatable memory, the case takes the whole-volume path.
+# KONFAI_STREAM_WORTH_THRESHOLD overrides the fraction.
 _STREAM_WORTH_MIN_FRACTION = 0.05
 
 
@@ -228,25 +216,18 @@ class OutputDataset(Dataset, NeedDevice):
     ) -> None:
         filename, _, file_format = split_path_spec(dataset_filename)
         super().__init__(filename, file_format)
-        # ``Dataset.__init__`` does not forward ``super().__init__()``, so the ``NeedDevice`` mixin is
-        # never initialised through the MRO; call it explicitly so ``self.device`` always has its CPU
-        # default. Otherwise an output writer that is never moved (e.g. a CPU-only PREDICTION run, whose
-        # device propagation is CUDA-gated) reads ``self.device`` and raises ``AttributeError``.
+        # ``Dataset.__init__`` does not forward ``super().__init__()``: initialise ``NeedDevice`` here.
         NeedDevice.__init__(self)
         self.group = group
         self._before_reduction_transforms = before_reduction_transforms
         self._after_reduction_transforms = after_reduction_transforms
         self._final_transforms = final_transforms
         self._patch_combine = patch_combine
-        # "key=value" strings rather than a mapping: the config layer accepts list[str] and not
-        # dict[str, str], so a mapping here would be unreachable from the YAML that is supposed to
-        # drive it. Same spelling as the --set overrides.
+        # "key=value" strings: the config layer accepts list[str], not dict[str, str]. Same spelling as --set.
         self._attributes = dict(entry.split("=", 1) for entry in attributes or [])
         self.reduction_classpath = reduction
         self.reduction: Reduction
-        #: The per-rank budget the streamed-vs-assembled route is priced against: the config's
-        #: number, pushed by the predictor, so the route is a function of configuration and data
-        #: rather than of the machine's free memory at the moment a case finalizes.
+        #: The per-rank budget the streamed-vs-assembled route is priced against, pushed by the predictor.
         self._per_rank_budget_bytes: float | None = None
 
         self.before_reduction_transforms: list[Transform] = []
@@ -258,24 +239,16 @@ class OutputDataset(Dataset, NeedDevice):
         self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
         self.names: dict[int, str] = {}
         self.nb_data_augmentation = 0
-        # One reusable page-locked buffer for GPU->CPU offload. Accumulators consume it synchronously
-        # into their own storage; callers retaining a CPU patch use ``_offload_to_cpu`` instead.
+        # One reusable page-locked buffer for GPU->CPU offload, consumed synchronously.
         self._pin_buffer: torch.Tensor | None = None
         # Per-CASE blend device, decided once at the case's first patch (see ``_accumulate_device``):
-        # CUDA when the full combined volume of EVERY augmentation fits VRAM (blend on GPU, no per-patch
-        # offload, assembled volume stays on-device for the reduction), else CPU. The decision is per case,
-        # not per (case, augmentation): all of a case's augmentations are reduced together in
-        # ``get_output``, and a mid-case flip would hand the reduction a mixed CPU/CUDA tensor list.
+        # CUDA when every augmentation's volume fits VRAM, else CPU. Never per (case, augmentation).
         self._accum_device: dict[int, torch.device] = {}
         # Same single-decision rule for the CPU-blend reduction device (see ``_reduction_device``).
         self._reduce_device: dict[int, torch.device] = {}
         # Disk writes go to a background writer when the destination serves disjoint files per entry
-        # (see ``Dataset.concurrent_write_safe``) AND the output runs on a GPU: the device-to-host
-        # copy and the write then overlap the next forward, byte-identically: same operations, same
-        # order. A single-store destination stays inline, so nothing ever writes one store from two
-        # threads; a CPU-only loop stays inline too: its blend shares the memory bandwidth the
-        # writer would consume, so there is nothing to overlap and something to lose.
-        # ``KONFAI_ASYNC_WRITES`` is tri-state: unset = automatic, ``0`` kills, ``1`` forces (tests).
+        # (``Dataset.concurrent_write_safe``) AND the output runs on a GPU; anything else stays inline.
+        # ``KONFAI_ASYNC_WRITES`` is tri-state: unset = automatic, ``0`` kills, ``1`` forces.
         raw = os.environ.get("KONFAI_ASYNC_WRITES", "").lower()
         self._async_writes: bool | None
         if raw in ("0", "false") or not self.concurrent_write_safe():
@@ -286,11 +259,8 @@ class OutputDataset(Dataset, NeedDevice):
             self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
         self.group_src, self.group_dest = same_as_group.split(":")
-        # Slab streaming has no config knob: it is applied automatically, per case, whenever it is
-        # byte-identical to the assembled path (see ``_plan_stream``), finalizing each z-slab as its
-        # patches complete so RAM is bounded at one patch window; otherwise the whole-volume path is
-        # used transparently. ``KONFAI_STREAMED_WRITES=0`` is a global ops/debug kill-switch (also how
-        # a test gets the assembled reference), not a per-output option.
+        # Slab streaming has no config knob: applied per case whenever it is byte-identical to the
+        # assembled path (``_plan_stream``). ``KONFAI_STREAMED_WRITES=0`` is a global kill-switch.
         self._streaming_enabled = env_flag("KONFAI_STREAMED_WRITES", True)
         self._stream_plans: dict[int, _StreamPlan | None] = {}
         self._stream_sinks: dict[int, DataStream] = {}
@@ -298,9 +268,7 @@ class OutputDataset(Dataset, NeedDevice):
         self._stream_buffers: dict[int, torch.Tensor] = {}
         self._post_prefix_attributes: dict[int, Attribute] = {}
         self._reported_paths: set[str] = set()
-        # One aligner per streamed case: the copies' accumulators emit slabs at their own pace, and
-        # the finalize needs every copy's rows together (the cross-copy reduction). A single copy is
-        # simply a one-stream aligner: same path, no special case.
+        # One aligner per streamed case: the finalize needs every copy's rows together for the cross-copy reduction.
         self._aligners: dict[int, SlabAligner] = {}
 
     def set_memory_budget(self, budget_bytes: float | None) -> None:
@@ -314,10 +282,7 @@ class OutputDataset(Dataset, NeedDevice):
     def _submit_write(self, operation: Callable[[], None]) -> None:
         """Run ``operation`` on the background writer, or inline when the destination must stay serial.
 
-        Charged to ``wait(write)`` either way: inline, the write IS the wait, and a submission
-        blocks once the writer's queue is full, which is where a slow destination turns the
-        background writer synchronous with nothing else to show it.
-        """
+        Charged to ``wait(write)`` either way, and a submission blocks once the queue is full."""
         if self._async_writes is None:
             self._async_writes = self._torch_device().type == "cuda"
         with PREDICTION_CLOCK.phase("wait(write)"):
@@ -334,19 +299,12 @@ class OutputDataset(Dataset, NeedDevice):
             writer, self._writer = self._writer, None
             writer.close()
 
-    # A pageable D2H copy on a large multi-class patch is a slow, fully synchronous PCIe transfer;
-    # staging through page-locked memory only pays off once the patch is large enough that the copy,
-    # not the buffer bookkeeping, dominates. Small patches (e.g. single-channel synthesis) take the
-    # plain path unchanged.
+    # Pinned staging pays off only above this size.
     _PINNED_OFFLOAD_MIN_BYTES = 64 * 1024 * 1024
 
     def _offload_to_cpu(self, layer: torch.Tensor) -> torch.Tensor:
-        """Return a CPU patch whose storage is independent of the reusable offload buffer.
-
-        Large CUDA patches stage through pinned memory, then copy into owned pageable storage.
-        Small/non-CUDA patches and a failed pinned allocation retain ``layer.detach().cpu()`` behavior.
-        The synchronous accumulator uses :meth:`_borrow_cpu_patch` to avoid that second copy.
-        """
+        """Return a CPU patch whose storage is independent of the reusable offload buffer. Large CUDA
+        patches stage through pinned memory, then copy into owned pageable storage."""
         with self._borrow_cpu_patch(layer) as patch:
             if patch is not self._pin_buffer:
                 return patch
@@ -358,10 +316,8 @@ class OutputDataset(Dataset, NeedDevice):
     def _borrow_cpu_patch(self, layer: torch.Tensor) -> Iterator[torch.Tensor]:
         """Lend one CPU patch until this context exits, for synchronous accumulation only.
 
-        The blocking CUDA copy completes before yielding. The caller must finish consuming the patch
-        within the context: the next offload may overwrite its storage. Accumulator.add_layer copies
-        or blends into owned storage, and StreamingAccumulator returns slabs cloned from that storage.
-        """
+        The caller must finish consuming the patch within the context: the next offload may overwrite
+        its storage."""
         detached = layer.detach()
         if (
             detached.device.type != "cuda"
@@ -378,7 +334,7 @@ class OutputDataset(Dataset, NeedDevice):
                 yield detached.cpu()
                 return
             self._pin_buffer = buffer
-        # Blocking copy: CPU accumulation must see completed host data before the buffer is lent.
+        # Blocking copy: the host data must be complete before the buffer is lent.
         buffer.copy_(detached)
         yield buffer
 
@@ -395,13 +351,11 @@ class OutputDataset(Dataset, NeedDevice):
         self.after_reduction_transforms = build("after_reduction_transforms", self._after_reduction_transforms)
         self.final_transforms = build("final_transforms", self._final_transforms)
 
-        # A patch grid overlaps whether or not a combine is declared, so the overlap needs a
-        # deterministic owner. Trim keeps each patch's central band: the bands tile the volume
-        # exactly, a seamless selection that never averages (a label map survives it).
+        # The overlap needs an owner whether or not a combine is declared: Trim keeps each patch's
+        # central band and never averages.
         module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
         self.patch_combine = apply_config(konfai_args)(getattr(module, name))()
 
-        # Built-in or custom, the operator binds its parameters from its own block, like every stage.
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
         # The classpath is one key, dots and all: escaped so the dotted path is not split through it.
         subtree = f"{konfai_args}.{_escape_key_component(self.reduction_classpath)}"
@@ -421,9 +375,8 @@ class OutputDataset(Dataset, NeedDevice):
         overlap: int | float | str | list[int | float | str] | None,
         nb_data_augmentation: int,
     ) -> None:
-        # Nothing tiled (no axis longer than one voxel) is a single patch covering the volume: no combine
-        # applies. Anything else keeps EVERY axis, the untiled ones as a single broadcast entry, because
-        # the accumulator reads one window per spatial axis (see blend_axes).
+        # A single patch covering the volume takes no combine. Anything else keeps EVERY axis, the
+        # untiled ones as a single broadcast entry.
         if patch_size and any(size > 1 for size in patch_size) and overlap is not None:
             if self.patch_combine is not None:
                 axes = blend_axes(patch_size)
@@ -438,8 +391,7 @@ class OutputDataset(Dataset, NeedDevice):
             transform.to(device)
 
     def is_done(self, index: int) -> bool:
-        # ``.get``: a streamed case cleans itself up inside ``add_layer`` (its slabs are already on
-        # disk), so by the time the run loop asks, the index is gone and the answer is "nothing to do".
+        # ``.get``: a streamed case cleans itself up inside ``add_layer``, so its index may already be gone.
         accumulators = self.output_layer_accumulator.get(index)
         if accumulators is None or len(accumulators) != self.nb_data_augmentation:
             return False
@@ -520,10 +472,7 @@ class OutputDataset(Dataset, NeedDevice):
         source_attribute = (
             Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
         )
-        # What the output declares about itself, applied over what it inherited from its input.
-        # Inheritance carries the geometry, which is right, but it also carries whatever the source
-        # entry said it WAS, and that describes the source, not this. Declared last, so the
-        # config always wins; declare a key empty to drop an inherited one.
+        # The declared attributes are applied over the inherited ones; an empty value drops a key.
         for key, value in self._attributes.items():
             if value == "":
                 source_attribute.pop(key, None)
@@ -533,11 +482,8 @@ class OutputDataset(Dataset, NeedDevice):
             self.output_layer_accumulator[index_dataset] = {}
             self.attributes[index_dataset] = {}
             self.names[index_dataset] = input_dataset.name
-            # The streamed consumers (sink target, region pipe, buffer) index their slabs on the
-            # first spatial axis, and the aligner needs every augmentation on the same footing:
-            # a grid swept along another axis takes the whole-volume path until they carry the
-            # axis too.
-            # max(1, ...): the count is set by load(); before it, augmentation 0 always exists.
+            # The streamed consumers index their slabs on the first spatial axis: a grid swept along
+            # another axis takes the whole-volume path. max(1, ...): the count is set by load().
             sweeps_first_axis = all(
                 input_dataset.patch.get_sweep_axis(a) == 0 for a in range(max(1, self.nb_data_augmentation))
             )
@@ -548,14 +494,10 @@ class OutputDataset(Dataset, NeedDevice):
             )
             self._stream_plans[index_dataset] = plan
             if self._streaming_enabled and (plan is None or not plan.to_sink):
-                # The whole-volume fallback is a normal outcome, but a silent one hides that a
-                # large case pays it: say so, once per distinct path.
                 path = "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
                 self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
-        # Everything past this point reads the header at index 0; a patch-level inverse reads one
-        # per patch, each undone on a copy of its own taken before any inverse ran. Only then are
-        # the copies made: on a grid of 18,000 thin 2.5D patches with nothing to undo they cost
-        # 473 ms and as many dicts held per (case, augmentation), measured.
+        # Everything past this point reads the header at index 0; a patch-level inverse reads one copy
+        # per patch, taken before any inverse ran.
         attributes = self.attributes[index_dataset][index_augmentation] = {0: source_attribute}
         if self._patch_inverses(dataset):
             for i in range(1, len(input_dataset.patch.get_patch_slices(index_augmentation))):
@@ -571,8 +513,7 @@ class OutputDataset(Dataset, NeedDevice):
         )
 
     def _patch_inverses(self, dataset: DatasetIter) -> list[TransformInverse]:
-        """The patch-level transforms of the mirrored group that each patch is passed back through,
-        last applied first."""
+        """The patch-level transforms of the mirrored group each patch is passed back through, last first."""
         return [
             transform
             for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms)
@@ -591,8 +532,7 @@ class OutputDataset(Dataset, NeedDevice):
                     f"case '{self.names[index_dataset]}' accumulates on the host.",
                 )
         target = self._accum_device[index_dataset]
-        # When the accumulator lives on the GPU, blend the patch straight in (no host round-trip);
-        # otherwise offload each patch to CPU so its device memory is released after post-processing.
+        # A GPU accumulator takes the patch straight in; a CPU one takes an offloaded copy.
         if target.type == "cpu":
             if layer.device.type != "cpu":
                 with self._borrow_cpu_patch(layer) as cpu_patch:
@@ -602,10 +542,7 @@ class OutputDataset(Dataset, NeedDevice):
         try:
             return accumulator.add_layer(index_patch, layer) or []
         except torch.cuda.OutOfMemoryError:
-            # The gate samples free VRAM once per case: another process can reclaim it before this
-            # volume-sized first allocation lands. Nothing is blended yet, so fall back to the
-            # memory-safe CPU blend for the rest of the case; ``get_output`` reconciles augmentations
-            # already blended on the GPU. A mid-blend OOM (buffer already resident) stays fatal.
+            # Nothing is blended yet, so the rest of the case blends on the CPU; a mid-blend OOM is fatal.
             if layer.device.type == "cpu" or not accumulator.is_empty():
                 raise
             self._accum_device[index_dataset] = torch.device("cpu")
@@ -654,9 +591,7 @@ class OutputDataset(Dataset, NeedDevice):
 
     @staticmethod
     def _voxel_local(locality: PatchLocality, attribute: Attribute) -> bool:
-        """Whether a finalize stage is a per-voxel map here: POINTWISE, or GLOBAL_STAT whose statistic
-        the case already carries: the finalize attribute holds what the forward pass pushed, and there
-        is no stored volume left to derive a missing one from."""
+        """POINTWISE, or GLOBAL_STAT whose statistic the case attribute already carries."""
         if locality.kind is LocalityKind.POINTWISE:
             return True
         return locality.kind is LocalityKind.GLOBAL_STAT and all(key in attribute for key in locality.stat_keys)
@@ -668,15 +603,9 @@ class OutputDataset(Dataset, NeedDevice):
             print(f"[KonfAI] {message}")
 
     def _worth_streaming(self, dataset: DatasetIter, index: int, layer: torch.Tensor) -> bool:
-        """Whether this case's accumulators are heavy enough for the per-slab machinery to pay:
-        every copy holds a volume-sized accumulator, and when all of them together are a sliver of
-        allocatable memory (a 2.5D case) the assembled path costs nothing to hold: streaming it
-        would spend pipe traversals and region writes to save nothing.
-
-        ``layer`` carries the accumulator's channel count and dtype whatever the ensemble combine is
-        (a Concat layer arrives already concatenated); the estimate is taken before the patch-level
-        inverses, so a dtype-widening inverse under-counts by at most 2x: inside the threshold's
-        margin."""
+        """Whether this case's accumulators are heavy enough for the per-slab machinery to pay. The
+        estimate is taken before the patch-level inverses, so a dtype-widening inverse under-counts by
+        at most 2x."""
         spatial = dataset.get_dataset_from_index(self.group_dest, index).shapes[0]
         assembled = int(layer.shape[0]) * int(np.prod(spatial)) * layer.element_size() * self.nb_data_augmentation
         raw = os.environ.get("KONFAI_STREAM_WORTH_THRESHOLD")
@@ -688,9 +617,7 @@ class OutputDataset(Dataset, NeedDevice):
                 stacklevel=2,
             )
             fraction = _STREAM_WORTH_MIN_FRACTION
-        # The config's budget, never the machine's mood: the same case takes the same route on a
-        # loaded machine and an idle one. A writer no predictor configured (a bare test) prices
-        # against the auto-budget's own rule.
+        # The config's budget, never the machine's free memory.
         budget = self._per_rank_budget_bytes
         if budget is None:
             budget = resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
@@ -706,16 +633,11 @@ class OutputDataset(Dataset, NeedDevice):
     ) -> _StreamPlan | None:
         """The streaming plan for this case, or ``None`` for the whole-volume path.
 
-        The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``:
-        region stages compose (each pulls through the one before it), so any number of geometry
-        inverses streams to the write. What streaming cannot honour (a WHOLE_VOLUME stage, a
-        statistic nothing seeded) becomes a whole-volume TAIL: the prefix still streams slab by slab
-        into a light post-reduction buffer and the tail runs once on that buffer. A destination that
-        cannot serve region writes buffers too, and writes classically. Only a non-streamable start
-        refuses outright: a reduction that is not voxel-local, a non-voxel-local before-reduction
-        transform (it runs per model chunk inside the slab prefix), a TTA copy whose un-augment does
-        not act slab by slab (see ``_tta_streamable``), or a case too light for the per-slab
-        machinery to pay (``_worth_streaming``: gauged from ``layer`` when the caller has one).
+        The streamed part of the finalize chain is ``[pointwise*][region and pointwise stages]``. What
+        streaming cannot honour becomes a whole-volume TAIL run once on a post-reduction buffer, as does
+        a destination that cannot serve region writes. Refused outright: a reduction that is not
+        voxel-local, a non-voxel-local before-reduction transform, a TTA copy whose un-augment does not
+        act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``).
         """
         if self.nb_data_augmentation < 1:
             return None
@@ -727,9 +649,8 @@ class OutputDataset(Dataset, NeedDevice):
             return None
         for transform in self.before_reduction_transforms:
             locality = transform.patch_locality(Attribute(attribute))
-            # A SLAB before-reduction transform (InferenceStack) streams per slab through ``stream_slab``
-            # in ``_prepare_copy_slab``, so it does not force the whole-volume path; anything else that
-            # is not voxel-local (a spatial mix, an unseeded statistic) still refuses outright.
+            # A SLAB before-reduction transform streams through ``stream_slab``; any other
+            # non-voxel-local one refuses outright.
             if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
                 return None
         stages = [
@@ -749,10 +670,7 @@ class OutputDataset(Dataset, NeedDevice):
             if self._voxel_local(locality, attribute):
                 continue
             if locality.kind is LocalityKind.SLAB and not stage.inverted and pipe_start is None:
-                # A per-voxel stage with a per-region side effect streams through ``stream_slab``: # but only
-                # on the accumulator grid: past a region stage the emissions are regions of
-                # ANOTHER space, so there it falls to the tail (whose whole-volume call is its
-                # classic behaviour).
+                # A SLAB stage streams through ``stream_slab`` only on the accumulator grid.
                 slab_stages.add(position)
                 continue
             if locality.kind.is_region:
@@ -762,8 +680,7 @@ class OutputDataset(Dataset, NeedDevice):
             tail_start = position
             break
         if tail_start < len(stages) or not self.can_stream_data(attribute):
-            # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator
-            # grid, and the tail runs the true whole-volume operators on it: byte-identical for free.
+            # A whole-volume tail swallows the region stages too: the buffer sits on the accumulator grid.
             if pipe_start is not None:
                 tail_start = min(tail_start, pipe_start)
             return _StreamPlan(stages, None, tail_start, to_sink=False, slab_stages=frozenset(slab_stages))
@@ -771,8 +688,7 @@ class OutputDataset(Dataset, NeedDevice):
 
     @staticmethod
     def _copy_draw(dataset: DatasetIter, index_augmentation: int) -> tuple[list[DataAugmentation], int] | None:
-        """The augmentations copy ``index_augmentation`` carries and its index within their list, or
-        ``None`` for the un-augmented copy."""
+        """The augmentations of copy ``index_augmentation`` and its index in their list, ``None`` for copy 0."""
         if index_augmentation == 0:
             return None
         i = index_augmentation - 1
@@ -785,8 +701,8 @@ class OutputDataset(Dataset, NeedDevice):
     def _unaugment(
         self, dataset: DatasetIter, index: int, index_augmentation: int, tensor: torch.Tensor
     ) -> torch.Tensor:
-        """Undo copy ``index_augmentation``'s draw on ``tensor``: the augmentations applied in
-        reverse, bound by the case index the draw was made under (the manager's own)."""
+        """Undo copy ``index_augmentation``'s draw on ``tensor``: the augmentations applied in reverse,
+        bound by the case index the draw was made under."""
         draw = self._copy_draw(dataset, index_augmentation)
         if draw is None:
             return tensor
@@ -799,14 +715,8 @@ class OutputDataset(Dataset, NeedDevice):
     def _tta_streamable(self, dataset: DatasetIter, index: int, attribute: Attribute) -> bool:
         """Whether every copy's un-augment acts slab by slab, read from the declarations alone.
 
-        The slab-synchronized reduce applies each augmentation's ``inverse`` to a finalized z-slab,
-        which equals the whole-volume inverse restricted to that slab exactly when the draw maps every
-        slab onto itself: a POINTWISE draw does (a per-voxel map inverts per voxel), and an
-        ORIENTATION draw does when its declared region remap fixes the slab axis row for row and its
-        shape fold keeps the slab extent: probed here against ``stream_region_source``, never by
-        running patches. A z-flip mirrors the rows (row 0 pulls the last), a z-moving permute
-        relocates them: both fail the probe and the case falls back to the whole-volume path. Any
-        other kind (a halo'd translate, a whole-volume draw) refuses outright.
+        A POINTWISE draw does; an ORIENTATION draw does when its declared region remap fixes the slab
+        axis row for row and its shape fold keeps the slab extent. Any other kind refuses outright.
         """
         try:
             input_dataset = dataset.get_dataset_from_index(self.group_dest, index)
@@ -832,7 +742,7 @@ class OutputDataset(Dataset, NeedDevice):
                         if (source[0].start, source[0].stop) != (row, row + 1):
                             return False
                     shape = out_shape
-        except Exception:  # nosec B110 - an unprobeable draw just keeps the case on the whole-volume path
+        except Exception:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
             return False
         return True
 
@@ -844,8 +754,7 @@ class OutputDataset(Dataset, NeedDevice):
         dataset: DatasetIter,
     ) -> None:
         """Run each jointly finalized slab through the plan: prefix per slab, then sink, region
-        stream, or buffer. The first slab fixes the case's state (post-prefix attribute, region
-        scheduler or buffer; see ``_init_stream_state``)."""
+        stream, or buffer. The first slab fixes the case's state (see ``_init_stream_state``)."""
         plan = cast(_StreamPlan, self._stream_plans[index])
         for region, copies in slabs:
             block, attribute = self._finalize_slab(index, copies, number_of_channels_per_model, plan, dataset, region)
@@ -867,12 +776,7 @@ class OutputDataset(Dataset, NeedDevice):
     def _init_stream_state(
         self, index: int, plan: _StreamPlan, block: torch.Tensor, attribute: Attribute
     ) -> _StreamPlan:
-        """Fix the case's streaming state at its first slab, when the prefix output is known.
-
-        A ``REGRID`` stage streams through the very code its whole-volume call runs, over a region
-        that happens to be smaller, so the streamed and whole-volume answers are equal by
-        construction rather than by agreement and a large resample never has to be held whole.
-        """
+        """Fix the case's streaming state at its first slab, when the prefix output is known."""
         self._post_prefix_attributes[index] = Attribute(attribute)
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
         if plan.pipe_start is not None:
@@ -894,20 +798,13 @@ class OutputDataset(Dataset, NeedDevice):
     def _make_pipe_state(
         self, index: int, plan: _StreamPlan, in_shape: list[int], block: torch.Tensor
     ) -> _RegionState | None:
-        """Wire the case's streamed pipe into one :class:`SlabRegionStream`: or answer ``None`` for
+        """Wire the case's streamed pipe into one :class:`SlabRegionStream`, or answer ``None`` for
         the buffered tail where streaming would not be exact.
 
-        Region stages compose: the pull map folds each stage's own declaration backward: a written
-        region pulls through the last stage, whose region pulls through the one before it, down to
-        the accumulator, and ``produce`` walks the pipe forward over the pulled window, handing each
-        stage the region pair the same fold computed for it. Pointwise stages ride along unchanged.
-
-        The fold is planned by walking a one-voxel corner of the real first slab through the pipe
-        with one evolving attribute: each stage declares against, and remaps from, the state the
-        stages before it left (a second resample pops the Size stack the first one already popped,
-        a reorientation after a permute reads the moved axes), and the walk carries the dtype.
-        ``produce`` then replays the same transitions on a fresh copy per emission (the same
-        slab-local scoping as the prefix).
+        The pull map folds each stage's declaration backward from the written region down to the
+        accumulator; ``produce`` walks the pipe forward over the pulled window. The fold is planned
+        by walking a one-voxel corner of the first slab through the pipe with one evolving attribute,
+        and ``produce`` replays the same transitions on a fresh copy per emission.
         """
         attr0 = self._post_prefix_attributes[index]
         pipe = plan.stages[cast(int, plan.pipe_start) :]
@@ -930,9 +827,8 @@ class OutputDataset(Dataset, NeedDevice):
                     shapes.append(list(shape))
                     probe = stage(name, probe, walking)
                 elif locality.kind is LocalityKind.REGRID:
-                    # A regrid states its transition instead of performing it: its inverse restores a
-                    # whole volume from a region, which is not something the one-voxel probe can be
-                    # run through, and its forward answer here would be one voxel's target grid.
+                    # A regrid states its transition instead of performing it: the one-voxel probe
+                    # cannot run through its inverse.
                     transform = stage.transform
                     if stage.inverted:
                         remapper = cast(TransformInverse, transform)
@@ -953,8 +849,7 @@ class OutputDataset(Dataset, NeedDevice):
                         pull_fns.append(_RemapPull(stage.transform.stream_region_source, shape, snapshot, name))
                         out = stage.transform.transform_shape(self.group_src, name, list(shape), Attribute(walking))
                     shapes.append([int(extent) for extent in out])
-                    # The stage's attribute transition, on a one-voxel corner: a crop's tensor answer
-                    # is meaningless there (the map is the action) but its pops are the case's.
+                    # The stage's attribute transition on the probe: a crop's tensor answer is dropped, its pops kept.
                     result = stage(name, probe, walking)
                     if locality.kind is not LocalityKind.CROP:
                         probe = result
@@ -1006,14 +901,12 @@ class OutputDataset(Dataset, NeedDevice):
     ) -> torch.Tensor:
         """Run one pipe stage on its pulled block, by declared kind, never by stage name."""
         if kind is LocalityKind.CROP:
-            # The pull already translated the region, so the block IS the answer. The stage still runs
-            # for its attribute transition (a crop restores the origin it recorded); its tensor answer
-            # is one window's, dropped.
+            # The pull already translated the region, so the block IS the answer; the stage still
+            # runs for its attribute transition.
             stage(name, block, attribute)
             return block
         if kind is LocalityKind.REGRID:
-            # Region-aware on both sides, and the geometry written from the FULL shape: what the
-            # stage records on the way is one region's, and the case's answer is the whole grid's.
+            # Region-aware on both sides; the geometry is written from the FULL shape.
             context = RegionContext(tuple(source), tuple(target), tuple(in_shape))
             if stage.inverted:
                 remapper = cast(TransformInverse, stage.transform)
@@ -1024,9 +917,8 @@ class OutputDataset(Dataset, NeedDevice):
                 stage.transform.write_stream_cache_attribute(attribute, in_shape, name)
             return result
         if kind is LocalityKind.ORIENTATION and not stage.inverted:
-            # A forward orientation writes the case origin/direction from the extent it is handed; run
-            # the tensor action on a throwaway scope so it does not record the SLAB's extent, then write
-            # the case geometry from the full ``in_shape`` (its documented contract): as REGRID does.
+            # Run the tensor action on a throwaway scope so it does not record the SLAB's extent, then
+            # write the case geometry from the full ``in_shape``.
             result = stage(name, block, Attribute(attribute))
             cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape, name)
             return result
@@ -1040,12 +932,10 @@ class OutputDataset(Dataset, NeedDevice):
     def _write_stream_block(
         self, index: int, target: tuple[slice, ...], block: torch.Tensor, attribute: Attribute
     ) -> None:
-        """Write one finalized output block into the case's sink (opened at the first block, once the
-        chain has fixed the output's shape, channel count and dtype).
+        """Write one finalized output block into the case's sink (opened at the first block).
 
-        The whole write (device-to-host copy, lazy sink open, region write) is one submitted
-        operation, so ``_stream_sinks`` is only ever touched in submission order; the attribute is
-        snapshotted because the region state's evolves with later emissions."""
+        The whole write is one submitted operation, so ``_stream_sinks`` is only touched in
+        submission order; the attribute is snapshotted: the region state's evolves."""
         state = self._region_states.get(index)
         spatial = (
             state.shapes[-1]
@@ -1099,12 +989,10 @@ class OutputDataset(Dataset, NeedDevice):
         region: slice,
         spatial: list[int],
     ) -> torch.Tensor:
-        """One copy's slab through the per-copy head of ``_get_output``: un-augment it (exact on a
-        slab: the gate admitted only slab-parallel draws), split the model chunks, run
-        before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A per-voxel
-        before-reduction transform is told where the slab sits (``stream_region``, the accumulator
-        grid, where before_reduction runs), so one reading a companion volume (a mask) reads its
-        slab region instead of the whole; a SLAB one goes through ``stream_slab``."""
+        """One copy's slab through the per-copy head of ``_get_output``: un-augment it, split the model
+        chunks, run before_reduction on each, and stack to the copy's ``[1, M, C, ...]`` block. A
+        per-voxel before-reduction transform is told where the slab sits (``stream_region``); a SLAB
+        one goes through ``stream_slab``."""
         layer = self._unaugment(dataset, index, index_augmentation, layer)
         attribute = Attribute(self.attributes[index][index_augmentation][0])
         chunks = self._split_model_chunks(layer, number_of_channels_per_model, attribute)
@@ -1134,12 +1022,8 @@ class OutputDataset(Dataset, NeedDevice):
         """The finalize chain of ``_get_output``/``get_output``, on one z-slab of every copy, up to
         the plan's prefix boundary.
 
-        Every prefix stage passed the gate as voxel-local (a SLAB stage additionally learns where the
-        slab sits, through ``stream_slab``) and every copy as slab-parallel, so each step is the
-        whole-volume computation restricted to the slab (same ops, same order, same reduction call)
-        which is what makes the streamed output byte-identical. Each slab gets its own copy of the
-        case attribute (transform writes stay slab-local, and case-level pops repeat identically per
-        slab).
+        Each step is the whole-volume computation restricted to the slab (same ops, same order, same
+        reduction call). Each slab gets its own copy of the case attribute.
         """
         spatial = [int(extent) for extent in self.output_layer_accumulator[index][0].shape]
         blocks = [
@@ -1156,15 +1040,13 @@ class OutputDataset(Dataset, NeedDevice):
             if position in plan.slab_stages:
                 result = stage.transform.stream_slab(self.names[index], result, region, spatial, attribute)
             else:
-                # Told where the slab sits: exact on a slab for every voxel-local stage the gate
-                # admitted, and a stage reading a companion volume (Mask) reads its slab region.
+                # Told where the slab sits, so a stage reading a companion volume (Mask) reads its slab region.
                 result = stage.stream_region(self.names[index], result, context, attribute)
         return result, attribute
 
     def reset(self) -> None:
         """Drop every in-flight accumulation (the OOM-restart path re-runs the rank's cases from scratch)."""
-        # Aborting an attempt mid-stream: abort each open sink so the backend removes the partial
-        # entry (a reader must never see a half-written volume); the restart rewrites it.
+        # Abort each open sink so the backend removes the partial entry; the restart rewrites it.
         error = PredictorError("prediction restart: the partial streamed output is discarded")
         for sink in self._stream_sinks.values():
             try:
@@ -1218,20 +1100,17 @@ class OutputDataset(Dataset, NeedDevice):
         layer: torch.Tensor, number_of_channels_per_model: list[int] | None, attribute: Attribute
     ) -> list[torch.Tensor]:
         """Split an ensemble layer into per-model chunk views and tag the attribute with the layout; a
-        layer whose channels do not match the ensemble layout stays whole. One splitter serves the
-        whole-volume and slab paths, so the two cannot drift."""
+        layer whose channels do not match the ensemble layout stays whole."""
         if number_of_channels_per_model and layer.shape[0] == sum(number_of_channels_per_model):
             attribute["number_of_channels_per_model_0"] = torch.tensor(number_of_channels_per_model)
             return list(torch.split(layer, number_of_channels_per_model, dim=0))
         return [layer]
 
     def _reduce_copies(self, copies: list[torch.Tensor]) -> torch.Tensor:
-        """The cross-copy reduction, identical for a slab and a whole volume: the streamed path's
-        byte-identity rests on the two staying in lockstep.
+        """The cross-copy reduction, identical for a slab and a whole volume.
 
-        Mixed devices can only come from a mid-case OOM fallback: reconcile on the host. Reduce, then
-        drop the singleton stack axis; Mean/Median also drop the singleton model axis, while Concat
-        keeps the ``[M, C, ...]`` model axis for after_reduction (Sum) to merge into labels."""
+        Mixed devices (a mid-case OOM fallback) reconcile on the host. Reduce, then drop the singleton
+        stack axis; Mean/Median also drop the singleton model axis, Concat keeps ``[M, C, ...]``."""
         if len({copy.device for copy in copies}) > 1:
             copies = [copy.cpu() if copy.device.type != "cpu" else copy for copy in copies]
         result = self.reduction(copies).squeeze(0)
@@ -1247,13 +1126,9 @@ class OutputDataset(Dataset, NeedDevice):
         base_attr = self.attributes[index][index_augmentation][0]
         chunks = self._split_model_chunks(layer, number_of_channels_per_model, base_attr)
 
-        # The per-model channel reduction (softmax/argmax over the class dimension of a whole-volume
-        # multi-class output) materialises a working volume on top of the resident accumulator. Decide
-        # once per case whether it fits free VRAM, with the accumulator already resident whatever device
-        # it sits on: if it fits, reduce on the GPU (a no-op move when the volume is already there); else
-        # move the finalize to the host. One decision per case: deciding per augmentation would let free
-        # VRAM shrinking between augmentations flip the device mid-case and hand the reduction a
-        # mixed-device list.
+        # The per-model channel reduction materialises a working volume on top of the resident
+        # accumulator. Decided once per case whether it fits free VRAM; per augmentation would let the
+        # device flip mid-case and hand the reduction a mixed-device list.
         if index not in self._reduce_device:
             self._reduce_device[index] = (
                 self._reduction_device(chunks[0], len(chunks)) if chunks else torch.device("cpu")
@@ -1265,13 +1140,11 @@ class OutputDataset(Dataset, NeedDevice):
             layer = layer.to(reduce_device)
             for transform in self.before_reduction_transforms:
                 layer = transform(self.names[index], layer, Attribute(attr))
-            # Keep the chunk on its current device; ``get_output`` decides once (via the GPU-finalize
-            # gate) whether the whole finalize chain stays on the GPU or moves back to the host.
+            # The chunk stays on its current device; ``get_output`` runs the finalize where the volume is.
             results.append(layer)
 
-        # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]. A lone chunk stacks as a view: the copy
-        # torch.stack made was the assembled volume, 448 MiB and 54 ms for a [14, 256^3] fp16 case
-        # (measured), once per augmentation. No reduction writes into what it is handed.
+        # Mean, Median -> [1, C, ...] | Concat -> [M, C, ...]. A lone chunk stacks as a view; no
+        # reduction writes into what it is handed.
         if len(results) == 1:
             return results[0].unsqueeze(0)
         return torch.stack(results, dim=0)
@@ -1284,28 +1157,23 @@ class OutputDataset(Dataset, NeedDevice):
         if device.type != "cuda":
             return torch.device("cpu")
         try:
-            # The forward pass leaves the allocator holding a large reserved cache; release the unused part
-            # back to the driver so a genuinely-free GPU is not mistaken for a full one.
+            # Release the allocator's unused reserved cache so ``mem_get_info`` reports what is free.
             torch.cuda.empty_cache()
             free, _ = torch.cuda.mem_get_info(device)
         except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
             return torch.device("cpu")
-        # Every transformed chunk is parked on the reduce device until the final stack (a combine:Concat
-        # ensemble keeps M of them), so budget all of them plus a same-size working temp per chunk and
-        # one stack copy.
+        # Every transformed chunk is parked on the reduce device until the final stack: budget all of
+        # them plus a same-size working temp per chunk and one stack copy.
         needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
         return device if needed < free else torch.device("cpu")
 
-    # A forward runs alongside the resident accumulator on every patch; the memory queries below happen
-    # before those allocations land, so keep ~10 % of free VRAM in reserve for fragmentation and a
-    # concurrent process.
+    # The memory queries run before a forward's allocations land: keep ~10 % of free VRAM in reserve
+    # for fragmentation and a concurrent process.
     _ACCUMULATE_MARGIN = 0.9
 
     def _accumulate_device(self, layer: torch.Tensor, accumulator: Accumulator) -> torch.device:
-        """Device on which to blend a case's patches. On the GPU the accumulator stays resident through
-        the case (no per-patch offload, no CPU blend, and the reduction runs where the volume already is).
-        Decided once per case, at the first patch, when the accumulator fits alongside the memory a
-        forward needs; else the accumulation runs on the CPU."""
+        """Device on which to blend a case's patches: the GPU when the accumulator fits alongside the
+        memory a forward needs, decided once per case at the first patch; else the CPU."""
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda" or layer.device.type != "cuda":
             return torch.device("cpu")
@@ -1313,30 +1181,25 @@ class OutputDataset(Dataset, NeedDevice):
             # Return the reserved-but-unused cache so ``mem_get_info`` reports the memory actually free.
             torch.cuda.empty_cache()
             free, _ = torch.cuda.mem_get_info(device)
-            # A forward's transient footprint above the resident set, measured on the batch that just ran
-            # (its activations are already freed). ``max_memory_allocated`` is a high-water mark, so this
-            # bounds the next forward from above: the gate errs toward the CPU, never toward an OOM.
+            # A forward's transient footprint above the resident set, from the batch that just ran;
+            # ``max_memory_allocated`` is a high-water mark, so the gate errs toward the CPU.
             transient = torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device)
         except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
             return torch.device("cpu")
         voxels = int(np.prod(accumulator.footprint_shape))
-        # result [C, volume] + weight_sum [volume] at the patch dtype, for EVERY augmentation of the
-        # case: ``is_done`` requires all augmentations complete before ``get_output``, so their
-        # accumulators are resident simultaneously and the per-case device decision must budget them all.
+        # result [C, volume] + weight_sum [volume] at the patch dtype, for EVERY augmentation: all of
+        # a case's accumulators are resident simultaneously.
         accumulator_bytes = (layer.shape[0] + 1) * voxels * layer.element_size() * max(1, self.nb_data_augmentation)
-        # During accumulation the resident accumulator and one forward coexist. The channel reduction's
-        # working volume is budgeted separately, at ``get_output`` time, by ``_reduction_device``.
+        # The channel reduction's working volume is budgeted separately by ``_reduction_device``.
         needed = accumulator_bytes + transient
         if isinstance(accumulator, StreamingAccumulator):
-            # Transients on top of the resident window (``voxels`` is the window footprint): the advance
-            # clone of the retained rows, the emission slab and its weight clamp, and, when the
-            # background writer engages: up to ``_AsyncWriter._CAPACITY`` emitted blocks alive on the
-            # device until their device-to-host copy runs. Two window footprints bound the sum.
+            # Transients on top of the resident window: the advance clone, the emission slab and its
+            # weight clamp, and up to ``_AsyncWriter._CAPACITY`` emitted blocks awaiting their copy.
+            # Two window footprints bound the sum.
             needed += 2 * layer.shape[0] * voxels * layer.element_size()
             if self.nb_data_augmentation > 1:
-                # Slab-aligned TTA holds pending slabs per copy (the arrival skew, ~one window) and
-                # reduces the joint interval through a float32 accumulate: budget one window per copy
-                # plus one more for the reduction's transients.
+                # Slab-aligned TTA holds pending slabs per copy and reduces through a float32
+                # accumulate: one window per copy plus one more for the reduction's transients.
                 needed += (self.nb_data_augmentation + 2) * layer.shape[0] * voxels * layer.element_size()
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
@@ -1348,48 +1211,15 @@ class OutputDataset(Dataset, NeedDevice):
         self.output_layer_accumulator.pop(index)
         self._accum_device.pop(index, None)
         self._reduce_device.pop(index, None)
-        # The volume stays on whatever device it was blended on (GPU when it fit VRAM, else CPU): the
-        # reduction and every finalize transform are device- and dtype-transparent, so the whole finalize
-        # simply runs where the volume already is. Only the final result is returned to the host.
+        # The finalize runs where the volume was blended; only the final result returns to the host.
         result = self._reduce_copies(results)
-        # Reduction strategy overview:
-        #
-        # Terminology:
-        #   - combine : aggregation across models (model ensembling)
-        #   - reduce  : aggregation across TTA (test-time augmentation)
-        #
-        # Let:
-        #   M = number of models
-        #   T = number of TTA samples
-        #   C = number of output channels
-        #
-        # Case 1 - combine = Mean / Median, reduce = Mean / Median:
-        #   Models are aggregated first:
-        #     [M, C, ...] -> combine -> [C, ...]
-        #   TTA samples are then reduced:
-        #     [T, C, ...] -> reduce -> [C, ...]
-        #
-        # Case 2 - combine = Mean / Median, reduce = Concat:
-        #   Models are aggregated first:
-        #     [M, C, ...] -> combine -> [C, ...]
-        #   TTA samples are concatenated:
-        #     [T, C, ...] -> concat -> [T, C, ...]
-        #
-        # Case 3 - combine = Concat, reduce = Mean / Median:
-        #   Model outputs are concatenated:
-        #     [M, C, ...] -> concat -> [M, C, ...]
-        #   TTA samples are then reduced:
-        #     [T, M, C, ...] -> reduce -> [M, C, ...]
-        #
-        # Case 4 - combine = Concat, reduce = Concat:
-        #   No reduction is applied at either level:
-        #     [M, C, ...] x T -> concat -> [M * T, C, ...]
-        #
-        # Important:
-        #   If combine = Concat or reduce = Concat,
-        #   the first transform in `after_reduction_transforms`
-        #   must be either `InferenceStack` or `Sum`,
-        #   to ensure a [C, ....] after
+        # combine = aggregation across models (M), reduce = aggregation across TTA copies (T):
+        #   Mean/Median at both levels : [M, C, ...] -> [C, ...], then [T, C, ...] -> [C, ...]
+        #   combine Concat, reduce Mean : [T, M, C, ...] -> [M, C, ...]
+        #   reduce Concat               : [T, C, ...] stays [T, C, ...]
+        #   Concat at both levels       : [M * T, C, ...]
+        # With a Concat at either level, the first ``after_reduction_transforms`` entry must be
+        # ``InferenceStack`` or ``Sum`` so a ``[C, ...]`` follows.
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 

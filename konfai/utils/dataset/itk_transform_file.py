@@ -52,10 +52,9 @@ from konfai.utils.errors import DatasetManagerError
 def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attribute) -> tuple[Any, Any]:
     """An ITK displacement-transform HDF5 file with its parameters dataset still to fill.
 
-    Three datasets, as ITK's own writer lays them out: the type (a variable-length ASCII string,
-    which is what ITK's reader accepts), the fixed parameters (size, origin, spacing, direction)
-    and the parameters, the field buffer with the component fastest, float64. Returns the open file
-    and the parameters dataset.
+    Three datasets, as ITK's writer lays them out: the type (a variable-length ASCII string), the
+    fixed parameters (size, origin, spacing, direction) and the parameters, the field buffer with
+    the component fastest, float64. Returns the open file and the parameters dataset.
     """
     fixed = np.concatenate(
         [
@@ -81,10 +80,8 @@ def _create_itk_transform_file(path: str, spatial: list[int], attributes: Attrib
 class _ItkTransformDataStream(DataStream):
     """An ITK displacement-transform file written region by region.
 
-    A slab of the field maps to one contiguous span of the parameters (the buffer is ``[z][y][x]``
-    with the component fastest), so full-width leading-axis slabs (what the streamed write
-    dispatcher emits) land with plain offset writes. Under a temporary name until the clean exit,
-    like every stream.
+    The buffer is ``[z][y][x]`` with the component fastest, so a full-width leading-axis slab is
+    one contiguous span of the parameters. Under a temporary name until the clean exit.
     """
 
     def __init__(self, file: Any, parameters: Any, temporary_path: str, final_path: str, spatial: list[int]) -> None:
@@ -105,8 +102,7 @@ class _ItkTransformDataStream(DataStream):
                 "A transform file writes full-width leading-axis slabs, and this region is not one.",
                 "This is a bug if it was reached: the streamed write dispatcher finalizes full rows.",
             )
-        # One buffer: the cast and the transpose are the same pass. Casting first materialises the
-        # slab in float64, and ravelling the transposed VIEW of that materialises it again.
+        # One buffer: the cast and the transpose are the same pass.
         block = np.ascontiguousarray(np.moveaxis(data, 0, -1), dtype=np.float64).ravel()
         offset = 3 * int(leading.start or 0) * int(np.prod(self._spatial[2:], dtype=np.int64))
         self._parameters[offset : offset + block.size] = block
@@ -122,16 +118,10 @@ class _ItkTransformDataStream(DataStream):
 class ItkTransformFile(AbstractFile):
     """ITK transform files, one ``<case>/<group>.h5`` per entry.
 
-    The write side is the point: ``sitk.WriteTransform`` needs the whole field resident in
-    float64, where the FILE is three HDF5 datasets that write by regions, so a displacement
-    field streams into a transform any ITK consumer (Slicer first) loads. The read side hands
-    back what ``Dataset.read_transform`` decodes: a displacement entry carries its field and
-    the displacement marker; any other stored transform, the parameter rows and type keys of
-    ``_encode_transform_leaves``.
-
-    Needs ``h5py``, as the ``h5`` backend does: the whole point is to touch the parameters
-    region by region, and a run whose peak memory turns on whether an optional import
-    succeeded is a run nobody can size.
+    A displacement field streams by regions into the three HDF5 datasets of a transform any ITK
+    consumer loads. The read side hands back what ``Dataset.read_transform`` decodes: a
+    displacement entry carries its field and the displacement marker; any other stored transform,
+    the parameter rows and type keys of ``_encode_transform_leaves``. Needs ``h5py``.
     """
 
     def __init__(self, filename: str, read: bool) -> None:
@@ -175,9 +165,7 @@ class ItkTransformFile(AbstractFile):
         return f"{self.filename}{name}.h5"
 
     def _read_path(self, name: str) -> str:
-        """The entry's file for a READ: a missing entry is the structured refusal, never a
-        synthesized path sitk.ReadTransform turns into its own RuntimeError. ``is_exist`` keeps
-        ``_path``, whose answer for a missing entry is a path that does not exist."""
+        """The entry's file for a read; a missing entry raises ``DatasetManagerError``."""
         path = self._path(name)
         if not os.path.exists(path):
             raise DatasetManagerError(
@@ -192,11 +180,8 @@ class ItkTransformFile(AbstractFile):
             with self._field_file(name) as file:
                 header = self._field_header(file)
                 if header is not None:
-                    # The parameters ARE the field: one span off the file, where ITK's transform
-                    # reader holds the field twice before the array is even copied out (a 128^3
-                    # field: +147 MiB of RSS through ITK, +100 MiB off the span). Read at the
-                    # dtype a region read takes, so the two routes carry the same values: the
-                    # file keeps ITK's double, the pipeline does not.
+                    # The parameters are the field: one span off the file, read at the dtype a
+                    # region read takes, so the two routes carry the same values.
                     shape, attributes = header
                     return self._field_region(file, shape[1:], (slice(None),) * 4), attributes
         transform = sitk.ReadTransform(self._read_path(name))
@@ -219,8 +204,7 @@ class ItkTransformFile(AbstractFile):
 
     @contextlib.contextmanager
     def _field_file(self, name: str) -> Iterator[Any]:
-        """The entry's HDF5 file off the process's read pool: opened once per file, held while
-        a region is read, replaced by the pool when the file is rewritten."""
+        """The entry's HDF5 file off the process's read pool, held while a region is read."""
         path = self._read_path(name)
         with _get_h5_file_lock(path):
             yield _h5_read_pool.get(path).file
@@ -228,7 +212,7 @@ class ItkTransformFile(AbstractFile):
     @staticmethod
     def _field_header(file: Any) -> tuple[list[int], Attribute] | None:
         """Shape and geometry of a displacement entry off its fixed parameters (size, origin,
-        spacing, direction); ``None`` for a transform of another kind, which the whole read decodes."""
+        spacing, direction); ``None`` for a transform of another kind."""
         kind = bytes(file["TransformGroup/0/TransformType"][0])
         if not kind.startswith(b"DisplacementFieldTransform"):
             return None
@@ -244,7 +228,7 @@ class ItkTransformFile(AbstractFile):
     @staticmethod
     def _covered(item: slice, extent: int) -> tuple[int, int, slice]:
         """The ``[low, high)`` range of an axis a slice touches, and the slice of that range it
-        takes: what a read of the range then subsamples, whichever way the slice runs."""
+        takes, whichever way the slice runs."""
         start, stop, step = item.indices(extent)
         count = len(range(start, stop, step))
         if count == 0:
@@ -260,18 +244,16 @@ class ItkTransformFile(AbstractFile):
     ) -> np.ndarray:
         """The region ``slices`` of the field, read as one HDF5 hyperslab of the parameters.
 
-        The buffer is ``[z][y][x]`` with the component fastest, so the rows of one plane the
-        region covers are one contiguous span, and the planes it covers are such spans a stride
-        apart: a hyperslab of ``count`` blocks reads them into one buffer, the bytes of the
-        region's planes and rows and no other (a 64^3 region of a 512^3 field reads 50 MB where
-        the leading-axis rows it sits on are 403 MB). A forward step on the leading axis is the
-        stride; every other step, and a reversed axis, subsamples the block after the read.
+        The buffer is ``[z][y][x]`` with the component fastest: the rows of one plane the region
+        covers are one contiguous span, and the planes it covers are such spans a stride apart. A
+        forward step on the leading axis is the stride; every other step, and a reversed axis,
+        subsamples the block after the read.
         """
         plane_low, plane_high, planes = cls._covered(slices[1], spatial[0])
         row_low, row_high, rows = cls._covered(slices[2], spatial[1])
         row_length = 3 * int(spatial[2])
         plane_length = row_length * int(spatial[1])
-        if planes.step > 0:  # the hyperslab's stride: the planes in between are never read
+        if planes.step > 0:  # the hyperslab's stride
             stride, count, planes = planes.step, len(range(plane_low, plane_high, planes.step)), slice(None)
         else:
             stride, count = 1, plane_high - plane_low
@@ -288,8 +270,7 @@ class ItkTransformFile(AbstractFile):
         return np.ascontiguousarray(np.moveaxis(region, -1, 0), dtype=dtype)
 
     def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-        """A region of a displacement entry, decoded from the parameters it maps to alone: the
-        header and the region come off one pooled handle, so a region read opens nothing."""
+        """A region of a displacement entry, decoded from the parameters it maps to alone."""
         if h5py.is_hdf5(self._read_path(name)):
             with self._field_file(name) as file:
                 header = self._field_header(file)
@@ -306,8 +287,7 @@ class ItkTransformFile(AbstractFile):
         attributes: Attribute | None = None,
     ) -> None:
         os.makedirs(self.filename, exist_ok=True)
-        # Always the `.h5` name: the content is HDF5 and ITK selects its transform IO from the
-        # extension, so renaming it onto a resolved existing `.tfm` would corrupt that entry.
+        # Always the `.h5` name: ITK selects its transform IO from the extension.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
         if isinstance(data, sitk.Transform):
@@ -328,7 +308,7 @@ class ItkTransformFile(AbstractFile):
                 # One buffer, as in _ItkTransformDataStream.write_slice.
                 parameters[:] = np.ascontiguousarray(np.moveaxis(array, 0, -1), dtype=np.float64).ravel()
         os.replace(staging, final)
-        try:  # one entry per name: a `.tfm` left under the same stem would double it
+        try:  # one entry per name
             os.remove(os.path.join(self.filename, f"{name}.tfm"))
         except FileNotFoundError:
             pass
@@ -341,20 +321,18 @@ class ItkTransformFile(AbstractFile):
         attributes: Attribute,
         region_shape: list[int] | None = None,
     ) -> DataStream | None:
-        del dtype, region_shape  # the parameters are float64 whatever arrives, converted per slab
+        del dtype, region_shape  # the parameters are float64 whatever arrives
         if len(shape) != 4 or shape[0] != 3 or not is_an_image(attributes):
             return None
         os.makedirs(self.filename, exist_ok=True)
         spatial = [int(extent) for extent in shape[1:]]
-        # The `.h5` name, as data_to_file: HDF5 content renamed onto a resolved `.tfm` is a
-        # transform ITK reads with its text IO.
+        # The `.h5` name, as data_to_file.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
         file, parameters = _create_itk_transform_file(staging, spatial, attributes)
         return _ItkTransformDataStream(file, parameters, staging, final, [3, *spatial])
 
     def _entries(self) -> list[str]:
-        # Path.glob matches hidden files, so a writer's staging file is filtered out by name.
         return sorted(
             {
                 path.stem
@@ -375,8 +353,7 @@ class ItkTransformFile(AbstractFile):
         return os.path.exists(self._path(name if name else group))
 
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-        # A legacy TEXT transform (`#Insight Transform File V1.0`) is served by the read side
-        # too; only a real HDF5 file has the parameter datasets this fast path opens.
+        # A text transform (`#Insight Transform File V1.0`) has no parameter datasets to open.
         header = None
         if h5py.is_hdf5(self._path(name)):
             with self._field_file(name) as file:

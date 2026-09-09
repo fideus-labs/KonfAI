@@ -38,17 +38,13 @@ class Accumulator:
         batch: bool = True,
         sweep_axis: int = 0,
     ) -> None:
-        # Which spatial axis the window slides along. The patch grid is emitted with this axis
-        # outermost, so a patch's arrival finalizes everything behind it on that axis and nothing
-        # else. 0 is what get_patch_slices_from_shape produces today.
+        # Which spatial axis the window slides along: the patch grid is emitted with this axis outermost.
         self.sweep_axis = sweep_axis
         self.patch_slices: list[tuple[slice, ...]] = []
         self.shape = max([[v.stop for v in patch] for patch in patch_slices])
 
         if patch_size is not None and not all(p == 0 for p in patch_size):
-            # The last patch of an axis is padded up to the patch size for the model, then cropped; a
-            # free axis (0) spans the full extent, so concretise it here or ``s.start + 0`` would
-            # collapse the axis to a zero-width slice.
+            # A free axis (0) spans the full extent: concretise it, or ``s.start + 0`` is a zero-width slice.
             concrete = [size if size > 0 else self.shape[dim] for dim, size in enumerate(patch_size)]
             for patch in patch_slices:
                 slices = [slice(s.start, s.start + concrete[dim]) for dim, s in enumerate(patch)]
@@ -62,33 +58,23 @@ class Accumulator:
         self._count = len(patch_slices)
         self._filled = 0
         self._done = [False] * self._count
-        # Patches are blended into this running buffer as they arrive (see add_layer), instead of
-        # being kept until assembly: holding every patch of a large multi-class case (e.g. ~70 patches
-        # of a 122-channel whole-body segmentation ≈ tens of GB) was the dominant reassembly RAM cost.
+        # Patches are blended into this running buffer as they arrive (add_layer), never kept.
         self._result: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
-        # Blend-weight geometry: fixed for the accumulator's life, so it survives _reset. The grid,
-        # the shares and the kept spans are all per (axis, start): sum(n_d) entries for a grid of
-        # prod(n_d) patches, and one dict lookup per patch and axis to find them.
+        # Blend-weight geometry, fixed for the accumulator's life (it survives _reset), per (axis, start).
         self._geometry: tuple[list[list[torch.Tensor]], list[torch.Tensor]] | None = None
         self._grid: list[dict[int, int]] | None = None
         self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor | None] = {}
         self._kept: dict[tuple[int, int], slice] = {}
 
     def add_layer(self, index: int, layer: torch.Tensor) -> list[tuple[slice, torch.Tensor]]:
-        """Blend one patch in; returns the slabs this completes (none for the whole-volume base)."""
-        # Blend each patch straight into the running accumulator and drop the patch, rather than
-        # storing all patches for a single assemble() at the end. The overlap blend is a weighted sum,
-        # so accumulating incrementally is equivalent; re-adding an index is a no-op (last-write wins is
-        # not possible once blended, and the prediction pipeline adds each patch exactly once).
+        """Blend one patch in; returns the slabs this completes (none for the whole-volume base).
+        Re-adding an index is a no-op."""
         if self._done[index]:
             return []
         if self._result is None:
-            # Allocate to the ACTUAL volume extent (self.shape), not the patch-size-extended grid. The
-            # last patch of each axis is padded up to patch_size for the model, but that padded tail lies
-            # OUTSIDE the volume; blending it would over-allocate the accumulator by up to
-            # (patch_size - overlap) per axis (then get cropped away). We crop each patch to its in-volume
-            # part at blend time instead, so nothing outside the volume is ever allocated.
+            # Allocated to the ACTUAL volume extent (self.shape): each patch is cropped to its in-volume
+            # part at blend time.
             n = self._n
             self._result = torch.zeros(list(layer.shape[:n]) + list(self.shape), dtype=layer.dtype, device=layer.device)
         self._blend(layer, self.patch_slices[index])
@@ -104,9 +90,7 @@ class Accumulator:
         for dim, s in enumerate(patch_slice):
             if s.stop - s.start == 1:
                 data = data.unsqueeze(dim=dim + n)
-        # Clamp each spatial destination to the volume and crop the patch to it, BEFORE weighting: the
-        # padded tail of a border patch lies outside the volume, so it has no share of the blend weight
-        # to compute and every index in _weighted_patch stays in range.
+        # Clamp each spatial destination to the volume and crop the patch to it, BEFORE weighting.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
         data = data[tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])]
         sweep = self.sweep_axis
@@ -117,13 +101,9 @@ class Accumulator:
         if self.patch_combine is None:
             result[slices_dest] = data
         elif self.patch_combine.selects:
-            # The kept regions partition the volume: nothing to weight, nothing to sum. Writing the box
-            # this patch owns IS the operation, and it is what carries a discrete output through,
-            # where a weighting would invent values between its classes.
-            # Cut to the patch's in-volume part like the data above: the last patch of an axis is
-            # padded past the volume, and its kept run may end in that padding. The whole-volume
-            # buffer clipped that implicitly; the streaming window, wider than the volume's tail,
-            # does not, and wrote a [1, 4] destination from a [3] source.
+            # The kept regions partition the volume: the box this patch owns is written, not summed.
+            # Cut to the patch's in-volume part like the data above: the kept run of the last patch
+            # of an axis may end in its padding.
             box = [
                 slice(min(b.start, d.stop - d.start), min(b.stop, d.stop - d.start))
                 for d, b in zip(dest, self._kept_box(patch_slice), strict=True)
@@ -134,12 +114,8 @@ class Accumulator:
             result[slices_dest] += self._weighted_patch(data, patch_slice)
 
     def _kept_box(self, patch_slice: tuple[slice, ...]) -> tuple[slice, ...]:
-        """The sub-box a selection keeps of this patch: the run of ones in its window, per axis.
-
-        Pure geometry, so it is read once from the host-side windows and cached per grid position
-        along each axis. Deriving it from the share instead would read a device tensor: a host sync
-        on every patch, which costs more than the weighting it replaces.
-        """
+        """The sub-box a selection keeps of this patch: the run of ones in its window, per axis, read
+        from the host-side windows and cached per grid position."""
         return tuple(self._kept_span(dim, s.start) for dim, s in enumerate(patch_slice))
 
     def _kept_span(self, dim: int, start: int) -> slice:
@@ -153,16 +129,11 @@ class Accumulator:
     def _weight_geometry(self) -> tuple[list[list[torch.Tensor]], list[torch.Tensor]]:
         """Per axis: the blend window, and its sum over the patch grid.
 
-        The outer product of those sums is the total weight covering each voxel. It factorises because
-        the patch grid is a full per-axis product and the window is itself separable
-        (``sum_p prod_d w_d == prod_d sum_k w_d``), so the total is one vector per axis and never exists
-        as a volume, on a 320-row window of a 1331x1775 volume, 13 KB instead of 2.8 GB.
-
-        The patch extent comes from the slices, not from the window: a free axis carries a single
-        broadcast entry (the ModelPatch blend-window contract) that must cover the whole extent.
-
-        The window is asked for per grid position, because a selection opens its border patches to the
-        volume edge (see Trim); a weighting returns the same window everywhere.
+        The outer product of those sums is the total weight covering each voxel
+        (``sum_p prod_d w_d == prod_d sum_k w_d``), so the total is one vector per axis. The patch
+        extent comes from the slices, not from the window: a free axis carries a single broadcast
+        entry that must cover the whole extent. The window is asked for per grid position: a
+        selection opens its border patches to the volume edge (Trim).
         """
         if self._geometry is None:
             combine = cast(PathCombine, self.patch_combine)
@@ -184,11 +155,7 @@ class Accumulator:
 
     def _positions(self) -> list[dict[int, int]]:
         """Per axis, the patch grid's starts in order, each mapped to its position along the axis.
-
-        One pass over the slices for the accumulator's life. Rebuilding the sorted starts per patch
-        made every lookup O(P): 0.07 ms per patch at P = 1331 and 15.6 s over a case of 18,000
-        thin 2.5D patches, against 16 ms for that case here.
-        """
+        One pass over the slices for the accumulator's life."""
         if self._grid is None:
             self._grid = [
                 {
@@ -205,10 +172,8 @@ class Accumulator:
     def _share(self, dim: int, start: int, data: torch.Tensor) -> torch.Tensor | None:
         """This patch's fraction of the blend weight along one axis, ``w / sum_k w``, cached per axis.
 
-        ``None`` where that fraction is exactly one on every voxel of the axis, which is what an axis
-        holding a single grid position gives (the patch is the whole of the weight there, so the total
-        IS its own window): the blend then skips a full pass over the patch, bit for bit the same
-        values. A patch grid that tiles one axis and spans the other two is that case twice over.
+        ``None`` where that fraction is exactly one on every voxel of the axis (an axis holding a
+        single grid position): the blend then skips a pass over the patch.
         """
         extent = data.shape[self._n + dim]
         key = (dim, start, extent, data.dtype, data.device)
@@ -223,17 +188,9 @@ class Accumulator:
     def _weighted_patch(self, data: torch.Tensor, patch_slice: tuple[slice, ...]) -> torch.Tensor:
         """``data`` scaled by its SHARE of the blend weight at each voxel, one axis at a time.
 
-        Normalising per patch rather than dividing the assembled volume by an accumulated weight drops
-        both the spatial-sized weight buffer and the final division pass over every channel. The shares
-        sum to one per voxel by construction (the total is the sum over the same grid), so the blend
-        stays exact, and each factor is a ratio of comparable quantities, so it lives in [0, 1] where
-        the raw product underflows fp16 and needed a floor.
-
-        Only the axes whose share is not identically one are applied (see ``_share``), each one pass
-        over the patch: a grid tiled along one axis and spanning the other two hands the patch back
-        untouched. Into a staging buffer the patches share otherwise, one patch-sized allocation per
-        accumulator instead of per blend, and out of place: the caller's tensor is never touched, so
-        the OOM retry (which re-blends the same patch on the CPU) never re-weights it.
+        The shares sum to one per voxel, and each factor lives in [0, 1]. Only the axes whose share
+        is not identically one are applied (``_share``). Out of place, into a staging buffer the
+        patches share: the caller's tensor is never touched, so the OOM retry never re-weights it.
         """
         shares = []
         for dim, s in enumerate(patch_slice):
@@ -276,8 +233,6 @@ class Accumulator:
         return self.shape
 
     def is_full(self) -> bool:
-        # O(1): a running counter avoids re-scanning every slot after each added patch
-        # (re-scanning per patch would be O(P^2) per case).
         return self._filled == self._count
 
     def assemble(self) -> torch.Tensor:
@@ -288,8 +243,7 @@ class Accumulator:
                 "Add at least one patch (and check is_full()) before calling assemble().",
             )
         result = self._result
-        # Nothing to normalise: each patch was blended in with its share of the weight, so the shares
-        # already sum to one per voxel. No final crop either: patches are cropped at blend time.
+        # Nothing to normalise or crop: both happened at blend time.
         self._reset()
         return result
 
@@ -301,14 +255,13 @@ class Accumulator:
 
 
 class StreamingAccumulator(Accumulator):
-    """Accumulator holding only the active window along the first spatial axis; it yields each finalized
-    slab as its patches complete, so peak memory is two patch extents (the window and its slide room).
+    """Accumulator holding only the active window along the sweep axis; it yields each finalized slab
+    as its patches complete.
 
-    The patch-grid order (``get_patch_slices_from_shape`` iterates ``itertools.product`` with the first
-    spatial axis outermost) has patch starts along that axis never decreasing, so when a patch starting
-    at ``z`` arrives, every voxel before ``z`` has already received all of its patches and the region up
-    to ``z`` is final. ``add_layer`` returns those finalized slabs (``assemble()``'s values, from the
-    same blend and weight arithmetic applied slab by slab), and ``finalize()`` flushes the tail.
+    Patches must arrive with non-decreasing starts along the sweep axis (the order
+    ``get_patch_slices_from_shape`` emits): a patch starting at ``z`` finalizes every row before
+    ``z``. ``add_layer`` returns those slabs (``assemble()``'s values, slab by slab) and
+    ``finalize()`` flushes the tail.
     """
 
     def __init__(
@@ -340,11 +293,8 @@ class StreamingAccumulator(Accumulator):
             return []
         n = self._n
         patch_slice = self.patch_slices[index]
-        # Correctness rests on patches ARRIVING in non-decreasing axis-0-start order, not just on the
-        # slice list being sorted: a patch whose start is already flushed would write at a negative
-        # window offset (dest[0] below), which torch silently reads from the end -> misplaced data, no
-        # error. Fail loud instead. The prediction loop preserves per-case order (shuffle=False), so
-        # this only guards a future misuse (e.g. a shuffling sampler).
+        # A patch whose start is already flushed would write at a negative window offset, which torch
+        # reads from the end without an error.
         if patch_slice[self.sweep_axis].start < self._flushed:
             raise PatchError(
                 f"StreamingAccumulator received patch start {patch_slice[self.sweep_axis].start} after flushing to "
@@ -372,10 +322,7 @@ class StreamingAccumulator(Accumulator):
 
     @property
     def footprint_shape(self) -> list[int]:
-        # Only the window is resident, so the blend-device budget is the window's: a huge volume streams
-        # on the GPU within bounded VRAM. Blend and IEEE-correctly-rounded finalize ops (+, *, /, argmax,
-        # cast) are bit-identical CPU/CUDA; only a transcendental-terminated float output (Softmax/Sigmoid)
-        # can differ by ~1 ULP between a window on the GPU and a whole-volume reference on the CPU.
+        # Only the window is resident, so the blend-device budget is the window's.
         return self._sweep_shape(self._window)
 
     def assemble(self) -> torch.Tensor:
@@ -396,8 +343,7 @@ class StreamingAccumulator(Accumulator):
                 f"StreamingAccumulator asked to finalize {length} rows at once with a {self._window}-row window.",
                 "Patch starts may advance by at most one patch extent per step (checked at construction).",
             )
-        # Cloned: the window slides over these rows right after, so the slab handed out must not be a
-        # view of it. Nothing else to do: the blend weights already sum to one over these voxels.
+        # Cloned: the window slides over these rows right after, so the slab handed out must not be a view.
         slab = self._result[self._along_sweep(slice(0, length), n)].clone()
         keep = self._window - length
         # .clone(): source and destination views overlap when length < window.
@@ -411,23 +357,19 @@ class StreamingAccumulator(Accumulator):
 
 
 class SlabRegionStream:
-    """Slab in → slab out through one region stage, with bounded lookahead.
+    """Slab in, slab out through one region stage, with bounded lookahead.
 
-    The write mirror of the read dispatcher's single-region rule: finalized slabs arrive in order along
-    the first spatial axis (the :class:`StreamingAccumulator`'s order), and each output region is
-    emitted as soon as the input region it pulls has arrived, so only a sliding window of the input is
-    ever resident. The stage itself is two injected callables, both pure region arithmetic + tensor
-    work, so no stage kind has streaming code of its own:
+    Finalized slabs arrive in order along the first spatial axis (the :class:`StreamingAccumulator`'s
+    order), and each output region is emitted as soon as the input region it pulls has arrived, so
+    only a sliding window of the input is resident. The stage is two callables:
 
     - ``pull(target_slices) -> source_slices``: the clamped input region an output region is computed
-      from (a transform's ``stream_region_target``/``stream_region_source``, or a halo enlargement).
+      from.
     - ``produce(window, target_slices, source_slices) -> tensor``: the output block for
       ``target_slices``, given exactly the pulled window.
 
     The schedule is derived from ``pull`` alone: a probe finds which output axis the input slab axis
-    feeds and in which direction (a mirrored or permuted axis streams too, through the sink's
-    random-access region writes), and emission advances along that axis as far as the arrived input
-    allows. Any per-axis monotone map works; nothing here names a stage.
+    feeds and in which direction. Any per-axis monotone map works.
     """
 
     def __init__(
@@ -447,13 +389,9 @@ class SlabRegionStream:
         self._emitted = 0
 
     def _probe_axis(self) -> tuple[int, bool]:
-        """Which output axis the input slab axis feeds, and whether in ascending order.
-
-        Probing one output row per axis against the full-region pull identifies the axis whose region
-        controls input axis 0; comparing the first and last rows' pulls gives the direction. A wrong
-        pick can never corrupt the output (emission is gated on the pull of the real regions); it only
-        buffers more, so a map no probe can tell apart falls back to axis 0 ascending.
-        """
+        """Which output axis the input slab axis feeds, and whether in ascending order. A wrong pick
+        cannot corrupt the output (emission is gated on the pull of the real regions), it only
+        buffers more; a map no probe can tell apart falls back to axis 0 ascending."""
         full = tuple(slice(0, n) for n in self._out_shape)
         baseline = self._pull(full)[0]
         for axis, extent in enumerate(self._out_shape):
@@ -501,9 +439,8 @@ class SlabRegionStream:
 
     def _emit(self) -> list[tuple[tuple[slice, ...], torch.Tensor]]:
         extent = self._out_shape[self._axis]
-        # The pull of an iteration prefix grows monotonically with it, so the furthest emittable row is
-        # a binary search. O(log rows) pull calls per push, and a pull may be more than slice
-        # arithmetic (a declaration may copy the attribute it reads).
+        # The pull of an iteration prefix grows monotonically with it: the furthest emittable row is a
+        # binary search.
         low, high = self._emitted, extent
         while low < high:
             middle = (low + high + 1) // 2
@@ -556,13 +493,9 @@ class SlabRegionStream:
 class SlabAligner:
     """Merge several slab streams over the same axis into jointly finalized intervals.
 
-    The cross-stream mirror of :class:`StreamingAccumulator`: each stream (a TTA copy's accumulator)
-    emits finalized slabs in non-decreasing order along the shared first spatial axis, and a consumer
-    that needs every stream's rows together (a cross-copy reduction) can only advance to the
-    slowest frontier. ``push`` takes one stream's new slabs and returns the intervals that just
-    became complete, each carrying every stream's rows; only the inter-stream skew is ever buffered,
-    and a single stream passes through untouched. Nothing here knows what a stream is: it is pure
-    interval arithmetic over ``nb_streams`` ordered emitters.
+    Each stream emits finalized slabs in non-decreasing order along the shared first spatial axis;
+    ``push`` takes one stream's new slabs and returns the intervals complete on every stream, each
+    carrying every stream's rows. Only the inter-stream skew is buffered.
     """
 
     def __init__(self, nb_streams: int, lead_dims: int = 1) -> None:

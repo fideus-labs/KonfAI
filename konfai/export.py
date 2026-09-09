@@ -17,14 +17,9 @@
 """Export a frozen KonfAI ``Network`` to a self-contained ONNX graph + manifest.
 
 A trained model becomes ``model.onnx`` (graph + weights, single file) plus ``manifest.json``
-(patch geometry, input/output spec) for a Python-free runtime. Three constraints shape the code:
-
-* ``Network.named_forward`` is a Python generator, which TorchScript cannot script, so the
-  **dynamo** exporter is used.
-* ``Network.forward`` returns per-output-group results (empty without ``init()``), so the
-  graph is reached via ``named_forward`` and a named head is selected.
-* The dynamo exporter writes weights as external data; they are inlined so the ``.onnx`` is
-  a single self-contained file.
+(patch geometry, input/output spec) for a Python-free runtime. The export uses the **dynamo**
+exporter, reaches the graph through ``named_forward`` and selects a named head, and inlines the
+external weight data so the ``.onnx`` is a single self-contained file.
 """
 
 from __future__ import annotations
@@ -107,8 +102,7 @@ def list_output_modules(model: torch.nn.Module, example_input: torch.Tensor) -> 
 def select_inference_head(model: torch.nn.Module, example_input: torch.Tensor) -> str:
     """Pick the head to export: the last **floating-point** output in execution order.
 
-    Terminal outputs often end in an integer ``Argmax`` label map; a float runtime wants the final
-    probability/regression head, so integer outputs are skipped. Pass ``output_module`` to target a
+    Integer outputs (an ``Argmax`` label map) are skipped. Pass ``output_module`` to target a
     specific head.
     """
     graph = _routed(model)
@@ -201,7 +195,7 @@ def export_to_onnx(
         )
 
     # The dynamo exporter writes weights as external data; inline them so the .onnx is a
-    # single self-contained file. Remove the now-orphan sidecar.
+    # single self-contained file.
     onnx.save(onnx.load(str(onnx_path)), str(onnx_path), save_as_external_data=False)
     sidecar = onnx_path.with_name(onnx_path.name + ".data")
     if sidecar.exists():

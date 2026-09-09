@@ -47,13 +47,9 @@ from konfai.utils.errors import DatasetManagerError
 
 
 def _open_h5(path: str, mode: str, **kwargs: Any) -> Any:
-    """Every h5py open in this module. Unlocked, because the flag must agree across a file's handles:
-    HDF5 refuses to open a file this process already holds under the other file-locking flag, and the
-    read pool keeps a handle open on a store while a stream writes it (the "invisible until finalize"
-    read contract reads the store mid-write). A held HDF5 lock would also block every other process's
-    open of the file for as long as the handle lives, the pool's whole lifetime. Same-process races
-    are held off by the per-file thread lock.
-    """
+    """Every h5py open in this module. Unlocked: the flag must agree across a file's handles, and the
+    read pool holds a handle on a store while a stream writes it. Same-process races are held off by
+    the per-file thread lock."""
     return h5py.File(path, mode, locking=False, **kwargs)
 
 
@@ -72,13 +68,8 @@ _h5_file_locks_guard = threading.Lock()
 
 
 class _PooledRead(NamedTuple):
-    """An open read handle and the store it was opened on, as one thing: the two travel together through
-    eviction and re-insertion, so no site can pair a handle with a view it never had.
-
-    The sidecars travel with them: an entry's attributes, read off the handle once and kept for its
-    life, so a patch read costs one hyperslab and not one HDF5 attribute open per key on top (measured
-    15 opens, 327 us, on a 15-key sidecar beside a 222 us slice). A handle replaced or dropped takes
-    its sidecars with it, which is every way the store can have changed underneath them."""
+    """An open read handle, the store as it was when opened, and the entries' attributes read off the
+    handle once and kept for its life."""
 
     file: Any
     opened_on: tuple[int, int] | None
@@ -88,16 +79,10 @@ class _PooledRead(NamedTuple):
 class _H5ReadPool:
     """Pooled read handles, one per file per process, LRU-bounded.
 
-    The HDF5 chunk cache lives on the open handle, so reusing the handle across patch reads is what
-    makes the cache effective: a per-read open rebuilds it empty every time. ``get``/``drop`` must be
-    called under the file's lock; a write drops the file's reader so it never serves stale metadata;
-    handles inherited across ``fork`` are dropped unused (closing them would flush another process's
-    state).
-
-    A handle also stops answering for a store another PROCESS has written (a loader worker producing
-    the group its parent reads), so one is kept only while the file it was opened on is unchanged.
-    Reopening alone would not do: HDF5 shares a file's metadata state across the handles one process
-    holds, so a second handle inherits the first's view. The stale one is closed before the new open."""
+    The HDF5 chunk cache lives on the open handle. ``get``/``drop`` must be called under the file's
+    lock; a write drops the file's reader; handles inherited across ``fork`` are dropped unused. A
+    handle is kept only while the file it was opened on is unchanged, and the stale one is closed
+    before the new open (HDF5 shares a file's metadata state across one process's handles)."""
 
     _MAX = 8
     _OPEN_ATTEMPTS = 4
@@ -118,12 +103,8 @@ class _H5ReadPool:
         return info.st_mtime_ns, info.st_size
 
     def _open(self, filename: str, **open_kwargs: Any) -> _PooledRead:
-        """A handle, with the store as it was when it was opened.
-
-        The reopen happens exactly when another process has just written, which is when that process is
-        most likely to still be mid-transaction: HDF5 without SWMR then refuses the open. It is transient,
-        so it is retried, and each attempt takes its own stamp: a handle is never paired with a view of
-        the store taken before the write that made the previous attempt fail."""
+        """A handle, with the store as it was when it was opened. An open refused mid-transaction by
+        another process's write is retried, each attempt with its own stamp."""
         for remaining in reversed(range(self._OPEN_ATTEMPTS)):
             stamp = self._stamp(filename)
             try:
@@ -135,16 +116,14 @@ class _H5ReadPool:
         raise AssertionError("unreachable: the last attempt either returns or raises")
 
     def get(self, filename: str, **open_kwargs: Any) -> _PooledRead:
-        # Read before the open, never after: a write landing in between then leaves a stamp older than
-        # the handle, and the next call reopens. The reverse would record a view it never had.
+        # Stamped before the open, never after: a write landing in between makes the next call reopen.
         stamp = self._stamp(filename)
         with self._guard:
             if os.getpid() != self._pid:
                 self._handles.clear()
                 self._pid = os.getpid()
             pooled = self._handles.pop(filename, None)
-        # Outside the pool guard: opening touches the filesystem and may sleep between attempts. The
-        # caller holds this file's lock, so no other thread of ours is reading or reopening it here.
+        # Outside the pool guard: opening may sleep between attempts. The caller holds this file's lock.
         if pooled is not None and (not pooled.file.id.valid or pooled.opened_on != stamp):
             pooled.file.close()
             pooled = None
@@ -167,22 +146,18 @@ class _H5ReadPool:
             pooled.file.close()
 
     def close_all(self) -> None:
-        """Release every pooled handle: what a workflow leaves behind in the caller's process
-        would otherwise keep its outputs open (read-only) for as long as the process lives."""
+        """Release every pooled handle."""
         with self._guard:
             handles = list(self._handles.items())
             self._handles.clear()
         for filename, pooled in handles:
-            # One handle's failing close must not leave the rest open and untracked.
             with _get_h5_file_lock(filename), contextlib.suppress(Exception):
                 if pooled.file.id.valid:
                     pooled.file.close()
 
     def _close_idle(self, filename: str, pooled: _PooledRead) -> None:
-        # An evicted handle may be mid-read under its file's lock: close only when that lock is free,
-        # otherwise put it back in the pool: an untracked open handle could never be dropped again.
-        # It goes back with the stamp it came with: re-stamping would hand it the store as it is now,
-        # and a write it never saw would stay invisible for the rest of the process.
+        # An evicted handle may be mid-read under its file's lock: closed only when that lock is free,
+        # otherwise put back in the pool with the stamp it came with.
         lock = _get_h5_file_lock(filename)
         if lock.acquire(blocking=False):
             try:
@@ -198,8 +173,8 @@ _h5_read_pool = _H5ReadPool()
 
 
 def release_read_handles() -> None:
-    """Close the process's pooled read handles (h5). A workflow's caller reopening its own output
-    for writing needs them gone: HDF5 refuses a write-open of a file this process holds for reading."""
+    """Close the process's pooled read handles (h5): HDF5 refuses a write-open of a file this process
+    holds for reading."""
     _h5_read_pool.close_all()
 
 
@@ -226,7 +201,7 @@ class _H5DataStream(DataStream):
         try:
             parent.move(temporary_name, self._final_name)
         except Exception:
-            # The old entry comes back where it was: a failed publish leaves the store as it found it.
+            # A failed publish leaves the store as it found it.
             if replaced and self._final_name not in parent:
                 parent.move(backup, self._final_name)
             raise
@@ -244,20 +219,15 @@ class H5File(AbstractFile):
         del file_format, attributes
         return True  # a dataset written by regions, chunked or contiguous
 
-    # Read-side HDF5 chunk cache, per opened dataset. The library default (1 MB) holds barely one
-    # medical-imaging chunk, so overlapping patch reads on a chunked (compressed) store
-    # re-decompress the same chunks once per patch. KonfAI writes its own h5 contiguous
-    # (unaffected); this serves third-party chunked stores read through the streamed patch path.
-    # nslots per the h5py guidance: a prime, well above the chunks the cache can hold.
+    # Read-side HDF5 chunk cache, per opened dataset, for third-party chunked stores (KonfAI writes
+    # its own h5 contiguous). nslots per the h5py guidance: a prime, well above the chunks held.
     _READ_CHUNK_CACHE_BYTES = 128 * 1024 * 1024
     _READ_CHUNK_CACHE_SLOTS = 100003
 
     @staticmethod
     def _read_chunk_cache_bytes() -> int:
         """What one pooled handle's HDF5 chunk cache may hold: the cache share of the declared
-        per-rank budget divided across the pool's handles, so the pool at capacity stays inside
-        the one share every decoded-block cache draws from; the fixed default when no budget was
-        declared."""
+        per-rank budget divided across the pool's handles, or the fixed default without a budget."""
         share = budget_share("cache")
         if share is None:
             return H5File._READ_CHUNK_CACHE_BYTES
@@ -278,10 +248,8 @@ class H5File(AbstractFile):
         self._sidecars: dict[str, Attribute] | None = None  # the pooled handle's, on a read open
 
     def __enter__(self):
-        # A single HDF5 file cannot be opened concurrently from several threads:
-        # the whole open/use/close sequence is serialised per file so that two
-        # cache workers never race between the existence check and the "w"/"r+"
-        # open (which would truncate each other's data).
+        # The open/use/close sequence is serialised per file: two writers must never race between
+        # the existence check and the "w"/"r+" open.
         self._lock = _get_h5_file_lock(self.filename)
         self._lock.acquire()
         try:
@@ -316,8 +284,7 @@ class H5File(AbstractFile):
                 self._lock = None
 
     def _sidecar(self, dataset: h5py.Dataset) -> Attribute:
-        """The entry's attributes, a copy of the pooled handle's record of them: one attribute open
-        per key on the first read of the entry through the handle, none after. A write handle is
+        """The entry's attributes, a copy of the pooled handle's record of them. A write handle is
         not pooled and reads them off the file."""
         if self._sidecars is None:
             return Attribute(dict(dataset.attrs))
@@ -334,16 +301,12 @@ class H5File(AbstractFile):
 
     def bounded_region_reads(self, name: str) -> bool:
         del name
-        # A hyperslab reads the bytes it covers (contiguous, what KonfAI writes) or the chunks it
-        # touches (a third-party chunked store): never the whole volume.
+        # A hyperslab reads the bytes it covers or the chunks it touches: never the whole volume.
         return True
 
     def read_granularity(self, name: str) -> tuple[int, ...] | None:
-        """The chunk a chunked entry is stored in (``C[Z]YX``): a hyperslab decodes every chunk it
-        touches whole, so a window costs the chunk-aligned hull that covers it, and a sweep cut on
-        that grid reads each chunk once. ``None`` for a contiguous entry, what ``data_to_file``
-        writes, where a read costs the bytes it covers. A region write (``open_data_stream``)
-        chunks on its region, so a cache this run wrote answers the grain it was written in."""
+        """The chunk a chunked entry is stored in (``C[Z]YX``); ``None`` for a contiguous entry, what
+        ``data_to_file`` writes."""
         groups, _, entry = name.rpartition("/")
         dataset = self._get_dataset(groups, entry)
         if not isinstance(dataset, h5py.Dataset) or dataset.chunks is None:
@@ -372,10 +335,8 @@ class H5File(AbstractFile):
             data = np.asarray(_encode_transform_leaves(data, name, attributes))
 
         h5_group, name = self._resolve_group(name)
-        # Staged under a temp name and moved, never created under the final one: the invariant
-        # every DataStream holds (a hard-killed writer leaves .tmp debris, not a plausible
-        # partial entry the resume then SKIPs as done). The old entry is moved aside and put
-        # back if the publish fails, so no instant has neither version in the file.
+        # Staged under a temp name and moved, never created under the final one; the old entry is
+        # moved aside and put back if the publish fails.
         staging = f"{name}.{DataStream.temporary_suffix()}"
         if staging in h5_group:
             del h5_group[staging]
@@ -398,8 +359,7 @@ class H5File(AbstractFile):
     @staticmethod
     def _create_entry(h5_group: h5py.Group, key: str, attributes: Attribute, **dataset_kwargs: Any) -> h5py.Dataset:
         """A dataset with its attributes, or nothing: an interrupt between the two must not leave an
-        attribute-less entry (or an orphaned temporary) in a file HDF5 never reclaims space from.
-        Contiguous: a full-row slab is one byte span, and a patch reads its own bytes, not a chunk."""
+        attribute-less entry. Contiguous: a patch reads its own bytes, not a chunk."""
         dataset = h5_group.create_dataset(key, chunks=None, **dataset_kwargs)
         try:
             dataset.attrs.update({k: str(v) for k, v in attributes.items()})
@@ -435,12 +395,9 @@ class H5File(AbstractFile):
         return _H5DataStream(dataset, name)
 
     def _recovered_key(self, h5_group: h5py.Group, name: str) -> str | None:
-        """The key ``name`` answers to when it is missing: its own, or the single backup a DEAD
-        writer left of it (see :func:`_recover_orphaned_backup`, the same rule inside a file).
-
-        An h5 file open for READING cannot be renamed in, so the backup is served under its own
-        key and put back at the next write open, which is when the move is legal.
-        """
+        """The key ``name`` answers to: its own, or the single backup a dead writer left of it
+        (:func:`_recover_orphaned_backup`, the same rule inside a file). A file open for reading
+        serves the backup under its own key; the next write open moves it back."""
         if name in h5_group:
             return name
         backups = _orphaned_backup_names(list(h5_group.keys()), name)
@@ -479,12 +436,9 @@ class H5File(AbstractFile):
             names = [
                 dataset.name.split("/")[-1]
                 for dataset in h5_group.values()
-                # ``.tmp`` keys are in-flight (or hard-kill-orphaned) DataStream writes, not entries.
                 if isinstance(dataset, h5py.Dataset) and not is_staging_entry(dataset.name)
             ]
-            # A backup a dead writer orphaned IS its entry (see _recover_orphaned_backup), and a
-            # listing that hid it while the probe and the read recover it would name fewer cases
-            # than the store serves: a run would silently skip one.
+            # A backup a dead writer orphaned is its entry (_recover_orphaned_backup).
             names.extend(self._orphaned_entries(h5_group, names))
         elif group == "*":
             for k in h5_group.keys():
@@ -506,9 +460,7 @@ class H5File(AbstractFile):
         return list(self.h5.keys()) if self.h5 is not None else []
 
     def _require_dataset(self, groups: str, name: str) -> h5py.Dataset:
-        """The entry, or the designed refusal: an absent group resolved ``None`` and every reader
-        dereferenced it, an anonymous ``AttributeError`` deep in numpy where the sibling backends
-        name the entry."""
+        """The entry, or a ``DatasetManagerError`` naming it."""
         dataset = self._get_dataset(groups, name)
         if dataset is None:
             entry = f"{groups}/{name}" if groups else name

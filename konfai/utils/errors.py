@@ -85,8 +85,7 @@ class TransformError(NamedKonfAIError):
 
 
 class TransformerError(NamedKonfAIError):
-    # One letter from TransformError, deliberately: the invariant is TYPE == root-class name, so the
-    # printed label tells a workflow failure ([Transformer]) from a data-transform one ([Transform]).
+    # TYPE == root-class name: [Transformer] is the workflow, [Transform] a data transform.
     TYPE = "Transformer"
 
 

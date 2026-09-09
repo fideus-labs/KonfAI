@@ -214,23 +214,11 @@ class ResidualBlockD(network.ModuleArgsDict):
     """nnU-Net ResNet-D basic residual block, reproduced as a routed KonfAI graph.
 
     Module-for-module and in forward-execution order equal to
-    ``dynamic_network_architectures.building_blocks.residual.BasicBlockD`` (the block the
-    nnU-Net ``ResidualEncoderUNet`` stacks). It reproduces the ResNet-D structure of He et al.,
-    *Bag of Tricks for Image Classification with CNNs* (CVPR 2019):
-
-    * **Skip path first** (matching ``BasicBlockD.forward``, which evaluates ``self.skip(x)``
-      before the main path): when the block is strided, the residual is downsampled with an
-      ``AvgPool`` of kernel = stride (never a strided conv); when the channel count changes, it is
-      then projected with a ``1x1`` conv whose ``bias`` is **always** ``False`` (independent of
-      ``conv_bias``) followed by a norm. When neither applies the skip is the identity (no extra
-      module, the residual falls back to the block input branch).
-    * **Main path** on branch ``0``: ``Conv(stride) -> Norm -> LeakyReLU -> Conv(stride 1) -> Norm``
-      (the second conv carries no activation, exactly as ``BasicBlockD``).
-    * The two paths are summed and a final ``LeakyReLU`` is applied.
-
-    Executing the skip modules before the main-path convs is what makes the block transparent to
-    the execution-order weight bridge (``konfai.utils.pretrained``): its weighted leaves fire in
-    the same order as ``BasicBlockD`` (skip conv/norm, then conv1, then conv2).
+    ``dynamic_network_architectures.building_blocks.residual.BasicBlockD``. A strided block downsamples
+    the residual with an ``AvgPool`` of kernel = stride, never a strided conv, and a channel change
+    projects it with a ``1x1`` conv whose ``bias`` is always ``False``, independent of ``conv_bias``.
+    The skip modules execute before the main-path convs, so the weighted leaves fire in ``BasicBlockD``
+    order (skip conv/norm, conv1, conv2) for the execution-order weight bridge.
     """
 
     def __init__(
@@ -299,24 +287,12 @@ class ResidualBlockD(network.ModuleArgsDict):
 class ResNetBasicBlock(network.ModuleArgsDict):
     """torchvision ResNet ``BasicBlock`` reproduced as a routed KonfAI graph (the ResNet-18/34 block).
 
-    Module-for-module and in forward-execution order equal to
-    ``torchvision.models.resnet.BasicBlock`` (the block the ``resnet18``/``resnet34`` encoders of
-    ``segmentation_models_pytorch`` stack). It reproduces the post-activation residual block of He et al.,
-    *Deep Residual Learning* (CVPR 2016):
-
-    * **Main path first** (matching ``BasicBlock.forward``, which computes the residual branch before it
-      evaluates ``self.downsample(x)``): on branch ``1`` ``Conv(stride) -> Norm -> ReLU -> Conv(stride 1)
-      -> Norm`` (the second conv carries no activation), keeping the block input untouched on branch ``0``.
-    * **Projection skip** on branch ``2``, evaluated *after* the main path (exactly as ``BasicBlock`` calls
-      ``self.downsample(x)`` only after ``bn2``): a ``1x1`` ``Conv(stride) -> Norm``. It is built when the
-      block is strided or changes channel count; otherwise the residual is the identity (block input).
-    * The two paths are summed onto branch ``0`` and a final ``ReLU`` is applied.
-
-    Evaluating the main-path convs before the downsample projection is what makes the block transparent to
-    the execution-order weight bridge (``konfai.utils.pretrained``): its weighted leaves fire in the same
-    order as ``BasicBlock`` (conv1, bn1, conv2, bn2, downsample.0, downsample.1). ``conv_bias`` defaults to
-    ``False`` (torchvision/timm ResNets never bias their convs) and the norm is ``BatchNorm`` (running stats,
-    so a checkpoint's BN buffers travel through the bridge and the ``eval()`` forward matches).
+    Module-for-module and in forward-execution order equal to ``torchvision.models.resnet.BasicBlock``:
+    the main path on branch ``1``, then the projection skip on branch ``2`` (built when the block is
+    strided or changes channel count, the identity otherwise), the two summed onto branch ``0`` under a
+    final ``ReLU``. The weighted leaves fire in ``BasicBlock`` order (conv1, bn1, conv2, bn2,
+    downsample.0, downsample.1) for the execution-order weight bridge. ``conv_bias`` defaults to
+    ``False`` and the norm is ``BatchNorm``, whose running stats travel with a checkpoint.
     """
 
     def __init__(
@@ -391,12 +367,9 @@ def _same_padding(kernel_size: int | list[int]) -> int | list[int]:
 class ResidualStage(network.ModuleArgsDict):
     """One encoder resolution stage: a stack of ``n_blocks`` :class:`ResidualBlockD` as a single node.
 
-    A generic, reusable building block for residual encoders (e.g. nnU-Net's ``ResidualEncoder``): the
-    **first** block carries ``stride`` and the ``in_channels -> out_channels`` change (nnU-Net strided-conv
-    downsampling), and the remaining ``n_blocks - 1`` blocks are stride 1 at ``out_channels``. The blocks
-    are wired sequentially (each on branch ``0``), so the whole stage is a drop-in single node with one
-    input and one output whose weighted leaves fire in the same order as the equivalent flat stack: it
-    stays transparent to the execution-order weight bridge (``konfai.utils.pretrained``).
+    The **first** block carries ``stride`` and the ``in_channels -> out_channels`` change, the remaining
+    ``n_blocks - 1`` are stride 1 at ``out_channels``, wired sequentially on branch ``0``. The stage's
+    weighted leaves fire in the same order as the equivalent flat stack.
     """
 
     def __init__(
@@ -433,13 +406,11 @@ class ResidualStage(network.ModuleArgsDict):
 class DecoderStage(network.ModuleArgsDict):
     """One U-Net decoder resolution stage as a single two-input node: upsample, concat skip, conv block.
 
-    A generic, reusable building block for U-Net decoders (nnU-Net's ``UNetDecoder`` shares it between the
-    plain and residual encoders). It is a **two-input** node (``in_branch: [coarser, skip]``), that runs
-    ``ConvTranspose(in_channels -> skip_channels, kernel = stride = upsample_stride)`` on the coarser input,
-    concatenates the encoder ``skip`` (transpose output first, then skip), then a :class:`ConvBlock` of
-    ``n_conv`` convs mapping ``2 * skip_channels -> skip_channels``: each Conv -> InstanceNorm(affine) ->
-    LeakyReLU with same-padding. It yields one output. ``upsample_stride`` sets both the transpose kernel and
-    stride so anisotropic plans (per-axis lists) upsample exactly the axes their encoder downsampled.
+    A **two-input** node (``in_branch: [coarser, skip]``): ``ConvTranspose(in_channels -> skip_channels,
+    kernel = stride = upsample_stride)`` on the coarser input, a concat of the encoder ``skip`` (transpose
+    output first), then a :class:`ConvBlock` of ``n_conv`` convs mapping ``2 * skip_channels ->
+    skip_channels``. ``upsample_stride`` sets both the transpose kernel and stride, so a per-axis list
+    upsamples exactly the axes its encoder downsampled.
     """
 
     def __init__(
@@ -473,8 +444,8 @@ class DecoderStage(network.ModuleArgsDict):
         )
         # Concatenate the encoder skip (branch 1); transpose output FIRST, then skip: nnU-Net order.
         self.add_module("Skip", Concat(), in_branch=[0, 1], out_branch=[0])
-        # Conv block: 2 * skip_channels -> skip_channels, then skip_channels -> skip_channels for the rest.
-        # ``kernel_size``/``padding`` pass through as Any so a per-axis (anisotropic) list is accepted.
+        # Conv block: 2 * skip_channels -> skip_channels, then skip_channels -> skip_channels; the
+        # ``kernel_size``/``padding`` pass through as Any so a per-axis list is accepted.
         kernel_value: Any = kernel_size
         padding_value: Any = _same_padding(kernel_size)
         conv_config = BlockConfig(
@@ -501,15 +472,11 @@ class DecoderStage(network.ModuleArgsDict):
 class ResNetStage(network.ModuleArgsDict):
     """One torchvision ResNet encoder stage: a stack of ``n_blocks`` :class:`ResNetBasicBlock` as a single node.
 
-    A generic, reusable building block for the ResNet-18/34 encoders that ``segmentation_models_pytorch``
-    stacks under its U-Net / UNet++ decoders (each is torchvision's ``ResNet`` ``layer1..layer4``). The
-    **first** block carries the stage ``stride`` and the ``in_channels -> out_channels`` change (its ``1x1``
-    projection ``downsample`` skip is built automatically when the stride or the channel count changes) and
-    the remaining ``n_blocks - 1`` blocks are stride 1 at ``out_channels`` with identity skips. The blocks run
-    sequentially on branch ``0``, so the whole stage is a drop-in single node with one input and one output
-    whose weighted leaves fire in the same order as the equivalent flat ``BasicBlock`` stack: it stays
-    transparent to the execution-order weight bridge (``konfai.utils.pretrained``). ``conv_bias`` defaults to
-    ``False`` and the norm to ``BatchNorm``: the torchvision/timm ResNet convention.
+    The **first** block carries the stage ``stride`` and the ``in_channels -> out_channels`` change (its
+    ``1x1`` projection ``downsample`` skip is built when either changes), the remaining ``n_blocks - 1``
+    are stride 1 at ``out_channels`` with identity skips, and they run sequentially on branch ``0``, so
+    the weighted leaves fire in flat ``BasicBlock`` order. ``conv_bias`` defaults to ``False`` and the
+    norm to ``BatchNorm``, the torchvision/timm ResNet convention.
     """
 
     def __init__(
@@ -542,21 +509,15 @@ class ResNetStage(network.ModuleArgsDict):
 class UNetPlusPlusNode(network.ModuleArgsDict):
     """One UNet++ dense-decoder node as a single multi-input node: upsample, dense concat, then Conv-Norm-ReLU.
 
-    A generic, reusable building block for the nested (dense) UNet++ decoder of
-    ``segmentation_models_pytorch`` (``UnetPlusPlusDecoder``). It is a **multi-input** node --
-    ``in_branch: [coarser, skip_0, skip_1, ...]``: that reproduces one grid node ``x_{d}_{l}``:
-
-    * ``Upsample(scale_factor=2, mode='nearest')`` on the shallower-column predecessor (branch ``0``);
-    * a :class:`Concat` of the upsampled feature FIRST, then every same-resolution dense skip and the matching
-      encoder skip (smp order), when any skip is provided;
-    * a :class:`ConvBlock` of ``n_conv`` ``Conv -> BatchNorm -> ReLU`` blocks (smp's ``Conv2dReLU``) mapping the
-      concatenated width ``up_channels + sum(skip_channels)`` to ``out_channels``.
+    A **multi-input** node (``in_branch: [coarser, skip_0, skip_1, ...]``) reproducing one grid node of
+    the nested UNet++ decoder of ``segmentation_models_pytorch``: nearest ``Upsample(scale_factor=2)`` on
+    the shallower-column predecessor, a :class:`Concat` of the upsampled feature FIRST then every dense
+    skip and the encoder skip (smp order), then a :class:`ConvBlock` of ``n_conv`` ``Conv -> BatchNorm ->
+    ReLU`` blocks mapping ``up_channels + sum(skip_channels)`` to ``out_channels``.
 
     ``skip_channels`` is the list of per-skip channel widths in ``in_branch`` order: its length wires the
-    concat (``n_skip + 1`` inputs) and its sum fixes the conv's input width, so the node self-describes the
-    dense fusion. An empty ``skip_channels`` (the final full-resolution ``x_0_depth`` node) drops the concat and
-    convolves the upsampled feature alone. The weighted leaves fire in ``ConvBlock`` order, so the node stays
-    transparent to the execution-order weight bridge (``konfai.utils.pretrained``).
+    concat (``n_skip + 1`` inputs) and its sum fixes the conv's input width. An empty ``skip_channels``
+    drops the concat.
     """
 
     def __init__(
@@ -689,8 +650,7 @@ class Add(torch.nn.Module):
         super().__init__()
 
     def forward(self, *tensor: torch.Tensor) -> torch.Tensor:
-        # Sequential fold: same left-to-right sum as a stacked reduction, without materializing
-        # a contiguous copy of every input, and it exports as ONNX Add nodes.
+        # Sequential fold: the same left-to-right sum without a contiguous copy, exported as ONNX Add nodes.
         output = tensor[0]
         for other in tensor[1:]:
             output = output + other
@@ -708,16 +668,13 @@ class Multiply(torch.nn.Module):
 class ClipNormalize(torch.nn.Module):
     """Clip to a stored intensity range, then standardize: ``(clamp(x, min, max) - mean) / std``.
 
-    The four scalars are buffers restored from the checkpoint, not config values, so a
-    per-checkpoint input normalization (e.g. a CT window baked into a trained model) travels
-    with its weights. It has no learnable parameters. Used as a declarative model's first node
-    so that normalization stays part of the model rather than a separate preprocessing step.
+    The four scalars are buffers restored from the checkpoint, not config values, so a per-checkpoint
+    input normalization travels with its weights. It has no learnable parameters.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        # Default to identity (no clip, zero mean, unit std): a checkpoint fills these, so a model
-        # built before its checkpoint is loaded must pass its input through unchanged.
+        # Default to identity (no clip, zero mean, unit std): a checkpoint fills these in.
         self.clip_min: torch.Tensor
         self.clip_max: torch.Tensor
         self.mean: torch.Tensor
@@ -881,11 +838,8 @@ class Attention(network.ModuleArgsDict):
 class PositionalEmbedding(torch.nn.Module):
     """Add a learnable positional embedding to a token sequence.
 
-    The input is a token sequence shaped ``[B, num_tokens, embedding_dim]`` (batch, sequence, feature),
-    the layout produced by a patch embedding. A single learnable parameter of shape
-    ``[1, num_tokens, embedding_dim]`` is broadcast over the batch and added, giving every token position a
-    trainable offset. This is the ``learnable`` positional encoding of the Vision Transformer; the parameter
-    is registered directly on the module so it is a self-contained, single-purpose building block.
+    The input is a token sequence shaped ``[B, num_tokens, embedding_dim]``. A learnable parameter of
+    shape ``[1, num_tokens, embedding_dim]`` is broadcast over the batch and added.
     """
 
     def __init__(self, num_tokens: int, embedding_dim: int) -> None:
@@ -903,12 +857,11 @@ class PositionalEmbedding(torch.nn.Module):
 class MultiHeadSelfAttention(torch.nn.Module):
     """Multi-head self-attention over a token sequence (the Transformer encoder attention).
 
-    Mirrors the self-attention of MONAI's ``SABlock``/ViT in its default configuration: a single packed
-    ``qkv`` linear projects the ``[B, num_tokens, hidden_size]`` sequence into queries, keys and values,
-    scaled dot-product attention is computed per head with scale ``head_dim ** -0.5``, and an ``out_proj``
-    linear mixes the concatenated heads back to ``hidden_size``. ``qkv_bias`` toggles the bias of the packed
-    projection (the ViT default is ``False``); ``out_proj`` always carries a bias. Both projections are child
-    ``Linear`` leaves, so the module is transparent to execution-order weight transfer.
+    Mirrors MONAI's ``SABlock``/ViT in its default configuration: a packed ``qkv`` linear projects the
+    ``[B, num_tokens, hidden_size]`` sequence into queries, keys and values, scaled dot-product attention
+    runs per head with scale ``head_dim ** -0.5``, and an ``out_proj`` linear mixes the concatenated heads
+    back to ``hidden_size``. ``qkv_bias`` toggles the bias of the packed projection (``False`` by default);
+    ``out_proj`` always carries a bias. Both are child ``Linear`` leaves, transparent to weight transfer.
     """
 
     def __init__(self, hidden_size: int, num_heads: int, qkv_bias: bool = False) -> None:
@@ -926,7 +879,7 @@ class MultiHeadSelfAttention(torch.nn.Module):
         batch, tokens, hidden = tensor.shape
         qkv = self.qkv(tensor).reshape(batch, tokens, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         query, key, value = qkv[0], qkv[1], qkv[2]
-        # SDPA's default scale is head_dim ** -0.5, the scale this block always used.
+        # SDPA's default scale is head_dim ** -0.5.
         output = torch.nn.functional.scaled_dot_product_attention(query, key, value)
         output = output.permute(0, 2, 1, 3).reshape(batch, tokens, hidden)
         return self.out_proj(output)

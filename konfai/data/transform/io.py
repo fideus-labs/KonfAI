@@ -28,18 +28,13 @@ from konfai.utils.utils import split_path_spec
 class Save(Transform):
     """Write the chain's state here, and become a source boundary.
 
-    ``scale_factors`` writes an OME-NGFF PYRAMID instead of a single level: ``[4]`` adds a level 1 at
-    a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth. Every reader indexes a
-    pyramid BY POSITION (``:omezarr@1`` is the second entry, not one named "1"), so the order is
-    the contract, 0 finest. It applies on both write paths: assembled in memory, or region by region,
-    where the levels are derived once the last region has landed.
-
-    ``downsample_method`` names how the coarse levels are derived, and its default is
-    ``DASK_BIN_SHRINK`` (block averaging), NOT ngff-zarr's own ``ITKWASM_GAUSSIAN``. Measured on a
-    real volume, the Gaussian holds a 0.9998 correlation while crushing peak intensity by 20 %.
+    ``scale_factors`` writes an OME-NGFF pyramid instead of a single level: ``[4]`` adds a level 1 at
+    a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth. A pyramid is indexed by
+    position (``:omezarr@1`` is the second entry), 0 finest. ``downsample_method`` names how the
+    coarse levels are derived; its default is ``DASK_BIN_SHRINK`` (block averaging), not ngff-zarr's
+    own ``ITKWASM_GAUSSIAN``.
     """
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
 
     alters_values = False
@@ -65,14 +60,11 @@ class Save(Transform):
         self._destination: Dataset | None = None
 
     # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
-    # source boundary, and an unsatisfied Save with a streamable prefix is materialized slab by slab
-    # first (DatasetManager._materialize_save). Only an unsweepable prefix loads the whole volume.
+    # source boundary, and an unsatisfied one with a streamable prefix is materialized slab by slab.
 
     @property
     def spec(self) -> tuple[str, str] | None:
-        """``(filename, file_format)`` of the dataset this stage names, ``None`` when it names none.
-
-        Parsed only: a parse-time check reads the path without probing the store on disk."""
+        """``(filename, file_format)`` of the dataset this stage names, ``None`` when it names none."""
         if not self.dataset:
             return None
         filename, _flag, file_format = split_path_spec(self.dataset, default_format="mha")
@@ -80,10 +72,7 @@ class Save(Transform):
 
     @property
     def destination(self) -> Dataset | None:
-        """The :class:`Dataset` this stage writes into, ``None`` when it names none.
-
-        Built once: the stage is shared by every case's manager, and constructing a Dataset probes
-        the destination directory on disk."""
+        """The :class:`Dataset` this stage writes into, ``None`` when it names none. Built once."""
         if self._destination is None and (spec := self.spec) is not None:
             self._destination = Dataset(*spec, self.scale_factors, self.downsample_method)
         return self._destination
@@ -95,15 +84,12 @@ class Save(Transform):
 class Write(Save):
     """A :class:`Save` that is a deliverable, not a cache.
 
-    Same object, same boundary semantics, one difference that is the point: ``dataset`` has no
-    default, so a bare ``Write:`` fails at config time instead of silently writing into the source
-    tree (a bare ``Save:`` binds ``dataset`` to nothing and falls back to the manager's own
-    dataset). The TRANSFORM workflow plans, resumes and reports on its ``Write`` stages; a ``Save``
-    between them stays an opportunistic milestone, never written when a satisfied ``Write``
-    downstream lets the boundary skip the whole prefix.
+    Same boundary semantics, with ``dataset`` mandatory: a bare ``Write:`` fails at config time,
+    where a bare ``Save:`` falls back to the manager's own dataset. The TRANSFORM workflow plans,
+    resumes and reports on its ``Write`` stages; a ``Save`` between them stays an opportunistic
+    milestone.
     """
 
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
 
     def __init__(

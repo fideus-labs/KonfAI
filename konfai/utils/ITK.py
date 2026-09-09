@@ -44,9 +44,7 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     """A displacement field, from an ITK image file OR an NGFF RFC-5 OME-Zarr store.
 
     A field written as a store cannot go through ``sitk.ReadImage``, and reading it as an ordinary
-    image is worse than failing: the component axis looks like any other, so indexing it yields one
-    third of the field and a registration that is wrong without being obviously wrong. This is the one
-    place that knows how to open either form, so no caller has to decide.
+    image yields one third of the field. This is the one place that knows how to open either form.
 
     The result is ``sitkVectorFloat64``: what ``DisplacementFieldTransform`` requires.
     """
@@ -69,8 +67,8 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     axes = get_ome_zarr_info(path)["axes"]
     n_axes = 1 + sum(axis in axes for axis in ("z", "y", "x"))  # channel-first C[Z]YX
     data, metadata = read_ome_zarr_data_slice(path, tuple(slice(None) for _ in range(n_axes)))
-    # Origin, Spacing and Direction together: NGFF scale/translation alone cannot express the
-    # direction matrix, so the geometry comes from the konfai sidecar through data_to_image.
+    # NGFF scale/translation cannot express the direction matrix, so the geometry comes from the
+    # konfai sidecar through data_to_image.
     field = data_to_image(data, ome_zarr_attributes(metadata))
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 
@@ -162,16 +160,11 @@ def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) ->
 def _linear_map(transform: sitk.Transform) -> AffineMap:
     """The exact world map of a linear transform: ``T(p) = M p + T(0)``.
 
-    ``M`` comes from ``GetMatrix`` where the type has one: the number ITK itself resamples with,
-    read past the centre/translation parameterisation that differs between Euler, Similarity,
-    Scale and Affine, and from ``T(e_k) - T(0)`` otherwise. The offset is ``T(0)`` directly
-    rather than assembled from centre and translation: one call, no cancellation, and true for
-    every parameterisation at once.
-
-    Probing is sound HERE and nowhere else in this file: for an affine map the columns are the map,
-    exactly, by linearity. For a non-linear one the same arithmetic measures a local gradient and
-    extrapolates it, which under-bounds, which is why a BSpline's affine part is the identity and
-    all of its reach lives in the residual.
+    ``M`` comes from ``GetMatrix`` where the type has one, past the centre/translation
+    parameterisation that differs between Euler, Similarity, Scale and Affine, and from
+    ``T(e_k) - T(0)`` otherwise. Probing is sound HERE and nowhere else in this file: for an affine
+    map the columns are the map exactly, while for a non-linear one the same arithmetic measures a
+    local gradient and under-bounds.
     """
     from konfai.data.geometry import AffineMap
 
@@ -207,20 +200,11 @@ def _displacement_stage(
     where they are not that already, none where they are.
 
     ``dtype`` is a CEILING, not a target: the values are held at the width the STORE holds them at,
-    never widened past it. A field written in float32 -- which is how ITK writes one, and how a DVF
-    normally sits on disk -- carries no more information as float64, so widening it buys a copy of
-    twice the bytes to say exactly the same thing, three times over once the sampler holds its own
-    (``_FIELD_WINDOW_COPIES``), and quantised straight back by any walk that runs in float32.
-
-    So float64 (the default ceiling, the bit-exact contract with SimpleITK) narrows nothing that
-    was stored wide, and lets a float32 store stay float32 -- losslessly, with no flag to set and
-    no precision traded, which is also what lets :func:`~konfai.data.transform._warp_field_float32`
-    apply such a field without a float64 transform to hold it. A caller whose coordinate walk runs
-    in float32 lowers the ceiling to float32, and there a genuinely float64 field does narrow: that
-    is the trade ``precision: fast`` names.
-
-    Anything not already float32 or float64 -- an integer field, a float16 one -- is converted to
-    the ceiling: those are widths SimpleITK has no pixel type for, and the walk no kernel for.
+    never widened past it. So float64, the default ceiling and the bit-exact contract with
+    SimpleITK, narrows nothing that was stored wide and lets a float32 store stay float32. A caller
+    whose coordinate walk runs in float32 lowers the ceiling to float32, the trade
+    ``precision: fast`` names, and there a genuinely float64 field does narrow. Anything not already
+    float32 or float64 is converted to the ceiling: SimpleITK has no pixel type for those widths.
     """
     from konfai.data.geometry import DisplacementStage
 
@@ -240,16 +224,15 @@ def _displacement_stage(
 def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
     """A stored transform as geometry stages in APPLICATION order, or a refusal naming the type.
 
-    ``CompositeTransform`` applies its member list in REVERSE (the last added runs first: verified
-    against SimpleITK, where ``GetNthTransform(0)`` is nonetheless the first added); the reversal is
-    normalized here, once, so every consumer reads stages first-applied-first.
+    ``CompositeTransform`` applies its member list in REVERSE (the last added runs first, though
+    ``GetNthTransform(0)`` is the first added); the reversal is normalized here, once, so every
+    consumer reads stages first-applied-first.
     """
     _require_simpleitk()
     if isinstance(transform, sitk.CompositeTransform):
         stages: list[AffineStage | DisplacementStage] = []
         for index in reversed(range(transform.GetNumberOfTransforms())):
-            # Downcast restores the member's concrete type where GetNthTransform hands back the
-            # generic wrapper, which the isinstance dispatch below cannot read.
+            # Downcast restores the concrete type behind GetNthTransform's generic wrapper.
             stages.extend(decode_transform_stages(transform.GetNthTransform(index).Downcast()))
         return tuple(stages)
     from konfai.data.geometry import AffineStage
@@ -265,9 +248,7 @@ def decode_transform_stages(transform: sitk.Transform) -> SpatialStages:
         )
     if isinstance(transform, sitk.DisplacementFieldTransform):
         # One copy of the field: the view is (Z, Y, X, rank) with the components (x, y, z) fastest,
-        # and the stage's component-first float64 layout is written straight from it (measured
-        # 159 MiB of peak against 50 MiB of content on a 128^3 field through GetArrayFromImage,
-        # a per-component ascontiguousarray and a stack).
+        # and the stage's component-first float64 layout is written straight from it.
         field = transform.GetDisplacementField()
         values = np.array(np.moveaxis(sitk.GetArrayViewFromImage(field), -1, 0), dtype=np.float64, order="C")
         return (_displacement_stage(_grid_of_image(field), values, 1, "this displacement field"),)
@@ -291,31 +272,19 @@ def read_transform_stages(
 ) -> SpatialStages:
     """The stored transform ``(group, name)`` of ``dataset`` as geometry stages in APPLICATION order.
 
-    A displacement entry becomes its stage straight from the array the store hands over, on the
-    grid its attributes describe: the field never passes through a SimpleITK image (a float32 store
-    widens to float64 exactly, where the image route copied it three times over on the way in and
-    once more on the way out). Every other entry decodes through :func:`decode_transform_stages`,
-    as does everything a store that serves transforms alone (``read_transform`` and nothing else)
-    hands over.
+    A displacement entry becomes its stage straight from the array the store hands over, on the grid
+    its attributes describe, without passing through a SimpleITK image. Every other entry decodes
+    through :func:`decode_transform_stages`, as does everything a store that serves transforms alone
+    (``read_transform`` and nothing else) hands over.
 
-    ``box`` is the world box the caller will evaluate the map over, and it is read from the headers
-    before a voxel is fetched: a field entry then comes back as its own sub-grid over the window
-    that box falls in, plus the lattice point linear interpolation reaches for. Without it the whole
-    entry is read, which is what a whole-volume call and the plan's own decode still want. A field
-    solved at full resolution is gigabytes -- 14.5 GiB per ExaSPIM case, and float64 on the way in
-    doubles it -- so a region that read the whole one would hold, per case, more than the budget
-    sizing it was ever told about.
-
-    Only a displacement entry is windowed. An affine is a matrix and a BSpline a coarse control
-    grid: both are small, and a BSpline's coefficients are not indexed by the box anyway.
-
+    ``box`` is the world box the caller will evaluate the map over, read from the headers before a
+    voxel is fetched: a field entry then comes back as its own sub-grid over the window that box
+    falls in, plus the lattice point linear interpolation reaches for. Without it the whole entry is
+    read, which is what a whole-volume call and the plan's own decode want. Only a displacement
+    entry is windowed: an affine is a matrix and a BSpline a coarse control grid, both small.
     ``headers_only`` is the plan's read: a dense field comes back as NO stage at all, which is the
-    identity, and its values are never touched. Nothing bounds a field from headers -- so a plan
-    that read them would pay a case's worth of memory for a number it cannot use, which is exactly
-    what the declared route already declines to do (:meth:`Resample._pricing_bound`).
-
-    ``field_dtype`` is what a dense field's values are held in: float64 for the bit-exact walk,
-    float32 for a caller whose walk runs in float32 and would quantise them back anyway.
+    identity, and its values are never touched. ``field_dtype`` is what a dense field's values are
+    held in: float64 for the bit-exact walk, float32 for a caller whose walk runs in float32.
     """
     from konfai.data.geometry import Grid
     from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, data_to_transform
@@ -326,17 +295,14 @@ def read_transform_stages(
     what = f"the displacement field '{group}' of case '{name}'"
     if headers_only:
         # The PLAN's read: a dense field answers as the identity and its values are never touched.
-        # Nothing bounds a field from headers, so there is nothing to read them for -- and reading
-        # them anyway is what put 29 GiB of one native case beside a budget that never saw it.
-        # Everything else is coefficients, small, and bounded exactly, so it decodes as usual.
+        # Everything else is coefficients, small and bounded exactly, so it decodes as usual.
         shape, header = dataset.get_infos(group, name)
         if DISPLACEMENT_FIELD_ATTRIBUTE in header:
             return ()
         data, attribute = read_data(group, name)
         return decode_transform_stages(data_to_transform(data, attribute, name))
     window = None
-    # A backend that cannot serve a slice reads whole, which is what it would do for any window it
-    # was given: the transform-only stores (read_transform and nothing else) are already out above.
+    # A backend that cannot serve a slice reads whole, as it would for any window it was given.
     if box is not None and getattr(dataset, "read_data_slice", None) is not None:
         shape, header = dataset.get_infos(group, name)
         if DISPLACEMENT_FIELD_ATTRIBUTE in header:
@@ -361,8 +327,7 @@ def encode_transform_stages(stages: SpatialStages) -> sitk.Transform:
     An affine stage becomes an ``AffineTransform`` (matrix and translation, world units); a
     displacement stage of order 1 a ``DisplacementFieldTransform`` on its own grid, of order 3 a
     ``BSplineTransform`` from its coefficient images. ``CompositeTransform`` applies its members
-    LAST-ADDED-FIRST, so the stages are added in reverse to run in order (the mirror of what
-    :func:`decode_transform_stages` undoes). One stage is returned as itself.
+    LAST-ADDED-FIRST, so the stages are added in reverse to run in order.
     """
     _require_simpleitk()
     from konfai.data.geometry import AffineStage
@@ -406,9 +371,8 @@ def encode_transform_stages(stages: SpatialStages) -> sitk.Transform:
 def invert_stages(stages: SpatialStages, rank: int) -> SpatialStages | None:
     """The exact inverse of an all-affine decoded map, or ``None`` when one is not algebraic.
 
-    A BSpline or a field inverts by an iterative dense solve, not an algebraic step, and a field
-    solved per region is not the restriction of the field solved once, so a non-affine inverse is
-    ``None`` here and the caller refuses with the remedy, rather than resampling through a guess.
+    A BSpline or a field inverts by an iterative dense solve, and a field solved per region is not
+    the restriction of the field solved once, so a non-affine inverse is ``None``.
     """
     from konfai.data.geometry import AffineMap, AffineStage
 

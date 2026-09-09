@@ -32,8 +32,7 @@ from konfai.utils.errors import ConfigError, DatasetManagerError
 
 
 def env_flag(name: str, default: bool) -> bool:
-    """A ``KONFAI_*`` boolean switch: ``0``/``false`` is off, anything else set is on, unset is
-    ``default``: one parser, so a switch read in two places accepts the same spellings."""
+    """A ``KONFAI_*`` switch: ``0``/``false`` is off, anything else set is on, unset is ``default``."""
     value = os.environ.get(name)
     if value is None:
         return default
@@ -47,12 +46,10 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     """Import the module a classpath names and return it with the name to take from it.
 
     A ``:`` separates the module from the name: everything before the last one is the module, so
-    ``torch:nn:L1Loss`` and ``torch.nn:L1Loss`` name the same class. Without one, the name is taken
-    from the kind's own package, and the dots between them lead there: ``Dice`` is that package's
-    own, ``segmentation.UNet.UNet`` is under two of its subpackages.
-    """
-    # A chain spelled as a list binds its stages under occurrence keys (`Clip`, `Clip#2`, `Clip#3`):
-    # the suffix is the stage's identity in the config, not part of the class it names.
+    ``torch:nn:L1Loss`` and ``torch.nn:L1Loss`` name the same class. Without one the name comes from the
+    kind's own package, dots leading into its subpackages (``segmentation.UNet.UNet``)."""
+    # A chain spelled as a list binds its stages under occurrence keys (`Clip#2`): the suffix is the
+    # stage's identity in the config, not part of the class it names.
     classpath = classpath.rsplit("#", 1)[0] if _OCCURRENCE.search(classpath) else classpath
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])
@@ -73,17 +70,9 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
 
 
 def best_sweep_axis(patch_size: list[int], shape: list[int]) -> int:
-    """The axis whose reassembly window is smallest.
-
-    The window holds ``min(patch, extent)`` rows of the swept axis across the whole of every other, so
-    it costs ``min(patch_d, extent_d) x prod(extent_e != d)``: smallest on the axis the patch divides
-    most. Measured on a 256x512x640 volume with a 128 patch: 0.47 GiB sweeping axis 0 against 0.19
-    sweeping axis 2, for the same patches read in the same total time (the set is identical, only the
-    order changes, and every chunk is read either way).
-
-    A free axis (patch 0) spans the extent, so it is the worst possible sweep and falls out of the min
-    on its own.
-    """
+    """The axis whose reassembly window is smallest: the window holds ``min(patch, extent)`` rows of the
+    swept axis across the whole of every other, costing ``min(patch_d, extent_d) x prod(extent_e != d)``.
+    A free axis (patch 0) spans the extent, so it falls out of the min on its own."""
 
     def window(axis: int) -> int:
         rows = min(patch_size[axis] or shape[axis], shape[axis])
@@ -94,12 +83,8 @@ def best_sweep_axis(patch_size: list[int], shape: list[int]) -> int:
 
 def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice, ...]]:
     """The patch grid, emitted with ``sweep_axis`` outermost and each tuple back in array order.
-
-    Which axis is outermost is what the reassembly window slides along: a patch's arrival finalizes
-    everything behind it on that axis and nothing else, so the window costs ``patch[axis] x (the other
-    extents)``. The order is the contract between the read and the write, both must be given the same
-    axis, or reassembly hands out regions that are not final.
-    """
+    The order is the contract between the read and the write: given different axes, reassembly hands
+    out regions that are not final."""
     order = [sweep_axis, *(dim for dim in range(len(slices)) if dim != sweep_axis)]
     back = [order.index(dim) for dim in range(len(slices))]
     return [tuple(chunk[position] for position in back) for chunk in itertools.product(*(slices[d] for d in order))]
@@ -118,14 +103,11 @@ def concretize_patch_size(
 ) -> list[int]:
     """Resolve the per-axis patch convention onto a concrete shape: ``0`` = free axis -> full extent.
 
-    ``[0,0,0]`` (or ``None``) is the whole volume; ``[1,0,0]`` is a full 2D slice; a positive entry is
-    fixed by the user and passes through (clamped to the extent so a patch never exceeds the volume).
-
-    ``multiple`` (the model's per-axis ``downsampling_factor``) rounds a free axis UP to a valid input
-    size for the network (122 -> 128 for a factor 16), so its encoder/decoder skips align. The rounded
-    size may exceed the extent; the border padding (``pad_to_patch``) fills it and the accumulator crops
-    it back, exactly as it does for any patch larger than its case. A factor shorter than the patch rank
-    aligns to the TRAILING axes (a 2D model in a ``[1,0,0]`` slice regime constrains Y and X, not Z).
+    ``[0,0,0]`` (or ``None``) is the whole volume; ``[1,0,0]`` is a full 2D slice; a positive entry
+    passes through, clamped to the extent. ``multiple`` (the model's ``downsampling_factor``) rounds a
+    free axis UP to a valid input size (122 -> 128 for a factor 16); the rounded size may exceed the
+    extent, where ``pad_to_patch`` fills it and the accumulator crops it back. A factor shorter than the
+    patch rank aligns to the TRAILING axes (a 2D model in a ``[1,0,0]`` regime constrains Y and X).
     """
     if patch_size is None:
         return list(shape)
@@ -148,9 +130,8 @@ def concretize_patch_size(
 
 
 def free_axis_rounding(multiple: list[int] | None, axis: int, rank: int) -> int:
-    """The rounding factor a free axis at spatial index ``axis`` (of ``rank`` axes) takes from the
-    model's per-axis ``multiple``: trailing-aligned: a 2D model's ``[fy, fx]`` in a 3-axis patch
-    constrains Y and X and leaves Z at 1."""
+    """The rounding factor a free axis at spatial index ``axis`` (of ``rank`` axes) takes from the model's
+    per-axis ``multiple``, trailing-aligned: a 2D ``[fy, fx]`` in a 3-axis patch leaves Z at 1."""
     if multiple is None:
         return 1
     aligned = axis - (rank - len(multiple))
@@ -163,11 +144,8 @@ def size_free_axes(
     multiple: list[int] | None,
 ) -> list[int] | None:
     """The up-front concrete patch for a free (``0``) axis config: the worst case with each free axis
-    rounded up to the model's ``multiple`` (its ``downsampling_factor``), so the first attempt is a
-    valid model input. ``None`` when there is nothing to size: no free axis, unknown worst case, or
-    every free extent is already a valid multiple (the raw path already works). Shared by the
-    prediction and training auto-patch loops so the rounding lives in one place.
-    """
+    rounded up to the model's ``multiple``, so the first attempt is a valid model input. ``None`` when
+    there is nothing to size: no free axis, unknown worst case, or free extents already valid."""
     if template is None or worst is None:
         return None
     sized = concretize_patch_size(template, worst, multiple)
@@ -179,8 +157,7 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
 
     Accepted forms: ``None`` -> ``DEFAULT_OVERLAP_FRACTION`` of the patch per axis; an ``int`` ->
     absolute voxels on every axis; a ``float`` in [0,1[ or a ``"20%"`` string -> that fraction of the
-    patch per axis; a per-axis list mixing those forms. Whatever the spec, an axis that is not tiled
-    (single patch spans the extent) resolves to 0: overlap only exists between patches.
+    patch; a per-axis list mixing those forms. An axis that is not tiled resolves to 0.
     """
 
     def one(spec: int | float | str, size: int) -> int:
@@ -209,8 +186,7 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
         raise ConfigError(f"overlap: {len(specs)} entries for {len(patch_size)} axes; give one per axis or a scalar.")
     resolved = []
     for spec, size, extent in zip(specs, patch_size, shape, strict=True):
-        # No overlap on an axis that is not tiled (one patch spans it) nor on a length-1 patch axis
-        # (2D slicing: nothing to blend along a single-voxel patch).
+        # No overlap on an axis that is not tiled (one patch spans it) nor on a length-1 patch axis.
         voxels = one(spec, size) if 1 < size < extent else 0
         if voxels >= size:
             raise ConfigError(f"overlap: {voxels} voxels must be smaller than the patch size {size}.")
@@ -235,13 +211,10 @@ def resolve_patch(
     """Size the free axes of ``patch_size`` so ONE patch fits ``budget_bytes``; fixed axes never move.
 
     ``0`` entries are free (their max = the volume's extent); positive entries are pinned by the user.
-    A patch's footprint is ``(resident_images + intermediate_factor) * voxels * channels * dtype_bytes``:
-    ``resident_images`` is exact (counted from the config: output + targets + masks), the
-    ``intermediate_factor`` covers the op's working copies. When everything fits, the free axes take
-    their full extent (the whole volume when all axes are free). Otherwise the free axes shrink
-    ISOTROPICALLY (the patch keeps the volume's proportions), optionally snapped down to ``snap``
-    multiples (a model's valid input sizes). ``budget_bytes=None`` disables sizing (free = extent).
-    Fixed axes alone exceeding the budget is an error: the user pinned more than the budget allows.
+    A patch's footprint is ``(resident_images + intermediate_factor) * voxels * channels * dtype_bytes``,
+    ``resident_images`` counted from the config (output + targets + masks). When everything fits, the free
+    axes take their full extent; otherwise they shrink ISOTROPICALLY, optionally snapped down to ``snap``
+    multiples. ``budget_bytes=None`` disables sizing, and fixed axes alone exceeding the budget is an error.
     """
     concrete = concretize_patch_size(patch_size, shape)
     free = [d for d, p in enumerate(patch_size) if p == 0] if patch_size is not None else list(range(len(concrete)))
@@ -280,14 +253,10 @@ def get_patch_slices_from_shape(
     sweep_axis: int = 0,
 ) -> list[tuple[slice, ...]]:
 
-    # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple`` so a
-    # small case still reaches the network at a valid input size: the up-front worst-case sizing only
-    # guarantees the largest case, and a heterogeneous smaller one would otherwise arrive non-divisible.
+    # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple``.
     template = [0] * len(shape) if patch_size is None else patch_size
     # ``declared_free_axis`` carries the original free-axis intent when a restart has already pinned
-    # ``patch_size`` to a concrete size: the OOM re-plan erases the ``0`` this default keys on, and the
-    # free axis must still take the fraction default, not the fixed-patch remainder. Derive it from the
-    # template when the caller does not know (every non-restart call).
+    # ``patch_size`` to a concrete size. Derived from the template when the caller does not know.
     if declared_free_axis is None:
         declared_free_axis = any(p == 0 for p in template) and not all(p == 0 for p in template)
     has_free_axis = declared_free_axis
@@ -303,7 +272,6 @@ def get_patch_slices_from_shape(
     overlap: np.ndarray | list[int]
     if overlap_tmp is None:
         if has_free_axis:
-            # Free axes are new territory (no config predates them), so they take the modern default:
             # DEFAULT_OVERLAP_FRACTION of the patch on tiled axes, 0 on untiled ones.
             overlap = np.array(resolve_overlap(None, patch_size, shape), dtype=np.int_)
         else:
@@ -345,8 +313,7 @@ def get_patch_slices_from_shape(
     return _sweep_first(slices, sweep_axis)
 
 
-# Suffixes an entry can carry on disk: probed next to a case to find an entry whatever it was
-# written as, and matched against a path to recognise an input file.
+# Suffixes an entry can carry on disk: probed next to a case, and matched against a path.
 SUPPORTED_EXTENSIONS = [
     "mha",
     "mhd",  # MetaImage
@@ -378,9 +345,8 @@ SUPPORTED_EXTENSIONS = [
     "npy",
 ]
 
-# Format tokens that name a backend rather than a suffix. An ':itktransform' entry is one ITK
-# transform file, written as `<group>.h5`, so nothing on disk ever ends in `.itktransform`: the
-# token is legal wherever a format is declared, and must never be probed as an extension.
+# Backend tokens that are not suffixes: an ':itktransform' entry is one ITK transform file written as
+# `<group>.h5`, legal wherever a format is declared and never probed on disk.
 SUPPORTED_BACKEND_FORMATS = [
     "itktransform",
 ]
@@ -391,17 +357,13 @@ SUPPORTED_FORMATS = [*SUPPORTED_EXTENSIONS, *SUPPORTED_BACKEND_FORMATS]
 # Every spelling of an OME-Zarr store, plus the compound `.ome.zarr` no single token covers.
 _STORE_FORMS = {".ome.zarr", ".ome-zarr", ".ome_zarr", ".omezarr", ".zarr"}
 
-# Longest first, so a compound extension wins over its tail: `.ome.zarr` over `.zarr`, `.nii.gz`
-# over `.gz`.
+# Longest first, so a compound extension wins over its tail: `.ome.zarr` over `.zarr`.
 _STORAGE_FORMS = sorted({f".{extension}" for extension in SUPPORTED_EXTENSIONS} | _STORE_FORMS, key=len, reverse=True)
 
 
 def is_dicom_file(path: Path) -> bool:
-    """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128.
-
-    A series is commonly exported with no extension at all, so its name proves nothing and the magic
-    is what identifies it.
-    """
+    """Whether a file carries the DICOM Part-10 magic: ``DICM`` at offset 128. A series is commonly
+    exported with no extension at all, so the magic is what identifies it."""
     try:
         with open(path, "rb") as file:
             return file.read(132)[128:132] == b"DICM"
@@ -412,11 +374,10 @@ def is_dicom_file(path: Path) -> bool:
 def storage_form(path: Path) -> str:
     """The extension KonfAI resolves ``path`` under, spelled as the path spells it.
 
-    NOT ``"".join(path.suffixes)``: a dot in the STEM belongs to the name, not to the format --
-    ``patient.v2.mha`` is a MetaImage and ``CT.contrast.nii.gz`` a gzipped NIfTI, where joining every
-    suffix asks for a ``v2.mha`` backend and lets a caller's file naming decide whether a run starts.
-    Matched from the right, longest first. A file whose end matches nothing keeps its last suffix; a
-    directory that carries none (a DICOM series) has no form at all.
+    NOT ``"".join(path.suffixes)``: a dot in the STEM belongs to the name, not to the format, so
+    ``patient.v2.mha`` is a MetaImage and ``CT.contrast.nii.gz`` a gzipped NIfTI. Matched from the right,
+    longest first. A file whose end matches nothing keeps its last suffix; a directory that carries none
+    (a DICOM series) has no form at all.
     """
     name = path.name
     lowered = name.lower()
@@ -440,9 +401,7 @@ def directory_volume_form(path: Path) -> str | None:
     """The form a directory that is ITSELF one volume is read under, or ``None`` for a plain one.
 
     ``.ome.zarr``/``.zarr`` for an OME-Zarr store, ``""`` for a DICOM series, ``None`` for a
-    directory holding separate per-case files. A store and a series are directories, not files, so
-    anything that stages or detects them has to tell the two apart: one travels whole, the other is
-    walked into the volumes it holds.
+    directory holding separate per-case files.
     """
     if not path.is_dir():
         return None
@@ -464,9 +423,8 @@ def directory_volume_form(path: Path) -> str | None:
 def format_token(form: str, *, directory: bool = False) -> str:
     """The dataset backend token a storage form is read and written through.
 
-    Writing needs one NAMED: nothing is on disk yet to detect it from. ``directory`` says the entry
-    is a directory volume, where the absence of a form means a DICOM series rather than the default
-    file format.
+    ``directory`` says the entry is a directory volume, where the absence of a form means a DICOM
+    series rather than the default file format.
     """
     lowered = form.lower()
     if lowered in _STORE_FORMS:
@@ -494,13 +452,8 @@ def is_windows_absolute_path(path: str) -> bool:
 
 
 def split_format_level(file_format: str) -> tuple[str, int]:
-    """Split an optional pyramid-level suffix from a format token.
-
-    Used by the OME-Zarr backend to pick a multiscale resolution directly in
-    the dataset spec, e.g. ``omezarr@2`` selects pyramid level 2 (coarser),
-    independently of any transform. Returns ``(base_format, level)`` and
-    defaults to level 0 (full resolution) when no ``@<int>`` suffix is present.
-    """
+    """Split an optional pyramid-level suffix from a format token: ``omezarr@2`` selects OME-Zarr
+    pyramid level 2 (coarser). Returns ``(base_format, level)``, level 0 without an ``@<int>`` suffix."""
     base, separator, level = file_format.rpartition("@")
     if separator and level.isdigit():
         return base, int(level)
@@ -516,16 +469,10 @@ def split_path_spec(
 ) -> tuple[str, str | None, str]:
     """Split a KonfAI ``path[:flag]:format`` spec over a path holding colons of its own.
 
-    KonfAI accepts dataset-like strings such as:
-
-    - ``./Dataset``
-    - ``./Dataset:mha``
-    - ``./Dataset:a:mha``
-    - ``C:\\Data\\Dataset:a:mha``
-    - ``s3://bucket/cohort:omezarr@2``
-
-    A URI's scheme comes off before the split and goes back on after it, and a Windows drive letter
-    is recognised where the split lands on one, so neither is read as a flag or as a format.
+    Accepted spellings: ``./Dataset``, ``./Dataset:mha``, ``./Dataset:a:mha``,
+    ``C:\\Data\\Dataset:a:mha``, ``s3://bucket/cohort:omezarr@2``. A URI's scheme comes off before the
+    split and goes back on after it, and a Windows drive letter is recognised, so neither is read as a
+    flag or as a format.
     """
     root, spec = uri.split_scheme(value)
     path, flag, file_format = _split_spec(spec, default_format, allowed_flags, supported_formats)

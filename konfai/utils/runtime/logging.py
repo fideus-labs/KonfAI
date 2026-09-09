@@ -46,8 +46,7 @@ from konfai.utils.errors import ConfigError
 
 class NullSummaryWriter:
     """Stands in for TensorBoard's ``SummaryWriter`` when the extra is absent: every ``add_*`` and
-    ``close`` call is absorbed, so the workflow still produces its outputs; only the curves are lost.
-    """
+    ``close`` call is absorbed; only the curves are lost."""
 
     def __getattr__(self, name: str):
         def _absorb(*args, **kwargs) -> None:
@@ -161,9 +160,7 @@ class MinimalLog:
         except (AttributeError, ValueError, OSError):
             self._mirror_is_tty = False
         self._mirror_last_redraw = 0.0
-        # Folded frames withheld by the throttle, one slot per bar (keyed by the text before the first
-        # digit): interleaved bars (train + validation) would overwrite a single slot, and one of the
-        # two would end the run without its final state ever mirrored.
+        # Folded frames withheld by the throttle, one slot per bar (interleaved bars keep their own).
         self._mirror_pending: dict[str, str] = {}
 
     def __enter__(self):
@@ -172,9 +169,7 @@ class MinimalLog:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # A run's last writes are often throttled frames: emitted here, so the sink ends on the bar's
-        # final state. flush() cannot carry this: the bars flush after every frame, which would empty
-        # the throttle each time.
+        # The throttled frames are emitted here, so the sink ends on the bar's final state.
         self._mirror_emit_pending()
         sys.stdout = self._stdout_bak
         sys.stderr = self._stderr_bak
@@ -183,8 +178,7 @@ class MinimalLog:
         if not msg:
             return
         msg_clean = ANSI_ESCAPE_RE.sub("", msg)
-        # A CRLF line ending is not a redraw: "warning\r\n" folds to the text after its last \r,
-        # which is nothing, and the message would vanish from the mirror and the log file both.
+        # A CRLF line ending is not a redraw.
         redraw = "\r" in msg_clean.replace("\r\n", "\n") or "[A" in msg
         if redraw:
             self._buffered_line = msg_clean.split("\r")[-1].strip()
@@ -195,10 +189,8 @@ class MinimalLog:
             self._mirror(msg, redraw)
 
     def _mirror(self, msg: str, redraw: bool) -> None:
-        # A terminal overwrites a redrawn bar; a file appends every frame, so a mirrored animation is
-        # megabytes per run in an MCP job log or a slurm-*.out. Off a terminal the mirror sends the
-        # folded line instead, throttled (a log tail still shows live progress), and a skipped frame
-        # is kept pending so a bar's final state lands before whatever message follows it.
+        # Off a terminal the mirror sends the folded line instead of every frame, throttled; a skipped
+        # frame is kept pending so a bar's final state lands before whatever message follows it.
         if not self._mirror_is_tty:
             if redraw:
                 now = time.monotonic()
@@ -210,9 +202,7 @@ class MinimalLog:
                 msg = f"{held}{self._buffered_line}\n"
             else:
                 msg = f"{self._mirror_take_pending()}{msg}"
-        # Best-effort: if the mirror's reader is gone (an interactive launcher exited, a server
-        # restarted), the pipe is broken: keep running and keep writing to the log file rather than
-        # crashing the job.
+        # Best-effort: a broken pipe (the mirror's reader is gone) never stops the job.
         try:
             self._stdout_bak.write(msg)
             self._stdout_bak.flush()
@@ -261,8 +251,7 @@ class Log(MinimalLog):
             path = transforms_directory()
         else:
             path = statistics_directory()
-        # ``name`` is train_name from the config; an absolute path or '..' segments would place the logs
-        # outside the run's output directory. A nested run name stays inside and is fine.
+        # ``name`` is train_name from the config; it must stay inside the run's output directory.
         self.log_path = path / name
         if not self.log_path.resolve().is_relative_to(path.resolve()):
             raise ConfigError(
@@ -270,8 +259,7 @@ class Log(MinimalLog):
                 "Use a plain run name, without an absolute path or '..' segments.",
             )
         self.log_path.mkdir(parents=True, exist_ok=True)
-        # Append, never truncate: this file is opened BEFORE the overwrite prompt runs, so a "w" mode
-        # destroyed the previous run's log even when the user declined the overwrite.
+        # Append, never truncate: this file is opened before the overwrite prompt runs.
         self.file = open(self.log_path / f"log_{rank}.txt", "a", buffering=1)
         self._last_logged: str | None = None
 
@@ -286,10 +274,7 @@ class Log(MinimalLog):
 
     def write(self, msg: str):
         super().write(msg)
-        # Consecutive identical lines are one fact said twice: a progress bar arrives as several
-        # write() calls per frame and a case line rides beside its own counter frame, which would
-        # multiply the file by ~4x against the console. Only CONSECUTIVE repeats fold: a fact that
-        # genuinely recurs later still lands.
+        # Only consecutive repeats fold (a progress bar arrives as several write() calls per frame).
         if self._buffered_line and self._buffered_line != self._last_logged:
             self._last_logged = self._buffered_line
             self.file.write(self._buffered_line + "\n")
@@ -301,12 +286,8 @@ class Log(MinimalLog):
 
 
 def record(message: str) -> Path | None:
-    """Keep ``message`` in the run's log without printing it, and answer where it went.
-
-    For detail that belongs beside the run but not on a console every other workflow keeps to a
-    progress bar (the TRANSFORM plan). Answers None when no ``Log`` is installed, which is every
-    context that has no run directory to keep it in.
-    """
+    """Keep ``message`` in the run's log without printing it, and answer where it went. Answers None
+    when no ``Log`` is installed."""
     sink = sys.stdout
     if not isinstance(sink, Log):
         return None

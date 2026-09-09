@@ -52,17 +52,13 @@ from konfai.utils.utils import split_path_spec
 
 
 class CriterionsLoader:
-    """
-    Loader for multiple criterion modules to be applied between a model output and one or more targets.
+    """Loader for the criterion modules applied between a model output and one or more targets.
 
-    Each loss module (e.g., Dice, CrossEntropy, NCC) is dynamically loaded using its fully-qualified
-    classpath. Evaluation criteria carry no per-criterion attributes, so the config value bound to each
-    classpath is an unused placeholder (``None``).
+    Evaluation criteria carry no per-criterion attributes: the value bound to each classpath is an
+    unused placeholder (``None``).
 
     Args:
-        criterions_loader (dict): A mapping from module classpaths (as strings) to placeholder values.
-                                  The module path is parsed and instantiated via `get_module`.
-
+        criterions_loader (dict): Mapping from module classpaths to placeholder values.
     """
 
     def __init__(
@@ -83,16 +79,10 @@ class CriterionsLoader:
 
 
 class TargetCriterionsLoader:
-    """
-    Loader class for handling multiple target groups with associated criterion configurations.
-
-    This class allows defining a set of criterion loaders (e.g., Dice, BCE, MSE) for each
-    target group to be used during evaluation or training. Each target group corresponds
-    to one or more loss functions, all linked to a specific model output.
+    """Loader for the criterion configurations of several target groups, all linked to one model output.
 
     Args:
-        targets_criterions (dict[str, CriterionsLoader]): Dictionary mapping each target group name
-            to a `CriterionsLoader` instance that defines its associated loss functions.
+        targets_criterions (dict[str, CriterionsLoader]): Each target group name to its `CriterionsLoader`.
     """
 
     def __init__(
@@ -102,18 +92,13 @@ class TargetCriterionsLoader:
         self.targets_criterions = targets_criterions
 
     def get_targets_criterions(self, output_group: str) -> dict[str, dict[Criterion, Any]]:
-        """
-        Retrieve the criterion modules and their attributes for a specific output group.
-
-        This function prepares the loss functions to be applied for a given model output,
-        grouped by their target group.
+        """The criterion modules and their placeholders for one output group, keyed by target group.
 
         Args:
             output_group (str): Name of the model output group (e.g., "output_segmentation").
 
         Returns:
-            dict[str, dict[nn.Module, Any]]: A nested dictionary where the first key is the
-            target group name, and the value is a dictionary mapping each loss module to its placeholder.
+            dict[str, dict[nn.Module, Any]]: target group name -> {loss module: placeholder}.
         """
         targets_criterions = {}
         for target_group, criterions_loader in self.targets_criterions.items():
@@ -122,38 +107,29 @@ class TargetCriterionsLoader:
 
 
 class Statistics:
-    """
-    Utility class to accumulate, structure, and write evaluation metric results.
-
-    This class is used to:
-    - Collect metrics for each dataset sample.
-    - Compute aggregate statistics (mean, std, percentiles, etc.).
-    - Export all results in a structured JSON format, including both per-case and aggregate values.
+    """Accumulate per-case metric values, compute aggregates and write both as one JSON report.
 
     Args:
-        filename (str): Path to the output JSON file that will store the final results.
+        filename (str): Path to the output JSON file.
     """
 
     def __init__(self, filename: Path) -> None:
         self.measures: dict[str, dict[str, float]] = {}
         self.filename = filename
-        # Per-metric optimisation direction ("max"/"min"), declared by each criterion's `maximize`
-        # property, so downstream ranking (the MCP leaderboard) reads it instead of guessing from names.
+        # Per-metric optimisation direction ("max"/"min"), from each criterion's `maximize` property.
         self.directions: dict[str, str] = {}
         self._incremental_path: Path | None = None
 
     def open_incremental(self, path: Path) -> None:
-        """Append every case recorded from now on to ``path``, one JSON object per line, as it
-        completes: what a crash keeps, and what a rerun reads back to skip the already-scored."""
+        """Append every case recorded from now on to ``path``, one JSON object per line, as it completes."""
         self._incremental_path = path
 
     def add(self, values: dict[str, float], name_dataset: str) -> None:
-        """
-        Add a set of metric values for a given dataset case.
+        """Add the metric values of one dataset case.
 
         Args:
-            values (dict): Dictionary of metric names and their values.
-            name_dataset (str): Identifier (e.g., case name) for the sample.
+            values (dict): Metric names to values.
+            name_dataset (str): Case identifier.
         """
         for name, value in values.items():
             if name_dataset not in self.measures:
@@ -166,9 +142,8 @@ class Statistics:
 
     @staticmethod
     def load_incremental(paths: list[Path]) -> dict[str, dict[str, float]]:
-        """The cases the given JSONL files hold, last row per name winning; a truncated tail line
-        (a kill mid-append) is dropped, never an error. ``null`` reads back as the NaN it stood for.
-        """
+        """The cases the JSONL files hold, last row per name winning; a truncated tail line is dropped,
+        never an error. ``null`` reads back as NaN."""
         rows: dict[str, dict[str, float]] = {}
         for path in paths:
             try:
@@ -209,11 +184,7 @@ class Statistics:
 
     @staticmethod
     def _to_serializable(obj: Any) -> Any:
-        """
-        Recursively replace non-finite floating-point values with ``None``.
-
-        NaN and ±Infinity have no representation in standard JSON. Converting them
-        to ``null`` keeps the serialized report parseable by strict JSON readers.
+        """Recursively replace non-finite floats with ``None``: NaN and infinities have no JSON representation.
 
         Args:
             obj: Any structure (dict, list, scalar) to normalize.
@@ -230,12 +201,8 @@ class Statistics:
         return obj
 
     def write(self, outputs: list[dict[str, dict[str, Any]]]) -> None:
-        """
-        Write the collected and aggregated statistics to the configured output file.
-
-        The output JSON structure contains:
-        - `case`: All individual metrics per sample.
-        - `aggregates`: Global statistics computed over all cases.
+        """Write the collected and aggregated statistics to the configured output file: ``case`` holds
+        the per-sample metrics, ``aggregates`` the global statistics.
 
         Args:
             outputs (list): List of metric dictionaries to merge and serialize.
@@ -243,8 +210,7 @@ class Statistics:
         measures = {}
         for output in outputs:
             measures.update(output)
-        # JSON payload with heterogeneous blocks: "case"/"aggregates" are nested dicts, "directions"
-        # maps metric-name -> "max"/"min".
+        # "case"/"aggregates" are nested dicts, "directions" maps metric name -> "max"/"min".
         result: dict[str, Any] = {}
         result["case"] = {}
         for name, v in measures.items():
@@ -263,7 +229,6 @@ class Statistics:
         for metric_name, values in tmp.items():
             result["aggregates"][metric_name] = Statistics.get_statistic(values)
 
-        # Declare each metric's optimisation direction so consumers rank without guessing.
         directions = {name: self.directions[name] for name in result["aggregates"] if name in self.directions}
         if directions:
             result["directions"] = directions
@@ -284,10 +249,8 @@ class Statistics:
             if mean_value is None:
                 continue
 
-            # A dict-valued metric emits both an aggregate entry
-            # ("output:target:Metric") and one entry per component
-            # ("output:target:Metric:component"); the latter share the aggregate
-            # key as a prefix, so keep only top-level metrics.
+            # A dict-valued metric emits an aggregate entry ("output:target:Metric") and one per
+            # component ("output:target:Metric:component"): keep only the top-level metrics.
             if key.rsplit(":", 1)[0] in aggregates:
                 continue
 
@@ -298,23 +261,18 @@ class Statistics:
 
 @config()
 class Evaluator(DistributedObject):
-    """
-    Distributed evaluation engine for computing metrics on model predictions.
-
-    This class handles the evaluation of predicted outputs using predefined metric loaders.
-    It supports multi-output and multi-target configurations, computes aggregated statistics
-    across training and validation datasets, and synchronizes results across processes.
-
-    Evaluation results are stored in JSON format and optionally displayed during iteration.
+    """Distributed evaluation engine: metrics on model predictions, multi-output and multi-target,
+    aggregated over the training and validation datasets and synchronized across processes. Results
+    are written as JSON.
 
     Args:
-        train_name (str): Unique name of the evaluation run, used for logging and output folders.
-        metrics (dict[str, TargetCriterionsLoader]): Dictionary mapping output groups to loaders of target metrics.
+        train_name (str): Name of the evaluation run, used for logging and output folders.
+        metrics (dict[str, TargetCriterionsLoader]): Output groups to loaders of target metrics.
         dataset (DataMetric): Dataset provider configured for evaluation mode.
 
     Attributes:
-        statistics_train (Statistics): Object used to store training evaluation metrics.
-        statistics_validation (Statistics): Object used to store validation evaluation metrics.
+        statistics_train (Statistics): Training evaluation metrics.
+        statistics_validation (Statistics): Validation evaluation metrics.
         dataloader (list[DataLoader]): DataLoaders for training and validation sets.
         metric_path (str): Path to the evaluation output directory.
         metrics (dict): Instantiated metrics organized by output and target groups.
@@ -335,37 +293,27 @@ class Evaluator(DistributedObject):
         self.metrics = {k: v.get_targets_criterions(k) for k, v in self.metricsLoader.items()}
         self.statistics_train = Statistics(self.metric_path / "Metric_TRAIN.json")
         self.statistics_validation = Statistics(self.metric_path / "Metric_VALIDATION.json")
-        # A memory budget may patch the evaluation, but only when EVERY metric can rebuild its
-        # whole-case value from partial states; one non-reducible metric keeps the whole-volume path
-        # for everything (correct beats bounded). A metric scoring through a window declares the
-        # halo its patches are read with, and the widest one is read for all.
+        # A memory budget patches the evaluation only when EVERY metric can rebuild its whole-case
+        # value from partial states. A windowed metric declares its halo, and the widest one is read for all.
         criterions = [metric for targets in self.metrics.values() for group in targets.values() for metric in group]
         self.dataset.auto_patch_allowed = all(getattr(metric, "reducible", False) for metric in criterions)
         self.dataset.patch_halo = max((int(getattr(metric, "halo", 0)) for metric in criterions), default=0)
         self.dataset.prepare()
         set_per_rank_budget(self.dataset.resolved_budget().per_rank_bytes(node_local_ranks()))
         bound_chunk_cache()
-        # Set iff the budget actually patched: batches then carry one disjoint patch of a case, and
-        # update() accumulates partial states until the case's last patch before recording it.
+        # Set iff the budget patched: batches carry one disjoint patch, accumulated until the case's last.
         self._streamed = self.dataset.patch is not None
-        # The context each patch is read with past its slot, when the grid reads any: a metric that
-        # declared it is handed the read and told where the slot sits, the others the slot alone.
+        # The halo each patch is read with; a metric that declared it is told where the slot sits.
         self._halo = self.dataset.patch.halo if self.dataset.patch is not None else 0
         self._pending: dict[tuple[str, str, int], tuple] = {}
         self._pending_name: str | None = None
         self._last_result: dict[str, float] = {}
-        #: Cases a previous, interrupted run already scored (read back from the per-rank case
-        #: files): their batches are skipped, and their rows still reach the final aggregate.
+        #: Cases an interrupted run already scored: their batches are skipped, their rows reach the aggregate.
         self._scored_names: set[str] = set()
-        # Per-voxel error maps under the patched path: one region-write sink per (metric, case),
-        # opened at the case's first patch, closed when the case flushes. Disjoint unpadded patches
-        # mean every voxel is written exactly once: the streamed map equals the whole-volume one.
+        # Per-voxel error maps under the patched path: one region-write sink per (metric, case).
         self._map_sinks: dict[tuple[str, str, int], DataStream] = {}
         self._iter_dataset: DatasetIter | None = None
-        # Where the metrics run. An evaluation has no model forward, so its tensors arrive from the
-        # DataLoader on CPU and reading the device off them pinned every metric to CPU: including the
-        # ones that own a network (a perceptual metric moves its model to the tensor's device, and a
-        # segmentation metric runs a whole nested inference). `run_process` sets the run's real device.
+        # The metrics' device; tensors arrive from the DataLoader on CPU, `run_process` sets the real device.
         self._device: torch.device | int = torch.device("cpu")
         # Where a split's wall clock goes, one clock per split (see _evaluate_split).
         self._clock = SweepClock()
@@ -392,27 +340,19 @@ class Evaluator(DistributedObject):
             )
 
     def setup(self, world_size: int):
-        """
-        Prepare the evaluator for distributed metric computation.
-
-        This method performs the following steps:
-        - Checks whether previous evaluation results exist and optionally overwrites them.
-        - Creates the output directory and copies the current configuration file for reproducibility.
-        - Loads the evaluation dataset according to the world size.
+        """Prepare the evaluator: check for previous results and overwrite or resume, create the output
+        directory with a copy of the configuration, load the dataset for ``world_size`` processes.
 
         Args:
             world_size (int): Number of processes in the distributed evaluation setup.
-
         """
-        # An interrupted run (case rows on disk, no aggregate yet) resumes: the scored cases are
-        # read back and skipped, so no prompt and no clearing. A COMPLETED run keeps the usual
-        # overwrite confirmation; --overwrite clears everything, case rows included.
+        # An interrupted run (case rows on disk, no aggregate) resumes without a prompt; a completed
+        # run keeps the overwrite confirmation; --overwrite clears everything, case rows included.
         resumable = os.environ.get("KONFAI_OVERWRITE") != "True" and self._is_resumable()
         if not resumable and self.metric_path.exists() and len(list(self.metric_path.rglob("*.yml"))):
             confirm_overwrite_or_raise(self.metric_path, "metric", EvaluatorError)
             if self.metric_path.exists():
-                # This directory holds the rank-0 evaluation log this process already has open:
-                # clear around it instead of rmtree'ing it out from under the live file.
+                # The directory holds the rank-0 log already open: clear around it, not rmtree.
                 clear_directory_except_logs(self.metric_path)
 
         os.makedirs(self.metric_path, exist_ok=True)
@@ -435,16 +375,14 @@ class Evaluator(DistributedObject):
         )
 
     def update(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
-        """
-        Compute metrics for a batch and update running statistics.
+        """Compute the metrics of one batch and update the running statistics.
 
         Args:
-            batch_sample (BatchSample): The batch sample object containing tensors and their metadata.
+            batch_sample (BatchSample): Tensors and their metadata.
             statistics (Statistics): The statistics object to update (train or validation).
 
         Returns:
-            dict[str, float]: Dictionary of computed metric values with keys in the format
-                            'output_group:target_group:MetricName'.
+            dict[str, float]: Metric values keyed 'output_group:target_group:MetricName'.
         """
         if self._streamed:
             return self._update_streamed(batch_sample, statistics)
@@ -502,13 +440,8 @@ class Evaluator(DistributedObject):
         return tensor.to(metric_device, non_blocking=tensor.device.type == "cpu")
 
     def _groups_on(self, batch_sample: BatchSample) -> dict[str, torch.Tensor]:
-        """Every group a metric names, on the metric device, moved once per update.
-
-        A target named by two specs (``CT`` and ``CT;MASK``) or shared by two outputs was uploaded
-        once per spec per case, and per patch on the streamed path. Sharing one copy is safe: a
-        metric never writes into its inputs (a mask multiplies into a new tensor), and the metrics
-        of one spec already read the same tensor.
-        """
+        """Every group a metric names, on the metric device, moved once per update. Sharing one copy is
+        safe: a metric never writes into its inputs."""
         groups = {
             group
             for output_group, targets in self.metrics.items()
@@ -545,12 +478,9 @@ class Evaluator(DistributedObject):
             statistics.directions[base_key] = direction
 
     def _update_streamed(self, batch_sample: BatchSample, statistics: Statistics) -> dict[str, float]:
-        """Accumulate one PATCH's partial states; record the case when its next sibling arrives.
-
-        The evaluation loader walks a case's disjoint patches contiguously (cases shard whole per
-        rank), so a change of case name marks the previous case complete: ``_flush_pending`` at the
-        end of the split closes the last one.
-        """
+        """Accumulate one PATCH's partial states; record the case when its next sibling arrives. Cases
+        shard whole per rank and their patches arrive contiguously, so a change of case name completes
+        the previous one; ``_flush_pending`` closes the split's last case."""
         name = batch_sample[next(iter(self.metrics))].name[0]
         if name in self._scored_names:
             return self._last_result
@@ -610,11 +540,8 @@ class Evaluator(DistributedObject):
         output_group: str,
         patch_map: torch.Tensor,
     ) -> None:
-        """Write one patch's per-voxel map into its case's region-write sink.
-
-        ``partial_map`` is voxel-local, so the patch's map is exactly the region of the whole-case
-        map; the disjoint unpadded evaluation grid writes every voxel once, never twice.
-        """
+        """Write one patch's per-voxel map into its case's region-write sink: ``partial_map`` is
+        voxel-local and the disjoint unpadded grid writes every voxel once."""
         manager = self._manager(output_group, item)
         array = patch_map.numpy()
         sink = self._map_sinks.get(key)
@@ -665,26 +592,14 @@ class Evaluator(DistributedObject):
         self._last_result = result
 
     def run_process(self, world_size: int, global_rank: int, gpu: int, dataloaders: list[DataLoader]):
-        """
-        Execute the distributed evaluation loop over the training and validation datasets.
-
-        This method iterates through the provided DataLoaders (train and optionally validation),
-        updates the metric statistics using the configured `metrics` dictionary, and synchronizes
-        the results across all processes. On the global rank 0, the metrics are saved as JSON files.
-
-        Metrics are displayed in real-time using `tqdm` progress bars, showing a summary of the
-        current batch's computed values.
+        """Run the evaluation loop over the training and validation datasets, synchronize the results
+        across processes and, on rank 0, write the JSON files.
 
         Args:
             world_size (int): Total number of distributed processes.
-            global_rank (int): Global rank of the current process (used for writing results).
+            global_rank (int): Global rank of the current process.
             gpu (int): Local GPU ID used for synchronization.
-            dataloaders (list[DataLoader]): A list containing one or two DataLoaders:
-                - `dataloaders[0]` is used for training evaluation.
-                - `dataloaders[1]` (optional) is used for validation evaluation.
-
-        Notes:
-            - Only the main process (`global_rank == 0`) writes final results to disk.
+            dataloaders (list[DataLoader]): ``[train]`` or ``[train, validation]``.
         """
 
         self._device = get_device(gpu) if len(cuda_visible_devices()) else torch.device("cpu")
@@ -710,10 +625,8 @@ class Evaluator(DistributedObject):
 
         self._iter_dataset = cast(DatasetIter, dataloader.dataset)
         self._clock = SweepClock()
-        # Per-case persistence: what an interrupted run already scored is read back and skipped,
-        # and every case scored from here on is appended to this rank's own case file as it
-        # completes, so a crash at case N-1 of N keeps N-1 cases. The aggregate below is built from
-        # the union.
+        # Cases an interrupted run scored are read back and skipped; each case scored from here on is
+        # appended to this rank's own case file. The aggregate is built from the union.
         scored = Statistics.load_incremental(self._incremental_case_files(statistics))
         self._scored_names = set(scored)
         if scored:
@@ -740,8 +653,7 @@ class Evaluator(DistributedObject):
                 with self._clock.phase("flush"):
                     self._flush_pending(statistics)  # close the split's last case
         except BaseException as error:
-            # A half-written error map must not survive as a valid-looking file: abort the open
-            # region-write sinks so their backends remove the partial entries, then re-raise.
+            # Abort the open region-write sinks so their backends remove the partial entries, then re-raise.
             self._abort_map_sinks(error)
             raise
         if global_rank == 0:
@@ -753,13 +665,9 @@ class Evaluator(DistributedObject):
             statistics.write(outputs)
 
     def _clock_report(self, label: str, min_seconds: float = 1.0) -> str | None:
-        """One line accounting for a split's wall clock, or ``None`` below ``min_seconds``.
-
-        The phases: the wait for the loader's next batch, the move to the metric device, one per
-        metric name, the map writes and the streamed flushes; ``other`` is what none of them names.
-        On a GPU a metric's phase is its enqueue time, not its run: no synchronize is added for the
-        report's sake, so a slow kernel shows up in whatever next waits on the device.
-        """
+        """One line accounting for a split's wall clock, or ``None`` below ``min_seconds``: the wait for
+        the loader, the move to the metric device, one phase per metric name, the map writes and the
+        streamed flushes; ``other`` is what none of them names. On a GPU a metric's phase is its enqueue."""
         wall = self._clock.spent("split")
         if wall < min_seconds:
             return None
@@ -782,8 +690,7 @@ def build_evaluate(
     evaluations_file: Path | str | dict = Path("./Evaluation.yml"),
     evaluations_dir: Path | str = Path("./Evaluations"),
 ) -> DistributedObject:
-    """
-    Build and return the configured evaluation workflow without executing it.
+    """Build and return the configured evaluation workflow without executing it.
 
     Parameters
     ----------
@@ -795,7 +702,7 @@ def build_evaluate(
     Returns
     -------
     DistributedObject
-        Configured evaluator object ready to be executed by the runtime wrapper.
+        Configured evaluator, executed by the runtime wrapper.
     """
     configure_workflow_environment(
         config_path=evaluations_file,
@@ -818,12 +725,10 @@ def evaluate(
     evaluations_file: Path | str | dict = Path("./Evaluation.yml"),
     evaluations_dir: Path | str = Path("./Evaluations"),
 ) -> DistributedObject:
-    """
-    Build and execute the configured evaluation workflow.
+    """Build and execute the configured evaluation workflow.
 
-    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
-    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
-    The pure build step is :func:`build_evaluate`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are read by :func:`run_distributed_app`
+    from the bound signature; the body drops them. The pure build step is :func:`build_evaluate`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_evaluate(

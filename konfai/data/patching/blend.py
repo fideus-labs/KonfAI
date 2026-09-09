@@ -41,16 +41,9 @@ class PathCombine(ABC):
         overlaps = [overlap] * len(patch_size) if isinstance(overlap, int) else list(overlap)
         self.overlap = max(overlaps)
         self.overlaps = overlaps
-        # The per-patch weight is the outer product of one 1-D window per axis. It is separable by
-        # construction, so a per-axis partition of unity stays a partition of unity in N-D and overlapping
-        # patches blend without darkening: no distance map or explicit renormalisation loop is needed, and
-        # the trailing normalisation in Accumulator.assemble stays exact at the volume borders.
-        # Each axis tapers over its own overlap, so anisotropic overlaps blend correctly per axis.
-        #
-        # The factors are kept, not just their product: Accumulator normalises by a per-axis sum rather
-        # than a volume-sized buffer (see _weight_factors). Stored rather than re-derived, because the
-        # all-flat case below never calls _window_1d: re-deriving would turn its uniform count into a
-        # tapered weighting.
+        # The per-patch weight is the outer product of one 1-D window per axis, each axis tapering over its
+        # own overlap. The factors are kept: Accumulator normalises by a per-axis sum (_weight_factors),
+        # and the all-flat case below never calls _window_1d.
         if all(o <= 0 for o in overlaps):
             self.windows_1d = [torch.ones(size) for size in patch_size]
             return
@@ -63,10 +56,8 @@ class PathCombine(ABC):
     def data(self) -> torch.Tensor:
         """The per-voxel window: the outer product of the per-axis factors.
 
-        Derived, not stored: it is a patch of floats that ``Network.init`` builds before the spawn and
-        every rank then unpickles (a 128^3 ModelPatch at overlap 16 pickles to 8 391 775 bytes with it,
-        1355 without), while assembly goes through the factors themselves (see ``_weight_factors``).
-        :meth:`weight` caches what it builds per device and dtype.
+        Derived, not stored: the object is pickled to every rank, and assembly goes through the factors
+        themselves (``_weight_factors``). :meth:`weight` caches what it builds per device and dtype.
         """
         data = self.windows_1d[0]
         for window in self.windows_1d[1:]:
@@ -77,8 +68,8 @@ class PathCombine(ABC):
     def selects(self) -> bool:
         """Whether the window picks ONE patch per voxel (values 0 or 1) rather than weighting several.
 
-        A selection makes the kept regions a partition of the volume, so assembly writes each one
-        instead of accumulating a weighted sum: see Accumulator._blend.
+        A selection is a partition of the volume: assembly writes each region instead of accumulating
+        a weighted sum (``Accumulator._blend``).
         """
         return False
 
@@ -92,22 +83,17 @@ class PathCombine(ABC):
         return self.windows_1d[dim]
 
     def weight(self, tensor: torch.Tensor) -> torch.Tensor:
-        """The raw per-voxel window on ``tensor``'s device and dtype (cached per pair).
+        """The raw per-voxel window on ``tensor``'s device and dtype (cached per pair), unnormalised.
 
-        The window UNNORMALISED, as declared. Assembly does not go through it: Accumulator divides each
-        window by the total over the patches covering a voxel and applies that share instead, so the
-        quantity it multiplies by is always in [0, 1]. This stays for a caller that wants the window
-        itself.
+        Assembly does not go through it: Accumulator divides each window by the total over the patches
+        covering a voxel, so what it multiplies by is always in [0, 1].
         """
         key = (tensor.device, tensor.dtype)
         if key not in self._data_per_device:
-            # Match the tensor dtype: the weight has no reason to carry more precision than the data it
-            # scales, and a float64 weight would upcast the whole (channels x volume) blend.
+            # Match the tensor dtype: a float64 weight would upcast the whole blend.
             weight = self.data.to(device=tensor.device, dtype=tensor.dtype)
             if weight.is_floating_point():
-                # A Gaussian tail underflows the target dtype (a 96^3 patch corner is ~6e-11: zero in
-                # fp16). Floor it at the smallest normal so a caller scaling by this window on its own
-                # does not silently drop those voxels.
+                # A Gaussian tail underflows fp16 (a 96^3 patch corner is ~6e-11): floor at the smallest normal.
                 weight = weight.clamp(min=torch.finfo(weight.dtype).tiny)
             self._data_per_device[key] = weight
         return self._data_per_device[key]
@@ -124,9 +110,7 @@ def blend_axes(patch_size: list[int]) -> list[int]:
     """The blend window's axes for a ``patch_size``: every axis kept, a free (0) or singleton (1) axis
     as a single broadcast entry.
 
-    ``Accumulator`` reads one window per spatial axis of the volume, and the window has to broadcast
-    against the patch at any axis position. Dropping the untiled axes shortens the list, so the
-    window is looked up on the wrong axis (or not at all).
+    ``Accumulator`` reads one window per spatial axis of the volume, so the list must not drop an axis.
     """
     return [size if size > 1 else 1 for size in patch_size]
 
@@ -134,8 +118,7 @@ def blend_axes(patch_size: list[int]) -> list[int]:
 def blend_overlap(overlap: "int | float | str | list[int | float | str]", patch_size: list[int]) -> list[int]:
     """Per-axis blend overlap for a concrete ``patch_size`` (int broadcast, ``%``/fraction resolved).
 
-    The blend has no volume extent: every axis whose patch is longer than one voxel is treated as tiled
-    (the untiled-axis-0 rule is already applied by the slicing plan), so an int is the same voxel
+    Every axis whose patch is longer than one voxel is treated as tiled, so an int is the same voxel
     overlap on every such axis.
     """
     if isinstance(overlap, int):
@@ -161,8 +144,7 @@ class Cosinus(PathCombine):
     def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
         window = torch.ones(size)
         # sin**2 ramp over the overlap; the neighbouring patch's cos**2 ramp is its complement, so the two
-        # sum to exactly one across the overlap. The +0.5 phase keeps the very edge > 0 so a single-patch
-        # border, whose share is then the whole of the weight there, recovers the raw value.
+        # sum to one. The +0.5 phase keeps the very edge > 0.
         ramp = torch.sin((torch.arange(overlap, dtype=torch.float32) + 0.5) / overlap * (torch.pi / 2)) ** 2
         window[:overlap] = ramp
         window[size - overlap :] = ramp.flip(0)
@@ -173,13 +155,9 @@ class Trim(PathCombine):
     """Selection instead of weighting: each voxel comes from the patch that holds it most centrally.
 
     An interior patch keeps its central ``patch - overlap`` band, so the kept bands tile the axis
-    exactly and the weights already sum to one; the first and last patch of an axis open to the volume
-    edge. Every kept voxel therefore carries at least half the overlap of context on each side, where
-    the unweighted default keeps whichever patch wrote last: possibly one holding that voxel on its
-    own border with no context behind it, which is what a seam is.
-
-    The values are 0 or 1, so the patch is selected rather than averaged: a discrete output (a label
-    map, an argmax) survives reassembly, where any weighting would invent values between its classes.
+    exactly; the first and last patch of an axis open to the volume edge. The values are 0 or 1, so
+    the patch is selected rather than averaged: a discrete output (a label map, an argmax) survives
+    reassembly.
     """
 
     @property
@@ -188,9 +166,7 @@ class Trim(PathCombine):
 
     def _window_1d(self, size: int, overlap: int) -> torch.Tensor:
         if overlap >= size:
-            # Nothing central left to keep: trimming both sides would leave an empty band, and a patch
-            # that keeps nothing has no box to write. Keep the patch whole instead: the axis stops
-            # being a partition and falls back to last-write-wins on it, which is what it was before.
+            # Nothing central left to keep: the patch stays whole and the axis falls back to last-write-wins.
             return torch.ones(size)
         window = torch.zeros(size)
         # Split an odd overlap so consecutive kept bands abut: k*stride + hi == (k+1)*stride + lo.
@@ -213,9 +189,7 @@ class Trim(PathCombine):
 class Gaussian(PathCombine):
     """nnU-Net-style Gaussian importance weighting.
 
-    Favours patch centres (where the model sees the most surrounding context), and down-weights the
-    borders, which suppresses seam artefacts. Not a partition of unity: the accumulator blends each
-    patch in with its share of the total weight, so overlapping patches still form a weighted average.
+    Not a partition of unity: the accumulator blends each patch in with its share of the total weight.
     """
 
     def __init__(self, sigma_scale: float = 0.125) -> None:

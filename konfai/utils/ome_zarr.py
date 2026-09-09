@@ -16,18 +16,13 @@
 
 """OME-Zarr (OME-NGFF) read/write backend for KonfAI, built on ``ngff-zarr``.
 
-This module is a thin adapter: ``ngff-zarr`` owns all OME-NGFF metadata parsing,
-multiscale handling, and (de)serialisation: KonfAI does not re-implement the
-spec. We only
+``ngff-zarr`` owns all OME-NGFF metadata parsing, multiscale handling and (de)serialisation. This
+module maps between KonfAI's channel-first ``C[Z]YX`` arrays / ``(x, y, z)`` geometry and
+ngff-zarr's ``NgffImage`` (axis-named ``scale``/``translation``), and round-trips the ``Attribute``
+sidecar (the ``Direction`` matrix included, which OME-NGFF cannot express) through a single
+``konfai`` root attribute.
 
-1. map between KonfAI's channel-first ``C[Z]YX`` arrays / ``(x, y, z)`` geometry
-   and ngff-zarr's ``NgffImage`` (axis-named ``scale``/``translation``), and
-2. round-trip KonfAI's full ``Attribute`` sidecar (including the ``Direction``
-   matrix, which OME-NGFF cannot express) through a single ``konfai`` root
-   attribute, carried by ngff-zarr beside the OME metadata.
-
-Reads are lazy: ``ngff-zarr`` exposes the array as a chunked store, so slicing
-only materialises the requested patch.
+Reads are lazy: the array is a chunked store, so slicing only materialises the requested patch.
 
 Optional dependencies: ``zarr`` + ``ngff-zarr`` (``pip install konfai[omezarr]``).
 """
@@ -61,8 +56,7 @@ except ImportError:
     _ZARR_AVAILABLE = False
 
 try:
-    # dask sits under the same guard because it is ngff-zarr's own hard dependency: the two are
-    # present or absent together, and dask.array is used only to describe a store to ngff-zarr.
+    # dask is ngff-zarr's own hard dependency, and dask.array only describes a store to ngff-zarr.
     import dask.array
     import ngff_zarr  # type: ignore[import-untyped]
 
@@ -88,34 +82,23 @@ def _native_dtype(dtype: np.dtype) -> np.dtype:
 def _native_byteorder(array: np.ndarray) -> np.ndarray:
     """The same samples in the machine's own byte order.
 
-    A store may hold big-endian samples (some acquisition software writes them, and zarr keeps the
-    dtype it was given), and a non-native array poisons everything downstream in two different ways.
-    ``torch.from_numpy`` refuses it outright ("given numpy array has byte order different from the
-    native byte order"), which is the loud half. The quiet half is numpy: the flag rides along
-    through slicing and arithmetic, so a value read here compares and writes correctly while any
-    consumer that reinterprets the buffer (a raw ``.tobytes()``, a memory-mapped write, a C
-    extension taking a pointer) sees the bytes swapped. Normalising once at the read boundary is
-    what every caller would otherwise have to remember to do by hand.
+    ``torch.from_numpy`` refuses a non-native array, and a consumer that reinterprets the buffer of
+    one numpy still accepts sees the bytes swapped. Normalised once at the read boundary.
     """
     return array.astype(_native_dtype(array.dtype), copy=False)
 
 
-# NGFF RFC-5 types the component axis of a vector field, so a displacement field says what it is on
-# disk. Those types only exist from NGFF 0.6 (zarr v3); 0.4 (zarr v2 layout) stays the default
-# everywhere else, being the version external OME-Zarr readers most widely accept.
+# NGFF RFC-5 types the component axis of a vector field. Those types exist only from NGFF 0.6
+# (zarr v3); 0.4 (zarr v2 layout) stays the default, being what external readers most widely accept.
 _DISPLACEMENT_AXIS_TYPE = "displacement"
 
-# EVERY field store holds its components in the spec's order -- the OUTPUT axes' (dz, dy, dx for a
-# zyx store) -- there is no second layout. KonfAI's own convention stays ITK's (dx, dy, dz)
-# everywhere in memory; the two orders meet only at this backend's read/write boundary, where the
-# components are flipped. An axis-aligned grid is additionally declared a ``displacements``
-# transformation mapping the physical coordinate system onto itself through the level-0 array,
-# which is what makes it APPLICABLE by a spec reader rather than merely labelled; a grid carrying
-# a rotation cannot be declared (RFC-5 maps a field's array to space by scale and translation
-# alone) and keeps only the typed axis, its Direction in the sidecar, the marker below saying how
-# its components are ordered. A typed store with NEITHER the entry NOR the marker is a pre-1.9
-# layout whose components are ITK-ordered: reading it under one convention or the other would be a
-# guess with a plausible registration either way, so it is refused by name.
+# Every field store holds its components in the spec's order, the output axes' (dz, dy, dx for a zyx
+# store); KonfAI's own convention is ITK's (dx, dy, dz) in memory, and the two meet only at this
+# backend's read/write boundary. An axis-aligned grid is additionally declared a ``displacements``
+# transformation mapping the physical coordinate system onto itself through the level-0 array, which
+# makes it applicable by a spec reader; a rotated grid cannot be declared (RFC-5 maps a field to
+# space by scale and translation alone) and keeps only the typed axis, its Direction in the sidecar
+# and the marker below. A typed store carrying neither the entry nor the marker is refused by name.
 _PHYSICAL_CS = "physical"
 _FIELD_COMPONENTS_KEY = "field_components"
 _FIELD_COMPONENTS = "output-axes"
@@ -124,16 +107,13 @@ _RFC5_VERSION = "0.6"
 _DEFAULT_VERSION = "0.4"
 
 #: How a chunk is sized, whether the store is created from a shape alone or from the region shape a
-#: streamed writer declares (:func:`konfai.utils.dataset._store_chunks`). One rule, two callers: a
-#: chunk is the unit a reader decompresses to reach one voxel, so an oversized one is paid by every
-#: partial read forever, and by any consumer that is not KonfAI.
+#: streamed writer declares (:func:`konfai.utils.dataset._store_chunks`). A chunk is the unit a
+#: reader decompresses to reach one voxel, so an oversized one is paid by every partial read.
 CHUNK_SPATIAL_TILE = 128
 CHUNK_TARGET_BYTES = 32 << 20
 
-#: zarr v2 stores keep byte-shuffled blosc-lz4 (what every 1.8.2 store carries) rather than the
-#: zarrista writer's zstd-0 default: measured on a CT-like uint16 volume, zstd-0 costs +19 % disk
-#: and ~+11 % on the streamed read sweep, because without the shuffle a uint16's high bytes break
-#: every run the compressor could fold.
+#: zarr v2 stores keep byte-shuffled blosc-lz4 rather than the zarrista writer's zstd-0 default:
+#: measured on a CT-like uint16 volume, zstd-0 costs +19 % disk and ~+11 % on the streamed read.
 _V2_COMPRESSOR = {"id": "blosc", "cname": "lz4", "clevel": 5, "shuffle": 1, "blocksize": 0}
 
 
@@ -155,10 +135,8 @@ def _require_ngff_zarr() -> None:
 
 
 def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
-    """KonfAI's proprietary ``Attribute`` sidecar: the ``konfai`` key ngff-zarr carries back beside
-    the OME metadata. A copy of a memoised parse: it is metadata, and a streamed run asks for it
-    once per region.
-    """
+    """KonfAI's ``Attribute`` sidecar: the ``konfai`` key ngff-zarr carries beside the OME metadata.
+    A copy of a memoised parse."""
     try:
         root = _multiscales(str(store_path)).root_attributes or {}
     except Exception:
@@ -168,12 +146,10 @@ def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
 
 def _from_ngff_zarr(store_path: str | Path) -> Any:
     """ngff-zarr's multiscales for ``store_path``. A remote root goes in as a key-to-bytes mapping
-    over its own filesystem (ngff-zarr >= 0.44 reads a remote string as a local path) and as its URL
-    when ngff-zarr refuses the mapping, which older releases resolve themselves."""
+    over its own filesystem, and as its URL when ngff-zarr refuses the mapping."""
     if not uri.is_uri(store_path):
         return ngff_zarr.from_ngff_zarr(str(store_path))
-    # Through uri.filesystem, so a missing fsspec backend or configuration is the structured
-    # DatasetManagerError, never a raw dependency error.
+    # Through uri.filesystem, so a missing fsspec backend is a structured DatasetManagerError.
     filesystem = uri.filesystem(store_path)
     _, target = uri.split_scheme(str(store_path))
     try:
@@ -184,14 +160,9 @@ def _from_ngff_zarr(store_path: str | Path) -> Any:
 
 @lru_cache(maxsize=8)
 def _multiscales(store_path: str) -> Any:
-    """ngff-zarr's multiscales for a store, memoised per path: the images, their metadata, and the
-    root attributes beside them, all from one parse.
-
-    A streamed run reads one patch per call, and re-parsing the NGFF metadata and rebuilding the
-    lazy array graph per patch is pure per-read overhead: the object is lazy (no voxel data), so a
-    handful of them is cheap to keep. The key is the path alone, so anything that puts a different
-    store at a path already read must call ``clear_ome_zarr_cache()``: see there.
-    """
+    """ngff-zarr's multiscales for a store, memoised per path: the images, their metadata and the
+    root attributes, all from one parse. The key is the path alone, so anything that puts a
+    different store at a path already read must call ``clear_ome_zarr_cache()``."""
     _require_ngff_zarr()
     return _from_ngff_zarr(store_path)
 
@@ -199,11 +170,8 @@ def _multiscales(store_path: str) -> Any:
 def _load_image(store_path: str, level: int) -> Any:
     """Return the ``NgffImage`` for ``level`` of an OME-Zarr store, off the memoised parse.
 
-    ``@N`` selects among the levels a store offers, so a single-level store has nothing to select: its
-    one level is read whatever ``N`` says (as every other backend does: ``SitkFile`` ignores
-    ``self.level`` too). Out of range on a store that IS a pyramid stays an error: asking level 3 of a
-    three-level mask beside a four-level image is a real mismatch (it silently pairs 160 µm against
-    320 µm), and quietly falling back to level 0 would hide it.
+    A single-level store has nothing to select: its one level is read whatever ``N`` says. Out of
+    range on a store that IS a pyramid is an error.
     """
     try:
         multiscales = _multiscales(store_path)
@@ -215,9 +183,7 @@ def _load_image(store_path: str, level: int) -> Any:
     if len(multiscales.images) == 1:
         return multiscales.images[0]
     if not 0 <= level < len(multiscales.images):
-        # Its own message: the store is fine, the LEVEL is not. Reporting an out-of-range level as
-        # "not a valid OME-NGFF store" sends the reader to inspect a store that has nothing wrong
-        # with it: the mismatch is in what was asked of it.
+        # Its own message: the store is fine, the LEVEL is not.
         raise DatasetManagerError(
             f"OME-Zarr store '{store_path}' has {len(multiscales.images)} level(s); level {level} is out of range.",
             f"Ask for a level in 0..{len(multiscales.images) - 1} (0 is the finest).",
@@ -228,11 +194,9 @@ def _load_image(store_path: str, level: int) -> Any:
 def store_identity(store_path: str | Path) -> str:
     """The string a store is keyed by, wherever it is named.
 
-    A reader keys its decoded chunks by the path it was handed, which
-    :meth:`~konfai.utils.dataset.OmeZarrFile._path` builds with ``uri.join``, on forward slashes
-    whatever the platform. A writer names the same store with a ``Path``, and on Windows
-    ``str(Path)`` is backslashed, so the two spellings would not meet and a replaced store would keep
-    serving the chunks of the store it replaced. One spelling, taken here.
+    A reader keys its decoded chunks by the forward-slashed path
+    :meth:`~konfai.utils.dataset.OmeZarrFile._path` builds; a writer names the same store with a
+    ``Path``, backslashed on Windows. One spelling, taken here.
     """
     return str(store_path).replace("\\", "/")
 
@@ -240,14 +204,9 @@ def store_identity(store_path: str | Path) -> str:
 def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     """Forget the memoised NGFF images, so a store replaced on disk is parsed afresh.
 
-    A named store forgets its own decoded chunks and read schedule and no one else's: an output
-    store is created per case, and the inputs' chunks are what the next case reads. The metadata
-    memos are cleared whatever the caller names, being one parse each to rebuild.
-
-    The write paths here call it for their own output. Anything that materialises a store by other
-    means (copying one over another, say) has to call it too: the memo is keyed on the path, and
-    a hit serves the previous store's axes and geometry against the new store's voxels. That reads as
-    a shape mismatch when the two differ, and as nothing at all when they do not.
+    A named store forgets its own decoded chunks and read schedule and no one else's; the metadata
+    memos are cleared whatever the caller names. Anything that materialises a store by other means
+    (copying one over another) has to call it too: a hit serves the previous store's geometry.
     """
     _multiscales.cache_clear()
     _level_array.cache_clear()
@@ -258,20 +217,15 @@ def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
 def is_displacement_field(store_path: str | Path) -> bool:
     """Whether the store declares its component axis as an NGFF RFC-5 displacement field.
 
-    This is what lets a DVF be read back as a transform rather than as a 3-channel image, and it is
-    read from the store itself: the producer does not have to be trusted, and no sidecar convention
-    (a filename, an attribute) has to be agreed on separately.
-
-    A store that predates RFC-5 simply answers False: an unreadable or absent store is not a
-    displacement field either, so this never raises.
+    This is what lets a DVF be read back as a transform rather than as a 3-channel image. A store
+    that predates RFC-5, or one that cannot be read, answers False; this never raises.
     """
     if not _NGFF_ZARR_AVAILABLE:
         return False
     try:
         image = _multiscales(str(store_path)).images[0]
     except Exception:
-        # "Not a displacement field" is the only answer this owes: it is asked purely to decide HOW to
-        # read an entry, and an absent or unreadable store is not one either.
+        # An absent or unreadable store is not a displacement field either.
         return False
     return _has_displacement_axis(image)
 
@@ -284,11 +238,8 @@ def _has_displacement_axis(image: Any) -> bool:
 def _component_flip(store_path: str) -> bool:
     """Whether the store holds its components in the spec's order, to flip back to ITK's on read.
 
-    Every field store this backend writes does -- marked by the ``displacements`` entry when the
-    grid could be declared, by the sidecar's ``field_components`` when it could not. A store that
-    types its axis and carries neither is a pre-1.9 layout whose components are ITK-ordered, and it
-    is refused rather than read: under either convention the guess yields a plausible field with
-    dx and dz possibly exchanged, which is the silent kind of wrong.
+    Marked by the ``displacements`` entry when the grid could be declared, by the sidecar's
+    ``field_components`` when it could not; a store carrying neither is refused rather than read.
     """
     if not _NGFF_ZARR_AVAILABLE:
         return False
@@ -327,11 +278,7 @@ _NEVER_AGAIN = 1 << 62
 class _ReadSchedule:
     """The chunks each of a caller's declared reads will touch, in the order it will read them.
 
-    LRU is the best a cache can do without the future. With it, the fewest decodes any policy can
-    reach is to evict the chunk whose next use is furthest away. Measured on a 513x1331x1776
-    resample cut into 40 blocks over 126 chunks of source, chunks decoded on the level array: 148
-    under LRU, 138 under this, 126 the floor.
-
+    Evicting the chunk whose next use is furthest away is the fewest decodes any policy can reach.
     Followed only while the reads match what was declared, and abandoned at the first that does
     not: a caller that deviates loses the optimisation, never the answer.
     """
@@ -363,8 +310,7 @@ class _ReadSchedule:
 
     def steps_to_next_use(self, coords: tuple) -> int:
         """How many reads away the next one touching ``coords`` is: 0 while the read touching it is
-        in progress (a chunk of the window being assembled is not the one to evict for the rest of
-        it), ``_NEVER_AGAIN`` when none does."""
+        in progress, ``_NEVER_AGAIN`` when none does."""
         uses = self._uses.get(coords)
         if uses is None:
             return _NEVER_AGAIN
@@ -380,12 +326,10 @@ class _DecodedChunkCache:
     """Decoded chunks of OME-Zarr arrays, kept whole, evicted under a byte cap.
 
     zarr 3 has no chunk cache of its own: every read decodes every chunk it touches, in full, and a
-    streamed run touches the same chunks region after region -- a 31-row slab of a 256-row chunk
-    grid decodes 8x the bytes it keeps, and the next slab decodes the same chunks again (measured:
-    the same 2.1 GB of useful bytes cost 1.9 s in 256-row slabs and 28 s in 6-row slabs). Kept
-    DECODED, so a hit is a memcpy; keyed by (array identity, chunk coordinates), so a store replaced
-    on disk is a new identity and never served stale (see :func:`clear_ome_zarr_cache`). Same
-    bytes, same order: a read through the cache is the read without it.
+    streamed run touches the same chunks region after region. Kept DECODED, so a hit is a memcpy;
+    keyed by (array identity, chunk coordinates), so a store replaced on disk is a new identity and
+    never served stale (see :func:`clear_ome_zarr_cache`). A read through the cache is the read
+    without it.
     """
 
     def __init__(self, capacity_bytes: int) -> None:
@@ -464,12 +408,8 @@ class _DecodedChunkCache:
 
     def _furthest(self) -> tuple:
         """The chunk whose next use is furthest: a declared chunk by its schedule, an undeclared one
-        by its recency, the ``n``-th most recently used taken as ``n`` reads away (the LRU order it
-        competes in: a companion volume read beside a declared source, a mask, has no schedule and
-        is read again at the next region all the same), a declared chunk nothing reads again first
-        of all. The older wins a tie. Measured on a 48-chunk source swept through a rotated resample
-        with a mask on the same grid read beside it, at a cache of 64 chunks: 66 + 66 decodes under
-        LRU, 44 + 66 with the companion ranked never-again, 44 + 44 with it ranked by recency."""
+        by its recency, the ``n``-th most recently used taken as ``n`` reads away, a declared chunk
+        nothing reads again first of all. The older wins a tie."""
         newer = len(self._entries)
         furthest, distance = next(iter(self._entries)), 0
         for key in self._entries:
@@ -488,20 +428,13 @@ class _DecodedChunkCache:
 #: The least the cache is worth: below a chunk or two of a large store, a region touching more
 #: chunks than it holds decodes them again. It is what an undeclared budget's share is raised to; a
 #: declared budget never gives the cache more than its share, and the plan says when that is under
-#: the floor. A cache allowed the floor out of a 128 MiB budget took the budget whole, while the
-#: sweep went on sizing its regions against the same 128 MiB: the run was priced at 2x its budget.
+#: the floor.
 CHUNK_CACHE_FLOOR = 256 << 20
 
 
 def chunk_cache_held_bytes() -> int:
-    """What the decoded-chunk cache holds resident right now, or 0 with no cache.
-
-    For an instrument reading the process's resident memory over one scope of work: the cache
-    outlives that scope by design (it is what a later region asks for again), so what it gained
-    during the scope is not the scope's own cost. A fold's probe region read VmHWM over its ten
-    members and charged the region 24.4 GiB, 13.2 of which was this cache filling from empty --
-    and cut every region after it to 78 % of the height that would have fit.
-    """
+    """What the decoded-chunk cache holds resident right now, or 0 with no cache. The cache outlives
+    the scope an instrument measures, so what it gained there is not that scope's own cost."""
     return _CHUNK_CACHE.held_bytes if _CHUNK_CACHE is not None else 0
 
 
@@ -547,9 +480,8 @@ def _level_array(store_path: str, level_path: str) -> Any:
 def _normalized_selection(index: tuple, shape: Sequence[int]) -> tuple[list[slice], list[int]]:
     """``index`` as one unit-step slice per axis, and the axes an integer selection squeezes out.
 
-    A stepped selection is refused rather than normalised: everything downstream counts the voxels
-    between ``start`` and ``stop``, so a step would size the output wrongly and fill it from the
-    wrong places. Both callers suppress this and fall back to the lazy array, which takes any step.
+    A stepped selection is refused: everything downstream counts the voxels between ``start`` and
+    ``stop``. Both callers suppress this and fall back to the lazy array, which takes any step.
     """
     selections: list[slice] = []
     squeeze: list[int] = []
@@ -580,21 +512,18 @@ def _touched_chunks(selections: Sequence[slice], chunks: Sequence[int]) -> list[
 def _read_chunked(store_path: str, level_path: str, array: Any, index: tuple) -> np.ndarray:
     """``array[index]`` assembled chunk by chunk through the decoded-chunk cache.
 
-    Only integer and slice selections with unit step reach here (the reader normalises to those);
-    each touched chunk is served from the cache or decoded whole and cached, then the requested
-    window is copied out of it. Values are exactly what ``array[index]`` returns.
+    Only integer and slice selections with unit step reach here; each touched chunk is served from
+    the cache or decoded whole and cached. Values are exactly what ``array[index]`` returns.
     """
     cache = _chunk_cache()
     shape, chunks = array.shape, array.chunks
     selections, squeeze = _normalized_selection(index, shape)
     out_shape = tuple(max(0, sel.stop - sel.start) for sel in selections)
-    # In the machine's byte order from the start: a big-endian store is converted by the copy that
-    # assembles the window, where a pass of its own over the result is a second walk of every byte.
+    # In the machine's byte order from the start: the assembling copy converts a big-endian store.
     out = np.empty(out_shape, dtype=_native_dtype(array.dtype))
     identity = (store_identity(store_path), level_path)
     wanted = _touched_chunks(selections, chunks)
-    # Begun before an empty selection returns: plan_ome_zarr_reads declared that read too, and a
-    # schedule that misses one step ranks every later chunk against the wrong read.
+    # Begun before an empty selection returns: plan_ome_zarr_reads declared that read too.
     cache.begin(identity, frozenset(wanted))
     try:
         if wanted:
@@ -633,9 +562,7 @@ def _assemble_window(
     from_hull: dict[tuple, np.ndarray] = {}
     if missing:
         # ONE zarr read for the chunk-aligned hull of what is missing: zarr decodes the chunks of a
-        # single selection in parallel, and one call per chunk would serialise them (measured 1.5x
-        # slower than the plain read on a cold pass). The hull may cover chunks already cached
-        # when the misses are sparse; those are decoded again -- a bounded waste on a rare shape.
+        # single selection in parallel. A hull covering chunks already cached decodes them again.
         lo = [min(c[axis] for c in missing) for axis in range(len(chunks))]
         hi = [max(c[axis] for c in missing) for axis in range(len(chunks))]
         hull = tuple(
@@ -650,16 +577,13 @@ def _assemble_window(
                 for c, lo_, ch, extent in zip(coords, lo, chunks, shape, strict=True)
             )
             if coords in wanted_set:
-                # Served from the hull while it is here: a cache smaller than the hull would evict
-                # the chunk before the read below asks for it, and decode it a second time.
+                # Served from the hull while it is here: a smaller cache would evict it first.
                 from_hull[coords] = decoded[piece]
             if cache.get(key) is None:
-                # A COPY, never a slice of the hull: a contiguous slice stays a view whose parent
-                # allocation the cache would keep alive whole while counting the slice's bytes.
+                # A COPY: a slice would keep the hull's whole allocation alive for its own bytes.
                 cache.put(key, np.array(decoded[piece], dtype=out.dtype, order="C"))
-        # The hull's windows are placed here, before it is released, one per worker (disjoint
-        # destinations, numpy releases the GIL for the copy); the cache is touched for each, in
-        # read order, so its recency is the one a read through the cache would have left.
+        # The hull's windows are placed before it is released, one per worker (disjoint
+        # destinations); the cache is touched for each in read order, leaving the same recency.
         map_over_rank_pool(lambda coords: window_of(coords, from_hull[coords]), list(from_hull))
         placed_from_hull.update(from_hull)
         for coords in wanted:
@@ -676,8 +600,7 @@ def _assemble_window(
             chunk = np.asarray(array[window])
         window_of(coords, chunk)
 
-    # A chunk cached before the fill can lie inside the hull and be evicted by that fill.
-    # It was already placed from the hull too: asking the cache again would decode it twice.
+    # A chunk cached before the fill can lie inside the hull, be evicted by it, and was placed.
     map_over_rank_pool(place, [coords for coords in wanted if coords not in placed_from_hull])
 
 
@@ -709,9 +632,7 @@ def _lazy_window(data: Any, index: tuple) -> np.ndarray:
     try:
         return np.asarray(data[index])
     except NotImplementedError:
-        # Each slice normalized against the shape, then its ascending unit-step span; a negative
-        # step reads that span backwards from its own end, which lands on the indices the original
-        # slice named.
+        # Each slice normalized against the shape, then read over its ascending unit-step span.
         bounds = tuple(
             slice(*item.indices(size)) if isinstance(item, slice) else item
             for item, size in zip(index, data.shape, strict=True)
@@ -744,11 +665,9 @@ def _store_index(
 def ome_zarr_read_granularity(store_path: str | Path, *, level: int = 0) -> tuple[int, ...] | None:
     """The stored block a read of this level is served in, as a KonfAI ``C[Z]YX`` shape.
 
-    A chunked store decodes whole chunks, so a window costs the chunk-aligned hull that covers it
-    (:func:`_assemble_window` issues one read over that hull): a decomposition whose blocks straddle
-    the grid materialises every plane it touches, twice over where it lands between two. Read from
-    the level's metadata, so it costs nothing and is answerable at plan time. ``None`` when the
-    store cannot be opened, where the caller prices a read at what it asks for.
+    A chunked store decodes whole chunks, so a window costs the chunk-aligned hull that covers it.
+    Read from the level's metadata, so it is answerable at plan time. ``None`` when the store cannot
+    be opened, where a read is priced at what it asks for.
     """
     if not _NGFF_ZARR_AVAILABLE:
         return None
@@ -768,10 +687,8 @@ def plan_ome_zarr_reads(
 ) -> None:
     """Declare the ``C[Z]YX`` windows about to be read from a store, in the order they will be read.
 
-    What the decoded-chunk cache does with it: evict the chunk whose next declared use is furthest
-    away instead of the least recently used, which is the fewest decodes any policy can reach. The
-    gain is the whole of it where a miss is expensive -- a tight cache, or a store across a network,
-    where a miss is a download. Declaring nothing costs nothing: the cache stays LRU.
+    The decoded-chunk cache then evicts the chunk whose next declared use is furthest away instead
+    of the least recently used. Declaring nothing costs nothing: the cache stays LRU.
     """
     if not _NGFF_ZARR_AVAILABLE or not windows:
         return
@@ -805,8 +722,7 @@ def read_ome_zarr_data_slice(
     """Read a KonfAI channel-first ``C[Z]YX`` patch from an OME-Zarr store (lazy).
 
     A conformant displacement store holds its components in RFC-5 order; the channel selection is
-    remapped and the patch flipped back, so every caller keeps receiving ITK's (dx, dy, dz)
-    whatever layout the store holds.
+    remapped and the patch flipped back, so every caller receives ITK's (dx, dy, dz).
     """
     image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
@@ -825,8 +741,7 @@ def read_ome_zarr_data_slice(
     if "c" not in remaining:
         patch = patch[np.newaxis]
     elif flipped:
-        # Contiguous, not a reversed view: a negative stride is refused by torch.from_numpy, and
-        # every patch this returns is about to become a tensor.
+        # Contiguous, not a reversed view: torch.from_numpy refuses a negative stride.
         patch = np.ascontiguousarray(patch[::-1])
 
     metadata = {
@@ -870,14 +785,10 @@ def _spatial_geometry(
 def _downsample_method(downsample_method: str | None) -> Any:
     """Resolve a downsampling method name to ngff-zarr's enum, defaulting to DASK_BIN_SHRINK.
 
-    NOT ngff-zarr's own default, which is ``ITKWASM_GAUSSIAN``: a pyramid is indexed by position and
-    read as "the same image, coarser", so a level that has been smoothed is a change of pixels that
-    no reader can see. Measured on a real volume, the gaussian keeps a 0.9998 correlation while
-    crushing the peak intensity by 20 %: the shape of difference that passes a sanity check and
-    resurfaces months later. ``DASK_BIN_SHRINK`` is a plain block mean with ITK's own BinShrink
-    semantics (aligned windows, remainder trimmed, integers rounded half up), computed lazily with
-    a bounded peak: it takes any extent and chunk layout the streamed writer leaves, where the wasm
-    variant traps on blocks past 2.5 GiB and on tails no chunking can avoid.
+    NOT ngff-zarr's own default, ``ITKWASM_GAUSSIAN``: a pyramid is read as "the same image,
+    coarser", and a smoothed level is a change of pixels no reader can see. ``DASK_BIN_SHRINK`` is a
+    plain block mean with ITK's own BinShrink semantics (aligned windows, remainder trimmed,
+    integers rounded half up), computed lazily with a bounded peak.
     """
     _require_ngff_zarr()
     if downsample_method is None:
@@ -912,24 +823,15 @@ def write_ome_zarr(
     """Write one channel-first KonfAI array as an OME-NGFF store, single-level or a pyramid.
 
     ``scale_factors`` makes it a pyramid, each factor shrinking the level above it: ``[4]`` writes
-    level 0 plus level 0 shrunk 4x per spatial axis, ``[4, 4]`` adds a third at 16x. (ngff-zarr's
-    own argument is spelled relative to level 0; :func:`_level_zero_scale_factors` converts, so
-    ``[4, 4]`` never writes the same level twice.) Consumers index a pyramid BY POSITION, so the
-    order is the contract: 0 finest. Each level carries its OWN scale and translation, and ngff-zarr shifts the
-    coarse origin by half the spacing delta, which is the centre-of-voxel convention these stores
-    use; getting that wrong biases every voxel by a fraction of a coarse voxel and still looks like a
-    plausible image. ``downsample_method`` selects how (see :func:`_downsample_method`).
+    level 0 plus level 0 shrunk 4x per spatial axis, ``[4, 4]`` adds a third at 16x. Consumers index
+    a pyramid BY POSITION, so the order is the contract: 0 finest. Each level carries its OWN scale
+    and translation, with the coarse origin shifted by half the spacing delta, the centre-of-voxel
+    convention these stores use. ``downsample_method`` selects how (see :func:`_downsample_method`).
 
     ``displacement_field`` writes it as a vector FIELD rather than an image: the component axis is
-    typed ``displacement`` (NGFF RFC-5), which is what makes a registration DVF self-describing
-    instead of an anonymous 3-channel image. A reader then no longer has to be told out of band that
-    the channels are a displacement: the mistake that path invites is silent, not loud: index the
-    component axis like any other and you get one third of the field back, and a plausible-looking
-    registration with it.
-
-    The NGFF version follows from that flag and is deliberately NOT a parameter. RFC-5 axis types
-    exist only from 0.6, so a caller passing both could only ever pass them consistently: an
-    invariant worth removing rather than documenting.
+    typed ``displacement`` (NGFF RFC-5), so a registration DVF is self-describing instead of an
+    anonymous 3-channel image. The NGFF version follows from that flag and is NOT a parameter:
+    RFC-5 axis types exist only from 0.6.
     """
     if scale_factors and uri.is_uri(store_path):
         raise DatasetManagerError(
@@ -937,10 +839,8 @@ def write_ome_zarr(
             "Levels are derived in place through local paths; write the store locally and upload it.",
         )
     array_data = np.asarray(data)
-    # The one write path: the store described and created empty (ngff-zarr's metadata, the
-    # caller's chunking), filled by zarr itself, its levels grafted beside level 0. Handing
-    # ngff-zarr the resident array instead went through dask -- a full rechunk into a 128 MB block
-    # per task -- at a sixth of the throughput (14.4 s vs 2.3 s for a 2.1 GB volume, measured).
+    # The one write path: the store described and created empty (ngff-zarr's metadata, the caller's
+    # chunking), filled by zarr itself, its levels grafted beside level 0.
     array = create_ome_zarr_store(
         store_path,
         array_data.shape,
@@ -959,8 +859,7 @@ def write_ome_zarr(
 def _write_skeleton(store_path: str | Path, multiscales: Any, version: str, **kwargs: Any) -> None:
     """The store's metadata and empty arrays, written in place (``to_ngff_zarr(metadata_only=True)``
     describes every level and creates its array without computing a voxel). ngff-zarr writes local
-    directories only, so a remote root gets the skeleton written locally and uploaded through the
-    root's own filesystem: metadata documents only, before a chunk lands."""
+    directories only, so a remote root gets the skeleton written locally and uploaded."""
     if not uri.is_uri(store_path):
         ngff_zarr.to_ngff_zarr(
             str(store_path), multiscales, overwrite=True, version=version, metadata_only=True, **kwargs
@@ -986,12 +885,10 @@ def _write_skeleton(store_path: str | Path, multiscales: Any, version: str, **kw
 def _grid_is_axis_aligned(attributes: dict[str, Any] | None) -> bool:
     """Whether the field's grid carries no rotation.
 
-    RFC-5 maps a field's array to space by scale and translation alone, so only an axis-aligned
-    grid can be declared a ``displacements`` transformation; an oriented one keeps the label-only
-    layout, its Direction in the sidecar.
-
-    The sidecar dict is read through :class:`Attribute`, the one owner of the versioned-key stack
-    and the printed-array format: the LATEST ``Direction`` is the grid the store describes.
+    RFC-5 maps a field's array to space by scale and translation alone, so only an axis-aligned grid
+    can be declared a ``displacements`` transformation; an oriented one keeps the label-only layout,
+    its Direction in the sidecar. The sidecar is read through :class:`Attribute`: the LATEST
+    ``Direction`` is the grid the store describes.
     """
     from konfai.utils.dataset.attribute import Attribute
 
@@ -1006,10 +903,8 @@ def _grid_is_axis_aligned(attributes: dict[str, Any] | None) -> bool:
 def _declare_displacements_transform(multiscales: Any) -> None:
     """Mark the store as an RFC-5 ``displacements`` transformation, in place.
 
-    What makes the field APPLICABLE by a spec reader rather than merely labelled: a spatial
-    ``physical`` coordinate system, and a ``displacements`` entry mapping it onto itself through
-    the level-0 array. The components must then follow the output axes' order, which is
-    ``_ComponentFlippedWriter``'s half of the contract.
+    A spatial ``physical`` coordinate system, and a ``displacements`` entry mapping it onto itself
+    through the level-0 array. The components must then follow the output axes' order.
     """
     from ngff_zarr.v06.zarr_metadata import Axis, CoordinateSystem, CoordinateSystemIdentifier, Displacements
 
@@ -1029,10 +924,9 @@ def _declare_displacements_transform(multiscales: Any) -> None:
 class _ComponentFlippedWriter:
     """The level-0 array of a conformant displacement store, taking ITK-ordered components.
 
-    Every producer in KonfAI hands fields in ITK's component order (dx, dy, dz); the store holds
-    the spec's (dz, dy, dx). Flipping at this boundary keeps the two conventions from ever
-    meeting: no producer knows about the spec, no store holds a private order. A value of lower
-    rank than the array (a scalar fill) has no component identity and broadcasts as it stands.
+    Every producer in KonfAI hands fields in ITK's component order (dx, dy, dz); the store holds the
+    spec's (dz, dy, dx). A value of lower rank than the array (a scalar fill) has no component
+    identity and broadcasts as it stands.
     """
 
     def __init__(self, array: Any) -> None:
@@ -1089,16 +983,10 @@ def create_ome_zarr_store(
 
     Returns the level-0 zarr array: chunks materialise as regions are assigned, and unwritten regions
     read back as zeros. Metadata is complete from the start, so the store is readable at any point
-    during the write.
-
-    ngff-zarr writes that metadata, exactly as it does for the whole-array path, so both paths describe
-    a store the same way: ``displacement_field`` included, which is the point of routing it through
-    ngff-zarr at all. A field too large to assemble in memory is written region by region, so this is
-    the ONLY path a real one takes. The KonfAI sidecar rides along as a root attribute beside the OME
-    keys, and the array is described from a LAZY zeros of the real shape: ``metadata_only`` creates it
-    without computing a voxel, chunked exactly as the caller says: the region grid is the one thing
-    ngff-zarr cannot infer, and a store whose chunks straddle it turns every region write into a
-    read-modify-write.
+    during the write, ``displacement_field`` included. The KonfAI sidecar rides along as a root
+    attribute beside the OME keys, and the array is described from a LAZY zeros of the real shape,
+    chunked exactly as the caller says: a store whose chunks straddle the region grid turns every
+    region write into a read-modify-write.
     """
     clear_ome_zarr_cache(store_path)
     _require_ngff_zarr()
@@ -1120,14 +1008,12 @@ def create_ome_zarr_store(
     image = ngff_zarr.to_ngff_image(data, dims=dims, scale=scale, translation=translation)
     version = _DEFAULT_VERSION
     if displacement_field:
-        # Typing the component axis (NGFF RFC-5, so version 0.6) is what lets the store say on disk
-        # that its channels are a displacement rather than an ordinary 3-channel image.
+        # Typing the component axis (NGFF RFC-5, so version 0.6) declares the channels a field.
         image.axes_types = {"c": _DISPLACEMENT_AXIS_TYPE}
         version = _RFC5_VERSION
     multiscales = ngff_zarr.to_multiscales(image, scale_factors=[], chunks=chunks, cache=False)
     if displacement_field:
-        # One layout for every field: components in the spec's order. The entry when the grid can
-        # be declared; the sidecar marker either way, so the reader never has to guess.
+        # One layout for every field: components in the spec's order, marked so nothing guesses.
         if _grid_is_axis_aligned(attributes):
             _declare_displacements_transform(multiscales)
         multiscales.root_attributes = {
@@ -1135,13 +1021,11 @@ def create_ome_zarr_store(
         }
     elif attributes:
         multiscales.root_attributes = {_KONFAI_ATTR_KEY: {"attributes": dict(attributes)}}
-    # version is explicit because to_ngff_zarr defaults to 0.5; 0.4 stays the portable default. A
-    # v3 (RFC-5) store takes the writer's own codec chain, which is what 1.8.2 wrote there too.
+    # version is explicit because to_ngff_zarr defaults to 0.5; 0.4 stays the portable default.
     compression = {} if displacement_field else {"compressor": _V2_COMPRESSOR}
     _write_skeleton(store_path, multiscales, version, **compression)
 
-    # The level-0 key comes from the metadata rather than a literal: ngff-zarr builds it from the
-    # image name, so "scale0/image" is its convention to change, not ours to hardcode.
+    # The level-0 key comes from the metadata: ngff-zarr builds it from the image name.
     array = zarr.open_group(str(store_path), mode="r+")[multiscales.metadata.datasets[0].path]
     return _ComponentFlippedWriter(array) if displacement_field else array
 
@@ -1154,15 +1038,12 @@ def append_ome_zarr_levels(
 ) -> None:
     """Add coarser levels to a store that already holds its level 0.
 
-    The companion of :func:`create_ome_zarr_store`: a store written region by region cannot be given
-    ``scale_factors`` up front, because no level exists until the last region lands. This derives the
-    pyramid afterwards, from what is on disk, and grafts it BESIDE level 0
-    (``to_ngff_zarr(start_level=1)``): level 0 is not rewritten, not moved, not read back whole; each
-    coarser level is computed lazily from the one before it with a chunk-sized peak, and the
-    multiscales metadata that names every level lands last, so an interrupted call leaves a store
-    that still reads exactly as its level 0. The KonfAI attribute sidecar rides along as the root
-    attributes ngff-zarr read back beside the OME keys; a displacement field keeps its typed
-    component axis the same way.
+    A store written region by region cannot be given ``scale_factors`` up front, since no level
+    exists until the last region lands. This derives the pyramid from what is on disk and grafts it
+    BESIDE level 0 (``to_ngff_zarr(start_level=1)``): level 0 is not rewritten, not moved, not read
+    back whole, each coarser level is computed lazily from the one before it with a chunk-sized
+    peak, and the metadata naming every level lands last, so an interrupted call leaves a store that
+    still reads as its level 0. The KonfAI sidecar and a typed component axis ride along.
     """
     if uri.is_uri(store_path):
         raise DatasetManagerError(
@@ -1187,8 +1068,7 @@ def append_ome_zarr_levels(
     )
     derived.root_attributes = multiscales.root_attributes
     if multiscales.metadata.coordinateTransformations:
-        # A conformant field keeps its ``displacements`` entry (and the coordinate system it names)
-        # through the append: the entry references level 0, which this never rewrites.
+        # A conformant field keeps its ``displacements`` entry through the append: it names level 0.
         metadata = cast("MetadataV06", derived.metadata)  # to_multiscales builds v06 metadata
         declared = {system.name for system in metadata.coordinateSystems}
         derived.metadata = dataclasses.replace(
@@ -1200,8 +1080,7 @@ def append_ome_zarr_levels(
             coordinateTransformations=multiscales.metadata.coordinateTransformations,
         )
     field = _has_displacement_axis(base)
-    # The coarse levels take level 0's own compressor, so the store stays uniform whatever wrote
-    # it; a v3 store carries a codec chain instead and keeps the writer's default.
+    # The coarse levels take level 0's own compressor; a v3 store keeps the writer's codec chain.
     level_zero = zarr.open_group(str(store), mode="r")[multiscales.metadata.datasets[0].path]
     compressor = level_zero.metadata.to_dict().get("compressor")
     compressor_kwargs: dict[str, Any] = {"compressor": compressor} if compressor else {}
@@ -1232,15 +1111,10 @@ def _refuse_factors_outgrowing_an_axis(base: Any, factors: Sequence[int]) -> Non
 def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     """OME-Zarr metadata, without reading pixel data.
 
-    Three of these keys describe the same level in two different orders, and mixing them is the
-    single most productive mistake this module invites. ``shape``, ``scale`` and ``translation``
-    follow the STORE's own axes, listed in ``axes``: a scalar volume written without a channel
-    axis has three of each. ``canonical_shape`` is the C[Z]YX form the reader indexes. So a caller
-    that sizes its slices from ``canonical_shape`` and then reads ``scale[1:]`` for the spatial
-    spacing is off by one axis, with plausible numbers and no error.
-
-    ``geometry`` exists so that never has to be reasoned about: it maps each axis NAME to its
-    ``(scale, translation)``. Prefer it.
+    ``shape``, ``scale`` and ``translation`` follow the STORE's own axes, listed in ``axes``: a
+    scalar volume written without a channel axis has three of each. ``canonical_shape`` is the
+    C[Z]YX form the reader indexes, so ``scale[1:]`` is not the spacing of its spatial axes.
+    ``geometry`` maps each axis NAME to its ``(scale, translation)``. Prefer it.
     """
     image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
@@ -1253,10 +1127,8 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     return {
         "axes": dims,
         "shape": list(image.data.shape),
-        # The shape the slices of `read_ome_zarr_data_slice` are indexed against. Both are here
-        # because they differ whenever the store's axes are not already C[Z]YX, and a caller sizing
-        # its slices from "shape" then reads a transposed region, with the right rank, plausible
-        # values, and nothing raised. "shape" stays the store's own order; this one is the reader's.
+        # The shape the slices of `read_ome_zarr_data_slice` are indexed against; "shape" is the
+        # store's own order.
         "canonical_shape": _canonical_shape(dims, image.data.shape),
         "chunks": list(getattr(image.data, "chunks", []) or []),
         "dtype": str(image.data.dtype),

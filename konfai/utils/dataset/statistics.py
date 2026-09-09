@@ -32,29 +32,16 @@ from konfai.utils.errors import DatasetManagerError
 #: Elements a block of ``Dataset.iter_data_blocks`` holds when no budget was declared: the read grain
 #: of a scan (the statistics fold, the quantile scan), whatever the backend.
 _STATISTICS_CHUNK_ELEMENTS = 8_000_000
-#: Blocks a scan holds at its peak: the map of the one being read, its copy, and the copy the fold has
-#: not released yet, a generator reading the next while its caller still names the last. Measured at
-#: 95.6 MiB of resident set for a 30.5 MiB block over a 78 MiB case.
-#:
-#: The scan itself keeps its side of the bargain: 95.4 / 96.0 / 67.1 / 34.4 MiB held over 512 / 128 /
-#: 64 / 32 MiB declared, so it is under the budget at 128 and above (where :data:`_STATISTICS_CHUNK_
-#: ELEMENTS` caps it) and about 1.1x over at 64 and 32. What a GLOBAL_STAT ROUTE holds is more: 183
-#: MiB over the floor at 128 MiB declared, against the 154 the plan announces (regions 104 + engine
-#: 32 + cache 18), so 1.19x. The scan frees (RSS falls back between the phases) and the sweep then
-#: peaks on top of a residue.
-#:
-#: Not chased further here, and the reason is the instrument: ``VmHWM`` is a high-water mark of the
-#: WHOLE resident set, so it cannot be compared with the ``RssAnon``/``RssFile`` split, which is
-#: instantaneous -- and it is anonymous memory alone that an OOM kill weighs. Attributing this needs
-#: a sampler for peak anonymous bytes across the phases, not another reading of the mark.
+#: Blocks a scan holds at its peak: the map of the one being read, its copy, and the copy the fold
+#: has not released yet, a generator reading the next while its caller still names the last.
+#: Measured at 95.6 MiB of resident set for a 30.5 MiB block over a 78 MiB case.
 _STATISTICS_BLOCKS_IN_FLIGHT = 3
-#: The bytes a scanned element is priced at when the source's own size is not known: what everything
-#: else the budget sizes prices an element at. A block is the store's OWN dtype, never a cast copy,
-#: so where the store can be asked (:meth:`Dataset._scanned_element_bytes`) it answers instead.
+#: The bytes a scanned element is priced at when the source's own size is not known. A block is the
+#: store's OWN dtype, so where the store can be asked (:meth:`Dataset._scanned_element_bytes`) it
+#: answers instead.
 _STATISTICS_ELEMENT_BYTES = 4
-#: Elements one running-statistics update takes at once: its float64 temporaries then stay in cache,
-#: where a whole block's stream through memory. Below the block on purpose: the block is the READ
-#: grain, and a chunked store decodes a chunk once per read that touches it.
+#: Elements one running-statistics update takes at once, so its float64 temporaries stay in cache.
+#: Below the block on purpose: the block is the READ grain of a chunked store.
 _STATISTICS_UPDATE_ELEMENTS = 1 << 18
 
 
@@ -64,9 +51,7 @@ def chunk_hull_voxels(span: Sequence[slice], granularity: Sequence[int], shape: 
     A chunked read decodes whole blocks and assembles the window out of them, so what it holds is
     the block-aligned hull of the window, never the window: a span that straddles two planes of the
     grid pays both in full, and one aligned to the grid pays exactly itself. The hull is capped at
-    the array, so an axis a span covers entirely costs that axis and no more.
-
-    The three sequences describe the same axes, in the same order.
+    the array. The three sequences describe the same axes, in the same order.
     """
     hull = 1
     for part, block, extent in zip(span, granularity, shape, strict=True):
@@ -89,11 +74,10 @@ def _scan_block_on_the_store_grid(
     """The rows one scan block reads, and what reading it holds.
 
     A chunked store decodes whole blocks, so a scan stepping finer than the store's grain decodes
-    the same block again at every step it takes inside it: measured at 1153 MiB decoded to serve a
-    13.5 MiB window, 85x, and 170x where the step straddles two -- 212 reads over a volume five
-    stored blocks deep. Where the budget can hold a whole stored block the grain is RAISED to it,
-    which reads each block once; where it cannot, the grain stays and what the store decodes is
-    CHARGED, so an impossible scan is refused by the plan instead of by the kernel.
+    the same block again at every step it takes inside it. Where the budget can hold a whole stored
+    block the grain is RAISED to it, which reads each block once; where it cannot, the grain stays
+    and what the store decodes is CHARGED, so an impossible scan is refused by the plan instead of
+    by the kernel.
     """
     block = max(1, int(granularity[0])) if granularity else 0
 
@@ -121,11 +105,9 @@ def _scan_block_on_the_store_grid(
 
 def _statistics_block_elements(element_bytes: int = _STATISTICS_ELEMENT_BYTES) -> int:
     """Elements one block of a whole-volume scan may hold: its share of the budget this rank
-    published, since :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them are in flight at the peak, each of
-    them ``element_bytes`` an element. A fixed read grain made a scan cost the same 95.6 MiB
-    whatever the budget said. Without a declared budget, the grain that keeps a chunked store's
-    decode whole.
-    """
+    published, :data:`_STATISTICS_BLOCKS_IN_FLIGHT` of them being in flight at the peak, each
+    ``element_bytes`` an element. Without a declared budget, the grain that keeps a chunked store's
+    decode whole."""
     budget = per_rank_budget_bytes()
     if budget is None:
         return _STATISTICS_CHUNK_ELEMENTS
@@ -200,10 +182,8 @@ def _max_of(current: Any, candidate: Any) -> Any:
 
 def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> tuple[Any, Any, float]:
     """The two order statistics ``numpy.quantile(..., q)`` interpolates between, and the weight, over
-    everything the blocks hold, without holding it: one pass counts and bounds the values, then passes
-    narrow a value interval by histogram until the rank's bin holds few enough values to collect, or a
-    single value.
-    """
+    everything the blocks hold, without holding it: one pass counts and bounds the values, then
+    passes narrow a value interval by histogram until the rank's bin holds few enough to collect."""
     count = 0
     low = high = None
     for block in blocks():
@@ -211,8 +191,7 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> t
         if flat.size == 0:
             continue
         if np.issubdtype(flat.dtype, np.floating) and np.isnan(flat).any():
-            # numpy.quantile of anything holding a NaN is NaN; a bin can hold no NaN, so the
-            # narrowing below would otherwise search a histogram the count does not match.
+            # numpy.quantile of anything holding a NaN is NaN, and a bin can hold no NaN.
             return np.nan, np.nan, 0.0
         count += int(flat.size)
         low, high = _min_of(low, flat.min()), _max_of(high, flat.max())
@@ -274,11 +253,8 @@ def _update_running_statistics(
 ) -> dict[str, Any]:
     """Update running min/max/mean/std from a NumPy chunk, over the volume AND per channel.
 
-    Both grains come from one pass because they come from the same samples: a chunk arrives as
-    ``(C, ...)``, so the per-channel figures are the same Welford recurrence applied along axis 0,
-    and the whole-volume ones are that recurrence pooled. Computing them separately would mean
-    scanning the volume once per channel: three passes over a displacement field to learn three
-    numbers.
+    A chunk arrives as ``(C, ...)``, so the per-channel figures are the same Welford recurrence
+    applied along axis 0 and the whole-volume ones are that recurrence pooled: one pass for both.
     """
     values = np.asarray(array, dtype=np.float64)
     per_channel = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
@@ -323,10 +299,9 @@ def _update_running_statistics(
 
 
 def _update_running_extrema(state: dict[str, Any] | None, array: np.ndarray) -> dict[str, Any]:
-    """Update running min/max only, over the volume and per channel, in the array's own dtype:
-    what a ``Normalize`` asks for, without the float64 cast and the Welford pass the mean and std
-    need (on the streaming bench, most of the scan's own time). The state keeps its moment
-    fields at zero, and the reader that asked for extrema reads nothing else."""
+    """Update running min/max only, over the volume and per channel, in the array's own dtype: what
+    a ``Normalize`` asks for, without the float64 cast and the Welford pass. The state keeps its
+    moment fields at zero, and the reader that asked for extrema reads nothing else."""
     values = np.asarray(array)
     per_channel = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
     channels = per_channel.shape[0]
@@ -378,14 +353,12 @@ def read_masked_data_statistics(
     The masked twin of ``Dataset.read_data_statistics``: both volumes are walked slab by slab along
     the first spatial axis (the slab aligned to the volume's own read granularity where it states
     one), and only the selected values enter the running fold, so neither volume is ever held. A
-    store that cannot serve bounded region reads is read whole ONCE and sliced in memory, exactly
-    as ``Dataset.iter_data_blocks`` serves such stores: a region read of them decodes the whole
-    volume anyway, so reading per slab would hold the same peak once per slab.
+    store that cannot serve bounded region reads is read whole ONCE and sliced in memory, as
+    ``Dataset.iter_data_blocks`` serves such stores.
 
-    The mask must sit on the volume's own grid (same spatial extent): a mask elsewhere would select
-    from the wrong place and the statistics would look right. The channel counts must agree too,
-    since selection is ``volume[mask == 1]``. ``source`` and ``mask_source`` are Datasets (duck
-    typed: this module is below the Dataset class).
+    The mask must sit on the volume's own grid (same spatial extent) and the channel counts must
+    agree, since selection is ``volume[mask == 1]``. ``source`` and ``mask_source`` are Datasets
+    (duck typed: this module is below the Dataset class).
     """
     shape, _ = source.get_infos(group, name)
     mask_shape, _ = mask_source.get_infos(mask_group, name)
@@ -429,8 +402,7 @@ def _finalize_running_statistics(state: dict[str, Any] | None) -> dict[str, Any]
     """Convert a running-statistics state into the public stats dictionary.
 
     The four scalars are the volume's; the four ``*_per_channel`` lists are the same figures per
-    channel, which is what a vector-valued quantity needs: the mean of a displacement field is
-    three numbers, and pooling them into one describes nothing.
+    channel, which is what a vector-valued quantity needs.
     """
     if state is None or state["count"] == 0:
         return {"min": 0.0, "max": 0.0, "mean": 0.0, "std": 0.0} | {

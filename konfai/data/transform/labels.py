@@ -33,10 +33,8 @@ from konfai.utils.ITK import _require_simpleitk
 class Mask(Transform):
     """Set everything outside a mask to a constant.
 
-    Per-voxel: the only thing a region needs beyond its own voxels is WHICH part of the mask lines
-    up with it, which the dispatcher hands over (``stream_region``): a dataset mask is region-read,
-    a ``.mha`` mask sliced from the one cached copy. The mask is assumed aligned to the volume at
-    this point. ``__call__`` (the whole-volume path) stays the reference.
+    Per-voxel: a region needs only the part of the mask that lines up with it, which the dispatcher
+    hands over. The mask is assumed aligned to the volume.
     """
 
     def __init__(self, path: str = "./default.mha", value_outside: int = 0) -> None:
@@ -47,18 +45,17 @@ class Mask(Transform):
         #: Cases whose stored mask was checked against the chain input's extent (once per case).
         self._aligned: set[str] = set()
 
-    # POINTWISE on the promise that the mask sits on the stage's input grid; a declaration may
-    # not do I/O, so the extent is checked at the point of use (stream_region), per case.
+    # POINTWISE on the promise that the mask sits on the stage's input grid, checked in
+    # stream_region once per case.
     locality = LocalityKind.POINTWISE
 
     def _apply(self, tensor: torch.Tensor, mask: torch.Tensor | np.ndarray) -> torch.Tensor:
-        # Index on the tensor's own device so the mask works whether the volume is on CPU or GPU
-        # (``torch.as_tensor`` keeps a torch mask as-is and wraps a numpy one, moving it to the device).
+        # Index on the tensor's own device so the mask works whether the volume is on CPU or GPU.
         tensor[torch.as_tensor(mask, device=tensor.device) == 0] = self.value_outside
         return tensor
 
     def _cached_mha(self) -> torch.Tensor:
-        """The whole ``.mha`` mask, read once: the whole-volume path's, never a region's."""
+        """The whole ``.mha`` mask, read once, for the whole-volume path only."""
         _require_simpleitk()
         if self._cached_mask is None:
             self._cached_mask = torch.tensor(sitk.GetArrayFromImage(sitk.ReadImage(self.path))).unsqueeze(0)
@@ -73,8 +70,7 @@ class Mask(Transform):
         return tuple(int(extent) for extent in reversed(reader.GetSize()))
 
     def _mha_region(self, slices: tuple[slice, ...]) -> torch.Tensor:
-        """One region of the ``.mha`` mask, read as a region: the whole mask is never held on the
-        streamed path (bounded on disk for an uncompressed file, transient for a compressed one)."""
+        """One region of the ``.mha`` mask; the whole mask is never held on the streamed path."""
         _require_simpleitk()
         reader = sitk.ImageFileReader()
         reader.SetFileName(self.path)
@@ -92,8 +88,7 @@ class Mask(Transform):
         raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
 
     def _mask(self, name: str, slices: tuple[slice, ...] | None) -> torch.Tensor | np.ndarray:
-        """The case's mask, or the ``slices`` region of it: a ``.mha`` mask is read whole for the
-        whole-volume path and by region for a region, a dataset mask likewise."""
+        """The case's mask, or the ``slices`` region of it."""
         if self.path.endswith(".mha"):
             return self._cached_mha() if slices is None else self._mha_region(slices)
         dataset = self._mask_dataset(name)
@@ -105,8 +100,7 @@ class Mask(Transform):
         return self._apply(tensor, self._mask(name, None))
 
     def _check_aligned(self, name: str, context: RegionContext) -> None:
-        """Refuse a mask whose extent is not the stage input's: a region of it would then be read
-        from the wrong place and the masked output would look right. Headers only, once per case."""
+        """Refuse a mask whose extent is not the stage input's. Headers only, once per case."""
         if name in self._aligned:
             return
         expected = tuple(int(extent) for extent in context.source_shape)
@@ -129,8 +123,7 @@ class Mask(Transform):
         return (slice(None), *context.source)
 
     def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None:
-        # A hint declares nothing it cannot find: a missing mask is the first region's error to
-        # raise, inside the sweep, where the case falls back. SimpleITK plans nothing for a .mha.
+        # A missing mask is the first region's error to raise. SimpleITK plans nothing for a .mha.
         if self.path.endswith(".mha"):
             return
         with contextlib.suppress(TransformError):
@@ -143,16 +136,12 @@ class Mask(Transform):
         context: RegionContext,
         cache_attribute: Attribute,
     ) -> torch.Tensor:
-        # Only the region's part of the mask, 1-channel and far smaller than the output; the mask
-        # is checked to sit on the stage input's grid before its first region is trusted.
+        # Only the region's part of the mask, checked to sit on the stage input's grid first.
         self._check_aligned(name, context)
         return self._apply(tensor, self._mask(name, self._window(context)))
 
 
 class Dilate(Transform):
-    # Measured 15.00 at two sizes on the CUDA allocator, under a budget large enough not
-    # to clamp it: the distance transform's own buffers, not the three a declaration
-    # copied from an interpolation's sampling grid assumed.
     working_multiple = 15.0
 
     def __init__(self, dilate: int = 1) -> None:
@@ -162,9 +151,7 @@ class Dilate(Transform):
         self.dilate = dilate
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # A box dilation of radius ``dilate`` spreads foreground by at most ``dilate`` voxels per axis:
-        # a bounded HALO. At the true border the separable max-pool padding matches the whole-volume
-        # result once the halo clamps, so seams are byte-identical. Radius 0 is a spatial identity.
+        # A box dilation spreads foreground by at most ``dilate`` voxels per axis: a bounded halo.
         if self.dilate == 0:
             return PatchLocality(LocalityKind.POINTWISE)
         return PatchLocality(LocalityKind.HALO, halo=(self.dilate,))
@@ -178,10 +165,7 @@ class Dilate(Transform):
         d = self.dilate
         k = 2 * d + 1
 
-        # A cubic (box) structuring element is separable: dilating by a k**n box equals n successive
-        # 1-D max-pools, one per spatial axis. This is bit-identical to a single k**n max-pool (max is
-        # associative and the box is the Minkowski sum of 1-D segments) for ~k**(n-1)x fewer comparisons
-        #: the k**3 dense pool is the dominant cost of the whole-volume mask load.
+        # A box structuring element is separable: a k**n box equals n successive 1-D max-pools.
         if spatial_dims == 2:
             data = F.max_pool2d(data, kernel_size=(k, 1), stride=1, padding=(d, 0))
             data = F.max_pool2d(data, kernel_size=(1, k), stride=1, padding=(0, d))
@@ -201,19 +185,14 @@ class Dilate(Transform):
 def _forget_model_channel_counts(cache_attribute: Attribute) -> None:
     """Take ``number_of_channels_per_model`` off a case's state, as folding the model axis does.
 
-    The key describes the ensemble the fold consumed: once the models' channels are one map it
-    describes an input that no longer exists, and a later ``Sum`` or ``MergeLabels`` reading it off
-    the written store would take the ensemble branch on a one-channel map. The whole-volume pass
-    pops it from the live attribute it writes the header from; a streamed region pops it from a
-    scope that is thrown away, so the case-level state has to say it here.
+    A later ``Sum`` or ``MergeLabels`` reading it off the written store would take the ensemble
+    branch on a one-channel map, and a streamed region pops it from a scope that is thrown away.
     """
     if "number_of_channels_per_model" in cache_attribute:
         cache_attribute.pop_tensor("number_of_channels_per_model")
 
 
 class Sum(Transform):
-    # What it holds beyond its input and its output: the shifted label ranges it adds over: measured 2.42,
-    # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 3.75
 
     def __init__(self, dim: int = 0) -> None:
@@ -244,26 +223,16 @@ class Sum(Transform):
 class MergeLabels(Transform):
     """Merge the per-model argmax label maps of a ``combine: Concat`` ensemble into one global map.
 
-    Each model's ``Argmax`` produces a LOCAL class index (``0`` = background). A model's
-    non-background labels are shifted past every earlier model's foreground classes (by the
-    CUMULATIVE sum of the earlier models' foreground counts (``nb_class - 1``)), so the models'
-    disjoint label ranges tile a single global label space.
-
-    This is the label-space counterpart of ``InferenceStack`` (which averages *same-class*
-    probability ensembles): use ``MergeLabels`` when the models segment DIFFERENT structures, e.g.
-    the 5-task TotalSegmentator ensemble (organs / vertebrae / cardiac / muscles / ribs). Requires
-    ``number_of_channels_per_model`` in the attribute (written by the ``Concat`` reduction).
-
-    Models are assumed to segment disjoint structures, but boundaries disagree in practice: a voxel
-    claimed by several models takes the label of the LAST model in ensemble order (adding the global
-    ids instead would fabricate a label belonging to neither model).
+    Each model's ``Argmax`` produces a local class index (``0`` = background). A model's
+    non-background labels are shifted past every earlier model's foreground classes, by the
+    cumulative sum of the earlier models' foreground counts (``nb_class - 1``), so the models'
+    disjoint label ranges tile a single global label space. Use it when the models segment different
+    structures. Requires ``number_of_channels_per_model`` in the attribute, written by the ``Concat``
+    reduction. A voxel claimed by several models takes the label of the last model in ensemble order.
     """
 
-    # What it holds beyond its input and its output: the shifted label ranges and the merged result: measured 2.42,
-    # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 3.75
 
-    # Merges the leading model axis per voxel; spatial support is a single voxel.
     locality = LocalityKind.POINTWISE
 
     def write_stream_cache_attribute(
@@ -289,8 +258,7 @@ class MergeLabels(Transform):
 
 
 def _axis_reduction_locality(dim: int) -> PatchLocality:
-    """POINTWISE for a reduction over the channel axis (dim 0); over a spatial axis it spans the whole
-    extent, so the stage takes the whole volume."""
+    """POINTWISE over the channel axis (dim 0); over a spatial axis the stage takes the whole volume."""
     if dim == 0:
         return PatchLocality(LocalityKind.POINTWISE)
     return PatchLocality(
@@ -300,7 +268,6 @@ def _axis_reduction_locality(dim: int) -> PatchLocality:
 
 
 class Argmax(Transform):
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
 
     def __init__(self, dim: int = 0) -> None:
@@ -315,8 +282,7 @@ class Argmax(Transform):
 
 
 class Softmax(Transform):
-    # Measured at 0.00 on a float input and 1.00 on the int16 a store serves, which widens to float
-    # before the kernel runs: the declaration is the worse of the two.
+    # 0.00 on a float input, 1.00 on the int16 a store serves, which widens before the kernel runs.
     working_multiple = 1.0
 
     def __init__(self, dim: int = 0) -> None:
@@ -327,15 +293,11 @@ class Softmax(Transform):
         return _axis_reduction_locality(self.dim)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # A store serves int16, and torch.softmax has no integer kernel: a chain that softmaxes a
-        # stored volume failed on the tensor, with torch's message about "host_softmax" and not one
-        # naming the stage. Widened here, where the scores an integer carries are what it means.
+        # torch.softmax has no integer kernel, and a store serves int16.
         return torch.softmax(tensor if tensor.is_floating_point() else tensor.float(), dim=self.dim)
 
 
 class FlatLabel(Transform):
-    # What it holds beyond its input and its output: one relabelled copy beside the input: measured 1.00,
-    # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 1.0
 
     locality = LocalityKind.POINTWISE
@@ -358,8 +320,6 @@ class FlatLabel(Transform):
 class SelectLabel(Transform):
     """Relabel: each ``"(old,new)"`` pair maps label ``old`` to ``new``; every other voxel is 0."""
 
-    # What it holds beyond its input and its output: the selection mask: measured 1.00,
-    # on the CUDA allocator, under a budget large enough not to clamp it.
     working_multiple = 1.0
 
     locality = LocalityKind.POINTWISE
@@ -382,27 +342,22 @@ class SelectLabel(Transform):
 
 
 class OneHot(TransformInverse):
-    # What it holds beyond its input and its output: half its own wider output: measured 0.50 against the larger of in and out,
-    # on the CUDA allocator, under a budget large enough not to clamp it.
+    # Half its own wider output, against the larger of input and output.
     working_multiple = 0.5
 
     def __init__(self, num_classes: int, inverse: bool = True) -> None:
         super().__init__(inverse)
         self.num_classes = num_classes
 
-    # Expands each voxel's scalar label into a one-hot channel vector (spatially pointwise).
     locality = LocalityKind.POINTWISE
 
     def output_channels(self, channels: int) -> int:
         return self.num_classes * channels
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # Scattered straight into the float32 answer: ``F.one_hot`` builds the classes in int64
-        # first, three times the bytes of the result for the time of a cast (80 GB for 50 classes
-        # of a 512^3 map, where the answer is 27 GB and this holds the answer plus the labels).
+        # Scattered straight into the float32 answer, where ``F.one_hot`` would build int64 first.
         labels = tensor.to(torch.int64)
-        # scatter_ names no label: out of range it is a raw index error on CPU and a device-side
-        # assert on CUDA that poisons the context, where F.one_hot said which value was wrong.
+        # scatter_ names no label, so an out-of-range one is checked here.
         lowest, highest = int(labels.min()), int(labels.max())
         if lowest < 0 or highest >= self.num_classes:
             raise TransformError(
@@ -416,9 +371,7 @@ class OneHot(TransformInverse):
         return result.squeeze(0)
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # Argmax the CLASS axis (the one sized num_classes) and re-insert it, restoring a [.., 1, *spatial]
-        # label map. The predictor feeds this per-sample output[i] = [num_classes, *spatial] (class axis 0),
-        # but a batched [B, num_classes, *spatial] (class axis 1) is also handled, so it never argmaxes a
-        # batch or spatial axis.
+        # Argmax the class axis (the one sized num_classes) and re-insert it, restoring a
+        # [.., 1, *spatial] label map. A batched [B, num_classes, *spatial] is handled too.
         class_dim = 0 if tensor.shape[0] == self.num_classes else 1
         return torch.argmax(tensor, dim=class_dim).unsqueeze(class_dim)

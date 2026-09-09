@@ -16,25 +16,18 @@
 
 """KonfAI in Python: the workflows as callables.
 
-The four CLI commands, callable: :func:`transform` (with :func:`plan_transform`, its dry-run
-twin), :func:`evaluate`, :func:`predict` and :func:`train`. One engine, two spellings: everything
-here builds the same config tree the YAML file would hold and hands it to the same binder: a
-chain is a list of live stage objects (their constructor arguments are recorded as given, see
-``record_given_arguments``), or the equivalent mapping, or a whole tree loaded from an existing
-YAML and modified in place.
+:func:`transform` (with :func:`plan_transform`, its dry-run twin), :func:`evaluate`,
+:func:`predict` and :func:`train` build the config tree the YAML file would hold and hand it to
+the same binder: a chain is a list of live stage objects (constructor arguments recorded as given,
+see ``record_given_arguments``), the equivalent mapping, or a tree loaded from a YAML and modified.
 
-The contract, and how it differs from the CLI:
+The contract:
 
-- **A designed refusal raises** ``KonfAIError``: the message and the remedy are the exception;
-  the caller decides. Only the CLI catches and exits.
-- **Results come back structured**: what a run wrote and where, read from the run's own record
-  (``outputs.json``, ``Metric_*.json``) instead of leaving the caller to fish files out.
-- **The process is left as found**: the ``KONFAI_*`` environment is restored around every call,
-  and one workflow runs at a time per process: a second concurrent call is refused with the
-  remedy (subprocesses), not allowed to corrupt the first.
-- **The record remains.** Every call materializes the resolved YAML in the run's workspace: a
-  notebook run is promoted to a versioned experiment by copying ``result.config``: nothing to
-  rewrite.
+- A designed refusal raises ``KonfAIError``; only the CLI catches and exits.
+- Results come back structured, read from the run's own record (``outputs.json``, ``Metric_*.json``).
+- The ``KONFAI_*`` environment is restored around every call; one workflow runs at a time per
+  process, a second concurrent call is refused.
+- Every call materializes the resolved YAML in the run's workspace, the record of the experiment.
 """
 
 import importlib
@@ -70,12 +63,9 @@ _ACTIVE = threading.Lock()
 
 @contextmanager
 def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
-    """Serialize workflows within the process and leave the environment as found.
-
-    The engine keys its state on process-wide ``KONFAI_*`` variables, so two in-process runs would
-    corrupt each other: refused with the remedy rather than allowed. ``ranks`` is exported as
-    ``KONFAI_LOCAL_RANKS`` for build-time budget sizing, exactly as the CLI launcher does.
-    """
+    """Serialize workflows within the process and leave the environment as found. Two in-process runs
+    would corrupt the process-wide ``KONFAI_*`` state, so a second is refused. ``ranks`` is exported
+    as ``KONFAI_LOCAL_RANKS`` for build-time budget sizing."""
     if not _ACTIVE.acquire(blocking=False):
         raise ConfigError(
             "A KonfAI workflow is already running in this process.",
@@ -125,12 +115,8 @@ def _launch(
     overwrite: bool,
     quiet: bool,
 ) -> _T:
-    """Take the workflow lock, build, execute, and read the result out through ``finish``.
-
-    ``finish`` runs inside the lock on purpose: the workspace lives in ``KONFAI_*`` variables the
-    lock's exit restores to the caller's. ``ranks`` sizes the lock and stays the caller's own
-    expression: the entry points do not all derive it from ``gpu``/``cpu`` the same way.
-    """
+    """Take the workflow lock, build, execute, and read the result out through ``finish``, which runs
+    inside the lock: the workspace lives in ``KONFAI_*`` variables the lock's exit restores."""
     from konfai.utils.clock import restart_startup_clock
     from konfai.utils.runtime import execute_distributed_object
 
@@ -143,7 +129,7 @@ def _launch(
 
 def _yaml_safe(value: object, where: str) -> object:
     """``value`` as the config file could hold it: or a refusal that names the argument."""
-    # Before the Python scalars: np.float64 IS a float subclass, and ruamel refuses it.
+    # Before the Python scalars: np.float64 is a float subclass, and ruamel refuses it.
     if isinstance(value, np.generic):
         return value.item()
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -212,13 +198,9 @@ def _stage_entry(stage: object, default_modules: tuple[str, ...], where: str) ->
 
 
 def _chain_tree(stages: object, default_modules: tuple[str, ...], where: str) -> dict[str, object]:
-    """A chain (a sequence of stages), as the mapping the config tree holds, in order.
-
-    The tree is a mapping keyed by class name: the second occurrence of a class is written
-    module-qualified (which resolves to the same class), and from the third on under an occurrence
-    key (``Clip#3``), the identity a list-spelled chain binds under; the resolver drops the suffix.
-    An already-qualified classpath keeps its module in every occurrence key.
-    """
+    """A chain (a sequence of stages), as the mapping the config tree holds, in order: the second
+    occurrence of a class is written module-qualified, from the third on under an occurrence key
+    (``Clip#3``); an already-qualified classpath keeps its module in every occurrence key."""
     if isinstance(stages, Mapping):  # a chain already spelled as its tree
         return {str(key): _yaml_safe(value, f"{where}.{key}") for key, value in stages.items()}
     tree: dict[str, object] = {}
@@ -250,10 +232,8 @@ def _stage_sequence(stages: object, where: str) -> Sequence[object]:
 def list_components(kind: str) -> "list[Component]":
     """Enumerate the shipped components of one kind, spelled as a YAML config references them.
 
-    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``model`` or
-    ``block`` (plural spellings accepted): the vocabulary the config trees above are written in.
-    Records carry ``name``, ``config_reference``, ``module`` and the one-line ``doc``. The catalog
-    imports the component families (torch included), hence the lazy import.
+    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``model`` or ``block``
+    (plural spellings accepted). Records carry ``name``, ``config_reference``, ``module`` and ``doc``.
     """
     from konfai.utils.catalog import list_components as _list_components
 
@@ -277,8 +257,7 @@ def _dataset_filenames(datasets: str | Path | Sequence[str | Path]) -> list[str]
 class TransformResult:
     """What a TRANSFORM run produced, in the run's own terms."""
 
-    #: The run directory (``Transforms/<name>``): logs (the plan opens them), the resolved config,
-    #: ``outputs.json``: never the deliverable, which each ``Write`` placed in the caller's tree.
+    #: The run directory (``Transforms/<name>``): logs, the resolved config, ``outputs.json``; never the data.
     workspace: Path
     #: Every chain's terminal ``Write``: ``{group_src, group_dest, dataset, path, group, format}``
     #: (``dataset`` as a config names the root, ``path`` as it is on disk: the ``.h5`` file itself).
@@ -336,8 +315,7 @@ def transform(
 
     ``chains`` maps ``group_src -> group_dest -> chain``, where a chain is a list of stage objects
     (``[Resample(...), Write(dataset='./Out:mha')]``), of one-entry mappings, or the equivalent
-    mapping tree. Every chain ends in a ``Write``: the same rule, message and plan as the CLI,
-    which is this function with a YAML file. GPU is opt-in (``gpu=[0]``), as it is on the CLI.
+    mapping tree. Every chain ends in a ``Write``. GPU is opt-in (``gpu=[0]``).
     """
     tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
     from konfai.transformer import build_transform
@@ -373,11 +351,8 @@ def plan_transform(
     quiet: bool = False,
     transforms_dir: Path | str = Path("./Transforms"),
 ) -> "TransformPlan":
-    """:func:`transform`'s dry-run twin: build, plan, print, return the plan: the run never starts.
-
-    Same arguments, same verdicts: the returned ``TransformPlan`` is the run's own routing
-    (STREAM/LOAD/WHOLE-VOLUME/SKIP/REDUCE), measured, not estimated.
-    """
+    """:func:`transform`'s dry-run twin: build, plan, print, return the plan; the run never starts.
+    The ``TransformPlan`` is the run's own routing (STREAM/LOAD/WHOLE-VOLUME/SKIP/REDUCE)."""
     tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
     from konfai.transformer import plan_transform as _plan_transform
 
@@ -423,21 +398,18 @@ def evaluate(
 
     ``metrics`` maps ``output_group -> target_group -> criteria``, where criteria is a list of
     :class:`~konfai.metric.measure.Criterion` instances (``[MAE(), Dice(labels=[1, 2])]``) or
-    one-entry mappings. ``transforms`` optionally names a pre-metric chain per group (a cast, a
-    clip): the groups themselves are derived from ``metrics``, declared once, not twice.
+    one-entry mappings. ``transforms`` optionally names a pre-metric chain per group; the groups
+    themselves are derived from ``metrics``.
     """
-    # A composite target ("Seg;Mask") is one metric key over several dataset groups: split it here,
-    # as the Evaluator does, so each named group is actually loaded.
+    # A composite target ("Seg;Mask") names several dataset groups: split it so each is loaded.
     groups = sorted(
         {str(group) for group in metrics}
         | {part for targets in metrics.values() for target in targets for part in str(target).split(";")}
     )
     groups_src: dict[str, object] = {}
     for group in groups:
-        # An undeclared chain is spelled None, never left out: the binder materializes its own
-        # default (Normalize) for an absent key, and each group rescaled to [-1, 1] by its own
-        # extrema erases the very difference the metrics measure (MAE 1.9e-8 instead of 0.025 on a
-        # pair related by 0.9x + 0.05). ``transforms`` is the only key GroupTransformMetric reads.
+        # An undeclared chain is spelled None, never left out: the binder materializes its own default
+        # (Normalize) for an absent key, which erases the difference the metrics measure.
         declared = None if transforms is None else transforms.get(group)
         chain: object = "None" if declared is None else _chain_tree(declared, _STAGE_MODULES, f"transforms.{group}")
         groups_src[group] = {"groups_dest": {group: {"transforms": chain}}}
@@ -478,18 +450,14 @@ def evaluate(
 def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, object] | Path":
     """The caller's config, in a form this call may consume.
 
-    Reading a KonfAI config resolves and REWRITES it: the record the workspace keeps. A tree is
-    passed through; a caller's FILE is not this call's to rewrite, so the write-back lands on a
-    scratch copy instead (released when the API call returns).
-
-    Both land in a scratch directory, and a model YAML named by a relative path resolves next to
-    the config file that names it (``ModelLoader._yaml_path``): so the path is made absolute here,
-    against the caller's file for a file and the working directory for a tree, or the shipped
-    examples' ``classpath: UNet.yml`` would be looked for in the scratch directory.
+    Reading a KonfAI config resolves and REWRITES it. A tree is passed through; a caller's FILE is
+    copied to scratch (released when the API call returns), so the write-back never lands on it. A
+    model YAML named by a relative path resolves next to the config file that names it
+    (``ModelLoader._yaml_path``), so the path is made absolute first: against the caller's file for
+    a file, the working directory for a tree.
     """
     if isinstance(config, Mapping):
-        # Through _yaml_safe so the documented sweep idiom (np.float64 learning rates from
-        # np.logspace, Path values) fails as a named refusal here, not a raw ruamel error at dump.
+        # Through _yaml_safe: an np.float64 or Path value fails as a named refusal, not a ruamel error.
         tree = _yaml_safe(dict(config), "config")
         _anchor_model_paths(tree, Path.cwd())
         return tree  # type: ignore[return-value]
@@ -543,9 +511,8 @@ _LIVE_MODELS: dict[str, object] = {}
 
 def live_model(token: str) -> object:
     """The model a caller built in Python and registered under ``token`` (:func:`train_model`,
-    :func:`predict_model`). The classpath ``konfai.api:live_model`` names it in the run's config,
-    so the run record says a live model was trained, by its token; the model itself lives in the
-    process that registered it, which is why such a run stays on one rank, inline."""
+    :func:`predict_model`). The classpath ``konfai.api:live_model`` names it in the run's config; the
+    model lives in the process that registered it, so such a run stays on one rank, inline."""
     try:
         return _LIVE_MODELS[token]
     except KeyError:
@@ -636,12 +603,10 @@ def train_model(
     """Train a model built in Python (any ``nn.Module`` with one tensor in and one out) on a KonfAI
     dataset; return the checkpoint workspace.
 
-    Ten lines, no YAML: the model is registered for this process and the config tree KonfAI would
-    read is built from the arguments (``inputs`` and ``targets`` are the dataset's groups, ``loss``
-    a criterion object or a list of them, ``augmentations`` a list of draws applied to every case,
-    ``patch`` the patch the model is fed, ``dim`` its spatial rank: the patch's non-unit axes by default, so a 2D model fed ``[1, 256, 256]`` slices is 2D).
-    The workspace keeps the resolved config as every run does; it names the model by its token, and
-    a RESUME must come from this same process. One rank, inline.
+    ``inputs`` and ``targets`` are the dataset's groups, ``loss`` a criterion object or a list of
+    them, ``augmentations`` a list of draws applied to every case, ``patch`` the patch the model is
+    fed, ``dim`` its spatial rank (the patch's non-unit axes by default). The workspace names the
+    model by its token, and a RESUME must come from this same process. One rank, inline.
     """
     from konfai.trainer import build_train
     from konfai.utils.runtime import State
@@ -757,11 +722,9 @@ def predict_model(
     blending, the output written slab by slab next to each case; return the workspace.
 
     ``checkpoints`` are KonfAI checkpoints of this model (what :func:`train_model` wrote); left
-    ``None``, the weights the module holds in memory are used, so a model loaded any other way
-    (a library's pretrained weights, a foreign checkpoint) predicts as it stands. ``output`` is a
-    dataset root the way the YAML spells one (``./Pred:mha``), relative to the run's workspace
-    (``Predictions/<name>/``) unless absolute; the prediction lands under ``group`` with the input's
-    own geometry. One rank, inline.
+    ``None``, the weights the module holds in memory are used. ``output`` is a dataset root the way
+    the YAML spells one (``./Pred:mha``), relative to the run's workspace (``Predictions/<name>/``)
+    unless absolute; the prediction lands under ``group`` with the input's geometry. One rank, inline.
     """
     from konfai.predictor import build_predict
     from konfai.utils.runtime.environment import register_scratch_config
@@ -874,13 +837,11 @@ def predict(
 ) -> Path:
     """Run a PREDICTION workflow; return its workspace (``Predictions/<name>``).
 
-    ``config`` is a ``Prediction.yml`` path or the same tree as a dict: a prediction's substance
-    (checkpoints, patching, TTA, ensembling) is wiring, and the tree is its honest spelling.
+    ``config`` is a ``Prediction.yml`` path or the same tree as a dict.
     """
     from konfai.predictor import build_predict
 
-    # A bare str IS a Sequence[str]: without this, "best.pt" expands per character into
-    # [Path('b'), Path('e'), ...] and fails far downstream as missing models.
+    # A bare str is a Sequence[str]: "best.pt" would expand per character.
     if isinstance(models, (str, Path)):
         models = [models]
     return _launch(
@@ -913,9 +874,8 @@ def train(
 ) -> Path:
     """Run a TRAIN (or RESUME) workflow; return its checkpoint workspace.
 
-    ``config`` is a ``Config.yml`` path or the same tree as a dict. The Python idiom for a sweep
-    is the tree: load the YAML once, change the keys under study, call this: the resolved config
-    each run keeps IS the record of what was tried.
+    ``config`` is a ``Config.yml`` path or the same tree as a dict; for a sweep, load the YAML once,
+    change the keys under study, and call this per run.
     """
     from konfai.trainer import build_train
     from konfai.utils.runtime import State

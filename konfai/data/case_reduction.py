@@ -16,15 +16,10 @@
 
 """Reducing a group's cases into one entry, one region at a time.
 
-A :class:`~konfai.data.patching.DatasetManager` IS one case: its name is the name it reads, the name
-it writes, and the name every stage is handed. A reduction has no case name, so it is not a manager
--- it is a consumer of them, which is why it lives here and not in the patching module.
-
-The loop is the per-case loop turned inside out. Instead of walking cases and, within a case, its
-regions, it walks the OUTPUT's regions and, within a region, the cases: each reads that region
-through its own chain (:meth:`~konfai.data.patching.DatasetManager.read_region`) and the operator
-folds them. Peak memory is N regions, never N volumes, and two regions, whatever N, once the
-operator can accumulate.
+The loop walks the OUTPUT's regions and, within a region, the cases: each reads that region through
+its own chain (:meth:`~konfai.data.patching.DatasetManager.read_region`) and the operator folds them.
+Peak memory is N regions, never N volumes, and two regions, whatever N, once the operator can
+accumulate.
 """
 
 from __future__ import annotations
@@ -54,32 +49,25 @@ from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.dataset.statistics import _finalize_running_statistics, _update_running_statistics
 from konfai.utils.errors import ReductionError
 
-#: Geometry keys compared between cases under ``grid: strict``. Direction is in because a flipped
-#: axis shows in neither extent nor spacing: averaging two volumes that disagree on it mirrors half
-#: the cases into the other half, silently, and the result still looks like a volume.
+#: Geometry keys compared between cases under ``grid: strict``. Direction is in: a flipped axis
+#: shows in neither extent nor spacing.
 _GEOMETRY_KEYS = ("Spacing", "Origin", "Direction")
 
 #: What a stage placed AFTER the reduction may declare. Voxel-local is exact on a region; a
-#: whole-volume statistic is exact too, because the engine seeds it with a pass of its own.
+#: whole-volume statistic is seeded by a pass of its own.
 _POST_KINDS = frozenset({LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT})
 
 #: Bytes per sample assumed when sizing regions from headers alone, before a dtype is known.
 _ASSUMED_ITEMSIZE = 4
 
 #: How much of the regions' own share the folds a stat pass KEEPS may take, the regions getting the
-#: rest. Not a share of the declaration: they sit beside the regions for the whole write pass, so
-#: they come out of what the regions were given (:data:`~konfai.utils.budget.BUDGET_SHARES`).
+#: rest (:data:`~konfai.utils.budget.BUDGET_SHARES`).
 _KEPT_FOLDS_SHARE_OF_REGIONS = 0.5
 
 
 @contextlib.contextmanager
 def _awaited(phase: str) -> Iterator[None]:
-    """A phase the fold both performs and stands still for.
-
-    The fold has no pipeline: every member's region is read, and every slab written, on its own
-    thread. So the store's own seconds ARE the seconds the loop waits, which is what
-    :meth:`~konfai.utils.clock.SweepClock.report` prints on either side of its bar.
-    """
+    """A phase the fold both performs and stands still for: the store's seconds are the loop's."""
     with SWEEP_CLOCK.phase(f"wait({phase})"), SWEEP_CLOCK.phase(phase):
         yield
 
@@ -95,31 +83,23 @@ class ReductionPlan:
     slab_rows: int
     incremental: bool
     stat_pass: bool
-    #: Channels a MEMBER's region carries. Separate from ``channels``, the output's, because an
-    #: operator may change the count: ``Concat`` writes ``N x C`` where each member holds ``C``, so
-    #: charging the members at the output's width over-states the peak by the cohort's size.
+    #: Channels a MEMBER's region carries, separate from ``channels``, the output's: an operator may
+    #: change the count (``Concat`` writes ``N x C`` where each member holds ``C``).
     source_channels: int = 0
     working_multiple: float = 0.0
     #: Volumes-worth the MEMBER CHAIN allocates beside the region it is producing
     #: (``DatasetManager.working_multiple()``, the largest ``Transform.working_multiple`` on the
-    #: chain: ``Resample`` declares 6.5 for its sampling grid, plus what the case's own field costs
-    #: through ``case_working_multiple``). Distinct from ``working_multiple``,
-    #: which is the OPERATOR's: a fold is a chain replay per member and then an accumulate, and
-    #: pricing only the second half under-states a resampling cohort by the first. Charged ONCE
-    #: whatever the cohort's size, because ``_fold`` accumulates the members one after another, so
-    #: only one chain is ever replaying.
+    #: chain). Distinct from ``working_multiple``, the OPERATOR's. Charged ONCE whatever the
+    #: cohort's size: ``_fold`` accumulates the members one after another, so one chain replays.
     chain_multiple: float = 0.0
     #: The source window ONE member's region pulls (:attr:`~konfai.data.patching.BlockReads`
-    #: ``widest_pull``). For a chain that resamples, a region's source is not the region -- a
-    #: rotated or scaled map reaches a box around it -- and the chain holds that box while it
-    #: produces the region. Charged ONCE, like the reads below: the members are folded in turn, so
-    #: one chain is pulling at a time. Zero for a chain whose region is its own source.
+    #: ``widest_pull``). Charged ONCE: the members are folded in turn, so one chain pulls at a time.
+    #: Zero for a chain whose region is its own source.
     pull_bytes: int = 0
     #: What ONE member's region makes the store decode ABOVE the window it asked for
     #: (:meth:`~konfai.data.patching.DatasetManager.region_reads`). A chunked backend decodes whole
-    #: blocks, so below one stored block this is the SAME figure at every height: it is charged flat
-    #: and never divided by the rows: measured on the prep's cohort at 4.51 GiB for a 17-row region
-    #: whose own tensor was 70 MiB, and 4.57 GiB for a 4-row one.
+    #: blocks, so below one stored block this is the same figure at every height: charged flat,
+    #: never divided by the rows.
     read_bytes: int = 0
     #: Members read from a store that cannot serve a bounded region read (a gzipped NIfTI, a
     #: compressed MetaImage, NRRD), by name, with the store's format: every region asked of such a
@@ -145,10 +125,8 @@ class ReductionPlan:
     def read_factor(self) -> float:
         """How many times a member's source is read in full, priced from the plan alone.
 
-        A store serving bounded region reads is read once per pass. One that cannot decodes the
-        whole volume behind every region asked of it: once per region and per pass, so a budget
-        that lowers ``slab_rows`` raises the count. The figure of the worst member, which the run is
-        paced by; ``unbounded`` names the members it applies to.
+        A store serving bounded region reads is read once per pass; one that cannot, once per region
+        and per pass. The figure of the worst member; ``unbounded`` names the members it applies to.
         """
         return float(self.passes * (self.regions if self.unbounded else 1))
 
@@ -159,9 +137,8 @@ class ReductionPlan:
 
     @property
     def resident_regions(self) -> float:
-        """Regions held at the peak, in member regions: the buffer, what the operator builds over
-        it (``working_multiple`` buffers-worth), what the one replaying chain holds beside the
-        region it is producing (``chain_multiple``), and the output's own. A count for
+        """Regions held at the peak, in member regions: the buffer, ``working_multiple`` buffers-worth
+        over it, ``chain_multiple`` for the replaying chain, and the output's own. A count for
         ``describe``; ``peak_bytes`` is the figure the plan sizes by."""
         return self.buffered_regions * (1 + self.working_multiple) + self.chain_multiple + 1
 
@@ -176,17 +153,12 @@ class ReductionPlan:
     @property
     def peak_bytes(self) -> int:
         # Members at their own width, the output at its, and whatever the operator builds over the
-        # buffer it is handed, which is member-sized, since that is what it was handed.
-        #
-        # A statistics pass is a second traversal, not a second working set: it holds exactly what
-        # one region holds, so the peak is the same whether there are one or two passes.
+        # buffer. A statistics pass is a second traversal, not a second working set.
         member_bytes = self._region_bytes(self.source_channels or self.channels)
         members = self.buffered_regions * member_bytes
-        # Beside the buffered regions, the one replaying chain holds three things at once: the
-        # source window it pulled, its own working buffers, and what the store decoded above that
-        # window. The buffers are built over the larger of the window and the region it lands, the
-        # sweep prices its blocks the same way, and all three are charged once because the members
-        # are folded in turn -- one chain pulls, allocates and decodes at a time.
+        # Beside the buffered regions, the one replaying chain holds the source window it pulled,
+        # its own working buffers (over the larger of the window and the region it lands) and what
+        # the store decoded above that window. All three are charged once: one chain runs at a time.
         return int(
             members * (1 + self.working_multiple)
             + self.chain_multiple * max(member_bytes, self.pull_bytes)
@@ -230,8 +202,8 @@ class ReductionPlan:
 class _RunningStatistics:
     """Min/Max/Mean/Std accumulated over regions, so the volume is never resident.
 
-    The store-scan recurrence (:func:`konfai.utils.dataset.statistics._update_running_statistics`) is the one
-    Welford kernel; this feeds it blocks and writes the keys in KonfAI's own spelling.
+    Feeds blocks to :func:`konfai.utils.dataset.statistics._update_running_statistics` and writes the
+    keys in KonfAI's own spelling.
     """
 
     _state: dict | None = None
@@ -240,9 +212,8 @@ class _RunningStatistics:
         self._state = _update_running_statistics(self._state, block.detach().cpu().numpy().reshape(1, -1))
 
     def write_into(self, attribute: Attribute) -> None:
-        """Seed the attribute the way the rest of KonfAI already spells these keys: Min/Max bare
-        scalars, Mean/Std one-element arrays. A second convention reads back as a string and fails
-        inside whichever transform consumed it."""
+        """Seed the attribute the way the rest of KonfAI spells these keys: Min/Max bare scalars,
+        Mean/Std one-element arrays."""
         if self._state is None or not self._state["count"]:
             raise ReductionError("Statistics were requested over an empty volume.", "Check the output extent.")
         statistics = _finalize_running_statistics(self._state)
@@ -264,15 +235,12 @@ def split_chain(transforms: list[Transform]) -> tuple[list[Transform], Reduce | 
 def check_post_stages(post: list[Transform], output: str) -> None:
     """What may follow a ``Reduce`` in the same chain.
 
-    Each stage after the reduction is handed ONE REGION of the result. A stage reading across space (a halo, a
-    resample, a reorientation) would take that region for the whole volume and seam
-    at every boundary: a plausible result, and a wrong one. Those are deferred, not forbidden:
-    end the chain, and read the written volume back in a second chain where the ordinary planner can
-    pull regions through it.
+    Each stage after the reduction is handed ONE REGION of the result, so only voxel-local stages may
+    follow: a stage reading across space would seam at every region boundary. End the chain and read
+    the written volume back in a second one instead.
 
     A statistic may follow the reduction, but only over stages that leave the values alone: the stat
-    pass measures the FOLD, so an earlier stage that changes the values makes the seed describe a
-    volume nobody wrote (``stat_seed_valid``, the per-case planner's rule).
+    pass measures the FOLD (``stat_seed_valid``, the per-case planner's rule).
     """
     localities: list[PatchLocality] = []
     for index, stage in enumerate(post):
@@ -302,9 +270,8 @@ def check_post_stages(post: list[Transform], output: str) -> None:
 class CaseReduction:
     """Fold every case of a group into one entry, region by region.
 
-    It uses only the public read side of each case's manager (the streaming machinery already
-    planned, accepted or refused per case), and owns the write side itself, under the output name
-    the chain declared.
+    It uses only the public read side of each case's manager and owns the write side itself, under
+    the output name the chain declared.
     """
 
     managers: list[DatasetManager]
@@ -334,33 +301,25 @@ class CaseReduction:
         """Size the FIRST region so the resident ones fit ``budget_bytes``; the rest follow what
         the regions hold (:meth:`_folds`).
 
-        The default region height is safe for one case and not for N: a reduction holds one region
-        PER CASE, so the constant that bounds a per-case sweep is off by the number of cases here.
-        The first region starts at ``_START_SHARE`` of the regions' share (the price is a model,
-        and the recorded incident is a first region at 1.5x its price on a host that kills before
-        anything is measured); ``cap`` bounds the growth, ``GROWTH_CAP_UNITS`` slabs by default.
-        Below one row nothing fits; the plan then reports a peak above the budget and the workflow
-        refuses, which is the only honest answer: there is no whole-volume path to fall back to.
+        The first region starts at ``_START_SHARE`` of the regions' share; ``cap`` bounds the
+        growth, ``GROWTH_CAP_UNITS`` slabs by default. Below one row nothing fits, the plan then
+        reports a peak above the budget and the workflow refuses: there is no whole-volume path.
 
-        The budget also goes to the cases' own managers, because a chain crossing a ``Save`` sweeps
-        that cache when first read, and ``read_region`` carries no budget of its own.
+        The budget also goes to the cases' own managers: a chain crossing a ``Save`` sweeps that
+        cache when first read, and ``read_region`` carries no budget of its own.
         """
         self._budget_bytes = budget_bytes
         self._cap = None if cap is None else max(1, int(cap))
-        # THE REMAINDER, not the whole figure. A member's chain holds what it holds WHILE the fold
-        # is holding its regions -- its own sweeps fire from inside the fold loop, when the operator
-        # already has earlier members in its buffer -- so handing it the full budget six lines above
-        # spending half of it on the regions declared the same bytes twice.
+        # THE REMAINDER, not the whole figure: a member's chain holds what it holds WHILE the fold
+        # is holding its regions.
         chains = budget_share("chains", budget_bytes)
         for manager in self.managers:
             manager.set_memory_budget(budget_bytes if chains is None else chains)
         if not budget_bytes or budget_bytes <= 0:
             return
         plan = self.plan()
-        # What the fold's own share leaves the regions: the folds it keeps live beside them, for the
-        # whole write pass, so they come out of the same half rather than out of nothing. Decided
-        # here and not at the stat pass, because the regions cannot be sized against a decision that
-        # has not been taken yet.
+        # What the fold's own share leaves the regions: the folds it keeps live beside them for the
+        # whole write pass. Decided here, since the regions are sized against it.
         allowance = budget_share("regions", budget_bytes) or 0.0
         if self.keeps_folds(plan):
             allowance -= self._folded_output_bytes(plan)
@@ -375,14 +334,7 @@ class CaseReduction:
     def _start_rows(self, plan: ReductionPlan, allowance: float) -> int:
         """Where the growth starts: the tallest height up to the cap whose PRICED plan fits
         ``_START_SHARE`` of ``allowance``, failing that ``allowance`` itself; one row when nothing
-        fits.
-
-        Bisected on the price itself rather than extrapolated from one height, because none of what
-        a region costs scales with its rows: a chain's source window is not its region (a halo is a
-        constant, a rotated map's box grows with the diagonal), and what a chunked store decodes
-        does not fall with the height at all. A straight line through one sample sized a fold at
-        2.6x the budget it printed.
-        """
+        fits. Bisected on the price itself: none of what a region costs scales with its rows."""
         ceiling = self._cap_rows(plan.spatial)
         for share in (_START_SHARE, 1.0):
             allowed = allowance * share
@@ -400,11 +352,7 @@ class CaseReduction:
 
     def _priced_peak(self, plan: ReductionPlan, rows: int) -> int:
         """What ``plan`` prices at ``rows``, leaving the height the sizing is working from alone.
-
-        Only the read fields depend on the height, so only they are recomputed per probe: the rest
-        of the plan (refusal walks, filesystem stats, channel maps) is height-independent, and a
-        sizing re-deriving all of it once put 96% of plan time into the members' geometry walks.
-        """
+        Only the read fields depend on the height, so only they are recomputed per probe."""
         held = self.slab_rows
         try:
             self.slab_rows = rows
@@ -417,9 +365,7 @@ class CaseReduction:
         """Whether the stat pass hands its folds to the write pass instead of re-folding them.
 
         One rule, two callers: the sizing subtracts what they will hold, the stat pass fills them.
-        Two rules would let the regions be cut for folds nobody keeps, or folds be kept the regions
-        made no room for. They may take their share of what the FOLD holds, never of the whole
-        declaration: a member's chain is holding the rest of it at the same moment.
+        They may take their share of what the FOLD holds, never of the whole declaration.
         """
         if not plan.stat_pass or not self._budget_bytes or self._budget_bytes <= 0:
             return False
@@ -445,17 +391,12 @@ class CaseReduction:
     def check_grid(self) -> str | None:
         """Whether the cases agree enough to be folded, or why they do not.
 
-        Compared on the grid each case's chain LANDS on (the folded shape and the plan-evolved
-        geometry), not the stored one: the chain exists precisely to bring disagreeing members onto
-        one grid (a ``Resample`` before the ``Reduce``), and comparing what is on disk would refuse
-        the very cohorts the reduction is for. Read from headers and plans alone, so it costs
-        nothing and happens before the first byte. Nothing anywhere can verify that the members
-        truly share a space, only that they claim to.
+        Compared on the grid each case's chain LANDS on, not the stored one, and from headers and
+        plans alone, before the first byte. Nothing can verify that the members truly share a space,
+        only that they claim to.
 
-        Compared against :attr:`reference`, the case whose geometry the output adopts, and only
-        ``strict`` compares geometry at all: naming a reference is how a cohort says its members
-        disagree on their headers and which one to believe, so demanding they agree would refuse
-        every cohort the policy exists for.
+        Compared against :attr:`reference`, the case whose geometry the output adopts; only
+        ``strict`` compares geometry at all.
         """
         reference = self.reference
         others = [manager for manager in self.managers if manager is not reference]
@@ -472,9 +413,7 @@ class CaseReduction:
             attribute = manager.landed_attributes()
             for key in _GEOMETRY_KEYS:
                 # ``strict`` is a promise that the geometries WERE compared, and a key nobody
-                # recorded cannot be. Skipping it is quietest exactly where it costs most: a
-                # Direction missing from one header is a flip that shows in neither extent nor
-                # spacing. Fold on extent alone with 'grid: shape_only' if that is what is meant.
+                # recorded cannot be. Fold on extent alone with 'grid: shape_only' instead.
                 absent = [
                     name for name, side in ((reference.name, expected), (manager.name, attribute)) if key not in side
                 ]
@@ -513,10 +452,8 @@ class CaseReduction:
 
     def _unbounded_members(self) -> dict[str, str]:
         """The members whose region reads decode their whole volume, with their store's format.
-
-        Only an entry on disk is asked: a cache the run has still to write is swept onto a store
-        that serves region writes, and every such store serves bounded region reads.
-        """
+        Only an entry on disk is asked: a cache still to write lands on a store serving bounded
+        reads."""
         unbounded: dict[str, str] = {}
         for manager in self.managers:
             dataset, group = self._member_source(manager)
@@ -525,12 +462,9 @@ class CaseReduction:
         return unbounded
 
     def _needs_stat_pass(self) -> bool:
-        """Whether a stage after the reduction wants whole-volume statistics OF THE RESULT.
-
-        Those cannot be seeded from disk the usual way: the reduced volume is stored nowhere yet --
-        so the engine computes them with a pass of its own. Twice the reads, no intermediate volume,
-        and the reduction is deterministic so both passes see the same values.
-        """
+        """Whether a stage after the reduction wants whole-volume statistics OF THE RESULT. The
+        reduced volume is stored nowhere yet, so the engine computes them with a pass of its own:
+        twice the reads, no intermediate volume."""
         return any(stage.patch_locality(Attribute()).kind is LocalityKind.GLOBAL_STAT for stage in self.post)
 
     def plan(self) -> ReductionPlan:
@@ -540,15 +474,14 @@ class CaseReduction:
             output=self.reduce.output,
             cases=[manager.name for manager in self.managers],
             spatial=reference.spatial_shape,
-            # The operator's own channel map, because only it knows the result's leading axis: a
-            # Concat over N cases writes N times the channels, and the plan must probe and size the
-            # shape the run will actually open.
+            # The operator's own channel map: a Concat over N cases writes N times the channels,
+            # and the plan must size the shape the run will open.
             channels=self.operator.output_channels(int(reference.base_shape[0]), len(self.managers)),
             source_channels=int(reference.base_shape[0]),
             slab_rows=self.slab_rows,
             incremental=self.operator.incremental,
             working_multiple=float(self.operator.working_multiple_for(len(self.managers))),
-            # The worst member's, because the fold is paced by whichever chain holds the most.
+            # The worst member's: the fold is paced by whichever chain holds the most.
             chain_multiple=max((float(manager.working_multiple()) for manager in self.managers), default=0.0),
             pull_bytes=pull_bytes,
             read_bytes=read_bytes,
@@ -559,13 +492,8 @@ class CaseReduction:
 
     def _member_read_bytes(self, channels: int) -> tuple[int, int]:
         """What one member's region costs its store at the current height, in bytes: the source
-        window it pulls, and what the store decodes above that window.
-
-        The fold is paced by whichever member costs the most, and one read is in flight at a time,
-        so both are the widest member's and both are charged once. ``None`` from a manager (a chain
-        that cannot answer) contributes nothing: the peak then says what it did before, which is
-        what the run-time probe is there to correct.
-        """
+        window it pulls, and what the store decodes above that window. Both are the widest member's
+        and both are charged once; ``None`` from a manager contributes nothing."""
         from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
 
         reads = [manager.region_reads(self.slab_rows) for manager in self.managers]
@@ -579,18 +507,13 @@ class CaseReduction:
 
     def _fold(self, region: tuple[slice, ...]) -> torch.Tensor:
         """One region of the reduced volume: every case reads that region, the operator folds them.
-
-        Each region is presented as ``[1, C, *spatial]`` (the stack-axis layout every operator is
-        written against (see :class:`~konfai.data.reduction.Reduction`)), and the result comes back
-        without it. The axis matters to any operator that places things side by side.
-        """
+        Each region is presented as ``[1, C, *spatial]``, the stack-axis layout every operator is
+        written against (:class:`~konfai.data.reduction.Reduction`); the result comes back without it."""
         with SWEEP_CLOCK.phase("chain"):
             self.operator.start()
         for manager in self.managers:
             # No name holds the region past its accumulate: one that did would keep a second member
-            # region resident, which the plan does not price (1162 MiB against 778 on a 5 x 384 MiB
-            # float32 cohort folded whole). The read stays outside the phase, and the argument dies
-            # with the frame that times the fold of it.
+            # region resident, which the plan does not price.
             self._accumulate(self._member_region(manager, region))
         with SWEEP_CLOCK.phase("chain"):
             return self.operator.finalize().squeeze(0)
@@ -607,19 +530,9 @@ class CaseReduction:
             return manager.read_region(region).unsqueeze(0)
 
     def _folds(self, spatial: list[int]):
-        """Every region's fold, in order, the height following what the regions HOLD.
-
-        The first region is the one the sizing priced (:meth:`fit_budget`); every one after it is
-        cut by :class:`RegionGrowth` from what the last one held, read by the instrument the route
-        has (:func:`open_held_meter`: the allocator on a device, the resident peak on the host).
-        What the plan priced is a model, and a model of what a chain holds has to be right about
-        every stage, every store and every bridge it crosses; what the region actually held is a
-        fact, and it costs one counter read on work the fold had to do anyway.
-
-        Judged against the declaration LESS the chunk cache's share, because that is what the
-        reading covers: the meter does not count the decoded-chunk cache (it outlives the region),
-        so the cache's bytes come off the other side of the comparison too.
-        """
+        """Every region's fold, in order, the height following what the regions HOLD: the first is
+        the one the sizing priced (:meth:`fit_budget`), each one after it is cut by
+        :class:`RegionGrowth` from what the last held, judged against the budget less the cache's share."""
         budget = self._budget_bytes if self._budget_bytes and self._budget_bytes > 0 else None
         allowed = None if budget is None else budget - (budget_share("cache", budget) or 0.0)
         growth = RegionGrowth(self.slab_rows, self._cap_rows(spatial), allowed)
@@ -671,22 +584,17 @@ class CaseReduction:
 
     def _output_attributes(self, plan: ReductionPlan) -> Attribute:
         # The header is the geometry the reference's chain LANDS on, not the geometry it was stored
-        # with: a cohort resampled onto a template grid by its pre-chain must publish that grid --
-        # seeding the source's own Spacing here would stamp a wrong header on every round of an
-        # atlas build, and nothing about the volume would look wrong.
+        # with: a cohort resampled onto a template grid must publish that grid.
         attribute = self.reference.landed_attributes()
         if self.reduce.provenance:
-            # The deliverable carries its own recipe. A set of cases that changed between two runs
-            # would otherwise write a different volume under the same name: the worst way this can
-            # fail, because nothing about the output looks wrong.
+            # The deliverable carries its own recipe: a case list that changed between two runs
+            # would otherwise write a different volume under the same name.
             attribute["konfai_reduce_operator"] = self.reduce.operator_classpath
             attribute["konfai_reduce_cases"] = "|".join(plan.cases)
         if plan.stat_pass:
             statistics = _RunningStatistics()
             # The folds this pass computes ARE the folds the write pass needs: keep them when they
-            # fit their share of what the fold holds (:meth:`keeps_folds`, the same rule the sizing
-            # subtracted them by), and the write pass then only applies the post stages. Otherwise
-            # the second pass re-folds, as before: correctness never depends on the keep.
+            # fit their share (:meth:`keeps_folds`). Correctness never depends on the keep.
             self._kept_folds = [] if self.keeps_folds(plan) else None
             # The region is kept beside its fold: the growth changes the height along the pass, so
             # regions re-derived at any one height would misalign with the folds cut at another.
@@ -720,35 +628,28 @@ class CaseReduction:
     def materialize(self, rewrite: bool = False, device: torch.device | None = None) -> bool:
         """Write the reduced entry, or raise saying why it cannot be written this way.
 
-        There is no whole-volume fallback: assembling every case is exactly what this exists to
-        avoid, and doing it silently would turn a bounded run into an unannounced OOM. A finished
-        output is left alone unless ``rewrite``, which is the resume.
-
-        ``device`` is where the fold runs: each member replays its region there, the operator folds
-        there, and only the finished block comes back to the host for the write.
+        There is no whole-volume fallback. A finished output is left alone unless ``rewrite``, which
+        is the resume. ``device`` is where the fold runs: each member replays its region there, the
+        operator folds there, and only the finished block comes back to the host for the write.
         """
         if not rewrite and self.destination.is_dataset_exist(self.group, self.reduce.output):
             return True
         for manager in self.managers:
             manager.set_chain_device(device)
             # --overwrite must reach the MEMBERS, not just this output: each member's read_region
-            # resolves satisfied Saves from the previous run's caches unless told to rewrite, and a
-            # reduction folding stale caches writes a wrong volume whose provenance looks correct.
+            # resolves satisfied Saves from the previous run's caches unless told to rewrite.
             manager._set_rewrite(rewrite)
         if device is not None and device.type == "cuda":
-            # The member regions this fold accumulates live in VRAM: the slabs are sized against
-            # the card, not against a budget declared in host bytes -- a host-sized region set on a
-            # 16 GB card is an OOM mid-fold, after the stat pass already paid.
+            # The member regions this fold accumulates live in VRAM: the slabs are sized against the
+            # card, not against a budget declared in host bytes.
             declared = self._budget_bytes
             capped = device_capped_budget(declared, device)
             if capped is not None and capped != declared:
                 self.fit_budget(capped)
                 # The slabs are the card's; the KEEP decision is the host's: kept folds live in host
-                # memory (``.cpu()``), and judging them against VRAM/2 re-folded outputs the host
-                # could have held whole -- a second full pass for nothing.
+                # memory (``.cpu()``).
                 self._budget_bytes = declared
-                # Said once, because the PLAN printed the host figure: the run must say which
-                # budget it actually worked under, or every future OOM is diagnosed off a lie.
+                # The PLAN printed the host figure, so the run says which budget it worked under.
                 print(
                     f"[Reduce] '{self.reduce.output}': regions re-sized for {device} --"
                     f" {self.slab_rows} row(s) under {capped / 2**30:.2f} GiB"
@@ -757,8 +658,7 @@ class CaseReduction:
                 )
         plan = self.plan()
         if not plan.streams:
-            # A grid disagreement gets its own remedy: a Save changes nothing about the grids, so
-            # the generic advice would send the reader in a circle.
+            # A grid disagreement gets its own remedy: a Save changes nothing about the grids.
             remedy = (
                 "The members do not land on one grid: resample them onto a common grid before the"
                 " Reduce, or declare grid: reference:<case> / shape_only if the cohort is already"
@@ -778,8 +678,7 @@ class CaseReduction:
         spatial = plan.spatial
         attribute = self._output_attributes(plan)
         rank = len(spatial) + 1
-        # The folds a stat pass kept (when the folded output fits half the budget) are written as
-        # they are; otherwise every region is folded here, once.
+        # The folds a stat pass kept are written as they are; otherwise every region is folded here.
         kept = self._kept_folds
         self._kept_folds = None
         folds = iter(kept) if kept is not None else self._folds(spatial)

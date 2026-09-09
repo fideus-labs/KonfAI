@@ -40,9 +40,7 @@ def _positive_int(value: str) -> int:
 
 
 class _VersionAction(argparse.Action):
-    """``--version``: the installed version, looked up when asked for. ``importlib.metadata.version``
-    scans the installed distributions (17 ms cold), which every other invocation would pay at
-    parser construction."""
+    """``--version``: the installed version, looked up when asked for."""
 
     def __init__(self, option_strings: list[str], dest: str, help: str | None = None) -> None:
         super().__init__(option_strings, dest, default=argparse.SUPPRESS, nargs=0, help=help)
@@ -149,8 +147,7 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         str(State.TRANSFORM), help="Prepare a dataset: apply a transform chain to every case and write the result."
     )
-    # Deliberately NOT _add_common_args: -tb has no scalar to show, so refusing it here is a parse
-    # error, not a silent no-op.
+    # Deliberately NOT _add_common_args: -tb has no scalar to show, so it is a parse error here.
     parser.add_argument(
         "-c",
         "--config",
@@ -220,7 +217,6 @@ def _run_list(kind: str) -> None:
 
 
 # Command -> (implementation module, entrypoint, the kwarg the config path travels under).
-# Imports stay lazy and by name: the heavy modules load only for the command that runs.
 _COMMANDS: dict[str, tuple[str, str, str]] = {
     str(State.TRAIN): ("konfai.trainer", "train", "config"),
     str(State.RESUME): ("konfai.trainer", "train", "config"),
@@ -242,9 +238,8 @@ _INIT_TARGETS: dict[str, tuple[str, str, str]] = {
 def _run_init(args: dict[str, Any]) -> None:
     """``--init``: bind the workflow once so every default resolves and lands in the file, then exit.
 
-    The file is created seeded with its root key when missing (an empty tree would be refused as
-    holding no root). The build itself never runs anything; a build error after partial binding
-    still leaves what resolved on disk (the strict block flushes on exceptional exit too).
+    The file is created seeded with its root key when missing. The build runs nothing, and a build
+    error after partial binding still leaves what resolved on disk.
     """
     import inspect
     from pathlib import Path
@@ -269,8 +264,7 @@ def _run_init(args: dict[str, Any]) -> None:
 
 
 def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
-    """The ``--gpu`` choices, checked after parsing: resolving them imports torch, which
-    ``--help`` and a usage error must not pay for."""
+    """The ``--gpu`` choices, checked after parsing, so ``--help`` and a usage error never import torch."""
     if not gpu:
         return
     from konfai import cuda_visible_devices
@@ -288,8 +282,7 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         _run_list(args["kind"])
         return
     if args["command"] not in _COMMANDS:
-        # Exhaustive on purpose: a fallback would silently launch the trainer for any command it
-        # does not know: a new workflow would train a UNet instead of failing.
+        # Exhaustive on purpose: a fallback would silently launch the trainer for an unknown command.
         parser.error(f"Unknown command '{args['command']}'.")
     _check_gpu_ids(parser, args["gpu"])
     module_name, function_name, config_key = _COMMANDS[args["command"]]
@@ -298,13 +291,11 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
     elif config_key != "config":
         args[config_key] = args.pop("config")
     if args.pop("init", False):
-        # --init must SHORT-CIRCUIT for the same reason --plan does just below.
         _run_init(args)
         return
     if args.pop("plan", False):
         # --plan must SHORT-CIRCUIT here: the distributed wrapper filters kwargs by the entrypoint's
-        # signature, so a 'plan' passed through would be silently dropped and the run would proceed
-        # as if the flag had never been given.
+        # signature, so a 'plan' passed through would be dropped and the run would proceed.
         if "num_nodes" in args:
             parser.error("--plan is a dry run on this machine and submits nothing: use `konfai TRANSFORM --plan`.")
         # plan_transform declares the TRANSFORM flags and nothing else; the command name is not one.

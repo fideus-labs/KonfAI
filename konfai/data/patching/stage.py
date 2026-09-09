@@ -48,10 +48,9 @@ def _halo_radii(halo: tuple[int, ...], n_axes: int) -> list[int]:
 class Stage(Protocol):
     """One step of what a case's copy is made of, as the patch-streaming dispatcher sees it.
 
-    A copy is its group's transforms followed by the augmentations drawn for it, and streaming asks the
-    same three things of every step: what its output depends on, which source region a target patch
-    needs, and to run on one tensor. A ``Transform`` answers them as itself. An augmentation is
-    parameterised per case and per copy, so it answers them bound to one (see :class:`AugmentedStage`).
+    Streaming asks three things of every step: what its output depends on, which source region a
+    target patch needs, and to run on one tensor. A ``Transform`` answers as itself; an augmentation
+    answers bound to one case and copy (:class:`AugmentedStage`).
     """
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality: ...
@@ -78,13 +77,8 @@ class Stage(Protocol):
 
 
 def _spatial(shape: object) -> list[int]:
-    """A folded shape as plain Python ints, whatever the stage returned it as.
-
-    ``transform_shape`` is user-facing: a stage that computes its target grid with torch or numpy
-    hands back that library's scalars, and they travel unnoticed until something outside Python asks
-    for a real int: a zarr store refusing "Expected an iterable of integers", a header holding
-    ``tensor(128)``. Normalising at the fold makes ``shapes`` hold what it is typed as.
-    """
+    """A folded shape as plain Python ints: a stage's ``transform_shape`` may hand back torch or numpy
+    scalars."""
     return [int(extent) for extent in cast("Sequence[Any]", shape)]
 
 
@@ -95,11 +89,9 @@ def _is_draw(stage: object) -> TypeGuard[DataAugmentation]:
 
 @contextlib.contextmanager
 def _drawn_from(*key: object) -> Iterator[None]:
-    """Seed the global RNGs (random, numpy, torch on every device) from ``key`` for the duration,
-    then restore them. Two chains of one case (an image and its mask) hold different draw objects
-    and derive the same copies from the same key (the Expand's seed, the case's name, which draw
-    this is). ``blake2b``, not ``hash()``: string hashing is salted per process.
-    """
+    """Seed the global RNGs (random, numpy, torch on every device) from ``key`` for the duration, then
+    restore them. Two chains of one case derive the same copies from the same key. ``blake2b``, not
+    ``hash()``: string hashing is salted per process."""
     digest = hashlib.blake2b("|".join(str(part) for part in key).encode(), digest_size=4).digest()
     with preserved_rng():
         seed_all(int.from_bytes(digest, "big"))
@@ -107,12 +99,7 @@ def _drawn_from(*key: object) -> Iterator[None]:
 
 
 def _stage_name(stage: Stage) -> str:
-    """What to CALL a stage in a message: a draw's own class, never the adapter that binds it.
-
-    Every refusal and every regime note names the stage that caused it, and 'AugmentedStage' names
-    nothing a user wrote: the point of saying which stage refused is lost if the answer is the
-    wrapper's name for all of them.
-    """
+    """What to CALL a stage in a message: a draw's own class, never the adapter that binds it."""
     if isinstance(stage, AugmentedStage):
         return type(stage.augmentation).__name__
     return type(stage).__name__
@@ -120,11 +107,8 @@ def _stage_name(stage: Stage) -> str:
 
 @dataclass(frozen=True)
 class AugmentedStage:
-    """One augmentation, bound to the case and the copy whose draw it carries.
-
-    An augmentation is parameterised per (case, copy); binding both makes it answer the Stage
-    protocol like a plain transform.
-    """
+    """One augmentation, bound to the case and the copy whose draw it carries, so it answers the Stage
+    protocol like a plain transform."""
 
     augmentation: DataAugmentation
     index: int
@@ -138,13 +122,9 @@ class AugmentedStage:
         return channels
 
     def case_working_multiple(self, name: str) -> float:
-        """What this copy's draw allocates beyond its block, in volumes-worth of it.
-
-        From the draw's locality: a REGRID draw resamples through ``grid_sample``, which builds the
-        pull box's coordinate grid (one volume per spatial axis) beside the landed block; any other
-        draw returns a fresh tensor or a view over a field of its own (one volume). Priced at zero,
-        an Expand copy's draws swept under a budget that never heard of their buffers.
-        """
+        """What this copy's draw allocates beyond its block, in volumes-worth of it: a REGRID draw builds
+        the pull box's coordinate grid through ``grid_sample`` (one volume per spatial axis), any other
+        draw one volume."""
         del name
         kind = self.patch_locality(Attribute()).kind
         return 4.0 if kind is LocalityKind.REGRID else 1.0
@@ -156,8 +136,7 @@ class AugmentedStage:
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # A draw is bound to (case index, copy), not to the case's NAME: the name a region stage
-        # needs to find its own per-case map means nothing to an augmentation.
+        # A draw is bound to (case index, copy), not to the case's NAME.
         del name
         return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
 
@@ -183,9 +162,7 @@ class AugmentedStage:
         return self.augmentation.compute(name, self.index, self.a, tensor)
 
 
-# The pull maps are callable dataclasses, not closures, because a plan crosses a process boundary:
-# the launcher plans every case, `mp.spawn` then pickles the workflow object whole, and a local
-# function cannot be pickled. Everything a plan memoizes must survive that trip.
+# The pull maps are callable dataclasses, not closures: a plan is pickled whole by `mp.spawn`.
 
 
 @dataclass(frozen=True)
@@ -206,11 +183,8 @@ class _HaloPull:
 class _RemapPull:
     """An index-remap stage's pull map, bound to the case and the state the stages before it left.
 
-    The case NAME is bound here because a stage instance is shared by every case of a manager
-    (``DatasetManager`` hands the same transforms list to each), while a map read from a stored
-    transform or a reference header is per case. A pull that could not say which case it was for
-    would build one case's window from another case's map, and a window that is short does not
-    raise, it returns the fill.
+    The case NAME is bound: a stage instance is shared by every case of a manager, while a map read
+    from a stored transform or a reference header is per case.
     """
 
     remap: Callable[[str, tuple[slice, ...], list[int], Attribute], list[slice]]
@@ -228,8 +202,7 @@ class _ReadStagePlan:
     on either side, and (for a region stage) the pull map from a region of its output to the region
     of its input it is computed from, bound to the case state the stages before it left.
 
-    ``run_pull``, when set, is the pull the RUN walks instead: a stage that sizes its windows from
-    the data it reads (a declared field) measures there, while ``pull`` stays headers-only for the
+    ``run_pull``, when set, is the pull the RUN walks instead; ``pull`` stays headers-only for the
     plan's pricing: the estimator must never read a voxel."""
 
     kind: LocalityKind

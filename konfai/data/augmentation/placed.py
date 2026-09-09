@@ -35,8 +35,7 @@ from konfai.utils.errors import AugmentationError
 class PlacedDraw(DataAugmentation):
     """A per-voxel draw whose value at a voxel is a function of the voxel's place in the volume.
 
-    POINTWISE: a region computes exactly its part, given where it sits (``offsets``) and the volume's
-    spatial extent (``full``), which the whole volume passes as zeros and its own shape.
+    A region computes its part from where it sits (``offsets``) and the volume's extent (``full``).
     """
 
     locality = LocalityKind.POINTWISE
@@ -58,7 +57,7 @@ class PlacedDraw(DataAugmentation):
         return self._apply(index, a, tensor, offsets, tuple(int(extent) for extent in context.source_shape))
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        # A value draw moves no voxel: the inverse a TTA applies to a prediction is the tensor itself.
+        # A value draw moves no voxel: the inverse a TTA applies is the tensor itself.
         return tensor
 
 
@@ -122,10 +121,8 @@ class Noise(PlacedDraw):
 class CutOUT(PlacedDraw):
     """Cut a box out of the copy and fill it with ``value``.
 
-    ``cutout_size`` is the box's edge as a FRACTION of the volume's extent per axis, in (0, 1]:
-    the box is placed in normalised coordinates, so a 0.34 box cuts about ``0.34**rank`` of the
-    volume. An integer count of voxels is not a size this draw takes: through the YAML binder it
-    once bound silently and erased the whole copy.
+    ``cutout_size`` is the box's edge as a fraction of the volume's extent per axis, in (0, 1], never
+    a count of voxels: a 0.34 box cuts about ``0.34**rank`` of the volume.
     """
 
     def __init__(
@@ -164,8 +161,7 @@ class CutOUT(PlacedDraw):
         result = masks[0]
         for mask in masks[1:]:
             result = torch.logical_or(result, mask)
-        # The bool mask broadcasts over the channels: repeated C times and re-tested against 1 it
-        # was a copy and a pass over C times the volume (measured 54-60 ms at 8x128^3, 34-40 without).
+        # The bool mask broadcasts over the channels, never repeated C times and re-tested.
         return torch.where(result.unsqueeze(0).to(tensor.device), tensor, torch.tensor(self.value).to(tensor.device))
 
 
@@ -201,8 +197,8 @@ class Mask(DataAugmentation):
         # The mask's own grid, the extent state_init gave the copy: the draw crops or pads to it.
         return list(self.mask_shape)
 
-    # WHOLE_VOLUME on purpose: the output grid is the mask's, and the mask volume is already resident
-    # at that extent: there is no whole-volume read left for a declaration to save.
+    # WHOLE_VOLUME on purpose: the output grid is the mask's, and the mask volume is already
+    # resident at that extent.
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         mask = self._load_mask()
         position = self.positions[index][a]

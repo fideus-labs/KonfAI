@@ -16,9 +16,8 @@
 
 """The memory budget: what a run may hold, resolved once and shared by every consumer.
 
-An ``auto`` budget measures the node (a cgroup ceiling, a SLURM grant, the host's free RAM), a
-declared one is the caller's per-rank figure; both land in a :class:`MemoryBudget` that answers the
-one question every consumer had been re-deriving: what is MY rank's share.
+An ``auto`` budget measures the node (a cgroup ceiling, a SLURM grant, the host's free RAM) and the
+ranks sharing that node split it; a declared budget is the caller's per-rank figure.
 """
 
 from __future__ import annotations
@@ -36,8 +35,7 @@ import psutil
 from konfai.utils.errors import ConfigError
 
 # Fraction of the detected node memory an ``"auto"`` budget offers the cache; the rest is reserved for
-# the model's optimizer/gradient state, DataLoader worker copies, CUDA pinned staging buffers, and
-# allocator slack. Caching runs with zero DataLoader workers, so a fifth of the node held back is ample.
+# the model's optimizer/gradient state, DataLoader worker copies, pinned staging buffers and allocator slack.
 AUTO_MEMORY_SAFETY_FRACTION = 0.8
 
 #: The smallest declared budget the stack can honor (see the warning in resolve_memory_budget).
@@ -54,7 +52,7 @@ _MEMORY_UNIT_BYTES: dict[str, int] = {
 
 
 def format_bytes(num_bytes: float) -> str:
-    """Human bytes at the unit that carries digits: a 0.3 MB refusal must not read '0.00 GiB'."""
+    """Human-readable bytes at the largest unit that carries digits."""
     for shift, unit in ((40, "TiB"), (30, "GiB"), (20, "MiB"), (10, "KiB")):
         if abs(num_bytes) >= 2**shift:
             return f"{num_bytes / 2**shift:.2f} {unit}"
@@ -63,13 +61,9 @@ def format_bytes(num_bytes: float) -> str:
 
 @dataclass(frozen=True)
 class MemoryBudget:
-    """A resolved memory budget that knows its own scope.
-
-    The one decision no consumer may make for itself: an ``auto`` budget measures the NODE, so
-    ranks sharing it split it; an explicit budget is the user's per-rank figure, taken as is.
-    Handing consumers a bare number with an ``is_auto`` flag makes each of them re-derive that
-    rule: this object answers it once, through :meth:`per_rank_bytes`.
-    """
+    """A resolved memory budget that knows its own scope: an ``auto`` budget measures the NODE, so
+    ranks sharing it split it, where an explicit budget is the user's per-rank figure taken as is.
+    :meth:`per_rank_bytes` applies that rule."""
 
     total_bytes: float
     description: str
@@ -79,19 +73,9 @@ class MemoryBudget:
         return self.total_bytes / max(1, world_size) if self.shared_across_ranks else self.total_bytes
 
     def work_bytes(self, world_size: int) -> float:
-        """What is left of this rank's budget for the work itself.
-
-        An ``auto`` budget is the MACHINE's figure, and the interpreter, torch and the imaging
-        libraries are resident out of it before the first voxel is read: measured at 647 MiB, which
-        is 0.8% of an 80 GiB budget and 22% of the 2.91 GiB a 4 GiB machine offers -- the whole of
-        its margin, and why chains that ran inside an 8 GiB machine were killed on a 4 GiB one.
-
-        A DECLARED budget is not the machine's: a caller who writes ``memory_budget: 2G`` is saying
-        what the work may take, not what the process may weigh, so nothing is taken off it.
-
-        Read, not assumed: what the process holds depends on which optional libraries the chain
-        pulled in. Never below zero, where the refusals speak for a budget already spent.
-        """
+        """What is left of this rank's budget for the work itself. An ``auto`` budget is the MACHINE's
+        figure, so what the process already holds resident is taken off it; a DECLARED budget states what
+        the work may take, so nothing is. Never below zero."""
         per_rank = self.per_rank_bytes(world_size)
         if not self.shared_across_ranks:
             return per_rank
@@ -100,12 +84,7 @@ class MemoryBudget:
 
 #: How a declared per-rank budget divides between the consumers that can be holding AT ONCE:
 #: shares of ONE declaration, so they add to one. Which consumers are simultaneous is a property of
-#: the call path, not of this table: a whole-volume fallback and a swept tile are alternatives and
-#: each may take the route's whole share, while a fold's regions and its members' chains are not,
-#: because a member's sweep fires from inside the fold loop.
-#:
-#: The cache is the one to give up first: it is an optimisation, its own miss costs a re-decode, and
-#: the other two are the working set itself.
+#: the call path, not of this table.
 BUDGET_SHARES: dict[str, float] = {
     "regions": 0.50,  # what a route holds in the regions it is landing (a fold's kept folds included)
     "chains": 0.35,  # what a chain may hold while producing one of them: its sweeps, its walk slab
@@ -117,11 +96,8 @@ if abs(sum(BUDGET_SHARES.values()) - 1.0) > 1e-9:  # pragma: no cover - a typo, 
 
 
 def budget_share(name: str, budget_bytes: float | None = None) -> float | None:
-    """One consumer's share of the declared per-rank budget, or ``None`` when none was declared.
-
-    Asked by name so the division is read in one place (:data:`BUDGET_SHARES`) rather than
-    rediscovered as a fraction in each consumer's own file.
-    """
+    """One consumer's share of the declared per-rank budget (:data:`BUDGET_SHARES`), or ``None``
+    when none was declared."""
     declared = per_rank_budget_bytes() if budget_bytes is None else budget_bytes
     if not declared or declared <= 0:
         return None
@@ -131,11 +107,8 @@ def budget_share(name: str, budget_bytes: float | None = None) -> float | None:
 def sweep_share(budget_bytes: float | None = None) -> float | None:
     """What a per-case sweep's block may hold: the landing's share and the chain's together.
 
-    A sweep is not a fold. Its block price already folds in what the chain running on it holds
-    (:meth:`~konfai.data.patching.DatasetManager.sweep_block_bytes` multiplies the chain's working
-    multiple into the block), so the two shares are one figure here where a reduction spends them
-    separately -- its regions are landed by one loop and its members' chains run inside another.
-    What is left over is the store's cache, which holds its own beside every block either way.
+    A sweep's block price already includes what the chain running on it holds, so the two shares
+    are one figure here. What is left over is the store's cache.
     """
     declared = per_rank_budget_bytes() if budget_bytes is None else budget_bytes
     if not declared or declared <= 0:
@@ -143,16 +116,14 @@ def sweep_share(budget_bytes: float | None = None) -> float | None:
     return declared * (BUDGET_SHARES["regions"] + BUDGET_SHARES["chains"])
 
 
-#: This rank's share of the budget, as the workflow that resolved it published it. Some consumers of
-#: a budget sit inside a ``Dataset``, which a workflow reaches through doors that carry no budget (a
-#: transform reading a companion volume, a statistics scan, a store's decoded-chunk cache): they read
-#: it from here instead of every door growing a parameter for them.
+#: This rank's share of the budget, as the workflow that resolved it published it. Consumers sitting
+#: inside a ``Dataset``, which a workflow reaches through doors that carry no budget, read it here.
 _per_rank_bytes: float | None = None
 
 
 def set_per_rank_budget(budget_bytes: float | None) -> None:
-    """Publish this rank's budget. ``None`` (or a non-positive figure) means none was declared, which
-    is what every consumer falls back to its own default on."""
+    """Publish this rank's budget. ``None`` or a non-positive figure means none was declared, and
+    every consumer falls back to its own default."""
     global _per_rank_bytes
     _per_rank_bytes = float(budget_bytes) if budget_bytes and budget_bytes > 0 else None
 
@@ -165,45 +136,30 @@ def per_rank_budget_bytes() -> float | None:
 def peak_resident_bytes() -> int | None:
     """The most this process has ever held resident, or ``None`` where the kernel does not say.
 
-    A budget is a promise about resident memory, and until a run reports what it actually held the
-    promise could only be checked from outside. ``VmHWM`` is a lifetime high-water mark, so it
-    answers "did this run stay inside its budget" and not "which region was the worst".
-
-    NOT the cgroup's ``memory.peak``, which is the figure to reach for from outside but the wrong one
-    to report from inside: it counts the page cache the run's reads pulled in, which is reclaimable
-    and kills nothing. Measured on one TRANSFORM over native-resolution fields: cgroup 36.9 GiB
-    against 31.25 here, the difference being cache behind 88 GiB of decoded chunks. What the OOM
-    killer counts is the anonymous set (``anon-rss`` in its message), and this tracks it: at the end
-    of that same run ``RssFile`` was 0.30 GiB against 11.05 of ``RssAnon``, so a process whose file
-    mappings are small -- which a streamed run's are, since it reads rather than maps -- has a
-    ``VmHWM`` that is its anonymous peak.
+    ``VmHWM`` is a lifetime high-water mark, so it answers "did this run stay inside its budget" and not
+    "which region was the worst". NOT the cgroup's ``memory.peak``, which also counts the reclaimable
+    page cache; ``VmHWM`` tracks the anonymous set the OOM killer counts.
     """
     return _status_bytes("VmHWM")
 
 
-#: The highest ``VmHWM`` read before a reset: what a run's closing line adds back, so a scope's
-#: reset (a region measured for the growth) never makes the run report less than it held.
+#: The highest ``VmHWM`` read before a reset, added back by :func:`run_peak_resident_bytes` so a
+#: scope's reset never makes the run report less than it held.
 _peak_before_resets = 0
 
 
 def run_peak_resident_bytes() -> int | None:
     """The most this process has held resident over the whole run, across every
-    :func:`reset_resident_peak`: the figure a run's closing line reports, where
-    :func:`peak_resident_bytes` reads the scope since the last reset."""
+    :func:`reset_resident_peak`, where :func:`peak_resident_bytes` reads the scope since the last reset."""
     peak = peak_resident_bytes()
     return None if peak is None else max(peak, _peak_before_resets)
 
 
 def reset_resident_peak() -> bool:
     """Set this process's resident high-water mark back to what it holds now, so the next reading of
-    :func:`peak_resident_bytes` is a peak over one scope rather than over the whole run.
-
-    ``VmHWM`` only rises, which is what makes it the right figure for a whole run and the wrong one
-    for a step. Writing ``5`` to ``/proc/self/clear_refs`` is the kernel's own reset for exactly this
-    (``CLEAR_REFS_MM_HIWATER_RSS``): it assigns the current RSS and walks nothing, so it costs a
-    write and no page-table scan. ``False`` where the kernel does not offer it, and a caller that
-    gets ``False`` has no per-step peak and should not pretend otherwise.
-    """
+    :func:`peak_resident_bytes` is a peak over one scope rather than over the whole run. Writes ``5`` to
+    ``/proc/self/clear_refs``. Returns ``False`` where the kernel does not offer it, and such a caller
+    has no per-step peak."""
     global _peak_before_resets
     peak = peak_resident_bytes()
     try:
@@ -227,11 +183,8 @@ _resident_floor: int | None = None
 def record_resident_floor() -> int | None:
     """Record what this process holds resident now as the run's floor (:func:`resident_floor`).
 
-    Called by a workflow after its setup and before its first case, so a region is measured above
-    the interpreter, the libraries and the workflow's own objects, and never above the pages an
-    earlier region freed and this one reuses: those are resident, and the budget is about what is
-    resident. Measured above where a scope started instead, a region reusing a predecessor's pages
-    read as holding nothing.
+    Called by a workflow after its setup and before its first case, so a region is measured above the
+    interpreter, the libraries and the workflow's own objects.
     """
     global _resident_floor
     _resident_floor = resident_bytes()
@@ -244,8 +197,7 @@ def resident_floor() -> int | None:
 
 
 def clear_resident_floor() -> None:
-    """Forget the recorded floor: a workflow's own, released when it ends, so the next workflow in
-    the same process (a notebook) measures above its own floor or above where its scopes start."""
+    """Forget the recorded floor, so the next workflow in the same process measures above its own."""
     global _resident_floor
     _resident_floor = None
 
@@ -271,28 +223,20 @@ def _positive_int_env(name: str) -> int | None:
 
 
 def node_local_ranks(world_size: int | None = None) -> int:
-    """How many ranks of this run share ONE node's RAM: the divisor a node-scoped budget needs.
-
-    The launcher publishes the count in ``KONFAI_LOCAL_RANKS``, because a budget is often sized before
-    the spawn where a world size exists at all. Without it (direct API use, a garbled value) the
-    world size stands in: exact on a single node, conservative everywhere else.
-    """
+    """How many ranks of this run share ONE node's RAM: the divisor a node-scoped budget needs. The
+    launcher publishes the count in ``KONFAI_LOCAL_RANKS``; without it the world size stands in, exact
+    on a single node and conservative everywhere else."""
     local = _positive_int_env("KONFAI_LOCAL_RANKS")
     if local is None:
         return max(1, world_size or 1)
     return min(local, world_size) if world_size else local
 
 
-# psutil.virtual_memory() always reports the HOST, so inside a container or a SLURM cgroup that grants
-# far less than the node has, a memory budget derived from it would overshoot the real limit and get
-# OOM-killed. The cgroup ceiling is read directly instead: the process's own cgroup (from
-# /proc/self/cgroup, since only ``docker run`` puts it at the mount root) and every ancestor up to the
-# mount, the tightest one winning. cgroup v2 exposes ``memory.max`` (the literal ``"max"`` means
-# unbounded); cgroup v1 exposes ``memory.limit_in_bytes`` with a page-aligned near INT64_MAX sentinel.
-# What the cgroup already holds is read from ``memory.stat`` and counts only the unreclaimable part
-# (``anon`` + ``kernel`` in v2, ``rss`` in v1): ``memory.current``/``usage_in_bytes`` include the page
-# cache, which the kernel drops under pressure, so a step that has streamed a cohort would otherwise
-# look full. Only Linux has these files.
+# psutil.virtual_memory() always reports the HOST, so the cgroup ceiling is read directly: the process's
+# own cgroup (from /proc/self/cgroup) and every ancestor up to the mount, the tightest one winning.
+# cgroup v2 exposes ``memory.max`` (the literal ``"max"`` means unbounded); v1 exposes
+# ``memory.limit_in_bytes`` with a page-aligned near INT64_MAX sentinel. What the cgroup already holds is
+# read from ``memory.stat``, the unreclaimable part only (``anon`` + ``kernel`` in v2, ``rss`` in v1).
 _CGROUP_ROOT = "/sys/fs/cgroup"
 _PROC_SELF_CGROUP = "/proc/self/cgroup"
 _CGROUP_UNLIMITED = 1 << 62  # any v1 limit at or above this is the "no limit" sentinel
@@ -317,8 +261,8 @@ def _own_cgroup(controller: str) -> tuple[Path, str, bool] | None:
         if hierarchy == "0" and controllers == "":
             return root, path, True
         if controller in controllers.split(","):
-            # A v1 controller mounts under the name it is mounted with: on most distributions the
-            # joint "cpu,cpuacct" with a "cpu" symlink beside it, on some only the joint one.
+            # A v1 controller mounts under the name it is mounted with: the joint "cpu,cpuacct" or
+            # the plain "cpu".
             mount = next((root / d for d in (controllers, controller) if (root / d).is_dir()), None)
             if mount is not None:
                 return mount, path, False
@@ -382,8 +326,7 @@ def forget_cgroup_cpu_ceiling() -> None:
 
 def _cgroup_cpu_ceiling() -> int | None:
     """The tightest CPU quota over this process's cpu cgroup and its ancestors, in cores; ``None``
-    when unbounded. Read once per process: the cgroup a process sits in does not move, and the
-    walk opens a file per ancestor, which a caller on every patch paid 300,000 times an epoch."""
+    when unbounded. Read once per process: the walk opens a file per ancestor."""
     key = (_PROC_SELF_CGROUP, _CGROUP_ROOT)
     if key not in _cpu_quota_cores:
         ceiling: int | None = None
@@ -398,9 +341,7 @@ def _cgroup_cpu_ceiling() -> int | None:
 
 def available_cpus() -> int:
     """The cores this process may actually run on: the tighter of its affinity mask and its cgroup
-    CPU quota (v2 ``cpu.max``, v1 ``cpu.cfs_quota_us``/``cpu.cfs_period_us``, over its ancestors).
-    ``os.cpu_count()`` is the host's core count, which a container sees in full while being allowed
-    a fraction of it, and every thread past that fraction is contention."""
+    CPU quota (v2 ``cpu.max``, v1 ``cpu.cfs_quota_us``/``cpu.cfs_period_us``, over its ancestors)."""
     try:
         cores = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
@@ -430,11 +371,9 @@ def _held_memory_bytes(directory: Path, keys: tuple[str, ...]) -> int | None:
 def _read_cgroup_memory_limit() -> tuple[int, int] | None:
     """``(ceiling, held bytes)`` for this process's cgroup, or ``None`` when unbounded or absent.
 
-    The ceiling is the tightest ``memory.max``/``limit_in_bytes`` on the path from the process's own
-    cgroup to the mount root; the held bytes are the innermost cgroup's unreclaimable memory, so a
-    SLURM step already holding memory does not count it as free. A missing hierarchy (non-Linux,
-    cgroups disabled), the ``"max"`` keyword, the v1 sentinel and unparseable values all mean "no
-    bound at this level".
+    The ceiling is the tightest ``memory.max``/``limit_in_bytes`` from the process's own cgroup to the
+    mount root; the held bytes are the innermost cgroup's unreclaimable memory. A missing hierarchy, the
+    ``"max"`` keyword, the v1 sentinel and unparseable values all mean "no bound at this level".
     """
     limits: list[int] = []
     held: int | None = None
@@ -457,8 +396,8 @@ def _read_cgroup_memory_limit() -> tuple[int, int] | None:
 
 def _slurm_memory_grant() -> int | None:
     """The bytes SLURM granted this step (``--mem`` / ``--mem-per-cpu``, in MB), or ``None`` outside a job.
-    Read as well as the cgroup: on a cluster whose slurmd does not enforce cgroups, the env is the bound.
-    ``--mem=0`` means the whole node, not zero: a zero grant is no bound."""
+    Read as well as the cgroup, which a slurmd may not enforce. ``--mem=0`` means the whole node,
+    so a zero grant is no bound."""
     per_node = _positive_int_env("SLURM_MEM_PER_NODE")
     if per_node is not None:
         return per_node * 2**20
@@ -470,13 +409,9 @@ def _slurm_memory_grant() -> int | None:
 
 
 def available_memory_bytes() -> tuple[int, str]:
-    """Return ``(bytes a process may safely allocate, source label)``, honouring a cgroup limit.
-
-    ``psutil`` sees the host's free RAM, which overshoots a container/cgroup ceiling; the tightest of
-    the cgroup's remaining room (its ceiling minus what it already holds), a SLURM memory grant and
-    the host figure wins, so the number is safe on a bare host, in a memory-capped container and in a
-    SLURM step alike. The label names which bound won, for the startup decision log.
-    """
+    """Return ``(bytes a process may safely allocate, source label)``: the tightest of the cgroup's
+    remaining room (its ceiling minus what it already holds), a SLURM memory grant and the host's free
+    RAM. The label names which bound won."""
     candidates = [(int(psutil.virtual_memory().available), "host available RAM")]
     cgroup = _read_cgroup_memory_limit()
     if cgroup is not None:
@@ -491,11 +426,10 @@ def available_memory_bytes() -> tuple[int, str]:
 def parse_memory_budget_bytes(value: str | float) -> int:
     """Parse an explicit memory budget to bytes: a bare number is GiB, a string carries its own unit.
 
-    KonfAI reports RAM in GiB throughout, so an unadorned ``24`` reads as ``24 GiB``: whether it
-    arrives as a number or, through the YAML binding, as the string ``"24"``. A string may name its
-    unit: decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, optional
-    space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is resolved by the
-    caller, not here.
+    An unadorned ``24`` reads as ``24 GiB``, as a number or as the YAML string ``"24"``. A string may
+    name its unit: decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, with
+    an optional space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is
+    resolved by the caller.
     """
     if isinstance(value, str):
         match = re.fullmatch(r"\s*(?P<number>[0-9]*\.?[0-9]+)\s*(?P<unit>[a-z]*)\s*", value.lower())
@@ -519,12 +453,9 @@ def parse_memory_budget_bytes(value: str | float) -> int:
 
 
 def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
-    """The configured ``memory_budget`` as an object that knows its own scope.
-
-    ``None``/``"auto"`` offers ``AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable memory: a
-    NODE budget, which ranks sharing the node split; an explicit budget is the caller's own figure,
-    per rank as declared.
-    """
+    """The configured ``memory_budget`` as an object that knows its own scope: ``None``/``"auto"`` offers
+    ``AUTO_MEMORY_SAFETY_FRACTION`` of the node's allocatable memory, a NODE budget which the ranks
+    sharing the node split, where an explicit budget is per rank as declared."""
     if memory_budget is None or (isinstance(memory_budget, str) and memory_budget.strip().lower() == "auto"):
         node_bytes, source = available_memory_bytes()
         return MemoryBudget(
@@ -534,12 +465,9 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
         )
     declared = parse_memory_budget_bytes(memory_budget)
     if declared < MINIMUM_DECLARED_BUDGET_BYTES:
-        # Below this the declaration describes no process that can run: the interpreter with torch
-        # and one imaging backend was measured at 647 MiB resident before the first voxel, and the
-        # per-case engine floor, the statistics scan's blocks and one collate copy sit outside the
-        # sizing model (a smaller declaration held at 512 MiB and broke below 128 as an
-        # unattributable kill deep in a run). Warned rather than refused: tests and probes size
-        # tiny fixtures under tiny declarations on purpose.
+        # Below this the declaration describes no process that can run: the interpreter with torch and
+        # one imaging backend is already several hundred MiB resident before the first voxel. Warned
+        # rather than refused: tests and probes size tiny fixtures under tiny declarations on purpose.
         warnings.warn(
             f"memory_budget {memory_budget!r} is below the smallest supported declaration"
             f" ({MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB): the process floor alone is several times"

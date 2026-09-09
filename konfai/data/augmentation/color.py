@@ -27,8 +27,7 @@ from konfai.utils.errors import AugmentationError
 
 
 class ColorTransform(DataAugmentation):
-    # The draw is a colour matrix applied to each voxel on its own: no neighbour, no coordinate,
-    # no extent. Whatever region a voxel is read in, it comes out the same.
+    # The draw is a colour matrix applied to each voxel on its own: no neighbour, no coordinate.
     locality = LocalityKind.POINTWISE
 
     def __init__(self, groups: list[str] | None = None) -> None:
@@ -106,9 +105,7 @@ class Saturation(ColorTransform):
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         saturation = torch.exp2(torch.randn(len(shapes)) * self.s_std)
         # Keep the luma component (v vT) at unit gain and scale only the orthogonal chroma component
-        # (I - v vT) by the saturation factor. Scaling the whole matrix instead, (v vT + (I - v vT)) * s
-        # = I * s, is a uniform per-channel gain (contrast) that never mixes toward luma. With this form
-        # s=1 is identity, s=0 collapses to greyscale, s>1 boosts saturation.
+        # (I - v vT) by the saturation factor: s=1 is the identity, s=0 collapses to greyscale.
         self.matrix[index] = [
             (self.v.ger(self.v) + (torch.eye(4) - self.v.ger(self.v)) * value).unsqueeze(0) for value in saturation
         ]

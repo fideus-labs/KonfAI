@@ -119,9 +119,8 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    # ``KonfAIInference`` lives in konfai-apps (it drives a nested app run), but published configs
-    # spell the bare name, which the TransformLoader resolves against this package: hand the class
-    # over when konfai-apps is installed, refuse with the install otherwise.
+    # ``KonfAIInference`` lives in konfai-apps, but published configs spell the bare name, which the
+    # TransformLoader resolves against this package.
     if name == "KonfAIInference":
         try:
             from konfai_apps.transforms import KonfAIInference

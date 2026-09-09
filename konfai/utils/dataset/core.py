@@ -105,30 +105,22 @@ class Dataset:
     ) -> None:
         base_format, self.level = split_format_level(file_format)
         normalized_format = base_format.lower().removeprefix(".")
-        # One vocabulary for a store: every spelling the walk accepts on disk is a token here, the
-        # dotted one included, since that is the suffix a store actually carries.
+        # Every spelling the walk accepts on disk for a store is a token here, the dotted one included.
         file_format = "omezarr" if f".{normalized_format}" in STORE_FORMS else normalized_format
         if file_format not in SUPPORTED_FORMATS:
-            # Unchecked, the token reaches the SimpleITK writer, which either raises on an extension
-            # it cannot name or writes a file no backend of ours probes: 'hd5' for 'h5' wrote and read
-            # back correctly while ``is_dataset_exist`` said no, so a resumed run redid the work.
+            # Unchecked, the token reaches the SimpleITK writer, which may write a file no backend probes.
             raise DatasetManagerError(
                 f"'{base_format}' is not a format KonfAI writes.",
                 "Use one of: " + ", ".join(sorted(SUPPORTED_FORMATS)) + ".",
             )
         self.filename, self.is_directory = Dataset._normalize_path(filename, file_format)
         self.file_format = file_format
-        # The store backend is auto-detected from what is actually on disk (like SitkFile already probes
-        # every supported extension): an OME-Zarr / Zarr / DICOM store is a directory whose type is
-        # knowable from its structure, so a ``:mha`` token never forces it to be mis-read. The token then
-        # only carries the WRITE format and the OME-Zarr pyramid level (``@N``).
+        # A store backend (OME-Zarr / Zarr / DICOM) is detected from disk; the token then only carries
+        # the write format and the OME-Zarr pyramid level (``@N``).
         detected = Dataset._detect_directory_store_format(self.filename) if self.is_directory else None
         if detected is not None:
             self.file_format = detected
-        # Write-side pyramid, declared by the Save/Write that owns this destination. Refused here
-        # rather than ignored: only OME-NGFF has multiple levels, so a pyramid asked of an mha or an
-        # h5 is a request the format cannot serve, and silently writing one level would leave the
-        # consumer's ``@1`` resolving to a level that does not exist.
+        # A pyramid asked of a format without levels is refused, never silently written as one level.
         if scale_factors and not backend_for(self.file_format).writes_pyramid:
             raise DatasetManagerError(
                 f"A pyramid was asked of a '{self.file_format}' destination, which has no levels.",
@@ -138,13 +130,12 @@ class Dataset:
         self.downsample_method = downsample_method
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}
-        #: Root-existence and case-path probes are one round-trip each on a remote root, per entry
-        #: read without these: a root seen once is not re-probed (a vanished one fails loudly at
-        #: the read), and a case resolved once keeps its path until a write drops the caches.
+        #: A root seen once is not re-probed, and a case resolved once keeps its path until a write
+        #: drops the caches (one round-trip each on a remote root).
         self._root_seen = False
         self._case_paths: dict[tuple[str, str], str] = {}
         #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
-        #: ``(group, name)``: computed once per volume, whatever the number of chains reading it.
+        #: ``(group, name)``: computed once per volume.
         self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _file(self, filename: str, read: bool) -> _File:
@@ -153,16 +144,13 @@ class Dataset:
 
     @property
     def _backend(self) -> type[_AbstractFile]:
-        """The class serving this dataset's format: where the per-backend facts are declared."""
+        """The class serving this dataset's format."""
         return backend_for(self.file_format)
 
     @staticmethod
     def _normalize_path(filename: str | Path, file_format: str) -> tuple[str, bool]:
         # A single store is one file, every other backend a directory of cases: only the latter gets the
-        # trailing slash that marks ``is_directory``. Keep the two in lock-step so a path never ends up a
-        # directory-flagged h5 (which would write the hidden dotfile ``<dir>/.h5``). ``as_posix`` keeps the
-        # separator forward on every OS, so the stored filename (and the trailing-slash marker) is the same
-        # on Windows, where ``prefix / name`` would otherwise render backslashes.
+        # trailing slash that marks ``is_directory``. The separator stays forward on every OS.
         path = uri.normalize(filename)
         if not backend_for(file_format).single_store and not path.endswith("/"):
             path += "/"
@@ -171,22 +159,19 @@ class Dataset:
     def rebase(self, prefix: Path) -> None:
         """Prepend ``prefix`` to this dataset's path, re-deriving ``is_directory`` from the format.
 
-        A rebased root is an output root, and ``prefix / uri`` folds the scheme's second slash away:
-        refused as a remote root before it can stop looking like one.
+        A rebased root is an output root: a remote root is refused.
         """
         uri.refuse_write(self.filename)
         self.filename, self.is_directory = Dataset._normalize_path(prefix / self.filename, self.file_format)
 
     @staticmethod
     def _detect_directory_store_format(root: str) -> str | None:
-        """Detect a directory dataset's store backend from disk (``omezarr`` / ``dicom``), independent of the
-        format token; ``None`` when it is plain per-file volumes (the SitkFile path, which auto-detects the
-        extension itself). Probes the first case's entries only: cheap, and cases share one layout."""
+        """The store backend of a directory dataset, from disk (``omezarr`` / ``dicom``), or ``None`` for
+        plain per-file volumes. Probes the first case's entries only."""
         if not uri.is_dir(root):
             return None
         if uri.is_uri(root):
-            # Only the store backend reads a remote root, and a store is told by its name: a
-            # remote entry is never probed as a path, which on a bare name asks the working directory.
+            # A remote store is told by its name, never probed as a path.
             names = Dataset._first_case_entries(root)
             return "omezarr" if any(is_store_name(name.name) for name in names) else None
         for entry in Dataset._first_case_entries(root):
@@ -197,12 +182,7 @@ class Dataset:
 
     @staticmethod
     def _first_case_entries(root: str) -> list[Path]:
-        """What ``root``'s first case directory holds, empty when it has none.
-
-        Unsorted on a local root: any case is representative of the layout, and ``iterdir`` stops at
-        the first directory where a listing materialises the whole of a resume's output tree. A
-        remote listing is one request either way, and arrives sorted.
-        """
+        """What ``root``'s first case directory holds, empty when it has none."""
         if uri.is_uri(root):
             cases = (name for name in uri.list_names(root))
             case = next((name for name in cases if uri.is_dir(uri.join(root, name))), None)
@@ -212,12 +192,8 @@ class Dataset:
 
     @property
     def store_root(self) -> str:
-        """Where the store lives, as text: its root directory, or the ``.h5`` file for a single-file
-        store (named with or without the suffix, as the backend opens it).
-
-        Text, because ``Path`` eats the second slash of a URI; :attr:`path_on_disk` is the local-only
-        view, for the callers that manipulate the path.
-        """
+        """Where the store lives, as text (a URI has no ``Path``): its root directory, or the ``.h5``
+        file for a single-file store. :attr:`path_on_disk` is the local-only view."""
         root = self.filename
         suffix = self._backend.case_file_suffix
         if self._backend.single_store and suffix and not root.endswith(suffix):
@@ -230,17 +206,12 @@ class Dataset:
         return Path(self.store_root)
 
     def exists_on_disk(self) -> bool:
-        """Whether the store is there, asked of whichever filesystem owns it. A remote root that
-        cannot be reached raises; only one that answers gets to say no."""
+        """Whether the store is there. A remote root that cannot be reached raises."""
         return uri.exists(self.store_root)
 
     def concurrent_write_safe(self) -> bool:
         """Whether writes to different entries land in disjoint files, so a background writer may
-        flush one entry while another thread writes elsewhere in the dataset.
-
-        The backend's own declaration: a store that shares handles or metadata across entries (one
-        HDF5 file, a zarr hierarchy, a DICOM series) says so and stays serial.
-        """
+        flush one entry while another thread writes elsewhere (the backend's own declaration)."""
         return self._backend.concurrent_write_safe
 
     def _write_target(self, group: str, name: str) -> tuple[_File, str]:
@@ -249,7 +220,6 @@ class Dataset:
         A directory dataset routes any sub-directory prefix of ``group`` into the file path (one file
         per case); a single store keeps one file and a ``group/name`` entry.
         """
-        # Ahead of the makedirs below, which would take a URI for a directory name.
         uri.refuse_write(self.filename)
         self._names_cache.clear()
         self._infos_cache.clear()
@@ -292,12 +262,8 @@ class Dataset:
             file.data_to_file(entry, data, attributes)
 
     def can_stream_data(self, attributes: Attribute) -> bool:
-        """Whether ``open_data_stream`` can serve this dataset's write format.
-
-        The backend's own declaration: H5 and OME-Zarr always can; MetaImage/NIfTI need image
-        geometry to write their headers up front; every other format only writes whole volumes
-        (use ``write``).
-        """
+        """Whether ``open_data_stream`` can serve this dataset's write format: H5 and OME-Zarr always;
+        MetaImage/NIfTI with image geometry; every other format only writes whole volumes."""
         return self._backend.can_stream(self.file_format, attributes)
 
     def open_data_stream(
@@ -315,10 +281,8 @@ class Dataset:
         the volume and uses ``write``. The returned stream is a context manager: a clean exit
         finalizes the entry, an exception removes the partial one.
 
-        ``region_shape`` is the extent the caller will write at a time, channels included. A store
-        that chunks on it never pays a read-modify-write; a store left to guess pays one on every
-        region that straddles a chunk. Declaring it is the writer's job, it is the only party that
-        knows its own access pattern.
+        ``region_shape`` is the extent the caller will write at a time, channels included; a store
+        that chunks on it never pays a read-modify-write.
         """
         if attributes is None:
             attributes = Attribute()
@@ -338,10 +302,8 @@ class Dataset:
     def _case_path(self, sub_directory: str, name: str) -> str | None:
         """The file a directory dataset stores case ``name`` under, or ``None`` if absent on disk.
 
-        The returned path omits the implicit ``.h5`` suffix h5 case files carry: ``H5File``
-        re-appends it on open. A case found once is not probed again (the probe is a round-trip on
-        a remote root, per entry read); an ABSENT case stays a fresh question, because a run may
-        produce it mid-read.
+        The returned path omits the implicit ``.h5`` suffix h5 case files carry. A case found once
+        is not probed again; an absent case stays a fresh question.
         """
         memo_key = (sub_directory, name)
         memoised = self._case_paths.get(memo_key)
@@ -353,10 +315,8 @@ class Dataset:
             self._case_paths[memo_key] = path
             return path
         if uri.is_uri(on_disk):
-            return None  # no writer of a remote root, so no backup of one to recover
-        # Absent is not always absent: a writer killed mid-replacement leaves the previous version
-        # under its backup name, which the listings hide. Asked of disk again after the attempt: the
-        # recovery declines to a publish that landed meanwhile, and that publish is the entry.
+            return None  # no writer of a remote root, so no backup to recover
+        # A writer killed mid-replacement leaves the previous version under its backup name.
         _recover_orphaned_backup(Path(on_disk))
         return path if os.path.exists(on_disk) else None
 
@@ -369,12 +329,12 @@ class Dataset:
             return file.is_exist(group)
 
     def _resolve_entry(self, groups: str, name: str, action: Callable[[_AbstractFile, str, str], _T]) -> _T:
-        """Run ``action`` on the open file holding ``(groups, name)``: THE place entry resolution lives.
+        """Run ``action`` on the open file holding ``(groups, name)``.
 
-        ``action`` receives the backend and the entry's coordinates INSIDE that file: a directory
-        dataset stores one case per file, addressed by ``name``, with the entry keyed by the group
-        path's last component, so the coordinates are ``("", group)`` there and ``(groups, name)``
-        on a single-file dataset. Raises ``DatasetManagerError`` when the dataset or the entry is missing.
+        ``action`` receives the backend and the entry's coordinates inside that file: ``("", group)``
+        on a directory dataset (one case per file, the entry keyed by the group path's last
+        component), ``(groups, name)`` on a single-file dataset. Raises ``DatasetManagerError`` when
+        the dataset or the entry is missing.
         """
         if not self._root_seen and not self.exists_on_disk():
             raise DatasetManagerError(
@@ -393,8 +353,7 @@ class Dataset:
                 "Check the groups_src spelling and that the case carries every group it names.",
             )
         with self._file(self.filename, True) as file:
-            # A wildcard group is expanded by get_names, as is_dataset_exist resolves it; is_exist
-            # would take the '*' literally.
+            # is_exist would take a wildcard group's '*' literally.
             exists = name in file.get_names(groups) if "*" in groups else file.is_exist(groups, name)
             if not exists:
                 raise DatasetManagerError(
@@ -413,30 +372,26 @@ class Dataset:
 
     def read_granularity(self, groups: str, name: str) -> tuple[int, ...] | None:
         """The stored block reads of ``(groups, name)`` are served in, or ``None`` when a read costs
-        exactly what it asks for. What a decomposition is sized and aligned against."""
+        exactly what it asks for."""
         with contextlib.suppress(Exception):
-            # The entry's path INSIDE the file: a single-file store (h5) keys it by its group as well.
+            # The entry's path inside the file: a single-file store (h5) keys it by its group as well.
             return self._resolve_entry(
                 groups, name, lambda file, group, entry: file.read_granularity(f"{group}/{entry}" if group else entry)
             )
         return None
 
     def plan_region_reads(self, groups: str, name: str, windows: Sequence[tuple[slice, ...]]) -> None:
-        """Declare the region reads about to happen on ``(groups, name)``, in order. A backend that
-        can use it does; the rest ignore it, and so does a caller that declares nothing."""
+        """Declare the region reads about to happen on ``(groups, name)``, in order. A hint the
+        backend may ignore."""
         with contextlib.suppress(DatasetManagerError):
             self._resolve_entry(groups, name, lambda file, _group, entry: file.plan_region_reads(entry, windows))
 
     def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
         """A factory of passes over one entry, block by block along the first spatial axis, each
-        block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what a scan that must never hold the
-        volume iterates (the statistics fold, the quantile scan). A store that cannot serve bounded
-        region reads (gzipped NIfTI, compressed MetaImage) is read whole ONCE and kept for every
-        pass the factory serves: those formats have no bounded reader to use instead, a block read
-        decodes the whole volume anyway, so reading per block would hold the same peak N times over.
-        This is the declared whole-volume route, not a way around the streaming invariant: a case
-        that needs it plans as LOAD, and the plan refuses it when the volume does not fit the
-        budget, before a byte is written."""
+        block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what the statistics fold and the
+        quantile scan iterate. A store that cannot serve bounded region reads (gzipped NIfTI,
+        compressed MetaImage) is read whole once and kept for every pass: the declared whole-volume
+        route, which the plan names LOAD and refuses when the volume does not fit the budget."""
         shape, _ = self.get_infos(groups, name)
         if len(shape) < 2 or not self.bounded_region_reads(groups, name):
             resident: list[np.ndarray] = []
@@ -447,11 +402,10 @@ class Dataset:
                 yield resident[0]
 
             return whole
-        # A whole number of update pieces, so the fold sees the same sequence of pieces in the same
-        # order whatever the read grain: the running mean and std are then the budget's business
-        # only in how much is held, never in what they answer.
+        # A whole number of update pieces: the fold sees the same pieces in the same order whatever
+        # the read grain, so the budget never changes what the running mean and std answer.
         budget = per_rank_budget_bytes()
-        # Only a declared budget sizes anything from it, so only a declared budget pays the probe.
+        # Only a declared budget pays the probe.
         element_bytes = (
             statistics._STATISTICS_ELEMENT_BYTES if budget is None else self._scanned_element_bytes(groups, name, shape)
         )
@@ -484,12 +438,7 @@ class Dataset:
 
     def _scanned_element_bytes(self, groups: str, name: str, shape: list[int]) -> int:
         """What one element of a scanned block costs: the store's own element size, read off a
-        one-voxel region.
-
-        A block of a scan is the bytes the store hands over, never a cast copy of them, so a
-        float64 source held twice what the budget was told at every block in flight. The probe is a
-        bounded read, which is the route this entry is on, and one voxel of it.
-        """
+        one-voxel region."""
         probe = (slice(0, 1),) * len(shape)
         return max(1, int(self.read_data_slice(groups, name, probe)[0].dtype.itemsize))
 
@@ -498,20 +447,13 @@ class Dataset:
         holding the volume: bounded passes over :meth:`iter_data_blocks`."""
         low, high, weight = _order_statistics(self.iter_data_blocks(groups, name), float(q))
         if not np.issubdtype(np.asarray(low).dtype, np.inexact):
-            # numpy.quantile promotes an integer input to float64 before it interpolates: the
-            # difference of two order statistics would wrap on a narrow signed type, and an exact
-            # index would answer in the stored dtype where numpy answers in float64.
+            # numpy.quantile promotes an integer input to float64 before it interpolates.
             low, high = np.float64(low), np.float64(high)
         return _lerp_like_numpy(low, high, weight) if weight else low
 
     def bounded_region_reads(self, groups: str, name: str) -> bool:
-        """Whether a region read of this entry decodes only the region, or the whole volume.
-
-        What it prices is the ROUTE, never the answer: a store that decodes the whole volume once
-        per slab (compressed MetaImage, NRRD, gzipped NIfTI) makes streaming read the source many
-        times over, where loading reads it once. ``False`` for a missing entry: pessimistic, and
-        only ever costing speed.
-        """
+        """Whether a region read of this entry decodes only the region, or the whole volume
+        (compressed MetaImage, NRRD, gzipped NIfTI). ``False`` for a missing entry."""
         try:
             return self._resolve_entry(groups, name, lambda file, _, entry: file.bounded_region_reads(entry))
         except DatasetManagerError:
@@ -526,9 +468,8 @@ class Dataset:
     ) -> dict[str, Any]:
         """Min/max/mean/std of one entry, over the volume and per channel (``channels`` restricts
         both to those), folded over :meth:`iter_data_blocks`: the volume is never held. ``keys``
-        names the statistics the caller reads (``min``, ``max_per_channel``, ...): a request
-        without a mean or std is folded in the stored dtype with one min and one max per block,
-        and its other figures are not computed. ``None`` computes the four."""
+        names the statistics the caller reads (``min``, ``max_per_channel``, ...): without a mean or
+        std the fold stays in the stored dtype and computes the extrema only. ``None`` computes the four."""
         update = _update_running_statistics if needs_moments(keys) else _update_running_extrema
         state = None
         for block in self.iter_data_blocks(groups, name)():
@@ -553,12 +494,10 @@ class Dataset:
         return len(self.get_names(group))
 
     def is_group_exist(self, group: str, requested: set[str] | None = None) -> bool:
-        """Whether this root holds ``group``, asked as narrowly as the caller will read it.
+        """Whether this root holds ``group``.
 
         ``requested`` is what the caller is about to select (:meth:`select_names`): with it, the
-        first case holding the group answers, where counting would walk a cohort the run then
-        discards. Without it the caller reads the whole listing next, so this takes that listing
-        and leaves it cached.
+        first case holding the group answers. Without it the whole listing is taken and cached.
         """
         if requested is None or not self.is_directory:
             return bool(self.get_names(group))
@@ -571,26 +510,19 @@ class Dataset:
     def is_dataset_exist(self, group: str, name: str) -> bool:
         """Whether ``(group, name)`` is on disk, asked of disk at the moment it is asked.
 
-        Deliberately NOT a slice of :meth:`get_names`: that listing is a planning-time snapshot, and a
-        group the run itself produces (a ``Save`` writing into the dataset being read) gains cases
-        while it is read, through a different ``Dataset`` object and, when the loader has workers, a
-        different PROCESS. No memo can be invalidated across that boundary, so membership asks the disk.
-        One entry, one probe: O(1) in the number of cases, where the listing is O(N) headers, and cheaper
-        than the listing it replaces.
+        Never a slice of :meth:`get_names`: a group the run itself produces gains cases while it is
+        read, from another ``Dataset`` object and possibly another process.
         """
         if not self.exists_on_disk():
-            # A store that is not there yet holds nothing: the first probe of every fresh
-            # destination, which a single-file backend would otherwise turn into an open error.
             return False
         if self.is_directory:
-            # Not _resolve_entry: membership keeps scanning past a case file whose group is absent,
-            # and answers False instead of raising.
+            # Not _resolve_entry: answers False instead of raising.
             entry_group = group.split("/")[-1]
             return any(
                 self._holds(sub_directory, entry_group, name) for sub_directory in self._get_sub_directories(group)
             )
         with self._file(self.filename, True) as file:
-            # A wildcard group is a path pattern; only the store's own listing expands it.
+            # Only the store's own listing expands a wildcard group.
             return name in file.get_names(group) if "*" in group else file.is_exist(group, name)
 
     def _get_sub_directories(self, groups: str, sub_directory: str = ""):
@@ -615,10 +547,7 @@ class Dataset:
         return sub_directories
 
     def _iter_names(self, groups: str) -> Generator[str, None, None]:
-        """Every case of ``groups`` this root holds, one entry open at a time and in no order.
-
-        Lazy so a caller that only needs to know whether there IS one stops at the first.
-        """
+        """Every case of ``groups`` this root holds, one entry open at a time and in no order."""
         if not self.is_directory:
             with self._file(self.filename, True) as file:
                 yield from file.get_names(groups)
@@ -645,14 +574,11 @@ class Dataset:
         return [name for i, name in enumerate(sorted_names) if i in index]
 
     def select_names(self, groups: str, requested: set[str] | None) -> list[str]:
-        """The names of ``groups`` this root holds, asked of it as narrowly as the caller can ask.
+        """The names of ``groups`` this root holds, narrowed to ``requested``.
 
-        ``requested`` is the set the caller will keep, or ``None`` when only the whole cohort
-        answers its selection. A root holding one entry per case is opened once per case it HOLDS
-        to enumerate, and once per case the caller ASKED for to answer this, which is the whole
-        difference between a wide root and a narrow subset. A root that is one entry answers
-        either from the single listing it already takes. A name is probed only as the listing
-        would have spelled it: one path component, so ``case/`` or ``./case`` selects nothing.
+        ``requested`` is the set the caller will keep, or ``None`` for the whole cohort. A directory
+        root probes each requested name instead of enumerating; a name is probed only as the listing
+        would spell it, one path component, so ``case/`` or ``./case`` selects nothing.
         """
         if requested is None or not self.is_directory:
             names = self.get_names(groups)
@@ -681,7 +607,7 @@ class Dataset:
             groups_set = set()
             for root_dir, _, files in os.walk(self.filename):
                 for file in files:
-                    if file.startswith(".") or is_staging_entry(file):  # a staging write, or its crashed leftover
+                    if file.startswith(".") or is_staging_entry(file):
                         continue
                     path = Path(root_dir, file.split(".")[0]).relative_to(self.filename).as_posix()
                     parts = path.split("/")
@@ -695,10 +621,7 @@ class Dataset:
         return list(groups)
 
     def get_infos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
-        # Memoize the header read (SITK reader + ReadImageInformation, or the HDF5/Zarr
-        # metadata parse): get_infos is called once per name per group per build-pass at
-        # setup, so caching it (like get_names) avoids re-parsing the same header N times.
-        # Cache and hand back copies so a caller mutating the geometry cannot poison it.
+        # The header read is memoised; copies go in and out so a caller cannot mutate the cache.
         cache_key = (groups, name)
         cached = self._infos_cache.get(cache_key)
         if cached is not None:

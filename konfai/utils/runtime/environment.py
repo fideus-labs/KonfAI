@@ -93,9 +93,7 @@ def description(model, model_ema=None, show_memory: bool = True, train: bool = T
 
 def get_cpu_info() -> str:
     """Return current CPU utilization as a short status string."""
-    # interval=None is non-blocking (utilization since the previous call). The blocking interval=0.5
-    # form would stall the caching progress-bar refresh by half a second each call, on the data-load
-    # critical path, purely to render a telemetry label.
+    # interval=None is non-blocking (utilization since the previous call).
     return f"CPU ({psutil.cpu_percent(interval=None):.2f} %)"
 
 
@@ -110,14 +108,8 @@ def get_memory() -> float:
 
 
 def _materialized_config(tree: dict, root: str) -> Path:
-    """A config TREE written where a workflow expects a file: the Python front door.
-
-    The caller hands the same tree the YAML file would hold (``{root: {...}}``, the very kwargs
-    the binder feeds each ``__init__``), and never touches YAML: it is written once here, under a
-    scratch directory of its own, and everything downstream (reflection binding, resolution
-    write-back, the workspace copy, resume) sees an ordinary config file. The workspace keeps the
-    resolved copy, as it does for every run.
-    """
+    """A config TREE (``{root: {...}}``, the tree the YAML file would hold) written as a file under a
+    scratch directory of its own; everything downstream sees an ordinary config file."""
     if list(tree) != [root]:
         raise ConfigError(
             f"A config tree for this workflow must hold exactly the '{root}' root"
@@ -134,15 +126,14 @@ def _materialized_config(tree: dict, root: str) -> Path:
     return path
 
 
-#: The scratch config directories this process created and has not released, oldest first. A
-#: Python caller's workflow releases its own when it returns (``api._launch``); the CLI, one
-#: workflow per process, leaves them to the exit hook.
+#: The scratch config directories this process created and has not released, oldest first. A Python
+#: caller's workflow releases its own when it returns; the CLI leaves them to the exit hook.
 _SCRATCH_CONFIGS: list[Path] = []
 
 
 def register_scratch_config(scratch: Path) -> None:
-    """A scratch config directory to remove: at the workflow's return, or at exit at the latest.
-    The file must outlive the run (spawned ranks re-read it), not the process."""
+    """A scratch config directory to remove at the workflow's return, or at exit at the latest. The
+    file must outlive the run (spawned ranks re-read it)."""
     _SCRATCH_CONFIGS.append(scratch)
 
 
@@ -162,22 +153,19 @@ def configure_workflow_environment(
     state: "State | str",
     path_env: dict[str, Path | str] | None = None,
 ) -> None:
-    """
-    Populate the process-wide environment expected by KonfAI workflows.
+    """Populate the process-wide environment expected by KonfAI workflows.
 
     Parameters
     ----------
     config_path : Path | str | dict
-        YAML configuration file used by the workflow: or the config TREE itself, as a dict, for
-        a Python caller that writes no YAML (see :func:`_materialized_config`). Every workflow
-        entry point accepts either, since they all pass through here.
+        YAML configuration file used by the workflow, or the config tree itself as a dict
+        (see :func:`_materialized_config`).
     root : str
         Root configuration section, for example ``Trainer`` or ``Predictor``.
     state : State | str
         Runtime state identifier exposed through ``KONFAI_STATE``.
     path_env : dict[str, Path | str] | None, optional
-        Additional environment variables whose values should be normalized as
-        absolute filesystem paths before export.
+        Additional environment variables, exported as absolute filesystem paths.
     """
     if isinstance(config_path, dict):
         config_path = _materialized_config(config_path, root)
@@ -235,8 +223,7 @@ class NeedDevice:
 
     def __init__(self) -> None:
         super().__init__()
-        # Default to CPU so ``self.device`` is always set: an object that is never explicitly moved (e.g. an
-        # output dataset off the propagation path) then reads as CPU instead of raising AttributeError.
+        # ``self.device`` is always set: an object never moved reads as CPU.
         self.device: torch.device = torch.device("cpu")
 
     def to(self, device: int):
@@ -244,34 +231,23 @@ class NeedDevice:
 
 
 def get_device(device: int):
-    """Return a CUDA index or CPU device depending on availability.
-
-    ``device_count`` and not availability alone: a latched runtime keeps ``is_available()`` True
-    after ``CUDA_VISIBLE_DEVICES`` was narrowed to nothing, while the count honestly reads 0.
-    """
+    """Return a CUDA index or CPU device depending on availability. ``device_count`` and not availability
+    alone: a latched runtime keeps ``is_available()`` True after ``CUDA_VISIBLE_DEVICES`` was narrowed."""
     return device if torch.cuda.is_available() and 0 <= device < torch.cuda.device_count() else torch.device("cpu")
 
 
 def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = False) -> Any:
-    """
-    Load a checkpoint from a local path or an ``https://`` URL, preferring the
-    safe ``weights_only=True`` deserializer.
+    """Load a checkpoint from a local path or an ``https://`` URL, preferring ``weights_only=True``.
 
-    For a local (trusted) checkpoint, fall back to ``weights_only=False`` only
-    when the safe unpickler refuses to reconstruct stored objects. A remote
-    ``https://`` checkpoint is untrusted and is loaded with ``weights_only=True``
-    only: a payload crafted to fail the safe load must not trigger the
-    arbitrary-code unpickler.
-
-    ``mmap=True`` maps the tensor storages of a local zip-format checkpoint on
-    demand. Legacy local files retain their ordinary load path; downloads keep
-    their safe-only contract. Release all returned tensors before deleting a
-    mapped file on platforms that require it.
+    A local (trusted) checkpoint falls back to ``weights_only=False`` when the safe unpickler refuses
+    it. A remote ``https://`` checkpoint is untrusted and is loaded with ``weights_only=True`` only.
+    ``mmap=True`` maps the tensor storages of a local zip-format checkpoint on demand; release all
+    returned tensors before deleting a mapped file on platforms that require it.
     """
     source = str(path_or_url)
     if source.startswith("https://"):
         return torch.hub.load_state_dict_from_url(source, map_location=map_location, weights_only=True)
-    # Windows refuses to replace or delete a mapped file, which a BEST prune and a checkpoint rewrite do.
+    # Windows refuses to replace or delete a mapped file.
     load_options = {"mmap": True} if mmap and sys.platform != "win32" and is_zipfile(source) else {}
     try:
         return torch.load(source, map_location=map_location, weights_only=True, **load_options)
@@ -283,8 +259,7 @@ def is_interactive_session() -> bool:
     """Return whether KonfAI can safely prompt on stdin/stdout."""
     stdin = getattr(sys, "stdin", None)
     stdout = getattr(sys, "stdout", None)
-    # ``stdout`` may be a Log/MinimalLog proxy (write/flush/fileno only); guard its ``isatty``
-    # exactly like ``stdin`` so a redirected stream degrades to non-interactive instead of raising.
+    # ``stdout`` may be a Log/MinimalLog proxy without ``isatty``: a redirected stream is non-interactive.
     return bool(
         stdin
         and stdout
@@ -296,8 +271,7 @@ def is_interactive_session() -> bool:
 
 
 def confirm_overwrite_or_raise(path: Path, label: str, error_cls: type[Exception]) -> None:
-    """
-    Ensure an existing output can be overwritten.
+    """Ensure an existing output can be overwritten.
 
     Parameters
     ----------
@@ -306,13 +280,7 @@ def confirm_overwrite_or_raise(path: Path, label: str, error_cls: type[Exception
     label : str
         Human-readable artifact label used in the prompt and error message.
     error_cls : type[Exception]
-        Exception type raised when overwrite is not allowed or declined.
-
-    Raises
-    ------
-    Exception
-        Instance of ``error_cls`` when overwrite is disabled in a
-        non-interactive session or explicitly declined by the user.
+        Raised when overwrite is disabled in a non-interactive session or declined by the user.
     """
     if os.environ.get("KONFAI_OVERWRITE") == "True":
         return
@@ -328,19 +296,13 @@ def confirm_overwrite_or_raise(path: Path, label: str, error_cls: type[Exception
 
 
 def clear_directory_except_logs(path: Path) -> None:
-    """Remove a run directory's contents but keep its ``log_*.txt`` files.
-
-    The rank-0 ``Log`` opens ``<dir>/log_0.txt`` before the workflow's overwrite branch runs, so an
-    ``rmtree`` of the directory unlinks the open file: every parent-process line (config binding,
-    dataset scan, a crash traceback) is written to an unlinked inode and lost, and Windows refuses
-    to delete a directory holding an open file. Clearing around the live logs preserves them.
-    """
+    """Remove a run directory's contents but keep its ``log_*.txt`` files: the rank-0 ``Log`` holds
+    ``<dir>/log_0.txt`` open before the overwrite branch runs."""
     for child in path.iterdir():
-        # Preserve only a regular log file: a directory or symlink merely named log_*.txt is not a live log.
+        # Only a regular file is a live log.
         if child.is_file() and not child.is_symlink() and child.name.startswith("log_") and child.suffix == ".txt":
             continue
-        # is_dir() follows symlinks, so unlink a symlink (even one to a directory) instead of rmtree-ing
-        # through it into the target's contents.
+        # is_dir() follows symlinks: a symlink is unlinked, never rmtree'd through.
         if child.is_symlink() or not child.is_dir():
             child.unlink()
         else:

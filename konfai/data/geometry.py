@@ -16,14 +16,12 @@
 
 """Grids, boxes and affine maps in world coordinates: the value vocabulary a resample shares.
 
-Two axis orders coexist in every KonfAI header, and the classic failure is a confusion between
-them: array data is ``(Z, Y, X)``, physical geometry (``Origin``,
-``Spacing``, ``Direction``) is ``(x, y, z)``. The types here carry the order in the field name (``size_zyx``,
-``origin_xyz``), so a mixed expression reads as wrong at the call site instead of
-resampling perfectly onto the wrong place.
+Two axis orders coexist in every KonfAI header: array data is ``(Z, Y, X)``, physical geometry
+(``Origin``, ``Spacing``, ``Direction``) is ``(x, y, z)``. The types here carry the order in the
+field name (``size_zyx``, ``origin_xyz``), so a mixed expression reads as wrong at the call site.
 
-Everything is plain float64 numpy: no torch, no SimpleITK. A value built here crosses the
-``mp.spawn`` pickle boundary as data, and the SimpleITK plumbing that produces it lives in
+Everything is plain float64 numpy: no torch, no SimpleITK, so a value built here crosses the
+``mp.spawn`` pickle boundary as data. The SimpleITK plumbing that produces it lives in
 ``konfai.utils.ITK`` behind its import guard.
 """
 
@@ -75,13 +73,10 @@ class AffineMap:
         return bool(np.array_equal(self.matrix, np.eye(self.rank)) and not self.translation.any())
 
     def apply(self, points_xyz: np.ndarray) -> np.ndarray:
-        """Map points of shape ``(..., rank)``, accumulating exactly as ITK does.
-
-        ``translation + Σ_j column_j · p_j`` with ``j`` ascending: the association of
-        ``TransformIndexToPhysicalPoint``. A matmul sums in whatever order BLAS picks, which is
-        one ULP away on an oblique grid, and one ULP of origin is the difference between a
-        streamed slab that is bit-identical to the whole volume and one that is merely close.
-        """
+        """Map points of shape ``(..., rank)``, accumulating exactly as ITK does:
+        ``translation + Σ_j column_j · p_j`` with ``j`` ascending, the association of
+        ``TransformIndexToPhysicalPoint``. A matmul sums in whatever order BLAS picks, one ULP away
+        on an oblique grid, and one ULP of origin costs a streamed slab its bit-identity."""
         points = np.asarray(points_xyz, dtype=np.float64)
         out = np.broadcast_to(self.translation, points.shape).copy()
         for j in range(self.rank):
@@ -93,11 +88,8 @@ class AffineMap:
         return AffineMap(outer.matrix @ self.matrix, outer.matrix @ self.translation + outer.translation)
 
     def inverted(self) -> AffineMap:
-        """The inverse map, or a refusal when the matrix is singular.
-
-        Refused rather than returned as garbage: a singular matrix here means a degenerate grid or
-        transform, and ``pinv`` would hand back a map that resamples plausibly from the wrong place.
-        """
+        """The inverse map, or a refusal when the matrix is singular: that means a degenerate grid
+        or transform, and ``pinv`` would hand back a map resampling plausibly from the wrong place."""
         try:
             inverse = np.linalg.inv(self.matrix)
         except np.linalg.LinAlgError:
@@ -121,25 +113,18 @@ class WorldBox:
         return WorldBox(self.low_xyz - radius, self.high_xyz + radius)
 
     def extended(self, low_xyz: np.ndarray, high_xyz: np.ndarray) -> WorldBox:
-        """This box plus a per-component interval: each end moved by its own end of it.
-
-        The asymmetric form of :meth:`grown`, and the one a signed displacement bound needs. An
-        interval that does not straddle zero MOVES the box instead of widening it, which is the
-        difference between a field's reach and twice its largest value.
-        """
+        """This box plus a per-component interval: each end moved by its own end of it. The
+        asymmetric form of :meth:`grown`, and the one a signed displacement bound needs. An interval
+        that does not straddle zero MOVES the box instead of widening it."""
         return WorldBox(
             self.low_xyz + np.asarray(low_xyz, dtype=np.float64),
             self.high_xyz + np.asarray(high_xyz, dtype=np.float64),
         )
 
     def image_under(self, affine: AffineMap) -> WorldBox:
-        """The axis-aligned hull of this box's image under ``affine``.
-
-        Centre and half-extents: the image of centre ``c`` is ``A c + b``, and the largest reach of
-        ``A h`` over the corners is ``|A| h`` because each corner coordinate is ``±h_k``. Equal to
-        the hull of the ``2^rank`` mapped corners (pinned by a test against that enumeration) in
-        O(rank²) and with no corner loop to get wrong.
-        """
+        """The axis-aligned hull of this box's image under ``affine``, from centre and half-extents:
+        the image of centre ``c`` is ``A c + b``, and the largest reach of ``A h`` over the corners is
+        ``|A| h``. Equal to the hull of the ``2^rank`` mapped corners, in O(rank²)."""
         centre = (self.low_xyz + self.high_xyz) / 2.0
         half = (self.high_xyz - self.low_xyz) / 2.0
         mapped = affine.apply(centre)
@@ -147,10 +132,9 @@ class WorldBox:
         return WorldBox(mapped - reach, mapped + reach)
 
 
-#: How close to a whole number a voxel count must be before it is taken to BE that number. A
-#: spacing of 0.7 mm is not representable in binary, so 90 voxels of it re-cut at 1.5 mm come to
-#: 41.999999999999997 and truncate to 41, one slice of anatomy dropped, and a spacing recorded
-#: that no longer covers what was read. The band is far narrower than any density a header states.
+#: How close to a whole number a voxel count must be before it is taken to BE that number. A spacing
+#: of 0.7 mm is not representable in binary, so 90 voxels of it re-cut at 1.5 mm come to
+#: 41.999999999999997 and would truncate to 41. The band is narrower than any density a header states.
 _COUNT_TOLERANCE = 1e-6
 
 
@@ -170,27 +154,17 @@ class Grid:
 
     @classmethod
     def identity(cls, spatial_shape: list[int]) -> Grid:
-        """The grid of a volume with no geometry: unit spacing, origin zero, axes as stored.
-
-        What a header carrying no ``Origin``/``Spacing``/``Direction`` means when the question is
-        only a change of extent. Under it a world coordinate IS an index, so a resample onto another
-        grid degenerates to the size ratio it always was, which is how one engine serves a case
-        whose geometry is known and one whose is not, instead of a physical path and a ratio path
-        that have to be kept agreeing.
-        """
+        """The grid of a volume with no geometry: unit spacing, origin zero, axes as stored, which is
+        what a header carrying no ``Origin``/``Spacing``/``Direction`` means. Under it a world
+        coordinate IS an index, so a resample onto another grid degenerates to the size ratio."""
         rank = len(spatial_shape)
         return cls(tuple(int(extent) for extent in spatial_shape), np.zeros(rank), np.ones(rank), np.eye(rank))
 
     @classmethod
     def from_header(cls, spatial_shape: list[int], attribute: Attribute, what: str) -> tuple[Grid, frozenset[str]]:
-        """The grid a header describes AND which of its keys it did not say, never a refusal.
-
-        The identity stands in for what is absent, and the caller is told what it stood in for: what
-        a missing key costs depends on the question. An extent change needs none of them; a density
-        change needs the ``Spacing`` and nothing else; a reference grid or a stored map needs a real
-        physical space and so needs all three. Deciding that here, once, for every caller would
-        either refuse a resample that was answerable or answer one that was not.
-        """
+        """The grid a header describes AND which of its keys it did not say, never a refusal. The
+        identity stands in for what is absent and the caller is told what it stood in for: an extent
+        change needs no key, a density change the ``Spacing`` alone, a reference grid all three."""
         rank = len(spatial_shape)
         identity = cls.identity(spatial_shape)
         missing = frozenset(key for key in _GEOMETRY_KEYS if key not in attribute)
@@ -242,12 +216,9 @@ class Grid:
 
     @cached_property
     def index_to_world(self) -> AffineMap:
-        """Continuous index ``(x, y, z)`` to world: ``p = O + D S i``: ITK's own association.
-
-        Cached (the grid is frozen): a streamed walk asks per SLAB, and rebuilding the product --
-        and, for :attr:`world_to_index`, re-INVERTING it -- thousands of times per region was
-        measurable wall time. The cache returns the same floats it always returned, only once.
-        """
+        """Continuous index ``(x, y, z)`` to world: ``p = O + D S i``, ITK's own association. Cached
+        (the grid is frozen): a streamed walk asks per SLAB, and rebuilding the product, and for
+        :attr:`world_to_index` re-INVERTING it, thousands of times per region was measurable."""
         return AffineMap(self.direction_xyz @ np.diag(self.spacing_xyz), np.asarray(self.origin_xyz, dtype=np.float64))
 
     @cached_property
@@ -256,12 +227,8 @@ class Grid:
 
     def _index_box(self, region_zyx: tuple[slice, ...] | None) -> tuple[np.ndarray, np.ndarray]:
         """The region's outer faces as continuous indices ``(x, y, z)``: ``start - 0.5 .. stop - 0.5``.
-
-        Outer faces and not voxel centres, deliberately: a sample is inside a grid while its
-        continuous index lies in ``[-0.5, n - 0.5)`` (the sampler rule of
-        ``Resample._resample_offset_region``), so a bound built on centres is short by the half
-        voxel that rule reaches.
-        """
+        Outer faces and not voxel centres: a sample is inside a grid while its continuous index lies
+        in ``[-0.5, n - 0.5)``, so a bound built on centres is short by that half voxel."""
         if region_zyx is None:
             region_zyx = tuple(slice(0, extent) for extent in self.size_zyx)
         low = np.array([float(part.start) - 0.5 for part in reversed(region_zyx)])
@@ -279,13 +246,9 @@ class Grid:
         return image.low_xyz, image.high_xyz
 
     def index_window(self, box: WorldBox, margin: int) -> tuple[slice, ...]:
-        """The clamped array-order window a world box needs, grown by ``margin`` whole voxels.
-
-        ``floor``/``ceil`` on the continuous-index box, plus the margin the interpolation taps
-        reach; clamped to a non-empty window, exactly as ``Resample._offset_window`` clamps: a region entirely
-        off the grid is a real place for a regrid (every sample takes the
-        fill) and a zero-width read is not something every backend serves.
-        """
+        """The clamped array-order window a world box needs, grown by ``margin`` whole voxels:
+        ``floor``/``ceil`` on the continuous-index box plus the margin the interpolation taps reach,
+        clamped to a non-empty window exactly as ``Resample._offset_window`` clamps."""
         low, high = self.continuous_box(box)
         window: list[slice] = []
         for axis in range(self.rank - 1, -1, -1):
@@ -305,20 +268,16 @@ class Grid:
         """The same anatomy at another sampling density: give a spacing, or give a count.
 
         A component left at zero keeps that axis as it is. Whichever is given, the other follows,
-        and ``align`` decides where the new grid SITS: the one real choice here, worth a quarter
-        of a voxel of anatomy, and made silently by every library that offers only one of them:
+        and ``align`` decides where the new grid SITS:
 
         - ``extent``: the outer faces coincide, so both grids cover exactly the same box and a
-          target index reads ``scale * (i + 0.5) - 0.5`` of the source. What ``F.interpolate`` does,
-          and what KonfAI has always done.
+          target index reads ``scale * (i + 0.5) - 0.5`` of the source. What ``F.interpolate`` does.
         - ``origin``: voxel zero's CENTRE stays put, so a target index reads ``scale * i`` and the
-          far edge moves by whatever the count rounded away. What resampling onto a grid that
-          shares an origin does.
+          far edge moves by whatever the count rounded away.
 
         Under ``extent`` the spacing is derived from the counts and not from the request: a count is
         a whole number, so the density that actually covers the box is ``n_src / n_dst`` times the
-        source's, and recording the requested one instead is a header that describes a grid nobody
-        sampled (up to a millimetre of drift across a volume, measured).
+        source's, and recording the requested one describes a grid nobody sampled.
         """
         if (spacing_xyz is None) == (size_zyx is None):
             raise TransformError("A resampled grid is defined by a spacing or by a count, and by exactly one of them.")
@@ -355,13 +314,9 @@ class Grid:
         )
 
     def sub_grid(self, region_zyx: tuple[slice, ...]) -> Grid:
-        """The grid of a region: same spacing and direction, the origin of its first voxel.
-
-        The load-bearing line of every streamed regrid: a region left at the volume's origin
-        replays the volume's first slab wherever it lands, and the output still looks like an
-        image. The origin is ``index_to_world`` of the region's start, one application of the
-        parent's own map, never a second association that could land a slab origin apart from it.
-        """
+        """The grid of a region: same spacing and direction, the origin of its first voxel. A region
+        left at the volume's origin replays the volume's first slab wherever it lands. The origin is
+        ``index_to_world`` of the region's start, one application of the parent's own map."""
         start_xyz = np.array([float(part.start) for part in reversed(region_zyx)])
         return Grid(
             tuple(int(part.stop - part.start) for part in region_zyx),
@@ -374,18 +329,16 @@ class Grid:
 # ---------------------------------------------------------------------------------- index remaps
 # A signed permutation of the axes is the one map that is an exact index remap: values only change
 # place, so an ORIENTATION stage's bijection promise (and everything preserves_statistics lets a
-# later stage trust) rests on the predicate below. It is written once, here, because two copies of
-# it (a draw's quarter turn, a header's reorientation) is exactly where a silent divergence starts.
+# later stage trust) rests on the predicate below. It is written once, here.
 
-#: Whether a matrix entry stands for exactly 0 or +/-1, by the matrix's provenance. Two tolerances,
-#: because the matrices come at two precisions: a draw's quarter-turn affine is composed from
-#: float32 cosines, so an entry lands within ~1e-7 of the value it stands for; a header
-#: reorientation is a float64 product of orthonormal matrices and lands within a few double ulps.
+#: Whether a matrix entry stands for exactly 0 or +/-1, by the matrix's provenance. Two tolerances:
+#: a draw's quarter-turn affine is composed from float32 cosines and lands within ~1e-7 of the value
+#: it stands for; a header reorientation is a float64 product and lands within a few double ulps.
 #: One shared 1e-6 would remap a float64 direction whose obliqueness is real, not rounding.
 SIGNED_PERMUTATION_ATOL_FLOAT32 = 1e-6
 SIGNED_PERMUTATION_ATOL_FLOAT64 = 1e-9
 
-#: Per output SPATIAL axis in array order: ``(source_axis, mirrored)`` — which source axis it reads,
+#: Per output SPATIAL axis in array order: ``(source_axis, mirrored)``, which source axis it reads
 #: and whether it reads it backwards.
 AxisRemap = list[tuple[int, bool]]
 
@@ -395,10 +348,8 @@ def signed_permutation(matrix: object, atol: float) -> AxisRemap | None:
 
     ``matrix`` maps an output coordinate onto the input it comes from, in physical ``(x, y, z)``
     order: it is a signed permutation exactly when every column holds a single +/-1 and every row
-    carries unit weight. The three tests together admit exactly those: unit column sums alone also
-    pass an axis-averaging matrix, unit peaks alone a superposing one, and columns alone a
-    rank-deficient one that reads the same axis twice. The answer is in array order, where physical
-    axis ``k`` is array axis ``n - 1 - k``.
+    carries unit weight, which is what the three tests together admit. The answer is in array order,
+    where physical axis ``k`` is array axis ``n - 1 - k``.
     """
     linear = np.asarray(matrix, dtype=np.float64)
     n = int(linear.shape[0])
@@ -426,12 +377,9 @@ def remap_shape(shape: list[int], remap: AxisRemap) -> list[int]:
 
 
 def remap_region(target_slices: tuple[slice, ...], source_shape: list[int], remap: AxisRemap) -> list[slice]:
-    """The source region a target region reads under a remap.
-
-    Output axis ``k``'s slice lands on the source axis it reads; a MIRRORED axis reads the mirror
-    region ``[n - stop, n - start)`` of it, because a flip restricted to a contiguous region is that
-    region reversed. The remap covers every axis exactly once, so every source axis is assigned.
-    """
+    """The source region a target region reads under a remap. Output axis ``k``'s slice lands on the
+    source axis it reads; a MIRRORED axis reads the mirror region ``[n - stop, n - start)`` of it.
+    The remap covers every axis exactly once, so every source axis is assigned."""
     source_slices: list[slice] = [slice(0, int(extent)) for extent in source_shape]
     for target, (source, mirrored) in zip(target_slices, remap, strict=True):
         extent = int(source_shape[source])
@@ -451,12 +399,9 @@ def invert_remap(remap: AxisRemap) -> AxisRemap:
 
 
 def apply_remap(tensor: torch.Tensor, remap: AxisRemap) -> torch.Tensor:
-    """The remap, materialised on a tensor whose trailing axes are the spatial ones.
-
-    Leading axes (channel, and anything before it) are left in place. ``flip`` materialises the
-    permuted view even for an empty mirror list, so the result never aliases the tensor it was
-    read from: a remapped copy may be handed on while the source tensor lives its own life.
-    """
+    """The remap, materialised on a tensor whose trailing axes are the spatial ones. Leading axes are
+    left in place. ``flip`` materialises the permuted view even for an empty mirror list, so the
+    result never aliases the tensor it was read from."""
     offset = tensor.dim() - len(remap)
     dims = list(range(offset)) + [offset + source for source, _ in remap]
     flips = [offset + axis for axis, (_, mirrored) in enumerate(remap) if mirrored]
@@ -469,18 +414,13 @@ class TransformBound:
 
     ``T(p)`` lies in ``affine(p) + [low_xyz, high_xyz]`` for every ``p``, per world component. For a
     linear transform the interval is empty and the statement is exact; for a BSpline it is the range
-    of the coefficients (non-negative basis functions summing to one make every displacement a
-    convex combination of them, so it lies between their smallest and largest); for a dense field it
-    is the range of its values. The affine part is read structurally off the transform, never
-    probed: a probe measures a local gradient and extrapolates it, which under-bounds (measured).
+    of the coefficients; for a dense field the range of its values. The affine part is read
+    structurally off the transform, never probed: a probe under-bounds.
 
     SIGNED, NOT A RADIUS. A displacement field solved between two frames carries the offset between
     them in its values, and an interval that does not straddle zero MOVES a region's window rather
-    than widening it. Measured on an ExaSPIM field whose z component runs [-28.1, -22.2] mm on a
-    volume 20.6 mm thick: as a radius it reaches 28.1 mm either way, so every region pulls the whole
-    volume and the fold refuses (23.57 GiB held against a 19.01 GiB budget); as an interval it
-    reaches 5.9 mm, and a 24-row region pulls 175 source rows of 514. The same two reductions
-    produce either (:attr:`DisplacementStage.range_xyz`), so the tighter one is free.
+    than widening it. The same two reductions produce either
+    (:attr:`DisplacementStage.range_xyz`), so the tighter one is free.
     """
 
     affine: AffineMap
@@ -499,11 +439,9 @@ class TransformBound:
 
     @staticmethod
     def shift(residual_xyz: np.ndarray) -> TransformBound:
-        """A pure displacement bounded in magnitude only, ``± residual_xyz``.
-
-        For a caller that knows a radius and not a range. Anything that can state both ends should
-        say so with :meth:`interval`: this one is twice as wide wherever the range is one-sided.
-        """
+        """A pure displacement bounded in magnitude only, ``± residual_xyz``, for a caller that knows
+        a radius and not a range. Anything that can state both ends should say so with
+        :meth:`interval`: this one is twice as wide wherever the range is one-sided."""
         radius = np.asarray(residual_xyz, dtype=np.float64)
         return TransformBound.interval(-radius, radius)
 
@@ -513,15 +451,11 @@ class TransformBound:
         return np.maximum(np.abs(self.low_xyz), np.abs(self.high_xyz))
 
     def after(self, inner: TransformBound) -> TransformBound:
-        """The bound of ``self(inner(p))``: interval arithmetic through the outer affine.
-
-        NOT ``|A| @ residual``. That is right for an interval centred on zero and wrong for one that
-        is not: a negative entry of ``A`` sends the inner interval's low end to the outer's high,
-        and taking absolute values first loses which end went where -- so a rotation folded onto a
-        one-sided field would be bounded by a box that does not contain it. Splitting the matrix
-        into its non-negative and non-positive parts is the same arithmetic written to hold either
-        way, and it reduces to ``|A| @ r`` when ``low = -high``.
-        """
+        """The bound of ``self(inner(p))``: interval arithmetic through the outer affine. NOT
+        ``|A| @ residual``, which is right only for an interval centred on zero: a negative entry of
+        ``A`` sends the inner interval's low end to the outer's high. Splitting the matrix into its
+        non-negative and non-positive parts holds either way and reduces to ``|A| @ r`` when
+        ``low = -high``."""
         matrix = self.affine.matrix
         rise, fall = np.maximum(matrix, 0.0), np.minimum(matrix, 0.0)
         return TransformBound(
@@ -546,9 +480,8 @@ class AffineStage:
 
 
 #: The B-spline orders KonfAI evaluates: the linear hat a dense field is read through, and the cubic
-#: ITK writes a BSplineTransform with. ITK will happily write orders 0 and 2, which decode as
-#: readily as any other and have no kernel here, so the refusal belongs where the value is built,
-#: not where it is finally sampled, which is mid-run and per region.
+#: ITK writes a BSplineTransform with. ITK also writes orders 0 and 2, which have no kernel here, so
+#: the refusal belongs where the value is built, not mid-run and per region where it is sampled.
 SUPPORTED_SPLINE_ORDERS = (1, 3)
 
 
@@ -556,25 +489,20 @@ SUPPORTED_SPLINE_ORDERS = (1, 3)
 class DisplacementStage:
     """One displacement step: ``p + d(p)``, with ``d`` interpolated off a value grid.
 
-    One shape for the two non-linear things a stored transform can be. A BSpline is order-3
-    coefficients on a coarse control grid; a dense field is order-1 samples on its own grid. Both
-    kernels are non-negative and sum to one, so the displacement anywhere is a convex combination
-    of ``values`` and ``sup |values|`` per component bounds it at every point: the bound that
-    replaces walking a region's boundary, which under-bounds a wiggle narrower than the region
-    and costs more than the resample it serves (both measured).
+    One shape for the two non-linear things a stored transform can be: a BSpline is order-3
+    coefficients on a coarse control grid, a dense field order-1 samples on its own grid. Both
+    kernels are non-negative and sum to one, so ``sup |values|`` per component bounds the
+    displacement at every point, which is what replaces walking a region's boundary.
 
     ``values`` is ``(rank, Z, Y, X)`` float64, components in physical ``(x, y, z)`` order, world
-    units. ITK applies no direction matrix to them (verified in ``itkBSplineTransform.hxx``).
-    Outside the grid's reach the displacement is zero: ITK returns the identity there.
+    units. ITK applies no direction matrix to them. Outside the grid's reach the displacement is zero.
     """
 
     grid: Grid
     values: np.ndarray
     order: int
-    #: The values as a tensor, per (device, dtype), built on first use and living exactly as long
-    #: as the stage does: a stage is evaluated once per region per case, and re-uploading a whole
-    #: field for each was the copy the arithmetic never saw. Frozen dataclass, so a mutable field
-    #: hides behind object.__setattr__ once; it is excluded from equality and pickling by name.
+    #: The values as a tensor, per (device, dtype), built on first use and living exactly as long as
+    #: the stage does. Excluded from equality, hashing and pickling.
     _tensors: dict = field(default_factory=dict, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
@@ -616,17 +544,10 @@ class DisplacementStage:
     def range_xyz(self) -> tuple[np.ndarray, np.ndarray]:
         """``(min, max)`` per component: one pass over the field, kept for the stage's life.
 
-        Every pull map asks for it (per patch, per plan block, per pushed slab), so it is kept:
-        a thousand patches recomputing one constant 3-vector cost 73 s on a 3x160x256x256 field.
+        Every pull map asks for it (per patch, per plan block, per pushed slab), so it is kept.
         ``cached_property`` writes through ``__dict__``, which a frozen dataclass allows; the entry
-        is dropped from the pickle beside ``_tensors``.
-
-        Two reductions and no temporary, which is what the pair costs and what its magnitude cost
-        before it: ``np.abs(...).max()`` would first write a values-sized copy and then walk it
-        again. On the 31 M-voxel field that copy is 72 ms and 250 MiB; on a native ExaSPIM field
-        window (3 x 141 x 1331 x 1775) it is 4 GiB, and the fold spent 26.4 s of its 179 s here.
-        Keeping both ends instead of the larger magnitude measured 79 ms against 80 on a 184
-        M-value window: the range is free, and it is the one a region can be sized from.
+        is dropped from the pickle beside ``_tensors``. Two reductions and no temporary:
+        ``np.abs(...).max()`` would first write a values-sized copy and then walk it again.
         """
         flat = self.values.reshape(self.values.shape[0], -1)
         return flat.min(axis=1), flat.max(axis=1)
@@ -638,8 +559,8 @@ class DisplacementStage:
         return np.maximum(np.abs(low), np.abs(high))
 
     def bound(self) -> TransformBound:
-        # The interval is clamped to include zero: the stage applies NO displacement outside its
-        # grid, so a target region past the field's edge still needs its identity-mapped samples.
+        # Clamped to include zero: the stage applies NO displacement outside its grid, so a target
+        # region past the field's edge still needs its identity-mapped samples.
         low, high = self.range_xyz
         return TransformBound.interval(np.minimum(low, 0.0), np.maximum(high, 0.0))
 

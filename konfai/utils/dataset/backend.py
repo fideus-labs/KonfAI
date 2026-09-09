@@ -33,8 +33,7 @@ if TYPE_CHECKING:
     from konfai.utils.dataset.abstract import AbstractFile
 
 #: The backend each format token dispatches to; every token not named here is a plain-file
-#: extension SitkFile serves. THE token-to-class table: a new backend registers here and declares
-#: its facts on the class (see ``AbstractFile``), and nothing else needs a format-name branch.
+#: extension SitkFile serves. A new backend registers here and declares its facts on the class.
 BACKENDS: dict[str, type[AbstractFile]] = {
     "h5": H5File,
     "omezarr": OmeZarrFile,
@@ -44,8 +43,7 @@ BACKENDS: dict[str, type[AbstractFile]] = {
 
 
 def backend_for(file_format: str) -> type[AbstractFile]:
-    """The backend class serving ``file_format``: where ``File.__enter__`` and ``Dataset`` read
-    the per-backend facts from."""
+    """The backend class serving ``file_format``."""
     return BACKENDS.get(file_format, SitkFile)
 
 

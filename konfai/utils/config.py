@@ -47,8 +47,8 @@ _log = logging.getLogger(__name__)
 class Range:
     """UI hint attached to a parameter's type: its inclusive numeric bounds.
 
-    Use ``Annotated[int, Range(0, 100)]`` (or ``float``) in a config-bound signature: the binder ignores the
-    metadata and validates the base type, while a UI reads the bounds to size a spinbox. Introspection-only.
+    Use ``Annotated[int, Range(0, 100)]`` (or ``float``). The binder ignores the metadata and validates the
+    base type; a UI reads the bounds. Introspection-only.
     """
 
     min: float
@@ -59,10 +59,9 @@ class Choices:
     """UI hint attached to a parameter's type: its allowed values.
 
     Use ``Annotated[str, Choices([...])]`` for a fixed list, or ``Annotated[str, Choices(resolver)]`` where
-    ``resolver`` is a zero-arg callable the app owns (e.g. one that lists a model registry it already
-    fetches). ``resolve()`` returns the list: a reader calls it lazily, so the app resolves its own values
-    and no tool re-fetches. Introspection-only; the binder ignores it (a value outside the list is still
-    accepted, e.g. a local path). For a small FIXED, binder-validated set, prefer ``Literal[...]``.
+    ``resolver`` is a zero-arg callable; ``resolve()`` returns the list. Introspection-only: the binder
+    ignores it, so a value outside the list is accepted. For a small fixed, binder-validated set, use
+    ``Literal[...]``.
     """
 
     def __init__(self, values) -> None:
@@ -95,15 +94,13 @@ def _load_tree(filename: Path | str) -> dict:
 
 
 def _write_tree(target: Path, tree: dict) -> None:
-    """Write TREE to TARGET atomically: a sibling temp file, then ``os.replace``, so a concurrent
-    independent launch reading the file never observes it truncated and binds all-defaults."""
+    """Write TREE to TARGET atomically (a sibling temp file, then ``os.replace``); a concurrent reader
+    never observes it truncated."""
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8") as yml:
             yaml.dump(tree, yml)
-        # Windows can deny the replace while the target is briefly held (a virus scanner or an
-        # indexer touching the fresh file): retried a few times, then refused. Never an in-place
-        # rewrite, which a concurrent reader would see truncated and bind all-defaults from.
+        # Windows can deny the replace while the target is briefly held: retried, then refused.
         for attempt in range(5):
             try:
                 os.replace(tmp, target)
@@ -121,9 +118,8 @@ def _write_tree(target: Path, tree: dict) -> None:
 
 
 def _merge_into(target: MutableMapping, source: Mapping) -> None:
-    """Fold SOURCE into TARGET in place: a mapping recurses, a value replaces, a ``None`` is not
-    written (a nested object's placeholder, materialized by its own context). A key TARGET lacks is
-    appended, so what a context sets lands after what the contexts opened inside it appended."""
+    """Fold SOURCE into TARGET in place: a mapping recurses, a value replaces, a ``None`` (a nested
+    object's placeholder) is not written. A key TARGET lacks is appended."""
     for key, value in source.items():
         existing = target.get(key)
         if existing is value or value is None:
@@ -159,11 +155,9 @@ _shared_trees: list[_SharedTree] = []
 
 
 def _occurrence_mapping(entries: list, where: str) -> dict:
-    """A chain written as a YAML list (``- Clip: {...}``, ``- Clip: {...}``) as the mapping the
-    binder reads: each stage under its class name, a repeated class under ``Name#2``, ``Name#3``
-    (the suffix is the stage's identity here; :func:`get_module` drops it when resolving the
-    class). Application order is the list's. The mapping form keeps its two spellings (bare and
-    module-qualified) as before."""
+    """A chain written as a YAML list as the mapping the binder reads: each stage under its class name,
+    a repeated class under ``Name#2``, ``Name#3`` (:func:`get_module` drops the suffix). Application
+    order is the list's."""
     mapping: dict = {}
     seen: dict[str, int] = {}
     for index, entry in enumerate(entries):
@@ -185,8 +179,7 @@ def _occurrence_mapping(entries: list, where: str) -> dict:
 
 def _normalize_chain_lists(tree: object, keys: Sequence[str]) -> None:
     """Along ``keys``, a list where a block is walked (a chain spelled as a YAML list) becomes its
-    occurrence mapping, in place, so the contexts opened under it and the write-back read one
-    tree. A context is only ever opened at an object's level, never at a list-valued parameter's."""
+    occurrence mapping, in place."""
     node = tree
     for index, key in enumerate(keys):
         if not isinstance(node, collections.abc.MutableMapping) or key not in node:
@@ -243,26 +236,19 @@ _ledgers: list[_KeyLedger] = []
 def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     """Report, when the block ends, every key of the config file that nothing bound inside it read.
 
-    The binder reads a key when a parameter names it and materializes the default when none does,
-    so a typo'd key is carried along and its default used in its place. Inside this block every
-    ``Config`` context records the keys its level held and the keys read there; on a clean exit
-    the difference is reported by path, with the keys read at that level and the closest of them:
-    a :class:`ConfigError` when ``refuse``, a warning otherwise. The block must contain everything
-    the workflow binds from the file: a key a later, lazily bound callable would read is unknown to
-    it. On entry the file must hold ROOT: a missing root binds an all-defaults workflow and writes
-    the whole block back over the user's file.
+    Inside this block every ``Config`` context records the keys its level held and the keys read there;
+    on a clean exit the difference is reported by path, with the keys read at that level and the closest
+    of them: a :class:`ConfigError` when ``refuse``, a warning otherwise. The block must contain
+    everything the workflow binds from the file: a key a later, lazily bound callable would read is
+    unknown to it. On entry the file must hold ROOT.
 
-    The file is read once here and written once when the block ends, whatever the number of
-    contexts opened inside it, and whatever the number of blocks opened over the same file: they
-    all resolve against the one tree held in memory, read and written by the outermost. A build of N
-    nested objects otherwise parses the file 2N+1 times and writes it N times (Config_GAN.yml, 7 KB,
-    76 objects: 153 parses and 76 dumps, 2.96 s of a 4.7 s build; 0.05 s held in memory).
+    The file is read once here and written once when the block ends, whatever the number of contexts
+    and nested blocks opened over it: they all resolve against the one tree held in memory, read and
+    written by the outermost.
     """
     filename = os.environ.get("KONFAI_config_file")
     tree: dict = {}
-    # A block opened inside another one on the same file binds to the tree already held: reloading
-    # it would hide what the outer contexts bound, and flushing it would be undone by the outer
-    # flush of a tree that predates this block.
+    # A block opened inside another one on the same file binds to the tree already held.
     outer = _shared_tree(Path(filename)) if filename else None
     if filename and Path(filename).exists():
         tree = outer.tree if outer is not None else _load_tree(filename)
@@ -286,8 +272,7 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
         unknown = ledger.unknown(root)
         if shared is not None:
             _shared_trees.remove(shared)
-            # Written whatever ended the block, EXCEPT when the block is about to refuse the config:
-            # a refused run must leave the user's file exactly as it was.
+            # Not written when the block is about to refuse the config: a refused run leaves the file as it was.
             if not (refuse and unknown):
                 shared.flush()
     if unknown:
@@ -306,18 +291,15 @@ def _report(refuse: bool, *messages: str) -> None:
 
 
 class Config:
-    """
-    Context manager for reading and updating a subtree of the active YAML
-    config.
+    """Context manager for reading and updating a subtree of the active YAML config.
 
-    Inside a :func:`strict_config` block the context reads the block's in-memory tree and folds
-    what it set back into it on exit; outside one it loads and writes the file itself.
+    Inside a :func:`strict_config` block the context reads the block's in-memory tree and folds what it
+    set back into it on exit; outside one it loads and writes the file itself.
 
     Parameters
     ----------
     key : str
-        Dot-separated path pointing to the configuration subtree to inspect or
-        materialize.
+        Dot-separated path to the configuration subtree to inspect or materialize.
     """
 
     def __init__(self, key: str) -> None:
@@ -353,16 +335,14 @@ class Config:
 
             self.config = self.config[key]
         if self._shared is not None and isinstance(self.config, collections.abc.MutableMapping):
-            # The context works on a copy of its level and folds it back on exit: what it sets is
-            # not seen by the contexts opened inside it, and lands after what they appended, as
-            # when every context read and wrote the file itself.
+            # The context works on a copy of its level and folds it back on exit.
             self.config = dict(self.config)
         for ledger in _ledgers:
             ledger.opened(tuple(self.keys), self.config if isinstance(self.config, collections.abc.Mapping) else ())
         return self
 
     def __exit__(self, exc_type, value, traceback) -> None:
-        # Only the visited subtree is folded back; the merge preserves the rest of the tree untouched.
+        # Only the visited subtree is folded back; the rest of the tree is untouched.
         subtree = self.config
         for key in reversed(self.keys):
             subtree = {key: subtree}
@@ -370,8 +350,7 @@ class Config:
             _merge_into(self._shared.tree, subtree)
             return
         data = _load_tree(self.filename)
-        # The file still spells a chain as a list until this write: merged as a list it would be
-        # replaced by the one entry a nested context folds back, and the others lost.
+        # A chain the file still spells as a list must be normalized before the merge, or one entry replaces it.
         _normalize_chain_lists(data, self.keys)
         _merge_into(data, subtree)
         _write_tree(self.filename, data)
@@ -391,9 +370,8 @@ class Config:
             ledger.read(tuple(self.keys), name)
 
         if name in self.config:
-            # An explicit null (`name:` empty or `name: null`) is the disabled spelling, exactly like
-            # the string "None": substituting the default here would silently reactivate the very
-            # thing the line was written to suppress.
+            # An explicit null (`name:` empty or `name: null`) is the disabled spelling, like the string
+            # "None"; the default is never substituted for it.
             value = self.config[name] if self.config[name] is not None else "None"
             value_config = value
         else:
@@ -416,10 +394,8 @@ class Config:
                     else:
                         value_tmp = next(v for k, v in value.items() if "default" in k)
 
-                    # dict[str, Object] entries are materialised by a later nested Config context,
-                    # so a None placeholder is correct; primitive entries have no such pass, so they
-                    # must be persisted here or the write-back collapses the whole dict to ``{}``
-                    # (empty on the next run, silently dropping the defaults).
+                    # dict[str, Object] entries are materialized by a later nested Config context (None
+                    # placeholder); primitive entries must be persisted here or the write-back drops them.
                     value_config[resolved] = value_tmp if isinstance(value_tmp, int | float | str | bool) else None
                     dict_value[resolved] = value_tmp
                 value = dict_value
@@ -460,13 +436,8 @@ _CONFIG_PRIMITIVE_TYPES = {
 
 
 def _tensor_type() -> type | None:
-    """``torch.Tensor`` when torch is already imported, else None.
-
-    torch is never imported here: an annotation can only mention Tensor if its declaring module
-    already paid the import, and keeping config.py torch-free keeps the light-import contract of
-    ``konfai/__init__`` honest for consumers like the Slicer-facing konfai-apps helpers (measured:
-    634 of this module's 676 ms import was torch).
-    """
+    """``torch.Tensor`` when torch is already imported, else None. torch is never imported here: this
+    module stays torch-free."""
     return getattr(sys.modules.get("torch"), "Tensor", None)
 
 
@@ -478,11 +449,8 @@ _CONFIG_SUPPORTED_TYPES_MESSAGE = (
 
 
 def _recordable(value):
-    """Normalize a default to the form the config file stores and the callable accepts back.
-
-    An ``Enum`` is recorded as its ``.value``, any other ``type`` as its ``.__name__``: the forms
-    the declaring parameter accepts (``LossReduction | str``, ``numpy.dtype | type | str``).
-    """
+    """Normalize a default to the form the config file stores and the callable accepts back: an ``Enum``
+    as its ``.value``, any other ``type`` as its ``.__name__``."""
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, type):
@@ -491,11 +459,8 @@ def _recordable(value):
 
 
 def _annotation_namespace(function) -> dict[str, Any]:
-    """The globals an annotation's names resolve against.
-
-    Under ``from __future__ import annotations`` an annotation is source text resolved against its
-    defining module's ``__globals__``. A class has none of its own, so fall back to its ``__init__``'s.
-    """
+    """The globals an annotation's names resolve against: the function's ``__globals__``, or its
+    ``__init__``'s for a class."""
     namespace = getattr(function, "__globals__", None)
     if namespace is None:
         namespace = getattr(getattr(function, "__init__", None), "__globals__", None)
@@ -534,11 +499,8 @@ def _resolve_annotation(function, annotation):
 
 
 def _unwrap_optional(annotation) -> tuple[Any, bool]:
-    """Return ``(bound type, was Optional[X])``.
-
-    The flag is what tells an ``X | None`` parameter from a plain ``X``: both bind on ``X``, but only
-    the first may legitimately stay ``None`` (see the nested-object binding in ``apply_config``).
-    """
+    """Return ``(bound type, was Optional[X])``. Only ``X | None`` collapses to ``X``; a genuine union
+    (``float | str``) is kept intact."""
     origin = get_origin(annotation)
     if origin not in {Union, types.UnionType}:
         return annotation, False
@@ -546,8 +508,6 @@ def _unwrap_optional(annotation) -> tuple[Any, bool]:
     args = [arg for arg in get_args(annotation) if arg not in {type(None), types.NoneType}]
     if len(args) == 1:
         return args[0], True
-    # Genuine unions (e.g. ``float | str``) are kept intact so the binding can try each
-    # member type; only ``Optional[X]`` (``X | None``) collapses to ``X``.
     return annotation, False
 
 
@@ -579,19 +539,15 @@ def _convert_union_sequence_value(
     valid_types: tuple[type | object, ...],
     param_name: str,
 ) -> object:
-    # Keep a value whose runtime type already satisfies a union member. Coercing in declaration order is
-    # lossy: int(0.25) == 0 silently beats a float member, str([1, 2]) swallows a list member, and a
-    # list[...] member is never a `type`, so a list value could otherwise never bind through it.
+    # A value whose runtime type already satisfies a union member is kept as is; coercion in declaration
+    # order is lossy (int(0.25) == 0, str([1, 2])) and applies only when no member matches.
     if value not in (None, "None"):
         for candidate_type in valid_types:
             if _value_matches_annotation(value, candidate_type):
                 return value
 
     if isinstance(value, Mapping) and not any(get_origin(member) is dict for member in valid_types):
-        # No member of these unions can hold a mapping, and the coercion loop must not see one:
-        # `str` is a member of most of them, `str(mapping)` never fails, and a block bound as its
-        # own repr fails far from here, on whatever that text then selects. This key is the last
-        # place the shape of the YAML is still visible.
+        # No member holds a mapping and `str(mapping)` never fails: refused here, not bound as a repr.
         raise ConfigError(
             f"Parameter '{param_name}' was given a nested block, but it takes a value.",
             f"Expected one of: {valid_types}.",
@@ -641,10 +597,8 @@ def _bind_literal(config: Config, param: inspect.Parameter, annotation, is_optio
     allowed_values = get_args(annotation)
     default_value = param.default if param.default != inspect._empty else allowed_values[0]
     value = config.get_value(param.name, f"default|{default_value}")
-    # get_value can hand back the raw "default|X" marker or the stringified "X"; recover the
-    # correctly-typed Literal member so NON-string Literals (Literal[1, 2], Literal[True, False])
-    # bind and round-trip through the resolved-config write-back instead of failing the
-    # membership check.
+    # get_value hands back the raw "default|X" marker or the stringified "X": the typed Literal member
+    # is recovered so non-string Literals (Literal[1, 2], Literal[True, False]) bind and round-trip.
     if isinstance(value, str) and value.startswith("default|"):
         value = value.split("|", 1)[1]
     if is_optional and value in (None, "None"):
@@ -675,10 +629,9 @@ def _parse_bool(value: object) -> bool:
 
 
 def _coerce_scalar(value: object, target: type) -> object:
-    """``value`` as the scalar type ``target``: the one coercion every binding path uses (a plain
-    parameter, a list element, a union member), so a quoted ``"false"`` reads False wherever a
-    bool is expected and never ``bool("false") == True``. Raises ValueError/TypeError when the
-    value is not that type's."""
+    """``value`` as the scalar type ``target``, the one coercion every binding path uses: a quoted
+    ``"false"`` reads False wherever a bool is expected. Raises ValueError/TypeError when the value is
+    not that type's."""
     if target is bool:
         return _parse_bool(value)
     if isinstance(value, bool) and target in (int, float):
@@ -725,8 +678,7 @@ def _bind_primitive(config: Config, param: inspect.Parameter, annotation, sectio
     value = config.get_value(param.name, param.default)
     if annotation in {int, float, bool, str} and value is not None:
         if isinstance(value, Mapping | list | tuple):
-            # `str` never fails to coerce, so without this a nested block or list binds as its
-            # Python repr and fails far downstream, on whatever that text then selects.
+            # `str` never fails to coerce: a nested block or list is refused here, not bound as a repr.
             shape = "a nested block" if isinstance(value, Mapping) else "a list"
             raise ConfigError(
                 f"Parameter '{section_key}.{param.name}' was given {shape}, but it takes a {annotation.__name__}.",
@@ -787,8 +739,7 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
     }:
         return _coerce_config_value(values, annotation, f"{section_key}.{param.name}")
     if isinstance(values, list):
-        # The list spelling of a chain: bound under occurrence keys, and the level's copy holds the
-        # mapping, so the write-back and the nested contexts read one tree.
+        # The list spelling of a chain: bound under occurrence keys, the level's copy holds the mapping.
         values = _occurrence_mapping(values, f"{section_key}.{param.name}")
         config.config[param.name] = values
     try:
@@ -801,9 +752,8 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
 
 
 def _bind_config_object(config: Config, param: inspect.Parameter, annotation, is_optional: bool, section_key: str):
-    # ``X | None = None`` declares an object the config must ASK for: binding it anyway would build
-    # X's defaults and write them back, turning "no patch" into a patch nobody configured. A non-None
-    # default (``X | None = X()``) is the opposite declaration and still binds.
+    # ``X | None = None`` declares an object the config must ask for: unbound unless the file names it.
+    # A non-None default (``X | None = X()``) still binds.
     if is_optional and param.default is None:
         annotation_key = getattr(annotation, "_key", None)
         if annotation_key is None or config.get_value(annotation_key, None) is None:
@@ -820,8 +770,7 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
     if hasattr(annotation, "__metadata__"):  # Annotated[T, meta]: bind on T, meta is a UI hint
         annotation = get_args(annotation)[0]
     annotation, is_optional = _unwrap_optional(annotation)
-    # After unwrapping, so ``Literal[X] | None`` binds as a literal (or None) instead of falling through
-    # to _bind_config_object, which would try to instantiate the Literal as a class.
+    # After unwrapping, so ``Literal[X] | None`` binds as a literal (or None).
     if get_origin(annotation) is Literal:
         return _bind_literal(config, param, annotation, is_optional)
 
@@ -834,8 +783,7 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
 
     tensor = _tensor_type()
     if tensor is not None and annotation is tensor:
-        # A bare (or Optional) Tensor parameter is a value, not a nested config object: bind the
-        # YAML scalar/list through torch.tensor, as the union path does.
+        # A bare (or Optional) Tensor parameter is a value: the YAML scalar/list binds through torch.tensor.
         value = config.get_value(param.name, param.default)
         return None if value is None else _convert_union_sequence_value(value, (tensor,), param.name)
 
@@ -887,8 +835,7 @@ def apply_config(konfai_args: str | None = None):
                         if not isinstance(config.config, collections.abc.Mapping):
                             if config.config in (None, "None"):
                                 return None
-                            # `optimizer: AdamW` where a block is expected would otherwise bind the
-                            # whole object to None and the run would proceed without it, silently.
+                            # `optimizer: AdamW` where a block is expected is refused, never bound to None.
                             raise ConfigError(
                                 f"'{key_tmp}' holds the value '{config.config}' where a block is expected.",
                                 f"Nest its settings under '{key_tmp.rsplit('.', 1)[-1]}:' as a mapping"
@@ -903,9 +850,7 @@ def apply_config(konfai_args: str | None = None):
                             if param.name in without:
                                 continue
 
-                            # ``*args`` and ``**kwargs`` name no parameter: they stand for the ones a
-                            # caller passes. There is nothing to bind them to, and binding them hands
-                            # the callable a parameter called "kwargs".
+                            # ``*args`` and ``**kwargs`` name no parameter: nothing to bind.
                             if param.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
                                 continue
 
@@ -926,21 +871,15 @@ def apply_config(konfai_args: str | None = None):
 
 
 def record_given_arguments(cls: type) -> None:
-    """Make ``cls`` record, on each instance, the constructor arguments AS GIVEN: the binder's mirror.
+    """Make ``cls`` record, on each instance, the constructor arguments as given (``_konfai_given``).
 
-    The binder builds an object from a config subtree; this makes the reverse spelling possible: an
-    object built in Python remembers what the caller said (``_konfai_given``), so :mod:`konfai.api`
-    can write a workflow tree from live objects with no second grammar: the recorded kwargs go
-    back through the binder, which stays the one place that validates and resolves defaults.
-
-    Only the OUTERMOST constructor records: a subclass delegating to ``super().__init__`` keeps its
-    own spelling, which is what the caller wrote. Applied by the extension bases'
-    ``__init_subclass__``, so a subclass that defines no ``__init__`` inherits a recording one. An
-    ``__init__`` taking ``*args`` cannot be spelled as a config subtree; such an instance records
-    nothing and :mod:`konfai.api` refuses it by name.
+    :mod:`konfai.api` writes a workflow tree from live objects by sending the recorded kwargs back
+    through the binder. Only the outermost constructor records: a subclass delegating to
+    ``super().__init__`` keeps its own spelling. Applied by the extension bases' ``__init_subclass__``,
+    so a subclass that defines no ``__init__`` inherits a recording one. An ``__init__`` taking
+    ``*args`` records nothing and :mod:`konfai.api` refuses it by name.
     """
-    # A subclass with no __init__ of its own wraps the inherited one here: the extension bases are
-    # never passed through this function, so their raw constructors record nothing by themselves.
+    # A subclass with no __init__ of its own wraps the inherited one here.
     original = cls.__dict__.get("__init__") or cls.__init__  # type: ignore[misc]
     if getattr(original, "_konfai_records", False):
         return
@@ -964,9 +903,8 @@ def record_given_arguments(cls: type) -> None:
                         arguments.update(dict(value))  # type: ignore[call-overload]
                     else:
                         arguments[name] = value
-            # None is recorded too: it marks the instance as spoken for, so a delegating
-            # super().__init__ cannot record the INNER spelling under the outer class's name --
-            # kwargs the outer constructor does not accept.
+            # None is recorded too: it marks the instance as spoken for, so a delegating super().__init__
+            # cannot record the inner spelling under the outer class's name.
             self._konfai_given = arguments  # type: ignore[attr-defined]
         original(self, *args, **kwargs)
 

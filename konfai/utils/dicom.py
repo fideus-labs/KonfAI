@@ -16,30 +16,20 @@
 
 """DICOM series reader for KonfAI medical imaging pipelines.
 
-Design rationale
-----------------
-DICOM is not a folder of independent images.  A CT or MRI acquisition is a
-*series*: a collection of .dcm files that together define a 3-D volume.
-Reading a DICOM correctly requires:
+A CT or MRI acquisition is a *series*: a collection of .dcm files that together define a 3-D volume.
+Reading one requires:
 
-1. **Series discovery**: group files by SeriesInstanceUID.  A folder may
-   contain multiple series (e.g. a T1 and a T2 acquired in the same session).
-
-2. **Slice ordering**: sort slices by ImagePositionPatient (z-component along
-   ImageOrientationPatient normal vector), not by filename or InstanceNumber,
-   which can be unreliable.
-
-3. **Geometry extraction**: derive spacing_mm (PixelSpacing + SliceThickness /
-   derived inter-slice distance), origin (ImagePositionPatient of first slice),
-   and direction cosines (ImageOrientationPatient rows and columns + cross
-   product for the z-axis).
-
-4. **CT intensity rescale**: apply RescaleSlope and RescaleIntercept to
-   convert stored pixel values to Hounsfield Units (HU).  This is mandatory
-   for CT and is absent (or identity) for MR.
-
-5. **Error handling**: missing tags, single-slice series, inconsistent spacing,
-   non-square pixels, and unsupported transfer syntaxes all need clear messages.
+1. **Series discovery**: group files by SeriesInstanceUID; a folder may hold several series.
+2. **Slice ordering**: sort by ImagePositionPatient (z along the ImageOrientationPatient normal),
+   not by filename or InstanceNumber.
+3. **Geometry extraction**: spacing_mm (PixelSpacing plus the derived inter-slice distance), origin
+   (ImagePositionPatient of the first slice), direction cosines (ImageOrientationPatient rows and
+   columns plus their cross product for the z-axis).
+4. **CT intensity rescale**: RescaleSlope and RescaleIntercept convert stored pixel values to
+   Hounsfield Units, mandatory for CT and absent or identity for MR.
+5. **Error handling**: missing tags, inconsistent slice spacing and unsupported transfer syntaxes
+   are reported. A single-slice series takes ``SliceThickness``, or 1.0 mm when it carries none,
+   and non-square pixels are read as they are.
 
 Optional dependency: ``pydicom`` (``pip install konfai[dicom]``).
 """
@@ -86,29 +76,14 @@ def _require_pydicom() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Series discovery
-# ---------------------------------------------------------------------------
 
 
 def discover_series(directory: str | Path) -> dict[str, list[Path]]:
-    """Return a mapping of SeriesInstanceUID -> sorted list of .dcm paths.
+    """Return a mapping of SeriesInstanceUID -> list of .dcm paths, unsorted at this stage.
 
-    Parameters
-    ----------
-    directory:
-        Root directory to scan recursively for .dcm files.
-
-    Returns
-    -------
-    dict[str, list[Path]]
-        Keys are SeriesInstanceUID values; values are lists of file paths
-        belonging to that series (unsorted at this stage).
-
-    Raises
-    ------
-    DatasetManagerError
-        If ``pydicom`` is not installed or the directory contains no DICOM.
+    ``directory`` is scanned recursively for .dcm files. Raises ``DatasetManagerError`` when
+    ``pydicom`` is not installed or the directory contains no DICOM.
     """
     _require_pydicom()
 
@@ -136,18 +111,13 @@ def discover_series(directory: str | Path) -> dict[str, list[Path]]:
     return series
 
 
-# ---------------------------------------------------------------------------
 # Slice sorting
-# ---------------------------------------------------------------------------
 
 
 def _slice_position(ds: DicomDataset) -> float:
-    """Return the signed position of one slice along the acquisition axis.
-
-    Uses ``ImagePositionPatient`` projected onto the slice-normal derived from
-    ``ImageOrientationPatient``.  Falls back to ``InstanceNumber`` (unreliable
-    but ubiquitous) when geometry tags are absent.
-    """
+    """The signed position of one slice along the acquisition axis: ``ImagePositionPatient``
+    projected onto the slice normal from ``ImageOrientationPatient``, falling back to
+    ``InstanceNumber`` when geometry tags are absent."""
     try:
         iop = [float(x) for x in ds.ImageOrientationPatient]
         ipp = [float(x) for x in ds.ImagePositionPatient]
@@ -165,15 +135,8 @@ def _slice_position(ds: DicomDataset) -> float:
 def sort_series(files: list[Path], *, stop_before_pixels: bool = False) -> list[DicomDataset]:
     """Read and sort slices in anatomical order (ascending slice position).
 
-    Parameters
-    ----------
-    files:
-        Unsorted list of paths belonging to one DICOM series.
-
-    Returns
-    -------
-    list[DicomDataset]
-        Datasets sorted by their position along the acquisition normal.
+    ``files`` is an unsorted list of paths belonging to one DICOM series; the datasets come back
+    sorted by their position along the acquisition normal.
     """
     _require_pydicom()
     datasets: list[DicomDataset] = [pydicom.dcmread(str(f), stop_before_pixels=stop_before_pixels) for f in files]
@@ -200,40 +163,26 @@ def _select_series_files(directory: str | Path, series_uid: str | None = None) -
     )
 
 
-# ---------------------------------------------------------------------------
 # Geometry extraction
-# ---------------------------------------------------------------------------
 
 
 def extract_geometry(
     datasets: list[DicomDataset],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Extract origin, spacing, and direction from a sorted DICOM series.
+    """Extract origin, spacing and direction from a sorted DICOM series.
 
-    Parameters
-    ----------
-    datasets:
-        Slice datasets in anatomical order (from :func:`sort_series`).
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray, np.ndarray]
-        - ``origin`` (3,): physical position of the first voxel (mm).
-        - ``spacing`` (3,): KonfAI/SimpleITK order (x, y, z) in mm.
-        - ``direction`` (9,): row-major 3-by-3 direction cosine matrix, flattened.
-
-    Raises
-    ------
-    DatasetManagerError
-        If required geometry tags are missing or inconsistent.
+    ``datasets`` are the slice datasets in anatomical order (from :func:`sort_series`). Returns
+    ``origin`` (3,), the physical position of the first voxel in mm; ``spacing`` (3,), in
+    KonfAI/SimpleITK ``(x, y, z)`` order in mm; and ``direction`` (9,), the row-major 3-by-3
+    direction cosine matrix flattened. Raises ``DatasetManagerError`` when required geometry tags
+    are missing or inconsistent.
     """
     if not datasets:
         raise DatasetManagerError("Cannot extract geometry from an empty series.")
 
     first = datasets[0]
 
-    # Multi-frame / enhanced DICOM (many frames in one file) would be mis-stacked as a
-    # single slice, so reject it explicitly rather than produce a wrong volume.
+    # Multi-frame / enhanced DICOM would be mis-stacked as a single slice, so it is refused.
     try:
         number_of_frames = int(getattr(first, "NumberOfFrames", 1) or 1)
     except (TypeError, ValueError):
@@ -265,10 +214,8 @@ def extract_geometry(
             "This tag is required to determine voxel dimensions.",
         ) from exc
 
-    # Slice spacing: prefer computed inter-slice distance over SliceThickness.
-    # Use the first gap (matches SimpleITK's geometry), but verify the whole series is
-    # uniformly spaced so irregular series (localizers, missing/duplicate slices, mixed
-    # series) fail loudly instead of silently producing a wrong z-spacing.
+    # Slice spacing: the first computed inter-slice gap (matching SimpleITK's geometry), with the
+    # whole series checked for uniform spacing so an irregular one fails instead of skewing z.
     if len(datasets) > 1:
         gaps = np.abs(np.diff([_slice_position(ds) for ds in datasets]))
         slice_spacing_mm = float(gaps[0])
@@ -304,9 +251,7 @@ def extract_geometry(
     return origin, spacing, direction
 
 
-# ---------------------------------------------------------------------------
 # Pixel reading with CT rescale
-# ---------------------------------------------------------------------------
 
 
 def read_volume(
@@ -316,37 +261,18 @@ def read_volume(
 ) -> np.ndarray:
     """Stack sorted slices into a channel-first (1, Z, Y, X) float32 array.
 
-    Parameters
-    ----------
-    datasets:
-        Sorted DICOM datasets (from :func:`sort_series`).
-    apply_rescale:
-        If True, apply RescaleSlope / RescaleIntercept to convert stored
-        pixel values to Hounsfield Units (HU) for CT, or to physical signal
-        units for modalities that provide these tags.  Set to False to keep
-        raw stored pixel integers (e.g., for label maps or QC).
-
-    Returns
-    -------
-    np.ndarray
-        Shape (1, Z, Y, X), dtype float32.  Channel dimension = 1 for scalar
-        volumes.
-
-    Raises
-    ------
-    DatasetManagerError
-        If pixel data cannot be read or slices have inconsistent shapes.
+    ``datasets`` are sorted DICOM datasets (from :func:`sort_series`). ``apply_rescale`` applies
+    RescaleSlope / RescaleIntercept to convert stored pixel values to Hounsfield Units for CT, or to
+    physical signal units for modalities providing these tags; False keeps the raw stored integers.
+    Raises ``DatasetManagerError`` when pixel data cannot be read or slices have inconsistent shapes.
     """
     return _decode_slices(datasets, (slice(None), slice(None)), apply_rescale)[np.newaxis]
 
 
 def _decode_slices(datasets: list[DicomDataset], window: tuple[slice, slice], apply_rescale: bool) -> np.ndarray:
-    """The ``window`` (rows, columns) of every slice, stacked ``(Z, y, x)`` in float32, into one buffer.
-
-    Each plane is cut to the window BEFORE the cast and the rescale, so a 64x64 patch of 512x512
-    slices pays for 64x64 of arithmetic and not 512x512. ``arr * slope + intercept``, elementwise on
-    the cut plane, is the same operation on the same values as on the whole one: bit-identical.
-    """
+    """The ``window`` (rows, columns) of every slice, stacked ``(Z, y, x)`` in float32, into one
+    buffer. Each plane is cut to the window BEFORE the cast and the rescale, which is the same
+    operation on the same values as on the whole plane: bit-identical."""
     volume: np.ndarray | None = None
     expected_shape: tuple[int, ...] | None = None
     for i, ds in enumerate(datasets):
@@ -378,11 +304,11 @@ def _decode_slices(datasets: list[DicomDataset], window: tuple[slice, slice], ap
 
 
 #: What the plane cache may hold when no budget is declared; a declared budget gives it the cache
-#: share instead (:data:`~konfai.utils.budget.BUDGET_SHARES`), so one declaration is divided once.
+#: share instead (:data:`~konfai.utils.budget.BUDGET_SHARES`).
 _PLANE_CACHE_DEFAULT_BYTES = 256 << 20
 
-#: Large data elements are left in the file until accessed: a plane read needs the pixels and the
-#: rescale tags, not every private element parsed into memory.
+#: Large data elements stay in the file until accessed: a plane read needs the pixels and the
+#: rescale tags, nothing else.
 _DCMREAD_DEFER_BYTES = 4096
 
 
@@ -397,9 +323,8 @@ class _DecodedPlaneCache:
     """Decoded DICOM slice planes with their rescale tags, evicted LRU under a byte cap.
 
     A series stores one file per plane, and every region read touching a z index decodes that
-    file's whole plane: overlapping regions of a sweep would parse and decode the same file once
-    per region (the same cliff the OME-Zarr route caps with its decoded-chunk cache). Keyed by
-    ``(path, mtime_ns, size)``, so a rewritten slice is a new entry and never served stale."""
+    file's whole plane. Keyed by ``(path, mtime_ns, size)``, so a rewritten slice is a new entry
+    and never served stale."""
 
     def __init__(self) -> None:
         self._entries: OrderedDict[tuple[str, int, int], tuple[np.ndarray, float, float]] = OrderedDict()
@@ -436,7 +361,7 @@ _plane_cache = _DecodedPlaneCache()
 
 def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
     """One slice file's whole decoded plane and its rescale tags, parsed and decoded once per file
-    per pass: the cache is what keeps an overlapping sweep from decoding it once per region."""
+    per pass."""
     stamp = os.stat(path)
     key = (str(path), stamp.st_mtime_ns, stamp.st_size)
     cached = _plane_cache.get(key)
@@ -490,11 +415,9 @@ def get_dicom_info(
 ) -> dict[str, Any]:
     """Read DICOM series shape and geometry without decoding pixel data.
 
-    Memoised per directory: input DICOM is read-only for a run, so the series walk and header reads are
-    done once instead of on every patch read. Unbounded, because a miss re-reads every slice header
-    (0.3 ms per slice, twice) where the record it rebuilds is 140 bytes per slice, and a cohort read
-    in any order but case by case would miss on every patch past a bound. ``write_dicom_series``
-    clears it. Callers that mutate the result must copy it first.
+    Memoised per directory and unbounded: input DICOM is read-only for a run, and a cohort read case
+    by case would miss on every patch past a bound. ``write_dicom_series`` clears it. Callers that
+    mutate the result must copy it first.
     """
     selected_uid, files = _select_series_files(directory, series_uid)
     datasets = sort_series(files, stop_before_pixels=True)
@@ -606,8 +529,7 @@ def write_dicom_series(
     root.mkdir(parents=True, exist_ok=True)
     get_dicom_info.cache_clear()  # what this directory holds is about to change
     _plane_cache.clear()
-    # Remove only slices previously written by this function (its zero-padded NNNNNN.dcm
-    # naming), never unrelated DICOM files that may share the directory.
+    # Remove only slices this function wrote (its zero-padded NNNNNN.dcm naming).
     for existing in root.glob("*.dcm"):
         if _SLICE_FILENAME_RE.match(existing.name):
             existing.unlink()
@@ -666,9 +588,7 @@ def write_dicom_series(
     return series_uid
 
 
-# ---------------------------------------------------------------------------
 # High-level convenience function
-# ---------------------------------------------------------------------------
 
 
 def read_dicom_series(
@@ -679,29 +599,14 @@ def read_dicom_series(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Read a DICOM series from a directory into a channel-first volume.
 
-    Parameters
-    ----------
-    directory:
-        Path to the folder containing the DICOM series.
-    series_uid:
-        If the folder contains multiple series, select by SeriesInstanceUID.
-        If None and only one series is present, that series is used.
-        If None and multiple series are present, raises DatasetManagerError.
-    apply_rescale:
-        Apply RescaleSlope / RescaleIntercept (True) or keep raw integers.
+    ``series_uid`` selects one series by SeriesInstanceUID when the folder holds several; with None,
+    a single series is used and several are an error. ``apply_rescale`` applies RescaleSlope /
+    RescaleIntercept (True) or keeps raw integers.
 
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-        - ``volume``: shape (1, Z, Y, X), dtype float32.
-        - ``origin``: physical origin of the first voxel, mm (shape (3,)).
-        - ``spacing``: voxel size in KonfAI/SimpleITK (x, y, z) order (shape (3,)).
-        - ``direction``: row-major 3-by-3 direction cosine matrix, flat (shape (9,)).
-
-    Raises
-    ------
-    DatasetManagerError
-        On missing deps, missing tags, multi-series ambiguity, or read errors.
+    Returns ``volume`` of shape (1, Z, Y, X) in float32, ``origin`` the physical origin of the first
+    voxel in mm (3,), ``spacing`` the voxel size in KonfAI/SimpleITK ``(x, y, z)`` order (3,), and
+    ``direction`` the row-major 3-by-3 direction cosine matrix, flat (9,). Raises
+    ``DatasetManagerError`` on missing deps, missing tags, multi-series ambiguity or read errors.
     """
     _require_pydicom()
 

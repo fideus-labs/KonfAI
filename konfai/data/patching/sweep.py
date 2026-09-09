@@ -41,14 +41,10 @@ from konfai.utils.runtime import rank_cpu_share
 
 
 def save_destination(save: Save, default_dataset: Dataset, default_group: str) -> tuple[Dataset, str]:
-    """The dataset and group a :class:`Save` caches into, the manager's own when it names none.
-
-    Public because a planner has to resolve a destination exactly as the engine will: one that probes
-    a store the run does not open has verified nothing.
-    """
+    """The dataset and group a :class:`Save` caches into, the manager's own when it names none. Public:
+    a planner must resolve a destination exactly as the engine will."""
     destination = save.destination
-    # No destination of its own: the Save caches into the manager's dataset, whose write format is
-    # not this stage's to redecorate: a pyramid asked here would silently not happen.
+    # A Save without a destination caches into the manager's dataset, whose write format is not its own.
     if destination is None and save.scale_factors:
         raise ConfigError(
             f"A '{type(save).__name__}' asks for a pyramid but names no dataset of its own.",
@@ -62,16 +58,9 @@ class RegionWriter:
     """Region writes into streams opened at their first block: the one sweep loop of the three
     engines (a Save's sweep, an Expand's shared pass, a Reduce).
 
-    ``write`` opens the stream for a key on its first block (through ``open_stream``, so a refusal
-    surfaces where the caller can say why) and writes the block; ``close`` publishes every stream,
-    ``abort`` drops every partial entry and is safe after a failure or an interrupt.
-
-    Writes here are synchronous. Whether a caller should overlap them with its compute depends on
-    where the compute runs, since the store's encoder competes for the host's cores: measured on a
-    300^3 float32 case to OME-Zarr, a host chain writing one slab behind was 50 % slower than
-    writing in place, and a host resample of a 513x1331x1776 case stayed at 13.0 s either way,
-    where the same resample on a GPU went from 8.2 s to 6.2 s with the write one block behind.
-    :class:`_WriteBehind` is what a sweep wraps this in; nothing here assumes it.
+    ``write`` opens the stream for a key on its first block (through ``open_stream``) and writes the
+    block; ``close`` publishes every stream, ``abort`` drops every partial entry and is safe after a
+    failure or an interrupt. Writes are synchronous; :class:`_WriteBehind` overlaps them.
     """
 
     def __init__(self, open_stream: Callable[[Any, np.ndarray, Attribute], DataStream]) -> None:
@@ -185,11 +174,8 @@ class _SweepMember:
 
 
 def _sweep_targets(spatial: list[int], tile: Sequence[int]) -> Iterator[tuple[slice, ...]]:
-    """The sweep's regions: ``tile``-sized blocks of the landing, innermost axis fastest.
-
-    The order is the source's: consecutive blocks differ on the axis stored contiguously, so the
-    chunks one block decodes are the chunks the next one reads.
-    """
+    """The sweep's regions: ``tile``-sized blocks of the landing, innermost axis fastest (the store's
+    own order)."""
     steps = [max(1, int(step)) for step in tile]
     for corner in itertools.product(*(range(0, extent, step) for extent, step in zip(spatial, steps, strict=True))):
         yield tuple(
@@ -201,13 +187,12 @@ def _cubic_tile(spatial: list[int], voxels: int, align: int) -> list[int]:
     """The block of at most ``voxels`` closest to a cube inside ``spatial``, aligned to ``align``.
 
     ``align`` keeps a block a whole number of store chunks wide, so a region write never becomes a
-    read-modify-write (:func:`konfai.utils.dataset.ome_zarr_file._store_chunks`); an axis shorter than one step is
-    taken whole. Why a cube: :meth:`DatasetManager._sweep_tile`.
+    read-modify-write; an axis shorter than one step is taken whole.
     """
     tile = [max(1, int(extent)) for extent in spatial]
     budget = float(max(1, voxels))
     # Shortest axis first: an axis under the ideal side takes its whole extent and hands its slack
-    # to the others, which only raises the side, so once one axis is over it every later one is too.
+    # to the others.
     free = sorted(range(len(spatial)), key=lambda axis: tile[axis])
     for taken, axis in enumerate(free):
         side = budget ** (1.0 / (len(free) - taken))
@@ -239,13 +224,8 @@ def _span_voxels(span: Sequence[slice]) -> int:
 
 
 class BlockReads(NamedTuple):
-    """What one decomposition's blocks read, in the currencies the sizing spends.
-
-    Every consumer of the enumeration wants an aggregate of it and none wants the blocks, so it is
-    walked once and the aggregates are kept: the widest window one block materialises, the widest
-    hull the store decodes to serve one, and what the whole decomposition reads. Walking it per
-    consumer made the plan spend 96% of its time in ``Resample.stream_region_source``.
-    """
+    """What one decomposition's blocks read: the widest window one block materialises, the widest
+    hull the store decodes to serve one, and what the whole decomposition reads."""
 
     widest_pull: int
     widest_hull: int
@@ -270,8 +250,7 @@ class _RegionPlan:
     The landing is swept in bands along the sweep axis, each band cut on the tile's trailing grid
     (one block per band for a slab, a grid of cubes for a cube). A band is as tall as the growth
     says when it starts, in whole multiples of the first, so every region starts on the chunk grid
-    the output was cut on and the trailing grid never moves: growing one axis of a cube re-cuts
-    nothing, where growing all three would no longer partition the landing.
+    the output was cut on and the trailing grid never moves.
     """
 
     def __init__(self, spatial: Sequence[int], tile: Sequence[int], growth: RegionGrowth) -> None:
@@ -282,14 +261,12 @@ class _RegionPlan:
         self._band: Iterator[tuple[slice, ...]] = iter(())
 
     def rewind(self, start: int) -> None:
-        """Cut again from ``start`` (a band's first row): what a sweep does after a region the device
-        could not hold, at the height the growth was cut to."""
+        """Cut again from ``start`` (a band's first row) at the growth's current height."""
         self._cursor = int(start)
         self._band = iter(())
 
     def next_target(self) -> tuple[slice, ...] | None:
-        """The next region, ``None`` past the last: a new band opens at the growth's CURRENT
-        height, so a height decided after one region is cut is the height of the bands cut after it."""
+        """The next region, ``None`` past the last: a new band opens at the growth's CURRENT height."""
         target = next(self._band, None)
         if target is not None:
             return target
@@ -313,9 +290,8 @@ def _sweep_pipeline_depth() -> int:
 
 def _sweep_resident_regions(depth: int) -> tuple[int, int]:
     """How many pulled source regions and how many landed blocks a sweep of pipeline ``depth`` holds
-    at once: the region the chain is running on, and, pipelined, the ``depth`` queued ahead of it
-    plus the one the reader holds while the queue is full; against the block being landed and,
-    pipelined, the one being written behind it."""
+    at once: the region being run, the ``depth`` queued ahead and the one the reader holds; the
+    block being landed and the one being written behind it."""
     return (1, 1) if depth < 1 else (depth + 2, 2)
 
 
@@ -343,9 +319,8 @@ SWEEP_CLOCK = SweepClock()
 class _ReadAhead:
     """One block's read running while the previous one is transformed and written.
 
-    The consumer drains IN ORDER, so a stage object is touched by one thread at a time: the read
-    stages by the producer, the tail by the consumer, disjoint by construction. At most ``depth``
-    blocks wait, and a consumer that leaves early stops the producer.
+    The consumer drains IN ORDER, so a stage object is touched by one thread at a time. At most
+    ``depth`` blocks wait, and a consumer that leaves early stops the producer.
     """
 
     _DONE = object()
@@ -366,8 +341,7 @@ class _ReadAhead:
     def __exit__(self, exc_type, value, traceback) -> None:
         if self._depth < 1:
             return
-        # To the end marker, whether the consumer stopped early or an error cut it short: a producer
-        # blocked on a full queue cannot reach its own end, and cannot then be joined.
+        # Drain to the end marker: a producer blocked on a full queue cannot be joined.
         self._stop.set()
         while self._queue.get()[0] is not _ReadAhead._DONE:
             pass
@@ -395,16 +369,9 @@ class _ReadAhead:
 
 
 class _HostLanding:
-    """The host buffers a device chain's blocks come home into, reused rather than reallocated.
-
-    A fresh allocation per block pays first-touch on pages the transfer overwrites whole, so the
-    pageable copy faults page by page: measured on a 216 MiB block, 2.4 GiB/s into a new buffer
-    against 10.1 GiB/s into one already resident. Two slots, because the writer holds exactly one
-    block while the sweep fills the next, and that is what the sweep already keeps live.
-
-    A block already on the host is handed over as it is: copying one would cost the host chain
-    exactly what this saves on the device one.
-    """
+    """The host buffers a device chain's blocks come home into, reused rather than reallocated. Two
+    slots: the writer holds one block while the sweep fills the next. A block already on the host is
+    handed over as it is."""
 
     _SLOTS = 2
 
@@ -428,10 +395,9 @@ class _HostLanding:
 class _WriteBehind:
     """A sweep's :class:`RegionWriter`, driven from one thread that is not the sweep's.
 
-    One worker and one outstanding write, so the order stays the sweep's and the store's own
-    encoder keeps its concurrency. EVERY call goes to that thread, not only the writes: the h5
-    backend holds a per-file ``RLock`` across a stream's whole life, and a release from a thread
-    that did not take it raises.
+    One worker and one outstanding write, so the order stays the sweep's. EVERY call goes to that
+    thread, not only the writes: the h5 backend holds a per-file ``RLock`` across a stream's whole
+    life, and a release from another thread raises.
     """
 
     def __init__(self, writer: RegionWriter, depth: int) -> None:
@@ -482,13 +448,8 @@ class _WriteBehind:
 
 
 def _torch_dtype_hint(error: BaseException) -> str | None:
-    """The config change that answers ``error``, when it is a dtype torch has no kernel for.
-
-    torch ships none for several dtypes a store legitimately holds: ``uint16`` is what microscopy
-    writes, and torch implements for it neither comparison, nor flip, nor arithmetic, nor scalar
-    fill. A chain that touches such a payload raises deep inside a stage with nothing but the
-    missing operator's name, where what the reader needs is the dtype and the line that fixes it.
-    """
+    """The config change that answers ``error``, when it is a dtype torch has no kernel for (``uint16``
+    is one)."""
     text = str(error)
     if not isinstance(error, NotImplementedError) or "not implemented for" not in text or text.count("'") < 2:
         return None
@@ -537,11 +498,8 @@ def _sweep_header(evolved: Attribute, scope: Attribute, keys_before: set[str]) -
 
 def _channel_first_block(block: np.ndarray, spatial: list[int], header: Attribute, what: str) -> np.ndarray:
     """The block a region write ships: channel-first, single-channel where the header says so
-    (:func:`as_channel_first`, the rule the whole-volume write applies), else refused.
-
-    Writing another rank anyway is the worst outcome available: the header would take the block's
-    first spatial extent for a channel count and publish a store of that many "channels", raising
-    nothing, while the whole-volume path returns the right rank: the two would silently disagree."""
+    (:func:`as_channel_first`, the rule the whole-volume write applies), else refused: the header
+    would take the block's first spatial extent for a channel count."""
     block = as_channel_first(block, header)
     if block.ndim != len(spatial) + 1:
         raise PatchError(
@@ -558,7 +516,7 @@ def _open_sweep_stream(
     sweep: _PendingSweep, block: np.ndarray, spatial: list[int], tile: Sequence[int], attributes: Attribute
 ) -> DataStream:
     """One region-write stream shaped for the sweep: the store chunks divide the block the sweep
-    writes (channels included), so no region write ever pays a read-modify-write."""
+    writes (channels included), so no region write pays a read-modify-write."""
     stream = sweep.destination.open_data_stream(
         sweep.group,
         sweep.entry,

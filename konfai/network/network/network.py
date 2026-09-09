@@ -56,13 +56,8 @@ _log = logging.getLogger(__name__)
 
 def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
     """Per-axis stride of a leaf that shrinks the grid (a ``Conv``, ``MaxPool`` or ``AvgPool``), else
-    ``None``.
-
-    ``ConvTranspose``/``Upsample`` grow the grid, so they read ``None`` and the trace passes their input
-    factor straight through. ``AvgPool`` IS a downsampler (a model may pool on its main path) and is
-    counted: a residual branch's ``AvgPool`` does not inflate the factor because the branch-aware trace
-    merges the parallel main path and shortcut by their per-axis MAX, not their product.
-    """
+    ``None``. ``ConvTranspose``/``Upsample`` grow the grid and read ``None``. ``AvgPool`` IS counted as
+    a downsampler, and the branch-aware trace merges parallel paths by their per-axis MAX."""
     if isinstance(
         module,
         (
@@ -86,14 +81,9 @@ def _leaf_spatial_stride(module: torch.nn.Module) -> list[int] | None:
 
 def _flat_downsampling(module: torch.nn.Module | None, ndim: int) -> list[int]:
     """Product of every strided ``Conv``/``MaxPool`` inside ``module`` (itself included), each
-    trailing-aligned to ``ndim``: a leaf of lower dimensionality acts on the LAST axes, so a 2D conv in
-    a 3D graph leaves the leading axis untouched.
-
-    This is the factor for an OPAQUE child: a plain torch module whose internal graph the branch trace
-    cannot see (a wrapped torchvision/MONAI/smp net added as one ``add_module`` leaf). The flat product
-    over-counts a parallel strided shortcut inside it, but over-padding is safe where under-counting
-    crashes the model's skip reassembly.
-    """
+    trailing-aligned to ``ndim``: a leaf of lower dimensionality acts on the LAST axes. This is the factor
+    for an OPAQUE child, whose internal graph the branch trace cannot see; the flat product over-counts a
+    parallel strided shortcut, and over-padding is safe where under-counting crashes skip reassembly."""
     factor = [1] * ndim
     if module is None:  # an absent child (a NONE norm): named_forward skips it
         return factor
@@ -300,8 +290,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
             elif isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
                 if module.weight is not None:
-                    # Normalisation gamma must centre on 1, not 0 (the pix2pix convention): a gamma
-                    # near 0 scales the normalised activations to ~0 and stalls early training.
+                    # Normalisation gamma must centre on 1, not 0 (the pix2pix convention).
                     torch.nn.init.normal_(module.weight, 1.0, std=init_gain)
                 if module.bias is not None:
                     torch.nn.init.constant_(module.bias, 0.0)
@@ -316,8 +305,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     ) -> Iterator[tuple[str, torch.Tensor]]:
         if len(inputs) > 0:
             if self._channels_last:
-                # Once, as the graph is entered: cuDNN hands a channels-last input's output back in
-                # that layout, so converting again at every module only recopies what it kept.
+                # Once, as the graph is entered: cuDNN hands a channels-last input's output back in that layout.
                 inputs = tuple(_channels_last(tensor) for tensor in inputs)
             branchs: dict[str, torch.Tensor] = {}
             attribute_branchs: dict[str, list[Attribute]] = {}
@@ -330,8 +318,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             tmp: list[int | str] = []
             for name, module in self.items():
                 # Reset per module: ``tmp`` tracks out_branches a nested sibling already filled via
-                # inner-match. Kept across siblings, a later sibling sharing that out_branch would skip
-                # the fallback below and its output would be silently dropped.
+                # inner-match. Kept across siblings, a later sibling's output would be silently dropped.
                 tmp = []
                 if self._modulesArgs[name].training is None or (
                     not (self._modulesArgs[name].training and self._training == NetState.PREDICTION)
@@ -344,8 +331,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     for ib in self._modulesArgs[name].in_branch:
                         if ib not in branchs:
                             # Numeric branches fall back to the network input (branch '0' = input; extra
-                            # indices are legitimate scratch wiring). A NAMED branch nobody produced is a
-                            # miswired graph: routing the raw input silently would hide it.
+                            # indices are legitimate scratch wiring). A NAMED branch nobody produced is refused.
                             if not ib.lstrip("-").isdigit():
                                 raise ConfigError(
                                     f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
@@ -413,12 +399,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         return cast(torch.Tensor, _v)
 
     def graph_parameters(self, pretrained: bool = False) -> Iterator[tuple[str, torch.nn.parameter.Parameter]]:
-        """The routed graph's trainable parameters, named by dotted module path.
-
-        Unlike ``named_parameters`` (torch semantics, untouched), this walk honours the graph
-        metadata: a module gated off by ``training=False`` is skipped, and ``pretrained=True``
-        keeps only the modules declared ``pretrained=False``.
-        """
+        """The routed graph's trainable parameters, named by dotted module path, honouring the graph
+        metadata where ``named_parameters`` does not: a module gated off by ``training=False`` is
+        skipped, and ``pretrained=True`` keeps only the modules declared ``pretrained=False``."""
         for name, module_args in self._modulesArgs.items():
             module = self[name]
             if isinstance(module, ModuleArgsDict):
@@ -450,15 +433,13 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
     def _trace_downsampling(self, seeds: list[list[int]], seen: list[list[int]]) -> list[int]:
         """Propagate the per-axis downsampling factor through the branch register, recording each branch
-        value in ``seen``. Parallel branches (a residual shortcut beside the main path) accumulate from
-        the SAME seed and merge at their ``Add`` without multiplying, so a strided projection is not
-        double-counted the way a flat ``modules()`` walk would. A child that is NOT a routed block is
-        opaque and contributes its flat internal product (``_flat_downsampling``).
+        value in ``seen``. Parallel branches accumulate from the SAME seed and merge at their ``Add``
+        without multiplying. A child that is NOT a routed block is opaque and contributes its flat internal
+        product (``_flat_downsampling``).
 
-        ``seeds`` are this block's input factors, one per positional input; the register is seeded from
-        all of them (a decoder block reading ``[upsampled, skip]`` keeps each at its own resolution) and
-        an unwritten branch falls back to the first, exactly as ``named_forward`` seeds it. A module
-        downsamples along its FIRST input branch; the others only route. Returns the last output's factor.
+        ``seeds`` are this block's input factors, one per positional input, and an unwritten branch falls
+        back to the first, as ``named_forward`` seeds it. A module downsamples along its FIRST input
+        branch; the others only route. Returns the last output's factor.
         """
         branches: dict[str, list[int]] = {str(i): seed for i, seed in enumerate(seeds)}
         default = seeds[0]
@@ -477,12 +458,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
 
 class OutputsGroup(list):
-    """Container describing one model output and its source modules.
-
-    Carries the OWNING network, not just its measure: criteria are scheduled on the owner's ``_it``
-    (the counter its backward advances). A composite root never steps its own ``_it``, so scheduling
-    on the root would freeze every start/stop window and loss-weight scheduler at 0.
-    """
+    """Container describing one model output and its source modules. It carries the OWNING network, not
+    just its measure: criteria are scheduled on the owner's ``_it``, the counter its backward advances,
+    which a composite root never steps."""
 
     def __init__(self, network: "Network") -> None:
         self.layers: dict[str, torch.Tensor] = {}
@@ -514,8 +492,7 @@ class Network(ModuleArgsDict, ABC):
         **kwargs,
     ) -> dict[str, object]:
         # The first caller in the recursion is the root graph; thread it (and the dotted key) down so a
-        # nested network can address the whole graph: e.g. a GAN generator whose loss targets a module
-        # of a sibling discriminator branch, which only exists in the root's module namespace.
+        # nested network can address the whole graph (a GAN generator's loss on a discriminator module).
         root = root if root is not None else self
         results: dict[str, object] = {}
         for module in self.values():
@@ -523,8 +500,7 @@ class Network(ModuleArgsDict, ABC):
                 name = name_function(module)
                 known = networks.get(name)
                 if known is module:
-                    # The same object under several module names (a GAN's shared discriminator)
-                    # is visited once.
+                    # The same object under several module names (a GAN's shared discriminator) runs once.
                     continue
                 if known is not None:
                     raise ConfigError(
@@ -599,11 +575,10 @@ class Network(ModuleArgsDict, ABC):
         self.init_type = init_type
         self.init_gain = init_gain
         self.dim = dim
-        #: Opt-in: a checkpoint head whose out-channels mismatch may be re-initialised and
-        #: overlap-copied instead of failing the load (transfer to a different label set).
+        #: Opt-in: a checkpoint head whose out-channels mismatch may be re-initialised and overlap-copied.
         self.allow_head_resize = allow_head_resize
-        #: Set on the root by ModelLoader when ``Model.pretrained_from`` is declared: a fresh
-        #: (checkpoint-less) load seeds the initialised graph from the external reference.
+        #: Set on the root by ModelLoader when ``Model.pretrained_from`` is declared: a checkpoint-less
+        #: load seeds the initialised graph from the external reference.
         self.pretrained_source: PretrainedFrom | None = None
         self._it = 0
         self._nb_lr_update = 0
@@ -644,8 +619,7 @@ class Network(ModuleArgsDict, ABC):
         error_msgs: list[str] = []
 
         metadata = getattr(state_dict, "_metadata", None)
-        # A plain copy: as a KEY the metadata would be collected as an unexpected key by the
-        # strict per-module load; the closure below reads the local variable.
+        # A plain copy: as a KEY the metadata would be collected as an unexpected key by the strict load.
         state_dict = state_dict.copy()
 
         def load(module: torch.nn.Module, prefix=""):
@@ -670,8 +644,7 @@ class Network(ModuleArgsDict, ABC):
                             current_size = child.weight.shape[0]
                             last_size = state_dict[weight_key].shape[0]
 
-                            # Opt-in only: without allow_head_resize the mismatch falls through to the
-                            # strict load below and raises, naming the tensor and both shapes.
+                            # Without allow_head_resize the mismatch falls through to the strict load and raises.
                             if current_size != last_size and self.allow_head_resize:
                                 _log.warning(
                                     "The size of '%s' has changed from %s to %s: re-initialised and "
@@ -683,17 +656,14 @@ class Network(ModuleArgsDict, ABC):
                                 ModuleArgsDict.init_func(child, self.init_type, self.init_gain)
 
                                 bias_key = prefix + name + ".bias"
-                                # Copy the overlap only. Slicing both sides by min(current, last) keeps the
-                                # GROW case (checkpoint smaller -> fill the top rows) working AND fixes the
-                                # SHRINK case (checkpoint larger): `weight[:last_size] = ckpt` would pair the
-                                # smaller current tensor against the larger checkpoint and crash.
+                                # Copy the overlap only: slicing both sides by min(current, last) covers a
+                                # checkpoint that is smaller as well as one that is larger.
                                 overlap = min(current_size, last_size)
                                 with torch.no_grad():
                                     child.weight[:overlap] = state_dict[weight_key][:overlap]
                                     if child.bias is not None and bias_key in state_dict:
                                         child.bias[:overlap] = state_dict[bias_key][:overlap]
-                                # Skip the normal load for this resized leaf, but keep
-                                # loading its siblings.
+                                # Skip the normal load for this resized leaf, but keep loading its siblings.
                                 continue
                         load(child, prefix + name + ".")
 
@@ -722,9 +692,8 @@ class Network(ModuleArgsDict, ABC):
         """
         Apply ``fn`` to each non-``Network`` child module and finally to ``self``.
 
-        Nested ``Network`` instances are skipped: each owns its own state (init, load), so a
-        fan-out over the graph applies ``fn`` per network, never twice through a parent.
-        ``torch.nn.Module.apply`` keeps its native signature and full recursion.
+        Nested ``Network`` instances are skipped: each owns its own state, so a fan-out over the graph
+        applies ``fn`` per network, never twice through a parent.
         """
         for module in self.children():
             if not isinstance(module, Network):
@@ -741,8 +710,7 @@ class Network(ModuleArgsDict, ABC):
         key: str | None = None,
     ):
         # `checkpoint_save` writes the optimizer/iteration/LR-schedule state under the network's DOTTED path
-        # (its get_networks() key, e.g. "Gan.Generator"). `_apply_network` injects that same dotted path as
-        # `key` here, so a nested network resumes its own state instead of silently missing the bare-name key.
+        # (its get_networks() key, e.g. "Gan.Generator"), which `_apply_network` injects as `key` here.
         state_key = key if key is not None else self.get_name()
         if init:
             self.graph_apply(
@@ -765,9 +733,8 @@ class Network(ModuleArgsDict, ABC):
             model_state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
 
             def remap(path: str) -> str:
-                # Segment-aligned: alias 'layer1' must not claim a module 'layer10', and only the
-                # leading prefix is rewritten, never a later occurrence of the same substring. Of
-                # the matches the longest wins: a nested alias 'p.a1' beats its parent 'p'.
+                # Segment-aligned: alias 'layer1' must not claim a module 'layer10', and only the leading
+                # prefix is rewritten. Of the matches the longest wins: a nested alias 'p.a1' beats 'p'.
                 candidates = [(a, b) for a, b in modules_name.items() if path == a or path.startswith(a + ".")]
                 if not candidates:
                     return path
@@ -779,16 +746,14 @@ class Network(ModuleArgsDict, ABC):
                 model_state_dict[remap(prefix) + alias[len(prefix) :]] = model_state_dict_tmp[alias]
             source_metadata = getattr(model_state_dict_tmp, "_metadata", None)
             if source_metadata is not None:
-                # Keys are module paths: remapped like the tensors so version-aware modules
-                # (_load_from_state_dict) find their entry.
+                # Keys are module paths: remapped like the tensors so version-aware modules find their entry.
                 model_state_dict._metadata = OrderedDict(  # type: ignore[attr-defined]
                     (remap(path), meta) for path, meta in source_metadata.items()
                 )
             self.load_state_dict(model_state_dict)
         elif self.pretrained_source is not None and not ema:
-            # A fresh TRAIN carries no checkpoint entry: the declared reference seeds the graph the
-            # init above just randomised. The EMA copy is deepcopied from the seeded model and must
-            # not pay the transfer again; a checkpoint's own weights take the branch above instead.
+            # A fresh TRAIN carries no checkpoint entry: the declared reference seeds the graph the init
+            # above randomised.
             self.pretrained_source.seed(self)
         if f"{state_key}_optimizer_state_dict" in state_dict and self.optimizer:
             self.optimizer.load_state_dict(state_dict[f"{state_key}_optimizer_state_dict"])
@@ -807,8 +772,7 @@ class Network(ModuleArgsDict, ABC):
         else:
             for scheduler in self.schedulers:
                 if scheduler not in restored:
-                    # A checkpoint from before the schedulers' own state was saved: the counter
-                    # places a step schedule, not a plateau's history or a cooldown.
+                    # No scheduler state: the counter places a step schedule, not a plateau's history.
                     scheduler.last_epoch = self._nb_lr_update
         self.initialized()
 
@@ -822,12 +786,9 @@ class Network(ModuleArgsDict, ABC):
             yield name if occurrence == 1 else f"{name}#{occurrence}", scheduler
 
     def schedule_states(self) -> dict[str, Any]:
-        """This network's scheduler/scaler state, with a distinct identity for each occurrence.
-
-        Version 1 keyed every scheduler by class alone, losing all but the last of a repeated
-        class. Single-class legacy entries remain readable; ambiguous repeated ones cannot be
-        restored exactly and fall back to the update count with a warning.
-        """
+        """This network's scheduler/scaler state, with a distinct identity for each occurrence. Version 1
+        keyed every scheduler by class alone: its single-class entries remain readable, ambiguous repeated
+        ones fall back to the update count with a warning."""
         states: dict[str, Any] = {
             "version": 2,
             "schedulers": {name: scheduler.state_dict() for name, scheduler in self._named_schedulers()},
@@ -944,15 +905,13 @@ class Network(ModuleArgsDict, ABC):
         downsamples.
 
         An encoder/decoder graph (U-Net) only reassembles its skip connections when the input divides
-        evenly at every level, so the input must be a multiple of the coarsest downsampling the graph
-        reaches. That factor is traced through the branch register: a strided ``Conv`` or a ``MaxPool``
-        multiplies the branch it writes, while ``ConvTranspose``/``Upsample`` and a residual branch's
-        ``AvgPool`` pass through. Because the trace follows branches, a residual block's strided shortcut
-        (parallel to its strided main conv, merged by ``Add``) counts ONCE, not twice. Used to size a
-        free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
+        evenly at every level. The factor is traced through the branch register: a strided ``Conv`` or
+        ``MaxPool`` or ``AvgPool`` multiplies the branch it writes, ``ConvTranspose``/``Upsample`` pass
+        through, and a residual block's strided shortcut counts ONCE: parallel paths merge by their
+        per-axis maximum, so a shortcut's ``AvgPool`` beside a strided main path adds nothing. Used to
+        size a free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
         """
-        # The graph's spatial rank = the WIDEST strided leaf (a 2D side head in a 3D net must not lock
-        # the rank to 2); every leaf stride then aligns to the trailing axes of that rank.
+        # The graph's spatial rank = the WIDEST strided leaf; strides align to that rank's trailing axes.
         ndim = max((len(s) for s in map(_leaf_spatial_stride, self.modules()) if s is not None), default=0)
         if ndim == 0:
             return None
@@ -966,8 +925,7 @@ class Network(ModuleArgsDict, ABC):
         if self.outputs_criterions_loader:
             self.measure = Measure(key, self.outputs_criterions_loader)
             # Validate the criterion targets against the ROOT graph, where runtime matching also happens:
-            # a nested network's loss may address a module in a sibling branch (a GAN generator's
-            # adversarial loss on the discriminator) that exists only in the root's module namespace.
+            # a nested network's loss may address a module that exists only in the root's namespace.
             self.measure.init(root, group_dest)
         if self.patch is not None:
             self.patch.init(f"{konfai_root()}.Model.{key}.Patch")
@@ -1023,8 +981,7 @@ class Network(ModuleArgsDict, ABC):
                         )
                     accumulators[buffer[0][0]].add_layer(i, buffer[0][1])
                 # The leftover entry must not leak into the next patch iteration: the name-transition
-                # branch above would re-add patch i's end-module output at index i+1, and Accumulator
-                # blends incrementally, so a spurious first add cannot be overwritten later.
+                # branch above would re-add patch i's end-module output at index i+1.
                 buffer.clear()
             for name, accumulator in accumulators.items():
                 yield name, accumulator.assemble()
@@ -1119,8 +1076,7 @@ class Network(ModuleArgsDict, ABC):
         checkpoints are placed on."""
         self.init(autocast, state, group_dest)
         if state != State.PREDICTION and all(network.optimizer is None for network in self.get_networks().values()):
-            # A YAML-catalog model with `optimizer: None` once trained an epoch with the backward
-            # skipped, a loss that never moved and a checkpoint written: the refusal names the key.
+            # A graph with no optimizer would run an epoch with the backward skipped: name the key.
             root = os.environ.get("KONFAI_ROOT", "Trainer")
             raise ConfigError(
                 f"No optimizer resolved for '{self.get_name()}': nothing would train.",
@@ -1230,18 +1186,15 @@ class Network(ModuleArgsDict, ABC):
             self.measure.release_targets()
 
     def steps_this_batch(self) -> bool:
-        """Whether this network's optimizer steps on the batch about to be run (its accumulation
-        window closes), read before ``forward`` so the DDP synchronisation can be decided for the
-        whole step."""
+        """Whether this network's optimizer steps on the batch about to be run, read before ``forward``
+        so the DDP synchronisation can be decided for the whole step."""
         return (self._it + 1) % self.nb_batch_per_step == 0
 
     def accumulation_sync(self, model: Any) -> AbstractContextManager[Any]:
-        """The DDP context the coming forward AND backward run under: ``no_sync`` when no network of
-        the graph steps on this batch (its gradients accumulate locally), the ordinary reduction
-        otherwise. DDP marks the gradients to reduce during ``forward``, so a ``no_sync`` entered
-        around the backward alone reduced every micro-batch, which is what accumulation exists
-        to avoid. A graph whose networks step at different cadences reduces whenever one of them
-        does: the others' accumulated gradients travel early, which changes nothing they compute."""
+        """The DDP context the coming forward AND backward run under: ``no_sync`` when no network of the
+        graph steps on this batch, the ordinary reduction otherwise. DDP marks the gradients to reduce
+        during ``forward``, so the context must wrap the forward too. A graph whose networks step at
+        different cadences reduces whenever one of them does."""
         trained = [network for network in self.get_networks().values() if network.optimizer is not None]
         if not trained or any(network.steps_this_batch() for network in trained):
             return nullcontext()
@@ -1249,12 +1202,9 @@ class Network(ModuleArgsDict, ABC):
         return no_sync() if callable(no_sync) else nullcontext()
 
     def backward(self, model: Any) -> dict[str, Any]:
-        """Backpropagate the graph, then step any optimizers waiting for DDP reductions.
-
-        A DDP bucket can span several nested networks. Stepping the first network before the
-        last one's backward completes uses local gradients and can clear the bucket's inputs.
-        Only distributed execution defers the steps; the ordinary per-network order is kept.
-        """
+        """Backpropagate the graph, then step any optimizers waiting for DDP reductions. A DDP bucket can
+        span several nested networks, so stepping the first before the last one's backward completes uses
+        local gradients. Only distributed execution defers the steps."""
         pending: list[Network] | None = [] if isinstance(model, torch.nn.parallel.DistributedDataParallel) else None
         result = self._backward(pending)
         if pending is not None:
@@ -1304,8 +1254,7 @@ class Network(ModuleArgsDict, ABC):
 
     def _rebase_lr_local(self, new_lr: float) -> None:
         """Set this one network's optimizer LR to ``new_lr`` and rebase its schedulers onto it (base_lrs /
-        initial_lr / _last_lr) with last_epoch reset, so the next scheduler step keeps the new value instead
-        of re-decaying from the old anchor. Plain (no fan-out): the callers own the recursion."""
+        initial_lr / _last_lr) with last_epoch reset. Plain (no fan-out): the callers own the recursion."""
         if self.optimizer is not None:
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = new_lr
@@ -1322,8 +1271,8 @@ class Network(ModuleArgsDict, ABC):
 
     @_function_network()
     def rebase_lr(self, new_lr: float) -> None:
-        """Rebase the learning rate of this network and every nested one onto ``new_lr``: the same restart a
-        RESUME with ``--lr`` applies, reused for a live mid-run change so the value sticks past the scheduler."""
+        """Rebase the learning rate of this network and every nested one onto ``new_lr``, the same restart
+        a RESUME with ``--lr`` applies."""
         self._rebase_lr_local(new_lr)
 
     @_function_network()
@@ -1332,13 +1281,8 @@ class Network(ModuleArgsDict, ABC):
 
     @staticmethod
     def set_channels_last(module: ModuleArgsDict) -> ModuleArgsDict:
-        """Lay the graph's convolution weights out channels-last, and its inputs as they enter.
-
-        cuDNN picks its kernels by layout: under autocast the shipped Segmentation example predicts
-        in 2.2 s against 2.7 s in the default layout (fp32: 4.1 against 4.2 s, where the kernels
-        chosen differ on 3199 of 58.4 million label voxels). Off by default, so the default layout
-        is what a run gets unless it asks.
-        """
+        """Lay the graph's convolution weights out channels-last, and its inputs as they enter. cuDNN
+        picks its kernels by layout, and the kernels it picks differ numerically. Off by default."""
         for tensor in (*module.parameters(), *module.buffers()):
             tensor.data = _channels_last(tensor.data)  # a 4-D and a 5-D weight each take their own layout
         for submodule in module.modules():
@@ -1348,10 +1292,8 @@ class Network(ModuleArgsDict, ABC):
 
     @staticmethod
     def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):  # type: ignore[override]  # a placement over the routed graph, not Module.to
-        # `_counter` is a single-element box holding the next GPU index, shared by
-        # reference through the recursion so model-parallel `isGPU_Checkpoint` splits
-        # advance it. Each top-level call starts fresh at `device` so the counter never
-        # leaks across independent placements.
+        # `_counter` is a single-element box holding the next GPU index, shared by reference through the
+        # recursion so model-parallel `isGPU_Checkpoint` splits advance it, fresh at `device` per call.
         if _counter is None:
             _counter = [device]
         for k, v in module.items():
@@ -1387,11 +1329,9 @@ class Network(ModuleArgsDict, ABC):
 class MinimalModel(Network):
     """Small wrapper exposing a single network as a full KonfAI model graph.
 
-    The wrapped model arrives fully constructed: possibly carrying pretrained weights (a
-    torchvision/MONAI/SMP class with ``weights=...``). ``load`` therefore never re-initialises:
-    ``load(init=True)`` at training start applies ``init_func`` over every descendant and would
-    silently destroy those weights with ``init_type`` noise. Models built from scratch keep
-    KonfAI's init behaviour; checkpoint loading is unaffected.
+    The wrapped model arrives fully constructed, possibly carrying pretrained weights, so ``load`` never
+    re-initialises: ``init_func`` over every descendant would destroy them. Checkpoint loading is
+    unaffected.
     """
 
     def load(

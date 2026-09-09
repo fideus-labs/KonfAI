@@ -53,16 +53,10 @@ from konfai.utils.utils import (
 def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) -> tuple[int, ...] | None:
     """Chunks a store should use, given the region shape its writer declared.
 
-    A region write that straddles a chunk becomes a read-modify-write of it, so the writer's own
-    region is the starting point; verbatim it is a gigabyte in one chunk at 2048x2048 float32, paid
-    by every later partial read. A region that fits ``CHUNK_TARGET_BYTES`` is taken as it stands; one
-    that does not is cut on EVERY axis longer than ``CHUNK_SPATIAL_TILE`` at once, the shape that
-    writes fastest (2.4 GB into a (1, 128, 128, 128) uint16 store takes 2.18 s, into
-    (1, 128, 640, 128) 3.53 s).
-
-    A covered axis may be cut anywhere; a partial one only into a DIVISOR of the region, since a
-    writer advancing in blocks of its declared size starts every block at a multiple of it. One whose
-    largest usable divisor would be a sliver is left long. ``None`` when the writer declared nothing.
+    A region that fits ``CHUNK_TARGET_BYTES`` is taken as it stands; one that does not is cut on
+    every axis longer than ``CHUNK_SPATIAL_TILE``. A covered axis may be cut anywhere; a partial one
+    only into a divisor of the region, since a writer advancing in blocks of its declared size starts
+    every block at a multiple of it. ``None`` when the writer declared nothing.
     """
     from konfai.utils.ome_zarr import CHUNK_SPATIAL_TILE, CHUNK_TARGET_BYTES
 
@@ -80,23 +74,20 @@ def _store_chunks(shape: list[int], region_shape: list[int] | None, dtype: Any) 
 
 def _divisor_tile(extent: int, cap: int) -> int:
     """The largest divisor of ``extent`` that is at most ``cap``, or ``extent`` when that divisor
-    would be a sliver (under a quarter of the cap): a chunk axis of one voxel is worse than a long
-    one."""
+    is under a quarter of the cap."""
     if extent <= cap:
         return max(1, extent)
     divisor = next((candidate for candidate in range(cap, 0, -1) if extent % candidate == 0), 1)
     return divisor if divisor * 4 >= cap else extent
 
 
-#: Where each entry's store was resolved on disk, keyed by ``(root, entry)``: the store-suffix
-#: probes are one ``fs.info`` round-trip each on a remote root, per patch without this. A write
-#: through this backend forgets the memo (it may change the suffix the entry resolves under); a
-#: store REPLACED at the same path keeps its resolution, so no other invalidation is owed.
+#: Where each entry's store was resolved on disk, keyed by ``(root, entry)``. A write through this
+#: backend forgets the memo; a store replaced at the same path keeps its resolution.
 _resolved_store_paths: dict[tuple[str, str], str] = {}
 
 
 def _forget_resolved_paths() -> None:
-    """Drop the entry-path memo: what a write must call, being the one thing that moves a store."""
+    """Drop the entry-path memo; every write must call it."""
     _resolved_store_paths.clear()
 
 
@@ -129,9 +120,7 @@ class _OmeZarrDataStream(DataStream):
             shutil.rmtree(self._store_path, ignore_errors=True)
             return
         if self._scale_factors:
-            # On the temporary store, so the rename below publishes level 0 and its coarser levels in
-            # one step. The levels are grafted beside level 0 (one pass over it, into an array 4^rank
-            # times smaller); level 0 itself is not rewritten.
+            # On the temporary store, so the rename publishes level 0 and its coarser levels in one step.
             append_ome_zarr_levels(self._store_path, self._scale_factors, downsample_method=self._downsample_method)
             self._array = None
         replaced = self._final_path.exists()
@@ -142,8 +131,7 @@ class _OmeZarrDataStream(DataStream):
         try:
             os.rename(self._store_path, self._final_path)
         except OSError:
-            # A concurrent writer of the same entry renamed its complete, identical store into place;
-            # keep it and drop ours.
+            # A concurrent writer of the same entry renamed its complete store into place: keep it.
             if not self._final_path.exists():
                 if replaced:
                     os.rename(backup, self._final_path)  # a failed publish leaves the old entry in place
@@ -151,11 +139,7 @@ class _OmeZarrDataStream(DataStream):
             shutil.rmtree(self._store_path, ignore_errors=True)
         if replaced:
             shutil.rmtree(backup, ignore_errors=True)
-        # The reader memoises loaded stores by path, and this rename changes what that path holds.
-        # A store replaced by one written through a different code path can differ down to the key
-        # its level-0 array lives under, so a stale entry does not merely serve old pixels: it
-        # points at a component that is no longer there. This path alone: the sources a cohort is
-        # still reading are not what changed.
+        # The reader memoises loaded stores by path, and this path now holds another store.
         clear_ome_zarr_cache(self._final_path)
         _forget_resolved_paths()
 
@@ -163,13 +147,9 @@ class _OmeZarrDataStream(DataStream):
 class OmeZarrFile(AbstractFile):
     """OME-NGFF backend using chunked Zarr reads for KonfAI patches.
 
-    ``level`` selects the multiscale pyramid resolution to read (0 = full
-    resolution, higher = coarser); it comes from the ``omezarr@<level>``
-    dataset-spec suffix.
-
-    ``scale_factors`` is the WRITE-side counterpart: it makes the store this backend writes a
-    pyramid instead of a single level. Reading indexes a pyramid BY POSITION, so a producer that
-    writes one and a consumer that asks for ``@1`` are two halves of the same contract.
+    ``level`` selects the multiscale pyramid level to read (0 = full resolution, higher = coarser),
+    from the ``omezarr@<level>`` dataset-spec suffix. ``scale_factors`` is the write-side
+    counterpart: the store written is a pyramid, indexed by position on read.
     """
 
     concurrent_write_safe = False  # a store shares metadata across its arrays
@@ -203,9 +183,8 @@ class OmeZarrFile(AbstractFile):
         return None
 
     def _path(self, name: str, *, writing: bool = False) -> str:
-        """Where entry ``name``'s store sits: text, because a remote one is a URI and ``Path``
-        eats the second slash of one. Resolved once per ``(root, entry)``: each suffix probe is a
-        round-trip on a remote root, and the store's location cannot change mid-run."""
+        """Where entry ``name``'s store sits, as text (a remote one is a URI). Resolved once per
+        ``(root, entry)``."""
         base = uri.join(self.filename, name)
         if writing:
             uri.refuse_write(self.filename)
@@ -218,8 +197,7 @@ class OmeZarrFile(AbstractFile):
         return resolved
 
     def _resolve_path(self, name: str, base: str) -> str:
-        # Every spelling is_store_name accepts, or a root whose first case names one of the
-        # others is detected as omezarr at setup and then fails to resolve.
+        # Every spelling is_store_name accepts.
         candidates = [f"{base}{form}" for form in STORE_FORMS] + [base]
         for candidate in candidates:
             if uri.is_dir(candidate):
@@ -238,14 +216,8 @@ class OmeZarrFile(AbstractFile):
         )
 
     def _listed_as(self, name: str) -> str | None:
-        """Where ``name``'s store sits when the directory spells its suffix in another case,
-        ``None`` when nothing there is that store.
-
-        ``is_store_name`` and :meth:`get_group` match the suffix case-insensitively, so a
-        ``CT.OME.ZARR`` is accepted at setup and listed as ``CT``; on a case-sensitive
-        filesystem the probes above, which are the accepted spellings in lower case, all miss
-        it. Only the miss pays the listing, and it lists one case's directory.
-        """
+        """Where ``name``'s store sits when the directory spells its suffix in another case
+        (``CT.OME.ZARR`` is listed as ``CT``), ``None`` when nothing there is that store."""
         prefix, _, stem = name.rpartition("/")
         directory = uri.join(self.filename, prefix) if prefix else self.filename
         wanted = {f"{stem}{form}".lower() for form in STORE_FORMS}
@@ -263,9 +235,7 @@ class OmeZarrFile(AbstractFile):
 
         info_shape, _ = self.get_infos(group, name)
         data, attributes = self.file_to_data_slice(group, name, tuple(slice(None) for _ in info_shape))
-        # Marked here and not in file_to_data_slice: that one is the streamed path, called once per
-        # patch, and re-reading the store's metadata per patch is exactly the overhead _load_image
-        # is memoised to avoid. A transform is only ever rebuilt from a whole entry.
+        # Not in file_to_data_slice: a transform is only ever rebuilt from a whole entry.
         if is_displacement_field(self._path(name)):
             attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         return data, attributes
@@ -311,28 +281,20 @@ class OmeZarrFile(AbstractFile):
         from konfai.utils.ome_zarr import clear_ome_zarr_cache, write_ome_zarr
 
         attributes = attributes or Attribute()
-        # Two ways to say "this is a field": hand over a DisplacementFieldTransform, or mark the
-        # attributes. The second exists because a producer that never builds a transform: the
-        # predictor emits arrays: would otherwise have to wrap its output in one purely to be
-        # described correctly, and a field too large to hold in memory cannot be wrapped at all.
+        # A field is a DisplacementFieldTransform handed over, or an array with the attribute marked.
         displacement_field = DISPLACEMENT_FIELD_ATTRIBUTE in attributes
         if sitk is not None and isinstance(data, sitk.Image):
             data, image_attributes = image_to_data(data)
             attributes.update(image_attributes)
         elif sitk is not None and isinstance(data, sitk.Transform):
-            # The parametric transforms the other backends serialise (Euler, affine, B-spline) have
-            # no OME-NGFF form; a displacement field does, and it is array-backed, so this backend
-            # stores exactly the one kind it can store faithfully.
+            # A displacement field is the one transform kind with an OME-NGFF form.
             data, field_attributes = displacement_field_to_data(data, name)
             attributes.update(field_attributes)
             displacement_field = True
         if not isinstance(data, np.ndarray):
             raise DatasetManagerError("OME-Zarr datasets can only store image arrays.")
-        # Staged beside the final store and renamed over it: writing under the final name
-        # truncates the destination before a byte lands, so a crash mid-write left a partial
-        # store the resume then counted as already written -- and an overwrite lost both
-        # versions. The rename is the atomicity every DataStream already holds; the .replaced
-        # hop keeps an instant with SOME complete store on disk.
+        # Staged beside the final store and renamed over it; the .replaced hop keeps a complete
+        # store on disk at every instant.
         final = Path(self._path(name, writing=True))
         staging = final.with_name(f"{final.name}.{os.getpid()}.tmp")
         if staging.exists():
@@ -356,14 +318,14 @@ class OmeZarrFile(AbstractFile):
         except BaseException:
             if replaced.exists() and not final.exists():
                 replaced.rename(final)
-            shutil.rmtree(staging, ignore_errors=True)  # or a full second copy of the entry stays
+            shutil.rmtree(staging, ignore_errors=True)
             raise
         shutil.rmtree(replaced, ignore_errors=True)
         # The reader memoises decoded chunks by path, and this path now holds another store.
         clear_ome_zarr_cache(final)
         _forget_resolved_paths()
         with contextlib.suppress(Exception):
-            _retire_dead_debris(final)  # housekeeping past the publish: it cannot fail the write
+            _retire_dead_debris(final)  # housekeeping: it cannot fail the write
 
     def open_data_stream(
         self,
@@ -387,16 +349,10 @@ class OmeZarrFile(AbstractFile):
             origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
             attributes=dict(attributes),
             displacement_field=DISPLACEMENT_FIELD_ATTRIBUTE in attributes,
-            # Chunked against what the writer says it will write, capped to something a reader
-            # can open. Guessing the writer's access pattern costs a read-modify-write on every
-            # region whose extent straddles a chunk: measured 1.8x on a slab sweep, paid on
-            # every byte, and invisible because the bytes are correct either way.
+            # Chunked against what the writer says it will write, capped to what a reader can open.
             chunks=_store_chunks(shape, region_shape, dtype),
         )
-        # The pyramid cannot be created up front: no level exists until the last region lands --
-        # so the stream derives it at finalize, on the TEMPORARY store, before the rename. That
-        # order is what keeps publication atomic: a reader never sees a store whose level 0 is
-        # complete but whose coarser levels are not.
+        # The pyramid is derived at finalize, on the temporary store, before the rename.
         return _OmeZarrDataStream(array, store_path, final_path, self.scale_factors, self.downsample_method)
 
     @classmethod
@@ -439,11 +395,8 @@ class OmeZarrFile(AbstractFile):
         shape = [axis_sizes.get("c", 1), *[axis_sizes[axis] for axis in ("z", "y", "x") if axis in axis_sizes]]
         metadata["shape"] = shape
         attributes = self._attributes(metadata)
-        # Marked on the HEADERS path, so a field stays a field on the streamed read too --
-        # file_to_data marks it only on the whole-volume read, and a store written from unmarked
-        # regions is an ordinary 3-channel image. This is the once-per-case call (Dataset caches
-        # it), not the per-patch one, which is why the check belongs here and not in
-        # file_to_data_slice.
+        # Marked on the headers path, the once-per-case call, so a field stays a field on the
+        # streamed read too.
         if is_displacement_field(self._path(name)):
             attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         return shape, attributes

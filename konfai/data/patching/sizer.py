@@ -16,12 +16,8 @@
 
 """The sweep's pricing engine, keyed to the segment it prices.
 
-The sizing once lived on the :class:`~konfai.data.patching.manager.DatasetManager` and read manager
-state: the WHOLE declared chain's channel folds and the RAW source's read granularity. A segment
-past a ``Save`` boundary was therefore priced with another segment's facts -- channel folds applied
-twice onto a cache that already holds them, the wrong store's chunk grid, and a copy's draws priced
-at zero. A :class:`SegmentSizer` is constructed per segment from explicit inputs, so the price can
-only read the segment's own facts -- and it needs no dataset fixture to be tested.
+A :class:`SegmentSizer` is constructed per segment from explicit inputs, so the price reads only the
+segment's own facts.
 """
 
 from collections.abc import Callable, Sequence
@@ -57,10 +53,8 @@ class SegmentSizer:
 
     ``spatial``/``channels``/``plans``/``stages`` are the segment's own landing, source channels,
     region plans and stage list; ``granularity`` is the segment's OWN store's decode grain (spatial
-    axes, ``None`` when a read costs what it asks for -- including a cache this run has still to
-    write, whose chunks will be the very tile being sized, so its reads align by construction).
-    ``block_reads_memo`` is shared across sizers by the owning manager: the geometry walk is the
-    expensive part and its key already carries everything a sizer varies.
+    axes, ``None`` when a read costs what it asks for, a cache this run has still to write included).
+    ``block_reads_memo`` is shared across sizers by the owning manager.
     """
 
     spatial: list[int]
@@ -81,10 +75,7 @@ class SegmentSizer:
         the channels a block lands with, the widest the segment ever holds, and the volumes-worth
         its widest stage allocates, that one counted on the channels that stage is handed.
 
-        Identity for a segment that keeps the axis. ``OneHot`` is the stage that widens it, and a
-        block priced at the source's would be short by its class count. Every stage of the segment
-        answers -- a copy's draws included: priced at zero, an Expand copy swept under a budget
-        that never heard of its ``grid_sample`` buffers.
+        Every stage of the segment answers, a copy's draws included.
         """
         source = held = landed = peak = max(1, int(self.channels))
         working = 0.0
@@ -101,22 +92,16 @@ class SegmentSizer:
     # ------------------------------------------------------------------ reads
 
     def _source_extents(self) -> list[int]:
-        """The extents the pull spans live in: the first stage's own input, which is the stored
-        volume. The landing is a different grid, and a hull capped against it is under-charged
-        wherever the source is the larger of the two."""
+        """The extents the pull spans live in: the first stage's own input, the stored volume, never
+        the landing."""
         if self.plans:
             return [int(extent) for extent in self.plans[0].in_shape]
         return [int(extent) for extent in self.spatial]
 
     def block_reads(self, tile: Sequence[int]) -> BlockReads:
-        """What a decomposition of the landing into ``tile`` reads, walked once and kept.
-
-        The sizing asks the same question of the same decomposition several times over -- the shape
-        rule prices the slab and the cube, the ladder is priced height by height -- and every one
-        of those goes through the chain's pull maps, which for a ``Resample`` is real geometry per
-        block. Keyed by the decomposition AND by the plans
-        that map it, whose tuple is held so no identity is reused under the key.
-        """
+        """What a decomposition of the landing into ``tile`` reads, walked once and kept, keyed by the
+        decomposition AND by the plans that map it, whose tuple is held so no identity is reused under
+        the key."""
         key = (tuple(self.spatial), tuple(tile), tuple(id(plan) for plan in self.plans), self.granularity)
         held = self.block_reads_memo.get(key)
         if held is not None:
@@ -132,22 +117,16 @@ class SegmentSizer:
         return reads
 
     def decomposition_reads(self, tile: Sequence[int]) -> int:
-        """What sweeping the landing in ``tile`` reads from the store, all blocks together.
-
-        The store's own currency: a chunked backend decodes whole blocks, so what a decomposition
-        reads is the sum of its blocks' hulls, and a shape is judged on the same figure it is later
-        priced with (:meth:`sweep_block_bytes`). Two currencies here and there is how a shape gets
-        chosen for pulling little and then costs what its hull costs.
-        """
+        """What sweeping the landing in ``tile`` reads from the store, all blocks together: the sum of
+        the blocks' hulls, the figure :meth:`sweep_block_bytes` prices."""
         return self.block_reads(tile).total
 
     def sweep_block_bytes(self, tile: list[int], depth: int) -> int:
         """What a sweep decomposed into ``tile`` holds at its peak: the source regions it has pulled
         and the blocks it has landed, both counted by :func:`_sweep_resident_regions`, plus what the
         widest stage of the segment allocates on top of the largest of them. Each term is counted on
-        the channels it actually holds (:meth:`chain_channels`), at ``_SWEEP_ELEMENT_BYTES`` each.
-        Beside this, and outside it, a streamed case holds ``SWEEP_ENGINE_FLOOR_BYTES`` the
-        decomposition cannot lower.
+        the channels it holds (:meth:`chain_channels`), at ``_SWEEP_ELEMENT_BYTES`` each. Outside
+        it, a streamed case holds ``SWEEP_ENGINE_FLOOR_BYTES``.
         """
         pulled, landed = _sweep_resident_regions(depth)
         block = int(np.prod(tile, dtype=np.int64))
@@ -155,11 +134,8 @@ class SegmentSizer:
         pull = reads.widest_pull or block
         source, landed_channels, _peak, working = self.chain_channels()
         held = pulled * pull * source + landed * block * landed_channels + working * max(pull, block)
-        # A chunked store serves a window by decoding the block-aligned hull that covers it, and
-        # assembles the window out of that: one read is in flight at a time, so the hull is resident
-        # ONCE, and the window is the part of it the chain keeps. What a straddling region costs is
-        # exactly this term, and it does not fall when the region does -- below one stored block a
-        # shorter region reads the same bytes and only reads them more often.
+        # A chunked store decodes the block-aligned hull covering a window, one read in flight: the
+        # hull is resident ONCE, and it does not fall when the region does.
         held += reads.widest_excess * source
         return int(held * _SWEEP_ELEMENT_BYTES)
 
@@ -169,11 +145,9 @@ class SegmentSizer:
         """The block ``rows`` rows of the landing become: the slab itself, or the cube of the same
         volume where that pulls less.
 
-        A region pulls the BOUNDING BOX of its own image under the chain's maps, so a slab spanning
-        the trailing plane pays that plane's extent for every degree of shear where a cube pays its
-        side: 1.79x the image against 1.09x on a 513x1331x1776 rigid+affine. Both are priced against
-        the plans' own pull maps, and the cube wins only by ``_SWEEP_TILE_MARGIN``: the decomposition
-        is also the shape a store gets chunked in. Without plans, the slab.
+        A region pulls the BOUNDING BOX of its own image under the chain's maps. Both are priced
+        against the plans' own pull maps, and the cube wins only by ``_SWEEP_TILE_MARGIN``. Without
+        plans, the slab.
         """
         slab, cube = self._slab(rows), self._cube(rows)
         if cube == slab or not self.plans:
@@ -183,8 +157,7 @@ class SegmentSizer:
 
     def unit_rows(self) -> int:
         """What a region grows by: the store's block along the sweep axis, else ``SWEEP_SLAB_ROWS``.
-        A region a whole number of blocks tall reads each stored block once; one that straddles the
-        grid decodes both blocks it touches, for every region."""
+        A region that straddles the grid decodes both blocks it touches."""
         block = int(self.granularity[0]) if self.granularity is not None else 1
         return block if block > 1 else int(budget.SWEEP_SLAB_ROWS)
 
@@ -207,9 +180,7 @@ class SegmentSizer:
 
     def _tallest(self, allowance: float, depth: int, shape: Callable[[int], list[int]]) -> int | None:
         """The tallest height up to the cap whose priced block, in ``shape``, holds inside
-        ``allowance``; ``None`` when one row does not. Bisected on the price itself: none of what a
-        region costs scales with its rows (a halo is a constant, a rotated map's box grows with
-        the diagonal, a chunked store decodes whole blocks whatever the height)."""
+        ``allowance``; ``None`` when one row does not. Bisected on the price itself."""
         if self.sweep_block_bytes(shape(1), depth) > allowance:
             return None
         low, high = 1, self.cap_rows()
@@ -224,20 +195,14 @@ class SegmentSizer:
     def start(self, depth: int | None = None) -> tuple[list[int], RegionGrowth]:
         """The block the first region covers and how the regions grow from it (:class:`RegionGrowth`).
 
-        The shape is decided at the height the whole budget buys (:meth:`sweep_shape`: the slab, or
-        the cube where a sheared map makes it pull less), because the shape is a fact of the pull
-        geometry and not of the memory. A slab then starts at the tallest height whose price holds
-        inside ``_START_SHARE`` of the budget, snapped down to a whole number of the store's blocks
-        when one fits, and grows from there; a cube starts where the budget's own price puts it,
-        since it cannot grow across the plane and would pay a small start for the whole case
-        (measured: 84 cubes of 256^3 against 37 slabs, +25 % of wall on a 513-row store under 8
-        GiB). Without a budget the unit stands, as it always did. The budget is what a sweep may
-        HOLD, so it is the priced block (:meth:`sweep_block_bytes`) that is held to it, never the
-        landed rows alone.
+        The shape is decided at the height the whole budget buys (:meth:`sweep_shape`). A slab starts
+        at the tallest height whose price holds inside ``_START_SHARE`` of the budget, snapped down to
+        a whole number of the store's blocks when one fits, and grows from there; a cube starts where
+        the budget's own price puts it. Without a budget the unit stands. The priced block
+        (:meth:`sweep_block_bytes`) is what is held to the budget, never the landed rows alone.
 
-        A budget one row does not fit is a refusal naming both figures, with the read-ahead given
-        up first: the queue is the one part of the price the sizing chose, and a sweep about to
-        refuse has no clock to buy with it.
+        A budget one row does not fit is a refusal naming both figures, with the read-ahead given up
+        first.
         """
         depth = sweep_module._sweep_pipeline_depth() if depth is None else depth
         budget_bytes = self.budget_bytes
@@ -277,9 +242,7 @@ class SegmentSizer:
     def sweep_depth(self, tile: list[int]) -> int:
         """How many blocks the sweep keeps in flight beside the one it transforms: the rank's
         pipeline depth while the priced block still holds inside the budget with it, none
-        otherwise. The queue is bought, and a sweep that cannot afford it stops buying it: three
-        source regions resident become one, a quarter to a third of the block on a chain whose
-        stage buffers do not dominate."""
+        otherwise."""
         depth = sweep_module._sweep_pipeline_depth()
         budget_bytes = self.budget_bytes
         if not depth or not budget_bytes or budget_bytes <= 0:
