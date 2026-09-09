@@ -435,9 +435,14 @@ class Data(DataSources):
 
         # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
         # large or a window would evict its own cases before their patches are consumed. Unwindowed,
-        # one batch plus the case being read is all a loader ever holds at once.
+        # one batch plus the case being read is all a loader ever holds at once. A one-pass workflow
+        # serves a case's patches in order and never reads it again: its FIFO holds the case being
+        # finished and the next one, whatever the batch size.
         window = subset.shuffle_window
-        self._buffer_size = batch_size + 1 if window is None else max(batch_size + 1, window)
+        if self._reads_each_case_once:
+            self._buffer_size = 2
+        else:
+            self._buffer_size = batch_size + 1 if window is None else max(batch_size + 1, window)
         self._num_workers = num_workers
         self._pin_memory = pin_memory
         self._prefetch_factor = prefetch_factor

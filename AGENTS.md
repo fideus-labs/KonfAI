@@ -234,6 +234,10 @@ Three, and only three, places decide trust. Keep them honest:
 
 Fixed, pinned by a test (do not re-fix; the guide once listed them as open):
 
+- The one-pass case FIFO: prediction and evaluation hold the case being finished and the next one,
+  whatever the batch size (the training-sized `batch_size + 1` kept whole cases loaded, a case per case
+  of RAM growth on a cohort)
+  (`test_data_manager.py::test_a_one_pass_source_holds_two_cases_whatever_its_batch_size`).
 - Nested-`Network` optimizer/scheduler state on RESUME: `checkpoint_save` and `Network.load` both use
   the dotted `get_networks()` key (`test_network.py::test_load_restores_nested_network_optimizer_and_counters`).
 - Inline augmentation redraws under persistent DataLoader workers: the loader forces
