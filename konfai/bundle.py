@@ -18,18 +18,16 @@
 becomes a bundle.
 
 A `MONAI Bundle <https://docs.monai.io/en/stable/mb_specification.html>`_ is a directory:
-``metadata.json`` (the model's card), ``configs/inference.json`` (the network under ``network_def``
-as a ``_target_`` class and its arguments, the preprocessing, the inferer), ``models/model.pt``
-(the network's plain state dict) and, optionally, ``models/model.ts`` (the network traced). What
-KonfAI needs of it is the network and its weights: :func:`import_bundle` reads them into the
-``Model`` block a ``Prediction.yml`` holds (``classpath: monai.networks.nets:UNet`` with the
-arguments the bundle resolved) and a checkpoint in KonfAI's own format. The bundle's
-preprocessing and inferer are MONAI transforms on MONAI's runtime; they are reported, not
-translated, and the caller spells the equivalent ``transforms:`` in KonfAI's own stages.
+``metadata.json``, ``configs/inference.json`` (the network under ``network_def`` as a ``_target_``
+class and its arguments, the preprocessing, the inferer), ``models/model.pt`` (the network's plain
+state dict) and, optionally, ``models/model.ts``. :func:`import_bundle` reads the network and its
+weights into the ``Model`` block a ``Prediction.yml`` holds and a checkpoint in KonfAI's own
+format; the bundle's preprocessing and inferer are reported, not translated, and the caller spells
+the equivalent ``transforms:`` in KonfAI's own stages.
 
 :func:`export_bundle` goes the other way: a KonfAI checkpoint's inference head traced to
 ``models/model.ts``, with a ``metadata.json`` and an ``inference.json`` that load that TorchScript
-module, so any bundle consumer (``monai.bundle.load``, MONAI Label, MONAI Deploy) runs it.
+module.
 """
 
 from __future__ import annotations
@@ -124,8 +122,7 @@ def import_bundle(
     ``config`` is the bundle config holding the network (``configs/inference.json`` by
     convention); ``network_key`` its entry; ``weights`` the state dict to convert. The checkpoint
     is written to ``out`` (default: ``<bundle>/models/konfai_model.pt``) in the format
-    ``Network.load`` reads for a wrapped foreign class, so ``konfai PREDICTION --models`` takes it
-    as it takes any KonfAI checkpoint. Nothing of the bundle is modified.
+    ``Network.load`` reads for a wrapped foreign class. Nothing of the bundle is modified.
     """
     monai_bundle = _require_monai()
     root = Path(bundle)
@@ -151,7 +148,7 @@ def import_bundle(
             f"'{weights_path}' is not a state dict.", "KonfAI converts the plain state dict a bundle ships as model.pt."
         )
     # The wrapped class is loaded by the wrapper's name (the class's), each key under the module
-    # the wrapper adds: what predict_model writes for a live model, and what Network.load reads.
+    # the wrapper adds: what Network.load reads.
     checkpoint = Path(out) if out is not None else root / "models" / "konfai_model.pt"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"Model": {class_name: {f"Model.{key}": value for key, value in state.items()}}}, checkpoint)
@@ -181,8 +178,7 @@ def export_bundle(
     one patch of the shape it is fed (``[1, C, *patch]``); the head is the last floating-point
     output in execution order unless ``output_module`` names one. The bundle carries
     ``models/model.ts``, a ``metadata.json`` and a ``configs/inference.json`` that loads the traced
-    module, which is what ``monai.bundle.load(..., load_ts_module=True)`` and the bundle runtimes
-    read. Preprocessing is not exported: the traced module expects what the KonfAI chain fed the
+    module. Preprocessing is not exported; the traced module expects what the KonfAI chain fed the
     network, which the bundle's metadata states.
     """
     import monai

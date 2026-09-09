@@ -43,27 +43,15 @@ from konfai.utils.runtime import (
     description,
 )
 
-#: Batches between two refreshes of the progress bar's status. The status is an NVML query, two
-#: psutil calls and a forced redraw (95 us per batch, measured) that no batch needs to be current.
+#: Batches between two refreshes of the progress bar's status, an NVML query plus two psutil calls.
 _DESCRIPTION_EVERY = 10
 
 
 def _prediction_report(clock: SweepClock, min_seconds: float = 1.0) -> str | None:
-    """One line accounting for the prediction loop's wall clock, in the sweep report's shape, or
-    ``None`` below ``min_seconds``.
+    """One line accounting for the prediction loop's wall clock, or ``None`` below ``min_seconds``.
 
-    The sum before the bar is the loop's own thread and closes exactly: what its phases do not
-    name (the logging, the progress bar, the bookkeeping between them) is ``other``. ``fetch`` is
-    the wait for the loader's next batch, ``blend`` a patch's inverses and its blend into the
-    accumulator (the copy home included on the host route), the two ``finalize`` the slabs and the
-    cases handed to the writer, ``drain`` the writes still queued when the loop ends. On a GPU the
-    loop only enqueues the forward and the blend; the device's time is waited for where a result
-    crosses to the host.
-
-    After the bar is the writer: its own thread's time, and how long the loop stood waiting on it
-    inside the finalize phases (a full queue, or the write itself when the destination keeps it
-    inline). A slow destination shows there, as the wait that turns the background writer
-    synchronous, which nothing reported before.
+    The phases before the bar sum to the loop's own thread, ``other`` covering what they do not name;
+    after it come the writer's own time and the loop's wait on it inside the finalize phases.
     """
     wall = clock.spent("prediction")
     if wall < min_seconds:
@@ -79,11 +67,7 @@ def _prediction_report(clock: SweepClock, min_seconds: float = 1.0) -> str | Non
 
 class _Predictor:
     """
-    Internal class that runs distributed inference over a dataset using a composite model.
-
-    This class handles patch-wise prediction, output accumulation, logging to TensorBoard, and
-    writing final predictions to disk. It is designed to be used as a context manager and
-    supports model ensembles via `ModelComposite`.
+    Run distributed patch-wise inference over a dataset with a composite model, as a context manager.
 
     Args:
         world_size (int): Total number of processes or GPUs used.
@@ -143,8 +127,7 @@ class _Predictor:
         self.tb: SummaryWriter | NullSummaryWriter | None
         if self._has_runtime_measures or len(self.data_log):
             if SummaryWriter is None:
-                # A missing logger must never refuse the run: the predictions are still written,
-                # only the curves and images are lost. One line says so; the extra keeps them.
+                # A missing logger never refuses the run: the predictions are written, the curves are lost.
                 if self.global_rank == 0:
                     print(
                         "[KonfAI] TensorBoard is not installed: no curves or images will be logged"
@@ -157,27 +140,16 @@ class _Predictor:
             self.tb = None
 
     def __enter__(self):
-        """
-        Enters the prediction context and returns the predictor instance.
-        """
+        """Enter the prediction context."""
         return self
 
     def __exit__(self, exc_type, value, traceback):
-        """
-        Closes the TensorBoard writer upon exit.
-        """
+        """Close the TensorBoard writer."""
         if self.tb:
             self.tb.close()
 
     def run(self):
-        """
-        Run the full prediction loop.
-
-        Iterates over the prediction DataLoader, performs inference using the composite model,
-        applies reduction (e.g., mean), and writes the final results using each `OutputDataset`.
-
-        Also logs intermediate data and metrics to TensorBoard if enabled.
-        """
+        """Run the full prediction loop: forward every batch, reduce, and write each ``OutputDataset``."""
 
         self.model_composite.eval()
         self.model_composite.module.set_state(NetState.PREDICTION)
@@ -187,8 +159,7 @@ class _Predictor:
             with PREDICTION_CLOCK.phase("prediction"):
                 self._run_batches()
         finally:
-            # Every submitted write must be on disk before the run returns: including on the error
-            # path, where the drain also closes the sinks the abort operations enqueued.
+            # Every submitted write must be on disk before the run returns, the error path included.
             with PREDICTION_CLOCK.phase("prediction"), PREDICTION_CLOCK.phase("drain"):
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.finalize_writes()
@@ -248,7 +219,6 @@ class _Predictor:
                                         )
 
                         if batch_index % _DESCRIPTION_EVERY == 0:
-                            # The bar redraws on its own clock; the status only has to be there by then.
                             batch_iter.set_description(
                                 f"Prediction : {description(self.model_composite)}", refresh=False
                             )
@@ -258,29 +228,13 @@ class _Predictor:
         self,
         batch_sample: BatchSample,
     ):
-        """
-        Log prediction results to TensorBoard, including images and metrics.
+        """Log images from ``data_log`` and the networks' losses and metrics under ``Prediction/``.
 
-        This method handles:
-        - Logging image-like data (e.g., inputs, outputs, masks) using `DataLog` instances,
-        based on the `data_log` configuration.
-        - Logging scalar loss and metric values (if present in the network) under the `Prediction/` namespace.
-        - Dynamically retrieving additional feature maps or intermediate layers if requested via `data_log`.
-
-        Logging is performed only on the global rank 0 process and only if `TensorBoard` is active.
-
-        Args:
-            data_dict (dict): Dictionary mapping group names to 6-tuples containing:
-                - input tensor,
-                - index,
-                - patch_augmentation,
-                - patch_index,
-                - metadata (list of strings),
-                - `requires_grad` flag (as a tensor).
+        Runs on global rank 0 only, and only while TensorBoard is active.
         """
         if self.tb is None or self.global_rank != 0:
-            # Prediction logging is a rank-0 progress indicator; gate before touching the measures so a
-            # non-zero rank never enters a cross-rank collective the unequal shards would deadlock on.
+            # Gate before touching the measures: a non-zero rank must never enter a cross-rank
+            # collective the unequal shards would deadlock on.
             return
 
         measures: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
@@ -307,8 +261,7 @@ class _Predictor:
                     self.it,
                 )
 
-        # Images are a progress peek, not a per-batch record, and a module-layer target re-runs a
-        # full forward (get_layers): both throttle to the status cadence.
+        # Images and a module-layer target (get_layers re-runs a forward) throttle to the status cadence.
         if not len(self.data_log) or self.it % _DESCRIPTION_EVERY != 0:
             return
         images_log = []
@@ -323,9 +276,7 @@ class _Predictor:
             else:
                 images_log.append(name.replace(":", "."))
         if len(images_log):
-            # get_layers is model-scoped, not per-network: run it once per model, or a multi-network
-            # model (a GAN's generator + discriminator) repeats the forward extraction and writes
-            # each image event once per network.
+            # get_layers is model-scoped: run it once per model, not once per network.
             for layer_name, layer, _ in self.model_composite.module.get_layers(
                 [v.tensor for v in batch_sample.values() if v.is_input],
                 images_log,

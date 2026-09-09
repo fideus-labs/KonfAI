@@ -38,9 +38,8 @@ if TYPE_CHECKING:
 class AbstractFile(ABC):
     """One storage backend: how a ``(group, name)`` entry is read, written and enumerated.
 
-    The per-backend FACTS live here as class-level declarations, so a new backend is one module
-    plus one :data:`~konfai.utils.dataset.backend.BACKENDS` entry: the dataset consults the class,
-    never a format-name branch of its own.
+    The per-backend facts are class-level declarations; a new backend is one module plus one
+    :data:`~konfai.utils.dataset.backend.BACKENDS` entry.
     """
 
     #: One store holds every case (a single ``.h5`` file); a directory backend keeps one file (or
@@ -48,9 +47,8 @@ class AbstractFile(ABC):
     single_store: bool = False
 
     #: Whether writes to different entries land in disjoint files, so a background writer may
-    #: flush one entry while another thread writes elsewhere in the dataset. A backend whose
-    #: entries share handles or metadata (one HDF5 file, a zarr hierarchy, a DICOM series)
-    #: declares False and stays serial.
+    #: flush one entry while another thread writes elsewhere. A backend whose entries share
+    #: handles or metadata (one HDF5 file, a zarr hierarchy, a DICOM series) declares False.
     concurrent_write_safe: bool = True
 
     #: The suffix a case file carries implicitly on disk (``.h5``), or ``None`` when the case path
@@ -82,8 +80,7 @@ class AbstractFile(ABC):
         scale_factors: list[int] | None = None,
         downsample_method: str | None = None,
     ) -> AbstractFile:
-        """This backend on ``filename``, built from the dispatch's full hand: each backend takes
-        the arguments its constructor actually needs and ignores the rest."""
+        """This backend on ``filename``; each backend takes the arguments its constructor needs."""
         del file_format, level, scale_factors, downsample_method
         return cls(filename, read)
 
@@ -91,8 +88,7 @@ class AbstractFile(ABC):
     def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
         """Whether this backend can serve incremental region writes for ``file_format``.
 
-        The base answers ``False``: a backend that cannot stream is written whole through
-        ``data_to_file``.
+        The base answers ``False``: such a backend is written whole through ``data_to_file``.
         """
         del file_format, attributes
         return False
@@ -116,30 +112,10 @@ class AbstractFile(ABC):
     def bounded_region_reads(self, name: str) -> bool:
         """Whether a region read decodes only the region, or the whole volume behind the scenes.
 
-        The base answers ``False``: getting this wrong only ever costs speed, never correctness,
-        and an unknown backend is priced pessimistically. What it prices is the ROUTE: a store
-        that decodes the whole volume once per slab makes streaming read the source many times
-        over, where loading reads it once.
-
-        A compressed stream answers ``False`` but is not all-or-nothing: ITK decodes forward from
-        the start and stops on the region, so a read costs its END offset, not its size. Measured
-        on a 256^3 int16 volume, one 32^3 region at z = 0 / 64 / 128 / 224:
-
-        =============  ======  ======  ======  ======
-        store            z=0    z=64   z=128   z=224
-        =============  ======  ======  ======  ======
-        .mha            0.8ms   0.9ms   0.8ms   0.8ms
-        .mha (zlib)    14.6ms  41.8ms  70.5ms  112.6ms
-        .nii.gz        16.1ms  35.8ms  55.5ms  85.2ms
-        =============  ======  ======  ======  ======
-
-        The uncompressed row is flat because it seeks; the other two are linear in depth, and the
-        deepest read costs the whole file (102 ms). Sweeping in K regions therefore costs about
-        K/2 whole decodes, which is why ``False`` here buys the LOAD verdict -- one ordered read
-        -- rather than a streamed route, and why the patch route can only warn and advise a
-        chunked store. Blocked compression (Zarr, HDF5) and indexed access into one stream
-        (``zran``/``indexed_gzip``, which nibabel uses) both solve it; ITK does neither, and the
-        header it writes carries ``CompressedDataSize`` and no compression table.
+        The base answers ``False``, which only costs speed: a store that decodes the whole volume
+        once per slab is planned as one ordered LOAD rather than a streamed route. A compressed ITK
+        stream (``.mha`` zlib, ``.nii.gz``) decodes forward from the start, so a region costs its
+        end offset; blocked compression (Zarr, HDF5) serves the region alone.
         """
         del name
         return False
@@ -147,9 +123,8 @@ class AbstractFile(ABC):
     def read_granularity(self, name: str) -> tuple[int, ...] | None:
         """The stored block a region read is served in, as a ``C[Z]YX`` shape, or ``None``.
 
-        A chunked backend decodes whole blocks, so a window costs the block-aligned hull that
-        covers it: a decomposition that straddles the grid pays every block it touches in full.
-        ``None`` says a read costs what it asks for, which is what the base answers.
+        A window costs the block-aligned hull that covers it. ``None`` (the base) says a read
+        costs what it asks for.
         """
         del name
         return None
@@ -157,10 +132,8 @@ class AbstractFile(ABC):
     def plan_region_reads(self, name: str, windows: Sequence[tuple[slice, ...]]) -> None:
         """Declare the windows a caller will read from ``name``, in the order it will read them.
 
-        A hint and never a promise: a backend that caches decoded blocks keeps what a later
-        window asks for again and drops what none does, which is the fewest decodes any policy
-        can reach and none can reach without the future. The base ignores it, as does any caller
-        that declares nothing.
+        A hint, never a promise: a backend that caches decoded blocks evicts by next use. The base
+        ignores it.
         """
         del name, windows
 
@@ -186,8 +159,7 @@ class AbstractFile(ABC):
 
     def get_names(self, group: str) -> list[str]:
         """The cases of ``group`` this store holds. Only a backend that enumerates its own entries
-        answers (a single store, a store-per-case directory); a plain-file backend's cases are the
-        root's listing, which the dataset walks itself."""
+        answers; a plain-file backend's cases are the root's listing, which the dataset walks."""
         raise NotImplementedError(f"{type(self).__name__} keeps one file per entry; the dataset lists its root.")
 
     def get_group(self) -> list[str]:

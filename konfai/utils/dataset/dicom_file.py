@@ -78,8 +78,7 @@ class DicomFile(AbstractFile):
     def read_granularity(self, name: str) -> tuple[int, ...] | None:
         from konfai.utils.dicom import get_dicom_info
 
-        # One file per z step, decoded as a whole plane: a window narrower than a plane costs the
-        # plane, exactly the band a memmapped volume declares.
+        # One file per z step, decoded as a whole plane.
         shape = get_dicom_info(self._path(name))["shape"]
         return (1, 1, int(shape[2]), int(shape[3]))
 
@@ -87,7 +86,7 @@ class DicomFile(AbstractFile):
         from konfai.utils.dicom import get_dicom_info, read_dicom_series_slice
 
         path = self._path(name)
-        info = dict(get_dicom_info(path))  # copy: get_dicom_info is memoised, and we update it below
+        info = dict(get_dicom_info(path))  # copy: get_dicom_info is memoised
         data, origin, spacing, direction = read_dicom_series_slice(
             path, slices, series_uid=info["series_uid"], info=info
         )

@@ -50,17 +50,11 @@ class EulerTransform(DataAugmentation):
     """A draw that resamples the copy through an affine map about the volume's centre.
 
     The map is stated in the normalised coordinates ``affine_grid`` spans over the whole extent
-    (``[-1, 1]`` per axis, ``align_corners=True``), output to source. Sampling goes through
-    :meth:`_sample_region`: the whole volume is the region that covers everything, so a streamed
-    region and the whole-volume copy run the very same arithmetic and agree to float rounding.
-
-    A REGRID by default, and the declared kind is what routes a streamed region: a REGRID samples
-    the target region out of the source box it pulled; any other kind (a HALO shift, an ORIENTATION
-    quarter turn) is handed the block its declaration asked for and applies the draw to it whole.
+    (``[-1, 1]`` per axis, ``align_corners=True``), output to source. A REGRID samples the target
+    region out of the source box it pulled; any other declared kind is handed the block it asked for.
     """
 
-    # A map about the centre displaces a voxel by an amount that grows with its distance to it,
-    # so no constant halo bounds the read: each target region pulls the source box it maps to.
+    # A map about the centre displaces a voxel by an amount that grows with its distance to it.
     locality = LocalityKind.REGRID
 
     def __init__(self) -> None:
@@ -72,9 +66,7 @@ class EulerTransform(DataAugmentation):
         return self.matrix[index][a]
 
     #: How far inside the grid a mapped box must lie, in voxels, for the float32 coordinates built
-    #: from it to lie inside too: the GEMM and the scaling to voxels err by a few float32 ulps of
-    #: the extent (under 2e-6 of it), and a coordinate within an ulp of the far face folds to its
-    #: mirror. The larger of the two margins applies.
+    #: from it to lie inside too. The larger of the two margins applies.
     _INTERIOR_MARGIN = 1e-3
     _INTERIOR_MARGIN_RELATIVE = 1e-5
 
@@ -82,16 +74,15 @@ class EulerTransform(DataAugmentation):
     def _mapped_box(
         matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...]
     ) -> list[tuple[float, float]]:
-        """Where the region's corners map to, per array axis, in source voxel indices of the full
-        grid: the hull of the affine image of the region's box, in float64."""
+        """The hull of the affine image of the region's box, per array axis, in source voxel indices."""
         n = len(full)
         affine = matrix[0].to(torch.float64).numpy()
 
         def normalised(position: int, extent: int) -> float:
-            # affine_grid's coordinate of a voxel of the FULL extent (a singleton axis sits at 0).
+            # affine_grid's coordinate of a voxel of the full extent (a singleton axis sits at 0).
             return -1.0 + 2.0 * position / (extent - 1) if extent > 1 else 0.0
 
-        # The region's first and last voxel per axis, in (x, y, z): affine_grid's order.
+        # The region's first and last voxel per axis, in (x, y, z).
         ends = np.array(
             [
                 [normalised(part.start, extent), normalised(part.stop - 1, extent)]
@@ -121,20 +112,12 @@ class EulerTransform(DataAugmentation):
     def _source_coordinates(
         matrix: torch.Tensor, target: tuple[slice, ...], full: tuple[int, ...], device: torch.device | None = None
     ) -> torch.Tensor:
-        """Where each target voxel samples from, in source VOXEL indices of the full grid, per axis in
-        array order: ``[*region_shape, n]``, on ``device``. Reflected into the volume as
-        ``padding_mode='reflection'`` would (``align_corners=True``: mirrored about the outer voxel
-        centres) and clipped.
-
-        In place past the affine map: each step is the op it always was, rounded once, on the one
-        tensor, where a chain of full-grid temporaries moved ~200 bytes per voxel for a 12-byte
-        result (measured 867 MiB of growth for an 81 MiB result at 192^3). A region whose mapped
-        box is interior skips the reflection and the clip: both are the identity on ``[0, n - 1]``.
-        """
+        """Where each target voxel samples from, in source voxel indices of the full grid, per axis in
+        array order: ``[*region_shape, n]``, on ``device``. Reflected as ``padding_mode='reflection'``
+        would and clipped, both skipped for a region whose mapped box is interior."""
         n = len(full)
-        # affine_grid's own base grid, restricted to the region: linspace over the FULL extent (a
-        # singleton axis sits at 0, as affine_grid places it). Built on the host and moved, so every
-        # device meshes the same bits.
+        # affine_grid's base grid restricted to the region, built on the host so every device meshes
+        # the same bits.
         axes = [
             (torch.linspace(-1.0, 1.0, extent, dtype=torch.float32) if extent > 1 else torch.zeros(1))[part].to(device)
             for extent, part in zip(full, target, strict=True)
@@ -146,8 +129,7 @@ class EulerTransform(DataAugmentation):
         if device is None or device.type == "cpu":
             source = homogeneous.reshape(-1, n + 1) @ weights.to(torch.float32)
         else:
-            # In float64 on a device: a float32 matmul there follows the process's TF32 setting,
-            # ten bits of mantissa, a thousandth of a voxel on a 512 axis. Sixteen flops per voxel.
+            # In float64 on a device: a float32 matmul there follows the process's TF32 setting.
             source = (homogeneous.reshape(-1, n + 1).to(torch.float64) @ weights.to(device, torch.float64)).to(
                 torch.float32
             )
@@ -178,13 +160,8 @@ class EulerTransform(DataAugmentation):
         target: tuple[slice, ...],
         full: tuple[int, ...],
     ) -> torch.Tensor:
-        """Sample the target region from ``block`` (the source region ``source`` of the full grid).
-
-        Integer tensors are label maps: interpolating them blends class ids into non-existent labels,
-        so they are resampled with nearest-neighbour instead. The coordinates are the full grid's,
-        re-expressed on the block: every one lies inside it, since the pull kept what a reflection
-        reads back from.
-        """
+        """Sample the target region from ``block``, the source region ``source`` of the full grid.
+        Integer tensors are label maps and are resampled with nearest-neighbour."""
         mode = "nearest" if not block.dtype.is_floating_point else "bilinear"
         coordinates = self._source_coordinates(matrix, target, full, block.device)
         starts = torch.tensor([float(part.start) for part in source], dtype=torch.float32, device=block.device)
@@ -214,9 +191,8 @@ class EulerTransform(DataAugmentation):
     def _stream_region_source(
         self, index: int, a: int, target_slices: tuple[slice, ...], source_spatial_shape: list[int]
     ) -> list[slice]:
-        """The source box a target region samples from: the affine image of the region's box,
-        widened by one voxel for the interpolation taps and to what a reflection at the border
-        reads back from, clamped to the volume."""
+        """The source box a target region samples from: the affine image of the region's box, widened
+        for the interpolation taps and the border reflection, clamped to the volume."""
         full = tuple(int(extent) for extent in source_spatial_shape)
         box = self._mapped_box(self._grid_matrix(index, a, list(full)), tuple(target_slices), full)
         pull: list[slice] = []
@@ -260,16 +236,13 @@ class Translate(EulerTransform):
         return shapes
 
     def _grid_matrix(self, index: int, a: int, shape: list[int]) -> torch.Tensor:
-        # The draw is a shift in VOXELS, in (x, y, z). ``affine_grid`` spans [-1, 1] over whatever
-        # extent it is given, so the same shift is a different matrix on a patch than on the volume:
-        # normalise it against the extent it is about to be applied to, never against a fixed one.
+        # The draw is a shift in voxels, in (x, y, z). ``affine_grid`` spans [-1, 1] over whatever
+        # extent it is given, so the shift is normalised against that extent.
         sizes = torch.tensor(list(reversed(shape)), dtype=torch.float32)
         return torch.unsqueeze(_translate_matrix(self.translate[index][a] * 2.0 / (sizes - 1)), dim=0)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # A uniform shift sends a target patch to that same patch displaced by the draw, so the source
-        # is a bounded neighbourhood of it. One voxel past the ceiling covers the far tap a fractional
-        # shift interpolates from. The draw is in (x, y, z); a halo is in array order.
+        # One voxel past the ceiling covers the far tap. The draw is in (x, y, z), a halo in array order.
         radius = (torch.ceil(self.translate[index][a].abs()).to(torch.int64) + 1).tolist()
         return PatchLocality(LocalityKind.HALO, halo=tuple(int(r) for r in reversed(radius)))
 
@@ -277,10 +250,8 @@ class Translate(EulerTransform):
 class Rotate(EulerTransform):
     """Rotate a copy of the case about its centre.
 
-    A quarter draw is a signed permutation of the axes: an exact index remap (permute + flip), never an
-    interpolation, and it transposes the extents it swaps, so the copy is cut on its own grid. A free
-    angle resamples: it streams as a REGRID, each target region pulling the source box its corners map
-    to (a slab of a rotated volume pulls a wide band, which the plan prices).
+    A quarter draw is a signed permutation of the axes, an exact index remap that transposes the
+    extents it swaps, so the copy is cut on its own grid. A free angle resamples as a REGRID.
     """
 
     def __init__(self, a_min: float = 0, a_max: float = 360, is_quarter: bool = False):
@@ -304,27 +275,19 @@ class Rotate(EulerTransform):
             )
 
         self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in angles]
-        # A quarter turn transposes the extents it swaps, so a copy whose draw is one is cut on the grid
-        # that draw lands on. A sampled draw keeps the grid it was applied to.
+        # A quarter turn transposes the extents it swaps; a sampled draw keeps its grid.
         return [Rotate._draw_shape(self.matrix[index][a], shape) for a, shape in enumerate(shapes)]
 
     @classmethod
     def _index_remap(cls, matrix: torch.Tensor) -> AxisRemap | None:
-        """The exact index remap this draw is, or ``None`` if it must be sampled.
-
-        ``matrix`` maps an output coordinate onto the input it comes from, so it is a signed
-        permutation exactly for a quarter turn: the shared predicate decides, at the tolerance of
-        the float32 cosines the matrix is composed from.
-        """
+        """The exact index remap this draw is, or ``None`` if it must be sampled: ``matrix`` is a
+        signed permutation exactly for a quarter turn."""
         return signed_permutation(matrix[0, :-1, :-1], SIGNED_PERMUTATION_ATOL_FLOAT32)
 
     @classmethod
     def _draw_shape(cls, matrix: torch.Tensor, shape: list[int]) -> list[int]:
-        """The spatial extents a draw lands on, given the ones it is applied to.
-
-        A quarter turn carries each extent with the axis it reads; a sampled draw spans the extent
-        it is given.
-        """
+        """The spatial extents a draw lands on: a quarter turn carries each extent with the axis it
+        reads, a sampled draw spans the extent it is given."""
         remap = cls._index_remap(matrix)
         if remap is None:
             return list(shape)
@@ -344,16 +307,12 @@ class Rotate(EulerTransform):
         return self._reorient(index, a, self._grid_matrix(index, a, list(tensor.shape[1:])).inverse(), tensor)
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # Permuting and mirroring voxels is a bijection on them, which is what ORIENTATION promises and
-        # what LocalityKind.preserves_statistics lets a later stage trust. Only the draw can say whether
-        # this one is that, and the draw is a property of the copy rather than of the case. Any other
-        # angle resamples: a REGRID whose target region pulls the source box its corners map to.
+        # Permuting and mirroring voxels is the bijection ORIENTATION promises; any angle is a REGRID.
         if Rotate._index_remap(self.matrix[index][a]) is None:
             return PatchLocality(LocalityKind.REGRID)
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
-        # The same extent carry state_init applied to the copy's grid.
         return Rotate._draw_shape(self.matrix[index][a], list(shape))
 
     def _stream_region_source(
@@ -400,21 +359,17 @@ class Flip(DataAugmentation):
 
     def _flip(self, tensor: torch.Tensor, dims: list[int]) -> torch.Tensor:
         result = torch.flip(tensor, dims=dims)
-        # A displacement/vector field (one channel per spatial axis, channel-first [C=(dx,dy,dz),(D),H,W])
-        # is not mirror-invariant: flipping a spatial axis must also negate its component channel
-        # (channel = tensor.dim() - 1 - dim, as channels are in (x,y,z) order and axes are reversed).
-        # Enable ``vector_field`` only in configs whose augmented tensors are single-channel (scalars/masks,
-        # left untouched) or genuine vector fields: any OTHER multi-channel tensor whose channel count
-        # equals the spatial rank (e.g. a 3-contrast volume in 3D) would be wrongly negated by this guard.
+        # Flipping a spatial axis also negates its component channel (channel = tensor.dim() - 1 -
+        # dim, channels being in (x, y, z) order). Enable ``vector_field`` only where the tensors are
+        # single-channel or genuine vector fields.
         if self.vector_field and tensor.shape[0] == tensor.dim() - 1:
             for dim in dims:
                 result[tensor.dim() - 1 - dim] = -result[tensor.dim() - 1 - dim]
         return result
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # A mirror is a bijection on the voxels (ORIENTATION). Negating a component channel is not: it
-        # maps values, so a later GLOBAL_STAT could no longer seed from the stored volume, and only
-        # the tensor's channel count says whether it fires, which a header-time declaration cannot see.
+        # A mirror is a bijection on the voxels (ORIENTATION), but negating a component channel maps
+        # values, so a later GLOBAL_STAT could no longer seed from the stored volume.
         if self.vector_field:
             return PatchLocality(
                 LocalityKind.WHOLE_VOLUME,
@@ -430,8 +385,7 @@ class Flip(DataAugmentation):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        # A mirror moves no axis: the remap is the identity permutation, mirrored on the flipped
-        # axes. ``flip`` holds channel-first tensor dims, so spatial axis k is dim k + 1.
+        # ``flip`` holds channel-first tensor dims, so spatial axis k is dim k + 1.
         dims = self.flip[index][a]
         remap: AxisRemap = [(k, (k + 1) in dims) for k in range(len(target_slices))]
         return remap_region(target_slices, source_spatial_shape, remap)
@@ -476,8 +430,7 @@ class Permute(DataAugmentation):
             axes = [axes[dim - 1] for dim in permute[1:]]
         return axes
 
-    # Reordering axes moves every voxel and touches none, so the multiset of values is the input's:
-    # a bijection, which is what ORIENTATION promises.
+    # Reordering axes moves every voxel and touches none: a bijection, which ORIENTATION promises.
     locality = LocalityKind.ORIENTATION
 
     def _remap(self, index: int, a: int) -> AxisRemap:
@@ -485,7 +438,6 @@ class Permute(DataAugmentation):
         return [(axis, False) for axis in self._source_axes(index, a)]
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
-        # The same reorder state_init applied to the copy's grid.
         return remap_shape(shape, self._remap(index, a))
 
     def _stream_region_source(
@@ -509,8 +461,7 @@ class Permute(DataAugmentation):
 
 
 #: Voxels one chunk of an Elastix warp evaluates at once: the float64 corner walk holds tens of
-#: bytes per voxel it evaluates, so the sampling grid is filled in chunks and only the grid (12
-#: bytes per voxel of the region) stands at the peak.
+#: bytes per voxel, so the sampling grid is filled in chunks and only the grid stands at the peak.
 _ELASTIX_CHUNK_VOXELS = 1 << 21
 
 
@@ -524,12 +475,10 @@ class Elastix(DataAugmentation):
     ``grid_spacing`` and ``max_displacement`` are in the case's world units (its header spacing; a
     headerless case counts voxels). Control values are uniform in ``[-max_displacement,
     max_displacement]`` and the kernel is a convex combination of them, so no voxel's displacement
-    exceeds ``max_displacement``: what bounds the source box a target region pulls.
+    exceeds ``max_displacement``.
     """
 
-    # A warp through a bounded field: each target region pulls its own box, widened by the field's
-    # reach, and samples it. The bound is constant, but REGRID (not HALO) keeps the pull exactly
-    # the mapped box and prices the sampling grid the warp builds beside its block.
+    # REGRID rather than HALO keeps the pull exactly the mapped box.
     locality = LocalityKind.REGRID
 
     def __init__(self, grid_spacing: int = 16, max_displacement: int = 16) -> None:
@@ -551,10 +500,8 @@ class Elastix(DataAugmentation):
         for shape, cache_attribute in zip(shapes, caches_attribute, strict=False):
             dim = len(shape)
             grid, _missing = Grid.from_header(list(shape), cache_attribute, "the case this draw warps")
-            # The transform domain covers the volume's physical footprint (voxel edges). The
-            # coefficient grid is what sitk.BSplineTransform(order=3) stores for that domain: one
-            # node's spacing before its origin, mesh + 3 nodes per axis (verified against
-            # GetCoefficientImages; the parity test holds it to TransformToDisplacementFieldFilter).
+            # The transform domain covers the volume's physical footprint (voxel edges), and the
+            # coefficient grid is what sitk.BSplineTransform(order=3) stores for it.
             physical_xyz = np.array(list(reversed(shape)), dtype=np.float64) * grid.spacing_xyz
             mesh_xyz = np.maximum(1, (physical_xyz / float(self.grid_spacing) + 0.5).astype(np.int64))
             node_spacing_xyz = physical_xyz / mesh_xyz
@@ -577,10 +524,8 @@ class Elastix(DataAugmentation):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        # |displacement| <= max_displacement per world component by convexity. An index axis
-        # combines the components through its row of the inverse affine (an oblique direction
-        # mixes them), so its reach is that row's L1 norm times the bound (which reduces to
-        # 1/spacing on an axis-aligned grid), plus one voxel for the far interpolation tap.
+        # |displacement| <= max_displacement per world component by convexity, so an index axis
+        # reaches that row's L1 norm times the bound, plus one voxel for the far interpolation tap.
         _stage, grid = self.draws[index][a]
         rank = len(source_spatial_shape)
         row_reach_xyz = np.abs(grid.world_to_index.matrix).sum(axis=1)
@@ -603,9 +548,7 @@ class Elastix(DataAugmentation):
         """Where each target voxel samples from, normalised on the source block for ``grid_sample``.
 
         Per target voxel: its world point, plus the lattice's displacement there, back to a
-        continuous index, re-expressed on the block. Filled slab by slab along the first target
-        axis: the corner walk's float64 temporaries then stay chunk-sized while the float32 grid is
-        the one region-sized tensor held.
+        continuous index. Filled slab by slab along the first target axis.
         """
         target_shape = tuple(int(part.stop - part.start) for part in target)
         rank = len(target_shape)
@@ -638,9 +581,7 @@ class Elastix(DataAugmentation):
         source: tuple[slice, ...],
         target: tuple[slice, ...],
     ) -> torch.Tensor:
-        # Integer tensors are label maps: nearest-neighbour keeps class ids intact. The whole
-        # volume is the region that covers everything, so a streamed region and the whole-volume
-        # copy run the same arithmetic and agree to grid_sample's own float rounding.
+        # Integer tensors are label maps: nearest-neighbour keeps class ids intact.
         mode = "nearest" if not tensor.dtype.is_floating_point else "bilinear"
         sampling = self._sampling_grid(stage, grid, target, source, tensor.device).unsqueeze(0)
         return (

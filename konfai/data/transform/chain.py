@@ -28,25 +28,17 @@ from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ReductionError, TransformError
 from konfai.utils.utils import get_module
 
-#: Keys the ``Reduce`` stage reads from its own mapping. An operator sharing one of these names
-#: would silently be handed the stage's value, so the collision is refused instead.
+#: Keys the ``Reduce`` stage reads from its own mapping. An operator sharing one of these names is
+#: refused.
 _REDUCE_OWN_KEYS = frozenset({"operator", "output", "grid", "grid_tolerance", "provenance"})
 
 
 def resolve_operator(reduce: "Reduce") -> Reduction:
     """The operator the stage names, as an instance, refusing one that cannot fold a region.
 
-    Configured like every other extension point: its constructor arguments are bound from the same
-    mapping the ``Reduce`` itself was read from, so a custom operator takes parameters exactly as a
-    custom transform or a custom draw does::
-
-        Reduce:
-          operator: mypkg:TrimmedMean
-          output: template
-          trim: 0.2            # the operator's own parameter
-
-    A chain assembled in Python has no configuration to read, and the operator is then built from
-    its own defaults.
+    Its constructor arguments are bound from the same mapping the ``Reduce`` itself was read from
+    (``Reduce: {operator: mypkg:TrimmedMean, output: template, trim: 0.2}`` gives it ``trim``). A
+    chain assembled in Python builds the operator from its own defaults.
     """
     module, name = get_module(reduce.operator_classpath, "konfai.data.reduction")
     factory = getattr(module, name)
@@ -83,22 +75,15 @@ def resolve_operator(reduce: "Reduce") -> Reduction:
 class Reduce(Transform):
     """Fold every case of a group into one volume, at fixed voxel.
 
-    The stage that changes a chain's CARDINALITY: everything before it runs once per case, this
-    folds the cases together, everything after it runs once on the result. A chain carrying one is
-    driven by the reduction engine rather than the per-case loop, so it is never applied as an
-    ordinary transform: ``__call__`` says so rather than quietly reducing one case to itself.
+    Everything before it runs once per case, this folds the cases together, everything after it runs
+    once on the result. A chain carrying one is driven by the reduction engine.
 
     ``operator`` is a classpath resolved against :mod:`konfai.data.reduction` (``Mean``, ``Median``,
-    ``Concat``, or your own :class:`~konfai.data.reduction.Reduction`). ``output`` is the entry name
-    the result is written under, and it is required: a reduction has no case name to inherit, and
-    letting it borrow one member's would tie the deliverable to iteration order.
-
-    ``grid`` decides how much agreement between members is demanded before a byte is read:
-    ``strict`` compares extents AND geometry (Spacing/Origin/Direction) within ``grid_tolerance``;
-    ``shape_only`` compares extents alone, the honest escape hatch for volumes already resampled
-    together but carrying approximate headers; ``reference:<case>`` adopts that member's geometry
-    for the output and still demands equal extents. Nothing can verify that the members truly live
-    in a common space: only that they claim to, which is why the claim is checked and printed.
+    ``Concat``, or your own :class:`~konfai.data.reduction.Reduction`). ``output`` is the required
+    entry name the result is written under. ``grid`` decides how much agreement between members is
+    demanded before a byte is read: ``strict`` compares extents and geometry
+    (Spacing/Origin/Direction) within ``grid_tolerance``; ``shape_only`` compares extents alone;
+    ``reference:<case>`` adopts that member's geometry and still demands equal extents.
     """
 
     def __init__(
@@ -128,7 +113,7 @@ class Reduce(Transform):
             )
         self.operator_classpath = str(operator)
         # Where this stage was configured from, so its operator binds its own parameters from the
-        # same mapping: None when the chain was built in Python, where there is no config to read.
+        # same mapping. None for a chain built in Python.
         self.konfai_args: str | None = None
         self._operator: Reduction | None = None
         self.output = str(output).strip()
@@ -137,8 +122,7 @@ class Reduce(Transform):
         self.provenance = bool(provenance)
 
     def prepare(self, konfai_args: str) -> None:
-        # Bound here, not when the reduction engine first needs it: its parameters sit in the
-        # stage's mapping, and a strict read of the config counts them only if something read them.
+        # Bound here, not lazily: a strict read of the config counts a key only if something read it.
         self.konfai_args = konfai_args
         self._operator = resolve_operator(self)
 
@@ -150,9 +134,8 @@ class Reduce(Transform):
         return self._operator
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        # A cardinality marker, not a per-case stage: the reduction engine SPLITS it out of the chain
-        # before any manager is built, so this declaration is only the safety net for a chain that
-        # reached the ordinary planner by mistake, where refusing to stream is the right answer.
+        # A cardinality marker, not a per-case stage: the reduction engine splits it out of the
+        # chain before any manager is built.
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
@@ -166,33 +149,24 @@ class Reduce(Transform):
 class Expand(Transform):
     """Turn one case into ``nb`` copies, at a declared point of the chain: ``Reduce``'s mirror.
 
-    The stage that changes a chain's cardinality the other way. Everything BEFORE it runs once per
-    case (a ``Save`` there is a cache every copy shares); everything AFTER it runs once per copy,
-    and a ``Save``/``Write`` there writes one entry per copy.
+    Everything before it runs once per case (a ``Save`` there is a cache every copy shares);
+    everything after it runs once per copy, and a ``Save``/``Write`` there writes one entry per copy.
 
-    It multiplies, and nothing else: the draws are ordinary stages of the chain, declared where they
-    apply, so transforms and augmentations interleave freely after the marker::
+    It multiplies, and nothing else: the draws are ordinary stages of the chain, so transforms and
+    augmentations interleave freely after the marker::
 
         transforms:
           Clip:   {min_value: 0.0, max_value: 400.0}   # once per case
           Expand: {nb: 8, pattern: "{name}_r{a:02d}"}
           Rotate: {a_min: -15, a_max: 15}              # a draw, per copy
-          Resample: {spacing: [2, 2, 2]}               # a transform, per copy
-          Brightness: {b_std: 0.2}                     # another draw, per copy
           Write:  {dataset: ./Augmented:omezarr}
 
-    Each draw is parameterised on the grid the stages before it leave, so a shape-changing draw hands
-    the next stage its own extent: a chain, exactly like the transforms it sits among.
-
     ``pattern`` names each copy's entry: ``str.format`` over ``{name}`` (the case) and ``{a}`` (the
-    copy ordinal, 1-based). Both tokens are required, without ``{a}`` every copy of a case writes
-    over the previous one, without ``{name}`` every case does.
+    copy ordinal, 1-based). Both tokens are required.
 
-    Every draw after this marker is parameterised from ``(seed, case, which draw this is)`` rather
-    than from a shared RNG, whose consumption order two chains cannot agree on. Left unset, ``seed``
-    is the run's ``manual_seed``, so an image chain and its mask chain produce matching copies: copy ``k`` of
-    the mask carries copy ``k`` of the image's rotation. Set it to decouple one chain
-    deliberately: that is the only way to ask two chains for DIFFERENT copies of the same cases.
+    Every draw after this marker is parameterised from ``(seed, case, which draw this is)``, not from
+    a shared RNG. Left unset, ``seed`` is the run's ``manual_seed``, so an image chain and its mask
+    chain produce matching copies. Set it to ask two chains for different copies of the same cases.
     """
 
     def __init__(self, nb: int = 2, pattern: str = "{name}_{a:02d}", seed: int | None = None) -> None:
@@ -233,8 +207,7 @@ class Expand(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # A cardinality marker, not a per-case stage: the dispatcher splices the copy's own draw at
-        # this position and never runs the marker itself. This declaration is only the safety net for
-        # a chain that reached a workflow without expansion semantics, where refusing is right.
+        # this position and never runs the marker itself.
         return PatchLocality(LocalityKind.WHOLE_VOLUME)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:

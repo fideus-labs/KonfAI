@@ -36,27 +36,17 @@ from konfai.utils.errors import DatasetManagerError
 
 
 def _attribute_text(value: Any) -> str:
-    """One value as an attribute holds it: its printed form, on one line and complete.
+    """One value as an attribute holds it: its printed form, on one line, complete and exact.
 
-    The single place a value stops being a live object, because every consumer takes text --
-    ``SetMetaData`` on a SimpleITK image, an h5 attribute, a zarr sidecar. The printed form is left
-    as each type prints it: a sequence has two, :meth:`Attribute.get_np_array` reads both, and
-    ``ast.literal_eval`` (:meth:`Dataset.read_transform`, on the parameter keys) needs the Python
-    one, so normalising to either here breaks the other reader.
-
-    Complete, because an attribute is a record and not a display: NumPy's own printing elides values
-    past a threshold, and an elided record is one no reader can parse back. Exact, for the same
-    reason: a float is printed as the shortest text that reads back to the very same float64 --
-    NumPy's default (8 decimals for an array, the float32-shortest form for a float32 scalar) is a
-    display, and a statistic that came back a few ulps off made the whole-volume and the streamed
-    path of one chain disagree by that much (measured: a Min/Max rescale, 28% of voxels one ulp
-    apart on CUDA).
+    The printed form is left as each type prints it: :meth:`Attribute.get_np_array` reads both
+    forms of a sequence and ``ast.literal_eval`` (:meth:`Dataset.read_transform`) needs the Python
+    one. No value is elided, and a float is printed as the shortest text that reads back to the
+    same float64.
     """
     if type(value) is str:
-        return value.replace("\n", "")  # what the printing below does to a str, without entering it
+        return value.replace("\n", "")
     if isinstance(value, torch.Tensor):
-        # Accept a tensor from any device: attributes are host-side strings, and finalize transforms
-        # (Normalize, Statistics, ...) may hand over stats computed on a CUDA-resident volume.
+        # A tensor from any device: attributes are host-side strings.
         value = value.detach().cpu().numpy()
     if isinstance(value, np.generic | np.ndarray) and np.issubdtype(value.dtype, np.floating):
         value = np.asarray(value, dtype=np.float64)[()] if isinstance(value, np.generic) else value.astype(np.float64)
@@ -73,8 +63,7 @@ def region_geometry(
     """The geometry record of the samples a normalized spatial slice keeps: the first sample's
     world position as the origin, the spacing scaled by the step.
 
-    THE region-geometry update, shared by every backend so a stepped read carries the same record
-    whatever format the volume is stored in. ``spatial_slices`` arrive array-ordered (``(Z)YX``,
+    Shared by every backend. ``spatial_slices`` arrive array-ordered (``(Z)YX``,
     ``slice.indices``-normalized); geometry is ``(x, y, z)``.
     """
     origin = np.asarray(origin, dtype=np.float64)
@@ -88,13 +77,8 @@ def region_geometry(
 class Attribute(dict[str, Any]):
     """Metadata container storing repeated values with a stack-like naming scheme.
 
-    Values are text, always. Both doors normalize (assignment and construction), so an attribute
-    built from a store's own sidecar, which JSON hands back as live lists, is the same thing as one
-    assigned in Python. Anything less and a value can be stored and not written back out.
-
-    Copying one is a dict copy: its values are text already, and the streamed route of every
-    workflow copies the case's attributes three to five times per patch (measured 69 us for a
-    23-key copy through the normalising door, 2 us at dict level).
+    Values are text, always; assignment and construction both normalize. Copying one is a dict
+    copy.
     """
 
     def __init__(self, attributes: dict[str, Any] | None = None) -> None:
@@ -109,8 +93,7 @@ class Attribute(dict[str, Any]):
 
     @staticmethod
     def _is_stack_member(stored_key: str, key: str) -> bool:
-        # Values are stacked as ``{key}_{n}``; match that exact pattern (or the bare key) so a sibling that
-        # merely shares a prefix (``SpacingOriginal`` vs ``Spacing``) is not miscounted as another entry.
+        # Values are stacked as ``{key}_{n}``; a sibling sharing a prefix (``SpacingOriginal``) is not one.
         if stored_key == key:
             return True
         prefix = f"{key}_"
@@ -150,24 +133,12 @@ class Attribute(dict[str, Any]):
 
     @staticmethod
     def _parse_array(text: str) -> np.ndarray:
-        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``.
-
-        Which one an attribute holds follows from what the writer handed over (an ``ndarray``, or
-        the plain list a JSON sidecar gives back), and no reader should have to make that
-        distinction. ``np.fromstring`` reads whitespace only, so the commas go first.
-        """
+        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``."""
         return np.fromstring(text[1:-1].replace(",", " "), sep=" ", dtype=np.double)
 
     @staticmethod
     def _parsed_array(key: str, text: str) -> np.ndarray:
-        """:meth:`_parse_array`, refusing by name what does not parse back as a flat array.
-
-        The sidecar stores any value as its print, so a >= 2-D array is accepted at write and its
-        nested print fails only here, far from the writer: ``np.fromstring`` used to surface it as
-        an anonymous ``ValueError`` deep in numpy. (``Crop`` deliberately records its 2-D ``box``
-        and reads it back through its own parser, never this door, which is why the write door
-        cannot refuse the rank outright.)
-        """
+        """:meth:`_parse_array`, refusing by name what does not parse back as a flat array."""
         try:
             return Attribute._parse_array(text)
         except ValueError:
@@ -203,13 +174,8 @@ def is_an_image(attributes: Attribute) -> bool:
 def as_channel_first(data: np.ndarray, attributes: Attribute) -> np.ndarray:
     """Give back its channel axis to a block that folded it away, where the header says it did.
 
-    A stage may hand back a volume without its channel axis (``Sum(dim=0)`` and ``MergeLabels`` fold
-    the leading axis, which in a TRANSFORM chain is the channel one). An array with as many axes as
-    the geometry has spatial axes IS a single-channel image: read as channel-first it would be a 2-D
-    image with a plane's worth of channels, refused by ITK or, worse, stored that way in silence.
-
-    The header is what declares the spatial rank, so a block that comes with none is handed back
-    untouched: only the caller knows whether it can be written as it is or must be refused.
+    An array with as many axes as the geometry has spatial axes is a single-channel image. A block
+    with no header is handed back untouched.
     """
     if "Spacing" in attributes and data.ndim == len(attributes.get_np_array("Spacing")):
         return data[None]
@@ -219,9 +185,7 @@ def as_channel_first(data: np.ndarray, attributes: Attribute) -> np.ndarray:
 def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sitk.Image:
     """Convert a NumPy array and KonfAI attributes into a SimpleITK image."""
     if isinstance(data, torch.Tensor):
-        # Accept a torch tensor on any device: SimpleITK works on host arrays, so a SITK-backed transform
-        # fed a CUDA-resident volume converts here and naturally returns on the CPU (the pipeline then
-        # continues on the CPU). This keeps every transform usable regardless of the volume's device.
+        # A tensor on any device: SimpleITK works on host arrays.
         data = data.detach().cpu().numpy()
     if not is_an_image(attributes):
         raise DatasetManagerError(
@@ -229,8 +193,7 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
             "This reader serves volumes; a transform or a point set is read by its own backend.",
         )
     if data.dtype == np.float16:
-        # ITK has no half-float pixel type (GetImageFromArray rejects float16), so widen to float32 --
-        # exact and lossless. The streamed .mha writer widens the same way, so both write identical bytes.
+        # ITK has no half-float pixel type; the streamed .mha writer widens the same way.
         data = data.astype(np.float32)
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
@@ -247,18 +210,16 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
 
 
 # Set on an entry read back from a store that types its component axis as an RFC-5 displacement
-# field, so ``Dataset.read_transform`` can rebuild the transform. The underscore matters: a key
-# without one is stack-renamed by ``Attribute.__setitem__`` (``Transform`` becomes ``Transform_0``).
+# field, so ``Dataset.read_transform`` can rebuild the transform. The underscore keeps the key out
+# of ``Attribute.__setitem__``'s stack renaming.
 DISPLACEMENT_FIELD_ATTRIBUTE = "konfai_displacement_field"
 
 
 def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np.ndarray, Attribute]:
     """A displacement-field transform as a channel-first array plus its geometry.
 
-    The counterpart of ``_encode_transform_leaves`` for the one transform kind that cannot go through
-    it: a displacement field's parameters ARE the field, so serialising it as a parameter vector
-    would drop the geometry that makes it meaningful. It travels as an image instead, and the store
-    records what it is (see ``write_ome_zarr(displacement_field=True)``).
+    The counterpart of ``_encode_transform_leaves`` for a field, which travels as an image; the
+    store records what it is (``write_ome_zarr(displacement_field=True)``).
     """
     if not isinstance(transform, sitk.DisplacementFieldTransform):
         raise DatasetManagerError(
@@ -271,45 +232,28 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     """Convert a SimpleITK image into a channel-first NumPy array and attributes."""
     attributes = Attribute()
     for k in image.GetMetaDataKeys():
-        # ``ITK_*`` keys are the reader's own bookkeeping (the input filter's name, the file's original
-        # direction and spacing), not the volume's metadata: carried into an output they describe the
-        # source of a resampled volume, which nothing should read as the output's.
+        # ``ITK_*`` keys are the reader's own bookkeeping, not the volume's metadata.
         if not k.startswith("ITK_"):
             attributes[k] = image.GetMetaData(k)
-    # AFTER the metadata import, deliberately. data_to_image stamps every attribute -- the
-    # geometry stack included -- back onto the image as metadata text, and the loop above imports
-    # it verbatim (versioned keys carry a '_', so they land as-is). Recorded first, the header
-    # landed as Origin_0 and the stale text then OVERWROTE that very key: an image read, moved
-    # (SetOrigin) and written back kept its old origin, silently. Recorded last, the header
-    # appends the next version of the stack, which is the one every reader takes.
+    # After the metadata import: the metadata may carry a stale geometry stack, and the header must
+    # land as its latest version.
     attributes["Origin"] = np.asarray(image.GetOrigin())
     attributes["Spacing"] = np.asarray(image.GetSpacing())
     attributes["Direction"] = np.asarray(image.GetDirection())
     if image.GetNumberOfComponentsPerPixel() == 1:
         return np.expand_dims(sitk.GetArrayFromImage(image), 0), attributes
-    # One copy, written channel-first straight off ITK's interleaved buffer: the array is contiguous
-    # for whatever holds it next, where the copy of the buffer transposed was a strided view every
-    # consumer needing a contiguous field copied again (a 3x128^3 float64 field: 50 MiB each time).
-    # np.array and not ascontiguousarray: a one-voxel image is contiguous however its axes are moved,
-    # and a view of ITK's buffer would outlive the image.
+    # One contiguous channel-first copy off ITK's interleaved buffer. np.array and not
+    # ascontiguousarray: a view of ITK's buffer would outlive the image.
     return np.array(np.moveaxis(sitk.GetArrayViewFromImage(image), -1, 0), order="C"), attributes
 
 
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
 
-    The store's konfai sidecar wins when present (it carries the full Direction matrix, which NGFF
-    scale/translation cannot express) otherwise geometry falls back to the NGFF transforms, Direction
-    defaulting to identity. Shared by the Dataset OME-Zarr reader and ``ITK.read_displacement_field``
-    so both recover geometry the one same way.
-
-    THE SIDECAR DESCRIBES ONE LEVEL: the one the writer was handed, and it writes the finest. Every
-    level of a pyramid carries its own scale and translation, so a sidecar taken at its word on a
-    coarser level put level 0's spacing and origin on level 1's voxels: half the extent along every
-    axis, a brain that reads at half its size for anything that asks for ``@1``. The sidecar is
-    therefore trusted for Spacing and Origin only where its Spacing IS this level's scale; on any other level those two come from the level's
-    own transforms, and the sidecar still supplies what NGFF cannot: the Direction, and every other
-    key it recorded.
+    The store's konfai sidecar carries the Direction matrix, which NGFF cannot express, and every
+    other key it recorded; Direction defaults to identity without it. The sidecar describes one
+    level, the finest: its Spacing and Origin are trusted only where its Spacing is this level's
+    scale, and any other level takes both from its own transforms.
     """
     attributes = Attribute(metadata.get("attributes", {}))
     axes = metadata["axes"]
@@ -321,9 +265,7 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     if "Spacing" in attributes:
         recorded = attributes.get_np_array("Spacing")
         if recorded.shape != level_spacing.shape or not np.allclose(recorded, level_spacing, rtol=1e-6, atol=0.0):
-            # Another level than the one the sidecar was written for: its own geometry, not the
-            # sidecar's. Popped then set, so the key keeps its place in the stack rather than
-            # gaining a rung that a later write would record twice.
+            # Another level than the sidecar's. Popped then set, so the key keeps its place in the stack.
             attributes.pop("Spacing")
             attributes["Spacing"] = level_spacing
             if "Origin" in attributes:
@@ -340,11 +282,7 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
 
 
 def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
-    """The leaf transforms of a (possibly nested) composite, in application order.
-
-    ``CompositeTransform.GetNthTransform`` can itself return a composite, so a single-level walk
-    leaves a nested composite in the list and the serializer rejects it. Recurse to the leaves.
-    """
+    """The leaf transforms of a (possibly nested) composite, in application order."""
     if isinstance(transform, sitk.CompositeTransform):
         leaves: list[sitk.Transform] = []
         for i in range(transform.GetNumberOfTransforms()):
@@ -354,10 +292,7 @@ def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
 
 
 def _transform_codec() -> list[tuple[type, str, Any]]:
-    """(sitk class, serialized type tag, decode factory) for every supported transform kind.
-
-    Built lazily because ``sitk`` is an optional import.
-    """
+    """(sitk class, serialized type tag, decode factory) for every supported transform kind."""
     return [
         (sitk.Euler3DTransform, "Euler3DTransform_double_3_3", sitk.Euler3DTransform),
         (sitk.AffineTransform, "AffineTransform_double_3_3", lambda: sitk.AffineTransform(3)),
@@ -390,9 +325,9 @@ def _decode_transform(transform_type: str, name: str) -> sitk.Transform:
 
 
 def data_to_transform(data: np.ndarray, attributes: Attribute, name: str) -> sitk.Transform:
-    """The transform a stored entry holds: a displacement field is its image in float64, what
-    ``DisplacementFieldTransform`` requires, widened here exactly so the image is built once in that
-    type; any other entry is the parameter rows and type keys of ``_encode_transform_leaves``."""
+    """The transform a stored entry holds: a displacement field is its image in float64, which
+    ``DisplacementFieldTransform`` requires; any other entry is the parameter rows and type keys of
+    ``_encode_transform_leaves``."""
     if DISPLACEMENT_FIELD_ATTRIBUTE in attributes:
         return sitk.DisplacementFieldTransform(data_to_image(np.asarray(data, dtype=np.float64), attributes))
     transforms = []
@@ -415,8 +350,7 @@ def get_infos(filename: str | Path) -> tuple[list[int], Attribute]:
     attributes["Direction"] = np.asarray(file_reader.GetDirection())
     for k in file_reader.GetMetaDataKeys():
         attributes[k] = file_reader.GetMetaData(k)
-    # SimpleITK GetSize() is (x, y, [z], ...); KonfAI arrays are numpy-order [C, (Z), Y, X], so the
-    # spatial size must be reversed for EVERY rank: a 3-D-only reversal transposes 2-D/4-D data.
+    # SimpleITK GetSize() is (x, y, [z], ...); KonfAI arrays are [C, (Z), Y, X]: reversed for every rank.
     size = list(reversed(file_reader.GetSize()))
     size = [file_reader.GetNumberOfComponents(), *size]
     return size, attributes

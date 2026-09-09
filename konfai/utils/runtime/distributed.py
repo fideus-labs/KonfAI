@@ -68,12 +68,8 @@ _rank_pool_lock = threading.Lock()
 @contextmanager
 def preserved_rng() -> Iterator[None]:
     """Snapshot random, numpy and torch's CPU generator, plus every CUDA generator when CUDA is already
-    initialised, and put them back on exit.
-
-    ``torch.manual_seed`` reseeds the CUDA generators too, so they belong in the snapshot; reading them
-    would initialise CUDA in a caller that never asked (a CPU data-loader worker, a notebook), so the
-    gate is ``torch.cuda.is_initialized()``, not ``is_available()``.
-    """
+    initialised, and put them back on exit. The gate is ``torch.cuda.is_initialized()``, never
+    ``is_available()``: reading the CUDA generators must not initialise CUDA."""
     states = (random.getstate(), np.random.get_state(), torch.get_rng_state())
     cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
     try:
@@ -147,8 +143,8 @@ class DistributedObject(ABC):
                         network.measure.format_loss(True, n),
                         network.measure.format_loss(False, n),
                     )
-        # `sync=False` skips the cross-rank all_gather: prediction shards whole cases per rank with unequal
-        # batch counts, so a per-batch collective would hang once the shortest shard stops calling it.
+        # `sync=False` skips the cross-rank all_gather: prediction shards have unequal batch counts, and a
+        # per-batch collective would hang.
         outputs: list[Any] = synchronize_data(world_size, gpu, data) if sync else [data]
         result: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
         if global_rank == 0:
@@ -176,18 +172,13 @@ class DistributedObject(ABC):
         return self.dataloader[global_rank]
 
     def _bound_chunk_cache(self, world_size: int) -> None:
-        """Bound the decoded-chunk cache by this rank's share of the memory budget.
-
-        Set here, on the rank: a spawned rank is a new process, and a bound set by the launcher is
-        a module global the child never sees.
-        """
+        """Bound the decoded-chunk cache by this rank's share of the memory budget. Set on the rank: a
+        bound set by the launcher is a module global a spawned child never sees."""
         from konfai.utils.ome_zarr import bound_chunk_cache
 
         dataset = getattr(self, "dataset", None)
         if dataset is not None and hasattr(dataset, "resolved_budget"):
-            # work_bytes and not per_rank_bytes: the interpreter and the imaging libraries are
-            # resident before the rank reads anything, and a budget that ignores them spends those
-            # bytes twice. Measured on the rank, which is where they were paid.
+            # work_bytes and not per_rank_bytes: the resident interpreter and libraries are already paid.
             set_per_rank_budget(dataset.resolved_budget().work_bytes(node_local_ranks(world_size)))
             bound_chunk_cache()
 
@@ -206,9 +197,8 @@ class DistributedObject(ABC):
             torch.backends.cudnn.benchmark = self.manual_seed is None
             torch.backends.cudnn.deterministic = self.manual_seed is not None
             dataloaders = self.rank_dataloaders(global_rank)
-            # device_count as well: on a process whose CUDA runtime latched BEFORE the launcher
-            # narrowed CUDA_VISIBLE_DEVICES to nothing, is_available() stays True while the count
-            # honestly reads 0, and set_device would pin a GPU the launch explicitly excluded.
+            # device_count as well: a CUDA runtime that latched before CUDA_VISIBLE_DEVICES was narrowed
+            # keeps is_available() True while the count reads 0.
             if torch.cuda.is_available() and 0 <= local_rank < torch.cuda.device_count():
                 torch.cuda.set_device(local_rank)
             if global_rank == 0 and self.startup_clock is not None and (startup := self.startup_clock.report()):
@@ -231,10 +221,8 @@ def run_distributed_app(
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> None:
         params = sig.parameters
-        # A kwarg the entrypoint does not declare must refuse, not vanish: silently dropping one
-        # already forced the --plan short-circuit in main.py. Tolerated beside the signature: the
-        # cluster kwargs (read from the raw kwargs below) and 'command', the CLI's subcommand
-        # discriminator, which only the TRAIN/RESUME entrypoint declares.
+        # A kwarg the entrypoint does not declare is refused. Tolerated beside the signature: the cluster
+        # kwargs (read from the raw kwargs below) and 'command', which only the TRAIN/RESUME entrypoint declares.
         unknown = set(kwargs) - set(params) - {"name", "memory", "num_nodes", "time_limit", "command"}
         if unknown:
             raise ConfigError(
@@ -245,13 +233,10 @@ def run_distributed_app(
 
         bound = sig.bind_partial(*args, **kwargs_fun)
         bound.apply_defaults()
-        # The cluster CLI always parses --name (required) and the workflow signatures never declare
-        # it, so its presence in the RAW kwargs is what tells a submission from a local run.
+        # The cluster CLI always passes --name and the workflow signatures never declare it.
         is_cluster = "name" in kwargs
-        # The auto memory budget is a NODE budget, but build-time sizing (the evaluation auto-patch)
-        # runs while ``func(...)`` constructs the workflow: before the spawn where world_size exists.
-        # The launcher therefore leaves the per-node rank count in the environment, and restores it
-        # after: a leak would silently shrink a later in-process run (tests, embedded Python).
+        # Build-time sizing runs before the spawn where world_size exists: the per-node rank count is
+        # published in the environment for the build and restored after.
         local_ranks = len(list(bound.arguments.get("gpu") or [])) or int(bound.arguments.get("cpu") or 1)
         previous_local_ranks = os.environ.get("KONFAI_LOCAL_RANKS")
         os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, local_ranks))
@@ -279,9 +264,7 @@ def run_distributed_app(
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
         except KonfAIError as error:
-            # A designed refusal: the message says what is wrong and the remedy what to change.
-            # The traceback under it is framework internals: 28 lines burying the 3 that matter --
-            # so it is shown only to a reader who asked (KONFAI_DEBUG=1).
+            # A designed refusal: the message alone, the traceback only under KONFAI_DEBUG=1.
             if env_flag("KONFAI_DEBUG", False):
                 raise
             print(str(error).strip(), file=sys.stderr)
@@ -296,16 +279,9 @@ def run_distributed_app(
 
 
 def _runs_inline(world_size: int) -> bool:
-    """Whether the single rank runs here instead of in a spawned child.
-
-    A spawned child is a fresh interpreter: it re-imports torch, re-initialises CUDA and unpickles the
-    whole payload before doing any work: measured at ~3 s, which a short prediction pays in full. With
-    one rank there is nothing to parallelise, so that cost buys only isolation.
-
-    Isolation is worth keeping where the caller outlives the run: an embedded interpreter (Slicer, the
-    apps server) would inherit this process's CUDA context and its memory. ``KONFAI_INLINE_SINGLE_RANK``
-    is the switch: default on for a CLI run, set it to 0 to force the child back.
-    """
+    """Whether the single rank runs here instead of in a spawned child. ``KONFAI_INLINE_SINGLE_RANK``
+    is the switch, default on; set it to 0 where the caller outlives the run (an embedded interpreter
+    would inherit this process's CUDA context)."""
     if world_size != 1:
         return False
     return env_flag("KONFAI_INLINE_SINGLE_RANK", True)
@@ -321,8 +297,7 @@ def execute_distributed_object(
     tensorboard: bool = False,
     cluster_kwargs: ClusterKwargs | None = None,
 ) -> None:
-    """
-    Execute a previously built KonfAI workflow object.
+    """Execute a previously built KonfAI workflow object.
 
     Parameters
     ----------
@@ -339,7 +314,7 @@ def execute_distributed_object(
     tensorboard : bool, optional
         Whether TensorBoard should be started for the workflow.
     cluster_kwargs : dict[str, Any] | None, optional
-        Optional cluster submission parameters used by ``submitit``.
+        Cluster submission parameters used by ``submitit``.
     """
     gpu_ids = [] if gpu is None else list(gpu)
     cpu_workers = 1 if cpu is None else int(cpu)
@@ -356,8 +331,7 @@ def execute_distributed_object(
         "KONFAI_CLUSTER",
     ]
     previous_env = {key: os.environ.get(key) for key in managed_env}
-    # The run seeds the process-wide RNGs and sets the cudnn flags; inline (the single-rank default)
-    # that process is the caller's (a notebook, Slicer), so what it found is put back.
+    # The run seeds the process-wide RNGs and sets the cudnn flags; inline, that process is the caller's.
     previous_cudnn = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
 
     with preserved_rng():
@@ -406,8 +380,7 @@ def execute_distributed_object(
                     if world_size == 0:
                         world_size = cpu_workers
                     if not quiet:
-                        # One line naming the resolved devices: omitting --gpu runs on CPU, and a
-                        # silent CPU fallback on a GPU machine is a 10-100x slowdown nobody sees.
+                        # One line naming the resolved devices: omitting --gpu runs on CPU.
                         device_line = (
                             "cuda:" + ",".join(str(i) for i in gpu_ids)
                             if gpu_ids
@@ -416,9 +389,8 @@ def execute_distributed_object(
                         print(f"[KonfAI] Running on {device_line}")
                     with clock.phase("setup"):
                         configured_object.setup(world_size)
-                    # Share tensors through /dev/shm files instead of one file descriptor per tensor:
-                    # spawning a worker that pickles a loaded model can otherwise exhaust the process
-                    # open-file limit ("Too many open files"), e.g. under Slicer's embedded Python.
+                    # Share tensors through /dev/shm files instead of one file descriptor per tensor, or a
+                    # worker pickling a loaded model can exhaust the open-file limit.
                     mp.set_sharing_strategy("file_system")
                     clock.launch()
                     configured_object.startup_clock = clock
@@ -437,8 +409,8 @@ def execute_distributed_object(
 
 
 def _forget_rank_pool() -> None:
-    """A forked child inherits the executor's bookkeeping and none of its threads: work submitted to
-    it waits forever. The child builds its own on first use."""
+    """A forked child inherits the executor's bookkeeping and none of its threads; it builds its own
+    on first use."""
     global _rank_pool, _rank_pool_share, _rank_pool_lock
     _rank_pool, _rank_pool_share, _rank_pool_lock = None, 0, threading.Lock()
 
@@ -449,10 +421,8 @@ if hasattr(os, "register_at_fork"):  # POSIX only: a platform without fork inher
 
 def rank_cpu_share(world_size: int | None = None) -> int:
     """The cores this rank may use: the node's, divided between its local ranks, or exactly
-    ``OMP_NUM_THREADS`` when that is set.
-
-    One number for every consumer: torch's intraop pool, ITK's, zarr's, :func:`rank_pool`. The world
-    size stands in for a launcher that published no ``KONFAI_LOCAL_RANKS``.
+    ``OMP_NUM_THREADS`` when that is set. One number for every consumer (torch, ITK, zarr,
+    :func:`rank_pool`). The world size stands in for a launcher that published no ``KONFAI_LOCAL_RANKS``.
     """
     explicit = os.environ.get("OMP_NUM_THREADS")
     if explicit:
@@ -461,17 +431,12 @@ def rank_cpu_share(world_size: int | None = None) -> int:
 
 
 def rank_pool() -> ThreadPoolExecutor | None:
-    """The rank's shared worker pool, for the host-side GIL-releasing work inside ONE case: sharding
-    cases over ranks does nothing for a cohort of one.
-
-    ``None`` at a share of one, where the work stays on the calling thread.
-    """
+    """The rank's shared worker pool, for the host-side GIL-releasing work inside one case. ``None`` at
+    a share of one, where the work stays on the calling thread."""
     global _rank_pool, _rank_pool_share
     workers = rank_cpu_share()
     with _rank_pool_lock:
-        # The share changes within one process when a multi-rank build is followed by an inline
-        # single-rank workflow: the pool is rebuilt at the new size, the old one's idle threads let go.
-        # A share of one keeps no pool at all, so the threads go with it.
+        # A share that changed within the process rebuilds the pool at the new size.
         if _rank_pool is not None and _rank_pool_share != workers:
             _rank_pool.shutdown(wait=False)
             _rank_pool, _rank_pool_share = None, 0
@@ -485,7 +450,7 @@ def rank_pool() -> ThreadPoolExecutor | None:
 
 def map_over_rank_pool(work: Callable[[_T], None], items: Sequence[_T]) -> None:
     """Run ``work`` over ``items`` on the rank's pool, in the caller's thread when there is none.
-    Every exception is raised, the first one first: a region half written is not a region."""
+    Every exception is raised, the first one first."""
     pool = rank_pool()
     if pool is None or len(items) < 2:
         for item in items:
@@ -496,32 +461,21 @@ def map_over_rank_pool(work: Callable[[_T], None], items: Sequence[_T]) -> None:
 
 
 def apply_cpu_thread_budget(world_size: int | None = None) -> None:
-    """Give each rank a bounded share of the machine's cores instead of every library's every-core
-    default -- torch's intraop pool AND ITK's, which does the host resample.
+    """Give each rank a bounded share of the machine's cores: torch's intraop pool, ITK's, and zarr's.
 
-    Each of the node's local ranks gets its share of :func:`available_cpus`, and the two pools take
-    that share differently. Torch's is capped at 12: past memory-bus saturation more intraop threads
-    only add barrier contention, and on a hybrid 24-core CPU the 498^3 separable gather measures
-    0.7 s at 12 threads and 67 s at 24. ITK's takes the share whole, because its resampler keeps
-    scaling with it (the same region: 10.98 s at 1 thread, 1.11 s at 12, 0.65 s at 24). An explicit
-    ``OMP_NUM_THREADS`` keeps authority over both (torch already honors it at init).
+    Each of the node's local ranks gets its share of :func:`available_cpus`. Torch's pool is capped at
+    12; ITK's takes the share whole; zarr's async concurrency takes a third of it (at least min(cores, 4)).
+    An explicit ``OMP_NUM_THREADS`` keeps authority over all of them.
 
-    Applied once per process, and never on macOS: torch documents ``set_num_threads`` as to be
-    called before any parallel work, and the Python API runs several workflows in one process.
-    On macOS the call intermittently crashes libomp with SIGSEGV once any parallel region ran,
-    whichever call is the first; the saturation this bounds was measured on many-core Linux
-    nodes, so macOS keeps torch's default.
+    Applied once per process, and never on macOS, where ``torch.set_num_threads`` after a parallel region
+    can crash libomp with SIGSEGV.
     """
     global _cpu_budget_applied
     if sys.platform == "darwin" or _cpu_budget_applied:
         return
     explicit = os.environ.get("OMP_NUM_THREADS")
     cores = rank_cpu_share(world_size)
-    # The cap is torch's alone: past memory-bus saturation its intraop pool only adds barrier
-    # contention. ITK's pool is not the same animal -- its resampler, which does the host walk,
-    # keeps scaling to the whole share (a fold-sized region through a displacement field: 10.98 s
-    # at 1 thread, 1.11 s at 12, 0.65 s at 24), so capping it at 12 left a third of a 24-core node
-    # idle and cost 15 s on a measured fold.
+    # The cap is torch's alone: ITK's resampler keeps scaling to the whole share.
     share = int(explicit) if explicit else min(cores, 12)
     itk_share = cores
     if not explicit:
@@ -535,24 +489,13 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     try:
         import zarr
 
-        # A THIRD of the share: a pipelined sweep runs three of these at once, the decode of the
-        # region being read, the assembly of the one before it, the encode of the one being written.
-        # Measured with the chain off the reading thread: 24 cores, ExaSPIM 513x1331x1776 through a stored affine, two runs per point,
-        # nothing else moved (a wrapper sets this alone, not OMP_NUM_THREADS, which would move ITK
-        # with it). Wall clock, host path then device path:
-        #   4  -> 12.1 / 13.4 s     4  -> 5.1 / 5.2 s
-        #   8  -> 10.7 / 11.1 s     8  -> 4.9 / 5.1 s
-        #   12 -> 11.0 / 11.3 s     12 -> 4.7 / 5.1 s
-        #   24 -> 11.0 / 12.3 s     24 -> 5.3 / 5.4 s
-        # A third wins or ties on both; starving it costs the host path 1.4 s and oversubscribing
-        # costs the reader its own throughput (read busy 4.4-4.6 s at 8, 5.1-5.2 s at 24). A share
-        # of a few cores keeps them all, up to four: a third of it is one chunk in flight, and on a
-        # remote root that is the whole of the read's parallelism.
+        # A third of the share: a pipelined sweep runs the decode, the assembly and the encode of three
+        # regions at once. A share of a few cores keeps them all, up to four.
         if hasattr(zarr, "config"):  # 2.x has no config object, and no async reader to share the cores with
             zarr.config.set({"async.concurrency": max(min(cores, 4), cores // 3)})
     except ImportError:
         pass
-    # Marked applied only once it is: a raise above (a bad OMP_NUM_THREADS) leaves the next call free to retry.
+    # Marked applied only once it is: a raise above leaves the next call free to retry.
     _cpu_budget_applied = True
 
 
@@ -560,17 +503,10 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
 def pin_gloo_to_loopback(local: bool) -> Iterator[None]:
     """Bind gloo to the loopback interface for a rendezvous whose ranks all sit on this host.
 
-    gloo picks its interface by resolving the host's name. On a macOS runner that name is an mDNS
-    ``.local`` name no resolver answers, and the rendezvous fails there rather than on the loopback
-    that carries the whole single-node world (the streamed-prediction integration tests flaked on
-    the macos-latest runner for exactly that). ``local`` says whether the world is that one: off
-    this host the loopback reaches no other rank, and gloo's own resolution stands.
-
-    gloo reads the variable as it builds the device, so it is taken back out of the environment
-    once the group is up: a later multi-node rendezvous in the same process, or a child that
-    inherits this environment, would otherwise be pinned to an interface reaching no other node.
-    An explicit ``GLOO_SOCKET_IFNAME`` keeps authority and is left untouched, and a host with no
-    loopback in ``if_nameindex`` is left to gloo's own resolution.
+    ``local`` says whether the world is that one; off this host gloo's own resolution stands. The
+    variable is taken back out of the environment once the group is up, so a later multi-node
+    rendezvous or an inheriting child is not pinned to it. An explicit ``GLOO_SOCKET_IFNAME`` keeps
+    authority, and a host with no loopback in ``if_nameindex`` is left to gloo's own resolution.
     """
     loopback = None
     if local and not os.environ.get("GLOO_SOCKET_IFNAME"):
@@ -607,9 +543,7 @@ def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = Tr
         scontrol_path = shutil.which("scontrol")
         if scontrol_path is None:
             raise FileNotFoundError("scontrol not found in PATH")
-        # `scontrol show hostnames` prints one host per line; for a multi-node job take only the FIRST
-        # (the rendezvous master). Without this the whole newline-joined list leaks into init_method
-        # (tcp://node001\nnode002:port) and init_process_group can never rendezvous.
+        # `scontrol show hostnames` prints one host per line; the first is the rendezvous master.
         host_name = (
             subprocess.check_output(  # nosec B603
                 [scontrol_path, "show", "hostnames", nodelist], text=True, stderr=subprocess.DEVNULL

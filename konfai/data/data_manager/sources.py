@@ -63,8 +63,7 @@ class DataSources(ABC):
     Which cases, from which file, under which destination group: the ``dataset_filenames`` roots,
     the case names common to every source group and kept by ``subset``, and one
     :class:`~konfai.data.patching.DatasetManager` per (destination group, case), all resolved by
-    :meth:`prepare`. :class:`Data` adds the batch-loading mechanics; :class:`DataTransform` builds
-    on this alone.
+    :meth:`prepare`. :class:`Data` adds the batch-loading mechanics.
     """
 
     @abstractmethod
@@ -107,14 +106,9 @@ class DataSources(ABC):
         return groups_dest
 
     def _check_destination_groups_are_unique(self) -> None:
-        """A destination group names ONE chain, whatever source group it reads.
-
-        It is the key everything downstream indexes by: the prepared managers, the sample handed to
-        a model, the plan's lines. Two source groups declaring the same destination name would
-        silently keep only the last one: the first chain built, then dropped, with nothing
-        anywhere looking wrong. Naming the chain is free: what a chain WRITES is the ``Write``'s own ``group``,
-        which is a separate word for a separate thing.
-        """
+        """A destination group names ONE chain, whatever source group it reads. It is the key
+        everything downstream indexes by: the prepared managers, the sample handed to a model, the
+        plan's lines. What a chain WRITES is the ``Write``'s own ``group``, a separate word."""
         owner: dict[str, str] = {}
         for group_src, group_dest, _chain in _chains(self.groups_src):
             if group_dest in owner:
@@ -165,15 +159,12 @@ class DataSources(ABC):
 
     def _resolve_dataset_sources(self, requested: set[str] | None = None) -> dict[str, list[tuple[str, bool]]]:
         """The roots holding each source group, as ``(filename, append)`` in declaration order.
-
-        ``requested`` is what the subset can name (:meth:`Subset.required_names`), asked of a root
-        in place of its whole listing; ``None`` lists every case.
-        """
+        ``requested`` is what the subset can name (:meth:`Subset.required_names`), asked of a root in
+        place of its whole listing; ``None`` lists every case."""
         datasets: dict[str, list[tuple[str, bool]]] = {}
         if self.dataset_filenames is None or len(self.dataset_filenames) == 0:
             raise DatasetManagerError("No dataset filenames were provided")
-        # A resolve after the first (the evaluation's sizing pass, an OOM re-plan) keeps each root's
-        # Dataset, and with it the listing it took and the headers it parsed.
+        # A resolve after the first keeps each root's Dataset, its listing and its parsed headers.
         kept = self.datasets
         self.datasets = {}
         for dataset_filename in self.dataset_filenames:
@@ -237,8 +228,7 @@ class DataSources(ABC):
             roots = sorted({filename for entries in datasets.values() for filename, _ in entries})
             print(f"[KonfAI] listing every case of {', '.join(sorted(datasets))} under {', '.join(roots)}")
         cohort: dict[str, set[str]] = {}
-        # Seeded from the first group, whatever it holds: an empty first group is a fact of the
-        # walk, not a walk that has not started, and it empties the intersection.
+        # Seeded from the first group, whatever it holds: an empty first group empties the intersection.
         names: set[str] | None = None
         for group in self.groups_src:
             names_by_group = set()
@@ -320,7 +310,6 @@ class DataSources(ABC):
                     first = source_filename_by_group[group_src].setdefault(name, filename)
                     if first != filename:
                         # Two roots hold the same case of the same group: the first declared is read.
-                        # Said out loud, because a stale copy left in one root would be read in silence.
                         warnings.warn(
                             f"Case '{name}' of group '{group_src}' is in '{first}' and in '{filename}':"
                             f" reading '{first}' (dataset_filenames order).",
@@ -377,10 +366,8 @@ class DataSources(ABC):
 class Data(DataSources):
     """The batch-loading layer over :class:`DataSources`, shared by training, prediction and
     evaluation: a patch grid, an optional RAM cache, a train/validation split, augmentation copies,
-    and one torch DataLoader per rank and partition (:meth:`get_data`).
-
-    ``case_names``/``managers`` hold the first partition (the training cases); the validation split
-    has its own.
+    and one torch DataLoader per rank and partition (:meth:`get_data`). ``case_names``/``managers``
+    hold the first partition (the training cases); the validation split has its own.
     """
 
     @staticmethod
@@ -435,9 +422,7 @@ class Data(DataSources):
 
         # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
         # large or a window would evict its own cases before their patches are consumed. Unwindowed,
-        # one batch plus the case being read is all a loader ever holds at once. A one-pass workflow
-        # serves a case's patches in order and never reads it again: its FIFO holds the case being
-        # finished and the next one, whatever the batch size.
+        # one batch plus the case being read is all a loader holds; a one-pass workflow holds two.
         window = subset.shuffle_window
         if self._reads_each_case_once:
             self._buffer_size = 2
@@ -447,8 +432,7 @@ class Data(DataSources):
         self._pin_memory = pin_memory
         self._prefetch_factor = prefetch_factor
         self._persistent_workers = persistent_workers
-        # ``memory_budget`` may later override ``use_cache`` (once the dataset size is known, in
-        # ``get_data``), which reshapes the loader; both paths funnel through the same builder.
+        # ``memory_budget`` may later override ``use_cache`` in ``get_data``; one builder for both.
         self._configure_data_loading(use_cache)
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
@@ -460,9 +444,8 @@ class Data(DataSources):
     def _configure_data_loading(self, use_cache: bool) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
 
-        Called once from ``__init__`` with the declared ``use_cache``, again from ``prepare`` once
-        the managers say how each case is read, and, when a ``memory_budget`` overrides it, again
-        from ``get_data`` with the derived value.
+        Called from ``__init__`` with the declared ``use_cache``, from ``prepare`` once the managers
+        say how each case is read, and from ``get_data`` when a ``memory_budget`` overrides it.
         """
         self.use_cache = use_cache
         self.datasetIter = partial(
@@ -489,9 +472,8 @@ class Data(DataSources):
         }
         if resolved_num_workers > 0:
             self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
-            # Persistent workers keep a fork-time copy of the dataset and never see the main process's
-            # per-epoch reset_augmentation redraw, so inline augmentations freeze at their first-epoch draw.
-            # An explicit persistent_workers=True cannot override that: correctness wins over the request.
+            # Persistent workers hold a fork-time copy of the dataset and never see the per-epoch
+            # redraw, so inline augmentations freeze; an explicit persistent_workers=True cannot win.
             inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
             if inline_augmentation_active:
                 persistent_workers = False
@@ -502,20 +484,10 @@ class Data(DataSources):
             self.dataLoader_args["persistent_workers"] = persistent_workers
 
     def _default_num_workers(self, use_cache: bool) -> int:
-        """The worker count when the config names none.
-
-        A cache preloads every case up front and leaves the loader nothing to do. A one-pass
-        workflow walks each case once in grid order, and shipping a batch through shared memory
-        costs more than reading it in place. Workers pay for themselves in one place, where a
-        patch read decodes more than the patch it asks for, and the decodes then run in parallel.
-
-        Measured on a quiet 24-core host, three cases, whole PREDICTION runs, best of two
-        (``CUDA_VISIBLE_DEVICES=``), zero workers against four:
-        patches streaming off an uncompressed MetaImage 0.24 s / 0.34 s (2.5-D, patch
-        [1, 192, 192]), 0.14 s / 0.27 s (3-D, [32, 32, 32]), and 4.26 s / 4.89 s on the 2.5-D grid
-        with a five-layer convolutional net; the case buffered whole 0.17 s / 0.44 s; and, where
-        every patch decodes the volume, 18.1 s / 5.7 s.
-        """
+        """The worker count when the config names none. A cache preloads every case up front and
+        leaves the loader nothing to do, and a one-pass workflow walks each case once in grid order,
+        where shipping a batch through shared memory costs more than reading it in place. Workers pay
+        for themselves where a patch read decodes more than the patch it asks for."""
         if use_cache:
             return 0
         if self._reads_each_case_once and not self._patch_read_decodes_the_volume():
@@ -523,15 +495,9 @@ class Data(DataSources):
         return max(1, min(os.cpu_count() or 1, 4))
 
     def _patch_read_decodes_the_volume(self) -> bool:
-        """Whether reading one patch costs a whole-volume decode, on any case of any group.
-
-        Only where the patches are read from the store one by one AND the store cannot serve a
-        region (a compressed MetaImage, an NRRD, a gzipped NIfTI). A chain that cannot stream is
-        not that: it reads the case once into the loader's buffer and cuts its patches from RAM.
-
-        ``False`` before ``prepare``, where no manager can answer yet: only the worker default
-        reads this, and only ``get_data`` reads the default.
-        """
+        """Whether reading one patch costs a whole-volume decode, on any case of any group: only
+        where the patches are read from the store one by one AND the store cannot serve a region (a
+        compressed MetaImage, an NRRD, a gzipped NIfTI). ``False`` before ``prepare``."""
         if self._managers is None:
             return False
         return any(
@@ -546,16 +512,11 @@ class Data(DataSources):
         self._configure_data_loading(self.use_cache)
 
     def _estimate_cached_bytes(self) -> int:
-        """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read).
-
-        Sums ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds:
-        a cached case is its base tensor PLUS one per augmentation draw, which validation only makes
-        when ``validation_augmentations``. See ``_CACHE_ELEMENT_BYTES``: this is an honest header-only
-        estimate that ignores size-changing transforms (an augmentation's ``Mask`` included). It also
-        counts the tensors themselves, not the allocator's arenas around them: those settle about a
-        third higher (measured), which is over the "auto" safety fraction, so a dataset landing within
-        a few percent of an "auto" budget can still be caching more than the budget names.
-        """
+        """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read). Sums
+        ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds (see
+        ``_CACHE_ELEMENT_BYTES``): the base tensor plus one per augmentation draw, which validation
+        only makes when ``validation_augmentations``. It ignores size-changing transforms and the
+        allocator's arenas, which settle about a third higher than the tensors counted here."""
         total = 0
         for prepared, copies in (
             (self._managers, Data._get_nb_augmentation(self._get_data_augmentations(True))),
@@ -569,25 +530,21 @@ class Data(DataSources):
                     total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
         return total
 
-    #: Whether the workflow reads each case exactly once. False for training, whose epochs
-    #: re-read every case; True for prediction and evaluation. A one-pass workflow never re-reads
-    #: a cache, so a fitting ``memory_budget`` does not choose one, and its loader has one region
-    #: read per patch to do, which costs less in place than through a worker.
+    #: Whether the workflow reads each case exactly once. False for training, whose epochs re-read
+    #: every case; True for prediction and evaluation. A one-pass workflow never re-reads a cache, so
+    #: a fitting ``memory_budget`` does not choose one.
     _reads_each_case_once = False
 
     def _resolve_cache_regime(self, world_size: int) -> None:
         """Derive ``use_cache`` from ``memory_budget``. ``None`` means ``"auto"``.
 
-        The cache is chosen iff the per-rank dataset (``dataset / world_size``: ``Data._split``
-        shards cases across ranks) fits the per-rank budget: an explicit budget is taken as declared
-        per rank; ``"auto"``: also what an absent key means: divides the detected node memory
-        (cgroup-capped) by the ranks sharing THAT node, so on a single node the two divisions cancel
-        and the test reduces to "does the whole dataset fit the node". The decision is logged once
-        here: ``get_data`` runs on the launcher alone, before any worker is spawned.
+        The cache is chosen iff the per-rank dataset (``Data._split`` shards cases across ranks) fits
+        the per-rank budget: an explicit budget is taken as declared per rank; ``"auto"`` divides the
+        detected node memory (cgroup-capped) by the ranks sharing THAT node, so on a single node the
+        two divisions cancel. Logged once here, on the launcher.
         """
         if self._reads_each_case_once:
-            # One-pass workflows (prediction, evaluation) read each case exactly once: a cache is
-            # never re-read, so the regime is always stream/buffer and there is nothing to derive.
+            # One-pass workflows never re-read a cache: the regime is always stream/buffer.
             return
         world_size = max(1, world_size)
         n_cases = len(self.case_names) + len(self._validation_names)
@@ -659,12 +616,10 @@ class Data(DataSources):
         self, dataset_name: dict[str, dict[str, list[str]]], managers: dict[str, list[DatasetManager]] | None = None
     ) -> None:
         """(Re)build the managers and patch mappings of both partitions from ``case_names`` and
-        ``_validation_names``; the validation indices continue the training ones. Nothing is
-        assigned until both are built, so a failure leaves the dataset unprepared.
-
-        ``managers`` are every selected case's, built in run order with the training draws: the
-        training partition is their head and, when validation keeps the draws, the validation
-        partition their tail, indices included. Unaugmented validation is built without them.
+        ``_validation_names``; the validation indices continue the training ones. Nothing is assigned
+        until both are built, so a failure leaves the dataset unprepared. ``managers`` are every
+        selected case's, built in run order with the training draws: the training partition is their
+        head and, when validation keeps the draws, the validation partition their tail.
         """
         split = len(self.case_names)
         training = validation = None
@@ -686,11 +641,9 @@ class Data(DataSources):
         self._validation_managers, self._prepared_validation_mapping = validation, validation_mapping
 
     def worst_case_shape(self) -> list[int] | None:
-        """Per-axis maximum spatial extent over every prepared case and augmentation copy.
-
-        A provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
-        size, which smaller cases clamp to fewer (or single whole-volume) patches for free.
-        """
+        """Per-axis maximum spatial extent over every prepared case and augmentation copy. A
+        provisional auto-patch grid starts from this worst case at full extent: one GLOBAL patch
+        size, which smaller cases clamp to fewer (or single whole-volume) patches for free."""
         shapes = [
             shape
             for prepared in (self._managers, self._validation_managers)
@@ -703,22 +656,18 @@ class Data(DataSources):
         return [max(int(shape[axis]) for shape in shapes) for axis in range(len(shapes[0]))]
 
     def set_free_axis_multiple(self, multiple: list[int] | None) -> None:
-        """Record the model's per-axis downsampling factor on the shared patch BEFORE ``prepare()`` cuts
-        the grids, so every case's free (``0``) axis rounds up to a valid model input. A no-op without a
-        patch (evaluation) or without a free axis; harmless once a re-plan has made the sizes concrete.
-        """
+        """Record the model's per-axis downsampling factor on the shared patch BEFORE ``prepare()``
+        cuts the grids, so every case's free (``0``) axis rounds up to a valid model input. A no-op
+        without a patch (evaluation) or without a free axis."""
         if self.patch is not None:
             self.patch.free_axis_multiple = multiple
 
     def replan_patch(self, patch_size: list[int]) -> None:
-        """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path).
-
-        The managers are rebuilt against the already-resolved sources and the SAME case lists --
-        NOT through ``prepare()`` (its idempotence guard would skip the rebuild): so a later
-        ``get_data`` shards cases identically across the restart: only the grids and the patch mapping change.
-        The new sizes are written into the shared ``patch_size`` list IN PLACE because the loader
-        factory holds a reference to it; each rebuilt manager then takes its own copy of them.
-        """
+        """Re-cut every prepared grid for a new GLOBAL patch size (the OOM-restart path). The managers
+        are rebuilt against the already-resolved sources and the SAME case lists, NOT through
+        ``prepare()``, whose idempotence guard would skip the rebuild, so a later ``get_data`` shards
+        cases identically. The new sizes are written into the shared ``patch_size`` list IN PLACE
+        because the loader factory holds a reference to it."""
         if self.patch is None or self._managers is None:
             raise DatasetManagerError(
                 "replan_patch requires a prepared dataset with a patch definition.",
@@ -741,12 +690,9 @@ class Data(DataSources):
 
     @staticmethod
     def _check_cross_group_patch_counts(managers: dict[str, list[DatasetManager]], nb_augmentation: int) -> None:
-        """Refuse destination groups whose grids disagree, before a single patch is read.
-
-        The mapping is counted on ONE group (``_patch_counts``) and every group is then read with
-        the same patch index: a group with more patches never has its tail enumerated, one with
-        fewer raises an IndexError deep in a loader worker.
-        """
+        """Refuse destination groups whose grids disagree, before a single patch is read. The mapping
+        is counted on ONE group (``_patch_counts``) and every group is then read with the same patch
+        index: a group with more patches never has its tail enumerated, one with fewer raises."""
         grouped = list(managers.items())
         if len(grouped) < 2:
             return
@@ -811,9 +757,8 @@ class Data(DataSources):
                 "\t• str  → list of sample names, file paths, slices ('0:10') or '~' exclusions",
                 f"Received list: {self.validation}",
             )
-        # One selector grammar for 'subset:' and 'validation:': names, case-list files, slices
-        # (negative ends included) and '~' exclusions all resolve through the subset's machinery,
-        # against the RUN-ORDER names, so a slice keeps its positional meaning.
+        # One selector grammar for 'subset:' and 'validation:': names, case-list files, slices and
+        # '~' exclusions all resolve through the subset's machinery, against the RUN-ORDER names.
         return self.subset._resolve_selectors(cast("list[str | int]", selectors), subset_names)
 
     def _split_train_validation_names(
@@ -867,8 +812,7 @@ class Data(DataSources):
         mapping: list[tuple[int, int, int]] = []
         # PREDICTION walks the mapping in order, and the copies of a TTA case must advance together
         # along the slab axis for the streamed write to hold a bounded window (see
-        # ``_interleaved_case_entries``). TRAIN shuffles the mapping anyway and keeps the plain
-        # order, as does a dataset prepared outside any workflow, where no state is set at all.
+        # ``_interleaved_case_entries``). TRAIN shuffles the mapping anyway and keeps the plain order.
         interleave = nb_augmentation > 1 and os.environ.get("KONFAI_STATE") == str(State.PREDICTION)
         for x, counts in enumerate(self._patch_counts(managers, nb_augmentation)):
             entries = [(y, z) for y in range(nb_augmentation) for z in range(counts[y])]
@@ -883,18 +827,16 @@ class Data(DataSources):
             return [[] for _ in range(world_size)]
 
         mappings: list[list[tuple[int, int, int]]] = []
-        # One-pass workflows shard by CASE; the default branch below is the TRAIN one, whose
-        # duplicate-padding (for DDP) would hand the same case to two ranks: two concurrent writers
-        # of the same output file for a workflow that writes per case.
+        # One-pass workflows shard by CASE; the TRAIN branch below pads duplicates for DDP, which
+        # would hand the same case to two ranks, two concurrent writers of one per-case output.
         if konfai_state() in (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM)):
             mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
             for entry in mapping:
                 mapping_by_index.setdefault(entry[0], []).append(entry)
             # Balanced by patch LOAD, not case count: an equal-count contiguous split lands a
-            # [1000, 10, 10, 10]-patch cohort as 1010 against 20 on two ranks, and every rank waits
-            # for the slowest at the end-of-run barrier. Deterministic (sorted cases, stable greedy),
-            # so a restart shards identically; within a shard each case keeps its entries in mapping
-            # order, walked in ascending case order.
+            # [1000, 10, 10, 10]-patch cohort as 1010 against 20 on two ranks. Deterministic (sorted
+            # cases, stable greedy), so a restart shards identically; within a shard each case keeps
+            # its entries in mapping order, walked in ascending case order.
             case_loads = {case: len(mapping_by_index[case]) for case in sorted(mapping_by_index)}
             for shard in _balanced_case_partitions(case_loads, world_size):
                 mappings.append([entry for case in sorted(shard) for entry in mapping_by_index[case]])
@@ -905,15 +847,10 @@ class Data(DataSources):
                 end = (size * (rank + 1)) // world_size
                 mappings.append(mapping[start:end])
             # TRAIN/RESUME wraps the model in DDP(static_graph=True): every rank must run the same
-            # number of backward all-reduces per epoch. Contiguous shards can differ by one sample,
-            # which desynchronises the collective and hangs NCCL, so equalise their length. PAD the
-            # shorter shards (wrapping their own head) rather than truncating: truncation permanently
-            # drops the tail sample of the longer shards (it is outside every rank's shard, and _split
-            # runs once at setup so the sampler's per-epoch shuffle never reaches it), whereas padding
-            # keeps every sample training with only a harmless duplicate. world_size == 1 is a no-op.
-            # A shard fills itself from its own head, and one that holds nothing has no head to fill
-            # from: fewer entries than ranks leaves it empty, and an empty rank runs no backward at
-            # all: the very hang this equalises against. It takes the mapping's head instead.
+            # number of backward all-reduces per epoch, so the shards are equalised in length. PAD
+            # the shorter shards (wrapping their own head) rather than truncating, which would
+            # permanently drop the tail sample of the longer shards. A shard that holds nothing has
+            # no head to fill from and takes the mapping's head. world_size == 1 is a no-op.
             max_len = max(len(shard) for shard in mappings)
             mappings = [shard + (shard if shard else mapping)[: max_len - len(shard)] for shard in mappings]
         return mappings
@@ -960,8 +897,7 @@ class Data(DataSources):
             data_loaders.append([])
             for loader_index, (dataset_items, mapping) in enumerate(zip(datas, mappings, strict=False)):
                 # Windowing is a training-order knob, so it reaches the shuffled training loader only
-                # (loader_index == 0). Validation is scored over the whole subset whatever the order,
-                # and ``None`` keeps it on the plain global one.
+                # (loader_index == 0). Validation is scored over the whole subset whatever the order.
                 window = self.subset.shuffle_window if loader_index == 0 else None
                 dataset_iter = self.datasetIter(
                     rank=i,
@@ -1087,26 +1023,22 @@ class DataMetric(Data):
     """Dataset configuration used by the evaluation workflow.
 
     Evaluation never exposes a patch: each run sizes its own from ``memory_budget`` (a missing key
-    means ``"auto"``): a case that fits the budget is evaluated whole (exact); one
-    that does not is cut into the largest DISJOINT patches that fit (overlap 0, no padding) and the
-    reducible metrics combine their running partials into the exact whole-case value. A metric
-    scoring through a window declares a halo, and every patch is then read that much wider than its
-    slot. The evaluator disables this sizing when any of its metrics is not reducible, so a metric
-    that needs the whole volume always gets it.
+    means ``"auto"``). A case that fits the budget is evaluated whole; one that does not is cut into
+    the largest DISJOINT patches that fit (overlap 0, no padding) and the reducible metrics combine
+    their running partials into the exact whole-case value. A metric scoring through a window
+    declares a halo, and every patch is read that much wider than its slot. The sizing is disabled
+    when any metric is not reducible.
     """
 
     _reads_each_case_once = True
 
-    #: Working copies a metric makes of the patch pair (float casts, the difference, a masked select):
-    #: measured ~<= 2x the resident tensors; the sizing keeps this conservative and the 0.8 safety
-    #: fraction absorbs the rest.
+    #: Working copies a metric makes of the patch pair (float casts, the difference, a masked
+    #: select): ~<= 2x the resident tensors, the 0.8 safety fraction absorbing the rest.
     _METRIC_INTERMEDIATE_FACTOR = 2.0
 
-    # The evaluator clears this when any of its metrics is not reducible: that metric needs whole
-    # volumes, so the budget sizing must not cut the case.
+    # Cleared by the evaluator when a metric is not reducible: that metric needs whole volumes.
     auto_patch_allowed = True
-    # The widest halo among the evaluator's metrics: the context every patch is read with past its
-    # slot, and what the sizing reserves on each face.
+    # The widest halo among the evaluator's metrics: what the sizing reserves on each face.
     patch_halo = 0
 
     def _maybe_auto_patch(self) -> None:
@@ -1115,9 +1047,8 @@ class DataMetric(Data):
             return
         requested = self.subset.required_names()
         sources = self._resolve_dataset_sources(requested)
-        # Header-only scan: for each case, its resident bytes per spatial voxel is the sum of its
-        # groups' channels (output + targets + masks all arrive as groups); the WORST case sizes the
-        # one patch every case then shares (a smaller case simply yields fewer patches).
+        # Header-only scan: each case's resident bytes per spatial voxel is the sum of its groups'
+        # channels; the WORST case sizes the one patch every case then shares.
         channels_by_name: dict[str, int] = {}
         spatial_by_name: dict[str, list[int]] = {}
         for group, entries in sources.items():
@@ -1138,9 +1069,8 @@ class DataMetric(Data):
         budget = self.resolved_budget().per_rank_bytes(node_local_ranks())
         extent = spatial_by_name[worst]
         halo = self.patch_halo
-        # What the budget bounds is the READ: a slot plus the halo past each face. Sized as one
-        # patch; an axis the budget cuts thinner than its two halos is spanned whole instead, since
-        # the halo there would cost more than the axis, and the other axes absorb it.
+        # What the budget bounds is the READ: a slot plus the halo past each face. An axis the
+        # budget cuts thinner than its two halos is spanned whole, the other axes absorbing it.
         template = [0] * len(extent)
         while True:
             sized = resolve_patch(
@@ -1201,16 +1131,14 @@ class DataMetric(Data):
             subset,
             memory_budget,
             patch=None,
-            # Evaluation reads each case exactly once (no augmentations, one pass): a cache is never
-            # re-read, it only fronts the whole dataset's RAM. Stream.
+            # Evaluation reads each case exactly once: a cache is never re-read. Stream.
             use_cache=False,
             batch_size=1,
             validation=validation,
             num_workers=num_workers,
             pin_memory=pin_memory,
             prefetch_factor=prefetch_factor,
-            # One pass: workers are never reused across epochs, and persistent workers race the
-            # process teardown (the terminated worker trips torch's failure handler at exit).
+            # One pass: persistent workers race the process teardown at exit.
             persistent_workers=False if persistent_workers is None else persistent_workers,
         )
 
@@ -1223,8 +1151,7 @@ class DataTransform(DataSources):
     :class:`~konfai.data.materialize.CaseMaterializer` over the managers, never a DataLoader. So no
     patch (the planner cuts slabs, never the user), no batch, no validation split, no shuffle, and
     no ``augmentations`` section: a draw is a stage, declared IN the chain, at the place it applies,
-    after an :class:`~konfai.data.transform.Expand` marker. Everything decidable from the config
-    alone is refused here, before a single byte is read.
+    after an :class:`~konfai.data.transform.Expand` marker.
     """
 
     def __init__(
@@ -1241,8 +1168,7 @@ class DataTransform(DataSources):
 
     def prepare(self) -> None:
         # The chains are bound first and the cardinality checked BEFORE any manager exists: a draw
-        # declared outside a copy has no shape map, so the manager's own fold would die on an
-        # AttributeError naming a method instead of refusing with the place to move the draw to.
+        # declared outside a copy has no shape map, and the manager's fold would die on it.
         for group_src, group_dest, chain in _chains(self.groups_src):
             chain.prepare(group_src, group_dest)
         self._validate_expansion()
@@ -1251,13 +1177,10 @@ class DataTransform(DataSources):
         self._validate_write_chains()
 
     def _seed_expansions(self) -> None:
-        """Hand the run's seed to every ``Expand`` that did not declare one of its own.
-
-        Done before ``super().prepare()``, which is where the managers are built and the copies
-        drawn. Every chain inheriting the same number is what makes an image chain and its mask
-        chain agree: they never meet, they derive from one seed they both hold. A chain that
-        declares ``seed`` keeps it, which is how two chains are asked for different copies.
-        """
+        """Hand the run's seed to every ``Expand`` that did not declare one of its own, before
+        ``super().prepare()`` builds the managers and draws the copies. Every chain inheriting the
+        same number is what makes an image chain and its mask chain agree; a chain that declares
+        ``seed`` keeps it, which is how two chains are asked for different copies."""
         for _group_src, _group_dest, chain in _chains(self.groups_src):
             for transform in chain.transforms:
                 if isinstance(transform, Expand) and transform.seed is None:

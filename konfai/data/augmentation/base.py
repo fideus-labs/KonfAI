@@ -102,10 +102,8 @@ def _rotation_3d_matrix(rotation: torch.Tensor, center: torch.Tensor | None = No
 def _axis_rotation_matrix(theta: torch.Tensor, axis: torch.Tensor) -> torch.Tensor:
     """Rodrigues rotation of a colour vector about ``axis`` by ``theta``, as a 4x4 homogeneous matrix.
 
-    Hue rotation is a rotation of the RGB vector about the luma axis (1, 1, 1)/sqrt(3): it preserves luma
-    (a grey pixel stays grey) and is identity at theta = 0. The 4th (alpha) channel is left untouched.
-    Using Euler XYZ angles about the coordinate axes instead (as ``_rotation_3d_matrix(theta.repeat(3), v)``
-    did) is not a rotation about the luma axis and recolours grey pixels.
+    About the luma axis (1, 1, 1)/sqrt(3) it preserves luma and is the identity at theta = 0. The
+    4th (alpha) channel is left untouched.
     """
     k = (axis[:3] / torch.linalg.norm(axis[:3])).to(torch.float32)
     cross = torch.zeros((3, 3))
@@ -158,12 +156,12 @@ class DataAugmentationsList:
         self.data_augmentations = []
         for augmentation, prob in self.data_augmentationsLoader.items():
             module, name = get_module(augmentation, "konfai.data.augmentation")
-            # A key is read as a dotted path, and a classpath naming its module carries dots of its own.
+            # A key is read as a dotted path, and a classpath carries dots of its own.
             drawn = apply_config(
                 f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{_escape_key_component(augmentation)}"
             )(getattr(module, name))()
-            # A foreign class is handed over wrapped, and the wrapper reads its own parameters from
-            # the same subtree the class read its arguments from, as MinimalModel does for a model.
+            # A foreign class is handed over wrapped, the wrapper reading its own parameters from
+            # the subtree the class read its arguments from.
             data_augmentation: DataAugmentation = (
                 drawn
                 if isinstance(drawn, DataAugmentation)
@@ -172,9 +170,7 @@ class DataAugmentationsList:
                     f".data_augmentations.{_escape_key_component(augmentation)}"
                 )(partial(Foreign, drawn, augmentation))()
             )
-            # A foreign class brings all of its randomness, including whether it applies at all, and
-            # names that gate itself (`prob`, `p`). A second gate here would compose with it, so a
-            # probability of one half would be one quarter. The one it declares is the one that runs.
+            # A foreign class brings its own gate (`prob`, `p`), which a second gate would compose with.
             data_augmentation.load(1.0 if isinstance(data_augmentation, Foreign) else prob.prob)
             self.data_augmentations.append(data_augmentation)
 
@@ -184,18 +180,16 @@ class DataAugmentationsList:
 
 
 class DataAugmentation(NeedDevice, ABC):
-    #: Tier-1 declaration, exactly as :attr:`konfai.data.transform.Transform.locality`: the one
-    #: :class:`LocalityKind` every draw of this class makes, when it is unconditional. The base
-    #: ``_patch_locality`` answers from it; ``None`` (the default) keeps the fail-safe
-    #: ``WHOLE_VOLUME``. A declaration that depends on the draw overrides the method instead.
+    #: The one :class:`LocalityKind` every draw of this class makes, when it is unconditional.
+    #: ``None`` keeps the fail-safe ``WHOLE_VOLUME``; a declaration that depends on the draw
+    #: overrides ``_patch_locality``.
     locality: LocalityKind | None = None
 
-    #: Tier-1 companion to a ``HALO`` :attr:`locality`: per-spatial-axis radius in array order.
+    #: Companion to a ``HALO`` :attr:`locality`: per-spatial-axis radius in array order.
     halo: tuple[int, ...] = ()
 
     def __init_subclass__(cls, **kwargs: object) -> None:
-        # A draw is a chain stage too: record its constructor arguments as given, so konfai.api can
-        # write the config tree back from live objects (see Transform.__init_subclass__).
+        # A draw is a chain stage too: konfai.api writes the config tree back from live objects.
         super().__init_subclass__(**kwargs)
         record_given_arguments(cls)
 
@@ -215,16 +209,9 @@ class DataAugmentation(NeedDevice, ABC):
     def reset_state(self, index: int | None = None) -> None:
         """Drop the cached sampling for *index* so the next ``state_init`` re-samples.
 
-        Augmentation parameters are drawn once per case index and cached so that
-        every patch of that case shares a consistent transform within an epoch
-        (see ``state_init``). They must, however, be re-drawn at the start of each
-        epoch; otherwise a case keeps identical augmentation parameters for the
-        whole run. ``DatasetManager.reset_augmentation`` calls this before
-        ``state_init`` on every epoch reset. Subclass-specific caches (e.g.
-        ``matrix``/``flip``) are keyed by the same index and are overwritten by
-        the subsequent ``_state_init``; when the re-draw selects nothing they are
-        left untouched but never read (``__call__``/``inverse`` gate on
-        ``who_index``). Passing ``None`` clears every cached index.
+        Augmentation parameters are drawn once per case index and cached, so every patch of that
+        case shares one transform within an epoch, and re-drawn at each epoch reset, which
+        ``DatasetManager.reset_augmentation`` calls this from. ``None`` clears every cached index.
         """
         if index is None:
             self.who_index.clear()
@@ -266,17 +253,14 @@ class DataAugmentation(NeedDevice, ABC):
 
     def _slot(self, index: int, a: int) -> int:
         """The slot copy *a*'s draw is kept at: state is stored for the selected copies only, in
-        selection order, and the ``_``-prefixed methods are all handed that slot."""
+        selection order, and the ``_``-prefixed methods are handed that slot."""
         return self.who_index[index].index(a)
 
     def patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         """Declare how the draw of copy *a* makes its output depend on its input, for patch streaming.
 
         The same contract as :meth:`konfai.data.transform.Transform.patch_locality` (read-only, no
-        I/O, total, ``WHOLE_VOLUME`` by default) asked of one copy of one case, because that is the
-        grain an augmentation is parameterised at: the halo of a geometric draw is the draw's own, so
-        two copies of the same case answer differently and the same copy answers differently next
-        epoch. A copy the draw did not select is the identity, which the base answers for.
+        I/O, total, ``WHOLE_VOLUME`` by default), asked of one copy of one case.
         """
         if a not in self.who_index[index]:
             return PatchLocality(LocalityKind.POINTWISE)
@@ -298,9 +282,8 @@ class DataAugmentation(NeedDevice, ABC):
         return self._stream_region_source(index, self._slot(index, a), target_slices, source_spatial_shape)
 
     def stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
-        """The spatial shape copy *a*'s draw produces from ``shape`` (the shape-fold counterpart of
-        ``Transform.transform_shape``). The identity default covers every draw but a shape-changing
-        one, which restates here what its ``state_init`` did to the copy's grid."""
+        """The spatial shape copy *a*'s draw produces from ``shape``, the counterpart of
+        ``Transform.transform_shape``. A shape-changing draw restates what ``state_init`` did."""
         return self._stream_shape(index, self._slot(index, a), shape)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
@@ -328,9 +311,8 @@ class DataAugmentation(NeedDevice, ABC):
         self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
     ) -> torch.Tensor:
         """Apply the draw of copy *a* to one region, told where it sits (the same contract as
-        :meth:`konfai.data.transform.Transform.stream_region`). The default is the draw itself: a
-        per-voxel draw gives the same answer wherever its input came from; a draw parameterised by
-        the place (a noise field, a cutout box, a resample) overrides ``_stream_region``."""
+        :meth:`konfai.data.transform.Transform.stream_region`). The default is the draw itself; a
+        draw parameterised by the place overrides ``_stream_region``."""
         if a not in self.who_index[index]:
             return tensor
         return self._stream_region(name, index, self._slot(index, a), tensor, context)
@@ -353,9 +335,7 @@ class DataAugmentation(NeedDevice, ABC):
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         """Copy ``a`` of case ``index`` drawn from ``tensor``: a fresh tensor or a view of it.
 
-        ``tensor`` is the case itself, or another draw's output, and every copy the draw did not
-        select aliases it: nothing may be written into it. A draw that must work in place clones
-        first, as ``Foreign`` does.
+        Every copy the draw did not select aliases ``tensor``, so nothing may be written into it.
         """
 
     def inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
@@ -372,9 +352,7 @@ def _hashed_normal_field(
     seed: int, shape: tuple[int, ...], offsets: tuple[int, ...], full: tuple[int, ...], device: torch.device
 ) -> torch.Tensor:
     """A standard-normal field over ``shape`` (channel first) whose value at a voxel is a function of
-    ``(seed, channel, position in the full volume)``: what lets a region hold exactly its part of the
-    volume's field. splitmix64 over the voxel's linear index (int64 arithmetic wraps, on every
-    device), two uniforms, one Box-Muller draw."""
+    ``(seed, channel, position in the full volume)``, so a region holds its part of the field."""
     channels, spatial = int(shape[0]), tuple(int(extent) for extent in shape[1:])
     positions = [
         torch.arange(start, start + extent, device=device, dtype=torch.int64)
@@ -410,9 +388,8 @@ def _hashed_normal_field(
 
 
 def _reflect_interval(low: float, high: float, span: float) -> tuple[float, float]:
-    """The interval ``[low, high]`` after ``padding_mode='reflection'`` folds it into ``[0, span]``
-    (mirrors at 0 and at ``span``, repeated). Every fold inside the interval lands on 0 or on
-    ``span``, so the image is the hull of the folded endpoints and those."""
+    """The interval ``[low, high]`` after ``padding_mode='reflection'`` folds it into ``[0, span]``:
+    the hull of the folded endpoints and the fold points inside the interval."""
     if span <= 0:
         return 0.0, 0.0
 
@@ -439,18 +416,13 @@ class Foreign(DataAugmentation):
             args: {prob: 1.0, std: 12.0}
             groups: [CT]
 
-    The class must be callable on one tensor, return the transformed tensor, and keep its shape --
-    which is what torchvision's transforms, TorchIO's and MONAI's array transforms all do.
+    The class must be callable on one tensor, return the transformed tensor, and keep its shape. A
+    draw belongs to the case, and each group of the case is handed the same copy of it: the seed is
+    drawn once and the global state is set from it before every group.
 
-    A draw belongs to the case, and each group of the case is handed the same copy of it. The seed
-    of the copy is drawn once and the global state is set from it before every group, so the class
-    draws the same way for the label as for the image.
-
-    Name the ONE group a foreign draw belongs to. A single draw suits several groups only when the
-    class consumes its random state identically whatever it is given and the draw does not SAMPLE:
-    a rotation of the image is a rotation of the label, but a label interpolated between two ids is
-    neither. Subclass ``DataAugmentation`` for a draw that must span groups: the draw is then a
-    value this framework holds, rather than a random state two libraries agree about.
+    Name the one group a foreign draw belongs to: a single draw suits several groups only when the
+    class consumes its random state identically whatever it is given and does not sample values.
+    Subclass ``DataAugmentation`` for a draw that must span groups.
     """
 
     def __init__(self, transform, classpath: str, groups: list[str] | None = None) -> None:
@@ -460,22 +432,14 @@ class Foreign(DataAugmentation):
         self.seeds: dict[int, list[int]] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
-        # One seed per copy, drawn once for the case: every group of it is handed these same seeds.
+        # One seed per copy, drawn once for the case: every group is handed these same seeds.
         self.seeds[index] = torch.randint(0, 2**31 - 1, (len(shapes),)).tolist()
         return shapes
 
     @contextmanager
     def _seeded(self, seed: int):
         """Put the class's random state where the seed says, and give the process back what it had.
-
-        A class draws either from the interpreter's global state, which torchvision's transforms and
-        TorchIO's draw from, or from a state of its own, which MONAI's Randomizable holds and reaches
-        through ``set_random_state``. Both are set: which one a class uses is not something it says.
-
-        The global state belongs to the run, not to this draw. Left where the class stopped, the two
-        groups of one case would leave it in the same place and whatever drew next would draw twice
-        the same, and torch's seed reaches the devices, where the model draws its own.
-        """
+        Both the interpreter's global state and the class's own ``set_random_state`` are set."""
         with preserved_rng():
             seed_all(seed)
             set_random_state = getattr(self.transform, "set_random_state", None)
@@ -484,8 +448,7 @@ class Foreign(DataAugmentation):
             yield
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        # A class from another framework may write into what it is handed. The tensor is the
-        # case's own, shared by every copy, so the class alone is handed a copy of it.
+        # A class from another framework may write into what it is handed, and the tensor is shared.
         with self._seeded(self.seeds[index][a]):
             result = self.transform(tensor.clone())
         if not isinstance(result, torch.Tensor):
@@ -498,8 +461,6 @@ class Foreign(DataAugmentation):
         return result
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        # Undoing a draw is a second thing a class must expose, and the convention this reads covers
-        # applying one alone.
         raise AugmentationError(
             f"'{self.classpath}' cannot be undone.",
             "Subclass DataAugmentation and implement _inverse(), or drop the augmentation from a"

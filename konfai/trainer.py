@@ -81,11 +81,8 @@ def _checkpoint_score(path: Path, default: float) -> float:
 
 
 def _ddp_kwargs(model: Network, local_rank: int, size: int) -> dict[str, Any]:
-    """DDP options compatible with the graph's gradient accumulation cadence.
-
-    Static-graph DDP cannot start its first backward inside ``no_sync``. An accumulating
-    network needs the ordinary reducer; graphs stepping every batch keep the static fast path.
-    """
+    """DDP options for the graph's gradient accumulation cadence: an accumulating network needs the
+    ordinary reducer, a graph stepping every batch keeps the static-graph fast path."""
     accumulates = any(
         network.optimizer is not None and network.nb_batch_per_step > 1 for network in model.get_networks().values()
     )
@@ -120,9 +117,8 @@ def _restore_checkpoint_rng(states: dict[str, Any]) -> None:
 class EarlyStoppingBase:
     """Minimal protocol for early stopping strategies used by :class:`Trainer`."""
 
-    # Single source of truth for the optimisation direction of the monitored score. The default
-    # (no configured EarlyStopping) monitors the summed loss, so lower is better; EarlyStopping
-    # overrides this from its `mode` config. Both early stopping and BEST-checkpoint retention read it.
+    # Direction of the monitored score, read by early stopping and BEST-checkpoint retention. The
+    # default (no EarlyStopping) monitors the summed loss, lower is better.
     mode: str = "min"
 
     def __init__(self):
@@ -219,10 +215,8 @@ class EarlyStopping(EarlyStoppingBase):
 
 
 def _on_host(value: Any) -> Any:
-    """``value`` with every tensor copied into host memory: a snapshot the writer serialises while the
-    training thread moves on. Containers keep their type and attributes (a state dict is an
-    OrderedDict, possibly carrying ``_metadata``), so the file's layout is the one torch.save of the
-    live objects would write."""
+    """``value`` with every tensor copied into host memory. Containers keep their type and attributes
+    (a state dict is an OrderedDict, possibly carrying ``_metadata``)."""
     if isinstance(value, torch.Tensor):
         return value.detach().to("cpu", copy=True)
     if isinstance(value, dict):
@@ -241,9 +235,8 @@ def _dataset(loader: DataLoader) -> DatasetIter:
 
 
 class _CheckpointWriter:
-    """Serialises one checkpoint at a time on a thread of its own. ``submit`` first joins the previous
-    write, so at most one is in flight; a failure on the thread is raised by the next ``join``, on the
-    training thread, never lost."""
+    """Serialises one checkpoint at a time on a thread of its own: ``submit`` joins the previous write,
+    and a failure on the thread is raised by the next ``join`` on the training thread."""
 
     def __init__(self) -> None:
         self._thread: threading.Thread | None = None
@@ -275,24 +268,14 @@ def _ema_network(model_ema: AveragedModel) -> Network:
 
 
 class _Trainer:
-    """
-    Internal class for managing the training loop in a distributed or standalone setting.
+    """Training loop for one process, distributed or standalone: epochs with optional validation,
+    autocast, EMA, early stopping, TensorBoard logging, checkpoint saving (ALL or BEST).
 
-    Handles:
-    - Epoch iteration with training and optional validation
-    - Mixed precision support (autocast)
-    - Exponential Moving Average (EMA) model tracking
-    - Early stopping
-    - Logging to TensorBoard
-    - Model checkpoint saving and selection (ALL or BEST)
-
-    This class is intended to be used via a context manager
-    (`with _Trainer(...) as trainer:`)  inside the public `Trainer` class.
+    Used as a context manager (``with _Trainer(...) as trainer:``) inside :class:`Trainer`.
     """
 
-    # Rank-aligned poll cadence (iterations) shared by the validation-request and live-tunable pollers,
-    # and the cadence of the progress bar's description (an NVML query, two psutil queries and the
-    # last values of every criterion; refreshed on the bar's own schedule, not once per batch).
+    # Poll cadence (iterations), rank-aligned, shared by the validation-request and live-tunable
+    # pollers and by the progress bar's description refresh.
     _LIVE_POLL_INTERVAL = 20
 
     def __init__(
@@ -355,14 +338,13 @@ class _Trainer:
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
         self.it = it
         self._declare_measure_window()
-        # Live steering: an external steerer (MCP/Studio) drops control.json in the run dir; the loop applies
-        # each new revision at a DDP poll boundary and records the change into the run's config snapshot.
+        # Live steering: control.json in the run dir; each new revision is applied at a DDP poll
+        # boundary and recorded in the run's config snapshot.
         self._config_snapshot = config_snapshot
         self._live_control = LiveControl(statistics_directory() / self.train_name / "control.json")
         self._interventions: list[dict[str, Any]] = []
         if SummaryWriter is None:
-            # A missing logger must never refuse the run: training still produces a model, and only
-            # the curves are lost. One line says so; the extra keeps them.
+            # A missing logger never refuses the run: only the curves are lost.
             if self.global_rank == 0:
                 print(
                     "[KonfAI] TensorBoard is not installed: no curves or images will be logged"
@@ -389,10 +371,8 @@ class _Trainer:
     def __exit__(self, exc_type, value, traceback):
         """Close the writer and save an exit checkpoint only when it records anything.
 
-        An exit at the last save's iteration adds nothing, and the auto-patch OOM restart is about
-        to rebuild and continue: both used to leave a multi-GB worst-score snapshot behind (the
-        restart's, of untrained weights, unprunable). A genuine failure that DID advance keeps its
-        crash-save, under a name that says what it is.
+        An exit at the last save's iteration and the auto-patch OOM restart add nothing; a failure
+        that advanced keeps its crash-save.
         """
         if self.tb is not None:
             self.tb.close()
@@ -412,12 +392,10 @@ class _Trainer:
                     network.measure.set_window(max(self.it_validation, validation))
 
     def _initialize_best_checkpoint_state(self) -> None:
-        """Bootstrap BEST-checkpoint tracking once, including resume scenarios.
+        """Bootstrap BEST-checkpoint tracking once, including on resume.
 
-        Crash saves (``crash_*.pt``) are the user's to manage: never a contender for best, never
-        pruned. When only unscored checkpoints remain (their stored loss is the worst-score
-        sentinel), they all hold the same claim, so the newest: the most-trained snapshot: is kept
-        and the rest are pruned; ``is_better`` is strict, so no scan can elect one best.
+        Crash saves (``crash_*.pt``) are never a contender for best and never pruned. When only
+        unscored checkpoints remain, the newest is kept and the rest are pruned.
         """
         path = checkpoints_directory() / self.train_name
         if not path.exists():
@@ -462,12 +440,8 @@ class _Trainer:
         checkpoint_path.unlink()
 
     def run(self) -> None:
-        """
-        Launches the training loop, performing one epoch at a time.
-        Triggers early stopping and resets data augmentations between epochs.
-        """
-        # SIGUSR1 requests an on-demand validation pass (KonfAI Studio's "Validate now"); the handler only
-        # flips a flag: the loop consumes it at a poll boundary, DDP-safe (see _poll_live_requests).
+        """Run the training loop one epoch at a time, with early stopping and augmentation resets."""
+        # SIGUSR1 requests an on-demand validation; the flag is consumed at a poll boundary (_poll_live_requests).
         sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
         if sigusr1 is not None:
             with suppress(ValueError, OSError):  # signals only install on the main thread
@@ -539,8 +513,7 @@ class _Trainer:
     def _save_epoch_boundary(self) -> None:
         """Publish a continuation cursor only after every optimizer finishes its accumulation window.
 
-        Every rank contributes its generator state. No extra optimizer step/zeroing is introduced to
-        make a boundary eligible: an incomplete window stays live for the next ordinary batch.
+        Every rank contributes its generator state; an incomplete window stays live for the next batch.
         """
         pending = [
             name
@@ -610,14 +583,7 @@ class _Trainer:
         self.checkpoint_save(self._deferred_score)
 
     def train(self) -> None:
-        """
-        Performs a full training epoch with support for:
-        - mixed precision
-        - DDP / CPU training
-        - EMA updates
-        - loss logging and checkpoint saving
-        - validation at configurable iteration interval
-        """
+        """One training epoch: autocast, DDP or CPU, EMA, logging, checkpoints, validation at ``it_validation``."""
         self._epoch_complete = False
         self._deferred_score = None
         self._resume_cursor = {
@@ -677,9 +643,8 @@ class _Trainer:
 
                         stop = False
                         if self.global_rank == 0:
-                            # Default selection scores on the losses only (always lower-is-better).
-                            # An explicit monitor may reference a metric; then use the full dict, and
-                            # its direction comes from EarlyStopping.mode (is_better).
+                            # Default selection scores the losses only (lower is better); an explicit
+                            # monitor reads the full dict with the direction of EarlyStopping.mode.
                             if isinstance(self.early_stopping, EarlyStopping) and self.early_stopping.monitor:
                                 score = self.early_stopping.get_score(loss)
                             else:
@@ -692,8 +657,7 @@ class _Trainer:
                                 with clock.phase("checkpoint"):
                                     self.checkpoint_save(score)
 
-                            # Stop once the schedulers have decayed the learning rate to zero:
-                            # no further optimisation is possible, so end the run cleanly.
+                            # Stop once the schedulers have decayed the learning rate to zero.
                             optimizer = self.model.module.optimizer
                             if not stop and optimizer is not None and optimizer.param_groups[0]["lr"] <= 0:
                                 self.early_stopping.stop()
@@ -718,12 +682,9 @@ class _Trainer:
     @staticmethod
     def _epoch_report(clock: SweepClock, min_seconds: float = 1.0) -> str | None:
         """One line accounting for the epoch's wall clock, in the sweep report's format, or ``None``
-        below ``min_seconds``. ``forward`` is the graph walk alone, the criteria being timed inside it;
-        what no phase names is ``other``, so the sum closes on the wall clock. On a device a phase
-        is the time its kernels took to enqueue: the device's own time lands where the host next
-        waits for it, so ``criteria`` carries the forward's kernels: its first target upload waits on
-        them, 13.8 s of a 20.2 s epoch on the shipped 2D example. The rest lands at the loss read, a
-        checkpoint's host copy and the validation."""
+        below ``min_seconds``. ``forward`` is the graph walk alone; what no phase names is ``other``. On
+        a device a phase is the time its kernels took to enqueue, so ``criteria`` carries the forward's
+        kernels."""
         wall = clock.spent("epoch")
         if wall < min_seconds:
             return None
@@ -735,9 +696,7 @@ class _Trainer:
 
     @torch.no_grad()
     def _validate(self) -> dict[str, float]:
-        """
-        Executes the validation phase, evaluates loss and metrics.
-        Updates model states and resets augmentation for validation set.
+        """Validation pass: losses and metrics, model states updated, augmentation reset for validation.
 
         Returns:
             dict[str, float]: Validation losses and metrics; empty off rank 0 or without a validation set.
@@ -774,9 +733,7 @@ class _Trainer:
         return self._validation_log(batch_sample)
 
     def _broadcast_from_master(self, value: Any) -> Any:
-        """Rank 0's value on every rank, so the loop stays synchronized under DDP: one broadcast of a
-        pickled object, where an all_gather would ship every rank's copy for a rank-0 payload. Any
-        picklable object rides through; callers cast as they need."""
+        """Rank 0's value on every rank, one broadcast of a pickled object; callers cast as they need."""
         if not dist.is_initialized():
             return value
         payload = [value if self.global_rank == 0 else None]
@@ -786,28 +743,19 @@ class _Trainer:
         return payload[0]
 
     def _broadcast_stop(self, stop: bool) -> bool:
-        """
-        Share rank 0's stop decision with every rank so the training loop is left together.
-
-        Only rank 0 owns the aggregated metrics and therefore the early-stopping decision.
-        Broadcasting it prevents ranks from diverging (some breaking, some continuing).
-        """
+        """Rank 0's stop decision on every rank, so the loop is left together."""
         return bool(self._broadcast_from_master(stop))
 
     def _poll_from_rank0(self, producer: Callable[[], Any]) -> Any:
-        """Rank 0 produces the value; every rank receives the same one via broadcast, so all ranks act on
-        the same value at the same iteration. Non-master ranks contribute a neutral placeholder that the
-        broadcast overwrites; single-process runs skip the collective entirely (like _broadcast_stop)."""
+        """Rank 0 produces the value and every rank receives it; single-process runs skip the collective."""
         value = producer() if self.global_rank == 0 else None
         if self.world_size > 1:
             value = self._broadcast_from_master(value)
         return value
 
     def _poll_live_requests(self) -> tuple[bool, dict[str, Any] | None]:
-        """What rank 0 has pending, at the poll cadence: an on-demand validation (SIGUSR1) and the
-        control file's new tunables, in one broadcast. Rank 0's state is authoritative, so every rank
-        acts on the same pair at the same iteration; the cadence bounds the latency while keeping the
-        collective rare, and single-process runs skip it entirely."""
+        """Rank 0's pending requests at the poll cadence, in one broadcast: an on-demand validation
+        (SIGUSR1) and the control file's new tunables."""
         if self.it % self._LIVE_POLL_INTERVAL != 0:
             return False, None
         requested, pending = self._poll_from_rank0(lambda: (self._validate_now, self._live_control.take()))
@@ -844,8 +792,8 @@ class _Trainer:
         return None
 
     def _record_interventions(self) -> None:
-        """Append the intervention audit trail to the run's config snapshot and reflect the current
-        it_validation, so the on-disk config stays a truthful record of the run. Rank 0, atomic."""
+        """Append the intervention audit trail and the current it_validation to the config snapshot.
+        Rank 0, atomic."""
         target = self._config_snapshot
         if not target.is_file():
             return
@@ -866,18 +814,15 @@ class _Trainer:
         os.replace(tmp, target)
 
     def checkpoint_save(self, loss: float | None, crash: bool = False) -> None:
-        """
-        Saves model and optimizer states. Keeps either all checkpoints or only the best one.
+        """Save model and optimizer states, keeping all checkpoints or only the best one.
 
-        The training thread copies the states into host memory and returns; the serialisation, the
-        publish and the BEST-mode pruning run on the writer's thread, joined before the next save and
-        at exit.
+        The training thread copies the states into host memory; serialisation, publish and BEST
+        pruning run on the writer's thread, joined before the next save and at exit.
 
         Args:
             loss (float): Current loss used for best checkpoint selection.
-            crash (bool): A save on an exceptional exit: named ``crash_<date>.pt`` and left outside
-                BEST retention, so the last state survives beside the best one instead of being
-                retired by it.
+            crash (bool): A save on an exceptional exit, named ``crash_<date>.pt`` and left outside
+                BEST retention.
         """
         if self.global_rank != 0:
             return
@@ -894,8 +839,7 @@ class _Trainer:
             collision += 1
         self._saved_at_it = self.it
 
-        # An unscored checkpoint (the final save at close) carries the worst possible score so
-        # `_update_best_checkpoint` retires it in BEST mode instead of leaving it beside the real best.
+        # An unscored checkpoint carries the worst possible score so BEST mode retires it.
         checkpoint_loss = loss if loss is not None else self.early_stopping.worst_score
         save_dict: dict[str, Any] = {
             "epoch": self.epoch,
@@ -941,18 +885,14 @@ class _Trainer:
         snapshot = _on_host(save_dict)
 
         def publish() -> None:
-            # Staged and renamed, the invariant the dataset writers hold: a multi-GB torch.save takes
-            # seconds, and a kill mid-write left a truncated .pt under a plausible name that RESUME
-            # then died on with an opaque unpickling error.
+            # Staged and renamed: a kill mid-write must not leave a truncated .pt under a plausible name.
             staging = save_path.with_name(f"{save_path.name}.{os.getpid()}.tmp")
             torch.save(snapshot, staging)
             os.replace(staging, save_path)
             if not crash and snapshot["resume"]["kind"] == "epoch_boundary":
-                # The newest dated save may be intermediate or a crash even in ALL mode.
-                # Keep an explicit latest continuation, sharing storage with its dated file.
+                # An explicit latest continuation, sharing storage with its dated file.
                 latest = path / "resume_latest.pt"
-                # A reused name could be a stale hard link left by a crashed process:
-                # truncating it in the copy fallback would also truncate its old BEST inode.
+                # A reused name may be a stale hard link; truncating it would also truncate its old BEST inode.
                 with tempfile.TemporaryDirectory(prefix=".resume-", dir=path) as temporary:
                     resume_staging = Path(temporary) / "checkpoint.pt"
                     try:
@@ -971,15 +911,14 @@ class _Trainer:
         type_log: str,
         batch_sample: BatchSample,
     ) -> dict[str, float]:
-        """
-        Logs losses, metrics and optionally images to TensorBoard.
+        """Log losses, metrics and optionally images to TensorBoard.
 
         Args:
             type_log (str): "Training" or "Validation".
             batch_item (dict): Dictionary of BatchItem from current batch.
 
         Returns:
-            dict[str, float]: Dictionary of aggregated losses and metrics on rank 0; empty on the other ranks.
+            dict[str, float]: Aggregated losses and metrics on rank 0; empty on the other ranks.
         """
         models: dict[str, Network] = {"": self.model.module}
         if self.model_ema is not None:
@@ -1015,12 +954,10 @@ class _Trainer:
 
         for label, model in models.items():
             for name, network in model.get_networks().items():
-                # EMA has no training forward, so its first validation has not produced a
-                # measurement yet. The collector omits such empty windows.
+                # EMA has no training forward: its first window may be empty, and the collector omits it.
                 if network.measure is None or f"{name}{label}" not in measures:
                     continue
-                # Losses and metrics take the same pair of boards: the measured value, and the
-                # weight that scaled it into the total.
+                # Losses and metrics take the same pair of boards: the value, and the weight that scaled it.
                 for board, table in (("Loss", 0), ("Metric", 1)):
                     entries = measures[f"{name}{label}"][table]
                     self.tb.add_scalars(
@@ -1035,9 +972,7 @@ class _Trainer:
                     )
 
             if len(images_log):
-                # get_layers is model-scoped, not per-network: run it once per model, or a
-                # multi-network model (a GAN's generator + discriminator) repeats the forward
-                # extraction and writes each image event once per network.
+                # get_layers is model-scoped: run it once per model, not once per network.
                 for name, layer, _ in model.get_layers(
                     [v.tensor for v in batch_sample.values() if v.is_input],
                     images_log,
@@ -1065,9 +1000,7 @@ class _Trainer:
                 minimized.update({k: v[2] for k, v in measures[name][0].items()})
                 loss.update({k: v[1] for k, v in measures[name][0].items()})
                 loss.update({k: v[1] for k, v in measures[name][1].items()})
-        # The default selection scores the losses by what they minimized, not by what they report:
-        # a Dice loss reports the coefficient, so summing that with a cross entropy kept the epoch
-        # with the worst overlap. A metric's direction varies and only an explicit monitor reads it.
+        # The default selection scores the losses by what they minimized, not by what they report.
         self._loss_score = minimized
         return loss
 
@@ -1084,12 +1017,8 @@ class _Trainer:
 
 def _agreed_patch(gathered: list, template: list[int]) -> list[int] | None:
     """The per-axis MIN of the candidates gathered at the OOM shrink rendezvous, ``None`` when no rank
-    proposed one (every rank is at its floor: the OOM is not recoverable).
-
-    A gathered entry that is not a patch candidate means another rank was still training and its own
-    collective crossed this rendezvous: an asymmetric OOM. That is not recoverable either, but it
-    must fail as a diagnosis, not as an opaque ``TypeError`` from ``min``.
-    """
+    proposed one. A gathered entry that is not a patch candidate is an asymmetric OOM (another rank's
+    collective crossed this rendezvous): unrecoverable, failed as a diagnosis."""
     proposals = [proposal for proposal in gathered if proposal is not None]
     if not proposals:
         return None
@@ -1110,15 +1039,8 @@ def _agreed_patch(gathered: list, template: list[int]) -> list[int] | None:
 
 @config()
 class Trainer(vram.VramAutoPatchMixin, DistributedObject):
-    """
-    Public API for training a model using the KonfAI framework.
-    Wraps setup, checkpointing, resuming, logging, and launching distributed _Trainer.
-
-    Main responsibilities:
-    - Initialization from config (via @config)
-    - Model and EMA setup
-    - Checkpoint loading and saving
-    - Distributed setup and launch
+    """Public API for training a model: setup, checkpointing, resuming, logging, and the distributed
+    ``_Trainer`` launch.
 
     Args:
         model (ModelLoader): Loader for model architecture.
@@ -1185,14 +1107,10 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
         state = State[konfai_state()]
-        # Cut the grids with the model's downsampling multiple already known, so each case's free axis
-        # rounds up to a valid input size (the graph (hence the factor) is final before init()).
+        # The model's downsampling multiple is final before init(); each case's free axis rounds up to it.
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
-        # The train/validation split is drawn inside prepare() here on the launcher, before spawn.
-        # It always comes from a CONCRETE seed: the configured one, or the seed the previous run
-        # recorded, or a fresh draw: an unseeded split would be redrawn on RESUME and leak
-        # validation cases into training. Per-rank seeding for the actual training happens later in
-        # the distributed runtime, and stays opt-in (`manual_seed`), as do the cudnn flags.
+        # The split is drawn on the launcher before spawn, from a concrete seed (configured, recorded,
+        # or fresh): an unseeded split would be redrawn on RESUME and leak validation cases into training.
         self._split_seed = self._resolve_split_seed(state)
         seed_all(self._split_seed)
         self.dataset.prepare()
@@ -1203,12 +1121,9 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self._downsampling_factor = self.model.downsampling_factor()
 
     def _resolve_split_seed(self, state: State) -> int:
-        """The seed every draw in ``prepare()`` (the split first) comes from, always concrete.
-
-        The configured ``manual_seed`` when there is one; on RESUME of an unseeded run, the seed the
-        TRAIN run recorded in its workspace, so the rebuilt split is the one the checkpoint trained
-        on; otherwise a fresh draw, recorded by ``setup`` for the next RESUME.
-        """
+        """The seed every draw in ``prepare()`` comes from: the configured ``manual_seed``, else the seed
+        the TRAIN run recorded (RESUME rebuilds the split the checkpoint trained on), else a fresh draw
+        recorded by ``setup`` for the next RESUME."""
         if self.manual_seed is not None:
             return self.manual_seed
         if state == State.RESUME:
@@ -1224,12 +1139,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             return None
 
     def setup(self, world_size: int):
-        """
-        Initializes the training environment:
-        - Clears previous outputs (unless resuming)
-        - Initializes model and EMA
-        - Loads checkpoint (if resuming)
-        - Prepares dataloaders
+        """Initialize the training environment: clear previous outputs unless resuming, build the model
+        and EMA, load the checkpoint when resuming, prepare the dataloaders.
 
         Args:
             world_size (int): Total number of distributed processes.
@@ -1242,8 +1153,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
                 shutil.rmtree(checkpoints_path)
             elif checkpoints_path.exists():
                 checkpoints_path.unlink()
-            # The statistics directory holds the rank-0 log this process already has open: clear
-            # around it instead of rmtree'ing the directory out from under the live file.
+            # The statistics directory holds the rank-0 log already open: clear around it, not rmtree.
             statistics_path = statistics_directory() / self.name
             if statistics_path.is_dir():
                 clear_directory_except_logs(statistics_path)
@@ -1255,8 +1165,6 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             if state != State.TRAIN:
                 state_dict = self._load()
             self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
-            # The EMA weights are restored from the same checkpoint: the startup line accounts for
-            # them where the reader looks for the weights, not in what setup does around them.
             if self.ema_decay > 0:
                 self.model_ema = AveragedModel(self.model, **self._ema_update())
                 if state_dict is not None:
@@ -1274,8 +1182,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
             for name in validation_names:
                 f.write(name + "\n")
-        # The seed the split was drawn from, kept where RESUME looks for it (_resolve_split_seed):
-        # written here, after the fresh-TRAIN clearing above, so it survives its own run.
+        # The split seed, where _resolve_split_seed reads it on RESUME; written after the clearing above.
         (statistics_directory() / self.name / "Seed.txt").write_text(f"{self._split_seed}\n")
 
     def set_model(self, path_to_model: str | Path) -> None:
@@ -1285,8 +1192,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self.override_lr = lr
 
     def _load(self) -> dict[str, Any]:
-        """
-        Loads a previously saved checkpoint from local disk or URL.
+        """Load a previously saved checkpoint from local disk or URL.
 
         Returns:
             dict: State dictionary loaded from checkpoint.
@@ -1317,15 +1223,14 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             self.epoch = next_epoch
             self._resume_state = cursor
         elif "epoch" in state_dict:
-            # Old integers meant the epoch being executed. Never reinterpret them as next_epoch.
+            # An integer "epoch" is the epoch being executed, never next_epoch.
             self.epoch = state_dict["epoch"]
         if "it" in state_dict:
             self.it = state_dict["it"]
         return state_dict
 
     def _ema_update(self) -> dict[str, Any]:
-        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn``, one ``_foreach_lerp_``
-        per device and dtype."""
+        """The EMA rule for AveragedModel: torch's fused ``multi_avg_fn``."""
         return {"multi_avg_fn": get_ema_multi_avg_fn(self.ema_decay)}
 
     def run_process(
@@ -1335,9 +1240,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         local_rank: int,
         dataloaders: list[DataLoader],
     ):
-        """
-        Launches the actual training process via internal `_Trainer` class.
-        Wraps model with DDP or CPU fallback, attaches EMA, and starts training.
+        """Launch the training via ``_Trainer``: wrap the model with DDP or the CPU fallback, attach EMA.
 
         Args:
             world_size (int): Number of model replicas sharding the data: the spawned process count
@@ -1390,21 +1293,15 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             except torch.cuda.OutOfMemoryError:
                 if self._vram_patch_template is None:
                     raise  # no free axis declared: not auto-patched
-                # The restart loop IS the sizing iteration: the step that just OOMed already measured
-                # its transient for free. Drop the failed step's gradients before reading free VRAM.
-                # The auto-patch OOM fires on the first batch's FORWARD (the memory peak), before any
-                # optimizer.step(), so no weights are updated. The rare case where it fires mid-step
-                # instead leaves that first batch's partial update in place (the restart continues from
-                # it); this is a bounded one-batch perturbation, not worth a whole-run state snapshot.
+                # The step that just OOMed measured its transient. Drop its gradients before reading free
+                # VRAM. The OOM fires on the first batch's forward, before any optimizer.step(); a mid-step
+                # OOM leaves a one-batch partial update in place, which the restart continues from.
                 measured = vram.transient_at_oom(device)
                 self.model.zero_grad(set_to_none=True)
                 candidate = self._shrunken_patch(measured, vram.usable_after_oom(device))
-                # Every rank must train the same grid, so the shrink is agreed at a rendezvous: each
-                # failing rank proposes its own candidate and all adopt the per-axis MIN. A rank that
-                # did NOT run out never reaches this all-gather; the job then dies at the collective
-                # timeout, exactly as an unhandled OOM kills it. Ranks failing together recover
-                # together when they fail at the same collective offset (the common case: they
-                # share the patch size); an offset mismatch pairs foreign payloads, caught below.
+                # Every rank must train the same grid: each failing rank proposes a candidate and all
+                # adopt the per-axis MIN. A rank that did not run out never reaches this all-gather and
+                # the job dies at the collective timeout; an offset mismatch pairs foreign payloads.
                 if world_size > 1:
                     print(
                         f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> waiting at the shrink"
@@ -1438,7 +1335,7 @@ def build_train(
     Parameters
     ----------
     command : State, optional
-        Training command variant, typically ``State.TRAIN`` or ``State.RESUME``.
+        ``State.TRAIN`` or ``State.RESUME``.
     model : Path | str | None, optional
         Checkpoint path used when resuming training.
     config : Path | str, optional
@@ -1448,14 +1345,13 @@ def build_train(
     statistics_dir : Path | str, optional
         Output directory for statistics and logs.
     lr : float | None, optional
-        Runtime learning-rate override applied when resuming/fine-tuning. When
-        ``None`` the checkpoint learning rate is resumed and the scheduler
-        continues; when set, the learning rate restarts from this value.
+        Learning-rate override when resuming: ``None`` resumes the checkpoint's rate and scheduler,
+        a value restarts from it.
 
     Returns
     -------
     DistributedObject
-        Configured trainer object ready to be executed by the runtime wrapper.
+        Configured trainer, executed by the runtime wrapper.
     """
     configure_workflow_environment(
         config_path=config,
@@ -1471,8 +1367,7 @@ def build_train(
     with strict_config("Trainer", refuse=False):
         trainer = apply_config()(Trainer)()
     if model is not None:
-        # Keep https:// checkpoint URLs as raw strings: Path() collapses the '//' into
-        # 'https:/…', which then fails both the startswith('https://') check and Path.exists().
+        # Keep https:// checkpoint URLs as raw strings: Path() collapses the '//'.
         trainer.set_model(model if isinstance(model, str) and model.startswith("https://") else Path(model))
     trainer.set_lr(lr)
     return trainer
@@ -1492,12 +1387,10 @@ def train(
     statistics_dir: Path | str = Path("./Statistics/"),
     lr: float | None = None,
 ) -> DistributedObject:
-    """
-    Build and execute the configured training workflow.
+    """Build and execute the configured training workflow.
 
-    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
-    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
-    The pure build step is :func:`build_train`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are read by :func:`run_distributed_app`
+    from the bound signature; the body drops them. The pure build step is :func:`build_train`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_train(

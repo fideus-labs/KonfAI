@@ -37,11 +37,8 @@ from konfai.utils.runtime import (
 def _colocate_loaded_modules(model: torch.nn.Module) -> None:
     """Move any still-CPU leaf module onto the model's device.
 
-    A custom :meth:`Network.load` may append modules after the model was already placed on its
-    device (e.g. a head sized from the checkpoint's class count), and those default to CPU, which
-    then raises a device mismatch on the forward pass. This re-homes any fully-CPU leaf onto the
-    device the rest of the model already lives on. Modules already on a device (including
-    model-parallel splits across several GPUs) are left untouched.
+    A custom :meth:`Network.load` may append modules after the model was placed, and those default to
+    CPU. Modules already on a device, model-parallel splits included, are left untouched.
     """
     target = next((p.device for p in model.parameters() if p.device.type != "cpu"), None)
     if target is None:
@@ -55,10 +52,8 @@ def _colocate_loaded_modules(model: torch.nn.Module) -> None:
 def _require_weights_entry(model: Network, state: dict[str, Any], source: dict[str, Any] | Path | str) -> None:
     """Refuse a checkpoint the stock loader would take no weights from.
 
-    ``Network.load`` reads weights from the ``Model`` entry a KonfAI checkpoint carries and is
-    silent without one: a raw ``nn.Module.state_dict()`` or a ``{"state_dict": ...}`` wrapper
-    then predicts with the constructor's weights and the run reports success. A model whose class
-    overrides ``load`` owns its format, and a weightless model has nothing to load.
+    ``Network.load`` reads weights from a KonfAI checkpoint's ``Model`` entry and is silent without
+    one. A model whose class overrides ``load`` owns its format, and a weightless model loads nothing.
     """
     from konfai.network.network.network import MinimalModel
 
@@ -77,10 +72,9 @@ def _require_weights_entry(model: Network, state: dict[str, Any], source: dict[s
 
 
 def _inference_entries(model: Network, state: dict[str, Any]) -> dict[str, Any]:
-    """What the host cache keeps of a checkpoint: the weights inference reads. A training
-    checkpoint carries the optimizer state beside them, as large again per member for Adam, and
-    an ensemble held every member's whole file. A model whose class owns its ``load`` keeps the
-    file whole: its format is its own."""
+    """What the host cache keeps of a checkpoint: the weights inference reads, dropping the optimizer
+    state a training checkpoint carries beside them. A model whose class owns its ``load`` keeps the
+    file whole."""
     from konfai.network.network.network import MinimalModel
 
     if getattr(type(model), "load", None) not in (Network.load, MinimalModel.load):
@@ -90,13 +84,9 @@ def _inference_entries(model: Network, state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _checkpoint_bytes(value: Any) -> int | None:
-    """Conservative retained size, counting shared tensor storage once within an entry.
-
-    A tiny view can hold a large allocation alive: ``numel * element_size`` is not its cost.
-    Include Python containers/metadata too. Unknown custom objects have no reliable size contract;
-    they remain loadable from files but bypass the cache. Bookkeeping and the active model are
-    outside this payload budget. Separate entries may overcount shared allocations, never undercount.
-    """
+    """Conservative retained size, counting shared tensor storage once within an entry and Python
+    containers too. Unknown custom objects answer ``None`` and bypass the cache. Separate entries may
+    overcount shared allocations, never undercount."""
     seen: set[int] = set()
     storages: set[tuple[str, int, int]] = set()
 
@@ -104,8 +94,7 @@ def _checkpoint_bytes(value: Any) -> int | None:
         if id(item) in seen:
             return 0
         seen.add(id(item))
-        # A container/scalar subclass can hide arbitrary allocations in attributes or C slots.
-        # Only the known representations below have a complete accounting contract.
+        # Only the exact types below have a complete accounting contract; a subclass can hide allocations.
         if type(item) not in (
             dict,
             OrderedDict,
@@ -162,13 +151,9 @@ class ModelComposite(Network):
 
     Args:
         model (Network): The base network to replicate.
-        combine (konfai.data.reduction.Reduction): The reduction method used to combine outputs from
-            all model replicas.
+        combine (konfai.data.reduction.Reduction): The reduction combining the replicas' outputs.
         checkpoint_cache_gib (float): Per-process retained checkpoint budget. Reloadable members
             that do not fit bypass the cache. Dictionary sources must fit in this budget.
-
-    Attributes:
-        combine (konfai.data.reduction.Reduction): The reduction used during forward inference.
     """
 
     def __init__(self, model: Network, combine: Reduction, checkpoint_cache_gib: float = 1.0):
@@ -234,9 +219,8 @@ class ModelComposite(Network):
         size = _checkpoint_bytes(state)
         if size is None or size > self._cache_limit_bytes:
             return
-        # A cyclic ensemble larger than an ordinary LRU cache gets ZERO hits. New members only
-        # take free room, keeping the resident subset hot across batches. If a cached file changes
-        # size, allow its replacement to evict the least recently used reloadable entries instead.
+        # New members only take free room, keeping the resident subset hot across a cyclic ensemble.
+        # A cached file that changed size may evict the least recently used reloadable entries.
         if replace:
             for victim in list(self._state_cache):
                 if self._state_cache_bytes + size <= self._cache_limit_bytes:
@@ -266,8 +250,7 @@ class ModelComposite(Network):
                 state = self._read_state_source(source)
                 if self._source_stamp(source) != stamp:
                     raise PredictorError(f"Checkpoint '{source}' changed while being read; retry prediction.")
-                # Checkpoints are keyed by the base model name, not by the streamed
-                # ensemble suffix added after the previous load.
+                # Checkpoints are keyed by the base model name, not by the streamed ensemble suffix.
                 model.set_name(self._base_model_name)
                 _require_weights_entry(model, state, source)
                 state = _inference_entries(model, state)
@@ -275,17 +258,14 @@ class ModelComposite(Network):
             self._state_stamps[index] = stamp
             model.set_name(self._base_model_name)
             model.load(state, init=False)
-            # A custom load() may append checkpoint-sized modules (e.g. the head) on CPU; co-locate
-            # them with the already device-placed model so the forward pass doesn't hit a mismatch.
+            # A custom load() may append modules on CPU: co-locate them with the placed model.
             _colocate_loaded_modules(model)
             model.set_name(f"{self._base_model_name}_{index}")
             self._loaded_state_index = index
         return model
 
     def _model_for_index(self, index: int) -> Network:
-        # With no checkpoint sources the model is weightless (0 parameters, e.g. a classical/optimisation
-        # engine): run it as constructed, once. The Predictor guards this, it only reaches here with empty
-        # sources when the model has no parameters to load, so there is nothing to stream.
+        # No checkpoint source means a weightless model (0 parameters): run it as constructed, once.
         if not self._state_sources:
             return self._get_model()
         return self._ensure_model_loaded(index)
@@ -295,9 +275,9 @@ class ModelComposite(Network):
         Load weights for each sub-model in the composite from the corresponding state dictionaries.
 
         Args:
-            state_sources (list): One checkpoint source per model replica. Empty ONLY for a weightless model
-                (0 parameters), which is then run once with its constructed weights; empty sources for a model
-                that has trainable parameters is refused here, so a caller cannot silently run random weights.
+            state_sources (list): One checkpoint source per model replica. Empty ONLY for a weightless
+                model (0 parameters), run once with its constructed weights; empty sources for a model
+                with trainable parameters are refused here.
         """
         if not state_sources and any(parameter.numel() for parameter in self._get_model().parameters()):
             raise PredictorError(
@@ -305,8 +285,7 @@ class ModelComposite(Network):
                 "A weightless model (0 parameters) may run with no checkpoint; a parameterised one may not.",
                 "Pass at least one checkpoint source, or wrap a model that has no parameters.",
             )
-        # A dictionary cannot be reloaded after eviction. Charge these resident inputs against the
-        # same ceiling and, for the stock loader, never retain the caller's optimizer via sources.
+        # A dictionary cannot be reloaded after eviction: charge it against the same ceiling.
         sources: list[dict[str, Any] | Path | str] = []
         resident_bytes = 0
         model = self._get_model()
@@ -349,7 +328,7 @@ class ModelComposite(Network):
             output_layers (list): List of output layer names to extract from each sub-model.
 
         Returns:
-            list[tuple[str, torch.Tensor]]: Aggregated output for each layer, after applying the reduction.
+            list[tuple[str, torch.Tensor]]: Aggregated output per layer, after the reduction.
         """
         final_outputs: list[tuple[str, list[int], torch.Tensor]] = []
         if not self._loaded:
@@ -376,8 +355,7 @@ class ModelComposite(Network):
                     count[key] += 1
             for key, acc in sum_acc.items():
                 # The sum was folded in place into the first model's output; a lone model's is the
-                # answer as it stands. Dividing by one copied the batch output (56 MiB per
-                # [1, 14, 128^3] fp16 patch, 512 MiB at 122 channels), on every single-model run.
+                # answer as it stands, and dividing it by one would copy the batch output.
                 final_outputs.append((key, channels[key], acc if count[key] == 1 else acc.div_(count[key])))
         else:
             aggregated = defaultdict(list)

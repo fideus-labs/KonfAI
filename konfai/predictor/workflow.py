@@ -58,12 +58,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
     """
     KonfAI's main prediction controller.
 
-    This class orchestrates the prediction phase by:
-    - Loading model weights from checkpoint(s) or URL(s)
-    - Preparing datasets and output configurations
-    - Managing distributed inference with optional multi-GPU support
-    - Applying transformations and saving predictions
-    - Optionally logging results to TensorBoard
+    It loads the model weights from checkpoint(s) or URL(s), prepares the datasets and the output
+    configurations, runs the inference distributed over the available GPUs, applies the transforms and
+    writes the predictions, and optionally logs to TensorBoard.
 
     Attributes:
         model (Network): The neural network model to use for prediction.
@@ -125,8 +122,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         for output_dataset in self.outputs_dataset.values():
             output_dataset.set_memory_budget(per_rank_budget)
             self.datasets_filename.append(output_dataset.filename)
-            # Rebase under the run directory, re-deriving is_directory: a bare string + "/" would flag an
-            # h5 output as a directory and write the hidden dotfile Predictions/<run>/Dataset/.h5.
+            # Rebase under the run directory, re-deriving is_directory from the path, not from a trailing "/".
             output_dataset.rebase(self.predict_path)
         self.data_log = data_log
         modules = [name for name, _ in self.model.named_modules()]
@@ -141,8 +137,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 )
 
         self.gpu_checkpoints = gpu_checkpoints
-        # Cut the grids with the model's downsampling multiple already known, so each case's free axis
-        # rounds up to a valid input size (the graph (hence the factor) is final before init()).
+        # Cut the grids with the model's downsampling multiple known, so each case's free axis rounds up
+        # to a valid input size.
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
         self.dataset.prepare()
         self.model.bind(
@@ -181,19 +177,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             )
 
     def setup(self, world_size: int):
-        """
-        Set up the predictor for inference.
-
-        This method performs all necessary initialization steps before running predictions:
-        - Ensures output directories exist, and optionally prompts the user before overwriting existing predictions.
-        - Copies the current configuration file (Prediction.yml) into the output directory for reproducibility.
-        - Dynamically loads pretrained weights from local files or remote URLs.
-        - Wraps the base model into a `ModelComposite` to support ensemble inference.
-        - Initializes the prediction dataloader, with proper distribution across available GPUs.
-
-        Args:
-            world_size (int): Total number of processes or GPUs used for distributed prediction.
-
+        """Set up the predictor for inference: create the output directories, copy the configuration
+        file (Prediction.yml) into the output directory, load the pretrained weights from local files or
+        remote URLs, wrap the base model into a ``ModelComposite`` for ensemble inference and build the
+        prediction dataloader, distributed over the ``world_size`` processes or GPUs.
         """
         for dataset_filename in self.datasets_filename:
             path = self.predict_path / dataset_filename
@@ -202,10 +189,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
 
         shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
 
-        # Per-case resume, the semantics TRANSFORM documents: a case whose every configured output
-        # is already on disk is skipped, so a rerun after a mid-cohort failure pays only the missing
-        # cases; --overwrite recomputes everything. The set is frozen here, on the launcher, so
-        # every rank (and every OOM-restart re-plan) shards the same reduced work list.
+        # Per-case resume, the semantics TRANSFORM documents: a case whose every configured output is
+        # already on disk is skipped, and --overwrite recomputes everything. The set is frozen here, on
+        # the launcher, so every rank (and every OOM-restart re-plan) shards the same work list.
         if os.environ.get("KONFAI_OVERWRITE") != "True" and self.outputs_dataset:
             self._done_case_indices = {
                 index
@@ -220,9 +206,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
 
         self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
         if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
-            # A model WITH weights but no checkpoint would run with random weights and silently produce
-            # garbage: refuse it. A WEIGHTLESS model (0 parameters, e.g. a classical/optimisation engine
-            # such as registration) is legitimate with no checkpoint: it is run once as constructed.
+            # A model WITH weights but no checkpoint would run with random weights: refuse it. A WEIGHTLESS
+            # model (0 parameters, a classical engine such as registration) runs once as constructed.
             raise PredictorError(
                 "No model checkpoint available for prediction.",
                 "This model has trainable weights, so at least one '.pt' checkpoint must be provided (for "
@@ -234,8 +219,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         try:
             self._report_chain_drift()
         except (OSError, KonfAIError, ValueError, TypeError) as error:
-            # A diagnostic reading someone else's config file never fails the prediction it reports
-            # on; what stopped it is said instead of swallowed.
+            # A diagnostic reading someone else's config file never fails the prediction it reports on.
             print(f"[KonfAI] the training-chain check did not run: {type(error).__name__}: {error}")
 
         self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
@@ -246,9 +230,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
     def _drop_done_cases(self) -> None:
         """Drop the already-written cases' entries from the prepared patch mapping.
 
-        Applied to the mapping rather than the case list so the surviving cases keep their indices
-        (the managers and the loader's remapping stay untouched), and re-applied after every
-        ``replan_patch``, which rebuilds the mapping from scratch.
+        Applied to the mapping rather than the case list so the surviving cases keep their indices, and
+        re-applied after every ``replan_patch``, which rebuilds the mapping from scratch.
         """
         if not self._done_case_indices:
             return
@@ -260,11 +243,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         """Warn when the chain applied to a model input is not the one its checkpoint trained on.
 
         Same checkpoint, different preprocessing is silent: the run succeeds and only the values are
-        wrong (the Synthesis example shipped ``Standardize(mask: None)`` in training against
-        ``Standardize(mask: MASK)`` here, and paid 409 HU of MAE instead of 98). A legitimate
-        difference exists, so this warns and never refuses, and ``check_training_transforms: false``
-        silences it. Compared against the resolved config the training run left in its ``Statistics``
-        directory, read without writing it back.
+        wrong. A legitimate difference exists, so this warns and never refuses, and
+        ``check_training_transforms: false`` silences it. Compared against the resolved config the
+        training run left in its ``Statistics`` directory, read without writing it back.
         """
         if not self.check_training_transforms:
             return
@@ -307,21 +288,12 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.path_to_models = path_to_models
 
     def _load(self) -> list[dict[str, Any] | Path | str]:
-        """
-        Resolve checkpoint sources for ensemble prediction.
+        """Resolve the checkpoint sources for ensemble prediction, one per model.
 
-        This method handles both remote and local model sources:
-        - A URL remains a reloadable source: torch.hub keeps its download on disk, while the
-          composite's bounded host cache decides which deserialized weights stay resident.
-        - If the model path is local:
-            - it keeps only the checkpoint path and lets `ModelComposite` stream weights into a single model
-              instance during prediction to reduce memory pressure.
-
-        Returns:
-            list[dict[str, dict[str, torch.Tensor]] | Path | str]: A list of checkpoint sources, one per model.
-
-        Raises:
-            Exception: If a model path does not exist or cannot be loaded.
+        A URL remains a reloadable source: torch.hub keeps its download on disk, while the composite's
+        bounded host cache decides which deserialized weights stay resident. A local path is kept as a
+        path and ``ModelComposite`` streams its weights into a single model instance during prediction.
+        Raises when a path neither exists nor is a URL.
         """
         state_dicts: list[dict[str, Any] | Path | str] = []
         for path_to_model in self.path_to_models:
@@ -340,15 +312,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         local_rank: int,
         dataloaders: list[DataLoader],
     ):
-        """
-        Launch prediction on the given process rank.
+        """Launch prediction on the given process rank.
 
-        Args:
-            world_size (int): Number of model replicas sharding the data: the spawned process count
-                already divided by the model-parallel size (``gpu_checkpoints``), NOT the GPU count.
-            global_rank (int): Rank of the current process.
-            local_rank (int): Local device rank.
-            dataloaders (list[DataLoader]): List of data loaders for prediction.
+        ``world_size`` is the number of model replicas sharding the data: the spawned process count
+        already divided by the model-parallel size (``gpu_checkpoints``), NOT the GPU count.
         """
 
         model_composite = (
@@ -365,8 +332,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         model_composite = Model(model_composite)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
         dataloader = dataloaders[0]
-        # A whole-axis extent still too large for VRAM OOMs into the shrink loop below, which keeps
-        # the size valid too (the border padding fills the round-up, cropped back after the forward).
+        # A whole-axis extent still too large for VRAM OOMs into the shrink loop below, which keeps the
+        # size valid too.
         if self._vram_patch_candidate is None and self._presize_free_axes():
             dataloader = self._rank_dataloader(world_size, global_rank)
         while True:
@@ -385,12 +352,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                     p.run()
                 return
             except torch.cuda.OutOfMemoryError:
-                # The restart loop IS the sizing iteration (no probe phase): the run that just OOMed
-                # already measured the step's transient for free. Read it BEFORE the reset (the peak
-                # still includes the resident accumulators on both sides of the difference), free the
-                # in-flight state: open streamed sinks abort and remove their partial entries, so a
-                # reader never sees a half-written volume even when the OOM is fatal, then read the
-                # honest free VRAM.
+                # The restart loop IS the sizing iteration: the run that just OOMed already measured the
+                # step's transient. Read it BEFORE the reset, free the in-flight state (open streamed sinks
+                # abort and remove their partial entries), then read the honest free VRAM.
                 measured = vram.transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
@@ -416,8 +380,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
     def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
         """The shared shrink step, with the blend kept on the GPU when it fits: the accumulation
         footprint is RESERVED beside the forward, so the sized patch passes the accumulation gate.
-        Only when that reserve fits at no size (or cannot be priced) is the forward sized alone:
-        the gate's memory-safe CPU blend absorbs that case.
+        Only when that reserve fits at no size, or cannot be priced, is the forward sized alone.
         """
         if self._vram_patch_template is None:
             return None
@@ -435,10 +398,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         return super()._shrunken_patch(measured, usable)
 
     def _accumulation_reserve(self, candidate: list[int], worst: list[int]) -> float | None:
-        """Bytes each case keeps resident while its patches accumulate, per output writer: the
-        streamed window (one patch extent x the cross-section) when the writer will stream --
-        single augmentation, voxel-local reduction: the assembled volume otherwise. ``None``
-        when a writer's channels cannot be read off the model trace (no reserve, gate decides).
+        """Bytes each case keeps resident while its patches accumulate, per output writer: the streamed
+        window (one patch extent x the cross-section) when the writer will stream (single augmentation,
+        voxel-local reduction), the assembled volume otherwise. ``None`` when a writer's channels cannot
+        be read off the model trace.
         """
         trace = {name: args.out_channels for name, _, args in self.model.named_module_args_dict()}
         elem = 2  # ModelComposite casts float32 outputs to float16 before accumulation
@@ -478,22 +441,11 @@ def build_predict(
     prediction_file: Path | str | dict = Path("./Prediction.yml"),
     predictions_dir: Path | str = Path("./Predictions"),
 ) -> DistributedObject:
-    """
-    Build and return the configured prediction workflow without executing it.
+    """Build and return the configured prediction workflow without executing it.
 
-    Parameters
-    ----------
-    models : list[Path]
-        One or more checkpoint files to load for prediction.
-    prediction_file : Path | str, optional
-        Prediction configuration file.
-    predictions_dir : Path | str, optional
-        Directory where prediction outputs are written.
-
-    Returns
-    -------
-    DistributedObject
-        Configured predictor object ready to be executed by the runtime wrapper.
+    ``models`` are the checkpoint files to load, ``prediction_file`` the prediction configuration and
+    ``predictions_dir`` the directory the outputs are written to. The predictor comes back ready to be
+    executed by the runtime wrapper.
     """
     configure_workflow_environment(
         config_path=prediction_file,
@@ -519,12 +471,11 @@ def predict(
     prediction_file: Path | str | dict = Path("./Prediction.yml"),
     predictions_dir: Path | str = Path("./Predictions"),
 ) -> DistributedObject:
-    """
-    Build and execute the configured prediction workflow.
+    """Build and execute the configured prediction workflow.
 
-    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body
-    drops them: :func:`run_distributed_app` reads them from the bound signature to drive the launch.
-    The pure build step is :func:`build_predict`.
+    ``overwrite``/``gpu``/``cpu``/``quiet``/``tensorboard`` are load-bearing even though the body drops
+    them: :func:`run_distributed_app` reads them from the bound signature to drive the launch. The pure
+    build step is :func:`build_predict`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
     return build_predict(

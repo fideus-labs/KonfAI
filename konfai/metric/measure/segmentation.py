@@ -128,9 +128,8 @@ class Dice(Criterion):
     @staticmethod
     def _hard_sums(output: torch.Tensor, target: torch.Tensor, labels: list[int] | None) -> LabelSums:
         """The sums of a hard-label pair, exact integers from three ``bincount`` passes over the flat
-        maps (the reference, the prediction, the reference where the two agree): every label at
-        once and one ``.tolist()`` for the lot, where a per-label ``==`` built two float volumes and
-        synchronised twice.
+        maps (the reference, the prediction, the reference where the two agree): every label at once
+        and one ``.tolist()`` for the lot.
 
         With ``labels=None`` every label either map holds gets its sums, so a patch's predicted mass
         for a label its reference lacks still reaches the whole-case ratio in ``combine_metric``;
@@ -164,13 +163,13 @@ class Dice(Criterion):
 
     @staticmethod
     def _soft_sums(output: torch.Tensor, target: torch.Tensor, labels: list[int] | None) -> LabelSums:
-        """The sums of a probability map against a label map, per channel: the intersection is
-        taken only where the reference holds the label (it is zero elsewhere), and one
-        ``.tolist()`` brings every sum back.
+        """The sums of a probability map against a label map, per channel: the intersection is taken
+        only where the reference holds the label (it is zero elsewhere), and one ``.tolist()`` brings
+        every sum back.
 
-        A label at a time, where the loss batches them: this route carries no gradient, so its peak
-        is one channel and never the label count. Batched it read 1050 MiB instead of 346 and took
-        4.44 ms instead of 1.95 on a ``[1, 41, 128, 128, 128]`` patch of 40 labels.
+        A label at a time, where the loss batches them: this route carries no gradient, so its peak is
+        one channel and never the label count (346 MiB and 1.95 ms against 1050 MiB and 4.44 ms
+        batched, on a ``[1, 41, 128, 128, 128]`` patch of 40 labels).
 
         With ``labels=None`` every label either map holds gets its sums, so a patch's predicted mass
         for a label its reference lacks still reaches the whole-case ratio in ``combine_metric``.
@@ -213,24 +212,19 @@ class Dice(Criterion):
     def _soft_loss(
         labels: list[int] | None, output: torch.Tensor, target: torch.Tensor
     ) -> tuple[torch.Tensor, dict[int, float] | LabelledValues]:
-        """The differentiable soft Dice over a probability map's channels, one per label the
-        reference holds, every label in one expression: their channels gathered in one slice, the
-        reference one comparison against the label vector on an axis of its own, and each sum one
-        reduction. That axis sits before the target's channels, so a reference of any channel count
-        broadcasts against a gathered channel exactly as a per-label ``target == label`` did.
+        """The differentiable soft Dice over a probability map's channels, one per label the reference
+        holds, every label in one expression: their channels gathered in one slice, the reference one
+        comparison against the label vector on an axis of its own, and each sum one reduction. That
+        axis sits before the target's channels, so a reference of any channel count broadcasts against
+        a gathered channel exactly as a per-label ``target == label`` did.
 
-        A slice per label cost a gradient write into the whole logits tensor each: 22.7 ``add_`` and
-        28.7 ``fill_`` per step, 10.2 ms of the 28.2 ms of GPU time of a training step of
-        ``examples/Segmentation`` (batch 8, 41 channels, 256x256, autocast + channels_last).
-        Backward held a float copy of both operands per label already, so training peaks lower
-        (242 -> 180 MiB on that batch); with no gradient to build it is the label count that peaks
-        where the loop peaked at one channel (6 -> 180 MiB), and ``_soft_sums`` is the frugal route.
+        A slice per label cost a gradient write into the whole logits tensor each: 10.2 ms of the
+        28.2 ms of GPU time of a training step of ``examples/Segmentation``. With no gradient to build
+        it is the label count that peaks (6 to 180 MiB), and ``_soft_sums`` is the frugal route.
 
-        The reference's own mass is the voxel count ``_reference_counts`` already holds, the exact
-        integer the metric route's ``_score`` divides by. The per-label dices leave as a
-        ``LabelledValues`` read off the device lazily (``Measure._materialize``), never a
-        ``.tolist()`` in the forward: a ``.item()`` per label once drained the CUDA queue mid-loss,
-        twice per label.
+        The reference's own mass is the voxel count ``_reference_counts`` already holds. The per-label
+        dices leave as a ``LabelledValues`` read off the device lazily (``Measure._materialize``),
+        never a ``.tolist()`` in the forward.
         """
         labels, reference = Dice._reference_counts(target, labels)
         held = [label for label, count in zip(labels, reference, strict=True) if count]

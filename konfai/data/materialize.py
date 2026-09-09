@@ -16,15 +16,10 @@
 
 """The TRANSFORM materialization engine: writes one case's chain over the manager's plan/replay API.
 
-A :class:`~konfai.data.patching.DatasetManager` plans and replays a case's chain (the patch and
-region reads training, prediction and evaluation share). :class:`CaseMaterializer` is the write
-side of that same machinery for the dataset-preparation workflow: it drives one case's ``Save``
-outputs to disk by the cheapest route the plan allows (the streamed slab sweep, the whole-volume
-load, or one shared read pass across the copies of an ``Expand``), prices those routes for the plan
-(peak bytes, working set, predicted source re-reads), and answers why a copy sweeps alone. It
-holds no read state of its own: the rewrite flag, the swept-entry ledger and the sweep-failure
-reason live on the manager, because a streamed read of a pending ``Save`` sweeps it there too
-(``DatasetManager._stream_ready``), training included.
+:class:`CaseMaterializer` drives one case's ``Save`` outputs to disk by the cheapest route the plan
+allows (the streamed slab sweep, the whole-volume load, or one shared read pass across the copies of
+an ``Expand``) and prices those routes for the plan. It holds no read state of its own: the rewrite
+flag, the swept-entry ledger and the sweep-failure reason live on the manager.
 """
 
 import contextlib
@@ -86,12 +81,9 @@ class CopyRoute:
 
 
 class CaseMaterializer:
-    """Write one case's chain to disk over its manager's plan/replay API, and price the routes.
-
-    Built per case (a :class:`~konfai.data.patching.DatasetManager`) and kept for the run: the
-    peak-bytes fold is memoized here, so the plan, the shards and the run all read the same figure
-    without re-folding the chain.
-    """
+    """Write one case's chain to disk over its manager's plan/replay API, and price the routes. Built
+    per case and kept for the run: the peak-bytes fold is memoized here, so the plan, the shards and
+    the run read the same figure."""
 
     def __init__(self, manager: DatasetManager) -> None:
         self.manager = manager
@@ -105,9 +97,7 @@ class CaseMaterializer:
     ) -> Iterator[None]:
         """What every materialization sets up on the manager: the rewrite mode, the budget its
         sweeps size their slabs against, and the device the chain runs on for this call (opt-in,
-        and only here: this same machinery loads training cases inside DataLoader workers, where a
-        CUDA default would be wrong; the transformer's rank is the one caller that knows its
-        device)."""
+        and only here: the transformer's rank is the one caller that knows its device)."""
         self.manager._set_rewrite(rewrite)
         self.manager.set_memory_budget(fallback_budget_bytes)
         with self.manager._chain_device_scope(device):
@@ -124,12 +114,10 @@ class CaseMaterializer:
     ) -> Verdict:
         """Write this case's chain to disk by the cheapest path that can, and say which it took.
 
-        The streamed path sweeps every unsatisfied :class:`Save` slab by slab; when the plan refuses
-        (a WHOLE_VOLUME stage, a destination without region writes, a failed sweep) the whole-volume
-        load writes the same caches, same bytes, more memory. ``allow_fallback=False`` raises instead
-        of loading; ``prefer_whole`` is the plan's LOAD choice (no fallback, no refusal);
-        ``rewrite=True`` recomputes the case and renames over the old entries (``--overwrite``). A
-        chain whose caches all exist writes nothing (the per-case resume).
+        The streamed path sweeps every unsatisfied :class:`Save` slab by slab, the whole-volume load
+        writes the same caches with more memory. ``allow_fallback=False`` raises instead of loading;
+        ``prefer_whole`` is the plan's LOAD choice; ``rewrite=True`` recomputes the case and renames
+        over the old entries (``--overwrite``). A chain whose caches all exist writes nothing.
         """
         with self._materialization(rewrite, fallback_budget_bytes, device):
             verdict = self._write_case(a, fallback_budget_bytes, allow_fallback, prefer_whole)
@@ -141,8 +129,7 @@ class CaseMaterializer:
     ) -> Verdict:
         """One case or copy, inside a materialization: streamed if it can, else the whole volume."""
         manager = self.manager
-        # A chain with an Expand materializes a COPY, whose draw must be part of the plan; without
-        # one it materializes the case itself, and augmentations have nothing to do with writing.
+        # With an Expand this materializes a COPY, whose draw must be part of the plan.
         apply_augmentations = manager._expand is not None and a > 0
         if not prefer_whole:
             if manager._stream_ready(a, apply_augmentations=apply_augmentations):
@@ -155,8 +142,7 @@ class CaseMaterializer:
                     or "the chain cannot stream.",
                     "Nothing was written for this case; the caller forbids the whole-volume fallback.",
                 )
-        # The plan's promise holds at run time too: a case that fell back here (a refusal the probe
-        # could not see) must not assemble a volume the budget cannot hold.
+        # A case that fell back here must not assemble a volume the budget cannot hold.
         self._enforce_fallback_budget(fallback_budget_bytes)
         self._assemble_and_write(a)
         return Verdict.LOAD if prefer_whole else Verdict.WHOLE_VOLUME
@@ -174,13 +160,9 @@ class CaseMaterializer:
             )
 
     def _assemble_and_write(self, a: int) -> None:
-        """The whole-volume fallback: assemble and write every Save. The caller releases.
-
-        Without an :class:`Expand` this is the classic load of the full chain. With one, the shared
-        part is assembled once (``load`` keeps it, so the copies of one case reuse the same tensor
-        across calls) and only the copy's draw and the per-copy stages run per copy, writing their
-        Saves under the copy's name.
-        """
+        """The whole-volume fallback: assemble and write every Save. The caller releases. With an
+        :class:`Expand`, the shared part is assembled once and only the copy's draw and the per-copy
+        stages run per copy, writing their Saves under the copy's name."""
         with _stage_failures_explained():
             self._assemble_and_write_chain(a)
 
@@ -202,14 +184,10 @@ class CaseMaterializer:
         allow_fallback: bool = True,
         device: "torch.device | None" = None,
     ) -> dict[int, tuple[Verdict, Regime | None]]:
-        """Write the :class:`Expand` copies of this case; returns what each took, as the plan lines
-        it: the verdict and, for a streamed copy, whether it rode the shared pass or its own.
-
-        Copies whose per-copy stages are all pointwise share ONE read pass (each slab is read and
-        carried through the shared prefix once, then every copy applies its draw into its own
-        stream); a copy whose draw reads regions sweeps its own pass; a copy that cannot stream falls
-        back to the whole volume, whose shared part is assembled once for all such copies.
-        """
+        """Write the :class:`Expand` copies of this case; returns what each took: the verdict and,
+        for a streamed copy, whether it rode the shared pass or its own. Copies whose per-copy stages
+        are all pointwise share ONE read pass; a copy whose draw reads regions sweeps its own; a copy
+        that cannot stream falls back to the whole volume."""
         manager = self.manager
         if manager._expand is None:
             raise PatchError(
@@ -222,8 +200,7 @@ class CaseMaterializer:
             if not copies:
                 return outcomes
             # The caches the copies share (pre-Expand Saves) are swept once, first: every copy's
-            # plan reads through them, and sweeping them inside each copy's own pass would redo
-            # the work.
+            # plan reads through them.
             first = manager._resolve_patch_stream_source(copies[0], apply_augmentations=True)
             if first is not None:
                 manager._sweep_pending([sweep for sweep in first.pending_sweeps if sweep.entry == manager.name])
@@ -260,14 +237,10 @@ class CaseMaterializer:
             return outcomes
 
     def classify_copies(self, copies: Iterable[int]) -> dict[int, CopyRoute]:
-        """How each copy streams, decided once for the run and the plan alike.
-
-        A copy joins the shared read pass when its per-copy segment is one Save whose stages are all
-        pointwise (its pull is exactly the slab the shared prefix landed on); it sweeps alone when a
-        per-copy stage reads regions, when it crosses several per-copy Saves, or when a cache the
-        copies share is still to write; and a shared pass with one member is that copy's own sweep.
-        A copy the planner refuses has no regime.
-        """
+        """How each copy streams, decided once for the run and the plan alike. A copy joins the
+        shared read pass when its per-copy segment is one Save whose stages are all pointwise; it
+        sweeps alone when a per-copy stage reads regions, when it crosses several per-copy Saves, or
+        when a cache the copies share is still to write. A copy the planner refuses has no regime."""
         manager = self.manager
         routes: dict[int, CopyRoute] = {}
         for a in copies:
@@ -294,8 +267,7 @@ class CaseMaterializer:
     @staticmethod
     def _pointwise_tail(plans: Sequence[_ReadStagePlan]) -> bool:
         """Whether a copy's per-copy stages are pure value maps on their slab: a pointwise tail pulls
-        exactly the slab the shared prefix landed on, so every such copy can consume one read; a
-        region draw pulls its own geometry and a GLOBAL_STAT reads a statistic of ITS input."""
+        exactly the slab the shared prefix landed on, so every such copy can consume one read."""
         return all(plan.kind is LocalityKind.POINTWISE for plan in plans)
 
     @staticmethod
@@ -313,16 +285,13 @@ class CaseMaterializer:
         return "the copy's plan is incomplete; it sweeps its own pass."
 
     def _materialize_shared_pass(self, shared: list[tuple[int, _PendingSweep]]) -> set[int]:
-        """One read pass, N write streams: each slab is read and computed through the shared prefix
-        once, each copy applies its pointwise tail to a clone and writes into its own stream (peak:
-        the pulled slab plus one block). On failure every stream is aborted and the copies take
-        their own passes; returns the copies written.
-        """
+        """One read pass, N write streams: each slab is computed through the shared prefix once, and
+        each copy applies its pointwise tail to a clone and writes into its own stream. On failure
+        the copies take their own passes; returns the copies written."""
         manager = self.manager
         reference = shared[0][1]
-        # Defensive: the regime only holds when every copy lands the same grid from the same source
-        # and writes into the same store. Built that way, but a draw that lies about its shape map
-        # would corrupt N entries at once here, so the mismatch is checked rather than assumed.
+        # The regime only holds when every copy lands the same grid from the same source and writes
+        # into the same store; the mismatch is checked rather than assumed.
         shared = [
             (a, sweep)
             for a, sweep in shared
@@ -334,8 +303,7 @@ class CaseMaterializer:
         ]
         if not shared:
             return set()
-        # The shared prefix is planned once, and replayed once per slab; each copy's header is its
-        # OWN full-segment plan state, since the tail's geometry and inversion keys are the copy's.
+        # The shared prefix is planned once and replayed per slab; each copy's header is its own.
         source, prefix_evolved, _refusal = manager._replan_sweep(
             reference, list(reference.stages[: reference.copy_stage_start])
         )
@@ -348,8 +316,7 @@ class CaseMaterializer:
                 continue
             tail_plans = planned.stage_plans[sweep.copy_stage_start :]
             # Re-planned against the materialized source, so re-checked here: the shared block is a
-            # tail stage's region only while every one of them is pointwise. A copy left out takes
-            # its own pass, where its tail reads its own geometry.
+            # tail stage's region only while every one of them is pointwise.
             if self._pointwise_tail(tail_plans):
                 members.append(_SweepMember(a, sweep, evolved, sweep.tail_stages, tail_plans))
         if not members:
@@ -366,12 +333,9 @@ class CaseMaterializer:
     # ---------------------------------------------------------------- what the plan asks
 
     def write_targets(self, a: int = 0) -> list[tuple[Save, list[int], Attribute]]:
-        """Every ``Save`` copy ``a`` writes, with the extent and case state it lands at.
-
-        What a write probe must open to be the run's own verdict: behind an ``Expand`` the stages
-        after the marker fold the COPY's grid, so probing the chain with the marker left in it
-        would validate the pre-draw extent and call a destination good for a shape it never sees.
-        """
+        """Every ``Save`` copy ``a`` writes, with the extent and case state it lands at: what a write
+        probe must open to be the run's own verdict. Behind an ``Expand`` the stages after the marker
+        fold the COPY's grid."""
         manager = self.manager
         spatial = [int(extent) for extent in manager.base_shape[1:]]
         attributes = Attribute(manager.cache_attributes_bak[0])
@@ -384,9 +348,8 @@ class CaseMaterializer:
 
     def sub_cap_sweep(self) -> bool:
         """Whether this case's landing is swept in more than one block AND a stage of its chain can
-        show it in the values: a resample whose map does not factorise, or a draw that samples
-        through an affine (a free rotation, a scale). Pointwise and separable chains land the same
-        bytes whatever the decomposition."""
+        show it in the values: a resample whose map does not factorise, or a draw sampling through
+        an affine. Pointwise and separable chains land the same bytes whatever the decomposition."""
         manager = self.manager
         if not any(
             extent < segment.landing[axis]
@@ -406,9 +369,8 @@ class CaseMaterializer:
 
     def plan_notes(self, group_dest: str) -> list[str]:
         """The notes the chain's transforms ask the plan to print (``Transform.plan_note``), each
-        stage asked about ITS OWN input: the case state folded through the stages before it, as
-        the streamed planner folds it. Only as far as a ``Reduce``: past it the grid is the
-        cohort's, and what the reduction writes is its own plan line."""
+        stage asked about ITS OWN input. Only as far as a ``Reduce``: past it the grid is the
+        cohort's."""
         manager = self.manager
         shape = [int(extent) for extent in manager.base_shape[1:]]
         attributes = Attribute(manager.stored_attributes)
@@ -426,18 +388,14 @@ class CaseMaterializer:
 
     def peak_case_bytes(self) -> int:
         """The largest single tensor the whole-volume path holds: the chain's shapes folded through
-        each stage's own map (a pad or an upsample holds its largest intermediate), at
-        ``CASE_ELEMENT_BYTES`` per element. Headers only, so a floor for a stage that widens the
-        dtype beyond what it declares."""
+        each stage's own map, at ``CASE_ELEMENT_BYTES`` per element. Headers only."""
         if self._peak_case_bytes is None:
             manager = self.manager
             channels = int(manager.base_shape[0])
             peak = int(np.prod(manager.base_shape, dtype=np.int64))
 
             # Copy 0 carries no draw, copy 1 carries them all, and a draw widens the grid as readily
-            # as a transform does (the augmentation Mask pads to the mask's own extent), so both
-            # walks run from the stored state and the peak is the largest either one holds. Copy 1
-            # exists only where the chain has copies at all.
+            # as a transform does, so the peak is the largest either walk holds.
             copies = [0]
             if manager._expand is not None or any(group.nb for group in manager.data_augmentations_list):
                 copies.append(1)
@@ -457,9 +415,8 @@ class CaseMaterializer:
 
     def reads_its_source_whole(self, a: int = 0, apply_augmentations: bool = False) -> bool | None:
         """Whether a sweep of this case would decode its stored source whole for every region: the
-        store serves no bounded region read (a gzipped NIfTI). ``None`` when the chain cannot
-        stream. A Save cache the run has still to write lands on a region-write store, and every
-        one of those serves bounded reads, so it never counts."""
+        store serves no bounded region read (a gzipped NIfTI). ``None`` when the chain cannot stream;
+        a Save cache still to write lands on a store serving bounded reads, so it never counts."""
         segments = self.manager.sweep_segments(a, apply_augmentations)
         if segments is None:
             return None

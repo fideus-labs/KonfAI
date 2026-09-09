@@ -35,10 +35,9 @@ from konfai.utils.runtime import State
 def _check_patch_transform_locality(transform: Transform, group_src: str, group_dest: str) -> None:
     """Reject a transform whose per-patch result cannot equal its case-level result.
 
-    Only POINTWISE and GLOBAL_STAT are correct on one patch (per-patch GLOBAL_STAT means: derive the
-    statistic from this patch; use ``lazy=True`` case-level to feed it the volume's). The messages in
-    ``reasons`` below say why each other kind is rejected. Probed with an empty ``Attribute`` (config
-    time has no case), so an image-decided kind answers WHOLE_VOLUME: the right answer here.
+    Only POINTWISE and GLOBAL_STAT are correct on one patch; per-patch GLOBAL_STAT derives the statistic
+    from that patch. The probe passes an empty ``Attribute``, so a kind decided by the image answers
+    WHOLE_VOLUME.
     """
     kind = transform.patch_locality(Attribute()).kind
     if kind in (LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT):
@@ -77,18 +76,9 @@ def _check_patch_transform_locality(transform: Transform, group_src: str, group_
 def _check_patch_transform_shape(transform: Transform, group_src: str, group_dest: str) -> None:
     """Reject a patch_transform that resizes the patch it is handed.
 
-    The patch grid is folded from the CASE-level ``transforms`` only (``DatasetManager``), so a
-    patch_transform that changes the spatial shape hands back a patch the batch cannot collate and the
-    ``Accumulator`` cannot write onto the grid. ``_check_patch_transform_locality`` above takes the
-    transform at its word; this is the structural check, and it is asked of ``transform_shape`` (the
-    contract every transform already owes the patch planner), with distinct extents, so a swap or a
-    resize of any single axis shows up. Only the SPATIAL shape is at stake: patching hands
-    ``transform_shape`` the channel-stripped shape, so a transform that changes only the channel count
-    (``OneHot``) is not caught here, and must not be: the grid it feeds is spatial.
-
-    Runs after the locality check, which is what makes the bare probe attribute safe: by here the
-    transform is POINTWISE or GLOBAL_STAT, and the kinds whose ``transform_shape`` needs real geometry
-    (``Resample`` reads ``Spacing``) have already been rejected.
+    The patch grid is folded from the CASE-level ``transforms`` only, so a patch_transform must be spatially
+    shape-preserving. Only the spatial shape is checked: ``transform_shape`` is asked with the
+    channel-stripped shape, so a transform that changes only the channel count is not caught here.
     """
     spatial_shape = [7, 11, 13]
     shape = list(transform.transform_shape(group_src, "", list(spatial_shape), Attribute()))
@@ -109,22 +99,10 @@ def _check_patch_transform_invertible(
 ) -> None:
     """Reject a per-patch global statistic at prediction, whose inverse cannot be reconstructed.
 
-    A ``GLOBAL_STAT`` transform is allowed in ``patch_transforms`` (see
-    ``_check_patch_transform_locality``): run per patch it standardizes each patch by that patch's OWN
-    statistic, which is what asking for it per-patch means: correct, and the deliberate training use.
-    But the per-patch statistic lives in the per-patch attribute scope and never reaches the case
-    attribute, so at prediction the finalize inverse, which seeds every patch from the CASE attribute
-    and pops the statistic: has nothing to pop. Nor could it: the reassembled volume was normalised
-    patch by patch with different coefficients, so a single case-level inverse cannot un-apply it. Refuse
-    here, at config time, rather than fail deep in the inverse with a lookup error.
-
-    A case-level ``transforms`` entry that derives the SAME statistic rescues it: run once on the whole
-    volume it caches that statistic on the case attribute (``Standardize(lazy=True)`` caches Mean/Std and
-    applies nothing), which the per-patch inverse then inherits and pops. So the patch transform is only
-    un-invertible when nothing case-level captures its statistic.
-
-    Training-only use stays valid: the check is gated on the prediction state, where the inverse actually
-    runs (``RESUME``/``TRAIN`` never invert patch_transforms, and evaluation drops them entirely).
+    A per-patch statistic never reaches the case attribute, so the finalize inverse, seeded from the case
+    attribute, has nothing to pop. A case-level ``transforms`` entry deriving the same statistic
+    (``Standardize(lazy=True)`` caches Mean/Std and applies nothing) rescues it. Gated on the prediction
+    state, the only one that inverts patch_transforms.
     """
     if konfai_state() != str(State.PREDICTION):
         return
@@ -171,10 +149,8 @@ class GroupTransform:
         self._prepared = False
 
     def prepare(self, group_src: str, group_dest: str) -> None:
-        # Binds ONCE. A workflow that inspects its chains before handing over to Data.prepare() calls
-        # this first, and Data.prepare() calls it again for every group, so without the guard every
-        # stage is constructed twice, and anything the workflow attached to the first set is silently
-        # thrown away with it. A stage's __init__ is user code and may not be run twice for free.
+        # Binds ONCE: a workflow may inspect its chains before Data.prepare() calls this for every group,
+        # and a stage's __init__ is user code that may not be run twice.
         if self._prepared:
             return
         self._prepared = True
@@ -185,8 +161,8 @@ class GroupTransform:
                 transform = transform_loader.get_transform(
                     classpath,
                     konfai_args=f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}.transforms",
-                    # Past an Expand marker the chain is the copies' draws: a name both packages
-                    # have (Flip, Mask, Permute) is the draw there, the transform before it.
+                    # Past an Expand marker the chain is the copies' draws: a name both packages have
+                    # (Flip, Mask, Permute) is the draw there, the transform before it.
                     prefer_augmentation=any(isinstance(stage, Expand) for stage in self.transforms),
                 )
                 self.transforms.append(transform)
@@ -237,9 +213,7 @@ class GroupTransformMetric(GroupTransform):
 class GroupTransformOut(GroupTransform):
     """Transform-workflow group: a plain chain, no patch-time transforms, no ``is_input``.
 
-    Every group of a dataset-preparation workflow is an input, so the flag is not a question to ask; and the
-    patch grid is an execution detail the planner owns, so a per-patch transform would make the
-    OUTPUT a function of the declared budget."""
+    Every group of a dataset-preparation workflow is an input."""
 
     def __init__(
         self,

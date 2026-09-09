@@ -26,10 +26,8 @@ import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
-#: The suffix an entry is moved to while its replacement is published. A stream moves the old entry
-#: aside rather than deleting it first: neither HDF5 nor a directory swap has an atomic rename-over,
-#: and a crash between a delete and the move would lose both. Per pid, so two writers of one entry
-#: never share a backup.
+#: The suffix an entry is moved to while its replacement is published. Per pid, so two writers of
+#: one entry never share a backup.
 _REPLACED_MARKER = ".replaced-"
 
 
@@ -39,10 +37,9 @@ def _replaced_name(name: str) -> str:
 
 
 def is_staging_entry(name: str) -> bool:
-    """Whether ``name`` (a path or an h5 key) is a writer's staging entry, never a case: an in-flight (or
-    hard-kill-orphaned) temporary carrying the ``.tmp`` marker of :meth:`DataStream.temporary_suffix` or
-    :meth:`DataStream.staging_path`, or the :func:`_replaced_name` an entry is moved to while its
-    replacement is published."""
+    """Whether ``name`` (a path or an h5 key) is a writer's staging entry, never a case: a temporary
+    carrying the ``.tmp`` marker of :meth:`DataStream.temporary_suffix` or :meth:`DataStream.staging_path`,
+    or the :func:`_replaced_name` an entry is moved to while its replacement is published."""
     leaf = os.path.basename(name)
     return leaf.endswith(".tmp") or ".tmp." in leaf or _REPLACED_MARKER in leaf
 
@@ -53,8 +50,8 @@ _STAGING_PID = re.compile(r"\.(?:(?P<pid>\d+)(?:-\d+)?\.(?:tmp|replaced)|replace
 
 
 def _writer_is_dead(pid: int) -> bool:
-    """Whether the writer that staged under ``pid`` no longer runs. ``psutil`` rather than
-    ``os.kill(pid, 0)``: on Windows a missing pid raises a generic OSError, not ProcessLookupError."""
+    """Whether the writer that staged under ``pid`` no longer runs. ``psutil``, not ``os.kill(pid, 0)``,
+    which on Windows raises a generic OSError for a missing pid."""
     if pid == os.getpid():
         return False
     import psutil
@@ -79,13 +76,9 @@ def _recover_orphaned_backup(final: Path) -> bool:
     """Put back the previous entry when a killed writer left it under its backup name alone.
 
     A replacement moves the old entry aside as ``<name>.replaced-<pid>``, publishes the new one,
-    then drops the backup, and a failed publish moves it back. A writer killed BETWEEN the two moves
-    leaves the previous, complete entry under the backup name, which every listing hides
-    (:func:`is_staging_entry`): the output is preserved and not served, which reads as data loss.
-
-    Exactly one backup, from a writer that no longer runs, and no entry under the final name: that
-    backup IS the entry, so it goes back. Two backups, or a writer still running, is nobody's to
-    guess, and the entry stays missing.
+    then drops the backup. Exactly one backup, from a writer that no longer runs, and no entry under
+    the final name: that backup goes back. Two backups, or a writer still running, and the entry
+    stays missing.
     """
     if final.exists():
         return False
@@ -98,11 +91,9 @@ def _recover_orphaned_backup(final: Path) -> bool:
         return False
     backup = final.parent.joinpath(backups[0])
     try:
-        # Never over a publish that landed while this was deciding. A second existence check would
-        # only move the window, so the move itself has to refuse: os.link fails EEXIST (and Windows
-        # rename fails outright), and a directory rename fails ENOTEMPTY against a complete store --
-        # a store is only ever published by renaming a full staging directory into place, so the
-        # final name is never an empty directory a rename could swallow.
+        # Never over a publish that landed meanwhile: the move itself refuses. os.link fails EEXIST,
+        # a Windows rename fails outright, and a directory rename fails ENOTEMPTY against a
+        # published store (never an empty directory).
         if backup.is_dir() or os.name == "nt":
             backup.rename(final)
         else:
@@ -121,14 +112,9 @@ def _recover_orphaned_backup(final: Path) -> bool:
 
 
 def _retire_dead_debris(final: Path) -> None:
-    """Remove what earlier, DEAD writers of ``final`` left beside it.
+    """Remove what earlier, dead writers of ``final`` left beside it.
 
-    Every writer here stages under a pid-marked name and publishes by rename, so a hard kill leaves
-    a staging file or store the readers already know to skip -- and nothing ever removed: a
-    27 GB one-hot store's staging sat beside the published one for good. Publishing an entry is
-    the moment its history is settled, so the debris of any writer that no longer runs goes then.
-    A LIVE writer's staging is left alone (two writers of one entry are legal, the last rename
-    wins), which is what the pid in the name is for.
+    A live writer's staging is left alone: two writers of one entry are legal, the last rename wins.
     """
     entry = final.name.split(".", 1)[0]
     try:

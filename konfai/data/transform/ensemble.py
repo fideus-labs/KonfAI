@@ -30,7 +30,6 @@ from konfai.utils.utils import split_path_spec
 class _MemberSpread(Transform):
     """A per-voxel spread across the leading member axis (no spatial neighbour); one member spreads 0."""
 
-    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
     _spread: Callable[[torch.Tensor, int], torch.Tensor]
 
@@ -40,7 +39,6 @@ class _MemberSpread(Transform):
         super().__init__()
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # The member axis stays in both branches: var/std drop it and unsqueeze re-adds it.
         if tensors.shape[0] > 1:
             return self._spread(tensors.float(), 0).unsqueeze(0)
         return torch.zeros_like(tensors[0]).unsqueeze(0)
@@ -55,12 +53,9 @@ class StandardDeviation(_MemberSpread):
 
 
 class SegmentationDisagreement(Transform):
-    # What it holds beyond its input and its output: the pairwise comparison over the model axis: measured 9.33 on the CUDA allocator.
     working_multiple = 24.5
 
-    # Per-voxel majority disagreement across the members. The global torch.unique only widens the
-    # label set with labels absent at a given voxel, which contribute zero counts there and never
-    # change that voxel's majority, so the result is decided voxel by voxel.
+    # Per-voxel majority disagreement across the members.
     locality = LocalityKind.POINTWISE
 
     def __init__(self, ignore_background: bool = False) -> None:
@@ -81,14 +76,14 @@ class SegmentationDisagreement(Transform):
 
         disagreement = torch.zeros_like(tensors[0], dtype=torch.float32)
 
-        # per-voxel disagreement = 1 - (frequency of majority label / number of valid segmentations)
+        # per-voxel disagreement = 1 - (majority label count / number of valid segmentations)
         unique_labels = torch.unique(tensors)
         label_counts: list[torch.Tensor] = []
         for label in unique_labels:
             label_counts.append(((tensors == label) & valid).sum(dim=0))
 
         counts = torch.stack(label_counts, dim=0)  # [L, ...]
-        del label_counts  # the per-label counts live in the stack now: L volumes-worth given back
+        del label_counts  # the per-label counts live in the stack now
         max_count = counts.max(dim=0).values
         valid_count = valid.sum(dim=0)
 
@@ -99,7 +94,6 @@ class SegmentationDisagreement(Transform):
 
 
 class Percentage(Transform):
-    # What it holds beyond its input and its output: the quantile's own copy: measured 1.00 on the CUDA allocator.
     working_multiple = 1.0
 
     locality = LocalityKind.POINTWISE
@@ -113,15 +107,11 @@ class Percentage(Transform):
 
 
 class Magnitude(Transform):
-    """Vector magnitude over the CHANNEL axis: ``[C, ...]`` becomes ``[1, ...]``.
+    """Vector magnitude over the channel axis: ``[C, ...]`` becomes ``[1, ...]``.
 
-    :class:`Norm`'s channel-first sibling. ``Norm`` folds the trailing axis of a stacked ensemble
-    and is whole-volume by construction (a rank change past the streamed write); a stored vector
-    volume (a displacement field read as a case) is channel-first, and its magnitude at a voxel
-    reads that voxel alone: POINTWISE, so it streams.
+    :class:`Norm`'s channel-first sibling, for a stored vector volume such as a displacement field.
     """
 
-    # Measured at 1.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 1.0
 
     locality = LocalityKind.POINTWISE
@@ -136,20 +126,17 @@ class Magnitude(Transform):
 class Norm(Transform):
     """Vector magnitude over the trailing component axis.
 
-    Reduces a stacked vector field (e.g. a displacement-field ensemble ``[N, (D), H, W, C]``) to
-    per-sample magnitudes ``[N, (D), H, W]``, typically before ``Variance``/``StandardDeviation``.
-    The trailing tensor axis is the first geometry axis (numpy order is reversed), so that axis is
-    dropped from ``Origin``/``Spacing``/``Direction``.
+    Reduces a stacked vector field (e.g. ``[N, (D), H, W, C]``) to per-sample magnitudes
+    ``[N, (D), H, W]``. The trailing tensor axis is the first geometry axis, so it is dropped from
+    ``Origin``/``Spacing``/``Direction``.
     """
 
-    # Measured at 2.00 on the CUDA allocator, in volumes-worth of what it is handed.
     working_multiple = 2.0
 
     def __init__(self) -> None:
         super().__init__()
 
-    # WHOLE_VOLUME on purpose: the magnitude drops the trailing spatial axis, and the streamed write
-    # sizes each slab from the pre-finalize accumulator grid: a rank change past it cannot region-stream.
+    # WHOLE_VOLUME on purpose: a rank change past the accumulator grid cannot region-stream.
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Origin" in cache_attribute:
@@ -167,7 +154,6 @@ class Norm(Transform):
 
 
 class InferenceStack(Transform):
-    # Measured at 0.00 on the CUDA allocator: it holds nothing beyond what it is handed.
     working_multiple = 0.0
 
     def __init__(self, dataset: str, name: str, mode: str = "mean"):
@@ -181,9 +167,8 @@ class InferenceStack(Transform):
         self._stack_sinks: dict[str, DataStream] = {}
         self._stack_buffers: dict[str, list[np.ndarray]] = {}
 
-    # The member reduction is per-voxel; the per-member stack write is the side effect that needs
-    # the slab's place in the volume, which is exactly what SLAB declares (whole-volume on the
-    # read side, streamed region by region on the write side via ``stream_slab``).
+    # The member reduction is per-voxel; the per-member stack write needs the slab's place in the
+    # volume, which is what SLAB declares.
     locality = LocalityKind.SLAB
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
@@ -195,11 +180,8 @@ class InferenceStack(Transform):
 
     def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
         if self.mode != "median":
-            # The mean has to accumulate wider, and torch materialises that copy however it is spelled.
             return tensors.float().mean(0).to(tensors.dtype)
-        # A median SELECTS: the element picked is the same under any monotone cast and comes back in
-        # its own dtype, so the stack is widened only where torch has no median kernel for it
-        # (uint16, uint32, uint64, bool).
+        # A median selects, so the stack is widened only where torch has no median kernel.
         try:
             return torch.median(tensors, dim=0).values
         except NotImplementedError:
@@ -222,8 +204,7 @@ class InferenceStack(Transform):
     ) -> torch.Tensor:
         """The whole-volume call, region by region: reduce the members per voxel and write the slab's
         rows of the per-member stack into a region sink opened at the first slab. A destination that
-        cannot serve region writes falls back to buffering the stack and writing it classically at
-        the last slab: the memory cost of the whole-volume path, never a lost stack."""
+        cannot serve region writes buffers until the last slab."""
         if tensor.shape[0] == 1:
             return tensor.squeeze(0)
         stack = self._stack(tensor)

@@ -31,9 +31,7 @@ except ImportError:
     _PYNVML_AVAILABLE = False
 
 # ``torch`` (device-name lookup only) is imported lazily at its point of use so that
-# ``import konfai`` stays light: CLI paths that never touch a GPU (``--help``/``--version``,
-# light apps helpers) avoid the ~1s torch import. The remote-server helpers speak plain HTTP
-# over the stdlib (urllib), so they cost no dependency at all.
+# ``import konfai`` stays light. The remote-server helpers speak plain HTTP over the stdlib.
 from konfai.utils.errors import KonfAIError
 
 try:
@@ -163,9 +161,8 @@ def get_available_devices(
         from torch.cuda import get_device_name
 
         devices_index = cuda_visible_devices()
-        # Torch reindexes devices after CUDA_VISIBLE_DEVICES masking, so the
-        # visible names must be resolved through local ordinals (0..N-1) while
-        # we keep returning the original user-facing device ids.
+        # Torch reindexes devices after CUDA_VISIBLE_DEVICES masking: the names are resolved
+        # through local ordinals (0..N-1), the returned ids stay the user-facing ones.
         return devices_index, [get_device_name(local_index) for local_index in range(len(devices_index))]
 
 
@@ -382,8 +379,8 @@ def assert_konfai_install() -> None:
         raise KonfAIPackagesError("\n".join(lines))
 
 
-#: The Python workflow API (:mod:`konfai.api`), re-exported lazily: ``konfai.transform(...)``
-#: works, and ``import konfai`` stays light: torch and the engines load on first use only.
+#: The Python workflow API (:mod:`konfai.api`), re-exported lazily: torch and the engines load
+#: on first use only.
 _API_EXPORTS = (
     "transform",
     "plan_transform",

@@ -72,21 +72,19 @@ class Patch(ABC):
         self._grids: dict[int, _PatchGrid] = {}
         self.pad_value = pad_value
         self.extend_slice = extend_slice
-        # Models need every patch at the declared size, so the last patch of an axis is padded up to it.
-        # A consumer that REDUCES patches instead (streamed evaluation) must see only in-volume voxels:
-        # padded ones would pollute its running sums, so it turns this off and takes the cropped patch.
+        # The last patch of an axis is padded up to the patch size for a model. A consumer that REDUCES
+        # patches (streamed evaluation) must see only in-volume voxels and turns this off.
         self.pad_to_patch = True
         #: Voxels of context read past each face of a grid patch, clamped to the volume, for a consumer
-        #: that reduces patches but scores through a window (a metric's halo). The grid keeps its
-        #: disjoint slots (``get_patch_slices``); ``core_in_read`` says where a slot sits in its read.
-        #: Unpadded only (``pad_to_patch`` False): a model input padded to the patch has no core.
+        #: that reduces patches through a window (a metric's halo). The grid keeps its disjoint slots
+        #: (``get_patch_slices``); ``core_in_read`` says where a slot sits in its read.
+        #: Unpadded only (``pad_to_patch`` False).
         self.halo = 0
         # The model's per-axis downsampling factor a FREE (``0``) axis rounds up to, set before the grids
-        # are cut so each case's whole-axis extent lands on a valid model input. ``None`` outside a model
-        # (evaluation) or for a network that never downsamples.
+        # are cut. ``None`` outside a model or for a network that never downsamples.
         self.free_axis_multiple: list[int] | None = None
-        # Whether a free (``0``) axis was DECLARED. Captured now because the OOM re-plan later pins
-        # ``patch_size`` to a concrete size in place, erasing the ``0`` the overlap default keys on.
+        # Whether a free (``0``) axis was DECLARED, captured before the OOM re-plan pins ``patch_size``
+        # in place.
         self._declared_free_axis: bool = (
             patch_size is not None and any(p == 0 for p in patch_size) and not all(p == 0 for p in patch_size)
         )
@@ -97,14 +95,11 @@ class Patch(ABC):
         self._grids.pop(a, None)
 
     def _grid(self, a: int) -> _PatchGrid:
-        """Copy ``a``'s cut, made once. A pure function of the recorded shape and this patch's own
-        configuration, so a rank rebuilds it instead of unpickling it (``__getstate__``)."""
+        """Copy ``a``'s cut, made once from the recorded shape (``__getstate__`` drops it)."""
         grid = self._grids.get(a)
         if grid is None:
             shape = self._shapes[a]
-            # The grid decides its own sweep axis and the reassembly reads it back (get_sweep_axis): one
-            # source of truth, because a grid emitted for one axis and reassembled along another hands out
-            # regions that are not final, with nothing to report it.
+            # The grid decides its own sweep axis and the reassembly reads it back (get_sweep_axis).
             sweep_axis = best_sweep_axis(concretize_patch_size(self.patch_size, shape, self.free_axis_multiple), shape)
             slices = get_patch_slices_from_shape(
                 self.patch_size,
@@ -118,15 +113,8 @@ class Patch(ABC):
         return grid
 
     def __getstate__(self) -> dict[str, Any]:
-        """The cuts stay out of the pickle: ``mp.spawn`` pickles the configured object once per
-        rank, and every manager's per-case grids dominated its bytes. Only the shapes travel, and
-        each rank cuts the same grids back from them on first use.
-
-        Cutting costs more than unpickling would have (100 cases of 2048 patches: 31 ms against 81
-        ms in process); it is the transfer, paid once per rank, that dominates. On a 2-rank CPU
-        spawn of 1000 such cases the payload goes from 35.2 to 0.44 MiB and the second rank holds
-        every grid 3.0 s after the launcher's stamp instead of 4.8 s.
-        """
+        """The cuts stay out of the pickle: only the shapes travel, and each rank cuts the same grids
+        back from them on first use."""
         return {**self.__dict__, "_grids": {}}
 
     def get_sweep_axis(self, a: int = 0) -> int:
@@ -188,9 +176,7 @@ class Patch(ABC):
                 if declared != 0:
                     target = declared
                 else:
-                    # A FREE axis pads up to THIS case's extent rounded to the model's downsampling
-                    # multiple, so a small heterogeneous case still reaches the network at a valid input
-                    # size (the up-front worst-case sizing only guarantees the largest case).
+                    # A FREE axis pads up to THIS case's extent rounded to the model's downsampling multiple.
                     m = free_axis_rounding(self.free_axis_multiple, axis, nspatial)
                     target = ((extent + m - 1) // m) * m if m > 1 else extent
                 p = 0 if _slice.start + target <= extent else target - (extent - _slice.start)
@@ -221,12 +207,8 @@ class Patch(ABC):
 
     def _pad_constant(self, data: torch.Tensor, padding: tuple[int, ...]) -> torch.Tensor:
         """``data`` padded (``F.pad`` pair order) with the configured value, a uint8 map with zero,
-        and anything else with its own minimum when no value is configured.
-
-        That minimum never leaves the device: the bands are filled from the 0-d tensor after a zero
-        pad, so a padded patch costs no host round trip (37 of the 64 patches of a 100^3 case at
-        32^3 are padded, measured).
-        """
+        and anything else with its own minimum when no value is configured. The minimum never leaves
+        the device."""
         if data.dtype == torch.uint8:
             return F.pad(data, padding, "constant", 0)
         if self.pad_value is not None:
