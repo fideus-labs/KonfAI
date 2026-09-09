@@ -50,6 +50,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from facts import fact
 from harness import PERF_DIR, PeakSampler, cprofile_summary, fingerprint, machine_gate, write_result
 
 sys.path.insert(0, str(PERF_DIR.parent))
@@ -276,6 +277,17 @@ def main() -> None:
             else:
                 shutil.rmtree(stray, ignore_errors=True)
     result["by_budget"] = sweep_rows
+    check = result["konfai_vs_naive"]
+    result["facts"] = [
+        # Equal to float32 rounding: another CPU's vector path lands one ULP away (1.19e-07 measured).
+        fact("max_abs_diff_konfai_vs_naive", check.get("max_abs_diff", float("nan")), 1e-6, "<="),
+        fact("shape_equal_konfai_vs_naive", check.get("shape_equal", False), 1),
+        fact("attrs_equal_konfai_vs_naive", check.get("attrs_equal", False), 1),
+    ]
+    for row in sweep_rows:
+        held = [line for line in row["plan"] if "held " in line]
+        tag = f"{row['budget_gib']:g}".replace(".", "p")
+        result["facts"].append(fact(f"within_budget_b{tag}", bool(held) and held[-1].endswith("within"), 1))
 
     prof_path = scratch / "transform.prof"
     in_fresh_process(

@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
 import tempfile
 from pathlib import Path
 
+from facts import fact
 from harness import (
     REPO,
     CliRun,
@@ -70,23 +72,81 @@ def predict_once(
     return run_cli(argv, cwd=copy, env=env, log_path=out_dir.with_suffix(".log"))
 
 
+SYNTHETIC_CASES = 2
+SYNTHETIC_SIDE = 256
+
+
+def synthetic_cases(root: Path) -> None:
+    """Random float32 volumes under ``root/Raw/<case>/CT.mha``: prediction needs no training to
+    write the same voxels on both routes, and 256^3 is larger than any patch, so the streamed route
+    exercises the slabs, the overlap and the blend."""
+    import numpy as np
+    import SimpleITK as sitk
+
+    rng = np.random.default_rng(0)
+    for index in range(SYNTHETIC_CASES):
+        case = root / "Raw" / f"P{index:03d}"
+        case.mkdir(parents=True, exist_ok=True)
+        image = sitk.GetImageFromArray(rng.normal(0.0, 100.0, (SYNTHETIC_SIDE,) * 3).astype(np.float32))
+        image.SetSpacing((1.0, 1.0, 1.0))
+        sitk.WriteImage(image, str(case / "CT.mha"))
+
+
+def _synthetic_worker(root: Path, out_dir: Path, gpu: bool) -> None:
+    """One prediction of the synthetic cases with a seeded random model, through the Python API."""
+    import torch
+    from konfai import api
+
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Conv3d(1, 8, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv3d(8, 2, 1))
+    os.chdir(root)
+    api.predict_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        patch=[64, 64, 64],
+        output="./Pred:mha",
+        name="SYNTHETIC",
+        gpu=[0] if gpu else None,
+        quiet=False,  # the clock lines are the phases the bench records
+        overwrite=True,
+        predictions_dir=out_dir,
+    )
+
+
+def predict_synthetic(root: Path, out_dir: Path, *, streamed: bool, gpu: bool) -> CliRun:
+    argv = [sys.executable, str(Path(__file__).resolve()), "--synthetic-worker", str(root), str(out_dir), str(int(gpu))]
+    env = {"KONFAI_STREAM_WORTH_THRESHOLD": "0"} if streamed else {}
+    return run_cli(argv, cwd=root, env=env, log_path=out_dir.with_suffix(".log"))
+
+
+def prediction_dataset(root: Path) -> Path:
+    """``<root>/<run>/<dataset>``, the directory whose case directories hold the written volumes."""
+    first = next(iter(sorted(root.rglob("*.mha"))), None)
+    if first is None:
+        raise SystemExit(f"[perf] no prediction written under {root}")
+    return first.parent.parent
+
+
 def compare_outputs(a_root: Path, b_root: Path) -> dict[str, object]:
     """Differing voxels and geometry agreement between two prediction trees, case by case."""
     import numpy as np
     import SimpleITK as sitk
 
-    cases = sorted(p.name for p in (a_root / "SEG_BASELINE" / "Dataset").iterdir() if p.is_dir())
+    a_dataset = prediction_dataset(a_root)
+    b_dataset = b_root / a_dataset.relative_to(a_root)
+    cases = sorted(p.name for p in a_dataset.iterdir() if p.is_dir())
+    # Every volume either route wrote, by relative path: a volume one route did not write is a difference.
+    a_files = {p.relative_to(a_dataset) for p in a_dataset.rglob("*.mha")}
+    b_files = {p.relative_to(b_dataset) for p in b_dataset.rglob("*.mha")} if b_dataset.is_dir() else set()
     differing = 0
     total = 0
-    geometry_ok = True
+    geometry_ok = a_files == b_files and bool(a_files)
     per_case: dict[str, int] = {}
-    for case in cases:
-        a = sitk.ReadImage(str(a_root / "SEG_BASELINE" / "Dataset" / case / "PRED.mha"))
-        b_path = b_root / "SEG_BASELINE" / "Dataset" / case / "PRED.mha"
-        if not b_path.exists():
-            geometry_ok = False
-            continue
-        b = sitk.ReadImage(str(b_path))
+    for relative in sorted(a_files & b_files):
+        case = str(relative)
+        a = sitk.ReadImage(str(a_dataset / relative))
+        b = sitk.ReadImage(str(b_dataset / relative))
         same_geometry = (
             a.GetSize() == b.GetSize()
             and np.allclose(a.GetSpacing(), b.GetSpacing())
@@ -132,7 +192,18 @@ def main() -> None:
         "--cprofile", action="store_true", help="run the whole-volume route once under cProfile (diagnostic)"
     )
     parser.add_argument("--cpu", action="store_true", help="no --gpu 0 (the default uses the GPU when torch sees one)")
+    parser.add_argument(
+        "--synthetic",
+        action="store_true",
+        help="random 256^3 volumes and a seeded random model through the Python API instead of the shipped "
+        "example and its checkpoint: the voxel identity of the two routes at scale, on any machine",
+    )
+    parser.add_argument("--synthetic-worker", nargs=3, metavar=("ROOT", "OUT", "GPU"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.synthetic_worker:
+        root_, out_, gpu_ = args.synthetic_worker
+        _synthetic_worker(Path(root_), Path(out_), bool(int(gpu_)))
+        return
     repeats = 1 if args.quick else args.repeats
     gate = machine_gate(force=args.force)
     fp = fingerprint()
@@ -141,9 +212,17 @@ def main() -> None:
 
     gpu = torch.cuda.is_available() and not args.cpu
     scratch = Path(tempfile.mkdtemp(prefix="konfai_perf_predict_"))
-    copy = copy_example("Segmentation", scratch)
-    checkpoint = newest_checkpoint(copy)
-    reference = REPO / "examples" / "Segmentation" / "Predictions"
+    if args.synthetic:
+        if args.cprofile:
+            raise SystemExit("[perf] --cprofile profiles the shipped example; drop --synthetic")
+        copy = scratch / "synthetic"
+        synthetic_cases(copy)
+        checkpoint = copy / "no-checkpoint"
+        reference = copy / "no-reference"
+    else:
+        copy = copy_example("Segmentation", scratch)
+        checkpoint = newest_checkpoint(copy)
+        reference = REPO / "examples" / "Segmentation" / "Predictions"
 
     result: dict[str, object] = {
         "gate_warnings": gate.warnings,
@@ -156,7 +235,11 @@ def main() -> None:
     for route in ("whole", "stream"):
         out_dir = scratch / f"pred_{route}"
         for _ in range(repeats + (0 if args.quick else 1)):  # one warmup unless quick
-            run = predict_once(copy, checkpoint, out_dir, streamed=route == "stream", gpu=gpu, cprofile=None)
+            run = (
+                predict_synthetic(copy, out_dir, streamed=route == "stream", gpu=gpu)
+                if args.synthetic
+                else predict_once(copy, checkpoint, out_dir, streamed=route == "stream", gpu=gpu, cprofile=None)
+            )
             if run.returncode != 0:
                 result["failure"] = {"route": route, "returncode": run.returncode, "tail": run.output[-3000:]}
                 write_result("predict", result, fp=fp)
@@ -179,6 +262,11 @@ def main() -> None:
         against_reference = compare_outputs(scratch / "pred_whole", reference)
         result["whole_vs_reference"] = against_reference
         metrics["differing_voxels_whole_vs_reference"] = float(against_reference["differing_voxels"])
+    result["lane"] = "synthetic" if args.synthetic else "example"
+    result["facts"] = [
+        fact("differing_voxels_whole_vs_stream", identity["differing_voxels"], 0),
+        fact("geometry_identical_whole_vs_stream", identity["geometry_ok"], 1),
+    ]
     if not identity["geometry_ok"] or identity["differing_voxels"] != 0:
         result["status"] = "OUTPUTS DIFFER between the whole-volume and the streamed route"
     else:

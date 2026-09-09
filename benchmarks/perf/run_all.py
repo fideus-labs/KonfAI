@@ -56,6 +56,10 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="time on a busy machine; warnings are recorded")
     parser.add_argument("--only", default="", help="comma-separated subset of: " + ", ".join(BENCHES))
     parser.add_argument("--skip", default="", help="comma-separated benches to skip (tests is the slow one)")
+    parser.add_argument("--cpu", action="store_true", help="the prediction bench without a GPU")
+    parser.add_argument(
+        "--synthetic", action="store_true", help="the prediction bench on synthetic cases, no example data"
+    )
     args = parser.parse_args()
 
     gate = machine_gate(force=args.force)
@@ -90,6 +94,8 @@ def main() -> None:
             argv.append("--quick")
         if args.force:
             argv.append("--force")
+        if bench == "predict":
+            argv += [flag for flag, on in (("--cpu", args.cpu), ("--synthetic", args.synthetic)) if on]
         started = time.time()
         print(f"[perf] === {bench}: {' '.join(argv[1:])}", flush=True)
         completed = subprocess.run(argv, cwd=PERF_DIR, check=False)
