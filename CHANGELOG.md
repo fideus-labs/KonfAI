@@ -16,6 +16,64 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## v1.8.4 (2026-09-09)
+
+### Features
+
+- Python API: `konfai.train_model` and `konfai.predict_model` take any `torch.nn.Module` with a
+  dataset root, the groups it reads, a loss and a patch; `konfai.import_bundle` and
+  `konfai.export_bundle` read and write MONAI Bundles. Two examples: `BringYourModel` and
+  `LargeImages` (a public ExaSPIM OME-Zarr store, streamed).
+- Config: a chain (`transforms:`, `patch_transforms:`, criteria) can be written as a YAML list;
+  a repeated class binds under occurrence keys (`Clip`, `Clip#2`). One scalar coercion applies on
+  every binding path, typed containers, unions and tuples included.
+- Apps: files declared at export (`--support-file DESTINATION=SOURCE`) travel with the bundle and
+  are listed in `app.json`; an existing bundle is replaced file by file. Remote uploads stream
+  (multipart, `requests-toolbelt`).
+- A two-class CPU segmentation quickstart (`examples/Segmentation/TwoClasses`): four synthetic
+  volumes, twenty epochs in about seven seconds, Dice 0.98 on the held-out case.
+- RESUME restarts from an epoch-boundary cursor (`resume_latest.pt`, per-rank RNG and measure
+  state); scheduler and AMP scaler state ride the checkpoint.
+- `Predictor.checkpoint_cache_gib`: a bounded checkpoint cache (1 GiB by default) with
+  memory-mapped loads for ensembles and folds.
+
+### Bug Fixes
+
+- Checkpoint selection (`BEST`) and `ReduceLROnPlateau` score what each loss minimizes: a Dice
+  reporting its coefficient summed with a cross-entropy kept the worst epoch.
+- Prediction and evaluation keep two cases loaded whatever the batch size: the training-sized
+  case buffer kept whole cases loaded, and a cohort's RAM grew by a case per case.
+- Refusals where a run used to go wrong in silence: a TRAIN without an optimizer, a weightless or
+  EMA-only checkpoint, a masked selection with an empty denominator, an unsigned Dice, a Trim on a
+  padded patch, a 2.5D context on the region route.
+- One DDP context over forward and backward, with deferred nested optimizer steps.
+- Apps: honest cancellation and lease races on the server, bundles kept whole on repackaging,
+  portable roles. MCP: validation reads an owned scratch copy beside the config, a failed spawn is
+  cleaned up, a job's resolved config is recorded once, when it ends. Studio: bounded log feeds,
+  lazy panels, browser tests.
+- A model YAML named by a relative path is anchored to the config file that names it, on every
+  entry point.
+
+### Performance
+
+- TRANSFORM sizes regions by price for the first one and by what the last held for the next,
+  decides LOAD from the store's read capability, and halves on a CUDA out-of-memory. ExaSPIM
+  (513x1331x1775 uint16): 1G 24.5 to 18.8 s, 2G 17.5 to 11.2 s, 16G 7 to 5.5 s.
+- `benchmarks/perf`: a benchmark series (startup, training step and epoch, prediction, evaluation,
+  transform, tests), a committed baseline and `pixi run perf-check` as the release gate; the apps
+  measured against the tools they wrap on the same input, torch and GPU (TotalSegmentator 1.8 to
+  3.9x faster, MRSegmentator at five folds 1.2 to 1.7x, 2 to 5x less host RAM).
+- Training examples default to autocast, `channels_last` on 2D and pinned memory.
+
+### Documentation
+
+- The site folds from 63 pages to 37; every old URL redirects to its new home.
+
+### CI
+
+- mypy in the pre-commit hook and in CI; representative lanes on pull requests, the full matrix on
+  main; one torch thread per test worker (the suite 8x faster on 24 cores).
+
 ## v1.8.3 (2026-09-02)
 
 ### Features
