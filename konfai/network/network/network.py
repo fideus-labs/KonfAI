@@ -906,8 +906,9 @@ class Network(ModuleArgsDict, ABC):
 
         An encoder/decoder graph (U-Net) only reassembles its skip connections when the input divides
         evenly at every level. The factor is traced through the branch register: a strided ``Conv`` or
-        ``MaxPool`` multiplies the branch it writes, ``ConvTranspose``/``Upsample`` and a residual
-        branch's ``AvgPool`` pass through, and a residual block's strided shortcut counts ONCE. Used to
+        ``MaxPool`` or ``AvgPool`` multiplies the branch it writes, ``ConvTranspose``/``Upsample`` pass
+        through, and a residual block's strided shortcut counts ONCE: parallel paths merge by their
+        per-axis maximum, so a shortcut's ``AvgPool`` beside a strided main path adds nothing. Used to
         size a free (``0``) patch axis to a valid extent (padded up, cropped back after the forward).
         """
         # The graph's spatial rank = the WIDEST strided leaf; strides align to that rank's trailing axes.

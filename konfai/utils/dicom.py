@@ -27,8 +27,9 @@ Reading one requires:
    columns plus their cross product for the z-axis).
 4. **CT intensity rescale**: RescaleSlope and RescaleIntercept convert stored pixel values to
    Hounsfield Units, mandatory for CT and absent or identity for MR.
-5. **Error handling**: missing tags, single-slice series, inconsistent spacing, non-square pixels
-   and unsupported transfer syntaxes are reported.
+5. **Error handling**: missing tags, inconsistent slice spacing and unsupported transfer syntaxes
+   are reported. A single-slice series takes ``SliceThickness``, or 1.0 mm when it carries none,
+   and non-square pixels are read as they are.
 
 Optional dependency: ``pydicom`` (``pip install konfai[dicom]``).
 """

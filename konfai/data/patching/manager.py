@@ -375,10 +375,10 @@ class DatasetManager:
         if all(index in self.augmented_data for index in indices):
             return
 
-        # The case tensor itself, once per copy. A draw hands back a fresh tensor or a view of what
-        # it was given and writes nothing into it (Foreign clones for a class that might), so a copy
-        # a draw did not select IS the case. A clone per copy was 640 MiB and 0.22 s for 10 copies of
-        # a 64 MiB case, per group, per case, per epoch under inline augmentation.
+        # The case tensor itself, once per copy. A draw must not write into the tensor it is handed:
+        # it returns a fresh tensor or a view (Foreign clones for a class that might), so a copy a
+        # draw did not select IS the case. A clone per copy was 640 MiB and 0.22 s for 10 copies of a
+        # 64 MiB case, per group, per case, per epoch under inline augmentation.
         a_data = [self.data[0] for _ in range(data_augmentations.nb)]
         for data_augmentation in data_augmentations.data_augmentations:
             if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:

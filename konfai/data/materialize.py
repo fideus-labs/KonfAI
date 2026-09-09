@@ -115,7 +115,8 @@ class CaseMaterializer:
         """Write this case's chain to disk by the cheapest path that can, and say which it took.
 
         The streamed path sweeps every unsatisfied :class:`Save` slab by slab, the whole-volume load
-        writes the same caches with more memory. ``allow_fallback=False`` raises instead of loading;
+        writes the same caches with more memory. ``allow_fallback=False`` raises instead of
+        loading when streaming is unavailable, but a planned ``prefer_whole`` route still loads;
         ``prefer_whole`` is the plan's LOAD choice; ``rewrite=True`` recomputes the case and renames
         over the old entries (``--overwrite``). A chain whose caches all exist writes nothing.
         """

@@ -328,7 +328,8 @@ class ModelComposite(Network):
             output_layers (list): List of output layer names to extract from each sub-model.
 
         Returns:
-            list[tuple[str, torch.Tensor]]: Aggregated output per layer, after the reduction.
+            list[tuple[str, list[int], torch.Tensor]]: per layer, its key, the channel counts of
+            the models that produced it, and the aggregated tensor.
         """
         final_outputs: list[tuple[str, list[int], torch.Tensor]] = []
         if not self._loaded:
