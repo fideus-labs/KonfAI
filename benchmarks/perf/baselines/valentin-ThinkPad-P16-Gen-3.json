@@ -1,15 +1,16 @@
 {
   "fingerprint": {
-    "date": "2026-09-07T17:23:41+0200",
+    "date": "2026-09-09T17:08:33+0200",
     "host": "valentin-ThinkPad-P16-Gen-3",
+    "machine": "valentin-ThinkPad-P16-Gen-3",
     "git": {
-      "sha": "81a66be8db07",
-      "dirty": true,
-      "describe": "v1.8.3-36-g81a66be8"
+      "sha": "d1c6961b9553",
+      "dirty": false,
+      "describe": "v1.8.3-4-gd1c6961b"
     },
     "versions": {
       "python": "3.13.14",
-      "konfai": "1.8.4.dev36",
+      "konfai": "1.8.4.dev3",
       "torch": "2.12.1+cu130",
       "numpy": "2.5.0",
       "SimpleITK": "2.5.5",
@@ -29,9 +30,9 @@
     },
     "power_profile": "performance",
     "load_avg": [
-      2.5,
-      11.66,
-      13.09
+      0.39,
+      1.01,
+      11.01
     ],
     "threads": {
       "OMP_NUM_THREADS": null,
@@ -44,16 +45,17 @@
     "startup": {
       "bench": "startup",
       "fingerprint": {
-        "date": "2026-09-07T17:23:43+0200",
+        "date": "2026-09-09T17:08:35+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "d1c6961b9553",
+          "dirty": false,
+          "describe": "v1.8.3-4-gd1c6961b"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -73,9 +75,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          2.5,
-          11.66,
-          13.09
+          0.39,
+          1.01,
+          11.01
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -86,48 +88,49 @@
         "repeats": 3,
         "gate_warnings": [],
         "import_konfai_runs_s": [
-          0.032,
-          0.031,
-          0.031
+          0.03,
+          0.03,
+          0.03
         ],
         "import_konfai_trainer_runs_s": [
-          0.731,
-          0.756,
-          0.743
+          0.799,
+          0.741,
+          0.8
         ],
         "import_konfai_utils_ome_zarr_runs_s": [
-          0.957,
-          0.972,
-          0.984
+          0.994,
+          0.978,
+          0.981
         ],
         "importtime_konfai_trainer_ms_by_top_module": {
-          "konfai": 741.6
+          "konfai": 769.3
         },
         "metrics": {
-          "import_konfai_s": 0.031,
+          "import_konfai_s": 0.03,
           "import_konfai_rss_mb": 21.3,
-          "import_konfai_trainer_s": 0.743,
-          "import_konfai_trainer_rss_mb": 604.4,
-          "import_konfai_utils_ome_zarr_s": 0.972,
-          "import_konfai_utils_ome_zarr_rss_mb": 555.0,
-          "cli_help_s": 0.055
+          "import_konfai_trainer_s": 0.799,
+          "import_konfai_trainer_rss_mb": 607.0,
+          "import_konfai_utils_ome_zarr_s": 0.981,
+          "import_konfai_utils_ome_zarr_rss_mb": 557.9,
+          "cli_help_s": 0.054
         },
-        "headline": "import konfai 0.031 s / konfai.trainer 0.743 s (604 MB); konfai --help 0.055 s"
+        "headline": "import konfai 0.03 s / konfai.trainer 0.799 s (607 MB); konfai --help 0.054 s"
       }
     },
     "train_step": {
       "bench": "train_step",
       "fingerprint": {
-        "date": "2026-09-07T17:23:59+0200",
+        "date": "2026-09-09T17:08:48+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "d1c6961b9553",
+          "dirty": false,
+          "describe": "v1.8.3-4-gd1c6961b"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -147,9 +150,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          2.32,
-          11.17,
-          12.91
+          0.68,
+          1.04,
+          10.86
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -168,410 +171,411 @@
         "steps": 40,
         "warmup": 5,
         "model_yaml": "/home/valentin/Documents/KonfAI/examples/Segmentation/UNet.yml",
+        "model_classpath": null,
         "fp32": {
           "head": "UNetBlock_0.Head.Softmax",
           "classes": 41,
           "medians_ms": {
-            "h2d": 0.276,
-            "forward": 12.103,
-            "loss": 0.507,
-            "backward": 24.893,
-            "optimizer": 0.264,
-            "step": 38.113
+            "h2d": 0.248,
+            "forward": 11.812,
+            "loss": 0.498,
+            "backward": 24.704,
+            "optimizer": 0.262,
+            "step": 37.629
           },
           "runs_ms": [
             {
-              "h2d": 0.274,
-              "forward": 11.876,
-              "loss": 0.488,
-              "backward": 24.618,
-              "optimizer": 0.214,
-              "step": 37.47
-            },
-            {
-              "h2d": 0.259,
-              "forward": 11.913,
-              "loss": 0.497,
-              "backward": 24.638,
-              "optimizer": 0.216,
-              "step": 37.522
-            },
-            {
-              "h2d": 0.241,
-              "forward": 11.932,
-              "loss": 0.492,
-              "backward": 21.873,
-              "optimizer": 0.202,
-              "step": 34.741
-            },
-            {
-              "h2d": 0.283,
-              "forward": 9.893,
-              "loss": 0.418,
-              "backward": 22.894,
-              "optimizer": 0.235,
-              "step": 33.724
-            },
-            {
-              "h2d": 0.277,
-              "forward": 11.321,
-              "loss": 0.49,
-              "backward": 24.856,
-              "optimizer": 0.264,
-              "step": 37.208
-            },
-            {
-              "h2d": 0.277,
-              "forward": 12.084,
-              "loss": 0.507,
-              "backward": 25.628,
-              "optimizer": 0.274,
-              "step": 38.77
-            },
-            {
-              "h2d": 0.276,
-              "forward": 12.239,
-              "loss": 0.489,
-              "backward": 24.95,
-              "optimizer": 0.273,
-              "step": 38.226
-            },
-            {
-              "h2d": 0.275,
-              "forward": 12.204,
-              "loss": 0.513,
-              "backward": 24.823,
-              "optimizer": 0.269,
-              "step": 38.084
-            },
-            {
-              "h2d": 0.277,
-              "forward": 12.122,
-              "loss": 0.507,
-              "backward": 24.753,
-              "optimizer": 0.272,
-              "step": 37.932
-            },
-            {
-              "h2d": 0.29,
-              "forward": 12.148,
-              "loss": 0.499,
-              "backward": 24.7,
-              "optimizer": 0.251,
-              "step": 37.887
-            },
-            {
-              "h2d": 0.27,
-              "forward": 11.729,
-              "loss": 0.486,
-              "backward": 24.498,
-              "optimizer": 0.25,
-              "step": 37.232
-            },
-            {
-              "h2d": 0.248,
-              "forward": 11.766,
-              "loss": 0.483,
-              "backward": 24.4,
-              "optimizer": 0.246,
-              "step": 37.143
-            },
-            {
-              "h2d": 0.261,
-              "forward": 11.685,
-              "loss": 0.479,
-              "backward": 24.464,
-              "optimizer": 0.245,
-              "step": 37.134
-            },
-            {
-              "h2d": 0.389,
-              "forward": 11.886,
-              "loss": 0.533,
-              "backward": 37.154,
-              "optimizer": 0.535,
-              "step": 50.497
-            },
-            {
-              "h2d": 0.32,
-              "forward": 20.135,
-              "loss": 0.849,
-              "backward": 68.571,
-              "optimizer": 0.636,
-              "step": 90.51
-            },
-            {
-              "h2d": 0.255,
-              "forward": 18.377,
-              "loss": 0.716,
-              "backward": 48.575,
-              "optimizer": 0.439,
-              "step": 68.362
-            },
-            {
-              "h2d": 0.28,
-              "forward": 16.963,
-              "loss": 0.781,
-              "backward": 56.564,
-              "optimizer": 0.532,
-              "step": 75.12
-            },
-            {
-              "h2d": 0.24,
-              "forward": 20.154,
-              "loss": 0.859,
-              "backward": 31.105,
-              "optimizer": 0.362,
-              "step": 52.72
-            },
-            {
-              "h2d": 0.277,
-              "forward": 14.184,
-              "loss": 0.544,
-              "backward": 27.977,
-              "optimizer": 0.288,
-              "step": 43.269
-            },
-            {
-              "h2d": 0.262,
-              "forward": 12.82,
-              "loss": 0.512,
-              "backward": 26.686,
-              "optimizer": 0.284,
-              "step": 40.565
-            },
-            {
-              "h2d": 0.245,
-              "forward": 12.443,
-              "loss": 0.507,
-              "backward": 25.909,
-              "optimizer": 0.26,
-              "step": 39.364
-            },
-            {
-              "h2d": 0.249,
-              "forward": 12.187,
-              "loss": 0.509,
-              "backward": 25.907,
+              "h2d": 0.251,
+              "forward": 10.804,
+              "loss": 0.467,
+              "backward": 23.586,
               "optimizer": 0.259,
-              "step": 39.111
+              "step": 35.368
             },
             {
-              "h2d": 0.249,
-              "forward": 12.131,
-              "loss": 0.511,
-              "backward": 25.729,
+              "h2d": 0.244,
+              "forward": 11.72,
+              "loss": 0.479,
+              "backward": 24.257,
               "optimizer": 0.263,
-              "step": 38.883
+              "step": 36.964
             },
             {
-              "h2d": 0.257,
-              "forward": 12.055,
-              "loss": 0.487,
-              "backward": 24.865,
-              "optimizer": 0.262,
-              "step": 37.927
-            },
-            {
-              "h2d": 0.287,
-              "forward": 12.132,
-              "loss": 0.486,
-              "backward": 24.665,
-              "optimizer": 0.246,
-              "step": 37.817
-            },
-            {
-              "h2d": 0.291,
-              "forward": 11.756,
-              "loss": 0.49,
-              "backward": 24.921,
-              "optimizer": 0.264,
-              "step": 37.722
-            },
-            {
-              "h2d": 0.277,
-              "forward": 12.225,
-              "loss": 0.515,
-              "backward": 24.856,
-              "optimizer": 0.269,
-              "step": 38.142
-            },
-            {
-              "h2d": 0.28,
-              "forward": 12.279,
-              "loss": 0.511,
-              "backward": 25.377,
+              "h2d": 0.242,
+              "forward": 11.799,
+              "loss": 0.5,
+              "backward": 24.238,
               "optimizer": 0.257,
-              "step": 38.703
-            },
-            {
-              "h2d": 0.282,
-              "forward": 12.051,
-              "loss": 0.507,
-              "backward": 24.782,
-              "optimizer": 0.246,
-              "step": 37.867
-            },
-            {
-              "h2d": 0.276,
-              "forward": 11.802,
-              "loss": 0.48,
-              "backward": 23.809,
-              "optimizer": 0.233,
-              "step": 36.6
-            },
-            {
-              "h2d": 0.276,
-              "forward": 11.068,
-              "loss": 0.474,
-              "backward": 23.665,
-              "optimizer": 0.232,
-              "step": 35.715
-            },
-            {
-              "h2d": 0.275,
-              "forward": 11.039,
-              "loss": 0.48,
-              "backward": 23.824,
-              "optimizer": 0.244,
-              "step": 35.863
-            },
-            {
-              "h2d": 0.288,
-              "forward": 11.509,
-              "loss": 0.477,
-              "backward": 23.798,
-              "optimizer": 0.245,
-              "step": 36.317
+              "step": 37.036
             },
             {
               "h2d": 0.245,
-              "forward": 11.472,
-              "loss": 0.483,
-              "backward": 24.553,
+              "forward": 11.794,
+              "loss": 0.495,
+              "backward": 24.226,
+              "optimizer": 0.249,
+              "step": 37.01
+            },
+            {
+              "h2d": 0.242,
+              "forward": 11.324,
+              "loss": 0.482,
+              "backward": 23.523,
               "optimizer": 0.237,
-              "step": 36.99
-            },
-            {
-              "h2d": 0.243,
-              "forward": 12.071,
-              "loss": 0.515,
-              "backward": 26.251,
-              "optimizer": 0.272,
-              "step": 39.353
-            },
-            {
-              "h2d": 0.26,
-              "forward": 11.947,
-              "loss": 0.497,
-              "backward": 33.781,
-              "optimizer": 0.414,
-              "step": 46.9
-            },
-            {
-              "h2d": 0.286,
-              "forward": 15.447,
-              "loss": 0.597,
-              "backward": 35.168,
-              "optimizer": 0.334,
-              "step": 51.832
+              "step": 35.809
             },
             {
               "h2d": 0.268,
-              "forward": 16.961,
-              "loss": 0.71,
-              "backward": 46.112,
-              "optimizer": 0.666,
-              "step": 64.716
+              "forward": 11.219,
+              "loss": 0.479,
+              "backward": 24.023,
+              "optimizer": 0.249,
+              "step": 36.238
+            },
+            {
+              "h2d": 0.242,
+              "forward": 11.322,
+              "loss": 0.469,
+              "backward": 23.432,
+              "optimizer": 0.237,
+              "step": 35.702
+            },
+            {
+              "h2d": 0.239,
+              "forward": 11.468,
+              "loss": 0.492,
+              "backward": 24.165,
+              "optimizer": 0.267,
+              "step": 36.632
+            },
+            {
+              "h2d": 0.239,
+              "forward": 11.935,
+              "loss": 0.5,
+              "backward": 24.63,
+              "optimizer": 0.262,
+              "step": 37.565
+            },
+            {
+              "h2d": 0.288,
+              "forward": 11.713,
+              "loss": 0.496,
+              "backward": 24.143,
+              "optimizer": 0.25,
+              "step": 36.89
+            },
+            {
+              "h2d": 0.275,
+              "forward": 11.399,
+              "loss": 0.483,
+              "backward": 23.569,
+              "optimizer": 0.237,
+              "step": 35.963
+            },
+            {
+              "h2d": 0.24,
+              "forward": 11.147,
+              "loss": 0.479,
+              "backward": 24.016,
+              "optimizer": 0.243,
+              "step": 36.125
+            },
+            {
+              "h2d": 0.252,
+              "forward": 11.326,
+              "loss": 0.47,
+              "backward": 23.916,
+              "optimizer": 0.256,
+              "step": 36.219
+            },
+            {
+              "h2d": 0.279,
+              "forward": 11.71,
+              "loss": 0.495,
+              "backward": 24.953,
+              "optimizer": 0.261,
+              "step": 37.698
+            },
+            {
+              "h2d": 0.241,
+              "forward": 11.715,
+              "loss": 0.491,
+              "backward": 52.842,
+              "optimizer": 0.551,
+              "step": 65.84
+            },
+            {
+              "h2d": 0.29,
+              "forward": 19.973,
+              "loss": 0.839,
+              "backward": 53.855,
+              "optimizer": 0.669,
+              "step": 75.626
+            },
+            {
+              "h2d": 0.251,
+              "forward": 17.957,
+              "loss": 0.758,
+              "backward": 61.606,
+              "optimizer": 0.667,
+              "step": 81.238
+            },
+            {
+              "h2d": 0.247,
+              "forward": 21.364,
+              "loss": 0.761,
+              "backward": 40.575,
+              "optimizer": 0.433,
+              "step": 63.379
+            },
+            {
+              "h2d": 0.24,
+              "forward": 14.803,
+              "loss": 0.55,
+              "backward": 28.798,
+              "optimizer": 0.304,
+              "step": 44.694
+            },
+            {
+              "h2d": 0.241,
+              "forward": 12.63,
+              "loss": 0.53,
+              "backward": 26.992,
+              "optimizer": 0.286,
+              "step": 40.678
+            },
+            {
+              "h2d": 0.25,
+              "forward": 12.082,
+              "loss": 0.504,
+              "backward": 25.575,
+              "optimizer": 0.265,
+              "step": 38.675
+            },
+            {
+              "h2d": 0.246,
+              "forward": 11.912,
+              "loss": 0.504,
+              "backward": 25.213,
+              "optimizer": 0.263,
+              "step": 38.139
             },
             {
               "h2d": 0.28,
-              "forward": 24.91,
-              "loss": 1.041,
-              "backward": 46.779,
-              "optimizer": 0.522,
-              "step": 73.533
+              "forward": 11.775,
+              "loss": 0.494,
+              "backward": 25.243,
+              "optimizer": 0.261,
+              "step": 38.053
             },
             {
-              "h2d": 0.277,
-              "forward": 19.851,
-              "loss": 0.853,
-              "backward": 40.537,
-              "optimizer": 0.514,
-              "step": 62.032
+              "h2d": 0.24,
+              "forward": 11.824,
+              "loss": 0.501,
+              "backward": 25.504,
+              "optimizer": 0.284,
+              "step": 38.352
+            },
+            {
+              "h2d": 0.241,
+              "forward": 12.313,
+              "loss": 0.495,
+              "backward": 25.307,
+              "optimizer": 0.265,
+              "step": 38.62
+            },
+            {
+              "h2d": 0.239,
+              "forward": 11.851,
+              "loss": 0.483,
+              "backward": 24.291,
+              "optimizer": 0.245,
+              "step": 37.11
+            },
+            {
+              "h2d": 0.24,
+              "forward": 11.62,
+              "loss": 0.509,
+              "backward": 24.3,
+              "optimizer": 0.245,
+              "step": 36.915
+            },
+            {
+              "h2d": 0.238,
+              "forward": 11.531,
+              "loss": 0.509,
+              "backward": 24.516,
+              "optimizer": 0.25,
+              "step": 37.043
+            },
+            {
+              "h2d": 0.275,
+              "forward": 11.519,
+              "loss": 0.485,
+              "backward": 24.187,
+              "optimizer": 0.245,
+              "step": 36.711
+            },
+            {
+              "h2d": 0.24,
+              "forward": 11.42,
+              "loss": 0.482,
+              "backward": 24.114,
+              "optimizer": 0.243,
+              "step": 36.499
+            },
+            {
+              "h2d": 0.242,
+              "forward": 11.453,
+              "loss": 0.479,
+              "backward": 24.699,
+              "optimizer": 0.257,
+              "step": 37.129
+            },
+            {
+              "h2d": 0.317,
+              "forward": 11.848,
+              "loss": 0.502,
+              "backward": 24.709,
+              "optimizer": 0.261,
+              "step": 37.638
+            },
+            {
+              "h2d": 0.272,
+              "forward": 11.951,
+              "loss": 0.488,
+              "backward": 24.645,
+              "optimizer": 0.265,
+              "step": 37.621
+            },
+            {
+              "h2d": 0.287,
+              "forward": 12.004,
+              "loss": 0.51,
+              "backward": 24.719,
+              "optimizer": 0.271,
+              "step": 37.791
+            },
+            {
+              "h2d": 0.267,
+              "forward": 12.085,
+              "loss": 0.511,
+              "backward": 26.124,
+              "optimizer": 0.349,
+              "step": 39.336
+            },
+            {
+              "h2d": 0.265,
+              "forward": 14.432,
+              "loss": 0.613,
+              "backward": 32.263,
+              "optimizer": 0.476,
+              "step": 48.05
+            },
+            {
+              "h2d": 0.263,
+              "forward": 17.733,
+              "loss": 0.768,
+              "backward": 40.405,
+              "optimizer": 0.411,
+              "step": 59.58
+            },
+            {
+              "h2d": 0.276,
+              "forward": 14.806,
+              "loss": 0.573,
+              "backward": 43.784,
+              "optimizer": 0.505,
+              "step": 59.945
+            },
+            {
+              "h2d": 0.25,
+              "forward": 17.533,
+              "loss": 0.659,
+              "backward": 43.738,
+              "optimizer": 0.517,
+              "step": 62.698
+            },
+            {
+              "h2d": 0.257,
+              "forward": 15.749,
+              "loss": 0.61,
+              "backward": 34.053,
+              "optimizer": 0.425,
+              "step": 51.094
             }
           ],
           "peak_alloc_mib": 1140.9,
           "kernel_families_ms": {
-            "conv_gemm": 283.418,
-            "layout": 11.332,
-            "norm_act": 19.239,
-            "loss_like": 2.203,
-            "optimizer": 0.367,
-            "reduce": 18.948,
-            "elementwise_copy": 66.591,
-            "other": 2.331,
-            "total_ms": 404.429
+            "conv_gemm": 275.837,
+            "layout": 11.451,
+            "norm_act": 18.29,
+            "loss_like": 2.053,
+            "optimizer": 0.355,
+            "reduce": 18.205,
+            "elementwise_copy": 64.909,
+            "other": 2.451,
+            "total_ms": 393.551
           },
           "kernel_families_share": {
             "conv_gemm": 0.701,
-            "layout": 0.028,
-            "norm_act": 0.048,
+            "layout": 0.029,
+            "norm_act": 0.046,
             "loss_like": 0.005,
             "optimizer": 0.001,
-            "reduce": 0.047,
+            "reduce": 0.046,
             "elementwise_copy": 0.165,
             "other": 0.006
           },
           "top_kernels": [
             {
               "name": "aten::convolution_backward",
-              "self_device_ms": 200.379,
+              "self_device_ms": 196.379,
               "count": 180
             },
             {
               "name": "aten::cudnn_convolution",
-              "self_device_ms": 75.506,
+              "self_device_ms": 72.156,
               "count": 170
             },
             {
               "name": "void cudnn::engines_precompiled::nchwToNhwcKernel<float, float, float, false, true, (cudnn",
-              "self_device_ms": 50.163,
+              "self_device_ms": 49.404,
               "count": 830
             },
             {
               "name": "_ZN17cutlass__5x_cudnn6KernelINS_4conv6kernel23ImplicitGemmConvolutionINS1_11threadblock22",
-              "self_device_ms": 49.919,
+              "self_device_ms": 48.898,
               "count": 90
             },
             {
               "name": "void cutlass__5x_cudnn::Kernel<cutlass_tensorop_s1688dgrad_optimized_tf32_128x64_16x6_nhwc",
-              "self_device_ms": 47.21,
+              "self_device_ms": 46.403,
               "count": 130
             },
             {
               "name": "void cutlass__5x_cudnn::Kernel<cutlass_tensorop_s1688fprop_optimized_tf32_128x64_16x6_nhwc",
-              "self_device_ms": 25.696,
+              "self_device_ms": 24.917,
               "count": 80
             },
             {
               "name": "sm80_xmma_wgrad_implicit_gemm_indexed_tf32f32_tf32f32_f32_nhwckrsc_nhwc_tilesize128x128x16",
-              "self_device_ms": 22.609,
+              "self_device_ms": 22.197,
               "count": 40
             },
             {
               "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native:",
-              "self_device_ms": 22.063,
+              "self_device_ms": 21.52,
               "count": 230
             },
             {
               "name": "void cudnn::engines_precompiled::nhwcToNchwKernel<float, float, float, true, false, (cudnn",
-              "self_device_ms": 21.566,
+              "self_device_ms": 20.558,
               "count": 390
             },
             {
               "name": "aten::add_",
-              "self_device_ms": 18.01,
+              "self_device_ms": 17.526,
               "count": 560
             }
           ]
@@ -580,351 +584,351 @@
           "head": "UNetBlock_0.Head.Softmax",
           "classes": 41,
           "medians_ms": {
-            "h2d": 0.249,
-            "forward": 5.803,
-            "loss": 0.489,
-            "backward": 13.373,
-            "optimizer": 0.426,
-            "step": 20.112
+            "h2d": 0.251,
+            "forward": 5.903,
+            "loss": 0.497,
+            "backward": 13.382,
+            "optimizer": 0.48,
+            "step": 20.332
           },
           "runs_ms": [
             {
-              "h2d": 0.253,
-              "forward": 5.504,
+              "h2d": 0.28,
+              "forward": 5.415,
               "loss": 0.494,
-              "backward": 13.35,
-              "optimizer": 0.418,
-              "step": 20.018
-            },
-            {
-              "h2d": 0.24,
-              "forward": 5.507,
-              "loss": 0.496,
-              "backward": 13.366,
-              "optimizer": 0.407,
-              "step": 20.016
-            },
-            {
-              "h2d": 0.238,
-              "forward": 5.542,
-              "loss": 0.498,
-              "backward": 13.381,
-              "optimizer": 0.416,
-              "step": 20.075
-            },
-            {
-              "h2d": 0.29,
-              "forward": 5.52,
-              "loss": 0.495,
-              "backward": 13.424,
-              "optimizer": 0.406,
-              "step": 20.135
+              "backward": 13.233,
+              "optimizer": 0.457,
+              "step": 19.879
             },
             {
               "h2d": 0.241,
-              "forward": 5.543,
-              "loss": 0.495,
-              "backward": 13.405,
-              "optimizer": 0.427,
-              "step": 20.112
-            },
-            {
-              "h2d": 0.227,
-              "forward": 5.514,
-              "loss": 0.498,
-              "backward": 13.403,
-              "optimizer": 0.411,
-              "step": 20.052
-            },
-            {
-              "h2d": 0.239,
-              "forward": 5.55,
+              "forward": 5.493,
               "loss": 0.496,
-              "backward": 13.411,
-              "optimizer": 0.415,
-              "step": 20.111
+              "backward": 13.366,
+              "optimizer": 0.992,
+              "step": 20.587
             },
             {
-              "h2d": 0.239,
-              "forward": 5.528,
-              "loss": 0.495,
-              "backward": 13.45,
-              "optimizer": 0.434,
-              "step": 20.147
-            },
-            {
-              "h2d": 0.25,
-              "forward": 5.555,
+              "h2d": 0.303,
+              "forward": 5.633,
               "loss": 0.498,
-              "backward": 13.408,
-              "optimizer": 0.423,
-              "step": 20.133
+              "backward": 13.389,
+              "optimizer": 1.017,
+              "step": 20.839
             },
             {
-              "h2d": 0.249,
+              "h2d": 0.357,
+              "forward": 5.659,
+              "loss": 0.498,
+              "backward": 13.291,
+              "optimizer": 0.857,
+              "step": 20.662
+            },
+            {
+              "h2d": 0.327,
+              "forward": 5.467,
+              "loss": 0.496,
+              "backward": 13.284,
+              "optimizer": 0.732,
+              "step": 20.306
+            },
+            {
+              "h2d": 0.272,
+              "forward": 5.512,
+              "loss": 0.496,
+              "backward": 13.385,
+              "optimizer": 0.562,
+              "step": 20.227
+            },
+            {
+              "h2d": 0.281,
+              "forward": 5.536,
+              "loss": 0.498,
+              "backward": 13.418,
+              "optimizer": 0.911,
+              "step": 20.644
+            },
+            {
+              "h2d": 0.321,
+              "forward": 5.586,
+              "loss": 0.497,
+              "backward": 13.391,
+              "optimizer": 0.655,
+              "step": 20.45
+            },
+            {
+              "h2d": 0.261,
+              "forward": 5.518,
+              "loss": 0.501,
+              "backward": 13.386,
+              "optimizer": 0.681,
+              "step": 20.347
+            },
+            {
+              "h2d": 0.26,
+              "forward": 5.536,
+              "loss": 0.498,
+              "backward": 13.407,
+              "optimizer": 0.465,
+              "step": 20.165
+            },
+            {
+              "h2d": 0.263,
               "forward": 5.536,
               "loss": 0.5,
-              "backward": 13.405,
-              "optimizer": 0.432,
+              "backward": 13.391,
+              "optimizer": 0.445,
+              "step": 20.134
+            },
+            {
+              "h2d": 0.255,
+              "forward": 5.532,
+              "loss": 0.498,
+              "backward": 13.385,
+              "optimizer": 0.453,
               "step": 20.122
             },
             {
-              "h2d": 0.275,
-              "forward": 5.545,
-              "loss": 0.498,
-              "backward": 13.419,
-              "optimizer": 0.463,
-              "step": 20.201
-            },
-            {
-              "h2d": 0.454,
-              "forward": 5.5,
-              "loss": 0.425,
-              "backward": 11.919,
-              "optimizer": 0.418,
-              "step": 18.717
-            },
-            {
               "h2d": 0.24,
-              "forward": 5.306,
-              "loss": 0.426,
-              "backward": 12.074,
-              "optimizer": 0.399,
-              "step": 18.445
-            },
-            {
-              "h2d": 0.242,
-              "forward": 5.586,
-              "loss": 0.45,
-              "backward": 12.573,
-              "optimizer": 0.413,
-              "step": 19.262
-            },
-            {
-              "h2d": 0.237,
-              "forward": 5.727,
-              "loss": 0.455,
-              "backward": 13.199,
-              "optimizer": 0.409,
-              "step": 20.026
-            },
-            {
-              "h2d": 0.278,
-              "forward": 5.9,
-              "loss": 0.468,
-              "backward": 13.177,
-              "optimizer": 0.422,
-              "step": 20.244
-            },
-            {
-              "h2d": 0.278,
-              "forward": 5.86,
-              "loss": 0.462,
-              "backward": 13.031,
-              "optimizer": 0.442,
-              "step": 20.074
-            },
-            {
-              "h2d": 0.238,
-              "forward": 5.794,
-              "loss": 0.461,
-              "backward": 13.045,
-              "optimizer": 0.426,
-              "step": 19.965
-            },
-            {
-              "h2d": 0.288,
-              "forward": 5.781,
-              "loss": 0.462,
-              "backward": 13.007,
+              "forward": 5.519,
+              "loss": 0.499,
+              "backward": 13.379,
               "optimizer": 0.423,
-              "step": 19.961
-            },
-            {
-              "h2d": 0.275,
-              "forward": 5.788,
-              "loss": 0.459,
-              "backward": 13.012,
-              "optimizer": 0.414,
-              "step": 19.948
-            },
-            {
-              "h2d": 0.275,
-              "forward": 5.8,
-              "loss": 0.46,
-              "backward": 12.923,
-              "optimizer": 0.427,
-              "step": 19.886
-            },
-            {
-              "h2d": 0.262,
-              "forward": 5.743,
-              "loss": 0.464,
-              "backward": 13.113,
-              "optimizer": 0.422,
-              "step": 20.004
-            },
-            {
-              "h2d": 0.273,
-              "forward": 5.856,
-              "loss": 0.464,
-              "backward": 13.136,
-              "optimizer": 0.412,
-              "step": 20.14
-            },
-            {
-              "h2d": 0.279,
-              "forward": 5.843,
-              "loss": 0.462,
-              "backward": 13.007,
-              "optimizer": 0.423,
-              "step": 20.014
-            },
-            {
-              "h2d": 0.276,
-              "forward": 5.806,
-              "loss": 0.462,
-              "backward": 13.158,
-              "optimizer": 0.41,
-              "step": 20.112
-            },
-            {
-              "h2d": 0.238,
-              "forward": 5.83,
-              "loss": 0.462,
-              "backward": 13.035,
-              "optimizer": 0.421,
-              "step": 19.986
-            },
-            {
-              "h2d": 0.244,
-              "forward": 5.806,
-              "loss": 0.461,
-              "backward": 13.16,
-              "optimizer": 0.588,
-              "step": 20.258
-            },
-            {
-              "h2d": 0.25,
-              "forward": 5.837,
-              "loss": 0.461,
-              "backward": 13.038,
-              "optimizer": 0.446,
-              "step": 20.033
-            },
-            {
-              "h2d": 0.222,
-              "forward": 5.817,
-              "loss": 0.459,
-              "backward": 13.033,
-              "optimizer": 0.46,
-              "step": 19.99
-            },
-            {
-              "h2d": 0.242,
-              "forward": 5.897,
-              "loss": 0.484,
-              "backward": 14.093,
-              "optimizer": 0.457,
-              "step": 21.173
-            },
-            {
-              "h2d": 0.238,
-              "forward": 6.333,
-              "loss": 0.483,
-              "backward": 15.753,
-              "optimizer": 0.613,
-              "step": 23.422
-            },
-            {
-              "h2d": 0.249,
-              "forward": 10.894,
-              "loss": 0.709,
-              "backward": 22.318,
-              "optimizer": 0.64,
-              "step": 34.81
-            },
-            {
-              "h2d": 0.226,
-              "forward": 10.727,
-              "loss": 0.696,
-              "backward": 21.994,
-              "optimizer": 0.709,
-              "step": 34.352
-            },
-            {
-              "h2d": 0.242,
-              "forward": 13.943,
-              "loss": 0.886,
-              "backward": 26.864,
-              "optimizer": 0.736,
-              "step": 42.671
-            },
-            {
-              "h2d": 0.238,
-              "forward": 11.841,
-              "loss": 0.702,
-              "backward": 23.466,
-              "optimizer": 0.742,
-              "step": 36.99
-            },
-            {
-              "h2d": 0.277,
-              "forward": 17.659,
-              "loss": 0.797,
-              "backward": 26.12,
-              "optimizer": 0.722,
-              "step": 45.573
-            },
-            {
-              "h2d": 0.274,
-              "forward": 12.776,
-              "loss": 0.793,
-              "backward": 25.088,
-              "optimizer": 0.701,
-              "step": 39.63
-            },
-            {
-              "h2d": 0.277,
-              "forward": 11.006,
-              "loss": 0.618,
-              "backward": 19.42,
-              "optimizer": 0.54,
-              "step": 31.86
+              "step": 20.061
             },
             {
               "h2d": 0.239,
-              "forward": 9.177,
-              "loss": 0.603,
-              "backward": 17.234,
-              "optimizer": 0.498,
-              "step": 27.751
+              "forward": 5.53,
+              "loss": 0.498,
+              "backward": 13.415,
+              "optimizer": 0.576,
+              "step": 20.258
+            },
+            {
+              "h2d": 0.267,
+              "forward": 5.749,
+              "loss": 0.425,
+              "backward": 11.947,
+              "optimizer": 0.467,
+              "step": 18.856
+            },
+            {
+              "h2d": 0.239,
+              "forward": 5.274,
+              "loss": 0.421,
+              "backward": 12.62,
+              "optimizer": 0.433,
+              "step": 18.988
+            },
+            {
+              "h2d": 0.238,
+              "forward": 5.889,
+              "loss": 0.456,
+              "backward": 13.158,
+              "optimizer": 0.459,
+              "step": 20.201
+            },
+            {
+              "h2d": 0.282,
+              "forward": 5.904,
+              "loss": 0.456,
+              "backward": 13.15,
+              "optimizer": 0.46,
+              "step": 20.251
+            },
+            {
+              "h2d": 0.221,
+              "forward": 5.939,
+              "loss": 0.458,
+              "backward": 13.256,
+              "optimizer": 0.445,
+              "step": 20.318
+            },
+            {
+              "h2d": 0.238,
+              "forward": 6.011,
+              "loss": 0.462,
+              "backward": 13.246,
+              "optimizer": 0.43,
+              "step": 20.387
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.897,
+              "loss": 0.46,
+              "backward": 13.162,
+              "optimizer": 0.421,
+              "step": 20.177
+            },
+            {
+              "h2d": 0.238,
+              "forward": 5.903,
+              "loss": 0.46,
+              "backward": 13.177,
+              "optimizer": 0.439,
+              "step": 20.216
+            },
+            {
+              "h2d": 0.239,
+              "forward": 5.908,
+              "loss": 0.456,
+              "backward": 13.15,
+              "optimizer": 0.447,
+              "step": 20.199
+            },
+            {
+              "h2d": 0.239,
+              "forward": 5.904,
+              "loss": 0.458,
+              "backward": 13.16,
+              "optimizer": 0.43,
+              "step": 20.192
+            },
+            {
+              "h2d": 0.238,
+              "forward": 5.899,
+              "loss": 0.456,
+              "backward": 13.175,
+              "optimizer": 0.429,
+              "step": 20.197
+            },
+            {
+              "h2d": 0.276,
+              "forward": 5.927,
+              "loss": 0.456,
+              "backward": 13.235,
+              "optimizer": 0.665,
+              "step": 20.559
+            },
+            {
+              "h2d": 0.254,
+              "forward": 5.96,
+              "loss": 0.458,
+              "backward": 13.171,
+              "optimizer": 0.612,
+              "step": 20.454
+            },
+            {
+              "h2d": 0.249,
+              "forward": 5.916,
+              "loss": 0.455,
+              "backward": 13.149,
+              "optimizer": 0.453,
+              "step": 20.222
+            },
+            {
+              "h2d": 0.24,
+              "forward": 5.929,
+              "loss": 0.456,
+              "backward": 13.21,
+              "optimizer": 0.441,
+              "step": 20.275
             },
             {
               "h2d": 0.275,
-              "forward": 8.122,
-              "loss": 0.548,
-              "backward": 16.982,
-              "optimizer": 0.498,
-              "step": 26.426
+              "forward": 5.925,
+              "loss": 0.462,
+              "backward": 14.325,
+              "optimizer": 0.451,
+              "step": 21.437
+            },
+            {
+              "h2d": 0.239,
+              "forward": 6.768,
+              "loss": 0.508,
+              "backward": 16.54,
+              "optimizer": 0.483,
+              "step": 24.538
+            },
+            {
+              "h2d": 0.238,
+              "forward": 9.435,
+              "loss": 0.675,
+              "backward": 21.047,
+              "optimizer": 0.659,
+              "step": 32.053
+            },
+            {
+              "h2d": 0.242,
+              "forward": 10.213,
+              "loss": 0.662,
+              "backward": 20.998,
+              "optimizer": 0.685,
+              "step": 32.801
+            },
+            {
+              "h2d": 0.243,
+              "forward": 12.946,
+              "loss": 0.852,
+              "backward": 23.807,
+              "optimizer": 0.717,
+              "step": 38.565
+            },
+            {
+              "h2d": 0.268,
+              "forward": 12.188,
+              "loss": 0.765,
+              "backward": 23.77,
+              "optimizer": 0.654,
+              "step": 37.645
+            },
+            {
+              "h2d": 0.243,
+              "forward": 11.17,
+              "loss": 0.713,
+              "backward": 23.186,
+              "optimizer": 0.705,
+              "step": 36.017
+            },
+            {
+              "h2d": 0.281,
+              "forward": 11.349,
+              "loss": 0.715,
+              "backward": 23.896,
+              "optimizer": 0.685,
+              "step": 36.926
+            },
+            {
+              "h2d": 0.239,
+              "forward": 12.304,
+              "loss": 0.761,
+              "backward": 21.913,
+              "optimizer": 0.526,
+              "step": 35.743
+            },
+            {
+              "h2d": 0.271,
+              "forward": 8.814,
+              "loss": 0.586,
+              "backward": 16.35,
+              "optimizer": 0.485,
+              "step": 26.505
+            },
+            {
+              "h2d": 0.276,
+              "forward": 7.704,
+              "loss": 0.533,
+              "backward": 16.234,
+              "optimizer": 0.477,
+              "step": 25.223
             }
           ],
           "peak_alloc_mib": 775.8,
           "kernel_families_ms": {
-            "conv_gemm": 133.642,
-            "layout": 9.052,
-            "norm_act": 16.257,
-            "loss_like": 1.963,
-            "optimizer": 0.571,
-            "reduce": 14.107,
-            "elementwise_copy": 39.489,
-            "other": 2.018,
-            "total_ms": 217.099
+            "conv_gemm": 131.002,
+            "layout": 8.599,
+            "norm_act": 15.755,
+            "loss_like": 1.889,
+            "optimizer": 0.585,
+            "reduce": 13.763,
+            "elementwise_copy": 38.622,
+            "other": 1.952,
+            "total_ms": 212.168
           },
           "kernel_families_share": {
-            "conv_gemm": 0.616,
-            "layout": 0.042,
-            "norm_act": 0.075,
+            "conv_gemm": 0.617,
+            "layout": 0.041,
+            "norm_act": 0.074,
             "loss_like": 0.009,
             "optimizer": 0.003,
             "reduce": 0.065,
@@ -934,52 +938,52 @@
           "top_kernels": [
             {
               "name": "aten::convolution_backward",
-              "self_device_ms": 94.817,
+              "self_device_ms": 93.188,
               "count": 180
             },
             {
               "name": "aten::cudnn_convolution",
-              "self_device_ms": 35.488,
+              "self_device_ms": 34.593,
               "count": 170
             },
             {
               "name": "void cudnn::engines_precompiled::nchwToNhwcKernel<__half, __half, float, false, true, (cud",
-              "self_device_ms": 33.62,
+              "self_device_ms": 33.005,
               "count": 950
             },
             {
               "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native:",
-              "self_device_ms": 14.189,
+              "self_device_ms": 13.912,
               "count": 230
             },
             {
               "name": "aten::sum",
-              "self_device_ms": 12.673,
+              "self_device_ms": 12.385,
               "count": 180
             },
             {
               "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<c10::Half, at::native::func_wr",
-              "self_device_ms": 12.577,
+              "self_device_ms": 12.284,
               "count": 180
             },
             {
-              "name": "aten::add_",
-              "self_device_ms": 11.897,
-              "count": 560
-            },
-            {
               "name": "void cudnn::engines_precompiled::nhwcToNchwKernel<__half, __half, float, true, false, (cud",
-              "self_device_ms": 11.88,
+              "self_device_ms": 11.876,
               "count": 470
             },
             {
+              "name": "aten::add_",
+              "self_device_ms": 11.683,
+              "count": 560
+            },
+            {
               "name": "sm80_xmma_wgrad_implicit_gemm_indexed_f16f16_f16f32_f32_nhwckrsc_nhwc_tilesize32x128x32_st",
-              "self_device_ms": 9.914,
+              "self_device_ms": 9.951,
               "count": 30
             },
             {
               "name": "void cutlass__5x_cudnn::Kernel<cutlass_tensorop_f16_s16816dgrad_optimized_f16_128x128_32x3",
-              "self_device_ms": 7.849,
+              "self_device_ms": 7.775,
               "count": 60
             }
           ]
@@ -988,333 +992,333 @@
           "head": "UNetBlock_0.Head.Softmax",
           "classes": 41,
           "medians_ms": {
-            "h2d": 0.279,
-            "forward": 11.519,
-            "loss": 0.485,
-            "backward": 22.72,
-            "optimizer": 0.246,
-            "step": 35.262
+            "h2d": 0.266,
+            "forward": 12.052,
+            "loss": 0.506,
+            "backward": 23.488,
+            "optimizer": 0.263,
+            "step": 36.629
           },
           "runs_ms": [
             {
-              "h2d": 0.247,
-              "forward": 11.672,
+              "h2d": 0.241,
+              "forward": 11.671,
               "loss": 0.501,
-              "backward": 22.676,
-              "optimizer": 0.221,
-              "step": 35.316
-            },
-            {
-              "h2d": 0.275,
-              "forward": 11.724,
-              "loss": 0.497,
-              "backward": 22.608,
-              "optimizer": 0.217,
-              "step": 35.321
-            },
-            {
-              "h2d": 0.256,
-              "forward": 11.652,
-              "loss": 0.501,
-              "backward": 22.631,
-              "optimizer": 0.217,
-              "step": 35.257
-            },
-            {
-              "h2d": 0.298,
-              "forward": 12.079,
-              "loss": 0.426,
-              "backward": 19.917,
-              "optimizer": 0.201,
-              "step": 32.92
-            },
-            {
-              "h2d": 0.244,
-              "forward": 9.849,
-              "loss": 0.424,
-              "backward": 21.115,
-              "optimizer": 0.233,
-              "step": 31.865
-            },
-            {
-              "h2d": 0.28,
-              "forward": 10.876,
-              "loss": 0.469,
-              "backward": 22.298,
-              "optimizer": 0.239,
-              "step": 34.162
-            },
-            {
-              "h2d": 0.316,
-              "forward": 10.985,
-              "loss": 0.475,
-              "backward": 22.281,
-              "optimizer": 0.237,
-              "step": 34.294
-            },
-            {
-              "h2d": 0.29,
-              "forward": 10.974,
-              "loss": 0.475,
-              "backward": 22.554,
-              "optimizer": 0.253,
-              "step": 34.545
-            },
-            {
-              "h2d": 0.286,
-              "forward": 11.554,
-              "loss": 0.49,
-              "backward": 22.619,
-              "optimizer": 0.252,
-              "step": 35.2
-            },
-            {
-              "h2d": 0.286,
-              "forward": 11.53,
-              "loss": 0.486,
-              "backward": 22.641,
-              "optimizer": 0.24,
-              "step": 35.183
-            },
-            {
-              "h2d": 0.281,
-              "forward": 11.001,
-              "loss": 0.475,
-              "backward": 22.484,
-              "optimizer": 0.239,
-              "step": 34.48
-            },
-            {
-              "h2d": 0.25,
-              "forward": 11.106,
-              "loss": 0.476,
-              "backward": 22.716,
-              "optimizer": 0.251,
-              "step": 34.799
-            },
-            {
-              "h2d": 0.249,
-              "forward": 11.543,
-              "loss": 0.491,
-              "backward": 22.537,
-              "optimizer": 0.239,
-              "step": 35.059
-            },
-            {
-              "h2d": 0.23,
-              "forward": 11.059,
-              "loss": 0.475,
-              "backward": 22.521,
-              "optimizer": 0.238,
-              "step": 34.523
-            },
-            {
-              "h2d": 0.254,
-              "forward": 11.012,
-              "loss": 0.477,
-              "backward": 25.848,
-              "optimizer": 0.34,
-              "step": 37.93
-            },
-            {
-              "h2d": 0.249,
-              "forward": 13.719,
-              "loss": 0.58,
-              "backward": 29.276,
-              "optimizer": 0.349,
-              "step": 44.172
-            },
-            {
-              "h2d": 0.25,
-              "forward": 20.157,
-              "loss": 0.853,
-              "backward": 45.538,
-              "optimizer": 0.453,
-              "step": 67.251
-            },
-            {
-              "h2d": 0.297,
-              "forward": 17.532,
-              "loss": 0.737,
-              "backward": 51.826,
-              "optimizer": 0.565,
-              "step": 70.958
-            },
-            {
-              "h2d": 0.29,
-              "forward": 23.615,
-              "loss": 0.718,
-              "backward": 50.126,
-              "optimizer": 0.545,
-              "step": 75.293
-            },
-            {
-              "h2d": 0.291,
-              "forward": 20.736,
-              "loss": 0.859,
-              "backward": 36.232,
-              "optimizer": 0.418,
-              "step": 58.536
-            },
-            {
-              "h2d": 0.282,
-              "forward": 14.918,
-              "loss": 0.554,
-              "backward": 29.076,
-              "optimizer": 0.351,
-              "step": 45.182
-            },
-            {
-              "h2d": 0.318,
-              "forward": 13.949,
-              "loss": 0.547,
-              "backward": 27.174,
-              "optimizer": 0.296,
-              "step": 42.284
-            },
-            {
-              "h2d": 0.25,
-              "forward": 12.889,
-              "loss": 0.547,
-              "backward": 26.388,
-              "optimizer": 0.29,
-              "step": 40.363
-            },
-            {
-              "h2d": 0.235,
-              "forward": 11.892,
-              "loss": 0.496,
-              "backward": 23.968,
-              "optimizer": 0.255,
-              "step": 36.845
-            },
-            {
-              "h2d": 0.247,
-              "forward": 11.449,
-              "loss": 0.483,
-              "backward": 22.99,
-              "optimizer": 0.242,
-              "step": 35.411
-            },
-            {
-              "h2d": 0.253,
-              "forward": 11.311,
-              "loss": 0.481,
-              "backward": 22.937,
-              "optimizer": 0.243,
-              "step": 35.224
-            },
-            {
-              "h2d": 0.247,
-              "forward": 11.251,
-              "loss": 0.479,
-              "backward": 22.969,
-              "optimizer": 0.238,
-              "step": 35.184
-            },
-            {
-              "h2d": 0.298,
-              "forward": 11.053,
-              "loss": 0.477,
-              "backward": 22.505,
-              "optimizer": 0.237,
-              "step": 34.57
-            },
-            {
-              "h2d": 0.289,
-              "forward": 11.077,
-              "loss": 0.476,
-              "backward": 22.505,
-              "optimizer": 0.237,
-              "step": 34.584
+              "backward": 22.522,
+              "optimizer": 0.219,
+              "step": 35.153
             },
             {
               "h2d": 0.241,
-              "forward": 11.097,
-              "loss": 0.475,
-              "backward": 22.39,
-              "optimizer": 0.234,
-              "step": 34.437
+              "forward": 11.638,
+              "loss": 0.501,
+              "backward": 22.534,
+              "optimizer": 0.217,
+              "step": 35.131
             },
             {
-              "h2d": 0.268,
-              "forward": 11.081,
-              "loss": 0.476,
-              "backward": 22.581,
-              "optimizer": 0.242,
-              "step": 34.648
+              "h2d": 0.242,
+              "forward": 11.616,
+              "loss": 0.5,
+              "backward": 22.515,
+              "optimizer": 0.215,
+              "step": 35.087
+            },
+            {
+              "h2d": 0.244,
+              "forward": 11.626,
+              "loss": 0.5,
+              "backward": 22.736,
+              "optimizer": 0.223,
+              "step": 35.329
+            },
+            {
+              "h2d": 0.241,
+              "forward": 11.698,
+              "loss": 0.502,
+              "backward": 22.574,
+              "optimizer": 0.223,
+              "step": 35.238
             },
             {
               "h2d": 0.279,
-              "forward": 11.262,
-              "loss": 0.482,
-              "backward": 22.569,
-              "optimizer": 0.237,
-              "step": 34.828
+              "forward": 11.659,
+              "loss": 0.501,
+              "backward": 22.587,
+              "optimizer": 0.219,
+              "step": 35.245
             },
             {
-              "h2d": 0.282,
-              "forward": 11.046,
-              "loss": 0.475,
-              "backward": 22.94,
-              "optimizer": 0.252,
-              "step": 34.995
+              "h2d": 0.24,
+              "forward": 11.66,
+              "loss": 0.499,
+              "backward": 22.559,
+              "optimizer": 0.218,
+              "step": 35.176
             },
             {
               "h2d": 0.281,
-              "forward": 11.509,
-              "loss": 0.476,
-              "backward": 22.903,
-              "optimizer": 0.252,
-              "step": 35.421
+              "forward": 11.668,
+              "loss": 0.505,
+              "backward": 22.888,
+              "optimizer": 0.221,
+              "step": 35.564
             },
             {
-              "h2d": 0.303,
-              "forward": 11.699,
-              "loss": 0.494,
-              "backward": 22.558,
-              "optimizer": 0.25,
-              "step": 35.302
+              "h2d": 0.25,
+              "forward": 11.668,
+              "loss": 0.722,
+              "backward": 20.584,
+              "optimizer": 0.223,
+              "step": 33.447
             },
             {
-              "h2d": 0.336,
-              "forward": 11.487,
-              "loss": 0.487,
-              "backward": 22.724,
-              "optimizer": 0.234,
-              "step": 35.268
+              "h2d": 0.28,
+              "forward": 10.667,
+              "loss": 0.458,
+              "backward": 21.845,
+              "optimizer": 0.226,
+              "step": 33.476
             },
             {
-              "h2d": 0.251,
-              "forward": 11.076,
+              "h2d": 0.24,
+              "forward": 11.151,
               "loss": 0.475,
-              "backward": 23.44,
+              "backward": 22.84,
+              "optimizer": 0.249,
+              "step": 34.956
+            },
+            {
+              "h2d": 0.242,
+              "forward": 11.547,
+              "loss": 0.486,
+              "backward": 23.488,
               "optimizer": 0.265,
-              "step": 35.508
+              "step": 36.029
             },
             {
-              "h2d": 0.251,
-              "forward": 11.886,
-              "loss": 0.492,
-              "backward": 23.872,
-              "optimizer": 0.259,
-              "step": 36.759
+              "h2d": 0.244,
+              "forward": 12.042,
+              "loss": 0.487,
+              "backward": 23.386,
+              "optimizer": 0.268,
+              "step": 36.427
             },
             {
-              "h2d": 0.284,
-              "forward": 12.608,
-              "loss": 0.571,
-              "backward": 32.904,
-              "optimizer": 0.452,
-              "step": 46.819
+              "h2d": 0.276,
+              "forward": 12.121,
+              "loss": 0.507,
+              "backward": 23.443,
+              "optimizer": 0.269,
+              "step": 36.617
             },
             {
-              "h2d": 0.312,
-              "forward": 14.569,
-              "loss": 0.599,
-              "backward": 33.364,
-              "optimizer": 0.42,
-              "step": 49.264
+              "h2d": 0.308,
+              "forward": 12.152,
+              "loss": 0.507,
+              "backward": 25.659,
+              "optimizer": 0.337,
+              "step": 38.963
+            },
+            {
+              "h2d": 0.246,
+              "forward": 14.144,
+              "loss": 0.589,
+              "backward": 47.409,
+              "optimizer": 0.431,
+              "step": 62.819
+            },
+            {
+              "h2d": 0.29,
+              "forward": 16.829,
+              "loss": 0.697,
+              "backward": 49.99,
+              "optimizer": 0.522,
+              "step": 68.329
+            },
+            {
+              "h2d": 0.286,
+              "forward": 19.961,
+              "loss": 0.829,
+              "backward": 47.615,
+              "optimizer": 0.618,
+              "step": 69.309
+            },
+            {
+              "h2d": 0.256,
+              "forward": 19.544,
+              "loss": 0.707,
+              "backward": 41.472,
+              "optimizer": 0.346,
+              "step": 62.324
+            },
+            {
+              "h2d": 0.286,
+              "forward": 14.337,
+              "loss": 0.601,
+              "backward": 31.673,
+              "optimizer": 0.425,
+              "step": 47.323
+            },
+            {
+              "h2d": 0.253,
+              "forward": 14.846,
+              "loss": 0.539,
+              "backward": 26.764,
+              "optimizer": 0.294,
+              "step": 42.696
+            },
+            {
+              "h2d": 0.245,
+              "forward": 13.047,
+              "loss": 0.556,
+              "backward": 27.82,
+              "optimizer": 0.301,
+              "step": 41.969
+            },
+            {
+              "h2d": 0.281,
+              "forward": 12.497,
+              "loss": 0.513,
+              "backward": 24.969,
+              "optimizer": 0.274,
+              "step": 38.534
+            },
+            {
+              "h2d": 0.278,
+              "forward": 12.208,
+              "loss": 0.517,
+              "backward": 24.62,
+              "optimizer": 0.263,
+              "step": 37.886
+            },
+            {
+              "h2d": 0.241,
+              "forward": 12.063,
+              "loss": 0.497,
+              "backward": 23.941,
+              "optimizer": 0.274,
+              "step": 37.016
+            },
+            {
+              "h2d": 0.287,
+              "forward": 12.358,
+              "loss": 0.497,
+              "backward": 24.155,
+              "optimizer": 0.253,
+              "step": 37.55
+            },
+            {
+              "h2d": 0.253,
+              "forward": 12.279,
+              "loss": 0.536,
+              "backward": 24.268,
+              "optimizer": 0.272,
+              "step": 37.608
+            },
+            {
+              "h2d": 0.279,
+              "forward": 12.183,
+              "loss": 0.513,
+              "backward": 23.488,
+              "optimizer": 0.263,
+              "step": 36.726
+            },
+            {
+              "h2d": 0.285,
+              "forward": 12.081,
+              "loss": 0.515,
+              "backward": 23.555,
+              "optimizer": 0.251,
+              "step": 36.687
+            },
+            {
+              "h2d": 0.279,
+              "forward": 11.547,
+              "loss": 0.484,
+              "backward": 23.083,
+              "optimizer": 0.247,
+              "step": 35.64
+            },
+            {
+              "h2d": 0.282,
+              "forward": 11.559,
+              "loss": 0.484,
+              "backward": 23.304,
+              "optimizer": 0.265,
+              "step": 35.895
+            },
+            {
+              "h2d": 0.241,
+              "forward": 11.948,
+              "loss": 0.509,
+              "backward": 24.262,
+              "optimizer": 0.26,
+              "step": 37.219
+            },
+            {
+              "h2d": 0.287,
+              "forward": 11.924,
+              "loss": 0.505,
+              "backward": 23.278,
+              "optimizer": 0.28,
+              "step": 36.275
+            },
+            {
+              "h2d": 0.24,
+              "forward": 12.125,
+              "loss": 0.515,
+              "backward": 23.512,
+              "optimizer": 0.249,
+              "step": 36.642
+            },
+            {
+              "h2d": 0.277,
+              "forward": 11.639,
+              "loss": 0.485,
+              "backward": 23.049,
+              "optimizer": 0.252,
+              "step": 35.703
+            },
+            {
+              "h2d": 0.277,
+              "forward": 11.486,
+              "loss": 0.475,
+              "backward": 22.583,
+              "optimizer": 0.239,
+              "step": 35.06
+            },
+            {
+              "h2d": 0.281,
+              "forward": 11.203,
+              "loss": 0.482,
+              "backward": 22.856,
+              "optimizer": 0.238,
+              "step": 35.06
+            },
+            {
+              "h2d": 0.244,
+              "forward": 12.218,
+              "loss": 0.593,
+              "backward": 27.809,
+              "optimizer": 0.427,
+              "step": 41.291
+            },
+            {
+              "h2d": 0.281,
+              "forward": 16.136,
+              "loss": 0.6,
+              "backward": 34.514,
+              "optimizer": 0.456,
+              "step": 51.987
+            },
+            {
+              "h2d": 0.247,
+              "forward": 16.325,
+              "loss": 0.579,
+              "backward": 39.319,
+              "optimizer": 0.536,
+              "step": 57.006
             }
           ],
           "peak_alloc_mib": 1128.3
@@ -1323,390 +1327,391 @@
           "head": "UNetBlock_0.Head.Softmax",
           "classes": 41,
           "medians_ms": {
-            "h2d": 0.273,
-            "forward": 5.019,
-            "loss": 0.498,
-            "backward": 10.474,
-            "optimizer": 0.421,
-            "step": 16.705
+            "h2d": 0.239,
+            "forward": 5.16,
+            "loss": 0.457,
+            "backward": 10.326,
+            "optimizer": 0.426,
+            "step": 16.613
           },
           "runs_ms": [
             {
-              "h2d": 0.275,
-              "forward": 4.765,
-              "loss": 0.49,
-              "backward": 10.205,
-              "optimizer": 0.394,
-              "step": 16.129
-            },
-            {
-              "h2d": 0.279,
-              "forward": 4.864,
-              "loss": 0.489,
-              "backward": 10.262,
-              "optimizer": 0.435,
-              "step": 16.328
-            },
-            {
-              "h2d": 0.275,
-              "forward": 4.85,
-              "loss": 0.491,
-              "backward": 10.266,
+              "h2d": 0.276,
+              "forward": 4.938,
+              "loss": 0.437,
+              "backward": 9.9,
               "optimizer": 0.42,
-              "step": 16.302
+              "step": 15.971
+            },
+            {
+              "h2d": 0.237,
+              "forward": 4.966,
+              "loss": 0.438,
+              "backward": 9.897,
+              "optimizer": 0.417,
+              "step": 15.955
             },
             {
               "h2d": 0.274,
-              "forward": 4.906,
-              "loss": 0.496,
-              "backward": 10.425,
-              "optimizer": 0.421,
-              "step": 16.522
+              "forward": 4.956,
+              "loss": 0.438,
+              "backward": 10.192,
+              "optimizer": 0.408,
+              "step": 16.267
             },
             {
-              "h2d": 0.268,
-              "forward": 4.982,
-              "loss": 0.498,
-              "backward": 10.471,
-              "optimizer": 0.445,
+              "h2d": 0.239,
+              "forward": 5.146,
+              "loss": 0.453,
+              "backward": 10.341,
+              "optimizer": 0.422,
+              "step": 16.601
+            },
+            {
+              "h2d": 0.236,
+              "forward": 5.113,
+              "loss": 0.45,
+              "backward": 10.436,
+              "optimizer": 0.428,
               "step": 16.664
             },
             {
-              "h2d": 0.274,
-              "forward": 5.012,
-              "loss": 0.498,
-              "backward": 10.423,
-              "optimizer": 0.455,
-              "step": 16.661
-            },
-            {
-              "h2d": 0.277,
-              "forward": 5.001,
-              "loss": 0.498,
-              "backward": 10.417,
-              "optimizer": 0.418,
-              "step": 16.611
-            },
-            {
-              "h2d": 0.274,
-              "forward": 4.979,
-              "loss": 0.499,
-              "backward": 10.599,
-              "optimizer": 0.449,
-              "step": 16.799
-            },
-            {
-              "h2d": 0.247,
-              "forward": 5.029,
-              "loss": 0.5,
-              "backward": 10.477,
-              "optimizer": 0.443,
-              "step": 16.696
-            },
-            {
-              "h2d": 0.238,
-              "forward": 5.001,
-              "loss": 0.498,
-              "backward": 10.426,
-              "optimizer": 0.433,
-              "step": 16.597
+              "h2d": 0.272,
+              "forward": 5.245,
+              "loss": 0.457,
+              "backward": 10.55,
+              "optimizer": 0.417,
+              "step": 16.941
             },
             {
               "h2d": 0.273,
-              "forward": 5.018,
-              "loss": 0.5,
-              "backward": 10.515,
-              "optimizer": 0.421,
-              "step": 16.726
+              "forward": 5.22,
+              "loss": 0.459,
+              "backward": 10.405,
+              "optimizer": 0.428,
+              "step": 16.785
             },
             {
               "h2d": 0.239,
-              "forward": 5.03,
-              "loss": 0.5,
-              "backward": 10.486,
-              "optimizer": 0.433,
-              "step": 16.688
+              "forward": 5.196,
+              "loss": 0.455,
+              "backward": 10.579,
+              "optimizer": 0.427,
+              "step": 16.895
             },
             {
-              "h2d": 0.241,
-              "forward": 5.008,
-              "loss": 0.498,
-              "backward": 10.471,
-              "optimizer": 0.42,
-              "step": 16.638
+              "h2d": 0.275,
+              "forward": 5.22,
+              "loss": 0.454,
+              "backward": 10.383,
+              "optimizer": 0.412,
+              "step": 16.744
             },
             {
-              "h2d": 0.241,
-              "forward": 5.019,
-              "loss": 0.499,
-              "backward": 10.533,
-              "optimizer": 0.468,
-              "step": 16.76
-            },
-            {
-              "h2d": 0.297,
-              "forward": 5.001,
-              "loss": 0.5,
-              "backward": 10.473,
-              "optimizer": 0.424,
-              "step": 16.695
-            },
-            {
-              "h2d": 0.238,
-              "forward": 5.018,
-              "loss": 0.501,
-              "backward": 10.462,
-              "optimizer": 0.419,
-              "step": 16.637
-            },
-            {
-              "h2d": 0.237,
-              "forward": 4.997,
-              "loss": 0.499,
-              "backward": 10.474,
-              "optimizer": 0.441,
-              "step": 16.648
+              "h2d": 0.265,
+              "forward": 5.145,
+              "loss": 0.453,
+              "backward": 10.233,
+              "optimizer": 0.395,
+              "step": 16.491
             },
             {
               "h2d": 0.284,
-              "forward": 5.007,
-              "loss": 0.503,
-              "backward": 10.557,
-              "optimizer": 0.421,
-              "step": 16.772
-            },
-            {
-              "h2d": 0.239,
-              "forward": 5.002,
-              "loss": 0.5,
-              "backward": 10.458,
-              "optimizer": 0.398,
-              "step": 16.598
-            },
-            {
-              "h2d": 0.273,
-              "forward": 4.996,
-              "loss": 0.5,
-              "backward": 10.553,
-              "optimizer": 0.403,
-              "step": 16.726
+              "forward": 5.082,
+              "loss": 0.448,
+              "backward": 10.25,
+              "optimizer": 0.418,
+              "step": 16.482
             },
             {
               "h2d": 0.237,
-              "forward": 5.022,
-              "loss": 0.5,
-              "backward": 10.508,
-              "optimizer": 0.423,
-              "step": 16.689
+              "forward": 5.086,
+              "loss": 0.448,
+              "backward": 10.245,
+              "optimizer": 0.442,
+              "step": 16.459
             },
             {
-              "h2d": 0.274,
-              "forward": 5.036,
-              "loss": 0.503,
-              "backward": 10.557,
-              "optimizer": 0.414,
-              "step": 16.783
-            },
-            {
-              "h2d": 0.273,
-              "forward": 5.025,
-              "loss": 0.501,
-              "backward": 10.512,
-              "optimizer": 0.413,
-              "step": 16.723
-            },
-            {
-              "h2d": 0.278,
-              "forward": 5.046,
-              "loss": 0.504,
-              "backward": 10.558,
-              "optimizer": 0.409,
-              "step": 16.796
-            },
-            {
-              "h2d": 0.273,
-              "forward": 5.024,
-              "loss": 0.5,
-              "backward": 10.487,
-              "optimizer": 0.4,
-              "step": 16.684
-            },
-            {
-              "h2d": 0.277,
-              "forward": 5.013,
-              "loss": 0.502,
-              "backward": 10.788,
-              "optimizer": 0.406,
-              "step": 16.986
-            },
-            {
-              "h2d": 0.287,
-              "forward": 4.833,
-              "loss": 0.432,
-              "backward": 9.739,
-              "optimizer": 0.414,
-              "step": 15.705
-            },
-            {
-              "h2d": 0.273,
-              "forward": 4.937,
-              "loss": 0.436,
-              "backward": 9.87,
-              "optimizer": 0.412,
-              "step": 15.928
-            },
-            {
-              "h2d": 0.28,
-              "forward": 5.248,
-              "loss": 0.465,
-              "backward": 10.507,
-              "optimizer": 0.434,
-              "step": 16.935
-            },
-            {
-              "h2d": 0.274,
-              "forward": 5.235,
-              "loss": 0.458,
-              "backward": 10.345,
-              "optimizer": 0.423,
-              "step": 16.735
-            },
-            {
-              "h2d": 0.281,
-              "forward": 5.176,
-              "loss": 0.458,
-              "backward": 10.293,
-              "optimizer": 0.405,
-              "step": 16.612
-            },
-            {
-              "h2d": 0.267,
-              "forward": 5.168,
+              "h2d": 0.24,
+              "forward": 5.098,
               "loss": 0.457,
-              "backward": 10.391,
-              "optimizer": 0.432,
-              "step": 16.714
-            },
-            {
-              "h2d": 0.275,
-              "forward": 5.202,
-              "loss": 0.46,
-              "backward": 10.393,
-              "optimizer": 0.42,
-              "step": 16.75
-            },
-            {
-              "h2d": 0.273,
-              "forward": 5.203,
-              "loss": 0.459,
-              "backward": 10.401,
-              "optimizer": 0.41,
-              "step": 16.745
+              "backward": 10.587,
+              "optimizer": 0.424,
+              "step": 16.805
             },
             {
               "h2d": 0.237,
-              "forward": 5.233,
-              "loss": 0.465,
-              "backward": 10.491,
-              "optimizer": 0.427,
-              "step": 16.853
-            },
-            {
-              "h2d": 0.275,
-              "forward": 5.249,
-              "loss": 0.46,
-              "backward": 10.402,
-              "optimizer": 0.422,
-              "step": 16.808
+              "forward": 5.681,
+              "loss": 0.484,
+              "backward": 11.587,
+              "optimizer": 0.436,
+              "step": 18.425
             },
             {
               "h2d": 0.273,
-              "forward": 5.205,
-              "loss": 0.46,
-              "backward": 11.035,
+              "forward": 5.523,
+              "loss": 0.466,
+              "backward": 10.795,
               "optimizer": 0.43,
-              "step": 17.402
-            },
-            {
-              "h2d": 0.273,
-              "forward": 5.488,
-              "loss": 0.48,
-              "backward": 12.494,
-              "optimizer": 0.494,
-              "step": 19.228
-            },
-            {
-              "h2d": 0.244,
-              "forward": 6.308,
-              "loss": 0.518,
-              "backward": 12.677,
-              "optimizer": 0.48,
-              "step": 20.227
+              "step": 17.487
             },
             {
               "h2d": 0.238,
-              "forward": 6.746,
-              "loss": 0.604,
-              "backward": 18.488,
-              "optimizer": 0.703,
-              "step": 26.781
+              "forward": 5.34,
+              "loss": 0.457,
+              "backward": 10.634,
+              "optimizer": 0.444,
+              "step": 17.113
+            },
+            {
+              "h2d": 0.274,
+              "forward": 5.249,
+              "loss": 0.46,
+              "backward": 10.627,
+              "optimizer": 0.415,
+              "step": 17.025
+            },
+            {
+              "h2d": 0.238,
+              "forward": 5.247,
+              "loss": 0.459,
+              "backward": 10.614,
+              "optimizer": 0.43,
+              "step": 16.987
+            },
+            {
+              "h2d": 0.238,
+              "forward": 5.251,
+              "loss": 0.457,
+              "backward": 10.637,
+              "optimizer": 0.42,
+              "step": 17.002
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.258,
+              "loss": 0.457,
+              "backward": 10.612,
+              "optimizer": 0.417,
+              "step": 16.98
+            },
+            {
+              "h2d": 0.291,
+              "forward": 5.264,
+              "loss": 0.461,
+              "backward": 10.636,
+              "optimizer": 0.438,
+              "step": 17.091
+            },
+            {
+              "h2d": 0.239,
+              "forward": 5.258,
+              "loss": 0.459,
+              "backward": 10.585,
+              "optimizer": 0.413,
+              "step": 16.953
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.219,
+              "loss": 0.459,
+              "backward": 10.256,
+              "optimizer": 0.437,
+              "step": 16.608
+            },
+            {
+              "h2d": 0.275,
+              "forward": 5.094,
+              "loss": 0.451,
+              "backward": 10.118,
+              "optimizer": 0.422,
+              "step": 16.36
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.092,
+              "loss": 0.45,
+              "backward": 10.151,
+              "optimizer": 0.426,
+              "step": 16.356
+            },
+            {
+              "h2d": 0.271,
+              "forward": 5.124,
+              "loss": 0.456,
+              "backward": 10.271,
+              "optimizer": 0.427,
+              "step": 16.549
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.139,
+              "loss": 0.457,
+              "backward": 10.258,
+              "optimizer": 0.437,
+              "step": 16.528
+            },
+            {
+              "h2d": 0.275,
+              "forward": 5.151,
+              "loss": 0.456,
+              "backward": 10.256,
+              "optimizer": 0.413,
+              "step": 16.551
+            },
+            {
+              "h2d": 0.272,
+              "forward": 5.13,
+              "loss": 0.454,
+              "backward": 10.244,
+              "optimizer": 0.408,
+              "step": 16.508
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.14,
+              "loss": 0.455,
+              "backward": 10.227,
+              "optimizer": 0.412,
+              "step": 16.47
+            },
+            {
+              "h2d": 0.229,
+              "forward": 5.11,
+              "loss": 0.453,
+              "backward": 10.27,
+              "optimizer": 0.459,
+              "step": 16.521
+            },
+            {
+              "h2d": 0.275,
+              "forward": 5.193,
+              "loss": 0.459,
+              "backward": 10.321,
+              "optimizer": 0.426,
+              "step": 16.674
+            },
+            {
+              "h2d": 0.238,
+              "forward": 5.168,
+              "loss": 0.459,
+              "backward": 10.331,
+              "optimizer": 0.421,
+              "step": 16.617
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.172,
+              "loss": 0.457,
+              "backward": 10.252,
+              "optimizer": 0.429,
+              "step": 16.547
+            },
+            {
+              "h2d": 0.274,
+              "forward": 5.144,
+              "loss": 0.457,
+              "backward": 10.271,
+              "optimizer": 0.419,
+              "step": 16.565
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.147,
+              "loss": 0.455,
+              "backward": 10.262,
+              "optimizer": 0.43,
+              "step": 16.53
+            },
+            {
+              "h2d": 0.276,
+              "forward": 5.138,
+              "loss": 0.456,
+              "backward": 10.281,
+              "optimizer": 0.431,
+              "step": 16.582
+            },
+            {
+              "h2d": 0.237,
+              "forward": 5.173,
+              "loss": 0.475,
+              "backward": 14.524,
+              "optimizer": 0.604,
+              "step": 21.013
+            },
+            {
+              "h2d": 0.269,
+              "forward": 8.625,
+              "loss": 0.655,
+              "backward": 16.299,
+              "optimizer": 0.597,
+              "step": 26.444
+            },
+            {
+              "h2d": 0.276,
+              "forward": 8.683,
+              "loss": 0.648,
+              "backward": 16.44,
+              "optimizer": 0.608,
+              "step": 26.656
             }
           ],
           "peak_alloc_mib": 775.9
         },
         "fp32_phase_share": {
           "h2d": 0.007,
-          "forward": 0.318,
+          "forward": 0.314,
           "loss": 0.013,
-          "backward": 0.653,
+          "backward": 0.657,
           "optimizer": 0.007
         },
         "metrics": {
-          "step_ms_fp32": 38.113,
-          "h2d_ms_fp32": 0.276,
-          "forward_ms_fp32": 12.103,
-          "loss_ms_fp32": 0.507,
-          "backward_ms_fp32": 24.893,
-          "optimizer_ms_fp32": 0.264,
+          "step_ms_fp32": 37.629,
+          "h2d_ms_fp32": 0.248,
+          "forward_ms_fp32": 11.812,
+          "loss_ms_fp32": 0.498,
+          "backward_ms_fp32": 24.704,
+          "optimizer_ms_fp32": 0.262,
           "peak_alloc_mib_fp32": 1140.9,
-          "step_ms_autocast": 20.112,
-          "h2d_ms_autocast": 0.249,
-          "forward_ms_autocast": 5.803,
-          "loss_ms_autocast": 0.489,
-          "backward_ms_autocast": 13.373,
-          "optimizer_ms_autocast": 0.426,
+          "step_ms_autocast": 20.332,
+          "h2d_ms_autocast": 0.251,
+          "forward_ms_autocast": 5.903,
+          "loss_ms_autocast": 0.497,
+          "backward_ms_autocast": 13.382,
+          "optimizer_ms_autocast": 0.48,
           "peak_alloc_mib_autocast": 775.8,
-          "step_ms_channels_last": 35.262,
-          "h2d_ms_channels_last": 0.279,
-          "forward_ms_channels_last": 11.519,
-          "loss_ms_channels_last": 0.485,
-          "backward_ms_channels_last": 22.72,
-          "optimizer_ms_channels_last": 0.246,
+          "step_ms_channels_last": 36.629,
+          "h2d_ms_channels_last": 0.266,
+          "forward_ms_channels_last": 12.052,
+          "loss_ms_channels_last": 0.506,
+          "backward_ms_channels_last": 23.488,
+          "optimizer_ms_channels_last": 0.263,
           "peak_alloc_mib_channels_last": 1128.3,
-          "step_ms_both": 16.705,
-          "h2d_ms_both": 0.273,
-          "forward_ms_both": 5.019,
-          "loss_ms_both": 0.498,
-          "backward_ms_both": 10.474,
-          "optimizer_ms_both": 0.421,
+          "step_ms_both": 16.613,
+          "h2d_ms_both": 0.239,
+          "forward_ms_both": 5.16,
+          "loss_ms_both": 0.457,
+          "backward_ms_both": 10.326,
+          "optimizer_ms_both": 0.426,
           "peak_alloc_mib_both": 775.9
         },
-        "headline": "step fp32 38.113 ms (backward 65 %, forward 32 %, loss 1 %) | autocast 20.112 ms (1.90x) | channels_last 35.262 ms (1.08x) | both 16.705 ms (2.28x)"
+        "headline": "step fp32 37.629 ms (backward 66 %, forward 31 %, loss 1 %) | autocast 20.332 ms (1.85x) | channels_last 36.629 ms (1.03x) | both 16.613 ms (2.27x)"
       }
     },
     "train_epoch": {
       "bench": "train_epoch",
       "fingerprint": {
-        "date": "2026-09-07T17:24:13+0200",
+        "date": "2026-09-09T17:09:02+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "d1c6961b9553",
+          "dirty": false,
+          "describe": "v1.8.3-4-gd1c6961b"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -1726,9 +1731,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          4.09,
-          11.13,
-          12.87
+          0.96,
+          1.09,
+          10.71
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -1739,66 +1744,67 @@
         "gate_warnings": [],
         "epochs": 2,
         "gpu": true,
-        "scratch": "/tmp/konfai_perf_train_jxl3wfnl",
+        "scratch": "/tmp/konfai_perf_train_ypqwxbwn",
         "run_fp32": {
           "returncode": 0,
-          "wall_s": 38.244,
+          "wall_s": 39.316,
           "epoch_lines": [
             {
-              "wall": 17.9,
-              "wait(data)": 0.5,
-              "forward": 0.7,
-              "criteria": 11.7,
-              "backward+step": 1.2,
+              "wall": 18.3,
+              "wait(data)": 0.4,
+              "forward": 0.6,
+              "criteria": 12.2,
+              "backward+step": 1.1,
               "ema": 0.0,
               "telemetry": 0.5,
-              "validation": 3.2,
+              "validation": 3.4,
               "checkpoint": 0.0,
               "other": 0.0
             },
             {
-              "wall": 17.3,
-              "wait(data)": 0.5,
-              "forward": 0.5,
-              "criteria": 11.4,
-              "backward+step": 1.1,
+              "wall": 17.9,
+              "wait(data)": 0.4,
+              "forward": 0.4,
+              "criteria": 12.2,
+              "backward+step": 0.9,
               "ema": 0.0,
-              "telemetry": 0.4,
-              "validation": 3.3,
+              "telemetry": 0.5,
+              "validation": 3.5,
               "checkpoint": 0.0,
               "other": 0.0
             }
           ],
           "startup": {},
           "checkpoints": [
-            "2026_09_07_17_24_52.pt"
+            "2026_09_09_17_09_42.pt",
+            "resume_latest.pt"
           ],
           "last_loss": 1.0,
           "valid": true,
-          "log": "/tmp/konfai_perf_train_jxl3wfnl/train_fp32.log"
+          "log": "/tmp/konfai_perf_train_ypqwxbwn/train_fp32.log"
         },
         "run_autocast": {
           "returncode": 0,
-          "wall_s": 21.787,
+          "wall_s": 21.801,
           "epoch_lines": [
             {
-              "wall": 9.6,
-              "wait(data)": 0.5,
+              "wall": 9.5,
+              "wait(data)": 0.4,
               "forward": 0.7,
-              "criteria": 4.8,
-              "backward+step": 1.4,
+              "criteria": 5.0,
+              "backward+step": 1.3,
               "ema": 0.0,
               "telemetry": 0.2,
-              "validation": 2.0,
+              "validation": 1.9,
               "checkpoint": 0.0,
               "other": 0.0
             },
             {
-              "wall": 9.0,
-              "wait(data)": 0.5,
-              "forward": 0.5,
+              "wall": 8.9,
+              "wait(data)": 0.4,
+              "forward": 0.4,
               "criteria": 4.8,
-              "backward+step": 1.1,
+              "backward+step": 1.0,
               "ema": 0.0,
               "telemetry": 0.2,
               "validation": 2.0,
@@ -1808,54 +1814,56 @@
           ],
           "startup": {},
           "checkpoints": [
-            "2026_09_07_17_25_13.pt"
+            "2026_09_09_17_10_03.pt",
+            "resume_latest.pt"
           ],
           "last_loss": 1.0,
           "valid": true,
-          "log": "/tmp/konfai_perf_train_jxl3wfnl/train_autocast.log"
+          "log": "/tmp/konfai_perf_train_ypqwxbwn/train_autocast.log"
         },
         "metrics": {
-          "wall_s_fp32": 38.244,
+          "wall_s_fp32": 39.316,
           "startup_s_fp32": 0.0,
-          "epoch1_wall_s_fp32": 17.9,
-          "epoch2_wall_s_fp32": 17.3,
-          "wait_data_s_fp32": 0.5,
-          "forward_s_fp32": 0.5,
-          "criteria_s_fp32": 11.4,
-          "backward_step_s_fp32": 1.1,
-          "validation_s_fp32": 3.3,
-          "telemetry_s_fp32": 0.4,
-          "peak_rss_gib_fp32": 3.76,
+          "epoch1_wall_s_fp32": 18.3,
+          "epoch2_wall_s_fp32": 17.9,
+          "wait_data_s_fp32": 0.4,
+          "forward_s_fp32": 0.4,
+          "criteria_s_fp32": 12.2,
+          "backward_step_s_fp32": 0.9,
+          "validation_s_fp32": 3.5,
+          "telemetry_s_fp32": 0.5,
+          "peak_rss_gib_fp32": 3.763,
           "gpu_delta_mib_fp32": 2747,
-          "wall_s_autocast": 21.787,
+          "wall_s_autocast": 21.801,
           "startup_s_autocast": 0.0,
-          "epoch1_wall_s_autocast": 9.6,
-          "epoch2_wall_s_autocast": 9.0,
-          "wait_data_s_autocast": 0.5,
-          "forward_s_autocast": 0.5,
+          "epoch1_wall_s_autocast": 9.5,
+          "epoch2_wall_s_autocast": 8.9,
+          "wait_data_s_autocast": 0.4,
+          "forward_s_autocast": 0.4,
           "criteria_s_autocast": 4.8,
-          "backward_step_s_autocast": 1.1,
+          "backward_step_s_autocast": 1.0,
           "validation_s_autocast": 2.0,
           "telemetry_s_autocast": 0.2,
-          "peak_rss_gib_autocast": 3.98,
+          "peak_rss_gib_autocast": 3.985,
           "gpu_delta_mib_autocast": 1953
         },
-        "headline": "epoch fp32 17.3 s (criteria 11.4, validation 3.3, wait(data) 0.5) | autocast 9.0 s | startup 0.0 s | RSS 3.76 GiB"
+        "headline": "epoch fp32 17.9 s (criteria 12.2, validation 3.5, wait(data) 0.4) | autocast 8.9 s | startup 0.0 s | RSS 3.763 GiB"
       }
     },
     "predict": {
       "bench": "predict",
       "fingerprint": {
-        "date": "2026-09-07T17:25:16+0200",
+        "date": "2026-09-09T17:10:06+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "d1c6961b9553",
+          "dirty": false,
+          "describe": "v1.8.3-4-gd1c6961b"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -1875,9 +1883,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          6.66,
-          10.38,
-          12.48
+          2.77,
+          1.61,
+          10.24
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -1888,10 +1896,28 @@
         "gate_warnings": [],
         "repeats": 3,
         "gpu": true,
-        "scratch": "/tmp/konfai_perf_predict_f7zv7c9_",
+        "scratch": "/tmp/konfai_perf_predict_xmkt40hq",
         "runs_whole": [
           {
-            "wall_s": 4.359,
+            "wall_s": 4.556,
+            "clocks": {
+              "prediction": {
+                "wall": 2.5,
+                "fetch": 1.1,
+                "forward": 1.3,
+                "blend": 0.0,
+                "finalize(stream)": 0.0,
+                "finalize(case)": 0.0,
+                "drain": 0.0,
+                "other": 0.0,
+                "after_bar:writer": 0.0,
+                "after_bar:on": 0.0
+              }
+            },
+            "peak_rss_gib": 1.517
+          },
+          {
+            "wall_s": 4.519,
             "clocks": {
               "prediction": {
                 "wall": 2.5,
@@ -1906,28 +1932,10 @@
                 "after_bar:on": 0.0
               }
             },
-            "peak_rss_gib": 1.526
+            "peak_rss_gib": 1.517
           },
           {
-            "wall_s": 4.433,
-            "clocks": {
-              "prediction": {
-                "wall": 2.5,
-                "fetch": 1.0,
-                "forward": 1.3,
-                "blend": 0.0,
-                "finalize(stream)": 0.0,
-                "finalize(case)": 0.1,
-                "drain": 0.0,
-                "other": 0.0,
-                "after_bar:writer": 0.0,
-                "after_bar:on": 0.0
-              }
-            },
-            "peak_rss_gib": 1.515
-          },
-          {
-            "wall_s": 4.338,
+            "wall_s": 4.417,
             "clocks": {
               "prediction": {
                 "wall": 2.5,
@@ -1935,17 +1943,17 @@
                 "forward": 1.3,
                 "blend": 0.0,
                 "finalize(stream)": 0.0,
-                "finalize(case)": 0.1,
+                "finalize(case)": 0.0,
                 "drain": 0.0,
                 "other": 0.0,
                 "after_bar:writer": 0.0,
                 "after_bar:on": 0.0
               }
             },
-            "peak_rss_gib": 1.516
+            "peak_rss_gib": 1.517
           },
           {
-            "wall_s": 4.49,
+            "wall_s": 4.43,
             "clocks": {
               "prediction": {
                 "wall": 2.5,
@@ -1953,61 +1961,43 @@
                 "forward": 1.3,
                 "blend": 0.0,
                 "finalize(stream)": 0.0,
-                "finalize(case)": 0.1,
+                "finalize(case)": 0.0,
                 "drain": 0.0,
                 "other": 0.0,
                 "after_bar:writer": 0.0,
                 "after_bar:on": 0.0
               }
             },
-            "peak_rss_gib": 1.515
+            "peak_rss_gib": 1.528
           }
         ],
         "runs_stream": [
           {
-            "wall_s": 4.74,
-            "clocks": {
-              "prediction": {
-                "wall": 2.8,
-                "fetch": 1.1,
-                "forward": 0.9,
-                "blend": 0.5,
-                "finalize(stream)": 0.2,
-                "finalize(case)": 0.0,
-                "drain": 0.0,
-                "other": 0.0,
-                "after_bar:writer": 1.1,
-                "after_bar:on": 0.0
-              }
-            },
-            "peak_rss_gib": 1.478
-          },
-          {
-            "wall_s": 4.798,
-            "clocks": {
-              "prediction": {
-                "wall": 2.8,
-                "fetch": 1.1,
-                "forward": 0.9,
-                "blend": 0.5,
-                "finalize(stream)": 0.2,
-                "finalize(case)": 0.0,
-                "drain": 0.0,
-                "other": 0.0,
-                "after_bar:writer": 1.1,
-                "after_bar:on": 0.0
-              }
-            },
-            "peak_rss_gib": 1.479
-          },
-          {
-            "wall_s": 4.788,
+            "wall_s": 4.767,
             "clocks": {
               "prediction": {
                 "wall": 2.9,
                 "fetch": 1.1,
                 "forward": 0.9,
-                "blend": 0.7,
+                "blend": 0.5,
+                "finalize(stream)": 0.3,
+                "finalize(case)": 0.0,
+                "drain": 0.0,
+                "other": 0.0,
+                "after_bar:writer": 1.1,
+                "after_bar:on": 0.0
+              }
+            },
+            "peak_rss_gib": 1.481
+          },
+          {
+            "wall_s": 4.688,
+            "clocks": {
+              "prediction": {
+                "wall": 2.8,
+                "fetch": 1.1,
+                "forward": 0.9,
+                "blend": 0.5,
                 "finalize(stream)": 0.2,
                 "finalize(case)": 0.0,
                 "drain": 0.0,
@@ -2016,10 +2006,10 @@
                 "after_bar:on": 0.0
               }
             },
-            "peak_rss_gib": 1.477
+            "peak_rss_gib": 1.49
           },
           {
-            "wall_s": 4.774,
+            "wall_s": 4.944,
             "clocks": {
               "prediction": {
                 "wall": 2.9,
@@ -2034,7 +2024,25 @@
                 "after_bar:on": 0.0
               }
             },
-            "peak_rss_gib": 1.477
+            "peak_rss_gib": 1.515
+          },
+          {
+            "wall_s": 4.823,
+            "clocks": {
+              "prediction": {
+                "wall": 2.9,
+                "fetch": 1.2,
+                "forward": 0.9,
+                "blend": 0.5,
+                "finalize(stream)": 0.2,
+                "finalize(case)": 0.0,
+                "drain": 0.0,
+                "other": 0.0,
+                "after_bar:writer": 1.1,
+                "after_bar:on": 0.0
+              }
+            },
+            "peak_rss_gib": 1.48
           }
         ],
         "whole_vs_stream": {
@@ -2043,11 +2051,11 @@
           "total_voxels": 58446992,
           "geometry_ok": true,
           "per_case": {
-            "1PC006": 0,
-            "1PC032": 0,
-            "1PC044": 0,
-            "1PC073": 0,
-            "1PC095": 0
+            "1PC006/PRED.mha": 0,
+            "1PC032/PRED.mha": 0,
+            "1PC044/PRED.mha": 0,
+            "1PC073/PRED.mha": 0,
+            "1PC095/PRED.mha": 0
           }
         },
         "whole_vs_reference": {
@@ -2056,57 +2064,73 @@
           "total_voxels": 58446992,
           "geometry_ok": true,
           "per_case": {
-            "1PC006": 2551,
-            "1PC032": 2290,
-            "1PC044": 2114,
-            "1PC073": 1758,
-            "1PC095": 2397
+            "1PC006/PRED.mha": 2551,
+            "1PC032/PRED.mha": 2290,
+            "1PC044/PRED.mha": 2114,
+            "1PC073/PRED.mha": 1758,
+            "1PC095/PRED.mha": 2397
           }
         },
+        "lane": "example",
+        "facts": [
+          {
+            "name": "differing_voxels_whole_vs_stream",
+            "value": 0.0,
+            "expect": 0.0,
+            "op": "=="
+          },
+          {
+            "name": "geometry_identical_whole_vs_stream",
+            "value": 1.0,
+            "expect": 1.0,
+            "op": "=="
+          }
+        ],
         "status": "voxel-identical",
         "clock_note": "the [KonfAI] clocks print only above one second: a 0.0 here means under a second, not zero",
         "metrics": {
-          "wall_s_whole": 4.433,
+          "wall_s_whole": 4.43,
           "loop_s_whole": 2.5,
           "fetch_s_whole": 1.1,
           "forward_s_whole": 1.3,
           "blend_s_whole": 0.0,
           "finalizetream_s_whole": 0.0,
-          "finalize_case_s_whole": 0.1,
+          "finalize_case_s_whole": 0.0,
           "writer_s_whole": 0.0,
           "startup_s_whole": 0.0,
-          "peak_rss_gib_whole": 1.516,
+          "peak_rss_gib_whole": 1.528,
           "gpu_delta_mib_whole": 721,
-          "wall_s_stream": 4.788,
+          "wall_s_stream": 4.823,
           "loop_s_stream": 2.9,
           "fetch_s_stream": 1.1,
           "forward_s_stream": 0.9,
-          "blend_s_stream": 0.6,
+          "blend_s_stream": 0.5,
           "finalizetream_s_stream": 0.2,
           "finalize_case_s_stream": 0.0,
           "writer_s_stream": 1.1,
           "startup_s_stream": 0.0,
-          "peak_rss_gib_stream": 1.479,
+          "peak_rss_gib_stream": 1.515,
           "gpu_delta_mib_stream": 631,
           "differing_voxels_whole_vs_stream": 0.0,
           "differing_voxels_whole_vs_reference": 11110.0
         },
-        "headline": "prediction whole 4.433 s (loop 2.5: fetch 1.1 + forward 1.3) | streamed 4.788 s (loop 2.9) | 0 of 58446992 voxels differ | RSS 1.516 GiB"
+        "headline": "prediction whole 4.43 s (loop 2.5: fetch 1.1 + forward 1.3) | streamed 4.823 s (loop 2.9) | 0 of 58446992 voxels differ | RSS 1.528 GiB"
       }
     },
     "evaluate": {
       "bench": "evaluate",
       "fingerprint": {
-        "date": "2026-09-07T17:25:56+0200",
+        "date": "2026-09-09T17:14:56+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "d1c6961b9553",
+          "dirty": false,
+          "describe": "v1.8.3-4-gd1c6961b"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -2126,9 +2150,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          6.7,
-          9.99,
-          12.26
+          50.41,
+          32.74,
+          20.27
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -2140,24 +2164,24 @@
         "repeats": 3,
         "runs": [
           {
-            "wall_s": 4.078,
+            "wall_s": 4.008,
             "clocks": {},
-            "peak_rss_gib": 2.775
+            "peak_rss_gib": 2.774
           },
           {
-            "wall_s": 3.975,
+            "wall_s": 3.977,
             "clocks": {},
-            "peak_rss_gib": 2.726
+            "peak_rss_gib": 2.739
           },
           {
-            "wall_s": 3.984,
+            "wall_s": 3.945,
             "clocks": {},
-            "peak_rss_gib": 2.775
+            "peak_rss_gib": 2.783
           },
           {
-            "wall_s": 3.988,
+            "wall_s": 4.018,
             "clocks": {},
-            "peak_rss_gib": 2.716
+            "peak_rss_gib": 2.747
           }
         ],
         "metric_files": [
@@ -2176,27 +2200,28 @@
         "loop_note": "loop_s is wall_s minus the startup clock: a difference, not a clock",
         "clock_note": "the [KonfAI] startup and loop clocks print only above one second: a 0.0 here means under a second, not zero",
         "metrics": {
-          "wall_s": 3.984,
+          "wall_s": 3.977,
           "startup_s": 0.0,
-          "peak_rss_gib": 2.775,
-          "loop_s": 3.984
+          "peak_rss_gib": 2.783,
+          "loop_s": 3.977
         },
-        "headline": "evaluation 3.984 s wall, startup 0.0 s, loop about 3.984 s, RSS 2.775 GiB; 1 metric files, 393 numbers, 0 non-finite"
+        "headline": "evaluation 3.977 s wall, startup 0.0 s, loop about 3.977 s, RSS 2.783 GiB; 1 metric files, 393 numbers, 0 non-finite"
       }
     },
     "transform": {
       "bench": "transform",
       "fingerprint": {
-        "date": "2026-09-07T17:26:15+0200",
+        "date": "2026-09-09T17:26:54+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "760f23ed2f23",
+          "dirty": false,
+          "describe": "v1.8.3-5-g760f23ed"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -2216,9 +2241,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          5.0,
-          9.39,
-          12.02
+          11.16,
+          33.2,
+          28.55
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -2234,12 +2259,12 @@
           512
         ],
         "repeats": 3,
-        "scratch": "/tmp/konfai_perf_transform_a625oskc",
+        "scratch": "/tmp/konfai_perf_transform_pkaagaz8",
         "naive_runs_s": [
-          3.867,
-          4.006,
-          3.972,
-          3.926
+          3.869,
+          4.334,
+          4.114,
+          3.982
         ],
         "konfai_vs_naive": {
           "shape_equal": true,
@@ -2264,175 +2289,208 @@
           {
             "budget_gib": 1.0,
             "walls_s": [
-              7.103,
-              3.996,
-              3.882,
-              3.913
+              7.17,
+              3.944,
+              3.938,
+              3.973
             ],
-            "peak_rss_gib": 1.182,
+            "peak_rss_gib": 1.289,
             "region_rows": null,
             "plan": [
               "[KonfAI] plan over 1 rank(s) | per-rank budget 1.00 GiB ('1.0gib') | held beside the regions: engine ~32.00 MiB, decoded-chunk cache up to 153.60 MiB (under the 256.00 MiB floor: a region touching mor",
-              "CT -> CT (Normalize -> Write /tmp/konfai_perf_transform_a625oskc/out_b1_0:h5): 1 case(s) -- 1 STREAM, 0 LOAD, 0 WHOLE-VOLUME, 0 SKIP (output already written)",
-              "[KonfAI] plan over 1 rank(s) | 1 entr(ies): 1 STREAM | per-rank budget 1.00 GiB ('1.0gib') -> full plan in /tmp/konfai_perf_transform_a625oskc/Transforms_b1_0/BENCH/log_0.txt",
-              "[KonfAI] sweep 2.1 s = chain 0.7 + fetch 0.0 + wait(read) 1.2 + wait(write) 0.1 + other 0.0 | stages read 2.0 s, write 1.7 s | 19 region(s) of 64 -> 128 -> 64 row(s), peak held 0.58 GiB",
-              "[KonfAI] held 1.23 GiB at its peak against a per-rank budget of 1.00 GiB: 1.23x"
+              "CT -> CT (Normalize -> Write /tmp/konfai_perf_transform_pkaagaz8/out_b1_0:h5): 1 case(s) -- 1 STREAM, 0 LOAD, 0 WHOLE-VOLUME, 0 SKIP (output already written)",
+              "[KonfAI] plan over 1 rank(s) | 1 entr(ies): 1 STREAM | per-rank budget 1.00 GiB ('1.0gib') -> full plan in /tmp/konfai_perf_transform_pkaagaz8/Transforms_b1_0/BENCH/log_0.txt",
+              "[KonfAI] sweep 2.1 s = chain 0.8 + fetch 0.0 + wait(read) 0.5 + wait(write) 0.7 + other 0.0 | stages read 2.0 s, write 1.9 s | 32 region(s) of 64 row(s), peak held 0.38 GiB",
+              "[KonfAI] held 1.04 GiB at its peak against a per-rank budget of 1.00 GiB: 1.04x"
             ]
           },
           {
             "budget_gib": 8.0,
             "walls_s": [
-              3.924,
-              3.934,
-              3.873,
-              3.875
+              4.006,
+              4.051,
+              4.031,
+              3.963
             ],
-            "peak_rss_gib": 3.223,
+            "peak_rss_gib": 3.215,
             "region_rows": null,
             "plan": [
               "[KonfAI] plan over 1 rank(s) | per-rank budget 8.00 GiB ('8.0gib') | held beside the regions: engine ~32.00 MiB, decoded-chunk cache up to 1.20 GiB | fallback working set = case x 4 B x (2 + the wides",
-              "CT -> CT (Normalize -> Write /tmp/konfai_perf_transform_a625oskc/out_b8_0:h5): 1 case(s) -- 1 STREAM, 0 LOAD, 0 WHOLE-VOLUME, 0 SKIP (output already written)",
-              "[KonfAI] plan over 1 rank(s) | 1 entr(ies): 1 STREAM | per-rank budget 8.00 GiB ('8.0gib') -> full plan in /tmp/konfai_perf_transform_a625oskc/Transforms_b8_0/BENCH/log_0.txt",
-              "[KonfAI] sweep 2.1 s = chain 0.7 + fetch 0.0 + wait(read) 0.9 + wait(write) 0.6 + other 0.0 | stages read 1.6 s, write 1.6 s | 4 region(s) of 512 row(s), peak held 2.30 GiB",
-              "[KonfAI] held 2.96 GiB at its peak against a per-rank budget of 8.00 GiB: within"
+              "CT -> CT (Normalize -> Write /tmp/konfai_perf_transform_pkaagaz8/out_b8_0:h5): 1 case(s) -- 1 STREAM, 0 LOAD, 0 WHOLE-VOLUME, 0 SKIP (output already written)",
+              "[KonfAI] plan over 1 rank(s) | 1 entr(ies): 1 STREAM | per-rank budget 8.00 GiB ('8.0gib') -> full plan in /tmp/konfai_perf_transform_pkaagaz8/Transforms_b8_0/BENCH/log_0.txt",
+              "[KonfAI] sweep 2.1 s = chain 0.8 + fetch 0.0 + wait(read) 1.2 + wait(write) 0.2 + other 0.0 | stages read 1.8 s, write 1.6 s | 4 region(s) of 512 row(s), peak held 2.00 GiB",
+              "[KonfAI] held 2.66 GiB at its peak against a per-rank budget of 8.00 GiB: within"
             ]
           }
         ],
+        "facts": [
+          {
+            "name": "max_abs_diff_konfai_vs_naive",
+            "value": 1.1920928955078125e-07,
+            "expect": 1e-06,
+            "op": "<="
+          },
+          {
+            "name": "shape_equal_konfai_vs_naive",
+            "value": 1.0,
+            "expect": 1.0,
+            "op": "=="
+          },
+          {
+            "name": "attrs_equal_konfai_vs_naive",
+            "value": 1.0,
+            "expect": 1.0,
+            "op": "=="
+          },
+          {
+            "name": "sweep_peak_gib_b1",
+            "value": 0.38,
+            "expect": 1.0,
+            "op": "<="
+          },
+          {
+            "name": "sweep_peak_gib_b8",
+            "value": 2.0,
+            "expect": 8.0,
+            "op": "<="
+          }
+        ],
         "cprofile": {
-          "total_tottime_s": 5.444,
+          "total_tottime_s": 5.396,
           "top": [
             {
-              "function": "harness.py:224(_tree_rss)",
-              "ncalls": 67,
-              "tottime": 0.005,
-              "cumtime": 6.401
-            },
-            {
-              "function": "__init__.py:951(children)",
-              "ncalls": 67,
-              "tottime": 0.005,
-              "cumtime": 4.584
+              "function": "sweep.py:453(flush)",
+              "ncalls": 33,
+              "tottime": 0.019,
+              "cumtime": 6.687
             },
             {
               "function": "threading.py:1059(join)",
               "ncalls": 3,
               "tottime": 0.0,
-              "cumtime": 4.398
-            },
-            {
-              "function": "~:0(<method 'acquire' of '_thread.lock' objects>)",
-              "ncalls": 238,
-              "tottime": 0.006,
-              "cumtime": 4.381
-            },
-            {
-              "function": "bench_transform.py:84(konfai_normalize)",
-              "ncalls": 1,
-              "tottime": 0.0,
-              "cumtime": 4.381
-            },
-            {
-              "function": "threading.py:327(wait)",
-              "ncalls": 36,
-              "tottime": 0.0,
-              "cumtime": 4.381
-            },
-            {
-              "function": "harness.py:253(stop)",
-              "ncalls": 1,
-              "tottime": 0.0,
-              "cumtime": 4.381
-            },
-            {
-              "function": "threading.py:641(wait)",
-              "ncalls": 5,
-              "tottime": 0.0,
-              "cumtime": 4.381
-            },
-            {
-              "function": "threading.py:1001(_bootstrap)",
-              "ncalls": 4,
-              "tottime": 0.0,
-              "cumtime": 4.381
+              "cumtime": 6.39
             },
             {
               "function": "~:0(<method 'join' of '_thread._ThreadHandle' objects>)",
               "ncalls": 3,
               "tottime": 0.0,
-              "cumtime": 4.379
+              "cumtime": 5.764
             },
             {
-              "function": "sweep.py:436(write)",
-              "ncalls": 19,
-              "tottime": 0.002,
-              "cumtime": 4.125
+              "function": "sweep.py:442(write)",
+              "ncalls": 32,
+              "tottime": 0.004,
+              "cumtime": 4.809
             },
             {
-              "function": "sweep.py:447(flush)",
-              "ncalls": 20,
-              "tottime": 0.0,
-              "cumtime": 3.991
+              "function": "~:0(<method 'acquire' of '_thread.lock' objects>)",
+              "ncalls": 366,
+              "tottime": 0.023,
+              "cumtime": 4.352
             },
             {
-              "function": "harness.py:245(run)",
+              "function": "bench_transform.py:85(konfai_normalize)",
               "ncalls": 1,
               "tottime": 0.0,
-              "cumtime": 3.665
+              "cumtime": 4.352
             },
             {
-              "function": "api.py:103(_launch)",
+              "function": "threading.py:327(wait)",
+              "ncalls": 71,
+              "tottime": 0.004,
+              "cumtime": 4.352
+            },
+            {
+              "function": "harness.py:266(stop)",
+              "ncalls": 1,
+              "tottime": 0.0,
+              "cumtime": 4.352
+            },
+            {
+              "function": "threading.py:641(wait)",
+              "ncalls": 5,
+              "tottime": 0.0,
+              "cumtime": 4.352
+            },
+            {
+              "function": "threading.py:1001(_bootstrap)",
+              "ncalls": 4,
+              "tottime": 0.003,
+              "cumtime": 4.352
+            },
+            {
+              "function": "api.py:320(transform)",
+              "ncalls": 1,
+              "tottime": 0.0,
+              "cumtime": 3.672
+            },
+            {
+              "function": "api.py:118(_launch)",
               "ncalls": 1,
               "tottime": 0.0,
               "cumtime": 3.608
             },
             {
-              "function": "api.py:310(transform)",
+              "function": "distributed.py:194(__call__)",
               "ncalls": 1,
               "tottime": 0.0,
-              "cumtime": 3.608
+              "cumtime": 3.606
+            },
+            {
+              "function": "distributed.py:314(execute_distributed_object)",
+              "ncalls": 1,
+              "tottime": 0.0,
+              "cumtime": 3.606
+            },
+            {
+              "function": "transformer.py:1027(run_process)",
+              "ncalls": 1,
+              "tottime": 0.0,
+              "cumtime": 3.606
             }
           ],
           "family_share_of_tottime": {
             "statistics": 0.005,
-            "sweep": 0.008,
+            "sweep": 0.012,
             "h5": 0.002
           },
           "family_max_cumtime_s": {
-            "statistics": 0.222,
-            "sweep": 4.125,
-            "h5": 2.016
+            "statistics": 0.365,
+            "sweep": 6.687,
+            "h5": 1.854
           }
         },
         "status": "outputs agree",
         "metrics": {
-          "naive_wall_s": 3.972,
+          "naive_wall_s": 4.114,
           "naive_peak_rss_gib": 0.234,
-          "konfai_wall_s_b1": 3.913,
-          "konfai_peak_rss_gib_b1": 1.182,
-          "konfai_floor_rss_gib_b1": 0.591,
+          "konfai_wall_s_b1": 3.944,
+          "konfai_peak_rss_gib_b1": 1.289,
+          "konfai_floor_rss_gib_b1": 0.594,
           "max_abs_diff_konfai_vs_naive": 1.1920928955078125e-07,
-          "konfai_wall_s_b8": 3.875,
-          "konfai_peak_rss_gib_b8": 3.223,
-          "konfai_floor_rss_gib_b8": 0.591,
+          "konfai_wall_s_b8": 4.031,
+          "konfai_peak_rss_gib_b8": 3.215,
+          "konfai_floor_rss_gib_b8": 0.594,
           "statistics_share_of_tottime": 0.005,
-          "statistics_max_cumtime_s": 0.222
+          "statistics_max_cumtime_s": 0.365
         },
-        "headline": "2 GiB: KonfAI 3.913 s / 1.182 GiB at 1 GiB budget, 3.875 s at 8 GiB | naive 3.972 s / 0.234 GiB | statistics scan 0 % self, 0.222 s cumulative | max diff 1.1920928955078125e-07"
+        "headline": "2 GiB: KonfAI 3.944 s / 1.289 GiB at 1 GiB budget, 4.031 s at 8 GiB | naive 4.114 s / 0.234 GiB | statistics scan 0 % self, 0.365 s cumulative | max diff 1.1920928955078125e-07"
       }
     },
     "tests": {
       "bench": "tests",
       "fingerprint": {
-        "date": "2026-09-07T17:27:33+0200",
+        "date": "2026-09-09T17:28:12+0200",
         "host": "valentin-ThinkPad-P16-Gen-3",
+        "machine": "valentin-ThinkPad-P16-Gen-3",
         "git": {
-          "sha": "81a66be8db07",
-          "dirty": true,
-          "describe": "v1.8.3-36-g81a66be8"
+          "sha": "760f23ed2f23",
+          "dirty": false,
+          "describe": "v1.8.3-5-g760f23ed"
         },
         "versions": {
           "python": "3.13.14",
-          "konfai": "1.8.4.dev36",
+          "konfai": "1.8.4.dev3",
           "torch": "2.12.1+cu130",
           "numpy": "2.5.0",
           "SimpleITK": "2.5.5",
@@ -2452,9 +2510,9 @@
         },
         "power_profile": "performance",
         "load_avg": [
-          2.73,
-          7.7,
-          11.22
+          5.54,
+          26.29,
+          26.5
         ],
         "threads": {
           "OMP_NUM_THREADS": null,
@@ -2472,65 +2530,77 @@
             "/home/valentin/Documents/KonfAI/.pixi/envs/dev/bin/python",
             "-m",
             "pytest",
-            "-q",
             "-n",
             "auto",
-            "-m",
-            "not slow and not integration",
             "--dist",
             "loadfile",
             "-p",
             "no:cacheprovider",
+            "-m",
+            "not slow and not integration",
             "tests/"
           ],
           "pinned": true,
           "returncode": 0,
-          "wall_s": 22.54,
-          "cpu_s": 313.9,
-          "summary": null,
+          "wall_s": 25.21,
+          "cpu_s": 376.8,
+          "summary": "3445 passed, 27 skipped, 943 warnings in 24.47s",
           "failed": 0,
-          "passed": 0,
-          "skipped": 0,
+          "passed": 3445,
+          "skipped": 27,
           "failed_tests": [],
-          "tail": "essed .mha/.nii. Warned once per format.\n    _warn_unstreamed_region_read(path)\n\ntests/unit/test_transform_materialize_contract.py::test_streamed_materialize_equals_whole_volume_from_every_source_format[Canonical:Intensity-nii.gz]\n  /home/valentin/Documents/KonfAI/konfai/utils/dataset/sitk_file.py:264: UserWarning: Patch-streaming '.gz' files (e.g. '/tmp/pytest-of-valentin/pytest-11/popen-gw0/sources0/nii_gz/CASE_000/Intensity.nii.gz'): this format cannot serve a disk region (NRRD, or any compressed file), so every patch decodes the whole volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.\n    _warn_unstreamed_region_read(path)\n\ntests/unit/test_omezarr_displacement_field.py: 426 warnings\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute\n\ntests/unit/test_omezarr_displacement_field.py: 426 warnings\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute\n\ntests/unit/test_omezarr_displacement_field.py::test_an_axis_aligned_field_is_an_applicable_rfc5_transformation\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n<sys>:0: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n"
+          "tail": "rn_unstreamed_region_read(path)\n\ntests/unit/test_transform_materialize_contract.py::test_streamed_materialize_equals_whole_volume_from_every_source_format[Canonical:Intensity-nii.gz]\n  /home/valentin/Documents/KonfAI/konfai/utils/dataset/sitk_file.py:264: UserWarning: Patch-streaming '.gz' files (e.g. '/tmp/pytest-of-valentin/pytest-15/popen-gw0/sources0/nii_gz/CASE_000/Intensity.nii.gz'): this format cannot serve a disk region (NRRD, or any compressed file), so every patch decodes the whole volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.\n    _warn_unstreamed_region_read(path)\n\ntests/unit/test_omezarr_displacement_field.py: 426 warnings\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute\n\ntests/unit/test_omezarr_displacement_field.py: 426 warnings\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute\n\ntests/unit/test_omezarr_displacement_field.py::test_an_axis_aligned_field_is_an_applicable_rfc5_transformation\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n3445 passed, 27 skipped, 943 warnings in 24.47s\n<sys>:0: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n"
         },
         "unpinned": {
           "argv": [
             "/home/valentin/Documents/KonfAI/.pixi/envs/dev/bin/python",
             "-m",
             "pytest",
-            "-q",
             "-n",
             "auto",
-            "-m",
-            "not slow and not integration",
             "--dist",
             "loadfile",
             "-p",
             "no:cacheprovider",
+            "-m",
+            "not slow and not integration",
             "tests/"
           ],
           "pinned": false,
           "returncode": 0,
-          "wall_s": 110.01,
-          "cpu_s": 2265.5,
-          "summary": null,
+          "wall_s": 94.25,
+          "cpu_s": 2110.2,
+          "summary": "3445 passed, 27 skipped, 943 warnings in 93.47s (0:01:33)",
           "failed": 0,
-          "passed": 0,
-          "skipped": 0,
+          "passed": 3445,
+          "skipped": 27,
           "failed_tests": [],
-          "tail": "CASE_000/Intensity.nii.gz'): this format cannot serve a disk region (NRRD, or any compressed file), so every patch decodes the whole volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.\n    _warn_unstreamed_region_read(path)\n\ntests/unit/test_onnx_export.py::test_explicit_head_overrides_auto_selection\ntests/unit/test_onnx_export.py::test_fold_pre_bakes_a_custom_pointwise_op_into_the_graph\n  /home/valentin/Documents/KonfAI/.pixi/envs/dev/lib/python3.13/copyreg.py:99: FutureWarning: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.\n    return cls.__new__(cls, *args)\n\ntests/unit/test_omezarr_displacement_field.py: 426 warnings\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute\n\ntests/unit/test_omezarr_displacement_field.py: 426 warnings\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute\n\ntests/unit/test_omezarr_displacement_field.py::test_an_axis_aligned_field_is_an_applicable_rfc5_transformation\n  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n<sys>:0: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n"
+          "tail": "n/Documents/KonfAI/.pixi/envs/dev/lib/python3.13/site-packages/torch/nn/modules/instancenorm.py:116: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!\n    if input.size(feature_dim) != self.num_features:\n\ntests/unit/test_bundle.py::test_a_konfai_network_s_head_becomes_a_bundle_monai_loads\n  /home/valentin/Documents/KonfAI/.pixi/envs/dev/lib/python3.13/site-packages/torch/nn/functional.py:2868: TracerWarning: Converting a tensor to a Python boolean might cause the trace to be incorrect. We can't record the data flow of Python values, so this value will be treated as a constant in the future. This means that the trace might not generalize to other inputs!\n    if size_prods == 1:\n\ntests/unit/test_bundle.py::test_a_konfai_network_s_head_becomes_a_bundle_monai_loads\ntests/unit/test_bundle.py::test_a_konfai_network_s_head_becomes_a_bundle_monai_loads\n  /home/valentin/Documents/KonfAI/.pixi/envs/dev/lib/python3.13/site-packages/torch/jit/_serialization.py:176: DeprecationWarning: `torch.jit.load` is deprecated. Please switch to `torch.export`.\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n3445 passed, 27 skipped, 943 warnings in 93.47s (0:01:33)\n<sys>:0: DeprecationWarning: builtin type swigvarlink has no __module__ attribute\n"
         },
         "metrics": {
-          "testfast_pinned_wall_s": 22.54,
-          "testfast_pinned_cpu_s": 313.9,
+          "testfast_pinned_wall_s": 25.21,
+          "testfast_pinned_cpu_s": 376.8,
           "testfast_pinned_failed": 0.0,
-          "testfast_unpinned_wall_s": 110.01,
-          "testfast_unpinned_cpu_s": 2265.5,
+          "testfast_unpinned_wall_s": 94.25,
+          "testfast_unpinned_cpu_s": 2110.2,
           "testfast_unpinned_failed": 0.0,
-          "pin_speedup": 4.88
+          "pin_speedup": 3.74
         },
-        "headline": "test-fast pinned 22.54 s (313.9 CPU-s, 0 failed) | unpinned 110.01 s (2265.5 CPU-s, 0 failed) | 4.88x"
+        "facts": [
+          {
+            "name": "testfast_pinned_failed",
+            "value": 0.0,
+            "expect": 0.0,
+            "op": "=="
+          },
+          {
+            "name": "testfast_unpinned_failed",
+            "value": 0.0,
+            "expect": 0.0,
+            "op": "=="
+          }
+        ],
+        "headline": "test-fast pinned 25.21 s (376.8 CPU-s, 0 failed) | unpinned 94.25 s (2110.2 CPU-s, 0 failed) | 3.74x"
       }
     }
   }
