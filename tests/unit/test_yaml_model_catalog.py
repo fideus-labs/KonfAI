@@ -45,24 +45,17 @@ def test_default_catalog_name_cannot_escape_the_shipped_directory(name: str) -> 
         ModelLoader(classpath=name)._yaml_path()
 
 
-def test_pre_1_6_absolute_model_classpath_still_resolves_with_deprecation() -> None:
-    # A config naming a built-in model by the deprecated absolute path (konfai.models.<kind>...)
-    # must keep resolving onto konfai.models.python, with a DeprecationWarning.
-    import warnings
-
-    from konfai.utils.utils import get_module
-
+def test_the_pre_1_6_absolute_model_classpath_is_refused_by_name(monkeypatch) -> None:
+    # The path is gone, and ModuleNotFoundError would say only that a module is missing: the refusal
+    # names both spellings that work, since a config written before 1.6.0 is what reaches this.
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
     old = "konfai.models.segmentation.UNet:UNet"
-    with pytest.raises(ModuleNotFoundError):
-        get_module(old, "konfai.models.python")  # the raw deprecated path does not import
 
-    loader = ModelLoader(classpath=old)
-    assert loader._yaml_path() is None  # not a catalog yaml -> falls to the Python-class path + shim
-    # The shim in get_model rewrites the prefix; assert the rewrite target resolves and warns.
-    rewritten = old.replace("konfai.models.", "konfai.models.python.", 1)
-    with warnings.catch_warnings(record=True):
-        module, name = get_module(rewritten, "konfai.models.python")
-    assert (module.__name__, name, hasattr(module, name)) == ("konfai.models.python.segmentation.UNet", "UNet", True)
+    with pytest.raises(ConfigError, match=r"before 1\.6\.0") as refusal:
+        ModelLoader(classpath=old).get_model()
+
+    assert "konfai.models.python.segmentation.UNet:UNet" in str(refusal.value)
+    assert "segmentation.UNet:UNet" in str(refusal.value)
 
 
 def test_every_catalog_entry_builds() -> None:
