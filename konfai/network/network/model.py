@@ -18,7 +18,6 @@
 """Loading a model from its classpath or YAML, and the wrapper the workflows run."""
 
 import os
-import warnings
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -133,20 +132,17 @@ class ModelLoader:
             return self._apply_options(model)
 
         classpath = self.classpath
-        # A config that references a built-in model by the absolute path konfai.models.<kind>.<file>:<Class>
-        # keeps working: rewrite the prefix once to konfai.models.python, with a deprecation warning,
-        # instead of failing on ModuleNotFoundError.
+        # The pre-1.6.0 absolute path konfai.models.<kind>.<file>:<Class> is refused by name rather than
+        # left to ModuleNotFoundError, which says only that a module is missing.
         if classpath.startswith("konfai.models.") and not classpath.startswith(
             ("konfai.models.python.", "konfai.models.yaml.")
         ):
-            new_classpath = classpath.replace("konfai.models.", "konfai.models.python.", 1)
-            warnings.warn(
-                f"Model classpath '{classpath}' uses the pre-1.6.0 package layout; "
-                f"use '{new_classpath}'. The old path is accepted for now but will be removed.",
-                DeprecationWarning,
-                stacklevel=2,
+            absolute = classpath.replace("konfai.models.", "konfai.models.python.", 1)
+            relative = classpath.split("konfai.models.", 1)[1]
+            raise ConfigError(
+                f"Model classpath '{classpath}' uses the package layout of KonfAI before 1.6.0.",
+                f"Write '{absolute}', or the relative form the built-in models take: '{relative}'.",
             )
-            classpath = new_classpath
         module, name = get_module(classpath, "konfai.models.python")
         cls = getattr(module, name)
         if not hasattr(cls, "_key"):
