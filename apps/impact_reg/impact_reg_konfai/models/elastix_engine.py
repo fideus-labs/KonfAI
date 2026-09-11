@@ -132,7 +132,9 @@ class ElastixEngine:
     def _ensure_binary(self) -> Path:
         # Optional override: point at an existing elastix-IMPACT install (skips the download).
         override = os.environ.get("KONFAI_ELASTIX_DIR", "")
-        self._elastix_root = Path(override) if override else ELASTIX_CACHE
+        # Absolute: a registration runs from a temporary directory, and loader_env spells its search
+        # paths from this root.
+        self._elastix_root = Path(override).expanduser().resolve() if override else ELASTIX_CACHE
         if override:
             try_elastix(self._elastix_root)
             return get_elastix_bin(self._elastix_root).resolve()

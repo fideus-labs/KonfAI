@@ -229,6 +229,11 @@ def get_elastix_bin(install_path: Path) -> Path:
     return install_path / ("elastix.exe" if platform.system() == "Windows" else (Path("bin") / "elastix"))
 
 
+#: What a child answers when the loader cannot find a library it needs: 127 on POSIX, Windows
+#: STATUS_DLL_NOT_FOUND either way round, since Python reports it unsigned or signed by platform.
+_LOADER_FAILURE_CODES = (127, 0xC0000135, -1073741515)
+
+
 def loader_env(install_path: Path) -> dict[str, str]:
     """The environment the elastix binary needs to link its shared libraries.
 
@@ -267,8 +272,8 @@ def try_elastix(install_path: Path) -> None:
         msg += f"Command:\n{' '.join(e.cmd)}\n"
         msg += f"Return code: {e.returncode}\n\n"
 
-        if e.returncode == 127:
-            # A library the loader cannot find aborts a child that did exec: 127, never OSError.
+        if e.returncode in _LOADER_FAILURE_CODES:
+            # A library the loader cannot find aborts a child that did exec: never OSError.
             msg += (
                 "A shared library could not be found. The binary links LibTorch from the "
                 "environment's pip `torch`, so either no torch is installed or its version is not "

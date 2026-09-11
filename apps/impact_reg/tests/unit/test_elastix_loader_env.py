@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 import torch
+from impact_reg_konfai.models import elastix_engine as elastix_engine_module
+from impact_reg_konfai.models.elastix_engine import ElastixEngine
 from impact_reg_konfai.models.elastix_install import loader_env, try_elastix
 
 
@@ -70,14 +72,40 @@ def test_the_probe_runs_the_binary_under_the_loader_env(monkeypatch: pytest.Monk
     assert seen.get("env") == loader_env(install), "the probe ran with a different environment"
 
 
-def test_a_library_the_loader_cannot_find_is_named_as_such(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A missing shared library aborts a child that did exec: return code 127, never OSError. The
-    OSError branch carried the wording, so the cause was never named."""
+# 127 is the POSIX loader failure; the other two are Windows STATUS_DLL_NOT_FOUND, unsigned and signed.
+@pytest.mark.parametrize("code", [127, 0xC0000135, -1073741515])
+def test_a_library_the_loader_cannot_find_is_named_as_such(code: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing shared library aborts a child that did exec, so it never raises OSError. The OSError
+    branch carried the wording, so the cause was never named."""
 
     def refuse(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
-        raise subprocess.CalledProcessError(127, ["elastix", "-h"], stderr="libtorch_cpu.so: cannot open")
+        raise subprocess.CalledProcessError(code, ["elastix", "-h"], stderr="libtorch_cpu.so: cannot open")
 
     monkeypatch.setattr(subprocess, "run", refuse)
 
     with pytest.raises(NameError, match="shared library could not be found"):
         try_elastix(Path("install-root"))
+
+
+def test_a_relative_override_survives_the_registration_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registration runs the binary from a temporary directory. KONFAI_ELASTIX_DIR is validated from
+    the startup directory, so a root kept relative sends the loader looking under the temporary one."""
+    install = tmp_path / "elastix-impact"
+    (install / "lib").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KONFAI_ELASTIX_DIR", "elastix-impact")
+    monkeypatch.setattr(elastix_engine_module, "try_elastix", lambda path: None)
+    monkeypatch.setattr(elastix_engine_module, "get_elastix_bin", lambda path: path / "bin" / "elastix")
+
+    engine = ElastixEngine.__new__(ElastixEngine)
+    engine._ensure_binary()
+
+    elsewhere = tmp_path / "work"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    searched = loader_env(engine._elastix_root)[_loader_variable()].split(os.pathsep)
+
+    assert str(install.resolve() / "lib") in searched, searched
+    assert all(Path(path).is_absolute() for path in searched if "elastix-impact" in path), searched
