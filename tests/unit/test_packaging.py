@@ -349,6 +349,39 @@ _SIBLING_SETUPS = (
 )
 
 
+def test_the_dependency_self_check_names_only_what_an_install_carries(monkeypatch) -> None:
+    """``assert_konfai_install`` is what SlicerKonfAI runs to decide an install is sound, so every
+    name in ``_KONFAI_DEPS`` must be one konfai or konfai-apps actually declares. It listed three
+    optional extras, so a correct ``pip install konfai-apps`` failed the check and Slicer opened its
+    "installed but not functional" dialog on a first run that had nothing wrong with it."""
+    import runpy
+
+    import setuptools
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    root = Path(konfai.__file__).resolve().parents[1]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = {Requirement(spec).name for spec in pyproject["dependencies"]}
+
+    captured: dict = {}
+    monkeypatch.setattr(setuptools, "setup", lambda **kwargs: captured.update(kwargs))
+    runpy.run_path(str(root / "konfai-apps" / "setup.py"), run_name="__main__")
+    for spec in captured["install_requires"]:
+        requirement = Requirement(spec)
+        declared.add(requirement.name)
+        # konfai[monitoring] carries the extra's own packages into a konfai-apps install.
+        for extra in requirement.extras:
+            declared.update(Requirement(e).name for e in pyproject["optional-dependencies"][extra])
+
+    known = {canonicalize_name(name) for name in declared}
+    undeclared = sorted(name for name in konfai._KONFAI_DEPS if canonicalize_name(name) not in known)
+    assert not undeclared, (
+        f"the self-check demands {undeclared}, which no package declares: either drop them "
+        "from _KONFAI_DEPS or declare the extra that carries them"
+    )
+
+
 @pytest.mark.parametrize("setup_py", _SIBLING_SETUPS)
 def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monkeypatch) -> None:
     """Every sibling once pinned ``konfai==<its own scm version>``: from a working tree that is a
