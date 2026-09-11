@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared exception types used across KonfAI runtime, datasets, and app tooling."""
+"""Shared exception types used across the KonfAI runtime and datasets."""
 
 
 class KonfAIError(Exception):
@@ -91,15 +91,3 @@ class TransformerError(NamedKonfAIError):
 
 class ReductionError(NamedKonfAIError):
     TYPE = "Reduction"
-
-
-class AppRepositoryError(NamedKonfAIError):
-    TYPE = "App repository"
-
-
-class AppMetadataError(NamedKonfAIError):
-    TYPE = "Model metadata"
-
-
-class KonfAIAppClientError(NamedKonfAIError):
-    TYPE = "KonfAI App client"

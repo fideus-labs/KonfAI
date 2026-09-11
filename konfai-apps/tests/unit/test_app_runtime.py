@@ -23,8 +23,8 @@ import konfai_apps.app as app_module
 import numpy as np
 import pytest
 import SimpleITK as sitk
-from konfai.utils.errors import AppMetadataError
 from konfai_apps.app_repository import DataEntry, VolumeType, _parse_input_default
+from konfai_apps.errors import AppMetadataError
 from multipart_support import decode_multipart
 
 

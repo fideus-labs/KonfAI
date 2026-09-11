@@ -19,8 +19,8 @@
 import json
 
 import pytest
-from konfai.utils.errors import AppMetadataError
 from konfai_apps.bundle import assemble_bundle
+from konfai_apps.errors import AppMetadataError
 
 VALID_META = {
     "display_name": "Synthesis: MR",

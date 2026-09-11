@@ -11,8 +11,8 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))  # make _fold_fixture importable by classpath
 
-from konfai.utils.errors import AppMetadataError
 from konfai_apps.bundle import _transform_manifest, _try_fold
+from konfai_apps.errors import AppMetadataError
 
 
 def _cfg(transforms):

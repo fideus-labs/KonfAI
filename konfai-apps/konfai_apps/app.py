@@ -35,7 +35,6 @@ import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
 from konfai.utils.dataset import Dataset
-from konfai.utils.errors import AppRepositoryError, KonfAIAppClientError
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -49,6 +48,7 @@ from konfai.utils.utils import (
 from ruamel.yaml import YAML
 
 from .app_repository import LocalAppRepository, get_app_repository_info
+from .errors import AppRepositoryError, KonfAIAppClientError
 from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
 
 
