@@ -350,6 +350,11 @@ class _DecodedPlaneCache:
             while self._bytes > capacity and self._entries:
                 self._bytes -= self._entries.popitem(last=False)[1][0].nbytes
 
+    @property
+    def held_bytes(self) -> int:
+        """What the cache holds right now: decoded planes, in the bytes they take resident."""
+        return self._bytes
+
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
@@ -357,6 +362,12 @@ class _DecodedPlaneCache:
 
 
 _plane_cache = _DecodedPlaneCache()
+
+
+def plane_cache_held_bytes() -> int:
+    """What the decoded-plane cache holds resident right now. The cache outlives the scope an
+    instrument measures, so what it gained there is not that scope's own cost."""
+    return _plane_cache.held_bytes
 
 
 def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
