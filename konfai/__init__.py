@@ -243,16 +243,17 @@ def _get_env(var: str) -> str:
     return value
 
 
+#: What an install must carry for the check below to pass, as ``pip name -> import name``. Every entry
+#: is declared by konfai or by konfai-apps, so a correct install satisfies it: an optional extra does
+#: not belong here, it would fail the check on an install that has nothing wrong with it.
 _KONFAI_DEPS: dict[str, str] = {
     "torch": "torch",
     "tqdm": "tqdm",
     "numpy": "numpy",
     "ruamel.yaml": "ruamel.yaml",
     "psutil": "psutil",
-    "tensorboard": "tensorboard",
-    "SimpleITK": "SimpleITK",
-    "h5py": "h5py",
-    "nvidia-ml-py": "pynvml",  # IMPORTANT: pip != import
+    "SimpleITK": "SimpleITK",  # konfai-apps
+    "nvidia-ml-py": "pynvml",  # konfai-apps, via konfai[monitoring]; IMPORTANT: pip != import
 }
 
 

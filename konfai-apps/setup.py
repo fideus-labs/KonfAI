@@ -58,7 +58,7 @@ _version = _release_version()
 # depends on either.
 setup(
     install_requires=[
-        _sibling("konfai", _version),
+        _sibling("konfai[monitoring]", _version),
         "SimpleITK",
         "requests",
         "requests-toolbelt",
