@@ -37,7 +37,7 @@ from huggingface_hub import hf_hub_download
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
 from .elastix import _is_local_ref, _model_key, _sorted_specs, generate_impact_parameter_map, load_models_registry
-from .elastix_install import get_elastix_bin, install_elastix_impact, try_elastix
+from .elastix_install import get_elastix_bin, install_elastix_impact, loader_env, try_elastix
 
 # Elastix + IMPACT binary is cached once here (heavy: binary + LibTorch) and reused across runs.
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
@@ -132,9 +132,10 @@ class ElastixEngine:
     def _ensure_binary(self) -> Path:
         # Optional override: point at an existing elastix-IMPACT install (skips the download).
         override = os.environ.get("KONFAI_ELASTIX_DIR", "")
+        self._elastix_root = Path(override) if override else ELASTIX_CACHE
         if override:
-            try_elastix(Path(override))
-            return get_elastix_bin(Path(override)).resolve()
+            try_elastix(self._elastix_root)
+            return get_elastix_bin(self._elastix_root).resolve()
         ELASTIX_CACHE.mkdir(parents=True, exist_ok=True)
         try:
             try_elastix(ELASTIX_CACHE)
@@ -299,20 +300,7 @@ class ElastixEngine:
             for pmap in self._stage_parameter_maps(work, device_index):
                 args += ["-p", str(pmap)]
 
-            # The IMPACT metric plugin links LibTorch from the environment's pip ``torch`` (its ``lib/`` dir) --
-            # the same LibTorch the elastix asset is built against in CI. ``<install>/lib`` (the elastix runtime)
-            # and any extra dirs (KONFAI_ELASTIX_EXTRA_LIB) are also searched; on Windows the loader reads PATH.
-            import torch
-
-            env = os.environ.copy()
-            torch_lib = str(Path(torch.__file__).resolve().parent / "lib")
-            extra_libs = [
-                str(self._elastix_bin.parent.parent / "lib"),
-                torch_lib,
-                os.environ.get("KONFAI_ELASTIX_EXTRA_LIB", ""),
-            ]
-            lib_var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
-            env[lib_var] = os.pathsep.join(p for p in [*extra_libs, env.get(lib_var, "")] if p)
+            env = loader_env(self._elastix_root)
             proc = subprocess.Popen(  # nosec B603
                 args,
                 cwd=str(work),
