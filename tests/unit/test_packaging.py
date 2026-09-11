@@ -354,7 +354,10 @@ def test_the_dependency_self_check_names_only_what_an_install_carries(monkeypatc
     name in ``_KONFAI_DEPS`` must be one konfai or konfai-apps actually declares. It listed three
     optional extras, so a correct ``pip install konfai-apps`` failed the check and Slicer opened its
     "installed but not functional" dialog on a first run that had nothing wrong with it."""
+    import importlib.util
     import runpy
+    import sys
+    import types
 
     import setuptools
     from packaging.requirements import Requirement
@@ -364,6 +367,12 @@ def test_the_dependency_self_check_names_only_what_an_install_carries(monkeypatc
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     declared = {Requirement(spec).name for spec in pyproject["dependencies"]}
 
+    # konfai-apps/setup.py reads its version from setuptools_scm, which the dev extra does not carry.
+    # Only the names matter here, so a stub keeps the check running instead of skipping where it runs.
+    if importlib.util.find_spec("setuptools_scm") is None:
+        stub = types.ModuleType("setuptools_scm")
+        stub.get_version = lambda **kwargs: "0.0.0"  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "setuptools_scm", stub)
     captured: dict = {}
     monkeypatch.setattr(setuptools, "setup", lambda **kwargs: captured.update(kwargs))
     runpy.run_path(str(root / "konfai-apps" / "setup.py"), run_name="__main__")
