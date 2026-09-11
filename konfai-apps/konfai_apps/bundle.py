@@ -33,7 +33,7 @@ from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from konfai.utils.errors import AppMetadataError
+from .errors import AppMetadataError
 
 REQUIRED_APP_JSON_KEYS = ["display_name", "description", "short_description", "tta", "mc_dropout"]
 

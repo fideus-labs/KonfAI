@@ -19,8 +19,8 @@ import sys
 from pathlib import Path
 
 import pytest
-from konfai.utils.errors import AppMetadataError, AppRepositoryError
 from konfai_apps import app_repository as app_repository_module
+from konfai_apps.errors import AppMetadataError, AppRepositoryError
 
 
 def test_get_app_repository_info_rejects_missing_required_metadata_keys(tmp_path: Path) -> None:

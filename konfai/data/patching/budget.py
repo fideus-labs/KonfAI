@@ -198,16 +198,21 @@ def open_held_meter(device: "torch.device | None") -> HeldMeter | None:
     resident = resident_floor() if resident_floor() is not None else resident_bytes()
     if resident is None:
         return None
-    # The decoded-chunk cache sits inside the host peak and has its own budget line
-    # (BUDGET_SHARES['cache']): what it took during the scope is not the scope's.
-    from konfai.utils.ome_zarr import chunk_cache_held_bytes
 
-    cache_at_start = chunk_cache_held_bytes()
+    # The decoded caches sit inside the host peak and have a budget line of their own
+    # (BUDGET_SHARES['cache']): what they took during the scope is not the scope's.
+    def cache_held_bytes() -> int:
+        from konfai.utils.dicom import plane_cache_held_bytes
+        from konfai.utils.ome_zarr import chunk_cache_held_bytes
+
+        return chunk_cache_held_bytes() + plane_cache_held_bytes()
+
+    cache_at_start = cache_held_bytes()
 
     def resident_peak_less_cache() -> int | None:
         peak = peak_resident_bytes()
         if peak is None:
             return None
-        return peak - max(0, chunk_cache_held_bytes() - cache_at_start)
+        return peak - max(0, cache_held_bytes() - cache_at_start)
 
     return HeldMeter(resident_peak_less_cache, int(resident))

@@ -39,10 +39,10 @@ import konfai
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from konfai.utils.errors import AppMetadataError, AppRepositoryError
 from starlette.types import Receive, Scope, Send
 
 from .app_repository import get_app_repository_info
+from .errors import AppMetadataError, AppRepositoryError
 from .remote_options import parse_remote_options, remote_options_to_cli_args
 
 MAX_ACTIVE_JOBS = 32

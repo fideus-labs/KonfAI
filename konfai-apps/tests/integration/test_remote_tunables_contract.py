@@ -40,7 +40,7 @@ import konfai_apps.app as app_module
 import konfai_apps.app_server as app_server
 import konfai_apps.cli as apps_cli_module
 from fastapi.testclient import TestClient
-from konfai.utils.errors import KonfAIAppClientError
+from konfai_apps.errors import KonfAIAppClientError
 from konfai_apps.remote_options import REMOTE_OPTION_FIELDS
 
 TUNABLE_VALUES: dict[str, Any] = {

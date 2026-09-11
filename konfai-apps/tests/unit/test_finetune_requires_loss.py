@@ -22,8 +22,8 @@ from pathlib import Path
 import konfai_apps.app as app_module
 import pytest
 import torch
-from konfai.utils.errors import AppRepositoryError
 from konfai_apps.app import _finetune_target_has_loss
+from konfai_apps.errors import AppRepositoryError
 
 _WITH_LOSS = {
     "outputs_criterions": {

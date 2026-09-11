@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import os
 import platform
 import re
 import shutil
@@ -34,8 +35,8 @@ from tqdm import tqdm
 #   - ARCH   : normalized architecture -> "x86_64"
 #   - FLAVOR : "cpu" or "cu128"
 #
-# CPU assets are standalone (LibTorch CPU bundled).
-# CUDA assets do NOT bundle LibTorch (too large for GitHub limits).
+# No asset bundles LibTorch: both flavors link it from the environment's pip ``torch`` (loader_env).
+# The flavors differ in linkage, cu128 additionally needing libtorch_cuda and the CUDA runtime.
 # -----------------------------------------------------------------------------
 ELX_ASSET_TEMPLATE = {
     ("Linux", "x86_64", "cpu"): "elastix-impact-linux-x86_64-cpu.zip",
@@ -44,15 +45,6 @@ ELX_ASSET_TEMPLATE = {
     ("Windows", "x86_64", "cu128"): "elastix-impact-windows-x86_64-cu128.zip",
     ("Darwin", "x86_64", "cpu"): "elastix-impact-macos-14-x86_64-cpu.zip",
 }
-
-# -----------------------------------------------------------------------------
-# Official LibTorch downloads (PyTorch).
-#
-# IMPORTANT:
-# - Version MUST match the one used at build time (ABI compatibility).
-# - Using "shared-with-deps" ensures CUDA runtime libraries are included
-#   (except the NVIDIA driver, which must be installed system-wide).
-# -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 # Minimum NVIDIA driver versions required for CUDA 12.8.
@@ -69,10 +61,6 @@ GITHUB_TAG = "1.0.0"
 
 
 DEFAULT_PREFIX = Path.cwd() / "elastix-impact"
-
-
-def run_cmd(cmd: list[str]) -> str:
-    return subprocess.check_output(cmd, stderr=subprocess.STDOUT).decode("utf-8", errors="replace")  # nosec B603
 
 
 def detect_nvidia_driver() -> tuple[bool, tuple[int, int] | None]:
@@ -241,13 +229,42 @@ def get_elastix_bin(install_path: Path) -> Path:
     return install_path / ("elastix.exe" if platform.system() == "Windows" else (Path("bin") / "elastix"))
 
 
+#: What a child answers when the loader cannot find a library it needs: 127 on POSIX, Windows
+#: STATUS_DLL_NOT_FOUND either way round, since Python reports it unsigned or signed by platform.
+_LOADER_FAILURE_CODES = (127, 0xC0000135, -1073741515)
+
+
+def loader_env(install_path: Path) -> dict[str, str]:
+    """The environment the elastix binary needs to link its shared libraries.
+
+    LibTorch comes from the environment's pip ``torch`` (the LibTorch the asset is built against in
+    CI), beside the install's own ``lib/`` and anything ``KONFAI_ELASTIX_EXTRA_LIB`` names. The
+    Windows asset keeps its DLLs next to the executable, so the install root is searched too.
+    """
+    import torch
+
+    searched = [
+        str(install_path / "lib"),
+        str(install_path),
+        str(Path(torch.__file__).resolve().parent / "lib"),
+        os.environ.get("KONFAI_ELASTIX_EXTRA_LIB", ""),
+    ]
+    variable = {"Windows": "PATH", "Darwin": "DYLD_LIBRARY_PATH"}.get(platform.system(), "LD_LIBRARY_PATH")
+    env = os.environ.copy()
+    env[variable] = os.pathsep.join(path for path in [*searched, env.get(variable, "")] if path)
+    return env
+
+
 def try_elastix(install_path: Path) -> None:
+    """Run the install once, under the loader path a registration uses, so a binary that cannot link
+    fails here instead of mid-case."""
     try:
         subprocess.run(
             [str(get_elastix_bin(install_path)), "-h"],
             capture_output=True,
             text=True,
             check=True,
+            env=loader_env(install_path),
         )  # nosec B603
     except subprocess.CalledProcessError as e:
         msg = "Elastix execution failed.\n\n"
@@ -255,6 +272,13 @@ def try_elastix(install_path: Path) -> None:
         msg += f"Command:\n{' '.join(e.cmd)}\n"
         msg += f"Return code: {e.returncode}\n\n"
 
+        if e.returncode in _LOADER_FAILURE_CODES:
+            # A library the loader cannot find aborts a child that did exec: never OSError.
+            msg += (
+                "A shared library could not be found. The binary links LibTorch from the "
+                "environment's pip `torch`, so either no torch is installed or its version is not "
+                "the one elastix was built against.\n\n"
+            )
         if e.stderr:
             msg += "Error output:\n"
             msg += e.stderr.strip()
@@ -263,8 +287,7 @@ def try_elastix(install_path: Path) -> None:
     except OSError as e:
         msg = (
             "Elastix could not be started.\n\n"
-            "This is usually caused by missing shared libraries "
-            "(e.g. LibTorch or CUDA runtime).\n\n"
+            f"The binary at '{get_elastix_bin(install_path)}' is missing or not executable.\n\n"
             f"System error:\n{e!s}"
         )
 

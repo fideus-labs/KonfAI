@@ -33,7 +33,6 @@ CONTRACT = [
     ("konfai.utils.dataset", "image_to_data", "func", ["image"]),
     ("konfai.utils.dataset", "get_infos", "func", ["filename"]),
     ("konfai.utils.runtime", "MinimalLog", "class", []),
-    ("konfai.utils.errors", "AppRepositoryError", "class", []),
     # Top-level konfai/__init__ helpers the Slicer extensions import for server-check, device/RAM/VRAM
     # display, and the dependency self-test (same exposure class as current_free_vram).
     ("konfai", "get_available_devices", "func", ["remote_server", "timeout_s"]),

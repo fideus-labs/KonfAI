@@ -1050,6 +1050,28 @@ def test_a_host_meter_does_not_charge_the_scope_for_the_chunk_cache_it_filled(mo
     assert meter is not None and meter.held() == 100_000, "the cache's growth is not the scope's cost"
 
 
+def test_a_host_meter_does_not_charge_the_scope_for_the_plane_cache_it_filled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DICOM plane cache claims the same budget line as the chunk cache, so it comes off the
+    same peak. Only the chunk cache was subtracted, and a DICOM sweep paid for the cache it filled."""
+    from konfai.data.patching import budget as patching_module
+    from konfai.utils import dicom
+
+    monkeypatch.setattr("konfai.data.patching.budget.resident_floor", lambda: None)
+    monkeypatch.setattr(dicom, "_plane_cache", dicom._DecodedPlaneCache())
+    monkeypatch.setattr(patching_module, "reset_resident_peak", lambda: True)
+    monkeypatch.setattr(patching_module, "resident_bytes", lambda: 1_000_000)
+    peak = {"value": 1_000_000}
+    monkeypatch.setattr(patching_module, "peak_resident_bytes", lambda: peak["value"])
+
+    meter = open_held_meter(None)
+    plane = np.ones((256, 256), np.float32)  # 256 KiB decoded, kept by the cache past the scope
+    dicom._plane_cache.put(("slice", 0, 0), plane, 1.0, 0.0)
+    peak["value"] = 1_000_000 + plane.nbytes + 100_000
+    assert meter is not None and meter.held() == 100_000, "the cache's growth is not the scope's cost"
+
+
 def test_the_folds_a_stat_pass_keeps_come_out_of_the_regions_share(tmp_path: Path) -> None:
     """A kept fold is memory the regions are not holding, so it comes out of the same share.
 

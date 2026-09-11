@@ -39,11 +39,13 @@ from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.config import Choices, Range
-from konfai.utils.errors import AppMetadataError, AppRepositoryError, ConfigError
+from konfai.utils.errors import ConfigError
 from konfai.utils.utils import is_windows_absolute_path
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from ruamel.yaml import YAML
+
+from .errors import AppMetadataError, AppRepositoryError
 
 
 def _plain(value: Any) -> Any:
