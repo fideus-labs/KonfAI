@@ -33,6 +33,7 @@ from konfai.data.geometry import (
     remap_shape,
     signed_permutation,
 )
+from konfai.data.sampling import default_interpolation
 from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
@@ -456,12 +457,13 @@ class Canonical(TransformInverse):
 
     @staticmethod
     def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
-        if data.dtype == torch.uint8:
-            mode = "nearest"
+        mode = "nearest" if default_interpolation(data) == "nearest" else "bilinear"
+        # Sample in the data's own device and float dtype; an integer input still needs a float grid. A
+        # nearest pick copies voxels, so an int64 label travels in float64: float32 rounds past 2**24.
+        if data.is_floating_point():
+            work = data
         else:
-            mode = "bilinear"
-        # Sample in the data's own device and float dtype; an integer input still needs a float grid.
-        work = data if data.is_floating_point() else data.type(torch.float32)
+            work = data.type(torch.float64 if data.dtype == torch.int64 else torch.float32)
         grid = torch.nn.functional.affine_grid(
             matrix[:, :-1, ...].to(device=work.device, dtype=work.dtype),
             [1, *list(data.shape)],

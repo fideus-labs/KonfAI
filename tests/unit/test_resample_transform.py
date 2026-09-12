@@ -544,6 +544,43 @@ def test_cubic_tracks_the_bspline_oracle_closer_than_linear() -> None:
     assert error["cubic"] < error["linear"]
 
 
+@pytest.mark.parametrize(
+    ("dtype", "blended"),
+    [
+        (torch.uint8, False),
+        (torch.int64, False),
+        (torch.bool, False),
+        (torch.int16, True),
+        (torch.uint16, True),
+        (torch.int32, True),
+        (torch.float32, True),
+    ],
+)
+def test_an_unset_interpolation_picks_labels_by_dtype(dtype: torch.dtype, blended: bool) -> None:
+    """uint8, int64 (an Argmax's output) and bool keep their values; the integer types scanners store
+    intensities in are blended like any image."""
+    volume = torch.zeros((1, 4, 4, 8), dtype=dtype)
+    volume[..., 4:] = True if dtype is torch.bool else 100
+    attribute = Attribute()
+    attribute["Origin"] = np.zeros(3)
+    attribute["Spacing"] = np.ones(3)
+    attribute["Direction"] = np.eye(3).ravel()
+    out = Resample(spacing=[0.5, 0.0, 0.0])(CASE, volume, attribute)
+    assert out.dtype == dtype
+    assert (len(torch.unique(out)) > 2) is blended
+
+
+def test_a_stated_interpolation_wins_over_the_dtype() -> None:
+    volume = torch.zeros((1, 4, 4, 8), dtype=torch.int64)
+    volume[..., 4:] = 100
+    attribute = Attribute()
+    attribute["Origin"] = np.zeros(3)
+    attribute["Spacing"] = np.ones(3)
+    attribute["Direction"] = np.eye(3).ravel()
+    out = Resample(spacing=[0.5, 0.0, 0.0], interpolation="linear")(CASE, volume, attribute)
+    assert len(torch.unique(out)) > 2
+
+
 def test_cubic_saturates_overshoot_instead_of_wrapping() -> None:
     """Keys' negative lobes overshoot beside an edge, and an integer cast would WRAP the overshoot
     to the opposite extreme: a uint8 step must stay a step, saturated at its plateaus."""

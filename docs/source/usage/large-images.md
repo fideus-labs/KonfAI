@@ -443,7 +443,7 @@ field) goes through `grid_sample`, which normalises coordinates by the window it
 is handed; and on oblique direction cosines a region's origin is one rounding
 the whole volume never takes. Either way streamed and whole agree to about 1e-5
 of the data's range, the deviation following the local gradient (within 1 LSB on
-integer volumes). Nearest-neighbour, which is what a `uint8` label volume gets,
+integer volumes). Nearest-neighbour, which is what a `uint8`, `int64` or `bool` label volume gets,
 picks on the exact index; cubic walks its own corners; an axis-aligned change of
 density is read one axis at a time on global coordinates: all three are
 bit-identical everywhere.

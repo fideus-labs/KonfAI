@@ -95,6 +95,20 @@ def sampling_dtype(tensor: torch.Tensor) -> torch.dtype:
     return tensor.dtype
 
 
+#: The dtypes labels arrive in: a byte label map, an ``Argmax``'s int64, a boolean mask. Scanners store
+#: intensities as int16, uint16 or int32, so those stay images.
+LABEL_DTYPES = (torch.uint8, torch.int64, torch.bool)
+
+
+def default_interpolation(tensor: torch.Tensor) -> str:
+    """``nearest`` for a label dtype, ``linear`` otherwise: the interpolation a config that states none gets.
+
+    A dtype cannot settle this for every volume (an int16 label map exists), so a stated ``interpolation``
+    always wins over it.
+    """
+    return "nearest" if tensor.dtype in LABEL_DTYPES else "linear"
+
+
 def nearest_index(coordinate: torch.Tensor) -> torch.Tensor:
     """ITK's nearest: round half UP on the continuous source index. Not ``torch.round``, which ties
     to the even index, and not ``F.interpolate``'s ``floor(o * scale)``, which is a statement about a

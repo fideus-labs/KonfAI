@@ -603,6 +603,29 @@ def test_canonical_is_the_exact_index_remap_bit_for_bit(direction: np.ndarray, e
     assert torch.equal(out, expected(volume)), "an orthogonal reorientation must be the remap, not near it"
 
 
+def test_an_oblique_canonical_keeps_an_int64_label_past_float32() -> None:
+    # A nearest pick copies the voxel: a float32 trip would round 2**24 + 1 down to 2**24 in silence.
+    volume = torch.full((1, *_CANONICAL_SPATIAL), 2**24 + 1, dtype=torch.int64)
+
+    out = Canonical()("case", volume, _canonical_attributes(_OBLIQUE))
+
+    assert out.dtype == torch.int64
+    assert torch.equal(out, torch.full_like(out, 2**24 + 1))
+
+
+@pytest.mark.parametrize(("dtype", "blended"), [(torch.int64, False), (torch.bool, False), (torch.int16, True)])
+def test_an_oblique_canonical_picks_labels_by_dtype(dtype: torch.dtype, blended: bool) -> None:
+    # An oblique direction is sampled, not remapped, so the dtype decides the interpolation as it does
+    # for Resample: an Argmax's int64 and a mask keep their values, an int16 image is blended.
+    volume = torch.zeros((1, *_CANONICAL_SPATIAL), dtype=dtype)
+    volume[..., _CANONICAL_SPATIAL[-1] // 2 :] = True if dtype is torch.bool else 100
+
+    out = Canonical()("case", volume, _canonical_attributes(_OBLIQUE))
+
+    assert out.dtype == dtype
+    assert (len(torch.unique(out)) > 2) is blended
+
+
 @pytest.mark.parametrize("direction", [_RAS, _LPS, _PERMUTING], ids=["RAS", "LPS", "permuting"])
 def test_canonical_is_a_bijection_on_the_voxels(direction: np.ndarray) -> None:
     # The whole claim, stated as strongly as it can be: reorienting only moves values, so the sorted
