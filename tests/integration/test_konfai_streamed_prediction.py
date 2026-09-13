@@ -89,7 +89,7 @@ def main() -> None:
     # refuse and complete whole-volume.
     for variant in [
         "", "Canonical", "Padding", "ResampleLabel", "ResampleFloat", "GeometryPair", "GeometryStack",
-        "TTA", "TTAZ", "TTAStack",
+        "Crop", "CropForward", "TTA", "TTAZ", "TTAStack",
     ]:
         run_prediction(
             root / f"Prediction{variant}.yml", root / f"Predictions_{variant or 'base'}_reference",
@@ -146,7 +146,21 @@ _VARIANT_TRANSFORMS = {
                 padding: [0, 0, 0, 0, 2, 1]
                 mode: constant
                 inverse: true""",
+    # CROP, on the crop dataset (its margin makes the box): the forward crops to the foreground and
+    # moves the origin to the box's near corner; the inverse pads back onto the input's grid.
+    "Crop": """            transforms:
+              Crop:
+                inverse: true""",
+    "CropForward": """            transforms:
+              Crop:
+                inverse: false""",
 }
+
+_CROP_VARIANTS = ("Crop", "CropForward")
+
+# Off the identity grid, so a stage that leaves the origin in place is told apart from one that moves it.
+_CROP_ORIGIN = (0.5, -1.0, 2.5)
+_CROP_SPACING = (1.05, 0.95, 1.15)
 
 # ResampleLabel/GeometryStack cast to uint8 before the reduction, so the tensor reaching the REGRID
 # stage resamples in nearest mode (byte-exact). ResampleFloat keeps the float chain, so it resamples in
@@ -168,6 +182,9 @@ _VARIANT_USES_STREAMED_WRITER = {
     "ResampleFloat": True,
     "GeometryPair": True,
     "GeometryStack": True,
+    # Crop declares no streamed inverse, so its inverse is assembled; the forward streams.
+    "Crop": False,
+    "CropForward": True,
     "TTA": True,
     "TTAZ": False,
     "TTAStack": True,
@@ -183,6 +200,21 @@ _STACK_AFTER_REDUCTION_BLOCK = """\
             dataset: ''
             name: stack
             mode: mean"""
+
+
+def _write_crop_dataset(dataset_dir: Path, crop_dir: Path) -> None:
+    """Each case's input off the identity grid, with a background margin at low y, low x and high x, so
+    the foreground box is index (x, y, z) = (2, 3, 0), size (11, 13, 3), and not the whole volume."""
+    for source in sorted(dataset_dir.glob("*/MR.mha")):
+        array = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(source)))
+        array[:, :3, :] = -1000.0
+        array[:, :, :2] = -1000.0
+        array[:, :, 13:] = -1000.0
+        image = SimpleITK.GetImageFromArray(array)
+        image.SetOrigin(_CROP_ORIGIN)
+        image.SetSpacing(_CROP_SPACING)
+        (crop_dir / source.parent.name).mkdir(parents=True)
+        SimpleITK.WriteImage(image, str(crop_dir / source.parent.name / "MR.mha"))
 
 
 def _write_streamed_prediction_configs(experiment_dir: Path) -> None:
@@ -202,8 +234,13 @@ def _write_streamed_prediction_configs(experiment_dir: Path) -> None:
     tta_stack = replace_once(tta_stack, "        reduction: Mean", "        reduction: Concat")
     tta_stack = replace_once(tta_stack, "        Mean: {}", "        Concat: {}")
     (experiment_dir / "PredictionTTAStack.yml").write_text(tta_stack, encoding="utf-8")
+    _write_crop_dataset(experiment_dir / "Dataset", experiment_dir / "DatasetCrop")
     for variant, transforms_block in _VARIANT_TRANSFORMS.items():
         config = replace_once(base, "            transforms: None", transforms_block)
+        if variant in _CROP_VARIANTS:
+            config = replace_once(
+                config, f"{experiment_dir / 'Dataset'}:a:mha", f"{experiment_dir / 'DatasetCrop'}:a:mha"
+            )
         if variant in _UINT8_VARIANTS:
             config = replace_once(config, "        before_reduction_transforms: None", _UINT8_BEFORE_REDUCTION)
         (experiment_dir / f"Prediction{variant}.yml").write_text(config, encoding="utf-8")
@@ -282,6 +319,25 @@ def test_streamed_tta_output_shape_and_values_are_sane(streamed_experiment: dict
         array = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(path)))
         assert array.shape == (3, 16, 16), case
         assert np.isfinite(array).all(), case
+
+
+@pytest.mark.parametrize("kind", ["reference", "streamed"])
+def test_a_crop_on_the_input_writes_the_region_of_interest_geometry(
+    streamed_experiment: dict[str, Path], kind: str
+) -> None:
+    """The case is read with its geometry stacked (``Origin_0``). The forward's output carries ITK's
+    ``RegionOfInterest`` header over the box, the inverse's the input's own, on either writer."""
+    experiment_dir = streamed_experiment["experiment_dir"]
+    for case in _case_names(streamed_experiment["dataset_dir"]):
+        source = SimpleITK.ReadImage(str(experiment_dir / "DatasetCrop" / case / "MR.mha"))
+        expected = {"Crop": source, "CropForward": SimpleITK.RegionOfInterest(source, [11, 13, 3], [2, 3, 0])}
+        for variant, image in expected.items():
+            written = SimpleITK.ReadImage(str(_prediction_path(experiment_dir / f"Predictions_{variant}_{kind}", case)))
+            label = (variant, kind, case)
+            assert written.GetSize() == image.GetSize(), label
+            assert written.GetOrigin() == pytest.approx(image.GetOrigin(), abs=1e-6), label
+            assert written.GetSpacing() == pytest.approx(image.GetSpacing(), abs=1e-6), label
+            assert written.GetDirection() == pytest.approx(image.GetDirection(), abs=1e-6), label
 
 
 def test_streamed_inference_stack_sidecar_is_voxel_identical_to_reference(
