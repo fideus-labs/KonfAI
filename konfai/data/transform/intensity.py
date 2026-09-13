@@ -133,7 +133,8 @@ class Clip(Transform):
             return PatchLocality(LocalityKind.POINTWISE)
         if self.mask is not None:
             return PatchLocality(LocalityKind.GLOBAL_STAT)
-        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
+        saved = {key for key, save in (("Min", self.save_clip_min), ("Max", self.save_clip_max)) if save}
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys), records=frozenset(saved))
 
     def _masked_values(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
         """The tensor's values under the mask, on the whole-volume path."""
@@ -253,7 +254,12 @@ class Normalize(TransformInverse):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # Rescaling uses the volume-global Min/Max, seeded once so every patch sees the same range.
-        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max"}), stat_channels=self.channels)
+        return PatchLocality(
+            LocalityKind.GLOBAL_STAT,
+            stat_keys=frozenset({"Min", "Max"}),
+            stat_channels=self.channels,
+            takes_present=True,
+        )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Min" not in cache_attribute:
@@ -359,7 +365,7 @@ class Standardize(TransformInverse):
             return PatchLocality(LocalityKind.POINTWISE)
         if self.mask is not None:
             return PatchLocality(LocalityKind.GLOBAL_STAT)
-        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys))
+        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys), takes_present=True)
 
     def _masked_values(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
         """The tensor's values under the mask, on the whole-volume path."""
@@ -517,7 +523,9 @@ class Statistics(Transform):
         super().__init__()
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
-        return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max", "Mean", "Std"}))
+        return PatchLocality(
+            LocalityKind.GLOBAL_STAT, stat_keys=frozenset({"Min", "Max", "Mean", "Std"}), records=frozenset()
+        )
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         trusted = "StatisticsSeeded" in cache_attribute

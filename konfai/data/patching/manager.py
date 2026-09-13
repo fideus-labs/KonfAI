@@ -239,8 +239,11 @@ class DatasetManager:
         #: The (copy, stage object) pairs a pass ran without the stage recording the keys it declares
         #: (a Clip bound it does not save, Statistics): no pass can serve them, so none is asked for.
         self._unmeasurable: set[tuple[int, int]] = set()
-        #: What the plans wait on a pass for: stage object, then copy, then the keys.
-        self._wanted_measurements: dict[int, dict[int, frozenset[str]]] = {}
+        #: What the plans wait on a pass for: stage object, then copy, then the stage's declaration.
+        self._wanted_measurements: dict[int, dict[int, PatchLocality]] = {}
+        #: The (copy, stage object) pairs a pass found taking a statistic an earlier stage recorded: the
+        #: streamed route records it there too, so the stage needs no seed.
+        self._scope_served: set[tuple[int, int]] = set()
         #: The copies whose plan refused for want of a statistic no pass had measured yet. A pass may
         #: have measured it since, and the refusal is memoised, so the next load drops the plans.
         self._awaiting_measurement: set[int] = set()
@@ -399,14 +402,19 @@ class DatasetManager:
                 and locality.stat_keys
                 and key not in self._measured_statistics
                 and key not in self._unmeasurable
+                and key not in self._scope_served
             ):
-                self._wanted_measurements.setdefault(key[1], {})[a] = locality.stat_keys
+                self._wanted_measurements.setdefault(key[1], {})[a] = locality
         self._awaiting_measurement.add(a)
 
     def _measurement_depths(self, stage: object, scopes: dict[int, Attribute]) -> dict[int, dict[str, int]]:
         """How deep each key a plan waits on is stacked in the copies' scopes, before ``stage`` runs whole."""
         wanted = self._wanted_measurements.get(id(stage), {})
-        return {a: {key: scopes[a]._count_key(key) for key in keys} for a, keys in wanted.items() if a in scopes}
+        return {
+            a: {key: scopes[a]._count_key(key) for key in locality.stat_keys}
+            for a, locality in wanted.items()
+            if a in scopes
+        }
 
     def _keep_measurements(
         self, stage: object, scopes: dict[int, Attribute], depths: dict[int, dict[str, int]]
@@ -418,6 +426,9 @@ class DatasetManager:
             scope = scopes[a]
             if all(scope._count_key(key) > depth for key, depth in before.items()):
                 self._measured_statistics[(a, id(stage))] = {key: scope[key] for key in before}
+            elif wanted[a].takes_present and all(depth > 0 for depth in before.values()):
+                # It took what an earlier stage recorded, which the streamed route records there too.
+                self._scope_served.add((a, id(stage)))
             else:
                 self._unmeasurable.add((a, id(stage)))
             del wanted[a]
@@ -608,31 +619,34 @@ class DatasetManager:
             self.unload()
             self.unload_augmentation()
 
-    def _ensure_stream_stats(
+    def _store_seed(
         self,
         source_dataset: Dataset,
         source_group: str,
         source_entry: str,
         cache_attribute: Attribute,
-        required_stats: set[str],
-        channels: list[int] | None = None,
-    ) -> None:
-        missing_stats = [key for key in required_stats if key not in cache_attribute]
-        if not missing_stats:
-            return
+        loc: PatchLocality,
+    ) -> tuple[tuple[str, str], ...]:
+        """The store's statistics a stage is seeded with, as the scope spells them: those its header
+        does not already hold, which a stage takes as the whole-volume route does."""
+        missing = sorted(key for key in loc.stat_keys if key not in cache_attribute)
+        if not missing:
+            return ()
         stats = self._read_disk_statistics(
-            source_dataset, source_group, source_entry, channels, [_STREAM_STATS[key] for key in missing_stats]
+            source_dataset, source_group, source_entry, loc.stat_channels, [_STREAM_STATS[key] for key in missing]
         )
-        for key in missing_stats:
+        seed = Attribute()
+        for key in missing:
             value = stats.get(_STREAM_STATS[key])
             if value is None:
                 continue
             if key.endswith("PerChannel"):
-                cache_attribute[key] = np.asarray(value, dtype=np.float32)
+                seed[key] = np.asarray(value, dtype=np.float32)
             elif key in {"Mean", "Std"}:
-                cache_attribute[key] = np.asarray([value], dtype=np.float32)
+                seed[key] = np.asarray([value], dtype=np.float32)
             else:
-                cache_attribute[key] = value
+                seed[key] = value
+        return tuple((key, seed[key]) for key in missing if key in seed)
 
     def _affords_halo(self, a: int, halo: tuple[int, ...]) -> bool:
         """Whether a halo of this radius still buys copy *a* anything over loading the volume.
@@ -685,13 +699,11 @@ class DatasetManager:
             return False, (), evolved, reason
 
         waiting: list[str] = []
-        #: The keys an earlier stage was seeded with from the store, which the backup every whole-volume
-        #: load starts from carries.
-        store_seeded: set[str] = set()
         for stage_index, stage in enumerate(stages):
             loc = stage.patch_locality(Attribute(evolved))
             localities.append(loc)
             seed: tuple[tuple[str, str], ...] = ()
+            kept: frozenset[str] = loc.stat_keys
             label = f"stage {stage_index} '{_stage_name(stage)}'"
             if loc.kind in (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB):
                 # SLAB is a write-side contract: its side effect needs the slab's place in the
@@ -701,7 +713,8 @@ class DatasetManager:
             if loc.kind is LocalityKind.GLOBAL_STAT:
                 # The seed is the STORED volume's statistic; otherwise ([Clip(-200, 400), Standardize()])
                 # every patch would be standardized by the pre-Clip statistic: fall back to the whole volume.
-                measured = self._measured_statistics.get((a, _stage_identity(stage)))
+                identity = (a, _stage_identity(stage))
+                measured = self._measured_statistics.get(identity)
                 store_seeds = stat_seed_valid(localities[:-1])
                 if not store_seeds:
                     # The stored volume's statistic describes the wrong tensor, but a whole-volume
@@ -721,59 +734,46 @@ class DatasetManager:
                             " changes: the draw is redrawn every epoch, so no measurement outlives it."
                             " Put the statistic ahead of the draws, or give the stage its numbers."
                         )
-                    if measured is None and (not loc.stat_keys or (a, _stage_identity(stage)) in self._unmeasurable):
+                    if measured is None and identity in self._scope_served:
+                        pass  # it takes what the stages before it record, on the streamed route too
+                    elif measured is None and (not loc.stat_keys or identity in self._unmeasurable):
                         # A stage seeding itself from the stored volume (a masked bound), or one that records
                         # nothing of its own when it runs whole: only the whole-volume route has its number.
                         return refuse(
                             f"{label} needs whole-volume statistics, but an earlier stage changes the values, and"
                             " no whole-volume pass records them for it."
                         )
-                    if measured is None:
+                    elif measured is None:
                         # Planned on without a seed: a stage after it may refuse for a reason no pass settles,
                         # and every stage waiting on a pass is asked for at once.
                         waiting.append(label)
+                unknown = sorted(set(loc.stat_keys) - _STREAM_STAT_KEYS)
+                if unknown:
+                    return refuse(f"{label} needs statistics {unknown} that no source can provide.")
                 if measured is not None:
-                    shared = sorted(set(measured) & store_seeded)
-                    if shared:
-                        # A whole-volume load starts from the backup holding the store's numbers, and this
-                        # stage would read them there instead of measuring its own input.
-                        return refuse(
-                            f"{label} needs its own {shared}, and an earlier stage is seeded with the stored"
-                            " volume's under the same names: the whole-volume route would hand it those."
-                        )
                     # On the stage's own plan, pushed right before it runs, and onto the case state a Save
                     # sweep writes as its header. Taken over the store's statistic too: the stages after it
                     # were measured by a pass that ran with this number.
                     seed = tuple(measured.items())
                     for stat_key, value in seed:
                         evolved[stat_key] = value
-                unknown = sorted(set(loc.stat_keys) - _STREAM_STAT_KEYS)
-                if unknown:
-                    return refuse(f"{label} needs statistics {unknown} that no source can provide.")
-                if seed_statistics and self._statistics_seeded:
-                    self._ensure_stream_stats(
-                        source_dataset,
-                        source_group,
-                        source_entry,
-                        cache_attribute,
-                        set(loc.stat_keys) if store_seeds and not seed else set(),
-                        loc.stat_channels,
-                    )
-                elif seed_statistics and store_seeds and not seed:
+                elif store_seeds and seed_statistics and self._statistics_seeded:
+                    # The store's numbers, on the stage's own plan and nowhere else: the case attribute,
+                    # the backup a whole-volume load starts from and a Save header carry what the stage
+                    # records, which is the seed only where that route records it under the same name.
+                    seed = self._store_seed(source_dataset, source_group, source_entry, cache_attribute, loc)
+                    kept = loc.recorded
+                    for stat_key, value in seed:
+                        if stat_key in kept and stat_key not in evolved:
+                            evolved[stat_key] = value
+                elif store_seeds and seed_statistics:
                     self._statistics_deferred = True
-                if store_seeds and not seed:
-                    store_seeded.update(loc.stat_keys)
-                # The evolving case state carries the seed too: a Save sweep writes it as the cache
-                # header, exactly as the whole-volume pass leaves the statistic in the attribute.
-                for stat_key in loc.stat_keys:
-                    if stat_key in cache_attribute and stat_key not in evolved:
-                        evolved[stat_key] = cache_attribute[stat_key]
             if loc.kind is LocalityKind.HALO and not self._affords_halo(a, loc.halo):
                 return refuse(
                     f"{label} declares a halo of {loc.halo} that is too wide for this grid to be worth"
                     " reading (over half the patch extent per axis)."
                 )
-            plan = self._plan_read_stage(stage, loc, shape, evolved, seed)
+            plan = self._plan_read_stage(stage, loc, shape, evolved, seed, kept)
             plans.append(plan)
             shape = list(plan.out_shape)
         expected = landing_shape if landing_shape is not None else self.shapes[a]
@@ -797,12 +797,13 @@ class DatasetManager:
         shape: list[int],
         evolved: Attribute,
         seed: tuple[tuple[str, str], ...] = (),
+        kept: frozenset[str] = frozenset(),
     ) -> "_ReadStagePlan":
         """One stage's slot in the composed plan: its shapes, its pull map, and the case state it
         leaves for the stages after it and for the header the sweep ships
         (``write_stream_cache_attribute``, stated by every stage, region or not)."""
         if not loc.kind.is_region:
-            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None, measured=seed)
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None, measured=seed, kept=kept)
         elif loc.kind is LocalityKind.HALO:
             plan = _ReadStagePlan(
                 loc.kind, tuple(shape), tuple(shape), _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
@@ -1669,8 +1670,9 @@ class DatasetManager:
             region = tuple(plan.data_slices[len(plan.data_slices) - len(spatial) :])
             context = RegionContext(region, region, spatial)
             for stage, stage_plan in zip(stream_source.stages, stream_source.stage_plans, strict=True):
-                stage_plan.seed(cache_attribute)
+                pushed = stage_plan.seed(cache_attribute)
                 tensor = stage.stream_region(self.name, tensor, context, cache_attribute)
+                stage_plan.unseed(cache_attribute, pushed)
             # The read plan is applied AFTER the chain, as the whole-volume path transforms before
             # Patch.get_data cuts: padding first would feed f(pad) to the model on every border patch.
             tensor = self.patch.apply_read_plan(tensor, plan)
@@ -1953,12 +1955,13 @@ class DatasetManager:
         The one dispatch: a chain read through the store and a member's per-copy tail both come here.
         """
         for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):
-            plan.seed(cache_attribute)
+            pushed = plan.seed(cache_attribute)
             if not plan.kind.is_region:
                 # The span is handed over rather than dropped: a stage reading a second aligned
                 # volume needs to know WHICH part of it lines up with this region, and the
                 # dispatcher is the only thing that knows. The default hook ignores it.
                 tensor = stage.stream_region(self.name, tensor, plan.region_context(source, target), cache_attribute)
+                plan.unseed(cache_attribute, pushed)
                 continue
             # A region stage's geometry writes describe the region's extent, not the volume's: give it
             # a throwaway scope, and write the case-level answer once from the FULL shape below

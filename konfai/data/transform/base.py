@@ -133,6 +133,18 @@ class PatchLocality:
     #: inherently whole-volume (it changes the tensor's rank) leaves this None; one that is
     #: whole-volume because of its configuration must say so.
     reason: str | None = None
+    #: The ``stat_keys`` the whole-volume call leaves in the scope under those names, ``None`` for all
+    #: of them. The streamed route seeds a stage right before it runs and takes back what that route
+    #: would not have left: ``Statistics`` records under other names, a ``Clip`` bound it does not
+    #: save is recorded nowhere.
+    records: frozenset[str] | None = None
+    #: Whether the whole-volume call takes a statistic already in the scope over measuring its own
+    #: (``Normalize``, ``Standardize``): behind a stage that records it, the streamed route needs no seed.
+    takes_present: bool = False
+
+    @property
+    def recorded(self) -> frozenset[str]:
+        return self.stat_keys if self.records is None else self.records & self.stat_keys
 
     @property
     def statistics_preserving(self) -> bool:
