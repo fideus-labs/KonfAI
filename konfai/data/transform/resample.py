@@ -688,6 +688,8 @@ class Resample(TransformInverse):
         #: source grid, which the identity check sees.
         self._targets: dict[str, tuple[Grid, Grid]] = {}
         self._bounds: dict[str, tuple[Grid, _StoredMap | None, TransformBound]] = {}
+        #: Per case: the source grid its coverage was last found non-empty on.
+        self._covering: dict[str, Grid] = {}
         #: Per case: what the plan keeps of its stored map (see :class:`_StoredMap`).
         self._maps: dict[str, _StoredMap] = {}
         #: The decoded stages of the last cases sampled, most recent last, within
@@ -778,10 +780,17 @@ class Resample(TransformInverse):
         """The case's own grid, remembered under its name, with what its header left unsaid."""
         where = f"case '{name}'" if name else "the case"
         grid, missing = Grid.from_header(list(shape), cache_attribute, where)
+        # Every plan records the case again: the same header keeps its grid, so what was derived from
+        # that grid (the target, the bound, the coverage) is not derived again. A header that left a
+        # key unsaid is another header, whatever grid it is read as.
+        held = self._grids.get(name) if name else None
+        kept = held is not None and held.same_as(grid) and self._assumed.get(name) == missing
         self._assumed[name] = missing
-        if name:
+        if not name:
+            return grid
+        if not kept:
             self._grids[name] = grid
-        return grid
+        return self._grids[name]
 
     def _source_grid(self, name: str) -> Grid:
         grid = self._grids.get(name)
@@ -1412,7 +1421,13 @@ class Resample(TransformInverse):
         for. A cohort registered onto a template it sits 25 mm from covers nothing until its own
         field is applied.
         """
-        if self._target_is_own or self._prices_a_field(name) or self.coverage(name) > 0.0:
+        if self._target_is_own or self._prices_a_field(name):
+            return
+        source = self._source_grid(name)
+        if self._covering.get(name) is source:
+            return
+        if self.coverage(name) > 0.0:
+            self._covering[name] = source
             return
         where = f"case '{name}'" if name else "the case"
         raise TransformError(

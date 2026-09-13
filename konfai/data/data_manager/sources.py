@@ -565,7 +565,7 @@ class Data(DataSources):
             for managers in (prepared or {}).values():
                 for manager in managers:
                     stored = int(np.prod(manager.base_shape, dtype=np.int64))
-                    landed = int(manager.base_shape[0]) * int(np.prod(manager.spatial_shape, dtype=np.int64))
+                    landed = int(manager.landed_channels) * int(np.prod(manager.spatial_shape, dtype=np.int64))
                     stored_total += stored * CASE_ELEMENT_BYTES * copies
                     landed_total += landed * CASE_ELEMENT_BYTES * copies
         return stored_total, landed_total
@@ -576,16 +576,20 @@ class Data(DataSources):
         The pair :func:`~konfai.utils.runtime.bound_allocator_growth` needs: a threshold between
         them keeps a freed volume out of the heap without charging the step. A step here is a
         batch of patches, and a read brings in one case of one group, as stored: the smallest one."""
-        managers = [
+        managers = self._every_manager()
+        if not managers:
+            return 0, self._step_bytes()
+        volume = min(int(np.prod(manager.base_shape, dtype=np.int64)) for manager in managers) * CASE_ELEMENT_BYTES
+        return volume, self._step_bytes()
+
+    def _every_manager(self) -> list[DatasetManager]:
+        """The training and the validation cases' managers: a step reads either."""
+        return [
             manager
             for prepared in (self._managers, self._validation_managers)
             for group in (prepared or {}).values()
             for manager in group
         ]
-        if not managers:
-            return 0, self._step_bytes()
-        volume = min(int(np.prod(manager.base_shape, dtype=np.int64)) for manager in managers) * CASE_ELEMENT_BYTES
-        return volume, self._step_bytes()
 
     def _step_bytes(self) -> int:
         """What one step allocates over and over: a batch of patches, pinned or not.
@@ -599,19 +603,11 @@ class Data(DataSources):
             voxels = int(np.prod(patch_size, dtype=np.int64))
         else:
             voxels = max(
-                (
-                    int(np.prod(manager.spatial_shape, dtype=np.int64))
-                    for managers in (self._managers or {}).values()
-                    for manager in managers
-                ),
-                default=0,
+                (int(np.prod(manager.spatial_shape, dtype=np.int64)) for manager in self._every_manager()), default=0
             )
         # A 2.5D stack carries its neighbours as channels, so a patch is that many times its extent.
         stacked = 1 if self.patch is None else max(1, self.patch.extend_slice + 1)
-        channels = max(
-            (int(manager.base_shape[0]) for managers in (self._managers or {}).values() for manager in managers),
-            default=1,
-        )
+        channels = max((int(manager.landed_channels) for manager in self._every_manager()), default=1)
         # Twice a batch: the loader prefetches one while the step holds another, and pinning copies it.
         return voxels * channels * stacked * CASE_ELEMENT_BYTES * max(1, self.batch_size) * 2
 

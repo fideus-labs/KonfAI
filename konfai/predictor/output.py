@@ -68,6 +68,18 @@ from konfai.utils.utils import env_flag, get_module, split_path_spec
 PREDICTION_CLOCK = SweepClock()
 
 
+def _free_vram(device: torch.device, needed: float) -> int:
+    """What ``mem_get_info`` reports free on ``device``, the allocator's reserved-but-unused cache released
+    first only when ``needed`` does not fit without it. The release synchronizes and costs ~13 ms per
+    call, twice a case; a decision that fits either way does not depend on it."""
+    free, _ = torch.cuda.mem_get_info(device)
+    if needed < free:
+        return int(free)
+    torch.cuda.empty_cache()
+    free, _ = torch.cuda.mem_get_info(device)
+    return int(free)
+
+
 class _AsyncWriter:
     """A background thread owning one output dataset's disk writes, in submission order.
 
@@ -1156,15 +1168,13 @@ class OutputDataset(Dataset, NeedDevice):
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda":
             return torch.device("cpu")
-        try:
-            # Release the allocator's unused reserved cache so ``mem_get_info`` reports what is free.
-            torch.cuda.empty_cache()
-            free, _ = torch.cuda.mem_get_info(device)
-        except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
-            return torch.device("cpu")
         # Every transformed chunk is parked on the reduce device until the final stack: budget all of
         # them plus a same-size working temp per chunk and one stack copy.
         needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
+        try:
+            free = _free_vram(device, needed)
+        except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
+            return torch.device("cpu")
         return device if needed < free else torch.device("cpu")
 
     # The memory queries run before a forward's allocations land: keep ~10 % of free VRAM in reserve
@@ -1178,9 +1188,6 @@ class OutputDataset(Dataset, NeedDevice):
         if device.type != "cuda" or layer.device.type != "cuda":
             return torch.device("cpu")
         try:
-            # Return the reserved-but-unused cache so ``mem_get_info`` reports the memory actually free.
-            torch.cuda.empty_cache()
-            free, _ = torch.cuda.mem_get_info(device)
             # A forward's transient footprint above the resident set, from the batch that just ran;
             # ``max_memory_allocated`` is a high-water mark, so the gate errs toward the CPU.
             transient = torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device)
@@ -1201,6 +1208,10 @@ class OutputDataset(Dataset, NeedDevice):
                 # Slab-aligned TTA holds pending slabs per copy and reduces through a float32
                 # accumulate: one window per copy plus one more for the reduction's transients.
                 needed += (self.nb_data_augmentation + 2) * layer.shape[0] * voxels * layer.element_size()
+        try:
+            free = _free_vram(device, needed / self._ACCUMULATE_MARGIN)
+        except Exception:  # nosec B110 - any CUDA query failure keeps the blend on CPU
+            return torch.device("cpu")
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:

@@ -152,6 +152,15 @@ class Grid:
     spacing_xyz: np.ndarray
     direction_xyz: np.ndarray
 
+    def same_as(self, other: Grid) -> bool:
+        """Whether ``other`` samples the same points: the same extent and the same geometry, exactly."""
+        return (
+            self.size_zyx == other.size_zyx
+            and np.array_equal(self.origin_xyz, other.origin_xyz)
+            and np.array_equal(self.spacing_xyz, other.spacing_xyz)
+            and np.array_equal(self.direction_xyz, other.direction_xyz)
+        )
+
     @classmethod
     def identity(cls, spatial_shape: list[int]) -> Grid:
         """The grid of a volume with no geometry: unit spacing, origin zero, axes as stored, which is

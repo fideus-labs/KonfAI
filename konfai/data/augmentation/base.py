@@ -279,12 +279,18 @@ class DataAugmentation(NeedDevice, ABC):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        """Map a target patch's spatial slices to the source region copy *a* reads (region kinds)."""
+        """Map a target patch's spatial slices to the source region copy *a* reads (region kinds). A copy
+        the draw did not select reads its own region, as the pointwise locality it declares says."""
+        if a not in self.who_index[index]:
+            return list(target_slices)
         return self._stream_region_source(index, self._slot(index, a), target_slices, source_spatial_shape)
 
     def stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         """The spatial shape copy *a*'s draw produces from ``shape``, the counterpart of
-        ``Transform.transform_shape``. A shape-changing draw restates what ``state_init`` did."""
+        ``Transform.transform_shape``. A shape-changing draw restates what ``state_init`` did; a copy the
+        draw did not select keeps its shape."""
+        if a not in self.who_index[index]:
+            return shape
         return self._stream_shape(index, self._slot(index, a), shape)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:

@@ -97,6 +97,11 @@ def _covers(region: tuple[slice, ...], target: tuple[slice, ...]) -> bool:
     return all(r.start <= t.start and t.stop <= r.stop for r, t in zip(region, target, strict=True))
 
 
+def _stage_identity(stage: Stage) -> int:
+    """The object a measurement belongs to: a copy's draw is rebound for every plan, the draw is not."""
+    return id(stage.augmentation) if isinstance(stage, AugmentedStage) else id(stage)
+
+
 class DatasetManager:
     """Cache-backed manager for one dataset case and one source/destination group.
 
@@ -227,13 +232,18 @@ class DatasetManager:
         self._chain_device: torch.device | None = None
         self._disk_statistics: dict[tuple[Dataset, str, str, tuple[int, ...] | None, bool], dict[str, float]] = {}
         #: What a whole-volume pass measured for a ``GLOBAL_STAT`` stage whose seed the store cannot
-        #: give, keyed by (copy, stage index). The live attribute is rebuilt from the pristine backup
-        #: on every load, so the value a stage computed there is gone by the next one; this outlives
-        #: the load, and a stage whose statistic is known needs no whole volume to serve a region.
-        self._measured_statistics: dict[tuple[int, int], dict[str, Any]] = {}
-        #: Whether a plan refused for want of a statistic no pass had measured yet. A materialization
-        #: may have measured it since, and the refusal is memoised, so the next load drops the plans.
-        self._awaiting_measurement = False
+        #: give, keyed by (copy, stage object). Taken as the stage records it, before a later stage
+        #: records the same keys over it, and kept past the load, which rebuilds the live attribute:
+        #: a stage whose statistic is known needs no whole volume to serve a region.
+        self._measured_statistics: dict[tuple[int, int], dict[str, str]] = {}
+        #: The (copy, stage object) pairs a pass ran without the stage recording the keys it declares
+        #: (a Clip bound it does not save, Statistics): no pass can serve them, so none is asked for.
+        self._unmeasurable: set[tuple[int, int]] = set()
+        #: What the plans wait on a pass for: stage object, then copy, then the keys.
+        self._wanted_measurements: dict[int, dict[int, frozenset[str]]] = {}
+        #: The copies whose plan refused for want of a statistic no pass had measured yet. A pass may
+        #: have measured it since, and the refusal is memoised, so the next load drops the plans.
+        self._awaiting_measurement: set[int] = set()
 
         # Save caches already swept by THIS run, keyed by (store, group, entry): under --overwrite the
         # existence probe answers "not written", and without this ledger every copy of an Expand chain
@@ -262,6 +272,10 @@ class DatasetManager:
         self._stream_evolved.clear()
         self._stream_attributes_persisted.clear()
         self._landed_slabs.clear()
+        self._block_reads.clear()
+        # A wait is for the draw the plan saw: a pass under the new draw must not answer it.
+        self._wanted_measurements.clear()
+        self._awaiting_measurement.clear()
         self.total_augmentations = 0
         if self._expand is not None:
             self._draw_expand_copies(reset_state)
@@ -362,7 +376,7 @@ class DatasetManager:
             tensor = tensor.to(self._chain_device)
 
         if len(pre_transform):
-            tensor = self._apply_chain(tensor, pre_transform[i:], self.cache_attributes[0], self.name)
+            tensor = self._apply_chain(tensor, pre_transform[i:], self.cache_attributes[0], self.name, record=True)
         self.data.append(tensor)
 
         for i in range(len(self.cache_attributes) - 1):
@@ -370,42 +384,66 @@ class DatasetManager:
         if self._awaiting_measurement:
             # This pass may have measured the statistic a plan refused for. The refusal is memoised,
             # so drop the plans and let the next request find the chain streamable.
-            self._awaiting_measurement = False
-            self._patch_stream_sources.clear()
-            self._stream_refusals.clear()
-            self._stream_ok.clear()
-            self._stream_evolved.clear()
+            self._awaiting_measurement.clear()
+            self._invalidate_stream_plans()
         self.loaded = True
 
-    def _measure_from_the_last_pass(self, a: int, stage_index: int, wanted: frozenset[str]) -> dict[str, Any] | None:
-        """The statistics a whole-volume pass left for this stage, or ``None`` when none has run.
+    def _wait_for_a_pass(self, a: int, stages: Sequence[Stage], localities: Sequence[PatchLocality]) -> None:
+        """Ask the next pass for the statistic of every stage of copy ``a``'s chain that declares one: the
+        stages waiting on it, and the stages before them, so the regions replay the numbers the pass
+        measured with rather than the store's."""
+        for stage, locality in zip(stages, localities, strict=True):
+            key = (a, _stage_identity(stage))
+            if (
+                locality.kind is LocalityKind.GLOBAL_STAT
+                and locality.stat_keys
+                and key not in self._measured_statistics
+                and key not in self._unmeasurable
+            ):
+                self._wanted_measurements.setdefault(key[1], {})[a] = locality.stat_keys
+        self._awaiting_measurement.add(a)
 
-        The pass computes them on the stage's own input and writes them into the case's live scope,
-        which the next load rebuilds from the pristine backup; taking a copy here is what carries them
-        past that. Every wanted key or nothing: a stage seeded with half its input's description would
-        standardize by one number and not the other.
-        """
-        known = self._measured_statistics.get((a, stage_index))
-        if known is not None:
-            return known
-        scope = self.cache_attributes[a] if a < len(self.cache_attributes) else self.cache_attributes[0]
-        present = {name: scope[name] for name in wanted if name in scope}
-        if len(present) != len(wanted):
-            return None
-        self._measured_statistics[(a, stage_index)] = present
-        return present
+    def _measurement_depths(self, stage: object, scopes: dict[int, Attribute]) -> dict[int, dict[str, int]]:
+        """How deep each key a plan waits on is stacked in the copies' scopes, before ``stage`` runs whole."""
+        wanted = self._wanted_measurements.get(id(stage), {})
+        return {a: {key: scopes[a]._count_key(key) for key in keys} for a, keys in wanted.items() if a in scopes}
+
+    def _keep_measurements(
+        self, stage: object, scopes: dict[int, Attribute], depths: dict[int, dict[str, int]]
+    ) -> None:
+        """After ``stage`` ran whole: a copy's measurement is what the stage pushed on top of every key it
+        was asked for, read now, before a later stage records the same keys over it."""
+        wanted = self._wanted_measurements.get(id(stage), {})
+        for a, before in depths.items():
+            scope = scopes[a]
+            if all(scope._count_key(key) > depth for key, depth in before.items()):
+                self._measured_statistics[(a, id(stage))] = {key: scope[key] for key in before}
+            else:
+                self._unmeasurable.add((a, id(stage)))
+            del wanted[a]
 
     def _apply_chain(
-        self, tensor: torch.Tensor, transforms: Sequence[Stage], attribute: Attribute, entry: str
+        self,
+        tensor: torch.Tensor,
+        transforms: Sequence[Stage],
+        attribute: Attribute,
+        entry: str,
+        record: bool = False,
     ) -> torch.Tensor:
         """Apply stages in order on an assembled tensor, writing each Save's cache under ``entry``.
 
-        The one whole-volume applicator: ``_load`` drives it with the case's own name, the expansion
-        fallback with a copy's name.
+        The one whole-volume applicator: ``_load`` drives it with the case's own name and ``record``,
+        which keeps what a stage measures for the plans waiting on it; the expansion fallback drives it
+        with a copy's name.
         """
         self._records_source = None  # a stage re-records the case it is called on
         for transform_function in transforms:
+            # The copies share what the transforms produce, so a transform's measurement is every copy's.
+            wanted = self._wanted_measurements.get(id(transform_function), {}) if record else {}
+            scopes = dict.fromkeys(wanted, attribute)
+            depths = self._measurement_depths(transform_function, scopes)
             tensor = transform_function(self.name, tensor, attribute)
+            self._keep_measurements(transform_function, scopes, depths)
             if isinstance(transform_function, Save):
                 dataset, group_dest = save_destination(transform_function, self.dataset, self.group_dest)
                 dataset.write(group_dest, entry, tensor.cpu().numpy(), attribute)
@@ -434,9 +472,12 @@ class DatasetManager:
         # The copy's own scope, so a draw describing the whole case records there what a streamed
         # region will later be seeded with.
         a_attributes = [self.cache_attributes[index] for index in indices]
+        scopes = dict(zip(indices, a_attributes, strict=True))
         for data_augmentation in data_augmentations.data_augmentations:
             if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:
+                depths = self._measurement_depths(data_augmentation, scopes)
                 a_data = data_augmentation(self.name, self.index, a_data, a_attributes)
+                self._keep_measurements(data_augmentation, scopes, depths)
 
         for index, data in zip(indices, a_data, strict=False):
             self.augmented_data[index] = data
@@ -532,8 +573,9 @@ class DatasetManager:
             self._statistics_deferred = False
             self._invalidate_stream_plans()
 
-    def warm_stream_statistics(self, a: int = 0, apply_augmentations: bool = True) -> None:
-        """Read now the statistics a streamed plan will want, in the process that forks the workers.
+    def warm_stream_statistics(self, copies: Sequence[int] = (0,), apply_augmentations: bool = True) -> None:
+        """Read now the statistics the copies' streamed plans will want, and resolve those plans, in the
+        process that forks the workers.
 
         A disk statistic describes the case as STORED, so it is the same number for every reader and
         for every epoch; but the memo holding it lives on this manager, and a DataLoader worker that
@@ -541,21 +583,30 @@ class DatasetManager:
         once for the run instead of once per worker per epoch. A chain that wants no statistic
         resolves its plan here and reads nothing.
         """
-        if not self.can_stream_patch(a, apply_augmentations):
-            # A probe resolves the plan with the statistics still deferred, so it reads nothing. A
-            # chain that materializes for a reason a pass cannot settle is left alone: scanning for
-            # it would be a pass over the cohort nothing consumes.
-            if not self._awaiting_measurement:
+        # A probe resolves the plans with the statistics still deferred, so it reads nothing: a case none of
+        # whose copies can stream, and that no pass would change, is left alone rather than scanned.
+        streams = [self.can_stream_patch(a, apply_augmentations) for a in copies]
+        if not any(streams) and not self._awaiting_measurement.intersection(copies):
+            return
+        # The store's statistics reach the plans before any pass, so a pass runs under the seeds the regions
+        # replay.
+        self._require_statistics()
+        answered = -1
+        while True:
+            refused = [a for a in copies if not self.can_stream_patch(a, apply_augmentations)]
+            known = len(self._measured_statistics) + len(self._unmeasurable)
+            # A case in hand is served whole, and unloading it would take it from under its buffer; a pass
+            # that answered nothing new would answer nothing the next time either.
+            if not self._awaiting_measurement.intersection(refused) or self.loaded or known == answered:
                 return
-            # The store describes the case as stored, and a stage here wants its own input, which
-            # the chain has changed. Only a pass over the volume can say it. Nothing random precedes
-            # that stage (the plan refuses when a draw does), so the number holds for every epoch
-            # and every copy: paid once here, never again.
+            answered = known
+            # A stage here wants its own input, which the chain has changed, and only a pass over the volume
+            # can say it: one pass for every copy and every stage waiting on it. Nothing a selected draw
+            # changed precedes the stage (the plan refuses when one does), so the number holds for every
+            # epoch.
             self.load(self.transforms, self.data_augmentations_list, load_augmentations=apply_augmentations)
             self.unload()
             self.unload_augmentation()
-        self._require_statistics()
-        self.can_stream_patch(a, apply_augmentations)
 
     def _ensure_stream_stats(
         self,
@@ -633,9 +684,14 @@ class DatasetManager:
             the chain reached before the stage that stopped it."""
             return False, (), evolved, reason
 
+        waiting: list[str] = []
+        #: The keys an earlier stage was seeded with from the store, which the backup every whole-volume
+        #: load starts from carries.
+        store_seeded: set[str] = set()
         for stage_index, stage in enumerate(stages):
             loc = stage.patch_locality(Attribute(evolved))
             localities.append(loc)
+            seed: tuple[tuple[str, str], ...] = ()
             label = f"stage {stage_index} '{_stage_name(stage)}'"
             if loc.kind in (LocalityKind.WHOLE_VOLUME, LocalityKind.SLAB):
                 # SLAB is a write-side contract: its side effect needs the slab's place in the
@@ -645,17 +701,19 @@ class DatasetManager:
             if loc.kind is LocalityKind.GLOBAL_STAT:
                 # The seed is the STORED volume's statistic; otherwise ([Clip(-200, 400), Standardize()])
                 # every patch would be standardized by the pre-Clip statistic: fall back to the whole volume.
-                if not stat_seed_valid(localities[:-1]):
+                measured = self._measured_statistics.get((a, _stage_identity(stage)))
+                store_seeds = stat_seed_valid(localities[:-1])
+                if not store_seeds:
                     # The stored volume's statistic describes the wrong tensor, but a whole-volume
                     # pass over this case may already have measured the right one on this stage's own
                     # input. That number is the one the whole-volume route uses, so a region seeded
                     # with it lands on the same values.
                     # A pass measures the stage's input as it was under the draw that ran. A draw
                     # ahead of the statistic is redrawn every epoch, so that number describes the
-                    # previous epoch's copy: reusing it would standardize by a stale case.
-                    drawn_upstream = any(isinstance(earlier, AugmentedStage) for earlier in stages[:stage_index])
-                    measured = (
-                        None if drawn_upstream else self._measure_from_the_last_pass(a, stage_index, loc.stat_keys)
+                    # previous epoch's copy: reusing it would standardize by a stale case. A draw that
+                    # did not select the copy is the identity: behind it, the input is the chain's own.
+                    drawn_upstream = any(
+                        isinstance(earlier, AugmentedStage) and earlier.selected for earlier in stages[:stage_index]
                     )
                     if drawn_upstream:
                         return refuse(
@@ -663,18 +721,32 @@ class DatasetManager:
                             " changes: the draw is redrawn every epoch, so no measurement outlives it."
                             " Put the statistic ahead of the draws, or give the stage its numbers."
                         )
-                    if measured is None:
-                        self._awaiting_measurement = True
+                    if measured is None and (not loc.stat_keys or (a, _stage_identity(stage)) in self._unmeasurable):
+                        # A stage seeding itself from the stored volume (a masked bound), or one that records
+                        # nothing of its own when it runs whole: only the whole-volume route has its number.
                         return refuse(
-                            f"{label} needs whole-volume statistics, but an earlier stage changes the values"
-                            ": the stored volume's statistic is not this stage's input."
+                            f"{label} needs whole-volume statistics, but an earlier stage changes the values, and"
+                            " no whole-volume pass records them for it."
                         )
-                    # Into the planning scope, which the streamable branch copies onto the case's
-                    # backup: that is what a replayed region starts from, so the stage finds the
-                    # measured value instead of taking the region's own.
-                    for stat_key, value in measured.items():
-                        if stat_key not in cache_attribute:
-                            cache_attribute[stat_key] = value
+                    if measured is None:
+                        # Planned on without a seed: a stage after it may refuse for a reason no pass settles,
+                        # and every stage waiting on a pass is asked for at once.
+                        waiting.append(label)
+                if measured is not None:
+                    shared = sorted(set(measured) & store_seeded)
+                    if shared:
+                        # A whole-volume load starts from the backup holding the store's numbers, and this
+                        # stage would read them there instead of measuring its own input.
+                        return refuse(
+                            f"{label} needs its own {shared}, and an earlier stage is seeded with the stored"
+                            " volume's under the same names: the whole-volume route would hand it those."
+                        )
+                    # On the stage's own plan, pushed right before it runs, and onto the case state a Save
+                    # sweep writes as its header. Taken over the store's statistic too: the stages after it
+                    # were measured by a pass that ran with this number.
+                    seed = tuple(measured.items())
+                    for stat_key, value in seed:
+                        evolved[stat_key] = value
                 unknown = sorted(set(loc.stat_keys) - _STREAM_STAT_KEYS)
                 if unknown:
                     return refuse(f"{label} needs statistics {unknown} that no source can provide.")
@@ -684,11 +756,13 @@ class DatasetManager:
                         source_group,
                         source_entry,
                         cache_attribute,
-                        set(loc.stat_keys),
+                        set(loc.stat_keys) if store_seeds and not seed else set(),
                         loc.stat_channels,
                     )
-                elif seed_statistics:
+                elif seed_statistics and store_seeds and not seed:
                     self._statistics_deferred = True
+                if store_seeds and not seed:
+                    store_seeded.update(loc.stat_keys)
                 # The evolving case state carries the seed too: a Save sweep writes it as the cache
                 # header, exactly as the whole-volume pass leaves the statistic in the attribute.
                 for stat_key in loc.stat_keys:
@@ -699,7 +773,7 @@ class DatasetManager:
                     f"{label} declares a halo of {loc.halo} that is too wide for this grid to be worth"
                     " reading (over half the patch extent per axis)."
                 )
-            plan = self._plan_read_stage(stage, loc, shape, evolved)
+            plan = self._plan_read_stage(stage, loc, shape, evolved, seed)
             plans.append(plan)
             shape = list(plan.out_shape)
         expected = landing_shape if landing_shape is not None else self.shapes[a]
@@ -708,16 +782,27 @@ class DatasetManager:
                 f"the chain's shapes fold to {shape} but the target grid is"
                 f" {[int(extent) for extent in expected]}: a stage's shape map is missing or wrong."
             )
+        if waiting:
+            self._wait_for_a_pass(a, stages, localities)
+            return refuse(
+                f"{waiting[0]} needs whole-volume statistics, but an earlier stage changes the values: the"
+                " stored volume's statistic is not this stage's input."
+            )
         return True, tuple(plans), evolved, None
 
     def _plan_read_stage(
-        self, stage: Stage, loc: PatchLocality, shape: list[int], evolved: Attribute
+        self,
+        stage: Stage,
+        loc: PatchLocality,
+        shape: list[int],
+        evolved: Attribute,
+        seed: tuple[tuple[str, str], ...] = (),
     ) -> "_ReadStagePlan":
         """One stage's slot in the composed plan: its shapes, its pull map, and the case state it
         leaves for the stages after it and for the header the sweep ships
         (``write_stream_cache_attribute``, stated by every stage, region or not)."""
         if not loc.kind.is_region:
-            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None)
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(shape), None, measured=seed)
         elif loc.kind is LocalityKind.HALO:
             plan = _ReadStagePlan(
                 loc.kind, tuple(shape), tuple(shape), _HaloPull(_halo_radii(loc.halo, len(shape)), list(shape))
@@ -889,7 +974,10 @@ class DatasetManager:
                 source_dataset, source_group, source_entry, source_shape, stages, stage_plans, tuple(pending)
             )
         else:
-            self.cache_attributes[a] = Attribute(stream_cache_attribute)
+            if not self.loaded:
+                # A loaded case keeps what its whole-volume pass recorded: the plan's measured statistics
+                # reach the attribute only through a streamed region, and none is read while it is loaded.
+                self.cache_attributes[a] = Attribute(stream_cache_attribute)
             self.cache_attributes_bak[a] = Attribute(stream_cache_attribute)
             self._patch_stream_sources[key] = _PatchStreamSource(
                 source_dataset, source_group, source_entry, source_shape, stages, stage_plans
@@ -1037,6 +1125,14 @@ class DatasetManager:
         return list(self.shapes[0])
 
     @property
+    def landed_channels(self) -> int:
+        """The channel count the chain lands on: the stored one, folded through every stage."""
+        channels = int(self.base_shape[0])
+        for stage in self.chain_stages(0):
+            channels = stage.output_channels(channels)
+        return channels
+
+    @property
     def stored_attributes(self) -> Attribute:
         """The case as STORED: the geometry of the entry on disk, before any stage ran.
 
@@ -1156,6 +1252,9 @@ class DatasetManager:
 
     def _invalidate_stream_plans(self) -> None:
         self._landed_slabs.clear()
+        self._block_reads.clear()
+        # A replan rebuilds each copy's case attribute, and its first region fills it again.
+        self._stream_attributes_persisted.clear()
         self._patch_stream_sources.clear()
         self._stream_refusals.clear()
         self._stream_ok.clear()
@@ -1561,13 +1660,16 @@ class DatasetManager:
             # so it never persists past this read.
             cache_attribute["StatisticsSeeded"] = 1.0
             persist = a not in self._stream_attributes_persisted
+            if persist:
+                self._refill_case_attribute(a)
             keys_before = set(cache_attribute.keys()) if persist else set()
             # Told where the patch sits, like every region: a per-voxel stage reading a companion
             # volume (a mask) reads the part that lines up with it.
             spatial = tuple(int(extent) for extent in stream_source.shape[1:])
             region = tuple(plan.data_slices[len(plan.data_slices) - len(spatial) :])
             context = RegionContext(region, region, spatial)
-            for stage in stream_source.stages:
+            for stage, stage_plan in zip(stream_source.stages, stream_source.stage_plans, strict=True):
+                stage_plan.seed(cache_attribute)
                 tensor = stage.stream_region(self.name, tensor, context, cache_attribute)
             # The read plan is applied AFTER the chain, as the whole-volume path transforms before
             # Patch.get_data cuts: padding first would feed f(pad) to the model on every border patch.
@@ -1594,6 +1696,14 @@ class DatasetManager:
         """
         plan = self.patch.get_read_plan(self.shapes[a], index, a, is_input)
         return self.patch.apply_read_plan(tensor, plan)
+
+    def _refill_case_attribute(self, a: int) -> None:
+        """Start copy ``a``'s case attribute again, in place, from the state its regions replay: the first
+        region after a replan records the chain's transitions there, and a whole-volume load may already
+        have recorded them."""
+        live = self.cache_attributes[a]
+        dict.clear(live)
+        dict.update(live, self.cache_attributes_bak[a])
 
     def _persist_stream_attributes(self, a: int, cache_attribute: Attribute, keys_before: set[str]) -> None:
         # State a transform records for its own inversion (TensorCast's source dtype) must reach the
@@ -1626,6 +1736,8 @@ class DatasetManager:
             # as stored (plus planned stats), never the live attribute: that one carries the chain's
             # own output.
             persist = a not in self._stream_attributes_persisted
+            if persist:
+                self._refill_case_attribute(a)
             landed, cache_attribute, keys_before = self._replay_streamed_region(
                 stream_source,
                 region,
@@ -1651,7 +1763,9 @@ class DatasetManager:
         spatial = [int(extent) for extent in self.shapes[a]]
         axis = self.patch.get_sweep_axis(a)
         plane = int(np.prod([e for i, e in enumerate(spatial) if i != axis], dtype=np.int64))
-        plane_bytes = max(1, plane * max(1, int(self.base_shape[0])) * CASE_ELEMENT_BYTES)
+        # The slab held is the landed one, which a chain may widen (a one-hot).
+        channels = max(int(self.base_shape[0]), self.landed_channels)
+        plane_bytes = max(1, plane * max(1, channels) * CASE_ELEMENT_BYTES)
         rows = max(target[axis].stop - target[axis].start, min(SWEEP_SLAB_ROWS, _SLAB_BYTES // plane_bytes))
         start = target[axis].start
         return tuple(
@@ -1839,6 +1953,7 @@ class DatasetManager:
         The one dispatch: a chain read through the store and a member's per-copy tail both come here.
         """
         for stage, plan, source, target in zip(stages, plans, spans[:-1], spans[1:], strict=True):
+            plan.seed(cache_attribute)
             if not plan.kind.is_region:
                 # The span is handed over rather than dropped: a stage reading a second aligned
                 # volume needs to know WHICH part of it lines up with this region, and the

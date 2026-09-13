@@ -255,11 +255,12 @@ class DatasetIter(data.Dataset):
         copies: dict[int, set[int]] = {}
         for case, copy, _patch in self.mapping:
             copies.setdefault(case, set()).add(copy)
+        # One item per case: a copy's pass drops the plans of the case's other copies, and one manager
+        # is never walked by two threads.
         work = [
-            (self.data[group_dest][case], copy)
+            (self.data[group_dest][case], sorted(drawn))
             for _group_src, group_dest, _chain in _chains(self.groups_src)
             for case, drawn in sorted(copies.items())
-            for copy in sorted(drawn)
         ]
         self._on_fill_threads(
             f"scanning {label}",

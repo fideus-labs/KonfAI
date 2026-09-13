@@ -222,7 +222,12 @@ def _make_train(memory_budget: str | float | None) -> DataTrain:
     """A DataTrain with an injected, header-free prepared dataset (no disk, no config file)."""
     data = DataTrain(augmentations=None, memory_budget=memory_budget)
     managers = {
-        group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE), spatial_shape=list(_GROUP_SHAPE[1:])) for _ in _CASES]
+        group: [
+            SimpleNamespace(
+                base_shape=list(_GROUP_SHAPE), landed_channels=_GROUP_SHAPE[0], spatial_shape=list(_GROUP_SHAPE[1:])
+            )
+            for _ in _CASES
+        ]
         for group in ("CT", "SEG")
     }
     data._managers = managers  # type: ignore[assignment]
@@ -248,7 +253,12 @@ def test_estimate_counts_one_copy_per_augmentation_draw() -> None:
         validation=None,
     )
     managers = {
-        group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE), spatial_shape=list(_GROUP_SHAPE[1:])) for _ in _CASES]
+        group: [
+            SimpleNamespace(
+                base_shape=list(_GROUP_SHAPE), landed_channels=_GROUP_SHAPE[0], spatial_shape=list(_GROUP_SHAPE[1:])
+            )
+            for _ in _CASES
+        ]
         for group in ("CT", "SEG")
     }
     data._managers = managers  # type: ignore[assignment]
@@ -299,7 +309,7 @@ def test_one_pass_workflows_never_cache_whatever_the_budget() -> None:
         DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b"),
         DataMetric(memory_budget=f"{_DATASET_BYTES * 100}b"),
     ):
-        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2], spatial_shape=[2, 2, 2])]}  # type: ignore[assignment]
+        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2], landed_channels=1, spatial_shape=[2, 2, 2])]}  # type: ignore[assignment]
         data._validation_managers = {}
         data.case_names = ["case_a"]
         data._validation_names = []
@@ -816,7 +826,9 @@ def test_the_allocator_is_told_a_gap_only_where_there_is_one() -> None:
     data = DataTrain(augmentations={}, memory_budget=None, validation=None, batch_size=2)
     data.patch = DatasetPatch([1, 64, 64])
     data._managers = {  # type: ignore[assignment]
-        "CT": [SimpleNamespace(base_shape=list(big), spatial_shape=list(big[1:])) for _ in _CASES]
+        "CT": [
+            SimpleNamespace(base_shape=list(big), landed_channels=big[0], spatial_shape=list(big[1:])) for _ in _CASES
+        ]
     }
     data._validation_managers = {}
     data.case_names = list(_CASES)
@@ -836,7 +848,12 @@ def test_the_estimate_counts_the_shape_the_chain_lands_on() -> None:
     for landed, expected in (([extent // 2 for extent in _GROUP_SHAPE[1:]], 64), ([16, 16, 16], 4096)):
         data = DataTrain(augmentations={}, memory_budget=None, validation=None)
         data._managers = {  # type: ignore[assignment]
-            "CT": [SimpleNamespace(base_shape=list(_GROUP_SHAPE), spatial_shape=list(landed)) for _ in _CASES]
+            "CT": [
+                SimpleNamespace(
+                    base_shape=list(_GROUP_SHAPE), landed_channels=_GROUP_SHAPE[0], spatial_shape=list(landed)
+                )
+                for _ in _CASES
+            ]
         }
         data._validation_managers = {}
         data.case_names = list(_CASES)

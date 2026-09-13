@@ -1181,8 +1181,10 @@ def test_copying_an_attribute_is_the_same_record_as_normalising_it_again() -> No
     from_values = Attribute(values)
     from_text = Attribute(dict(from_values))
     from_attribute = Attribute(from_values)
+    again = Attribute(values)  # the small arrays' printed forms now come from the cache
 
     assert list(dict(from_values).items()) == list(dict(former).items())
+    assert list(dict(again).items()) == list(dict(former).items())
     assert list(dict(from_text).items()) == list(dict(former).items())
     assert list(dict(from_attribute).items()) == list(dict(former).items())
     assert all(type(v) is str for v in dict(from_attribute).values())

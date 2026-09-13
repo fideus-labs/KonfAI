@@ -782,3 +782,19 @@ def test_an_undeclared_locality_says_what_to_declare() -> None:
     ):
         assert reason is not None, "the plan would print the kind with no way to act on it"
         assert "locality" in reason
+
+
+def test_a_copy_the_draw_did_not_select_keeps_its_shape_and_reads_its_own_region() -> None:
+    # A draw with prob < 1 keeps state for the copies it selected only: every hook asked about another
+    # copy answers as the identity, the shape and the pull map included (the fill pricing walks them all).
+    from konfai.data.augmentation import Rotate
+    from konfai.utils.dataset import Attribute
+
+    rotate = Rotate(a_min=-10, a_max=10, in_plane=True)
+    rotate.load(0.0)
+    rotate.state_init(0, [[4, 6, 6], [4, 6, 6]], [Attribute(), Attribute()])
+    assert rotate.who_index[0] == []
+
+    target = (slice(0, 2), slice(1, 3), slice(2, 4))
+    assert rotate.stream_shape(0, 1, [4, 6, 6]) == [4, 6, 6]
+    assert rotate.stream_region_source(0, 1, target, [4, 6, 6]) == list(target)
