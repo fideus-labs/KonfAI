@@ -468,3 +468,21 @@ def test_a_stage_recording_its_seed_itself_leaves_it_once(streaming_dataset_stub
 
     for key in ("Min", "Max"):
         assert case.cache_attributes[0]._count_key(key) == fresh.cache_attributes[0]._count_key(key)
+
+
+def test_a_free_rotation_or_scale_streams_bit_for_bit(streaming_dataset_stub):
+    """A draw that resamples through an affine map samples on the full grid's own indices: a region
+    lands where the whole volume does, bit for bit, and so does a label map through the nearest voxel."""
+    from konfai.data.augmentation import Rotate, Scale
+    from konfai.data.transform import TensorCast
+
+    for dtype, chain in (("float32", []), ("int64", [TensorCast(dtype="int64")])):
+        stub = streaming_dataset_stub(_volume(100.0))
+        rotate, scale = Rotate(a_min=17.0, a_max=17.0, in_plane=True), Scale(s_std=0.3)
+        rotate.load(1.0)
+        scale.load(1.0)
+        case = _case(stub, [Clip(min_value=-50.0, max_value=250.0), *chain], [rotate, scale])
+        case.warm_stream_statistics([1])
+
+        assert case.stream_refusal(1, True) is None, dtype
+        assert _same(_patches(case, 1, True), _whole(case, 1, True)), dtype

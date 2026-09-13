@@ -17,6 +17,8 @@
 
 """Draws that move the grid: translation, rotation, scale, flips, permutations, elastic fields."""
 
+import itertools
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -41,7 +43,7 @@ from konfai.data.geometry import (
     remap_shape,
     signed_permutation,
 )
-from konfai.data.sampling import _apply, _displacement_at, _to_index
+from konfai.data.sampling import _apply, _displacement_at, _to_index, nearest_index, window_index
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.utils.dataset import Attribute
 
@@ -161,24 +163,72 @@ class EulerTransform(DataAugmentation):
         full: tuple[int, ...],
     ) -> torch.Tensor:
         """Sample the target region from ``block``, the source region ``source`` of the full grid.
-        Integer tensors are label maps and are resampled with nearest-neighbour."""
-        mode = "nearest" if not block.dtype.is_floating_point else "bilinear"
+
+        On the full grid's own indices, corner by corner: the index arithmetic is the same whatever
+        region is in hand, so a region lands where the whole volume does, bit for bit (``grid_sample``
+        normalises by the extent it is handed, and a region is handed a window). Integer tensors are
+        label maps and take the nearest voxel. Walked in slabs of rows, so the temporaries stay under
+        a volume's worth.
+        """
         coordinates = self._source_coordinates(matrix, target, full, block.device)
-        starts = torch.tensor([float(part.start) for part in source], dtype=torch.float32, device=block.device)
-        sizes = torch.tensor(
-            [float(part.stop - part.start - 1) for part in source], dtype=torch.float32, device=block.device
-        )
-        local = torch.where(
-            sizes > 0, (coordinates - starts) * 2.0 / sizes.clamp(min=1.0) - 1.0, torch.zeros_like(coordinates)
-        )
-        grid = local.flip(-1).unsqueeze(0)  # grid_sample orders a coordinate (x, y, z)
-        return (
-            F.grid_sample(
-                block.unsqueeze(0).type(torch.float32), grid, align_corners=True, mode=mode, padding_mode="border"
-            )
-            .type(block.dtype)
-            .squeeze(0)
-        )
+        starts = [int(part.start) for part in source]
+        windows = [int(part.stop - part.start) for part in source]
+        flat = block.reshape(int(block.shape[0]), -1)
+        out = torch.empty((int(block.shape[0]), *coordinates.shape[:-1]), dtype=block.dtype, device=block.device)
+        rows = int(coordinates.shape[0])
+        step = max(1, -(-rows // self._WALK_SLABS))
+        for start in range(0, rows, step):
+            out[:, start : start + step] = self._walk(flat, coordinates[start : start + step], starts, windows, full)
+        return out
+
+    #: How many slabs of rows a region is walked in: the corner temporaries of one slab stay well
+    #: under a volume's worth.
+    _WALK_SLABS = 16
+
+    @staticmethod
+    def _walk(
+        flat: torch.Tensor, coordinates: torch.Tensor, starts: list[int], windows: list[int], full: tuple[int, ...]
+    ) -> torch.Tensor:
+        """The samples at ``coordinates`` (global indices, array order) out of ``flat``, the window
+        ``starts``/``windows`` of the full grid flattened per channel; the taps clamp to the volume."""
+        n = int(coordinates.shape[-1])
+        shape = list(coordinates.shape[:-1])
+        channels = int(flat.shape[0])
+
+        def gathered(indices: list[torch.Tensor]) -> torch.Tensor:
+            place = torch.zeros(shape, dtype=torch.long, device=flat.device)
+            for axis in range(n):
+                place = place * windows[axis] + window_index(indices[axis], full[axis], starts[axis], windows[axis])
+            return flat[:, place.reshape(-1)].reshape(channels, *shape)
+
+        if not flat.dtype.is_floating_point:
+            return gathered([nearest_index(coordinates[..., axis]) for axis in range(n)])
+        floors = torch.floor(coordinates)
+        fractions = coordinates - floors
+        bases = floors.to(torch.long)
+        # Per axis, the two taps' places in the window and their weights, once: a corner is a product
+        # of them. An axis the map leaves on the grid (the slice axis of a turn in the plane) has one
+        # tap, so the walk is four corners rather than eight.
+        taps: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
+        for axis in range(n):
+            fraction = fractions[..., axis]
+            lower = window_index(bases[..., axis], full[axis], starts[axis], windows[axis])
+            axis_taps = [(lower, 1.0 - fraction)]
+            if bool(fraction.any()):
+                axis_taps.append(
+                    (window_index(bases[..., axis] + 1, full[axis], starts[axis], windows[axis]), fraction)
+                )
+            taps.append(axis_taps)
+        work = flat if flat.dtype == torch.float32 else flat.to(torch.float32)
+        out = torch.zeros((channels, *shape), dtype=torch.float32, device=flat.device)
+        for corner in itertools.product(*taps):
+            place, weight = corner[0]
+            for axis in range(1, n):
+                local, fraction = corner[axis]
+                place = place * windows[axis] + local
+                weight = weight * fraction
+            out += work[:, place.reshape(-1)].reshape(channels, *shape) * weight
+        return out.to(flat.dtype)
 
     def _sample(self, matrix: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
         full = tuple(int(extent) for extent in tensor.shape[1:])

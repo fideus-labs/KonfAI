@@ -130,11 +130,11 @@ class AugmentedStage:
 
     def case_working_multiple(self, name: str) -> float:
         """What this copy's draw allocates beyond its block, in volumes-worth of it: a REGRID draw builds
-        the pull box's coordinate grid through ``grid_sample`` (one volume per spatial axis), any other
-        draw one volume."""
+        the pull box's coordinate grid, whose build peaks at ten volumes (measured on a 100x512x512
+        case, in-plane and oblique alike, the walk's slabs under it), any other draw one volume."""
         del name
         kind = self.patch_locality(Attribute()).kind
-        return 4.0 if kind is LocalityKind.REGRID else 1.0
+        return 10.0 if kind is LocalityKind.REGRID else 1.0
 
     def stream_region_source(
         self,
