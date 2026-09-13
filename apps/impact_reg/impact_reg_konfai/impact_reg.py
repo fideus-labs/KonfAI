@@ -43,7 +43,8 @@ import numpy as np
 import SimpleITK as sitk
 from konfai.utils.dataset import read_landmarks, write_landmarks
 from konfai.utils.ITK import apply_to_data_transform, read_displacement_field
-from konfai.utils.utils import format_token, path_format_token, storage_form
+from konfai.utils.ome_zarr import write_ome_zarr
+from konfai.utils.utils import format_token, is_store_name, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import get_available_apps_on_hf_repo
 
@@ -198,13 +199,18 @@ def _units(paths: list[Path]) -> list[Path]:
     return [source for source, _ in KonfAIApp._list_input_units(list(paths))] if paths else []
 
 
-def _neutral_masks(work: Path, side: str, count: int) -> list[Path]:
+def _neutral_masks(work: Path, side: str, count: int, like: list[Path]) -> list[Path]:
     """``count`` all-ones sentinels, one per case, standing in for a mask group the caller left out.
 
     Input groups pair by POSITION, so a group that is present at all must carry as many units as the
     others: one sentinel would pair with the first case and leave the rest unmasked on that side.
+
+    They take the form of the images they stand beside (``like``): konfai-apps reads the staged
+    dataset under the format of its first group, so a ``.mha`` sentinel next to OME-Zarr images was
+    not listed, and the run stopped on the group it could not find.
     """
-    return [_neutral_mask(work / f"{side}Mask_{index:03d}.mha") for index in range(count)]
+    form = ".ome.zarr" if path_format_token(_units(like)[0]) == "omezarr" else ".mha"
+    return [_neutral_mask(work / f"{side}Mask_{index:03d}{form}") for index in range(count)]
 
 
 def _work_dir(tmp_dir: Path | None, prefix: str) -> Path:
@@ -323,8 +329,13 @@ def _neutral_mask(out_path: Path) -> Path:
     and in whole-volume mode a mask branch need not share the image grid, so a 2x2x2 sentinel yields a
     byte-identical registration without reading (or even sizing to) the input. (The common
     no-mask path passes no mask at all; konfai-apps fills both branches with an all-ones default.)
+    Written as an OME-Zarr store when named as one, as a file otherwise.
     """
-    sitk.WriteImage(sitk.GetImageFromArray(np.ones((2, 2, 2), dtype=np.uint8)), str(out_path))
+    ones = np.ones((2, 2, 2), dtype=np.uint8)
+    if is_store_name(out_path.name):
+        write_ome_zarr(out_path, ones[None], spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
+    else:
+        sitk.WriteImage(sitk.GetImageFromArray(ones), str(out_path))
     return out_path
 
 
@@ -372,8 +383,8 @@ class ImpactRegKonfAIApp:
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if fixed_masks or moving_masks:
-            command += ["-i", *(str(path) for path in fixed_masks or _neutral_masks(work, "Fixed", n_cases))]
-            command += ["-i", *(str(path) for path in moving_masks or _neutral_masks(work, "Moving", n_cases))]
+            command += ["-i", *(str(p) for p in fixed_masks or _neutral_masks(work, "Fixed", n_cases, fixed_images))]
+            command += ["-i", *(str(p) for p in moving_masks or _neutral_masks(work, "Moving", n_cases, moving_images))]
         command += ["-o", str(out)]
         # Hand konfai-apps a workspace we own, which is what every other app CLI does by exposing
         # --tmp-dir. Without it konfai-apps auto-creates one under TMPDIR, writes the prediction to
