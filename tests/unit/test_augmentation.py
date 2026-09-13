@@ -839,3 +839,16 @@ def test_a_draw_reading_the_header_reads_the_grid_the_chain_lands_on(streaming_d
             case.unload_augmentation()
             case.reset_augmentation()
         assert spacings == [landed] * 3, (tail, spacings)
+
+
+def test_an_affine_draw_keeps_a_float64_volume_s_digits() -> None:
+    """Blended in the block's own precision: sampled on its own voxels, a float64 volume is itself."""
+    from konfai.data.augmentation import EulerTransform
+
+    full = (6, 8, 8)
+    volume = torch.rand((1, *full), dtype=torch.float64) + 1e-9
+    axes = [torch.arange(extent, dtype=torch.float32) for extent in full]
+    coordinates = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+    sampled = EulerTransform._walk(volume.reshape(1, -1), coordinates, [0, 0, 0], list(full), full)
+    assert sampled.dtype == torch.float64
+    assert torch.equal(sampled, volume)

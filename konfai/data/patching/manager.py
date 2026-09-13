@@ -432,13 +432,15 @@ class DatasetManager:
         wanted = self._wanted_measurements.get(id(stage), {})
         for a, before in depths.items():
             scope = scopes[a]
-            if all(scope._count_key(key) > depth for key, depth in before.items()):
-                self._measured_statistics[(a, id(stage))] = {key: scope[key] for key in before}
-            elif wanted[a].takes_present and all(depth > 0 for depth in before.values()):
-                # It took what an earlier stage recorded, which the streamed route records there too.
-                self._scope_served.add((a, id(stage)))
-            else:
+            pushed = {key for key, depth in before.items() if scope._count_key(key) > depth}
+            # What an earlier stage recorded and this one took: the streamed route records it there too.
+            taken = {key for key, depth in before.items() if depth > 0 and key not in pushed}
+            if len(pushed) + len(taken) < len(before) or (taken and not wanted[a].takes_present):
                 self._unmeasurable.add((a, id(stage)))
+            elif pushed:
+                self._measured_statistics[(a, id(stage))] = {key: scope[key] for key in sorted(pushed)}
+            else:
+                self._scope_served.add((a, id(stage)))
             del wanted[a]
 
     def _apply_chain(
@@ -635,9 +637,10 @@ class DatasetManager:
         cache_attribute: Attribute,
         loc: PatchLocality,
     ) -> tuple[tuple[str, str], ...]:
-        """The store's statistics a stage is seeded with, as the scope spells them: those its header
-        does not already hold, which a stage takes as the whole-volume route does."""
-        missing = sorted(key for key in loc.stat_keys if key not in cache_attribute)
+        """The store's statistics a stage is seeded with, as the scope spells them. A stage that takes
+        a statistic already in the scope is seeded with the rest only, as the whole-volume route hands
+        it a header's; one that measures its own is seeded with every key, over a header's."""
+        missing = sorted(key for key in loc.stat_keys if not loc.takes_present or key not in cache_attribute)
         if not missing:
             return ()
         stats = self._read_disk_statistics(

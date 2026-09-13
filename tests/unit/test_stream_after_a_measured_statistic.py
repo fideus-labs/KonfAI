@@ -28,6 +28,7 @@ memory, never of meaning.
 from typing import cast
 
 import numpy as np
+import pytest
 import torch
 from konfai.data.augmentation import ContrastAroundMean, Gamma
 from konfai.data.augmentation.base import DataAugmentationsList
@@ -468,6 +469,40 @@ def test_a_stage_recording_its_seed_itself_leaves_it_once(streaming_dataset_stub
 
     for key in ("Min", "Max"):
         assert case.cache_attributes[0]._count_key(key) == fresh.cache_attributes[0]._count_key(key)
+
+
+def test_a_stage_taking_one_key_and_measuring_the_other_streams(streaming_dataset_stub):
+    """``Normalize`` behind a ``Clip`` saving its lower bound alone takes the Min it recorded and measures
+    the Max: the pass keeps the Max, the streamed route records the Min there too."""
+    stub = streaming_dataset_stub(_volume(20.0))
+    chain = [Clip(min_value=-50.0, max_value=50.0, save_clip_min=True), Normalize()]
+    case = _case(stub, chain)
+    case.warm_stream_statistics([0], apply_augmentations=False)
+
+    assert case.stream_refusal(0, False) is None
+    assert stub.full_reads == 1
+    assert _same(_patches(case, 0, False), _whole(case, 0, False))
+
+
+def test_a_stage_measuring_its_own_statistic_is_seeded_over_a_headers(tmp_path):
+    """A Save header carries the Mean and Std a ``Standardize`` recorded. ``Statistics`` behind the
+    boundary describes the saved tensor, whose mean is nought: seeded from its own store, over the
+    header's, it records that on the streamed route as on the whole one."""
+    from konfai.data.transform import Save
+
+    _source(tmp_path)
+    chain = [Standardize(), Save(str(tmp_path / "cache")), Statistics()]
+    case = manager(Dataset(tmp_path / "src", "omezarr"), chain)
+    assert case.can_stream_patch(0, apply_augmentations=False), case.stream_refusal(0, False)
+    case.get_data(0, 0, [], True, False)  # sweeps the Save, streams the patch, records the case's numbers
+    assert not case.loaded
+    streamed = float(case.cache_attributes[0]["ImageMean"])
+
+    fresh = manager(Dataset(tmp_path / "src", "omezarr"), [Standardize(), Save(str(tmp_path / "cache2")), Statistics()])
+    fresh.load(fresh.transforms, [], load_augmentations=False)
+    whole = float(fresh.cache_attributes[0]["ImageMean"])
+    assert abs(whole) < 1e-5
+    assert streamed == pytest.approx(whole, abs=1e-5)
 
 
 def test_a_free_rotation_or_scale_streams_bit_for_bit(streaming_dataset_stub):

@@ -219,8 +219,10 @@ class EulerTransform(DataAugmentation):
                     (window_index(bases[..., axis] + 1, full[axis], starts[axis], windows[axis]), fraction)
                 )
             taps.append(axis_taps)
-        work = flat if flat.dtype == torch.float32 else flat.to(torch.float32)
-        out = torch.zeros((channels, *shape), dtype=torch.float32, device=flat.device)
+        # Blended in the block's own precision from float32 up: a float64 volume keeps its digits.
+        work_dtype = torch.float64 if flat.dtype == torch.float64 else torch.float32
+        work = flat if flat.dtype == work_dtype else flat.to(work_dtype)
+        out = torch.zeros((channels, *shape), dtype=work_dtype, device=flat.device)
         for corner in itertools.product(*taps):
             place, weight = corner[0]
             for axis in range(1, n):
