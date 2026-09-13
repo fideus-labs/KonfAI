@@ -159,6 +159,9 @@ class DatasetManager:
                 continue
             _shape = self._fold_case_state(transform_function, _shape, folding)
         self._adopt_case_facts(folding, cache_attribute)
+        # The case state the chain lands on, which a training draw is handed: a draw reading the
+        # header (the grid an Elastix warp is drawn on) reads the geometry of what it draws from.
+        self._landed_folding = Attribute(folding)
 
         self.patch = (
             DatasetPatch(
@@ -331,15 +334,20 @@ class DatasetManager:
         for data_augmentations in self.data_augmentations_list:
             shape = []
             caches_attribute = []
+            foldings = []
             for _ in range(data_augmentations.nb):
                 shape.append(list(self.shapes[0]))
                 caches_attribute.append(copy.deepcopy(self.cache_attributes[0]))
+                # The draw is handed the landed walk state, as an Expand copy's draw is; the copy's
+                # own attribute stays the case baseline, which the replays and the loads evolve.
+                foldings.append(Attribute(self._landed_folding))
 
             for data_augmentation in data_augmentations.data_augmentations:
                 if reset_state:
                     data_augmentation.reset_state(self.index)
-                shape = data_augmentation.state_init(self.index, shape, caches_attribute)
+                shape = data_augmentation.state_init(self.index, shape, foldings)
             for it, s in enumerate(shape):
+                self._adopt_case_facts(foldings[it], caches_attribute[it])
                 self.cache_attributes.append(caches_attribute[it])
                 self.shapes.append(s)
                 self.patch.load(s, i)
