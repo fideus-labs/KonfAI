@@ -82,11 +82,16 @@ class StreamingDatasetStub:
     ) -> dict[str, float]:
         self.stats_reads += 1
         data = self.volume if channels is None else self.volume[channels]
+        flat = data.reshape(data.shape[0], -1)
         return {
             "min": float(data.min()),
             "max": float(data.max()),
             "mean": float(data.mean()),
             "std": float(data.std(ddof=1)),
+            "min_per_channel": flat.min(1).tolist(),
+            "max_per_channel": flat.max(1).tolist(),
+            "mean_per_channel": flat.mean(1).tolist(),
+            "std_per_channel": flat.std(1, ddof=1).tolist(),
         }
 
     def bounded_region_reads(self, group_src: str, name: str) -> bool:

@@ -415,9 +415,12 @@ class DatasetManager:
         # draw did not select IS the case. A clone per copy was 640 MiB and 0.22 s for 10 copies of a
         # 64 MiB case, per group, per case, per epoch under inline augmentation.
         a_data = [self.data[0] for _ in range(data_augmentations.nb)]
+        # The copy's own scope, so a draw describing the whole case records there what a streamed
+        # region will later be seeded with.
+        a_attributes = [self.cache_attributes[index] for index in indices]
         for data_augmentation in data_augmentations.data_augmentations:
             if data_augmentation.groups is None or self.group_dest in data_augmentation.groups:
-                a_data = data_augmentation(self.name, self.index, a_data)
+                a_data = data_augmentation(self.name, self.index, a_data, a_attributes)
 
         for index, data in zip(indices, a_data, strict=False):
             self.augmented_data[index] = data
@@ -524,9 +527,17 @@ class DatasetManager:
         """
         if not self.can_stream_patch(a, apply_augmentations):
             # A probe resolves the plan with the statistics still deferred, so it reads nothing. A
-            # chain that materializes takes them from the volume it loads: scanning for it would be
-            # a pass over the cohort nothing consumes.
-            return
+            # chain that materializes for a reason a pass cannot settle is left alone: scanning for
+            # it would be a pass over the cohort nothing consumes.
+            if not self._awaiting_measurement:
+                return
+            # The store describes the case as stored, and a stage here wants its own input, which
+            # the chain has changed. Only a pass over the volume can say it. Nothing random precedes
+            # that stage (the plan refuses when a draw does), so the number holds for every epoch
+            # and every copy: paid once here, never again.
+            self.load(self.transforms, self.data_augmentations_list, load_augmentations=apply_augmentations)
+            self.unload()
+            self.unload_augmentation()
         self._require_statistics()
         self.can_stream_patch(a, apply_augmentations)
 
@@ -623,7 +634,19 @@ class DatasetManager:
                     # pass over this case may already have measured the right one on this stage's own
                     # input. That number is the one the whole-volume route uses, so a region seeded
                     # with it lands on the same values.
-                    measured = self._measure_from_the_last_pass(a, stage_index, loc.stat_keys)
+                    # A pass measures the stage's input as it was under the draw that ran. A draw
+                    # ahead of the statistic is redrawn every epoch, so that number describes the
+                    # previous epoch's copy: reusing it would standardize by a stale case.
+                    drawn_upstream = any(isinstance(earlier, AugmentedStage) for earlier in stages[:stage_index])
+                    measured = (
+                        None if drawn_upstream else self._measure_from_the_last_pass(a, stage_index, loc.stat_keys)
+                    )
+                    if drawn_upstream:
+                        return refuse(
+                            f"{label} needs whole-volume statistics of an input a draw ahead of it"
+                            " changes: the draw is redrawn every epoch, so no measurement outlives it."
+                            " Put the statistic ahead of the draws, or give the stage its numbers."
+                        )
                     if measured is None:
                         self._awaiting_measurement = True
                         return refuse(

@@ -288,20 +288,26 @@ class DatasetIter(data.Dataset):
         if self._statistics_warmed:
             return  # the statistic describes the case as stored: one pass answers every epoch
         self._statistics_warmed = True
-        managers = [
-            self.data[group_dest][index]
+        # Every (case, copy) the epoch will ask for. A copy's statistic is its own: measured here it
+        # reaches every worker through the fork, where measured in a worker it dies with it.
+        copies: dict[int, set[int]] = {}
+        for case, copy, _patch in self.mapping:
+            copies.setdefault(case, set()).add(copy)
+        work = [
+            (self.data[group_dest][case], copy)
             for _group_src, group_dest, _chain in _chains(self.groups_src)
-            for index in range(self.nb_dataset)
+            for case, drawn in sorted(copies.items())
+            for copy in sorted(drawn)
         ]
-        if not managers:
+        if not work:
             return
-        pbar = tqdm.tqdm(total=len(managers), desc=f"Scanning {label}: {get_cpu_info()}", leave=False)
+        pbar = tqdm.tqdm(total=len(work), desc=f"Scanning {label}: {get_cpu_info()}", leave=False)
         try:
             with ThreadPoolExecutor(max_workers=_cache_worker_count(os.cpu_count() or 1, device_count())) as executor:
-                futures = {
-                    executor.submit(manager.warm_stream_statistics, 0, self.apply_augmentations): manager
-                    for manager in managers
-                }
+                futures = [
+                    executor.submit(manager.warm_stream_statistics, copy, self.apply_augmentations)
+                    for manager, copy in work
+                ]
                 for fut in as_completed(futures):
                     fut.result()
                     pbar.update(1)

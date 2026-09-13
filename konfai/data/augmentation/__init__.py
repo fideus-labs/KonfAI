@@ -28,6 +28,11 @@ from konfai.data.augmentation.color import ColorTransform as ColorTransform
 from konfai.data.augmentation.color import Contrast as Contrast
 from konfai.data.augmentation.color import LumaFlip as LumaFlip
 from konfai.data.augmentation.color import Saturation as Saturation
+from konfai.data.augmentation.intensity import ContrastAroundMean as ContrastAroundMean
+from konfai.data.augmentation.intensity import Gamma as Gamma
+from konfai.data.augmentation.intensity import GaussianBlur as GaussianBlur
+from konfai.data.augmentation.intensity import GaussianNoise as GaussianNoise
+from konfai.data.augmentation.intensity import SimulateLowResolution as SimulateLowResolution
 from konfai.data.augmentation.placed import CutOUT as CutOUT
 from konfai.data.augmentation.placed import Mask as Mask
 from konfai.data.augmentation.placed import Noise as Noise

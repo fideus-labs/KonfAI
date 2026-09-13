@@ -143,8 +143,7 @@ class AugmentedStage:
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
-        del cache_attribute  # a draw reads no case metadata; the place is what it may need
-        return self.augmentation.stream_region(name, self.index, self.a, tensor, context)
+        return self.augmentation.stream_region(name, self.index, self.a, tensor, context, cache_attribute)
 
     def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None:
         """A draw reads no companion volume beside its region: nothing to declare."""
@@ -159,7 +158,7 @@ class AugmentedStage:
         return self.augmentation.stream_shape(self.index, self.a, shape)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return self.augmentation.compute(name, self.index, self.a, tensor)
+        return self.augmentation.compute(name, self.index, self.a, tensor, cache_attribute)
 
 
 # The pull maps are callable dataclasses, not closures: a plan is pickled whole by `mp.spawn`.

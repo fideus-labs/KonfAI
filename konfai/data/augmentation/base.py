@@ -302,21 +302,48 @@ class DataAugmentation(NeedDevice, ABC):
             "Implement _stream_region_source() or declare a non-region _patch_locality().",
         )
 
-    def compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+    def compute(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, cache_attribute: Attribute | None = None
+    ) -> torch.Tensor:
         """Apply the draw of copy *a* to one tensor: the forward counterpart of :meth:`inverse`."""
-        if a in self.who_index[index]:
-            tensor = self._compute(name, index, self._slot(index, a), tensor)
-        return tensor
+        if a not in self.who_index[index]:
+            return tensor
+        slot = self._slot(index, a)
+        if cache_attribute is not None:
+            self._seed_statistics(index, slot, tensor, cache_attribute, whole=True)
+        return self._compute(name, index, slot, tensor)
 
     def stream_region(
-        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+        self,
+        name: str,
+        index: int,
+        a: int,
+        tensor: torch.Tensor,
+        context: RegionContext,
+        cache_attribute: Attribute | None = None,
     ) -> torch.Tensor:
         """Apply the draw of copy *a* to one region, told where it sits (the same contract as
         :meth:`konfai.data.transform.Transform.stream_region`). The default is the draw itself; a
         draw parameterised by the place overrides ``_stream_region``."""
         if a not in self.who_index[index]:
             return tensor
-        return self._stream_region(name, index, self._slot(index, a), tensor, context)
+        slot = self._slot(index, a)
+        if cache_attribute is not None:
+            self._seed_statistics(index, slot, tensor, cache_attribute, whole=False)
+        return self._stream_region(name, index, slot, tensor, context)
+
+    def _seed_statistics(
+        self, index: int, a: int, tensor: torch.Tensor, cache_attribute: Attribute, whole: bool
+    ) -> None:
+        """Take the case-level values this draw needs, before it runs, on either route.
+
+        A ``GLOBAL_STAT`` draw describes the WHOLE case, and a region is not the case. ``whole`` says
+        which is in hand: on the whole-volume route the draw measures the tensor and records it in
+        the scope, where a later streamed plan reads it back; on the region route the plan has
+        already seeded it, and a draw that finds nothing must raise rather than describe its region.
+        The base needs none.
+        """
+        del index, a, tensor, cache_attribute, whole
 
     def _stream_region(
         self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
@@ -329,8 +356,12 @@ class DataAugmentation(NeedDevice, ABC):
         name: str,
         index: int,
         tensors: list[torch.Tensor],
+        caches_attribute: list[Attribute] | None = None,
     ) -> list[torch.Tensor]:
-        return [self.compute(name, index, a, tensor) for a, tensor in enumerate(tensors)]
+        return [
+            self.compute(name, index, a, tensor, None if caches_attribute is None else caches_attribute[a])
+            for a, tensor in enumerate(tensors)
+        ]
 
     @abstractmethod
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
