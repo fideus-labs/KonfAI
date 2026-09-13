@@ -30,7 +30,7 @@ import torch
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.patching import budget as budget_module
-from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
+from konfai.data.patching.budget import CASE_ELEMENT_BYTES
 from konfai.data.patching.sweep import (
     _cubic_tile,
     _pull_block_voxels,
@@ -207,8 +207,8 @@ def test_a_chain_that_widens_the_channel_axis_is_priced_on_what_it_lands(tmp_pat
 
     # Two terms, and only two: the landed blocks widen by the classes, and OneHot's own declared
     # buffers enter a chain that had none (Save declares nothing). The pulled regions do not widen.
-    widening = landed * block * (classes - 1) * _SWEEP_ELEMENT_BYTES
-    own = OneHot(classes).working_multiple * block * _SWEEP_ELEMENT_BYTES
+    widening = landed * block * (classes - 1) * CASE_ELEMENT_BYTES
+    own = OneHot(classes).working_multiple * block * CASE_ELEMENT_BYTES
     assert (after - before) == widening + own
     assert after < before * classes  # the pulled regions did not widen with it
 
@@ -484,3 +484,16 @@ def test_entry_granularity_is_keyed_by_pyramid_level(tmp_path: Path) -> None:
 
     assert holder._entry_granularity(stub(0), "CT", "CASE_000") == (8, 8, 8)
     assert holder._entry_granularity(stub(1), "CT", "CASE_000") == (16, 8, 8)
+
+
+def test_a_one_row_region_that_does_not_fit_ends_the_recovery(monkeypatch) -> None:
+    """A volume's last region can be one row while the height still stands higher: halving the height
+    would retry that same row until the height reached one."""
+    monkeypatch.setattr("konfai.data.patching.budget.device_signals_oom", lambda device: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    growth = budget_module.RegionGrowth(rows=8, cap=64, budget_bytes=1000.0)
+
+    assert growth.halve_after_device_oom(None, "test", failed_rows=8)
+    assert growth.rows == 4
+    assert not growth.halve_after_device_oom(None, "test", failed_rows=1)
+    assert growth.rows == 4

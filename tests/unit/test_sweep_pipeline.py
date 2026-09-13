@@ -518,7 +518,7 @@ def test_a_region_the_device_cannot_hold_halves_the_rest_and_the_bytes_stand(
     volume = (rng.random((1, 14, 10, 8)) * 100).astype(np.float32)
     source.write("CT", "CASE_000", volume, _attributes())
     manager = _manager(source, [Clip(min_value=10.0, max_value=90.0), Save(f"{tmp_path / 'out'}:h5")], tmp_path)
-    monkeypatch.setattr("konfai.data.patching.manager.device_signals_oom", lambda device: True)
+    monkeypatch.setattr("konfai.data.patching.budget.device_signals_oom", lambda device: True)
     heights: list[int] = []
     apply = DatasetManager._apply_streamed_region
 

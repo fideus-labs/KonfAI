@@ -35,7 +35,6 @@ from konfai.data.patching.budget import (
     CASE_ELEMENT_BYTES,
     SWEEP_SLAB_ROWS,
     RegionGrowth,
-    device_signals_oom,
     open_held_meter,
 )
 from konfai.data.patching.grid import DatasetPatch
@@ -1479,19 +1478,12 @@ class DatasetManager:
                     break
                 except torch.cuda.OutOfMemoryError:
                     # A region the device could not hold: cut the rest at half the height and read
-                    # again from the one that failed (its writes never happened). The host has no
-                    # such signal (the kernel kills), and one row that does not fit is the end.
+                    # again from the one that failed (its writes never happened).
                     pending.put(None)  # the reader is released before the read-ahead drains
-                    if not device_signals_oom(self._chain_device) or growth.rows <= 1 or current is None:
+                    if current is None or not growth.halve_after_device_oom(
+                        self._chain_device, f"[KonfAI] '{self.name}'", current[0].stop - current[0].start
+                    ):
                         raise
-                    failed_rows = current[0].stop - current[0].start
-                    rows = growth.halve_below_first()
-                    torch.cuda.empty_cache()
-                    print(
-                        f"[KonfAI] '{self.name}': out of device memory on a {failed_rows}-row region;"
-                        f" the rest are cut to {rows} row(s).",
-                        flush=True,
-                    )
                     regions_plan.rewind(current[0].start)
                     pending, exhausted = queue.Queue(), False
                     for _ in range(ahead + 2):
