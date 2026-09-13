@@ -47,7 +47,7 @@ from konfai.data.data_manager import (
 )
 from konfai.data.data_manager.samples import _cache_worker_count
 from konfai.data.patching import DatasetManager, DatasetPatch
-from konfai.data.transform import Gradient, TensorCast, Transform, TransformLoader
+from konfai.data.transform import Gradient, Standardize, TensorCast, Transform, TransformLoader
 from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import DatasetManagerError
@@ -464,6 +464,48 @@ def test_cache_worker_count_never_drops_below_one() -> None:
 
 def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
     return geometry(origin, spacing)
+
+
+def test_a_streamed_case_is_scanned_once_for_the_run_not_once_per_worker(streaming_dataset_stub) -> None:
+    """The disk statistic describes the case as stored, so it is one read for the whole run.
+
+    The memo holding it lives on the manager, and a DataLoader worker that is not persistent is
+    forked again for every epoch: scanned from the worker, a cohort is read once per worker per
+    epoch. Reading it where the workers are forked FROM is what makes it once.
+    """
+    volume = np.arange(1 * 4 * 4, dtype=np.float32).reshape(1, 4, 4)
+    dataset_stub = streaming_dataset_stub(volume)
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, dataset_stub),
+        patch=DatasetPatch([2, 2]),
+        transforms=[Standardize()],
+        data_augmentations_list=[],
+    )
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"CT": [manager]},
+        mapping=[(0, 0, 0), (0, 0, 1), (0, 0, 2), (0, 0, 3)],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        inline_augmentations=False,
+        data_augmentations_list=[],
+        patch_size=[2, 2],
+        overlap=None,
+        buffer_size=1,
+        use_cache=False,
+    )
+
+    dataset_iter.load("Train")
+    assert dataset_stub.stats_reads == 1, "the scan did not happen where the workers are forked from"
+
+    for index in range(len(dataset_iter.mapping)):
+        dataset_iter[index]
+    # Every patch found the statistic already in hand, and the case was never materialized for it.
+    assert dataset_stub.stats_reads == 1
+    assert dataset_stub.full_reads == 0
 
 
 def test_streaming_tensorcast_persists_source_dtype_for_inverse(streaming_dataset_stub) -> None:
@@ -1204,7 +1246,9 @@ def test_inline_augmentations_disable_persistent_workers() -> None:
     augmentations = {"DataAugmentation_0": DataAugmentationsList(nb=1, data_augmentations={})}
 
     inline = DataTrain(augmentations=augmentations, inline_augmentations=True, persistent_workers=True)
-    inline._configure_data_loading(use_cache=False)
+    # Dropping a setting the config asked for in silence leaves the reader believing it holds.
+    with pytest.warns(UserWarning, match="persistent_workers=True is dropped"):
+        inline._configure_data_loading(use_cache=False)
     assert cast(int, inline.dataLoader_args["num_workers"]) >= 1
     assert inline.dataLoader_args["persistent_workers"] is False
 

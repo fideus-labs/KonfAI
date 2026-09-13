@@ -476,6 +476,13 @@ class Data(DataSources):
             # redraw, so inline augmentations freeze; an explicit persistent_workers=True cannot win.
             inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
             if inline_augmentation_active:
+                if self._persistent_workers:
+                    warnings.warn(
+                        "persistent_workers=True is dropped: inline augmentations redraw once per epoch and a"
+                        " persistent worker holds a fork-time copy that never sees the redraw. Set"
+                        " inline_augmentations=False to keep the workers alive across epochs.",
+                        stacklevel=2,
+                    )
                 persistent_workers = False
             elif self._persistent_workers is not None:
                 persistent_workers = self._persistent_workers
@@ -515,9 +522,26 @@ class Data(DataSources):
         """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read). Sums
         ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds (see
         ``_CACHE_ELEMENT_BYTES``): the base tensor plus one per augmentation draw, which validation
-        only makes when ``validation_augmentations``. It ignores size-changing transforms and the
-        allocator's arenas, which settle about a third higher than the tensors counted here."""
-        total = 0
+        only makes when ``validation_augmentations``. It ignores the allocator's arenas, which settle
+        about a third higher than the tensors counted here.
+
+        The larger of the stored and the landed shape. A cache holds the transformed case
+        (:meth:`DatasetManager._load` appends the chain's output), so a chain that GROWS its case is
+        under-counted on the stored shape alone. A chain that shrinks it is not counted on the landed
+        shape either: measured on a 3 mm resample of a 1 mm case, the cache holds 1.1 MiB per case and
+        the process grows by 15.9, about what the case occupies on disk, because reading and
+        transforming each case leaves that much in the allocator's arenas. The channel count stays the
+        stored one, which no fold tracks."""
+        return self._estimate_bytes()[0]
+
+    def _estimate_bytes(self) -> tuple[int, int, int]:
+        """What the cache is charged, what the cases weigh as stored, what the chain lands them at.
+
+        The charge is the first; the other two are reported, because a chain that shrinks its cases
+        makes them differ by a large factor and the reader cannot otherwise see that a coarser target
+        spacing, or a budget raised to the landed figure, brings the cohort into the cache.
+        """
+        charged = stored_total = landed_total = 0
         for prepared, copies in (
             (self._managers, Data._get_nb_augmentation(self._get_data_augmentations(True))),
             (
@@ -527,8 +551,12 @@ class Data(DataSources):
         ):
             for managers in (prepared or {}).values():
                 for manager in managers:
-                    total += int(np.prod(manager.base_shape, dtype=np.int64)) * _CACHE_ELEMENT_BYTES * copies
-        return total
+                    stored = int(np.prod(manager.base_shape, dtype=np.int64))
+                    landed = int(manager.base_shape[0]) * int(np.prod(manager.spatial_shape, dtype=np.int64))
+                    charged += max(stored, landed) * _CACHE_ELEMENT_BYTES * copies
+                    stored_total += stored * _CACHE_ELEMENT_BYTES * copies
+                    landed_total += landed * _CACHE_ELEMENT_BYTES * copies
+        return charged, stored_total, landed_total
 
     #: Whether the workflow reads each case exactly once. False for training, whose epochs re-read
     #: every case; True for prediction and evaluation. A one-pass workflow never re-reads a cache, so
@@ -548,7 +576,7 @@ class Data(DataSources):
             return
         world_size = max(1, world_size)
         n_cases = len(self.case_names) + len(self._validation_names)
-        dataset_bytes = self._estimate_cached_bytes()
+        dataset_bytes, stored_bytes, landed_bytes = self._estimate_bytes()
         per_rank_bytes = dataset_bytes / world_size
 
         budget = self.resolved_budget()
@@ -562,11 +590,18 @@ class Data(DataSources):
         if not use_cache:
             case_bytes = dataset_bytes / max(1, n_cases)
             decision = (
-                f"STREAM/BUFFER, no cache; FIFO working set ~= {self._buffer_size} cases x "
-                f"{format_bytes(case_bytes)} = {format_bytes(self._buffer_size * case_bytes)} per worker"
+                f"STREAM/BUFFER, no cache; FIFO working set at most {self._buffer_size} cases x "
+                f"{format_bytes(case_bytes)} = {format_bytes(self._buffer_size * case_bytes)} per worker,"
+                " for the cases whose chain cannot serve a patch as a region"
             )
+        shape_note = ""
+        if landed_bytes < stored_bytes * 0.9:
+            # The chain shrinks the case, so the cache would hold far less than the store does. The
+            # charge stays the larger of the two, and naming both is what lets a reader act on it.
+            shape_note = f" (stored {format_bytes(stored_bytes)}, landed {format_bytes(landed_bytes)})"
         print(
-            f"[KonfAI] memory_budget: dataset ~= {format_bytes(dataset_bytes)} over {n_cases} cases | "
+            f"[KonfAI] memory_budget: dataset ~= {format_bytes(dataset_bytes)}{shape_note} over"
+            f" {n_cases} cases | "
             f"per-rank ~= {format_bytes(per_rank_bytes)} across {world_size} rank(s) | "
             f"budget {format_bytes(per_rank_budget)} ({budget_desc}) -> {decision}"
         )

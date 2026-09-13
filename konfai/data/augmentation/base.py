@@ -30,6 +30,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai import konfai_root
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
+from konfai.data.transform.base import _UNDECLARED_LOCALITY
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import AugmentationError
@@ -269,7 +270,7 @@ class DataAugmentation(NeedDevice, ABC):
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         if self.locality is not None:
             return PatchLocality(self.locality, halo=self.halo)
-        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_UNDECLARED_LOCALITY)
 
     def stream_region_source(
         self,

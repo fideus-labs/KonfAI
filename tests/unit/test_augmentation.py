@@ -746,3 +746,39 @@ def test_an_augmentation_group_is_handed_the_case_not_a_clone_of_it(tmp_path: Pa
         else:
             assert copy is manager.data[0]
     assert torch.equal(manager.data[0], before)
+
+
+def test_an_undeclared_locality_says_what_to_declare() -> None:
+    """The base must answer WHOLE_VOLUME for a class nobody described, and the plan prints that
+    answer. Told only the kind, a reader cannot tell a stage that truly needs the volume from one
+    whose author never declared anything, and the second costs every case a materialization."""
+    from konfai.data.augmentation.base import DataAugmentation
+    from konfai.data.transform.base import Transform
+    from konfai.utils.dataset import Attribute
+
+    class UndeclaredAugmentation(DataAugmentation):
+        def _state_init(self, index, shape, cache_attribute) -> None:
+            del index, shape, cache_attribute
+
+        def _compute(self, index, a, tensor):
+            del index, a
+            return tensor
+
+        def _inverse(self, *args, **kwargs):
+            return None
+
+    class UndeclaredTransform(Transform):
+        def __call__(self, name, tensor, cache_attribute):
+            del name, cache_attribute
+            return tensor
+
+        def transform_shape(self, group_src, name, shape, cache_attribute):
+            del group_src, name, cache_attribute
+            return shape
+
+    for reason in (
+        UndeclaredAugmentation()._patch_locality(0, 0, Attribute()).reason,
+        UndeclaredTransform().patch_locality(Attribute()).reason,
+    ):
+        assert reason is not None, "the plan would print the kind with no way to act on it"
+        assert "locality" in reason

@@ -221,7 +221,10 @@ _DATASET_BYTES = 2 * len(_CASES) * 512 * data_manager.samples._CACHE_ELEMENT_BYT
 def _make_train(memory_budget: str | float | None) -> DataTrain:
     """A DataTrain with an injected, header-free prepared dataset (no disk, no config file)."""
     data = DataTrain(augmentations=None, memory_budget=memory_budget)
-    managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
+    managers = {
+        group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE), spatial_shape=list(_GROUP_SHAPE[1:])) for _ in _CASES]
+        for group in ("CT", "SEG")
+    }
     data._managers = managers  # type: ignore[assignment]
     data._validation_managers = {}
     data.case_names = list(_CASES)
@@ -244,7 +247,10 @@ def test_estimate_counts_one_copy_per_augmentation_draw() -> None:
         memory_budget=None,
         validation=None,
     )
-    managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
+    managers = {
+        group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE), spatial_shape=list(_GROUP_SHAPE[1:])) for _ in _CASES]
+        for group in ("CT", "SEG")
+    }
     data._managers = managers  # type: ignore[assignment]
     data._validation_managers = {}
     data.case_names = list(_CASES)
@@ -293,7 +299,7 @@ def test_one_pass_workflows_never_cache_whatever_the_budget() -> None:
         DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b"),
         DataMetric(memory_budget=f"{_DATASET_BYTES * 100}b"),
     ):
-        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
+        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2], spatial_shape=[2, 2, 2])]}  # type: ignore[assignment]
         data._validation_managers = {}
         data.case_names = ["case_a"]
         data._validation_names = []
@@ -793,3 +799,21 @@ def test_a_machine_budget_the_process_has_already_spent_leaves_nothing(
     handing the sizing a figure below zero to divide by."""
     monkeypatch.setattr(budget, "resident_bytes", lambda: 8 << 30)
     assert budget.MemoryBudget(1 << 30, "auto", shared_across_ranks=True).work_bytes(1) == 0.0
+
+
+def test_the_estimate_counts_the_larger_of_the_stored_and_the_landed_shape() -> None:
+    """A cache holds the chain's output, and the process holds what reading each case left behind.
+
+    A chain that GROWS its case is under-counted on the stored shape, and one that shrinks it is not
+    counted on the landed shape either: a 3 mm resample of a 1 mm case caches 1.1 MiB per case while
+    the process grows by 15.9, about what the case occupies on disk.
+    """
+    for landed, expected in (([extent // 2 for extent in _GROUP_SHAPE[1:]], 512), ([16, 16, 16], 4096)):
+        data = DataTrain(augmentations={}, memory_budget=None, validation=None)
+        data._managers = {  # type: ignore[assignment]
+            "CT": [SimpleNamespace(base_shape=list(_GROUP_SHAPE), spatial_shape=list(landed)) for _ in _CASES]
+        }
+        data._validation_managers = {}
+        data.case_names = list(_CASES)
+        data._validation_names = []
+        assert data._estimate_cached_bytes() == len(_CASES) * expected * data_manager.samples._CACHE_ELEMENT_BYTES
