@@ -136,3 +136,15 @@ def test_fireants_refuses_a_registration_with_no_stage_at_all() -> None:
 
     with pytest.raises(ValueError, match="leaves nothing to optimise"):
         RegistrationNet(linear_method="none", deformable_method="none")
+
+
+def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
+    # Every shipped IMPACT preset turns half precision on; on the CPU the feature model's pooling has no
+    # half-precision kernel, so a run placed there with --cpu died in the first layer.
+    text = '(ImpactGPU 0)\n(ImpactUseMixedPrecision "true" "true")\n(Metric "Impact")'
+
+    cpu = ElastixEngine._apply_map_overrides(text, {}, [], -1)
+    gpu = ElastixEngine._apply_map_overrides(text, {}, [], 1)
+
+    assert '(ImpactUseMixedPrecision "false")' in cpu and "(ImpactGPU -1)" in cpu
+    assert '(ImpactUseMixedPrecision "true" "true")' in gpu and "(ImpactGPU 1)" in gpu

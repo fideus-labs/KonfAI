@@ -185,8 +185,9 @@ class ElastixEngine:
         ``per_token`` maps an elastix key (or the ``ImpactSubsetFeatures`` prefix) to a value replacing
         **each** existing token, preserving per-resolution / per-model multiplicity. ``exact`` entries (from
         ``parameter_overrides``, ``Key=value text``) replace the whole value verbatim and win over the named
-        knobs. Overrides only REPLACE keys already present, never inject. ``global_only`` (matrix mode) drops
-        ``max_iterations`` / ``subset_features`` (the matrix already sets those per cell).
+        knobs. A named knob only REPLACES a key the map already has; an ``exact`` entry the map lacks is
+        appended (``_apply_map_overrides``). ``global_only`` (matrix mode) drops ``max_iterations`` /
+        ``subset_features`` (the matrix already sets those per cell).
         """
         per_token: dict[str, str] = {}
         if not global_only and self._max_iterations > 0:
@@ -211,6 +212,10 @@ class ElastixEngine:
     ) -> str:
         """Patch a parameter map: set ImpactGPU to the device, apply exact key overrides, replace each token
         of a per-token knob (preserving multiplicity), and warn for a requested key absent from the map.
+
+        On the CPU (``device_index`` below 0) ``ImpactUseMixedPrecision`` is forced to ``"false"``: half
+        precision has no 3-D pooling on the CPU, so a preset written for a GPU (every shipped IMPACT
+        preset turns it on) died in the feature model's first layer.
         """
         entry_pattern = re.compile(r"^(\s*)\((\S+)((?:\s+[^)]*)?)\)\s*$")
         requested = set(per_token) | {key for key, _ in exact}
@@ -222,6 +227,8 @@ class ElastixEngine:
                 indent, key, values = match.group(1), match.group(2), match.group(3)
                 if key == "ImpactGPU":
                     line = f"{indent}(ImpactGPU {device_index})"
+                elif key == "ImpactUseMixedPrecision" and device_index < 0:
+                    line = f'{indent}(ImpactUseMixedPrecision "false")'
                 else:
                     exact_value = next((value for k, value in exact if k == key), None)
                     if exact_value is not None:
