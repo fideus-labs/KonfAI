@@ -219,6 +219,10 @@ class Measure:
             tail = list(_tail(self._losses, n))
             return float(np.nanmean(tail)) if tail else float("nan")
 
+        def learns(self, n: int) -> bool:
+            """Whether any of the last ``n`` minimized values is finite."""
+            return any(math.isfinite(loss) for loss in _tail(self._losses, n))
+
         def weights_mean(self, n: int) -> float:
             return float(np.nanmean(_tail(self._weight, n))) if n > 0 else self._mean_weight.mean()
 
@@ -519,6 +523,12 @@ class Measure:
         """The minimized value per criterion, lower is better whatever the criterion reports: what a
         plateau schedule steps on and what selects a checkpoint."""
         return {name: record.loss_mean(n) for name, record in self._read(n)}
+
+    def learns(self, n: int) -> bool:
+        """Whether any loss minimized a finite value over the last ``n`` steps: ``False`` once every step
+        of the window is NaN or infinite. A window not yet full is not judged, and metrics do not count."""
+        losses = [record for _, record in self._read(n) if record.is_loss]
+        return not losses or any(record.learns(n) for record in losses)
 
     def format_loss(self, is_loss: bool, n: int) -> dict[str, tuple[float, float, float]]:
         """Per criterion: the mean weight, the reported value (the board's), the minimized value."""

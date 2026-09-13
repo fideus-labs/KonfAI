@@ -16,7 +16,8 @@
 
 """TRAIN on the shipped Segmentation example: where an epoch goes, by the trainer's own clocks.
 
-    python benchmarks/perf/bench_train_epoch.py [--epochs 2] [--force] [--quick] [--cprofile] [--variants fp32,autocast]
+    python benchmarks/perf/bench_train_epoch.py [--epochs 2] [--force] [--quick] [--cprofile]
+                                                [--variants fp32,autocast,cudnn,compile]
 
 The CLI runs on a scratch copy of ``examples/Segmentation`` whose ``Config.yml`` is rewritten to the
 requested epoch count and, per variant, ``autocast``. Every ``[KonfAI] epoch`` line is parsed (one per
@@ -25,6 +26,9 @@ too; the process tree's peak RSS and the GPU's memory delta are sampled from out
 only if it exits 0, writes a checkpoint and prints a finite loss. ``--cprofile`` runs the child under
 ``cProfile`` once (a diagnostic: it slows the host side) and reports the share of the data path and
 of the criteria in host time.
+
+``cudnn`` and ``compile`` train over autocast with ``cudnn_benchmark`` or ``torch_compile`` set; a compiled
+run's first epoch carries its compilation, so its last epoch is the steady state to compare.
 """
 
 from __future__ import annotations
@@ -52,14 +56,26 @@ _PART = re.compile(r"(?P<phase>[a-z()+]+) (?P<value>[0-9.]+)")
 _LOSS = re.compile(r"(?:loss|Loss)[^0-9\-]*(-?[0-9]+\.[0-9]+(?:e-?[0-9]+)?)")
 
 
-def rewrite_config(path: Path, *, epochs: int, autocast: bool) -> None:
+#: What each variant sets in ``Config.yml`` beside the epoch count.
+VARIANT_KEYS: dict[str, dict[str, str]] = {
+    "fp32": {"autocast": "false"},
+    "autocast": {"autocast": "true"},
+    "cudnn": {"autocast": "true", "cudnn_benchmark": "true"},
+    "compile": {"autocast": "true", "torch_compile": "true"},
+}
+
+
+def rewrite_config(path: Path, *, epochs: int, variant: str) -> None:
     text = path.read_text()
     text, n_epochs = re.subn(r"^(\s*epochs:\s*)\d+", rf"\g<1>{epochs}", text, count=1, flags=re.M)
-    text, n_autocast = re.subn(
-        r"^(\s*autocast:\s*)\w+", rf"\g<1>{'true' if autocast else 'false'}", text, count=1, flags=re.M
-    )
-    if not n_epochs or not n_autocast:
-        raise SystemExit(f"[perf] could not rewrite epochs/autocast in {path}")
+    if not n_epochs:
+        raise SystemExit(f"[perf] could not rewrite epochs in {path}")
+    for key, value in VARIANT_KEYS[variant].items():
+        text, n = re.subn(rf"^(\s*{key}:\s*)\w+", rf"\g<1>{value}", text, count=1, flags=re.M)
+        if not n:  # a key the example does not spell: set beside autocast, at its indent
+            text, n = re.subn(r"^(\s*)(autocast:.*)$", rf"\g<1>\g<2>\n\g<1>{key}: {value}", text, count=1, flags=re.M)
+        if not n:
+            raise SystemExit(f"[perf] could not set {key} in {path}")
     path.write_text(text)
 
 
@@ -115,7 +131,7 @@ def train_once(copy: Path, scratch: Path, variant: str, *, gpu: bool, cprofile: 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--variants", default="fp32,autocast")
+    parser.add_argument("--variants", default="fp32,autocast,cudnn,compile")
     parser.add_argument("--repeats", type=int, default=1, help="epochs are the repeats here; keep 1")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--quick", action="store_true")
@@ -133,13 +149,15 @@ def main() -> None:
     gpu = torch.cuda.is_available() and not args.cpu
     epochs = 1 if args.quick else args.epochs
     variants = ["fp32"] if args.quick else [v.strip() for v in args.variants.split(",") if v.strip()]
+    if unknown := sorted(set(variants) - set(VARIANT_KEYS)):
+        raise SystemExit(f"[perf] unknown variants {unknown}; known: {', '.join(VARIANT_KEYS)}")
     scratch = Path(tempfile.mkdtemp(prefix="konfai_perf_train_"))
 
     result: dict[str, object] = {"gate_warnings": gate.warnings, "epochs": epochs, "gpu": gpu, "scratch": str(scratch)}
     metrics: dict[str, float] = {}
     for variant in variants:
         copy = copy_example("Segmentation", scratch / variant)
-        rewrite_config(copy / "Config.yml", epochs=epochs, autocast=variant == "autocast")
+        rewrite_config(copy / "Config.yml", epochs=epochs, variant=variant)
         run = train_once(copy, scratch, variant, gpu=gpu, cprofile=False)
         lines = epoch_lines(run.output)
         checkpoints = (
@@ -199,7 +217,7 @@ def main() -> None:
     result["headline"] = (
         f"epoch {first} {metrics.get(last_epoch, 0.0)} s (criteria {metrics[f'criteria_s_{first}']}, validation "
         f"{metrics[f'validation_s_{first}']}, wait(data) {metrics[f'wait_data_s_{first}']})"
-        + (f" | autocast {metrics.get(f'epoch{epochs}_wall_s_autocast', 0.0)} s" if "autocast" in variants else "")
+        + "".join(f" | {v} {metrics.get(f'epoch{epochs}_wall_s_{v}', 0.0)} s" for v in variants[1:])
         + f" | startup {metrics[f'startup_s_{first}']} s | RSS {metrics[f'peak_rss_gib_{first}']} GiB"
     )
     path = write_result("train_epoch", result, fp=fp)

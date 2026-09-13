@@ -636,6 +636,13 @@ class _Trainer:
                     if (self.it) % self.it_validation == 0:
                         with clock.phase("telemetry"):
                             loss = self._train_log(batch_sample)
+                            # The networks whose every loss of the window is NaN or infinite: nothing left
+                            # to step on. Read here, on the training window, before the validation's log.
+                            stalled = [
+                                name
+                                for name, network in self.model.module.get_networks().items()
+                                if network.measure is not None and not network.measure.learns(self.it_validation)
+                            ]
 
                         if self.dataloader_validation is not None:
                             with clock.phase("validation"):
@@ -660,6 +667,16 @@ class _Trainer:
                             # Stop once the schedulers have decayed the learning rate to zero.
                             optimizer = self.model.module.optimizer
                             if not stop and optimizer is not None and optimizer.param_groups[0]["lr"] <= 0:
+                                self.early_stopping.stop()
+                                stop = True
+                            if not stop and stalled:
+                                print(
+                                    f"[KonfAI] Training stopped at iteration {self.it}: no loss of"
+                                    f" {', '.join(stalled)} was finite over the last {self.it_validation} step(s)."
+                                    " Under autocast the forward overflowed float16; add a normalization to the"
+                                    " network, lower the learning rate, or set autocast: false.",
+                                    flush=True,
+                                )
                                 self.early_stopping.stop()
                                 stop = True
 
@@ -1051,6 +1068,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         it_validation (int | None): Validation interval.
         it_lr_update (int | None): Learning rate update interval.
         autocast (bool): Enable AMP training.
+        cudnn_benchmark (bool): Let cuDNN benchmark its kernels under ``manual_seed``: faster, no bit-for-bit replay.
+        torch_compile (bool): Compile the graph walk with torch.compile; the first steps pay the compilation.
         gradient_checkpoints (list[str] | None): Modules to use gradient checkpointing on.
         gpu_checkpoints (list[str] | None): Modules to pin on specific GPUs.
         ema_decay (float): EMA decay factor.
@@ -1070,6 +1089,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         it_lr_update: int | None = None,
         autocast: bool = False,
         channels_last: bool = False,
+        cudnn_benchmark: bool = False,
+        torch_compile: bool = False,
         gradient_checkpoints: list[str] | None = None,
         gpu_checkpoints: list[str] | None = None,
         ema_decay: float = 0,
@@ -1085,6 +1106,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self._capture_vram_patch_template(dataset.patch)
         self.autocast = autocast
         self.channels_last = channels_last
+        self.cudnn_benchmark = cudnn_benchmark
+        self.torch_compile = torch_compile
         self.epochs = epochs
         self.epoch = 0
         self._resume_state: dict[str, Any] | None = None
@@ -1252,6 +1275,10 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
         if self.channels_last:
             Network.set_channels_last(model)
+        if self.torch_compile:
+            eager = self.model.compile_walk()
+            if eager is not None and global_rank == 0:
+                print(f"[KonfAI] torch_compile is set, but the graph walk stays eager: {eager}.", flush=True)
         if dist.is_initialized():
             model = DDP(model, **_ddp_kwargs(model, local_rank, self.size))
         else:

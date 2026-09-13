@@ -298,6 +298,7 @@ so it belongs in the chain that needs it rather than in the read.
 | `name` | string | `TRANSFORM_01` | Names the run folder under `--transforms-dir`. |
 | `on_fallback` | `allow` \| `warn` \| `error` | `warn` | What a whole-volume case means. |
 | `manual_seed` | int | `0` | The seed every `Expand` in the run draws from. Same seed, same copies, which is what makes a resumed run redraw what it already wrote. |
+| `cudnn_benchmark` | bool | `false` | Lets cuDNN benchmark its convolution kernels even under `manual_seed` (a TRANSFORM always carries one), trading a bit-for-bit replay for speed on a chain that runs a network on the GPU. |
 | `Dataset` | mapping | `DataTransform()` | Sources, chains, budget. |
 
 Under `Dataset:`:

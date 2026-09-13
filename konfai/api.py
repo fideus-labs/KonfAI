@@ -273,6 +273,7 @@ def _transform_tree(
     memory_budget: str | int | None,
     on_fallback: str,
     manual_seed: int,
+    cudnn_benchmark: bool,
     dataset_options: Mapping[str, object] | None,
 ) -> dict:
     groups_src: dict[str, object] = {}
@@ -291,6 +292,7 @@ def _transform_tree(
             "name": name,
             "on_fallback": on_fallback,
             "manual_seed": manual_seed,
+            "cudnn_benchmark": cudnn_benchmark,
             "Dataset": dataset_tree,
         }
     }
@@ -304,6 +306,7 @@ def transform(
     memory_budget: str | int | None = None,
     on_fallback: str = "warn",
     manual_seed: int = 0,
+    cudnn_benchmark: bool = False,
     dataset_options: Mapping[str, object] | None = None,
     gpu: Sequence[int] | None = None,
     cpu: int = 1,
@@ -317,7 +320,9 @@ def transform(
     (``[Resample(...), Write(dataset='./Out:mha')]``), of one-entry mappings, or the equivalent
     mapping tree. Every chain ends in a ``Write``. GPU is opt-in (``gpu=[0]``).
     """
-    tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
+    tree = _transform_tree(
+        name, datasets, chains, memory_budget, on_fallback, manual_seed, cudnn_benchmark, dataset_options
+    )
     from konfai.transformer import build_transform
 
     workspace, config_name = _launch(
@@ -344,6 +349,7 @@ def plan_transform(
     memory_budget: str | int | None = None,
     on_fallback: str = "warn",
     manual_seed: int = 0,
+    cudnn_benchmark: bool = False,
     dataset_options: Mapping[str, object] | None = None,
     gpu: Sequence[int] | None = None,
     cpu: int = 1,
@@ -353,7 +359,9 @@ def plan_transform(
 ) -> "TransformPlan":
     """:func:`transform`'s dry-run twin: build, plan, print, return the plan; the run never starts.
     The ``TransformPlan`` is the run's own routing (STREAM/LOAD/WHOLE-VOLUME/SKIP/REDUCE)."""
-    tree = _transform_tree(name, datasets, chains, memory_budget, on_fallback, manual_seed, dataset_options)
+    tree = _transform_tree(
+        name, datasets, chains, memory_budget, on_fallback, manual_seed, cudnn_benchmark, dataset_options
+    )
     from konfai.transformer import plan_transform as _plan_transform
 
     ranks = len(gpu or []) or cpu
@@ -592,6 +600,8 @@ def train_model(
     validation: float | str | None = 0.2,
     autocast: bool = False,
     channels_last: bool = False,
+    cudnn_benchmark: bool = False,
+    torch_compile: bool = False,
     name: str = "MODEL",
     manual_seed: int | None = None,
     gpu: Sequence[int] | None = None,
@@ -664,6 +674,8 @@ def train_model(
                 "epochs": epochs,
                 "autocast": autocast,
                 "channels_last": channels_last,
+                "cudnn_benchmark": cudnn_benchmark,
+                "torch_compile": torch_compile,
                 "save_checkpoint_mode": "BEST",
             }
         }

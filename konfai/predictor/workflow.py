@@ -67,6 +67,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         dataset (konfai.data.data_manager.DataPrediction): Dataset manager for prediction data.
         combine_classpath (str): Path to the reduction strategy (e.g., "Mean").
         autocast (bool): Whether to enable AMP inference.
+        cudnn_benchmark (bool): Let cuDNN benchmark its kernels under ``manual_seed``: faster, no bit-for-bit replay.
+        torch_compile (bool): Compile the model's graph walk with torch.compile; the first batches pay the compilation.
         outputs_dataset (dict[str, OutputDataset]): Mapping from layer names to output writers.
         data_log (list[str] | None): List of tensors to log during inference.
     """
@@ -81,6 +83,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         gpu_checkpoints: list[str] | None = None,
         autocast: bool = False,
         channels_last: bool = False,
+        cudnn_benchmark: bool = False,
+        torch_compile: bool = False,
         outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default|Default": OutputDatasetLoader()},
         data_log: list[str] | None = None,
         check_training_transforms: bool = True,
@@ -103,6 +107,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
 
         self.autocast = autocast
         self.channels_last = channels_last
+        self.cudnn_benchmark = cudnn_benchmark
+        self.torch_compile = torch_compile
         self.check_training_transforms = check_training_transforms
         self.checkpoint_cache_gib = checkpoint_cache_gib
         with startup_clock().phase("model"):
@@ -325,6 +331,12 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         )
         if self.channels_last:
             Network.set_channels_last(model_composite)
+        if self.torch_compile:
+            # The replicas of an ensemble load their weights into this one model, so one compiled walk
+            # serves them all.
+            eager = self.model_composite._get_model().compile_walk()
+            if eager is not None and global_rank == 0:
+                print(f"[KonfAI] torch_compile is set, but the graph walk stays eager: {eager}.", flush=True)
         if len(cuda_visible_devices()):
             # Co-locate the output writers with the model so their reduction/transforms know the GPU.
             for output_dataset in self.outputs_dataset.values():

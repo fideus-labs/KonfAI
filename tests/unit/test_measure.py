@@ -1312,3 +1312,25 @@ def test_checkpoint_preserves_bounded_measure_history_and_plateau_decisions(tmp_
             network.update_lr()
         assert network.optimizer.param_groups[0]["lr"] == pytest.approx(0.01)
     assert resumed.measure.get_last_values(0) == original.measure.get_last_values(0)
+
+
+def test_a_window_learns_while_any_step_of_its_losses_is_finite() -> None:
+    from konfai.network.network import Measure
+
+    def measure_of(losses, metrics=()):
+        loss = Measure.Loss("CE", "out", "target", 0, True, False)
+        metric = Measure.Loss("Dice", "out", "target", 0, False, False)
+        for value in losses:
+            loss.add(1.0, torch.tensor(value))
+        for value in metrics:
+            metric.add(1.0, torch.tensor(value))
+        measure = object.__new__(Measure)
+        measure._loss = {0: {"out:target:CE": loss, "out:target:Dice": metric}}
+        return measure
+
+    nan, inf = float("nan"), float("inf")
+    assert not measure_of([nan, inf, nan]).learns(3)
+    assert measure_of([nan, 0.5, inf]).learns(3)  # one finite step keeps the window alive
+    assert not measure_of([0.4, nan, nan]).learns(2)  # the window is the last two steps
+    assert measure_of([nan]).learns(3)  # a window not yet full is not judged
+    assert not measure_of([nan, nan], metrics=[0.9, 0.9]).learns(2)  # a finite metric is no loss

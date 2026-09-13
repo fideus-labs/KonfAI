@@ -91,6 +91,14 @@ def seed_all(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def cudnn_flags(manual_seed: int | None, benchmark: bool) -> tuple[bool, bool]:
+    """cuDNN's ``(benchmark, deterministic)`` for a run. A seed makes it deterministic, so the run replays
+    bit for bit, unless the run asks to benchmark: the fastest kernel per shape, and no replay. A run
+    without a seed benchmarks either way."""
+    seeded = manual_seed is not None
+    return not seeded or benchmark, seeded and not benchmark
+
+
 class DistributedObject(ABC):
     """Base class for trainer, predictor, and evaluator distributed workflows."""
 
@@ -101,6 +109,8 @@ class DistributedObject(ABC):
     def __init__(self, name: str) -> None:
         self.dataloader: list[list[DataLoader]]
         self.manual_seed: int | None = None
+        #: Whether cuDNN benchmarks its kernels under ``manual_seed`` too (:func:`cudnn_flags`).
+        self.cudnn_benchmark = False
         self.name = name
         self.size = 1
         #: The launcher's clock, handed over before the ranks start; rank 0 reports it.
@@ -205,8 +215,9 @@ class DistributedObject(ABC):
                 pynvml.nvmlInit()
             if self.manual_seed is not None:
                 seed_all(self.manual_seed * world_size + global_rank)
-            torch.backends.cudnn.benchmark = self.manual_seed is None
-            torch.backends.cudnn.deterministic = self.manual_seed is not None
+            torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = cudnn_flags(
+                self.manual_seed, self.cudnn_benchmark
+            )
             dataloaders = self.rank_dataloaders(global_rank)
             # device_count as well: a CUDA runtime that latched before CUDA_VISIBLE_DEVICES was narrowed
             # keeps is_available() True while the count reads 0.

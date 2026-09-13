@@ -1019,3 +1019,10 @@ def test_run_distributed_app_refuses_a_kwarg_the_entrypoint_does_not_declare() -
     # kwargs and 'command' is the CLI dispatch discriminator only TRAIN/RESUME declares.
     with pytest.raises(Sentinel):
         build(command="PREDICTION")
+
+
+def test_a_seed_makes_cudnn_deterministic_unless_the_run_benchmarks() -> None:
+    assert rt_dist.cudnn_flags(None, False) == (True, False)
+    assert rt_dist.cudnn_flags(7, False) == (False, True)
+    assert rt_dist.cudnn_flags(7, True) == (True, False)
+    assert rt_dist.cudnn_flags(None, True) == (True, False)

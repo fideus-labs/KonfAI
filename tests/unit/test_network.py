@@ -1318,3 +1318,46 @@ def test_accumulation_sync_spans_the_step_and_skips_the_reduction_off_the_bounda
     with untrained.accumulation_sync(ddp):
         pass
     assert ddp.entered == 2
+
+
+class _NeverRuns(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        raise AssertionError("the walk ran past the last requested output")
+
+
+class _WalkNet(Network):
+    def __init__(self) -> None:
+        super().__init__(in_channels=1)
+        self.add_module("A", _MulConst(3.0), in_branch=[0], out_branch=[0])
+        self.add_module("B", _MulConst(2.0), in_branch=[0], out_branch=[0])
+        self.add_module("C", _NeverRuns(), in_branch=[0], out_branch=[0])
+
+
+def test_the_compiled_walk_hands_get_layers_what_the_eager_walk_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    monkeypatch.setattr(torch, "compile", lambda function: function)  # the walk's logic, not inductor's
+    net = _WalkNet()
+    x = torch.ones(1, 1, 2)
+
+    eager = [(name, layer) for name, layer, _ in net.get_layers([x], ["B", "A"])]
+    assert net.compile_walk() is None and net._walk is not None
+    walked = [(name, layer) for name, layer, _ in net.get_layers([x], ["B", "A"])]
+
+    assert [name for name, _ in walked] == [name for name, _ in eager] == ["A", "B"]
+    assert all(torch.equal(a, b) for (_, a), (_, b) in zip(walked, eager, strict=True))
+
+
+def test_a_graph_the_compiled_walk_cannot_serve_stays_eager_and_says_why() -> None:
+    class _ReadsAttributes(torch.nn.Module):
+        accepts_attributes = True
+
+        def forward(self, x: torch.Tensor, attributes: Any = None) -> torch.Tensor:
+            return x
+
+    reading = _WalkNet()
+    reading.add_module("R", _ReadsAttributes(), in_branch=[0], out_branch=[0])
+    assert "attributes" in (reading.compile_walk() or "") and reading._walk is None
+
+    patched = _WalkNet()
+    patched.patch = cast(Any, SimpleNamespace())
+    assert "ModelPatch" in (patched.compile_walk() or "") and patched._walk is None

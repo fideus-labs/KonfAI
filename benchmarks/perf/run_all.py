@@ -36,7 +36,17 @@ from pathlib import Path
 
 from harness import PERF_DIR, fingerprint, machine_gate, results_dir
 
-BENCHES = ("startup", "train_step", "train_epoch", "predict", "evaluate", "transform", "tests")
+BENCHES = (
+    "startup",
+    "train_step",
+    "train_epoch",
+    "resume",
+    "predict",
+    "evaluate",
+    "transform",
+    "transform_routes",
+    "tests",
+)
 
 
 def newest_result(bench: str, since: float) -> Path | None:

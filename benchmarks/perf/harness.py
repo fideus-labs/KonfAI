@@ -356,8 +356,11 @@ def run_cli(
 ) -> CliRun:
     """Run a KonfAI command line, timing its wall and sampling its tree's RSS and the GPU's memory."""
     merged = dict(os.environ)
-    if env:
-        merged.update(env)
+    for key, value in (env or {}).items():
+        if value == "":
+            merged.pop(key, None)  # an empty value unsets: libgomp refuses an empty OMP_NUM_THREADS
+        else:
+            merged[key] = value
     gpu = GpuSampler()
     gpu.start()
     start = time.perf_counter()

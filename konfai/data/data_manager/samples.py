@@ -162,6 +162,10 @@ class DatasetIter(data.Dataset):
         # A one-pass workflow never re-reads what a sample's tensor could alias, so its items may
         # batch as views; a training loader's items may alias the epoch-spanning cache and may not.
         self.single_pass = single_pass
+        if single_pass:
+            for managers in data.values():
+                for manager in managers:
+                    manager.sequential_patches = True
         self.patch_size = patch_size
         self.overlap = overlap
         self.groups_src = groups_src

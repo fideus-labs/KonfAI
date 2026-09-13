@@ -32,6 +32,8 @@ from konfai.data.patching.budget import (
     _STREAM_STAT_KEYS,
     _STREAM_STATS,
     _UNRESOLVED,
+    CASE_ELEMENT_BYTES,
+    SWEEP_SLAB_ROWS,
     RegionGrowth,
     device_signals_oom,
     open_held_meter,
@@ -85,6 +87,14 @@ from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, PatchError
 from konfai.utils.runtime import return_freed_heap
 from konfai.utils.utils import env_flag
+
+#: The most a sequential reader's landed slab holds, whatever its rows.
+_SLAB_BYTES = 256 << 20
+
+
+def _covers(region: tuple[slice, ...], target: tuple[slice, ...]) -> bool:
+    """Whether ``region`` holds all of ``target``."""
+    return all(r.start <= t.start and t.stop <= r.stop for r, t in zip(region, target, strict=True))
 
 
 class DatasetManager:
@@ -182,6 +192,10 @@ class DatasetManager:
         self._stream_ok: set[tuple[int, bool]] = set()
         self._stream_evolved: dict[tuple[int, bool], Attribute] = {}
         self._stream_attributes_persisted: set[int] = set()
+        #: Set by a one-pass reader, whose patches come in grid order: the streamed route then replays a
+        #: slab of rows once per copy and cuts the patches that fall in it (:meth:`_slab_target`).
+        self.sequential_patches = False
+        self._landed_slabs: dict[int, tuple[_PatchStreamSource, tuple[slice, ...], torch.Tensor, Attribute]] = {}
         # Whose chain state the stages' per-case records hold: the stream source last re-folded
         # for a patch replay (_refold_copy_records), or None once any fold or whole-volume call
         # moved them.
@@ -247,6 +261,7 @@ class DatasetManager:
         self._stream_ok.clear()
         self._stream_evolved.clear()
         self._stream_attributes_persisted.clear()
+        self._landed_slabs.clear()
         self.total_augmentations = 0
         if self._expand is not None:
             self._draw_expand_copies(reset_state)
@@ -1140,6 +1155,7 @@ class DatasetManager:
         return self._sweep_failure is not None
 
     def _invalidate_stream_plans(self) -> None:
+        self._landed_slabs.clear()
         self._patch_stream_sources.clear()
         self._stream_refusals.clear()
         self._stream_ok.clear()
@@ -1603,20 +1619,45 @@ class DatasetManager:
         if self._expand is not None and self._records_source is not stream_source:
             self._refold_copy_records(a, stream_source)
         target_slices = self._region_target(index, a, is_input)
-        # Each patch re-runs the chain from the state the whole-volume pass started from: the case as
-        # stored (plus planned stats), never the live attribute: that one carries the chain's own
-        # output.
-        persist = a not in self._stream_attributes_persisted
-        tensor, cache_attribute, keys_before = self._replay_streamed_region(
-            stream_source,
-            target_slices,
-            Attribute(self.cache_attributes_bak[a]),
-            self.cache_attributes[a] if persist else None,
+        held = self._landed_slabs.get(a)
+        if held is None or held[0] is not stream_source or not _covers(held[1], target_slices):
+            region = self._slab_target(a, target_slices) if self.sequential_patches else target_slices
+            # Each region re-runs the chain from the state the whole-volume pass started from: the case
+            # as stored (plus planned stats), never the live attribute: that one carries the chain's
+            # own output.
+            persist = a not in self._stream_attributes_persisted
+            landed, cache_attribute, keys_before = self._replay_streamed_region(
+                stream_source,
+                region,
+                Attribute(self.cache_attributes_bak[a]),
+                self.cache_attributes[a] if persist else None,
+            )
+            if persist:
+                self._persist_stream_attributes(a, cache_attribute, keys_before)
+            held = (stream_source, region, landed, cache_attribute)
+            if self.sequential_patches:
+                self._landed_slabs[a] = held
+        _, region, landed, cache_attribute = held
+        lead = (slice(None),) * (landed.dim() - len(target_slices))
+        cut = tuple(slice(t.start - r.start, t.stop - r.start) for t, r in zip(target_slices, region, strict=True))
+        # A slab outlives the patch cut from it: the patch is a copy, so nothing done to it reaches the next.
+        tensor = landed[(*lead, *cut)].clone() if self.sequential_patches else landed[(*lead, *cut)]
+        return self._finalize_stream_patch(tensor, index, a, is_input), cache_attribute
+
+    def _slab_target(self, a: int, target: tuple[slice, ...]) -> tuple[slice, ...]:
+        """The slab a sequential reader replays for ``target``: from its first row along the sweep axis,
+        ``SWEEP_SLAB_ROWS`` rows (at least the target's, at most what ``_SLAB_BYTES`` holds, never past
+        the volume), whole on every other axis, so the patches that follow in grid order fall in it."""
+        spatial = [int(extent) for extent in self.shapes[a]]
+        axis = self.patch.get_sweep_axis(a)
+        plane = int(np.prod([e for i, e in enumerate(spatial) if i != axis], dtype=np.int64))
+        plane_bytes = max(1, plane * max(1, int(self.base_shape[0])) * CASE_ELEMENT_BYTES)
+        rows = max(target[axis].stop - target[axis].start, min(SWEEP_SLAB_ROWS, _SLAB_BYTES // plane_bytes))
+        start = target[axis].start
+        return tuple(
+            slice(start, min(extent, start + rows)) if i == axis else slice(0, extent)
+            for i, extent in enumerate(spatial)
         )
-        tensor = self._finalize_stream_patch(tensor, index, a, is_input)
-        if persist:
-            self._persist_stream_attributes(a, cache_attribute, keys_before)
-        return tensor, cache_attribute
 
     def _refold_copy_records(self, a: int, stream_source: _PatchStreamSource) -> None:
         """Re-fold copy ``a``'s chain state before replaying a region of it.
@@ -1845,6 +1886,7 @@ class DatasetManager:
         )
 
     def unload(self) -> None:
+        self._landed_slabs.clear()
         self.data.clear()
         self.augmented_data.clear()
         self.loaded = False
