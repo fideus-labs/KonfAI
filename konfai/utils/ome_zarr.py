@@ -832,6 +832,10 @@ def write_ome_zarr(
     typed ``displacement`` (NGFF RFC-5), so a registration DVF is self-describing instead of an
     anonymous 3-channel image. The NGFF version follows from that flag and is NOT a parameter:
     RFC-5 axis types exist only from 0.6.
+
+    ``attributes`` is the konfai sidecar, for what NGFF cannot express: the ``Direction`` matrix
+    first. A store written without one reads back axis-aligned, whatever grid its array came from,
+    and a registration run on such a pair returns its field in that axis-aligned frame.
     """
     if scale_factors and uri.is_uri(store_path):
         raise DatasetManagerError(
