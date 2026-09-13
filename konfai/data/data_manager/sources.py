@@ -34,9 +34,9 @@ from konfai import konfai_state
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chains
 from konfai.data.data_manager.order import WindowedCaseSampler, _balanced_case_partitions, _interleaved_case_entries
-from konfai.data.data_manager.samples import _CACHE_ELEMENT_BYTES, DatasetIter, collate_konfai
+from konfai.data.data_manager.samples import DatasetIter, collate_konfai
 from konfai.data.data_manager.subset import PredictionSubset, Subset
-from konfai.data.patching import DatasetManager, DatasetPatch
+from konfai.data.patching import CASE_ELEMENT_BYTES, DatasetManager, DatasetPatch
 from konfai.data.transform import (
     Expand,
     Reduce,
@@ -65,6 +65,20 @@ class DataSources(ABC):
     :class:`~konfai.data.patching.DatasetManager` per (destination group, case), all resolved by
     :meth:`prepare`. :class:`Data` adds the batch-loading mechanics.
     """
+
+    def allocation_scales(self) -> tuple[int, int]:
+        """What a read brings in, and what one step allocates over and over, in bytes.
+
+        The pair :func:`~konfai.utils.runtime.bound_allocator_growth` weighs: it keeps a freed volume
+        out of the heap only where a threshold fits between the two. The base answers with the same
+        figure twice, which is the honest answer for a workflow whose every step reads a volume: no
+        room, no pinning.
+        """
+        managers = [manager for group in (self._managers or {}).values() for manager in group]
+        if not managers:
+            return 0, 0
+        volume = min(int(np.prod(manager.base_shape, dtype=np.int64)) for manager in managers) * CASE_ELEMENT_BYTES
+        return volume, volume
 
     @abstractmethod
     def __init__(
@@ -521,27 +535,26 @@ class Data(DataSources):
     def _estimate_cached_bytes(self) -> int:
         """Raw in-RAM size of the whole prepared dataset, from headers alone (no voxel read). Sums
         ``prod(shape) x 4`` over every case of every source group, once per COPY the cache holds (see
-        ``_CACHE_ELEMENT_BYTES``): the base tensor plus one per augmentation draw, which validation
+        ``CASE_ELEMENT_BYTES``): the base tensor plus one per augmentation draw, which validation
         only makes when ``validation_augmentations``. It ignores the allocator's arenas, which settle
         about a third higher than the tensors counted here.
 
-        The larger of the stored and the landed shape. A cache holds the transformed case
-        (:meth:`DatasetManager._load` appends the chain's output), so a chain that GROWS its case is
-        under-counted on the stored shape alone. A chain that shrinks it is not counted on the landed
-        shape either: measured on a 3 mm resample of a 1 mm case, the cache holds 1.1 MiB per case and
-        the process grows by 15.9, about what the case occupies on disk, because reading and
-        transforming each case leaves that much in the allocator's arenas. The channel count stays the
-        stored one, which no fold tracks."""
-        return self._estimate_bytes()[0]
+        The LANDED shape, which is what a cache holds: :meth:`DatasetManager._load` appends the
+        chain's output, not its input. Measured on a 3 mm resample of a 1 mm case, per case held for
+        the life of the run: 2.4 MiB against the 2.5 counted here
+        (:func:`~konfai.utils.runtime.bound_allocator_growth` is what makes the two agree; without it
+        the volume a read frees stays in the heap and the process holds 6.5). The channel count stays
+        the stored one, which no fold tracks."""
+        return self._estimate_bytes()[1]
 
-    def _estimate_bytes(self) -> tuple[int, int, int]:
-        """What the cache is charged, what the cases weigh as stored, what the chain lands them at.
+    def _estimate_bytes(self) -> tuple[int, int]:
+        """What the cases weigh as stored, and what the chain lands them at.
 
-        The charge is the first; the other two are reported, because a chain that shrinks its cases
-        makes them differ by a large factor and the reader cannot otherwise see that a coarser target
-        spacing, or a budget raised to the landed figure, brings the cohort into the cache.
+        The cache holds, and is charged, the landed figure. The stored one is reported beside it,
+        because a chain that shrinks its cases makes the two differ by a large factor and the reader
+        would otherwise read the decision against the size on disk.
         """
-        charged = stored_total = landed_total = 0
+        stored_total = landed_total = 0
         for prepared, copies in (
             (self._managers, Data._get_nb_augmentation(self._get_data_augmentations(True))),
             (
@@ -553,10 +566,54 @@ class Data(DataSources):
                 for manager in managers:
                     stored = int(np.prod(manager.base_shape, dtype=np.int64))
                     landed = int(manager.base_shape[0]) * int(np.prod(manager.spatial_shape, dtype=np.int64))
-                    charged += max(stored, landed) * _CACHE_ELEMENT_BYTES * copies
-                    stored_total += stored * _CACHE_ELEMENT_BYTES * copies
-                    landed_total += landed * _CACHE_ELEMENT_BYTES * copies
-        return charged, stored_total, landed_total
+                    stored_total += stored * CASE_ELEMENT_BYTES * copies
+                    landed_total += landed * CASE_ELEMENT_BYTES * copies
+        return stored_total, landed_total
+
+    def allocation_scales(self) -> tuple[int, int]:
+        """What a read brings in, and what one step allocates over and over.
+
+        The pair :func:`~konfai.utils.runtime.bound_allocator_growth` needs: a threshold between
+        them keeps a freed volume out of the heap without charging the step. A step here is a
+        batch of patches, and a read brings in one case of one group, as stored: the smallest one."""
+        managers = [
+            manager
+            for prepared in (self._managers, self._validation_managers)
+            for group in (prepared or {}).values()
+            for manager in group
+        ]
+        if not managers:
+            return 0, self._step_bytes()
+        volume = min(int(np.prod(manager.base_shape, dtype=np.int64)) for manager in managers) * CASE_ELEMENT_BYTES
+        return volume, self._step_bytes()
+
+    def _step_bytes(self) -> int:
+        """What one step allocates over and over: a batch of patches, pinned or not.
+
+        An upper bound is what it is for: a threshold under it would send every step through its own
+        mapping. The patch size is the configured one where there is one, and the largest case's
+        spatial extent where there is not.
+        """
+        patch_size = None if self.patch is None else self.patch.patch_size
+        if patch_size and all(extent > 0 for extent in patch_size):
+            voxels = int(np.prod(patch_size, dtype=np.int64))
+        else:
+            voxels = max(
+                (
+                    int(np.prod(manager.spatial_shape, dtype=np.int64))
+                    for managers in (self._managers or {}).values()
+                    for manager in managers
+                ),
+                default=0,
+            )
+        # A 2.5D stack carries its neighbours as channels, so a patch is that many times its extent.
+        stacked = 1 if self.patch is None else max(1, self.patch.extend_slice + 1)
+        channels = max(
+            (int(manager.base_shape[0]) for managers in (self._managers or {}).values() for manager in managers),
+            default=1,
+        )
+        # Twice a batch: the loader prefetches one while the step holds another, and pinning copies it.
+        return voxels * channels * stacked * CASE_ELEMENT_BYTES * max(1, self.batch_size) * 2
 
     #: Whether the workflow reads each case exactly once. False for training, whose epochs re-read
     #: every case; True for prediction and evaluation. A one-pass workflow never re-reads a cache, so
@@ -576,7 +633,7 @@ class Data(DataSources):
             return
         world_size = max(1, world_size)
         n_cases = len(self.case_names) + len(self._validation_names)
-        dataset_bytes, stored_bytes, landed_bytes = self._estimate_bytes()
+        stored_bytes, dataset_bytes = self._estimate_bytes()
         per_rank_bytes = dataset_bytes / world_size
 
         budget = self.resolved_budget()
@@ -595,10 +652,11 @@ class Data(DataSources):
                 " for the cases whose chain cannot serve a patch as a region"
             )
         shape_note = ""
-        if landed_bytes < stored_bytes * 0.9:
-            # The chain shrinks the case, so the cache would hold far less than the store does. The
-            # charge stays the larger of the two, and naming both is what lets a reader act on it.
-            shape_note = f" (stored {format_bytes(stored_bytes)}, landed {format_bytes(landed_bytes)})"
+        if abs(dataset_bytes - stored_bytes) > stored_bytes * 0.1:
+            # The chain changes the size of its cases, so what the cache holds is not what the store
+            # does. The charge is what it holds; the store's figure is named so the two are not read
+            # for one another.
+            shape_note = f" (as stored {format_bytes(stored_bytes)})"
         print(
             f"[KonfAI] memory_budget: dataset ~= {format_bytes(dataset_bytes)}{shape_note} over"
             f" {n_cases} cases | "
@@ -1112,7 +1170,7 @@ class DataMetric(Data):
                 template,
                 extent,
                 channels_by_name[worst],
-                _CACHE_ELEMENT_BYTES,
+                CASE_ELEMENT_BYTES,
                 budget,
                 resident_images=1,
                 intermediate_factor=DataMetric._METRIC_INTERMEDIATE_FACTOR,

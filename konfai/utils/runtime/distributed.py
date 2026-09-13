@@ -17,6 +17,7 @@
 
 """The distributed runtime: one process per device, rank pools, thread budgets, the SLURM path."""
 
+import ctypes
 import inspect
 import os
 import random
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 _cpu_budget_applied = False
+_allocator_bounded = False
 _rank_pool: ThreadPoolExecutor | None = None
 _rank_pool_share = 0  # the share the pool was sized for
 _rank_pool_lock = threading.Lock()
@@ -182,6 +184,14 @@ class DistributedObject(ABC):
             set_per_rank_budget(dataset.resolved_budget().work_bytes(node_local_ranks(world_size)))
             bound_chunk_cache()
 
+    def _bound_allocator(self) -> None:
+        """Keep a freed volume out of this rank's heap. Set on the rank, for the same reason the chunk
+        cache is: a threshold the launcher sets is a process setting a spawned child never sees."""
+        dataset = getattr(self, "dataset", None)
+        scales = getattr(dataset, "allocation_scales", None)
+        if scales is not None:
+            bound_allocator_growth(*scales())
+
     def __call__(self, rank: int | None = None) -> None:
         world_size = self.world_size
         global_rank, local_rank = setup_gpu(world_size, rank, process_group=self.uses_collectives)
@@ -189,6 +199,7 @@ class DistributedObject(ABC):
             return
         apply_cpu_thread_budget(world_size)
         self._bound_chunk_cache(world_size)
+        self._bound_allocator()
         with Log(self.name, global_rank):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
@@ -458,6 +469,49 @@ def map_over_rank_pool(work: Callable[[_T], None], items: Sequence[_T]) -> None:
         return
     for future in [pool.submit(work, item) for item in items]:
         future.result()
+
+
+def return_freed_heap() -> None:
+    """Hand back the heap a freed volume left behind, on every route that drops one.
+
+    :func:`bound_allocator_growth` keeps a volume out of the heap where the run gives it the room to;
+    this returns what got in anyway. One call walks the heap's top and costs nothing when there is
+    nothing to give back. A no-op wherever malloc_trim is not glibc's.
+    """
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def bound_allocator_growth(volume_bytes: int, loop_bytes: int) -> bool:
+    """Keep a freed volume out of the heap, so the process is resident for what it HOLDS.
+
+    Reading a case allocates a volume-sized buffer and frees it once the chain has landed its much
+    smaller output. glibc raises its own mmap threshold the first time such a block is freed, so
+    every later one is served from the heap, which grows to its high-water mark and never shrinks.
+    Pinning the threshold also stops that adjustment, which is the growth itself.
+
+    The threshold has to sit ABOVE what the loop allocates over and over and BELOW a volume: a batch
+    buffer that crosses it takes a mapping of its own on every step, which is a cost with no matching
+    gain (measured at 4 % of a run when an 8 MiB threshold fell under a 10 MiB batch). ``loop_bytes``
+    is what one step allocates, ``volume_bytes`` the smallest case a read brings in. No gap between
+    them, no pinning: the answer is then to leave glibc alone.
+
+    Applied once per process, and a no-op wherever mallopt is not glibc's. Returns whether it holds.
+    """
+    global _allocator_bounded
+    if _allocator_bounded:
+        return True
+    threshold = max(2 * loop_bytes, 8 * 1024 * 1024)
+    if volume_bytes <= 2 * threshold:
+        return False  # no room between the two: leave glibc alone rather than charge the loop
+    try:
+        ctypes.CDLL("libc.so.6").mallopt(-3, threshold)  # M_MMAP_THRESHOLD
+    except (OSError, AttributeError):
+        return False
+    _allocator_bounded = True
+    return True
 
 
 def apply_cpu_thread_budget(world_size: int | None = None) -> None:

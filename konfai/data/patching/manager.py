@@ -83,6 +83,7 @@ from konfai.data.transform import (
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, PatchError
+from konfai.utils.runtime import return_freed_heap
 from konfai.utils.utils import env_flag
 
 
@@ -1848,6 +1849,9 @@ class DatasetManager:
         self.augmented_data.clear()
         self.loaded = False
         self.augmentationLoaded = self.total_augmentations == 0
+        # The volume is gone from Python here; this is what gives its bytes back to the kernel. Every
+        # route that materializes a case passes through this one.
+        return_freed_heap()
 
     def unload_augmentation(self) -> None:
         self.augmented_data.clear()

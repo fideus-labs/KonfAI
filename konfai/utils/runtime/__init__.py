@@ -20,6 +20,7 @@
 from konfai.utils import State as State
 from konfai.utils.runtime.distributed import DistributedObject as DistributedObject
 from konfai.utils.runtime.distributed import apply_cpu_thread_budget as apply_cpu_thread_budget
+from konfai.utils.runtime.distributed import bound_allocator_growth as bound_allocator_growth
 from konfai.utils.runtime.distributed import cleanup as cleanup
 from konfai.utils.runtime.distributed import execute_distributed_object as execute_distributed_object
 from konfai.utils.runtime.distributed import find_free_port as find_free_port
@@ -28,6 +29,7 @@ from konfai.utils.runtime.distributed import pin_gloo_to_loopback as pin_gloo_to
 from konfai.utils.runtime.distributed import preserved_rng as preserved_rng
 from konfai.utils.runtime.distributed import rank_cpu_share as rank_cpu_share
 from konfai.utils.runtime.distributed import rank_pool as rank_pool
+from konfai.utils.runtime.distributed import return_freed_heap as return_freed_heap
 from konfai.utils.runtime.distributed import run_distributed_app as run_distributed_app
 from konfai.utils.runtime.distributed import seed_all as seed_all
 from konfai.utils.runtime.distributed import setup_gpu as setup_gpu
@@ -67,6 +69,7 @@ __all__ = [
     "State",
     "TensorBoard",
     "apply_cpu_thread_budget",
+    "bound_allocator_growth",
     "cleanup",
     "clear_directory_except_logs",
     "configure_workflow_environment",
@@ -88,6 +91,7 @@ __all__ = [
     "rank_cpu_share",
     "rank_pool",
     "record",
+    "return_freed_heap",
     "run_distributed_app",
     "safe_torch_load",
     "seed_all",

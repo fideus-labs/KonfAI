@@ -683,6 +683,11 @@ class Resample(TransformInverse):
         self._grids: dict[str, Grid] = {}
         #: Per case: the geometry keys its header did not carry (see :meth:`Grid.from_header`).
         self._assumed: dict[str, frozenset[str]] = {}
+        #: Per case: the target grid and the pricing bound, each beside the objects it was built from.
+        #: A sizer prices hundreds of windows per case through them; a case recorded again is a new
+        #: source grid, which the identity check sees.
+        self._targets: dict[str, tuple[Grid, Grid]] = {}
+        self._bounds: dict[str, tuple[Grid, _StoredMap | None, TransformBound]] = {}
         #: Per case: what the plan keeps of its stored map (see :class:`_StoredMap`).
         self._maps: dict[str, _StoredMap] = {}
         #: The decoded stages of the last cases sampled, most recent last, within
@@ -830,6 +835,9 @@ class Resample(TransformInverse):
 
     def _grids_of(self, name: str) -> tuple[Grid, Grid]:
         source = self._source_grid(name)
+        held = self._targets.get(name)
+        if held is not None and held[0] is source:
+            return held
         absent = self._assumed.get(name, frozenset())
         lacking = [key for key in _GEOMETRY_KEYS if key in absent and key in self._needs]
         if lacking:
@@ -840,7 +848,8 @@ class Resample(TransformInverse):
                 " without an origin, a spacing and a direction there is no space to do it in. Use a"
                 " source whose geometry is readable (mha, nii, h5, or an OME-Zarr written by KonfAI).",
             )
-        return source, self._target.of(source, name)
+        grids = self._targets[name] = (source, self._target.of(source, name))
+        return grids
 
     # ------------------------------------------------------------------ the map
 
@@ -999,10 +1008,15 @@ class Resample(TransformInverse):
         (:meth:`measured_region_source`), so the optimism costs estimate accuracy, not bytes. What is
         left is the affine part, which is exact.
         """
-        rank = self._source_grid(name).rank
-        folded = TransformBound.exact(AffineMap.identity(rank))
-        if self.transforms is not None:
-            folded = self._stored_map(name).bound.after(folded)
+        source = self._source_grid(name)
+        stored = self._stored_map(name) if self.transforms is not None else None
+        held = self._bounds.get(name)
+        if held is not None and held[0] is source and held[1] is stored:
+            return held[2]
+        folded = TransformBound.exact(AffineMap.identity(source.rank))
+        if stored is not None:
+            folded = stored.bound.after(folded)
+        self._bounds[name] = (source, stored, folded)
         return folded
 
     # ------------------------------------------------------------------ the contract

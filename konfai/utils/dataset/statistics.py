@@ -253,27 +253,30 @@ def _update_running_statistics(
 ) -> dict[str, Any]:
     """Update running min/max/mean/std from a NumPy chunk, over the volume AND per channel.
 
-    A chunk arrives as ``(C, ...)``, so the per-channel figures are the same Welford recurrence
-    applied along axis 0 and the whole-volume ones are that recurrence pooled: one pass for both.
+    A chunk arrives as ``(C, ...)``, so the per-channel figures are the Welford recurrence applied
+    along axis 0. Every channel holds the same count, so the whole-volume figures are pooled from the
+    channels' own (the between-channel spread added to the within), never computed a second time.
     """
     values = np.asarray(array, dtype=np.float64)
     per_channel = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
-    flat = per_channel.reshape(-1)
     channels = per_channel.shape[0]
-    if flat.size == 0:
+    if per_channel.size == 0:
         return state or _empty_statistics_state(channels)
 
     if state is None:
         state = _empty_statistics_state(channels)
 
-    chunk_count = float(flat.size)
-    chunk_mean = float(flat.mean())
-    chunk_m2 = float(np.square(flat - chunk_mean).sum())
-
-    # Per channel, the same recurrence on vectors, one entry per channel, updated together.
     channel_count = float(per_channel.shape[1])
     channel_mean = per_channel.mean(axis=1)
-    channel_m2 = np.square(per_channel - channel_mean[:, None]).sum(axis=1)
+    centred = per_channel - channel_mean[:, None]
+    channel_m2 = np.einsum("ij,ij->i", centred, centred)
+    channel_min = per_channel.min(axis=1)
+    channel_max = per_channel.max(axis=1)
+
+    chunk_count = float(per_channel.size)
+    chunk_mean = float(channel_mean.mean())
+    chunk_m2 = float(channel_m2.sum() + channel_count * np.square(channel_mean - chunk_mean).sum())
+
     channel_total = state["channel_count"] + channel_count
     if channel_total > 0:
         channel_delta = channel_mean - state["channel_mean"]
@@ -284,8 +287,8 @@ def _update_running_statistics(
             + channel_delta * channel_delta * state["channel_count"] * channel_count / channel_total
         )
         state["channel_count"] = channel_total
-        state["channel_min"] = np.minimum(state["channel_min"], per_channel.min(axis=1))
-        state["channel_max"] = np.maximum(state["channel_max"], per_channel.max(axis=1))
+        state["channel_min"] = np.minimum(state["channel_min"], channel_min)
+        state["channel_max"] = np.maximum(state["channel_max"], channel_max)
 
     total_count = state["count"] + chunk_count
     delta = chunk_mean - state["mean"]
@@ -293,8 +296,8 @@ def _update_running_statistics(
         state["mean"] += delta * chunk_count / total_count
         state["m2"] += chunk_m2 + delta * delta * state["count"] * chunk_count / total_count
         state["count"] = total_count
-        state["min"] = min(state["min"], float(flat.min()))
-        state["max"] = max(state["max"], float(flat.max()))
+        state["min"] = min(state["min"], float(channel_min.min()))
+        state["max"] = max(state["max"], float(channel_max.max()))
     return state
 
 
