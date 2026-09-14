@@ -312,6 +312,9 @@ class Rotate(EulerTransform):
         self.a_max = a_max
         self.is_quarter = is_quarter
         self.in_plane = in_plane
+        #: Per case index and copy, the exact index remap the draw is: settled with the draw, because
+        #: every window of a streamed copy asks and the permutation test costs three allclose.
+        self._remaps: dict[int, list[AxisRemap | None]] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         dim = len(shapes[0])
@@ -332,8 +335,9 @@ class Rotate(EulerTransform):
             # and a turn out of the plane draws each of them from a different place.
             angles = torch.cat((torch.zeros((len(shapes), 2)), angles[:, 2:]), dim=1)
         self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in angles]
+        self._remaps[index] = [Rotate._index_remap(matrix) for matrix in self.matrix[index]]
         # A quarter turn transposes the extents it swaps; a sampled draw keeps its grid.
-        return [Rotate._draw_shape(self.matrix[index][a], shape) for a, shape in enumerate(shapes)]
+        return [Rotate._draw_shape(remap, shape) for remap, shape in zip(self._remaps[index], shapes, strict=True)]
 
     @classmethod
     def _index_remap(cls, matrix: torch.Tensor) -> AxisRemap | None:
@@ -342,10 +346,9 @@ class Rotate(EulerTransform):
         return signed_permutation(matrix[0, :-1, :-1], SIGNED_PERMUTATION_ATOL_FLOAT32)
 
     @classmethod
-    def _draw_shape(cls, matrix: torch.Tensor, shape: list[int]) -> list[int]:
+    def _draw_shape(cls, remap: AxisRemap | None, shape: list[int]) -> list[int]:
         """The spatial extents a draw lands on: a quarter turn carries each extent with the axis it
         reads, a sampled draw spans the extent it is given."""
-        remap = cls._index_remap(matrix)
         if remap is None:
             return list(shape)
         return remap_shape(shape, remap)
@@ -365,12 +368,12 @@ class Rotate(EulerTransform):
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         # Permuting and mirroring voxels is the bijection ORIENTATION promises; any angle is a REGRID.
-        if Rotate._index_remap(self.matrix[index][a]) is None:
+        if self._remaps[index][a] is None:
             return PatchLocality(LocalityKind.REGRID)
         return PatchLocality(LocalityKind.ORIENTATION)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
-        return Rotate._draw_shape(self.matrix[index][a], list(shape))
+        return Rotate._draw_shape(self._remaps[index][a], list(shape))
 
     def _stream_region_source(
         self,
@@ -379,7 +382,7 @@ class Rotate(EulerTransform):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        remap = Rotate._index_remap(self.matrix[index][a])
+        remap = self._remaps[index][a]
         if remap is None:
             return super()._stream_region_source(index, a, target_slices, source_spatial_shape)
         return remap_region(target_slices, source_spatial_shape, remap)
