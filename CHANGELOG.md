@@ -16,7 +16,7 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
-## v1.8.6 (2026-09-14)
+## Unreleased
 
 ### Bug Fixes
 
