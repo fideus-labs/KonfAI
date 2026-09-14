@@ -75,13 +75,13 @@ _START_SHARE = 0.5
 _GROW_BELOW = 1.0 / 3.0
 #: How much less a cubic block must read for the sweep to take it (``DatasetManager._sweep_tile``).
 _SWEEP_TILE_MARGIN = 0.8
-#: The bytes each element travels as through a sweep (float32).
-_SWEEP_ELEMENT_BYTES = 4
 
 #: What a whole-volume fallback holds while a case is in flight (the assembled tensor plus one
-#: transform output), and the bytes each element travels as. Public: the run-time budget check
-#: (``CaseMaterializer._enforce_fallback_budget``) and the TRANSFORM plan must agree on the figure.
+#: transform output). Public: the run-time budget check (``CaseMaterializer._enforce_fallback_budget``)
+#: and the TRANSFORM plan must agree on the figure.
 FALLBACK_INFLIGHT_FACTOR = 2
+#: The bytes an element travels as through a chain (float32): a sweep's regions, a whole-volume
+#: fallback and a fold are all priced at it, before any dtype is known.
 CASE_ELEMENT_BYTES = 4
 
 
@@ -117,6 +117,21 @@ class RegionGrowth:
         self.rows = max(1, self.rows // 2)
         self.first, self._at_height = self.rows, 0
         return self.rows
+
+    def halve_after_device_oom(self, device: "torch.device | None", who: str, failed_rows: int) -> bool:
+        """Answer an OutOfMemoryError on a ``failed_rows``-row region: half the height, the device's
+        cache released, the reader told. ``False`` when nothing is left to halve: the device raises no
+        such signal (the host's kernel kills instead), or the region that failed was one row already
+        (a volume's last, short region can be, while the height still stands higher)."""
+        if not device_signals_oom(device) or failed_rows <= 1:
+            return False
+        rows = self.halve_below_first()
+        torch.cuda.empty_cache()
+        print(
+            f"{who}: out of device memory on a {failed_rows}-row region; the rest are cut to {rows} row(s).",
+            flush=True,
+        )
+        return True
 
     def after(self, held: int | None) -> int:
         """The height of the regions cut after one that held ``held`` bytes."""

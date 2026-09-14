@@ -41,7 +41,7 @@ from konfai.data.patching import (
     open_held_meter,
     save_destination,
 )
-from konfai.data.patching.budget import _START_SHARE, GROWTH_CAP_UNITS, RegionGrowth, device_signals_oom
+from konfai.data.patching.budget import _START_SHARE, CASE_ELEMENT_BYTES, GROWTH_CAP_UNITS, RegionGrowth
 from konfai.data.reduction import Reduction
 from konfai.data.transform import LocalityKind, PatchLocality, Reduce, Save, Transform, stat_seed_valid
 from konfai.utils.budget import budget_share
@@ -57,8 +57,6 @@ _GEOMETRY_KEYS = ("Spacing", "Origin", "Direction")
 #: whole-volume statistic is seeded by a pass of its own.
 _POST_KINDS = frozenset({LocalityKind.POINTWISE, LocalityKind.GLOBAL_STAT})
 
-#: Bytes per sample assumed when sizing regions from headers alone, before a dtype is known.
-_ASSUMED_ITEMSIZE = 4
 
 #: How much of the regions' own share the folds a stat pass KEEPS may take, the regions getting the
 #: rest (:data:`~konfai.utils.budget.BUDGET_SHARES`).
@@ -143,7 +141,7 @@ class ReductionPlan:
         return self.buffered_regions * (1 + self.working_multiple) + self.chain_multiple + 1
 
     def _region_bytes(self, channels: int) -> int:
-        return int(self.slab_rows * np.prod(self.spatial[1:], dtype=np.int64) * channels * _ASSUMED_ITEMSIZE)
+        return int(self.slab_rows * np.prod(self.spatial[1:], dtype=np.int64) * channels * CASE_ELEMENT_BYTES)
 
     @property
     def region_bytes(self) -> int:
@@ -494,11 +492,9 @@ class CaseReduction:
         """What one member's region costs its store at the current height, in bytes: the source
         window it pulls, and what the store decodes above that window. Both are the widest member's
         and both are charged once; ``None`` from a manager contributes nothing."""
-        from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
-
         reads = [manager.region_reads(self.slab_rows) for manager in self.managers]
         present = [read for read in reads if read is not None]
-        element = max(1, channels) * _SWEEP_ELEMENT_BYTES
+        element = max(1, channels) * CASE_ELEMENT_BYTES
         pull = max((read.widest_pull for read in present), default=0)
         excess = max((read.widest_excess for read in present), default=0)
         return int(pull * element), int(excess * element)
@@ -545,17 +541,9 @@ class CaseReduction:
             try:
                 folded = self._fold(region)
             except torch.cuda.OutOfMemoryError:
-                # A region the device could not hold: half the height, this region again. The host
-                # has no such signal, and one row that does not fit is the end.
-                if not device_signals_oom(device) or growth.rows <= 1:
+                # A region the device could not hold: this region again, at half the height.
+                if not growth.halve_after_device_oom(device, f"[Reduce] '{self.reduce.output}'", stop - start):
                     raise
-                rows = growth.halve_below_first()
-                torch.cuda.empty_cache()
-                print(
-                    f"[Reduce] '{self.reduce.output}': out of device memory on a {stop - start}-row region;"
-                    f" the rest are cut to {rows} row(s).",
-                    flush=True,
-                )
                 continue
             yield region, folded
             held = meter.held() if meter is not None else None
@@ -606,7 +594,7 @@ class CaseReduction:
         return attribute
 
     def _folded_output_bytes(self, plan: ReductionPlan) -> int:
-        return int(np.prod(plan.spatial, dtype=np.int64)) * max(1, int(plan.channels)) * _ASSUMED_ITEMSIZE
+        return int(np.prod(plan.spatial, dtype=np.int64)) * max(1, int(plan.channels)) * CASE_ELEMENT_BYTES
 
     def _open_stream(self, spatial: list[int], array: np.ndarray, attribute: Attribute) -> DataStream:
         stream = self.destination.open_data_stream(

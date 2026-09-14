@@ -125,6 +125,12 @@ class _AsyncWriter:
             raise error
 
 
+def _corner_context(shape: list[int]) -> RegionContext:
+    """The one-voxel corner a pipe's planning probe stands for, as a region of ``shape``."""
+    corner = tuple(slice(0, 1) for _ in shape)
+    return RegionContext(corner, corner, tuple(int(extent) for extent in shape))
+
+
 def _slab_context(region: slice, spatial: list[int]) -> RegionContext:
     """Where one z-slab of the accumulator grid sits: the same region as source and target."""
     slices = (region, *(slice(0, int(extent)) for extent in spatial[1:]))
@@ -837,7 +843,7 @@ class OutputDataset(Dataset, NeedDevice):
                 if locality.kind is LocalityKind.HALO:
                     pull_fns.append(_HaloPull(_halo_radii(locality.halo, len(shape)), shape))
                     shapes.append(list(shape))
-                    probe = stage(name, probe, walking)
+                    probe = stage.stream_region(name, probe, _corner_context(shape), walking)
                 elif locality.kind is LocalityKind.REGRID:
                     # A regrid states its transition instead of performing it: the one-voxel probe
                     # cannot run through its inverse.
@@ -868,7 +874,7 @@ class OutputDataset(Dataset, NeedDevice):
                 else:
                     pull_fns.append(lambda target: list(target))
                     shapes.append(list(shape))
-                    probe = stage(name, probe, walking)
+                    probe = stage.stream_region(name, probe, _corner_context(shape), walking)
         except Exception:  # nosec B110 - an unplannable pipe just keeps the case on the buffered path
             return None
 
@@ -911,7 +917,10 @@ class OutputDataset(Dataset, NeedDevice):
         attribute: Attribute,
         name: str,
     ) -> torch.Tensor:
-        """Run one pipe stage on its pulled block, by declared kind, never by stage name."""
+        """Run one pipe stage on its pulled block, by declared kind, never by stage name. Every stage that
+        runs is told where its block sits, as the read side's dispatcher tells it: a stage reading a
+        companion volume (Mask) reads its region, and every other falls back to its whole call."""
+        context = RegionContext(tuple(source), tuple(target), tuple(in_shape))
         if kind is LocalityKind.CROP:
             # The pull already translated the region, so the block IS the answer; the stage still
             # runs for its attribute transition.
@@ -919,7 +928,6 @@ class OutputDataset(Dataset, NeedDevice):
             return block
         if kind is LocalityKind.REGRID:
             # Region-aware on both sides; the geometry is written from the FULL shape.
-            context = RegionContext(tuple(source), tuple(target), tuple(in_shape))
             if stage.inverted:
                 remapper = cast(TransformInverse, stage.transform)
                 result = remapper.stream_region_inverse(name, block, context, Attribute(attribute))
@@ -934,7 +942,7 @@ class OutputDataset(Dataset, NeedDevice):
             result = stage(name, block, Attribute(attribute))
             cast(TransformInverse, stage.transform).write_stream_cache_attribute(attribute, in_shape, name)
             return result
-        result = stage(name, block, attribute)
+        result = stage.stream_region(name, block, context, attribute)
         if kind is LocalityKind.HALO:
             lead = (slice(None),) * (result.dim() - len(target))
             crop = tuple(slice(t.start - s.start, t.stop - s.start) for t, s in zip(target, source, strict=False))

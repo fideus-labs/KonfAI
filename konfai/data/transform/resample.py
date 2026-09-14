@@ -435,7 +435,7 @@ _FIELD_WINDOW_COPIES = 3.0
 
 #: What one element of a decoded field weighs under the bit-exact walk: read as float64 whatever
 #: the store holds (:meth:`_DisplacementSource.read`), against the plan's count at
-#: :data:`~konfai.data.patching.budget._SWEEP_ELEMENT_BYTES`. Under ``precision: fast`` the field is
+#: :data:`~konfai.data.patching.budget.CASE_ELEMENT_BYTES`. Under ``precision: fast`` the field is
 #: held in float32 and weighs half (:meth:`Resample._field_element_bytes`).
 _FIELD_ELEMENT_BYTES = 8
 
@@ -1170,12 +1170,12 @@ class Resample(TransformInverse):
             return base
         if field_voxel <= 0.0:
             return base
-        # In the PLAN'S currency, which counts a volume at _SWEEP_ELEMENT_BYTES: a field window is
+        # In the PLAN'S currency, which counts a volume at CASE_ELEMENT_BYTES: a field window is
         # read as float64 whatever the store holds (see _DisplacementSource.read), so each of its
         # components weighs two of the plan's volumes, not one.
-        from konfai.data.patching.budget import _SWEEP_ELEMENT_BYTES
+        from konfai.data.patching.budget import CASE_ELEMENT_BYTES
 
-        widening = self._field_element_bytes / _SWEEP_ELEMENT_BYTES
+        widening = self._field_element_bytes / CASE_ELEMENT_BYTES
         window = max(1, int(shape[0])) * (target_voxel / field_voxel) * widening
         return base + window * _FIELD_WINDOW_COPIES
 

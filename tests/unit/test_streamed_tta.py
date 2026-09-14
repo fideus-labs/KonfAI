@@ -284,6 +284,48 @@ def test_a_mask_after_reduction_streams_and_reads_its_slab_of_the_mask(tmp_path,
     assert (got.numpy()[0][mask == 0] == -9).all()
 
 
+def test_a_mask_behind_a_region_stage_streams_and_reads_its_region_of_the_mask(
+    tmp_path, monkeypatch, drive_tta
+) -> None:
+    # Behind a region stage (Dilate, a halo) the Mask runs inside the write pipe, not the per-slab
+    # prefix: it must still be told where its block sits, as the read side's dispatcher tells it.
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai.data.transform import Argmax, Dilate, Mask
+
+    mask = (np.random.default_rng(7).random((6, 4, 3)) > 0.5).astype(np.uint8)
+    sitk.WriteImage(sitk.GetImageFromArray(mask), str(tmp_path / "mask.mha"))
+
+    def run(where: str, streamed: bool):
+        return drive_tta(
+            tmp_path / where,
+            monkeypatch,
+            augmentation=Flip(f_prob=[0, 1, 1]),
+            streamed=streamed,
+            reduction=Mean(),
+            after=[Argmax(0), Dilate(1), Mask(path=str(tmp_path / "mask.mha"), value_outside=-9)],
+        )
+
+    told, pipes = [], []
+    region_call, build_pipe = Mask.stream_region, OutputDataset._make_pipe_state
+
+    def stream_region(self, *args, **kwargs):
+        told.append(args[2])
+        return region_call(self, *args, **kwargs)
+
+    def make_pipe_state(self, *args, **kwargs):
+        pipes.append(build_pipe(self, *args, **kwargs))
+        return pipes[-1]
+
+    monkeypatch.setattr(Mask, "stream_region", stream_region)
+    monkeypatch.setattr(OutputDataset, "_make_pipe_state", make_pipe_state)
+    got, whole_volume = run("streamed", streamed=True)
+    assert not whole_volume, "a Mask behind a region stage must not force the whole-volume path"
+    assert pipes and all(state is not None for state in pipes), "the case must stream through the pipe"
+    assert told, "the Mask must be told where its block sits"
+    want, _ = run("reference", streamed=False)
+    assert torch.equal(got, want)
+
+
 def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path, monkeypatch, drive_tta) -> None:
     # A destination that cannot serve region writes must not lose the stack: the SLAB stage buffers
     # and writes classically at the last slab: the whole-volume path's memory, never a missing file.

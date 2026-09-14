@@ -30,8 +30,8 @@ from konfai.data.patching import budget
 from konfai.data.patching import sweep as sweep_module
 from konfai.data.patching.budget import (
     _START_SHARE,
-    _SWEEP_ELEMENT_BYTES,
     _SWEEP_TILE_MARGIN,
+    CASE_ELEMENT_BYTES,
     RegionGrowth,
 )
 from konfai.data.patching.stage import Stage, _ReadStagePlan
@@ -125,7 +125,7 @@ class SegmentSizer:
         """What a sweep decomposed into ``tile`` holds at its peak: the source regions it has pulled
         and the blocks it has landed, both counted by :func:`_sweep_resident_regions`, plus what the
         widest stage of the segment allocates on top of the largest of them. Each term is counted on
-        the channels it holds (:meth:`chain_channels`), at ``_SWEEP_ELEMENT_BYTES`` each. Outside
+        the channels it holds (:meth:`chain_channels`), at ``CASE_ELEMENT_BYTES`` each. Outside
         it, a streamed case holds ``SWEEP_ENGINE_FLOOR_BYTES``.
         """
         pulled, landed = _sweep_resident_regions(depth)
@@ -137,7 +137,7 @@ class SegmentSizer:
         # A chunked store decodes the block-aligned hull covering a window, one read in flight: the
         # hull is resident ONCE, and it does not fall when the region does.
         held += reads.widest_excess * source
-        return int(held * _SWEEP_ELEMENT_BYTES)
+        return int(held * CASE_ELEMENT_BYTES)
 
     # ------------------------------------------------------------------ the search
 
