@@ -16,6 +16,21 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## v1.8.6 (2026-09-14)
+
+### Bug Fixes
+
+- impact-reg: an empty fixed mask is a zero field rather than a registration of the whole patch,
+  background included (in a tiled run every patch the tissue did not reach dragged its neighbours'
+  tissue edge through the blend); the mask sentinels take the form of the images they stand beside,
+  OME-Zarr included; half precision is off on the CPU and an exact override cannot turn it back on;
+  a previous elastix install is replaced instead of extracted over.
+
+### Documentation
+
+- OME-Zarr: the `Direction` matrix travels in the attributes sidecar, and a store written without
+  one reads back axis-aligned; `write_ome_zarr` names its keyword-only arguments.
+
 ## v1.8.5 (2026-09-14)
 
 ### Breaking Changes
