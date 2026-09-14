@@ -130,11 +130,11 @@ class AugmentedStage:
 
     def case_working_multiple(self, name: str) -> float:
         """What this copy's draw allocates beyond its block, in volumes-worth of it: a REGRID draw builds
-        the pull box's coordinate grid through ``grid_sample`` (one volume per spatial axis), any other
-        draw one volume."""
+        the pull box's coordinate grid, whose build peaks at ten volumes (measured on a 100x512x512
+        case, in-plane and oblique alike, the walk's slabs under it), any other draw one volume."""
         del name
         kind = self.patch_locality(Attribute()).kind
-        return 4.0 if kind is LocalityKind.REGRID else 1.0
+        return 10.0 if kind is LocalityKind.REGRID else 1.0
 
     def stream_region_source(
         self,
@@ -216,15 +216,30 @@ class _ReadStagePlan:
     out_shape: tuple[int, ...]
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
     run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
-    #: The statistics a whole-volume pass measured for this stage, on its own input.
+    #: The statistics this stage is seeded with: what a whole-volume pass measured on its own input, or
+    #: the store's when they still describe it.
     measured: tuple[tuple[str, str], ...] = ()
+    #: The seed's keys the whole-volume route leaves in the scope once the stage ran.
+    kept: frozenset[str] = frozenset()
 
-    def seed(self, scope: Attribute) -> None:
-        """Push what the pass measured for this stage, right before it runs: the whole-volume route
-        leaves each stage's statistic on top of the scope when that stage runs, and a scope seeded once
-        for the chain would hand one stage's number to every stage reading the same key."""
+    def seed(self, scope: Attribute) -> dict[str, int]:
+        """Push the seed right before the stage runs, and say how deep each key then stacks: the
+        whole-volume route leaves each stage's statistic on top of the scope when that stage runs, and a
+        scope seeded once for the chain would hand one stage's number to every stage reading the same
+        key."""
+        pushed: dict[str, int] = {}
         for key, value in self.measured:
             scope[key] = value
+            pushed[key] = scope._count_key(key)
+        return pushed
+
+    def unseed(self, scope: Attribute, pushed: dict[str, int]) -> None:
+        """Leave the scope, once the stage ran, as the whole-volume route leaves it: a stage that
+        recorded the key itself (a saving Clip) stacked the seed's value twice, and one that leaves it
+        under another name or not at all (Statistics, a bound not saved) leaves the seed to take back."""
+        for key, depth in pushed.items():
+            if scope._count_key(key) > depth or key not in self.kept:
+                scope.pop(key)
 
     def region_context(self, source: Sequence[slice], target: Sequence[slice]) -> RegionContext:
         """Where one region of this stage sits: the part of its input read, the part of its output due."""

@@ -28,13 +28,14 @@ memory, never of meaning.
 from typing import cast
 
 import numpy as np
+import pytest
 import torch
 from konfai.data.augmentation import ContrastAroundMean, Gamma
 from konfai.data.augmentation.base import DataAugmentationsList
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Clip, Normalize, Resample, Standardize, Statistics, Transform
 from konfai.data.transform.base import LocalityKind, PatchLocality
-from konfai.utils.dataset import Dataset
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.ome_zarr import write_ome_zarr
 from oracle_support import manager
 
@@ -363,19 +364,79 @@ def test_a_replan_while_the_case_is_loaded_keeps_its_statistics(streaming_datase
     assert "Std" in case.cache_attributes[0]
 
 
-def test_a_measured_stage_is_not_streamed_over_a_store_seed_of_the_same_names(streaming_dataset_stub):
-    """``Statistics`` records nothing a pass can keep, so it is seeded from the store, and that seed sits in
-    the backup a whole-volume load starts from, where ``Standardize`` would read it. The chain stays whole,
-    and a whole load after the warm-up lands where one that ran no plan does."""
+def test_a_store_seed_reaches_the_regions_that_use_it_and_nothing_else(streaming_dataset_stub):
+    """``Statistics`` is seeded from the store and records nothing under those names: the seed is pushed
+    before it runs and taken back after, so the ``Standardize`` behind a value change measures its own
+    input on the whole route, which a whole load after the plan still is, and the regions replay it."""
     chain = [Statistics(), Clip(min_value=-1.0, max_value=1.0), Standardize()]
     case = _case(streaming_dataset_stub(_volume(20.0)), chain)
     case.warm_stream_statistics([0], apply_augmentations=False)
-
-    assert case.stream_refusal(0, False) is not None
     fresh = _case(
         streaming_dataset_stub(_volume(20.0)), [Statistics(), Clip(min_value=-1.0, max_value=1.0), Standardize()]
     )
-    assert _same(_whole(case, 0, False), _whole(fresh, 0, False))
+    reference = _whole(fresh, 0, False)
+
+    assert case.stream_refusal(0, False) is None
+    assert _same(_patches(case, 0, False), reference)
+    assert _same(_whole(case, 0, False), reference)
+
+
+def test_a_store_seed_does_not_reach_the_patch_transforms(streaming_dataset_stub):
+    """A patch transform reads the case attribute: with the store's Mean left there by a seeded
+    ``Statistics``, a patch ``Standardize`` would take the case's number over its own patch's."""
+
+    def items(case: DatasetManager) -> list[torch.Tensor]:
+        return [
+            case.get_data(index, 0, [Standardize()], True, False).clone() for index in range(case.patch.get_size(0))
+        ]
+
+    case = _case(streaming_dataset_stub(_volume(20.0)), [Statistics()])
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    fresh = _case(streaming_dataset_stub(_volume(20.0)), [Statistics()])
+    fresh.load(fresh.transforms, [], load_augmentations=False)
+    reference = items(fresh)
+
+    assert case.stream_refusal(0, False) is None
+    assert _close(items(case), reference)  # a patch's mean, over a view and over a copy of the same values
+    case.load(case.transforms, [], load_augmentations=False)
+    assert _same(items(case), reference)
+
+
+def test_a_stage_taking_a_recorded_statistic_streams_without_a_seed(streaming_dataset_stub):
+    """``Normalize`` and ``Standardize`` take a statistic already in the scope over measuring their own:
+    behind a stage that records it, the streamed route records it there too, so one pass learns that
+    the stage needs no seed."""
+    for chain in (
+        [Clip(min_value=-50.0, max_value=50.0, save_clip_min=True, save_clip_max=True), Normalize()],
+        [Clip(min_value=-50.0, max_value=50.0), Standardize(), Clip(min_value=-1.0, max_value=1.0), Standardize()],
+    ):
+        stub = streaming_dataset_stub(_volume(20.0))
+        case = _case(stub, chain)
+        case.warm_stream_statistics([0], apply_augmentations=False)
+
+        assert case.stream_refusal(0, False) is None
+        assert stub.full_reads == 1
+        assert _same(_patches(case, 0, False), _whole(case, 0, False))
+
+
+def test_a_save_header_carries_what_the_stage_records_and_not_the_stores_seed(tmp_path):
+    """A sweep writes the case state as the Save header. A seeded ``Statistics`` left the store's Mean
+    there, and the ``Standardize`` behind the boundary took it over its own input."""
+    from konfai.data.transform import Save
+
+    volume = _source(tmp_path)
+    chain = [Statistics(), Clip(min_value=-50.0, max_value=50.0), Save(str(tmp_path / "cache")), Standardize()]
+    reference = torch.from_numpy(volume.copy())
+    for stage in chain:
+        if not isinstance(stage, Save):
+            reference = stage("CASE_000", reference, Attribute())
+
+    case = manager(Dataset(tmp_path / "src", "omezarr"), chain)
+    region = case.read_region((slice(0, 8), slice(0, 8), slice(0, 8)), 0, False)
+    _shape, header = Dataset(tmp_path / "cache", "mha").get_infos("CT", "CASE_000")
+    assert "Mean" not in header and "Std" not in header
+    assert "ImageMean" in header
+    np.testing.assert_allclose(region.numpy(), reference.numpy(), atol=1e-6)
 
 
 def test_a_copy_streamed_after_a_whole_load_records_its_geometry_once(streaming_dataset_stub):
@@ -392,3 +453,71 @@ def test_a_copy_streamed_after_a_whole_load_records_its_geometry_once(streaming_
     fresh = _case(streaming_dataset_stub(_volume(20.0)), [Resample(spacing=[1.5, 1.5, 1.5]), Standardize()])
     fresh.load(fresh.transforms, [], load_augmentations=False)
     assert case.cache_attributes[0]._count_key("Spacing") == fresh.cache_attributes[0]._count_key("Spacing")
+
+
+def test_a_stage_recording_its_seed_itself_leaves_it_once(streaming_dataset_stub):
+    """A saving ``Clip`` records the bound it read from its seed: the seed and the record would stack the
+    same value twice, where the whole-volume route leaves it once."""
+    stub = streaming_dataset_stub(_volume(20.0))
+    chain = [Clip(min_value=-50.0, max_value="max", save_clip_min=True, save_clip_max=True), Normalize()]
+    case = _case(stub, chain)
+    case.warm_stream_statistics([0], apply_augmentations=False)
+    assert case.stream_refusal(0, False) is None
+    case.get_data(0, 0, [], True, False)
+    fresh = _case(streaming_dataset_stub(_volume(20.0)), chain)
+    fresh.load(fresh.transforms, [], load_augmentations=False)
+
+    for key in ("Min", "Max"):
+        assert case.cache_attributes[0]._count_key(key) == fresh.cache_attributes[0]._count_key(key)
+
+
+def test_a_stage_taking_one_key_and_measuring_the_other_streams(streaming_dataset_stub):
+    """``Normalize`` behind a ``Clip`` saving its lower bound alone takes the Min it recorded and measures
+    the Max: the pass keeps the Max, the streamed route records the Min there too."""
+    stub = streaming_dataset_stub(_volume(20.0))
+    chain = [Clip(min_value=-50.0, max_value=50.0, save_clip_min=True), Normalize()]
+    case = _case(stub, chain)
+    case.warm_stream_statistics([0], apply_augmentations=False)
+
+    assert case.stream_refusal(0, False) is None
+    assert stub.full_reads == 1
+    assert _same(_patches(case, 0, False), _whole(case, 0, False))
+
+
+def test_a_stage_measuring_its_own_statistic_is_seeded_over_a_headers(tmp_path):
+    """A Save header carries the Mean and Std a ``Standardize`` recorded. ``Statistics`` behind the
+    boundary describes the saved tensor, whose mean is nought: seeded from its own store, over the
+    header's, it records that on the streamed route as on the whole one."""
+    from konfai.data.transform import Save
+
+    _source(tmp_path)
+    chain = [Standardize(), Save(str(tmp_path / "cache")), Statistics()]
+    case = manager(Dataset(tmp_path / "src", "omezarr"), chain)
+    assert case.can_stream_patch(0, apply_augmentations=False), case.stream_refusal(0, False)
+    case.get_data(0, 0, [], True, False)  # sweeps the Save, streams the patch, records the case's numbers
+    assert not case.loaded
+    streamed = float(case.cache_attributes[0]["ImageMean"])
+
+    fresh = manager(Dataset(tmp_path / "src", "omezarr"), [Standardize(), Save(str(tmp_path / "cache2")), Statistics()])
+    fresh.load(fresh.transforms, [], load_augmentations=False)
+    whole = float(fresh.cache_attributes[0]["ImageMean"])
+    assert abs(whole) < 1e-5
+    assert streamed == pytest.approx(whole, abs=1e-5)
+
+
+def test_a_free_rotation_or_scale_streams_bit_for_bit(streaming_dataset_stub):
+    """A draw that resamples through an affine map samples on the full grid's own indices: a region
+    lands where the whole volume does, bit for bit, and so does a label map through the nearest voxel."""
+    from konfai.data.augmentation import Rotate, Scale
+    from konfai.data.transform import TensorCast
+
+    for dtype, chain in (("float32", []), ("int64", [TensorCast(dtype="int64")])):
+        stub = streaming_dataset_stub(_volume(100.0))
+        rotate, scale = Rotate(a_min=17.0, a_max=17.0, in_plane=True), Scale(s_std=0.3)
+        rotate.load(1.0)
+        scale.load(1.0)
+        case = _case(stub, [Clip(min_value=-50.0, max_value=250.0), *chain], [rotate, scale])
+        case.warm_stream_statistics([1])
+
+        assert case.stream_refusal(1, True) is None, dtype
+        assert _same(_patches(case, 1, True), _whole(case, 1, True)), dtype

@@ -798,3 +798,57 @@ def test_a_copy_the_draw_did_not_select_keeps_its_shape_and_reads_its_own_region
     target = (slice(0, 2), slice(1, 3), slice(2, 4))
     assert rotate.stream_shape(0, 1, [4, 6, 6]) == [4, 6, 6]
     assert rotate.stream_region_source(0, 1, target, [4, 6, 6]) == list(target)
+
+
+def test_a_draw_reading_the_header_reads_the_grid_the_chain_lands_on(streaming_dataset_stub) -> None:
+    """An Elastix warp is drawn on the grid of what it warps: the chain's landing, not the stored
+    header, whichever route served copy 0 and however many times the case was redrawn."""
+    from typing import cast
+
+    from konfai.data.augmentation.base import DataAugmentationsList
+    from konfai.data.augmentation.spatial import Elastix
+    from konfai.data.patching import DatasetManager, DatasetPatch
+    from konfai.data.transform import Clip, Resample, TensorCast
+    from konfai.utils.dataset import Dataset
+
+    volume = (np.random.default_rng(0).normal(size=(1, 12, 32, 32)) * 40 + 100).astype(np.float32)
+    for tail in ([], [Clip(min_value="min", max_value=150.0)]):  # the second keeps copy 0 whole
+        warp = Elastix(grid_spacing=8, max_displacement=1)
+        warp.load(1.0)
+        listed = DataAugmentationsList(nb=1, data_augmentations={})
+        listed.data_augmentations = [warp]
+        case = DatasetManager(
+            index=0,
+            group_src="CT",
+            group_dest="CT",
+            name="CASE_000",
+            dataset=cast(Dataset, streaming_dataset_stub(volume)),
+            patch=DatasetPatch([4, 16, 16]),
+            transforms=[TensorCast(dtype="float32"), Resample(spacing=[1.5, 1.5, 1.5]), *tail],
+            data_augmentations_list=[listed],
+        )
+        # With `align: extent` the resample keeps each extent and derives the spacing: 32 voxels at
+        # 1 mm land as 21 at 32/21 mm, which is what the draw's grid must carry.
+        landed = [float(x) for x in case.transforms[1]._target_of("CASE_000")[1].spacing_xyz]
+        assert landed != [1.0, 1.0, 1.0]
+        spacings = []
+        for _epoch in range(3):
+            spacings.append([float(x) for _stage, grid in warp.draws[0] for x in grid.spacing_xyz][:3])
+            case.load(case.transforms, case.data_augmentations_list, load_augmentations=True)
+            case.unload()
+            case.unload_augmentation()
+            case.reset_augmentation()
+        assert spacings == [landed] * 3, (tail, spacings)
+
+
+def test_an_affine_draw_keeps_a_float64_volume_s_digits() -> None:
+    """Blended in the block's own precision: sampled on its own voxels, a float64 volume is itself."""
+    from konfai.data.augmentation import EulerTransform
+
+    full = (6, 8, 8)
+    volume = torch.rand((1, *full), dtype=torch.float64) + 1e-9
+    axes = [torch.arange(extent, dtype=torch.float32) for extent in full]
+    coordinates = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+    sampled = EulerTransform._walk(volume.reshape(1, -1), coordinates, [0, 0, 0], list(full), full)
+    assert sampled.dtype == torch.float64
+    assert torch.equal(sampled, volume)
