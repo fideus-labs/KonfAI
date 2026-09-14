@@ -30,7 +30,7 @@ sitk = pytest.importorskip("SimpleITK")
 
 from konfai import api  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
-from konfai.data.transform import Clip, Magnitude, Resample, Save, Write  # noqa: E402
+from konfai.data.transform import Clip, Crop, Magnitude, Resample, Save, Write  # noqa: E402
 from konfai.metric.measure import MAE, Dice  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
@@ -230,6 +230,42 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
         assert moved.GetSpacing() == pytest.approx(spacing)
         assert moved.GetOrigin() == pytest.approx(origin)
         assert moved.GetSize() == (7, 6, 5)
+
+
+@pytest.mark.parametrize(
+    ("stored", "written", "verdict"),
+    [("nii.gz", "nii.gz", "WHOLE-VOLUME"), ("nii.gz", "mha", "LOAD"), ("mha", "mha", "STREAM")],
+)
+def test_a_crop_writes_the_region_of_interest_header_on_every_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stored: str, written: str, verdict: str
+) -> None:
+    """A case read from disk stacks its geometry (``Origin_0``): whichever route the plan takes, the
+    written header is ITK's ``RegionOfInterest`` over the foreground box."""
+    monkeypatch.chdir(tmp_path)
+    volume = np.zeros((12, 14, 16), dtype=np.float32)
+    volume[3:10, 2:11, 5:13] = 1.0  # foreground box: index (x, y, z) = (5, 2, 3), size (8, 9, 7)
+    image = sitk.GetImageFromArray(volume)
+    image.SetOrigin((0.5, -1.0, 2.5))
+    image.SetSpacing((1.05, 0.95, 1.15))
+    image.SetDirection((0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0))  # the origin moves along D's columns
+    source = tmp_path / "Raw" / "P000" / f"CT.{stored}"
+    source.parent.mkdir(parents=True)
+    sitk.WriteImage(image, str(source))
+    chains = {"CT": {"CT": [Crop(inverse=False), Write(dataset=f"./Out:{written}")]}}
+
+    plan = api.plan_transform(
+        "CROP_PLAN", f"./Raw:{stored}", chains, transforms_dir=tmp_path / "Transforms", quiet=True
+    )
+    assert [entry.verdict for entry in plan.entries] == [verdict]
+    api.transform("CROP", f"./Raw:{stored}", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+
+    expected = sitk.RegionOfInterest(sitk.ReadImage(str(source)), [8, 9, 7], [5, 2, 3])
+    cropped = sitk.ReadImage(str(tmp_path / "Out" / "P000" / f"CT.{written}"))
+    assert cropped.GetSize() == expected.GetSize()
+    assert cropped.GetOrigin() == pytest.approx(expected.GetOrigin(), abs=1e-5)
+    assert cropped.GetSpacing() == pytest.approx(expected.GetSpacing(), abs=1e-6)
+    assert cropped.GetDirection() == pytest.approx(expected.GetDirection(), abs=1e-6)
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(cropped), sitk.GetArrayFromImage(expected))
 
 
 def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(

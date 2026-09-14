@@ -118,7 +118,7 @@ declared is applied first. Both can be combined with any grid choice.
 
 `align` decides how a derived grid lines up: `extent` keeps the outer faces
 coincident, `origin` keeps voxel zero's centre in place. `interpolation` defaults
-to nearest for a `uint8` volume and linear otherwise.
+to nearest for a `uint8`, `int64` or `bool` volume and linear otherwise.
 
 A stored transform can be inverted per group, `transforms: {Reg: true}`, but only
 when it is rigid or affine: `invert: true` on a spline or a field is refused,

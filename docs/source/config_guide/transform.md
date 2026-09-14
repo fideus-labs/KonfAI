@@ -553,10 +553,11 @@ case never has to fit in memory. The sampler is `sitk.Resample`'s: linear with
 taps clamped to the buffer, nearest by round-half-up, and `fill` wherever the
 reference grid reaches past the case.
 
-**Label maps.** Left unset, `interpolation` is read off the dtype: `uint8` takes
-the nearest voxel, everything else is interpolated. A dtype cannot decide this
-on its own (a CT is `int16` and so is nothing else about it), so a label map
-stored as anything but `uint8` must say so:
+**Label maps.** Left unset, `interpolation` is read off the dtype: `uint8`, `int64`
+(what `Argmax` produces) and `bool` take the nearest voxel, everything else is
+interpolated. A dtype cannot decide this on its own (a CT is stored as `int16`,
+and so are some label maps), so a label map stored in another integer type must
+say so:
 
 ```yaml
 Resample: {reference: case_0, reference_group: Labels, interpolation: nearest}

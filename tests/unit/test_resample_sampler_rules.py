@@ -30,7 +30,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
-from konfai.data.sampling import gather
+from konfai.data.sampling import default_interpolation, gather
 
 _SOURCE = (12, 14, 16)
 _SCALES = [1.31, 1.17, 1.23]
@@ -63,7 +63,7 @@ def _sample(tensor: torch.Tensor, fill: float = 0.0, mode: str | None = None, **
     source_shape = list(overrides.pop("source_shape", _SOURCE))
     coordinates = _coordinates(**overrides)
     if mode is None:
-        mode = "nearest" if tensor.dtype == torch.uint8 else "linear"
+        mode = default_interpolation(tensor)
     return gather(tensor, coordinates, [0] * len(source_shape), source_shape, mode, fill)
 
 

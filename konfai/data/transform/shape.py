@@ -33,6 +33,7 @@ from konfai.data.geometry import (
     remap_shape,
     signed_permutation,
 )
+from konfai.data.sampling import default_interpolation
 from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
@@ -66,13 +67,17 @@ class Padding(TransformInverse):
         return pairs
 
     def _shift_origin(self, cache_attribute: Attribute) -> None:
-        if "Origin" in cache_attribute and "Spacing" in cache_attribute and "Direction" in cache_attribute:
-            origin = torch.tensor(cache_attribute.get_np_array("Origin"))
-            matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
-            origin = torch.matmul(origin, matrix)
-            for dim in range(len(self.padding) // 2):
-                origin[dim] -= self.padding[dim * 2] * cache_attribute.get_np_array("Spacing")[dim]
-            cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
+        if not Grid.readable(cache_attribute):
+            return
+        # ITK's own association: a point is ``O + D (index * spacing)``, so an index shift moves the
+        # origin through the direction itself, which is not its inverse transpose once it shears.
+        origin = cache_attribute.get_np_array("Origin")
+        spacing = cache_attribute.get_np_array("Spacing")
+        matrix = cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin)))
+        shift = np.zeros(len(origin))
+        for dim in range(min(len(self.padding) // 2, len(origin))):  # F.pad order: (x, y, z)
+            shift[dim] = -self.padding[dim * 2] * spacing[dim]
+        cache_attribute["Origin"] = origin + matrix @ shift
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         self._shift_origin(cache_attribute)
@@ -182,6 +187,9 @@ class Crop(TransformInverse):
     The content-dependent box is computed once (``transform_shape``) and kept on the case as ``box``
     margins; cropping is then the translation ``out[o] = volume[o + start]``. Dropped voxels make it
     a ``LocalityKind.CROP``, the stored volume's statistics not being the output's.
+
+    Spacing and direction are kept and the origin moves to the box's near corner,
+    ``O + D (start * spacing)`` (ITK's ``RegionOfInterest``); the inverse restores it.
     """
 
     working_multiple = 0.0
@@ -217,18 +225,18 @@ class Crop(TransformInverse):
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
     ) -> None:
         del name
-        if "box" not in cache_attribute:
+        # A read stores the geometry stacked (``Origin_0``): only the stack-aware ``in`` sees it.
+        if "box" not in cache_attribute or not Grid.readable(cache_attribute):
             return
-        if not {"Origin", "Spacing", "Direction"} <= set(cache_attribute.keys()):
-            return
-        # The new origin is the physical point the box's near corner sat on.
+        # The new origin is the physical point the box's near corner sat on, ``O + D (start * spacing)``.
         box = Crop._parse_box(cache_attribute["box"])
-        origin = torch.tensor(cache_attribute.get_np_array("Origin"))
-        matrix = torch.tensor(cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin))))
-        origin = torch.matmul(origin, matrix)
-        for dim in range(box.shape[0]):
-            origin[-dim - 1] += box[dim][0] * cache_attribute.get_np_array("Spacing")[-dim - 1]
-        cache_attribute["Origin"] = torch.matmul(origin, torch.inverse(matrix))
+        origin = cache_attribute.get_np_array("Origin")
+        spacing = cache_attribute.get_np_array("Spacing")
+        matrix = cache_attribute.get_np_array("Direction").reshape((len(origin), len(origin)))
+        shift = np.zeros(len(origin))
+        for dim in range(box.shape[0]):  # box rows are in array order, the geometry in (x, y, z)
+            shift[-dim - 1] = box[dim][0] * spacing[-dim - 1]
+        cache_attribute["Origin"] = origin + matrix @ shift
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # The crop box is the foreground bounding box, so the output shape needs the pixel data: a
@@ -298,7 +306,8 @@ class Crop(TransformInverse):
         if "box" not in cache_attribute:
             return tensor
         box = self._parse_box(cache_attribute.pop("box"))
-        cache_attribute.pop_np_array("Origin")
+        if Grid.readable(cache_attribute):  # the forward pushed an origin only on a case with a geometry
+            cache_attribute.pop("Origin")
         padding = []
         for b in reversed(box):
             padding.extend([b[0], b[1]])
@@ -456,12 +465,13 @@ class Canonical(TransformInverse):
 
     @staticmethod
     def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
-        if data.dtype == torch.uint8:
-            mode = "nearest"
+        mode = "nearest" if default_interpolation(data) == "nearest" else "bilinear"
+        # Sample in the data's own device and float dtype; an integer input still needs a float grid. A
+        # nearest pick copies voxels, so an int64 label travels in float64: float32 rounds past 2**24.
+        if data.is_floating_point():
+            work = data
         else:
-            mode = "bilinear"
-        # Sample in the data's own device and float dtype; an integer input still needs a float grid.
-        work = data if data.is_floating_point() else data.type(torch.float32)
+            work = data.type(torch.float64 if data.dtype == torch.int64 else torch.float32)
         grid = torch.nn.functional.affine_grid(
             matrix[:, :-1, ...].to(device=work.device, dtype=work.dtype),
             [1, *list(data.shape)],

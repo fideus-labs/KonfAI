@@ -279,6 +279,76 @@ def test_crop_finds_its_box_without_holding_the_volume(tmp_path: Path, monkeypat
     assert quantile_calls == [0.05], "one scan per volume, shared by every chain"
 
 
+def test_crop_moves_a_read_cases_origin_to_its_box_near_corner(tmp_path: Path) -> None:
+    """A read stacks the header as ``Origin_0``/``Spacing_0``/``Direction_0``. The whole-volume call and
+    the hook the region routes call must both write ITK's ``RegionOfInterest`` header, and the inverse
+    must hand the stored one back."""
+    sitk = pytest.importorskip("SimpleITK")
+    volume = np.zeros((12, 14, 16), dtype=np.float32)
+    volume[3:10, 2:11, 5:13] = 1.0  # foreground box: index (x, y, z) = (5, 2, 3), size (8, 9, 7)
+    image = sitk.GetImageFromArray(volume)
+    image.SetOrigin((0.5, -1.0, 2.5))
+    image.SetSpacing((1.05, 0.95, 1.15))
+    # An axis permutation: the origin moves along the direction's columns, not along the array axes.
+    image.SetDirection((0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0))
+    (tmp_path / "CASE").mkdir()
+    sitk.WriteImage(image, str(tmp_path / "CASE" / "CT.mha"))
+    dataset = Dataset(tmp_path, "mha")
+    data, attribute = dataset.read_data("CT", "CASE")
+    assert "Origin_0" in attribute.keys()
+    stored = Attribute(attribute)
+    crop = Crop()
+    crop.set_datasets([dataset])
+
+    shape = crop.transform_shape("CT", "CASE", list(data.shape[1:]), attribute)
+    streamed = Attribute(attribute)
+    crop.write_stream_cache_attribute(streamed, list(data.shape[1:]), "CASE")
+    out = crop("CASE", torch.from_numpy(data.copy()), attribute)
+
+    expected = sitk.RegionOfInterest(sitk.ReadImage(str(tmp_path / "CASE" / "CT.mha")), [8, 9, 7], [5, 2, 3])
+    assert list(out.shape[1:]) == shape == list(reversed(expected.GetSize()))
+    np.testing.assert_array_equal(out[0].numpy(), sitk.GetArrayFromImage(expected))
+    for header in (attribute, streamed):
+        np.testing.assert_allclose(header.get_np_array("Origin"), expected.GetOrigin(), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(header.get_np_array("Spacing"), expected.GetSpacing(), rtol=0, atol=1e-12)
+        np.testing.assert_allclose(header.get_np_array("Direction"), expected.GetDirection(), rtol=0, atol=1e-12)
+
+    back = crop.inverse("CASE", out, attribute)
+    assert back.shape == data.shape
+    assert attribute == stored
+
+
+def test_crop_moves_the_origin_along_a_sheared_direction() -> None:
+    """A non-orthonormal direction, which an mha round-trips, separates ``D`` from its inverse
+    transpose: the origin moves along the direction's own columns."""
+    sitk = pytest.importorskip("SimpleITK")
+    image = sitk.GetImageFromArray(np.zeros((20, 18, 16), dtype=np.float32))
+    image.SetOrigin((0.5, -1.0, 2.5))
+    image.SetSpacing((1.05, 0.95, 1.15))
+    image.SetDirection((1.0, 0.3, 0.0, 0.0, 1.0, 0.0, 0.0, 0.2, 1.0))
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(image.GetOrigin())
+    attribute["Spacing"] = np.asarray(image.GetSpacing())
+    attribute["Direction"] = np.asarray(image.GetDirection())
+    # Array order (z, y, x): the near index and the margin left after the box.
+    attribute["box"] = np.array([[3, 9], [4, 7], [5, 5]])
+
+    Crop().write_stream_cache_attribute(attribute, [20, 18, 16])
+
+    expected = sitk.RegionOfInterest(image, [6, 7, 8], [5, 4, 3])
+    np.testing.assert_allclose(attribute.get_np_array("Origin"), expected.GetOrigin(), rtol=0, atol=1e-9)
+
+
+def test_crop_inverse_pads_back_a_case_without_geometry() -> None:
+    attribute = Attribute()
+    attribute["box"] = np.array([[1, 2], [0, 1], [3, 0]])
+
+    back = Crop().inverse("case", torch.ones(1, 4, 5, 6), attribute)
+
+    assert list(back.shape) == [1, 7, 6, 9]
+    assert "box" not in attribute
+
+
 # --------------------------------------------------------------------------------------
 # Standardize
 # --------------------------------------------------------------------------------------
@@ -328,6 +398,24 @@ def test_padding_after_the_data_keeps_origin(image_attributes):
 
     assert list(padded.shape) == [1, 6, 5, 7]
     np.testing.assert_allclose(attributes.get_np_array("Origin"), [10.0, 20.0, 30.0])
+
+
+def test_padding_shifts_the_origin_along_a_sheared_direction() -> None:
+    """Same rule as the crop, the other way: the pad moves the origin by ``D (-before * spacing)``."""
+    sitk = pytest.importorskip("SimpleITK")
+    image = sitk.GetImageFromArray(np.zeros((6, 5, 4), dtype=np.float32))
+    image.SetOrigin((0.5, -1.0, 2.5))
+    image.SetSpacing((1.05, 0.95, 1.15))
+    image.SetDirection((1.0, 0.3, 0.0, 0.0, 1.0, 0.0, 0.0, 0.2, 1.0))
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(image.GetOrigin())
+    attribute["Spacing"] = np.asarray(image.GetSpacing())
+    attribute["Direction"] = np.asarray(image.GetDirection())
+
+    Padding(padding=[2, 0, 3, 0, 4, 0])("case", torch.zeros(1, 6, 5, 4), attribute)
+
+    expected = sitk.ConstantPad(image, [2, 3, 4], [0, 0, 0])
+    np.testing.assert_allclose(attribute.get_np_array("Origin"), expected.GetOrigin(), rtol=0, atol=1e-9)
 
 
 # --------------------------------------------------------------------------------------
@@ -601,6 +689,29 @@ def test_canonical_is_the_exact_index_remap_bit_for_bit(direction: np.ndarray, e
     out = Canonical()("case", volume, _canonical_attributes(direction))
 
     assert torch.equal(out, expected(volume)), "an orthogonal reorientation must be the remap, not near it"
+
+
+def test_an_oblique_canonical_keeps_an_int64_label_past_float32() -> None:
+    # A nearest pick copies the voxel: a float32 trip would round 2**24 + 1 down to 2**24 in silence.
+    volume = torch.full((1, *_CANONICAL_SPATIAL), 2**24 + 1, dtype=torch.int64)
+
+    out = Canonical()("case", volume, _canonical_attributes(_OBLIQUE))
+
+    assert out.dtype == torch.int64
+    assert torch.equal(out, torch.full_like(out, 2**24 + 1))
+
+
+@pytest.mark.parametrize(("dtype", "blended"), [(torch.int64, False), (torch.bool, False), (torch.int16, True)])
+def test_an_oblique_canonical_picks_labels_by_dtype(dtype: torch.dtype, blended: bool) -> None:
+    # An oblique direction is sampled, not remapped, so the dtype decides the interpolation as it does
+    # for Resample: an Argmax's int64 and a mask keep their values, an int16 image is blended.
+    volume = torch.zeros((1, *_CANONICAL_SPATIAL), dtype=dtype)
+    volume[..., _CANONICAL_SPATIAL[-1] // 2 :] = True if dtype is torch.bool else 100
+
+    out = Canonical()("case", volume, _canonical_attributes(_OBLIQUE))
+
+    assert out.dtype == dtype
+    assert (len(torch.unique(out)) > 2) is blended
 
 
 @pytest.mark.parametrize("direction", [_RAS, _LPS, _PERMUTING], ids=["RAS", "LPS", "permuting"])

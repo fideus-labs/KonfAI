@@ -39,6 +39,7 @@ from konfai.data.geometry import (
 from konfai.data.sampling import (
     blend_order,
     coordinate_precision,
+    default_interpolation,
     gather,
     gather_separable,
     sampling_dtype,
@@ -591,10 +592,10 @@ class Resample(TransformInverse):
     ONE INTERPOLATION, ALWAYS. A grid change and a warp asked for together are composed into a single
     coordinate per target voxel and the source is read once, at the displaced point.
 
-    ``interpolation`` is ``nearest``, ``linear`` (the default; ``uint8`` defaults to ``nearest``) or
-    ``cubic``: Keys' cubic convolution (Catmull-Rom, a = -1/2), interpolating and patch-local (four
-    taps per axis, one extra voxel of streamed halo). It is NOT a prefiltered B-spline: scipy's
-    ``order=3`` runs a global prefilter this stage does not.
+    ``interpolation`` is ``nearest``, ``linear`` (the default; a label dtype, ``uint8``, ``int64`` or
+    ``bool``, defaults to ``nearest``) or ``cubic``: Keys' cubic convolution (Catmull-Rom, a = -1/2),
+    interpolating and patch-local (four taps per axis, one extra voxel of streamed halo). It is NOT a
+    prefiltered B-spline: scipy's ``order=3`` runs a global prefilter this stage does not.
 
     IT STREAMS, and what a region reads is known before a voxel of the SOURCE is touched. A rigid or
     affine map is an exact affine. A BSpline and a dense field are values on a grid read through a
@@ -649,8 +650,8 @@ class Resample(TransformInverse):
             raise TransformError(
                 f"'Resample' has an unknown interpolation '{interpolation}'.",
                 "Use 'linear' for an image, 'nearest' for a label map, or 'cubic' (Keys/Catmull-Rom)"
-                " for a sharper image blend. Left unset, uint8 is taken for a label map and"
-                " everything else is interpolated linearly.",
+                " for a sharper image blend. Left unset, uint8, int64 and bool are taken for a label map"
+                " and everything else is interpolated linearly.",
             )
         if precision not in ("exact", "fast"):
             raise TransformError(
@@ -1310,11 +1311,11 @@ class Resample(TransformInverse):
     def _mode(self, tensor: torch.Tensor) -> str:
         """``nearest``, ``linear`` or ``cubic``: what a sampler asks before it blends anything.
 
-        A dtype cannot settle this on its own, so the heuristic claims ``uint8`` and nothing more and
-        ``interpolation`` answers for the rest. Getting it wrong is silent: two blended labels give a
+        A dtype cannot settle this on its own, so the heuristic claims the label dtypes and nothing more
+        and ``interpolation`` answers for the rest. Getting it wrong is silent: two blended labels give a
         third that was in no input.
         """
-        return self.interpolation or ("nearest" if tensor.dtype == torch.uint8 else "linear")
+        return self.interpolation or default_interpolation(tensor)
 
     @property
     def _tap_margin(self) -> int:
