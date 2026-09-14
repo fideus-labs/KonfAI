@@ -228,6 +228,8 @@ class ElastixEngine:
                 if key == "ImpactGPU":
                     line = f"{indent}(ImpactGPU {device_index})"
                 elif key == "ImpactUseMixedPrecision" and device_index < 0:
+                    # Handled here, so an exact override of the key is not appended behind it.
+                    seen.add(key)
                     line = f'{indent}(ImpactUseMixedPrecision "false")'
                 else:
                     exact_value = next((value for k, value in exact if k == key), None)

@@ -138,6 +138,17 @@ def test_fireants_refuses_a_registration_with_no_stage_at_all() -> None:
         RegistrationNet(linear_method="none", deformable_method="none")
 
 
+def test_an_exact_mixed_precision_override_stays_off_on_the_cpu() -> None:
+    # An exact override of the key used to be appended behind the forced line, so the map carried a
+    # second, "true" entry and elastix ran the half precision the CPU cannot.
+    text = '(ImpactGPU 0)\n(ImpactUseMixedPrecision "true" "true")\n(Metric "Impact")'
+
+    cpu = ElastixEngine._apply_map_overrides(text, {}, [("ImpactUseMixedPrecision", '"true"')], -1)
+
+    assert cpu.count("ImpactUseMixedPrecision") == 1
+    assert '(ImpactUseMixedPrecision "false")' in cpu
+
+
 def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
     # Every shipped IMPACT preset turns half precision on; on the CPU the feature model's pooling has no
     # half-precision kernel, so a run placed there with --cpu died in the first layer.
