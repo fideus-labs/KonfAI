@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import SimpleITK as sitk
 from impact_reg_konfai.models import elastix_engine as elastix_engine_module
 from impact_reg_konfai.models.elastix_engine import ElastixEngine
 
@@ -58,6 +59,24 @@ def test_a_windows_drive_letter_is_a_local_path_not_an_hf_repo() -> None:
     assert not _is_local_ref("org/repo:MIND/R1D2.pt")
     assert _model_key("C:/models/m.pt") == "C:/models/m.pt"
     assert _model_key("org/repo:MIND/R1D2.pt") == "MIND/R1D2.pt"
+
+
+def test_an_empty_fixed_mask_is_a_zero_field_and_never_reaches_elastix(monkeypatch) -> None:
+    # A patch the fixed mask does not reach has nothing to register. Read as 'no mask', it had elastix
+    # fit the whole patch, background included, and a tiled run dragged the tissue edge by millimetres.
+    def elastix_must_not_run(*args, **kwargs):
+        raise AssertionError("elastix was launched on an empty fixed mask")
+
+    monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", elastix_must_not_run)
+    fixed = sitk.Image([6, 5, 4], sitk.sitkFloat32)
+    fixed.SetSpacing((0.5, 0.5, 2.0))
+    fixed.SetOrigin((3.0, -1.0, 7.0))
+    empty = sitk.Image([6, 5, 4], sitk.sitkUInt8)
+
+    field = ElastixEngine.register(SimpleNamespace(), fixed, sitk.Image(fixed), 0, fixed_mask=empty)
+
+    assert field.shape == (3, 4, 5, 6)
+    assert not field.any()
 
 
 def test_elastix_engine_refuses_an_empty_parameter_map_list() -> None:
@@ -117,3 +136,26 @@ def test_fireants_refuses_a_registration_with_no_stage_at_all() -> None:
 
     with pytest.raises(ValueError, match="leaves nothing to optimise"):
         RegistrationNet(linear_method="none", deformable_method="none")
+
+
+def test_an_exact_mixed_precision_override_stays_off_on_the_cpu() -> None:
+    # An exact override of the key used to be appended behind the forced line, so the map carried a
+    # second, "true" entry and elastix ran the half precision the CPU cannot.
+    text = '(ImpactGPU 0)\n(ImpactUseMixedPrecision "true" "true")\n(Metric "Impact")'
+
+    cpu = ElastixEngine._apply_map_overrides(text, {}, [("ImpactUseMixedPrecision", '"true"')], -1)
+
+    assert cpu.count("ImpactUseMixedPrecision") == 1
+    assert '(ImpactUseMixedPrecision "false")' in cpu
+
+
+def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
+    # Every shipped IMPACT preset turns half precision on; on the CPU the feature model's pooling has no
+    # half-precision kernel, so a run placed there with --cpu died in the first layer.
+    text = '(ImpactGPU 0)\n(ImpactUseMixedPrecision "true" "true")\n(Metric "Impact")'
+
+    cpu = ElastixEngine._apply_map_overrides(text, {}, [], -1)
+    gpu = ElastixEngine._apply_map_overrides(text, {}, [], 1)
+
+    assert '(ImpactUseMixedPrecision "false")' in cpu and "(ImpactGPU -1)" in cpu
+    assert '(ImpactUseMixedPrecision "true" "true")' in gpu and "(ImpactGPU 1)" in gpu

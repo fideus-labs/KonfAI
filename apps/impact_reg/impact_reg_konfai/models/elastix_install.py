@@ -208,6 +208,11 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
     elx_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{GITHUB_TAG}/{elx_asset}"
     elx_archive = install_path / elx_asset
     download_file(elx_url, elx_archive)
+    # Extracting over a previous install keeps whatever the new asset does not overwrite. An older asset
+    # bundled its own LibTorch under lib/, which then shadowed the environment's torch on the loader
+    # path: a CUDA build ran CPU-only, and a build of another torch failed to link at all.
+    for stale in ("bin", "lib", "third_party"):
+        shutil.rmtree(install_path / stale, ignore_errors=True)
     extract_archive(elx_archive, install_path)
 
     # -------------------------------------------------------------------------

@@ -46,13 +46,27 @@ ELASTIX_CACHE = Path.home() / ".cache" / "konfai" / "elastix-impact"
 
 def _is_partial_mask(mask: "sitk.Image | None") -> bool:
     """True only for a mask that actually restricts the metric region: some voxels in, some out. An
-    absent optional mask arrives as a whole-image (all-ones) default from KonfAI, and an all-zero mask
-    is degenerate; both are treated as no mask, so elastix runs without ``-fMask`` / ``-mMask`` (i.e.
-    the whole image) instead of paying for a mask that restricts nothing."""
+    absent optional mask arrives as a whole-image (all-ones) default from KonfAI, and elastix then runs
+    without ``-fMask`` / ``-mMask`` (i.e. the whole image) instead of paying for a mask that restricts
+    nothing. An all-zero fixed mask never gets here: ``register`` returns a zero field for it."""
     if mask is None:
         return False
     arr = sitk.GetArrayViewFromImage(mask)
     return bool((arr > 0).any()) and bool((arr == 0).any())
+
+
+def _displacement_on(fixed: sitk.Image, transform: sitk.Transform) -> np.ndarray:
+    """``transform`` sampled as a displacement field on the grid of ``fixed``, channel-first."""
+    dvf = sitk.TransformToDisplacementField(
+        transform,
+        sitk.sitkVectorFloat64,
+        fixed.GetSize(),
+        fixed.GetOrigin(),
+        fixed.GetSpacing(),
+        fixed.GetDirection(),
+    )
+    dvf_np, _ = image_to_data(dvf)
+    return dvf_np
 
 
 class ElastixEngine:
@@ -171,8 +185,9 @@ class ElastixEngine:
         ``per_token`` maps an elastix key (or the ``ImpactSubsetFeatures`` prefix) to a value replacing
         **each** existing token, preserving per-resolution / per-model multiplicity. ``exact`` entries (from
         ``parameter_overrides``, ``Key=value text``) replace the whole value verbatim and win over the named
-        knobs. Overrides only REPLACE keys already present, never inject. ``global_only`` (matrix mode) drops
-        ``max_iterations`` / ``subset_features`` (the matrix already sets those per cell).
+        knobs. A named knob only REPLACES a key the map already has; an ``exact`` entry the map lacks is
+        appended (``_apply_map_overrides``). ``global_only`` (matrix mode) drops ``max_iterations`` /
+        ``subset_features`` (the matrix already sets those per cell).
         """
         per_token: dict[str, str] = {}
         if not global_only and self._max_iterations > 0:
@@ -197,6 +212,10 @@ class ElastixEngine:
     ) -> str:
         """Patch a parameter map: set ImpactGPU to the device, apply exact key overrides, replace each token
         of a per-token knob (preserving multiplicity), and warn for a requested key absent from the map.
+
+        On the CPU (``device_index`` below 0) ``ImpactUseMixedPrecision`` is forced to ``"false"``: half
+        precision has no 3-D pooling on the CPU, so a preset written for a GPU (every shipped IMPACT
+        preset turns it on) died in the feature model's first layer.
         """
         entry_pattern = re.compile(r"^(\s*)\((\S+)((?:\s+[^)]*)?)\)\s*$")
         requested = set(per_token) | {key for key, _ in exact}
@@ -208,6 +227,10 @@ class ElastixEngine:
                 indent, key, values = match.group(1), match.group(2), match.group(3)
                 if key == "ImpactGPU":
                     line = f"{indent}(ImpactGPU {device_index})"
+                elif key == "ImpactUseMixedPrecision" and device_index < 0:
+                    # Handled here, so an exact override of the key is not appended behind it.
+                    seen.add(key)
+                    line = f'{indent}(ImpactUseMixedPrecision "false")'
                 else:
                     exact_value = next((value for k, value in exact if k == key), None)
                     if exact_value is not None:
@@ -269,8 +292,14 @@ class ElastixEngine:
         """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid.
 
         Optional ``fixed_mask`` / ``moving_mask`` restrict the similarity metric to a region (elastix
-        ``-fMask`` / ``-mMask``); a mask covering the whole image is equivalent to passing none.
+        ``-fMask`` / ``-mMask``); a mask covering the whole image is equivalent to passing none, and a
+        fixed mask with no voxel in it leaves nothing to register, so the field is zero.
         """
+        if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
+            # Read as 'no mask', an empty one had elastix fit the whole patch, background included: in a
+            # tiled run every patch the tissue does not reach then deformed its background, and dragged
+            # the tissue edge of its neighbours through the blend.
+            return _displacement_on(fixed, sitk.Transform(fixed.GetDimension(), sitk.sitkIdentity))
         work = Path(tempfile.mkdtemp(prefix="konfai_reg_"))
         try:
             fixed_path, moving_path = work / "Fixed.mha", work / "Moving.mha"
@@ -350,18 +379,7 @@ class ElastixEngine:
             )
             if not transforms:
                 raise FileNotFoundError("elastix produced no composite transform file.")
-            transform = sitk.ReadTransform(str(transforms[-1]))
-
-            dvf = sitk.TransformToDisplacementField(
-                transform,
-                sitk.sitkVectorFloat64,
-                fixed.GetSize(),
-                fixed.GetOrigin(),
-                fixed.GetSpacing(),
-                fixed.GetDirection(),
-            )
-            dvf_np, _ = image_to_data(dvf)
-            return dvf_np
+            return _displacement_on(fixed, sitk.ReadTransform(str(transforms[-1])))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
