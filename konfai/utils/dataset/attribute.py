@@ -66,8 +66,32 @@ _PRINTED_ARRAYS_UP_TO = 64
 def _array_text(dtype: str, shape: tuple[int, ...], data: bytes) -> str:
     """The printed form of a small numeric array, from its bytes."""
     value = np.frombuffer(data, dtype=np.dtype(dtype)).reshape(shape)
+    text = _vector_text(value)
+    if text is not None:
+        return text
     with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
         return str(value).replace("\n", "")
+
+
+def _vector_text(value: np.ndarray) -> str | None:
+    """numpy's positional print of a short float64 vector (a region's origin, drawn anew for every
+    region a streamed read serves, and 35 us through numpy's printer), or ``None`` where numpy would
+    wrap the line or switch to exponents: past 1e8, under 1e-4, or a thousandfold spread."""
+    if value.dtype != np.float64 or value.ndim != 1 or not 0 < value.size <= 16 or not np.isfinite(value).all():
+        return None
+    magnitudes = np.abs(value[value != 0])
+    if magnitudes.size:
+        low, high = float(magnitudes.min()), float(magnitudes.max())
+        if high >= 1e8 or low < 1e-4 or high / low > 1000.0:
+            return None
+    parts = []
+    for scalar in value.tolist():
+        whole, _, fraction = repr(scalar).partition(".")
+        parts.append((whole, fraction.rstrip("0")))
+    left = max(len(whole) for whole, _ in parts)
+    right = max(len(fraction) for _, fraction in parts)
+    text = "[" + " ".join(whole.rjust(left) + "." + fraction.ljust(right) for whole, fraction in parts) + "]"
+    return text if len(text) <= 75 else None
 
 
 def region_geometry(
