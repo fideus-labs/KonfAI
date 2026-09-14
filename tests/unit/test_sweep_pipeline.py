@@ -538,3 +538,13 @@ def test_a_region_the_device_cannot_hold_halves_the_rest_and_the_bytes_stand(
     assert heights[:3] == [4, 4, 2], f"the failed region is cut again at half the height: {heights}"
     assert 4 not in heights[2:], "and the rest never grow back past the height that failed"
     assert "4 -> 2" in SWEEP_CLOCK.regions_line()
+
+
+def test_the_regions_line_counts_the_heights_of_a_cohort() -> None:
+    from konfai.utils.clock import SweepClock
+
+    clock = SweepClock()
+    for _case in range(40):
+        clock.region(109, None)
+        clock.region(19, None)
+    assert clock.regions_line() == " | 80 region(s) of 109 x40, 19 x40 row(s), unmeasured"

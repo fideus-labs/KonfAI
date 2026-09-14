@@ -30,6 +30,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai import konfai_root
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
+from konfai.data.transform.base import _UNDECLARED_LOCALITY
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import AugmentationError
@@ -269,7 +270,7 @@ class DataAugmentation(NeedDevice, ABC):
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
         if self.locality is not None:
             return PatchLocality(self.locality, halo=self.halo)
-        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_UNDECLARED_LOCALITY)
 
     def stream_region_source(
         self,
@@ -278,12 +279,18 @@ class DataAugmentation(NeedDevice, ABC):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        """Map a target patch's spatial slices to the source region copy *a* reads (region kinds)."""
+        """Map a target patch's spatial slices to the source region copy *a* reads (region kinds). A copy
+        the draw did not select reads its own region, as the pointwise locality it declares says."""
+        if a not in self.who_index[index]:
+            return list(target_slices)
         return self._stream_region_source(index, self._slot(index, a), target_slices, source_spatial_shape)
 
     def stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         """The spatial shape copy *a*'s draw produces from ``shape``, the counterpart of
-        ``Transform.transform_shape``. A shape-changing draw restates what ``state_init`` did."""
+        ``Transform.transform_shape``. A shape-changing draw restates what ``state_init`` did; a copy the
+        draw did not select keeps its shape."""
+        if a not in self.who_index[index]:
+            return shape
         return self._stream_shape(index, self._slot(index, a), shape)
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
@@ -301,21 +308,48 @@ class DataAugmentation(NeedDevice, ABC):
             "Implement _stream_region_source() or declare a non-region _patch_locality().",
         )
 
-    def compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
+    def compute(
+        self, name: str, index: int, a: int, tensor: torch.Tensor, cache_attribute: Attribute | None = None
+    ) -> torch.Tensor:
         """Apply the draw of copy *a* to one tensor: the forward counterpart of :meth:`inverse`."""
-        if a in self.who_index[index]:
-            tensor = self._compute(name, index, self._slot(index, a), tensor)
-        return tensor
+        if a not in self.who_index[index]:
+            return tensor
+        slot = self._slot(index, a)
+        if cache_attribute is not None:
+            self._seed_statistics(index, slot, tensor, cache_attribute, whole=True)
+        return self._compute(name, index, slot, tensor)
 
     def stream_region(
-        self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
+        self,
+        name: str,
+        index: int,
+        a: int,
+        tensor: torch.Tensor,
+        context: RegionContext,
+        cache_attribute: Attribute | None = None,
     ) -> torch.Tensor:
         """Apply the draw of copy *a* to one region, told where it sits (the same contract as
         :meth:`konfai.data.transform.Transform.stream_region`). The default is the draw itself; a
         draw parameterised by the place overrides ``_stream_region``."""
         if a not in self.who_index[index]:
             return tensor
-        return self._stream_region(name, index, self._slot(index, a), tensor, context)
+        slot = self._slot(index, a)
+        if cache_attribute is not None:
+            self._seed_statistics(index, slot, tensor, cache_attribute, whole=False)
+        return self._stream_region(name, index, slot, tensor, context)
+
+    def _seed_statistics(
+        self, index: int, a: int, tensor: torch.Tensor, cache_attribute: Attribute, whole: bool
+    ) -> None:
+        """Take the case-level values this draw needs, before it runs, on either route.
+
+        A ``GLOBAL_STAT`` draw describes the WHOLE case, and a region is not the case. ``whole`` says
+        which is in hand: on the whole-volume route the draw measures the tensor and records it in
+        the scope, where a later streamed plan reads it back; on the region route the plan has
+        already seeded it, and a draw that finds nothing must raise rather than describe its region.
+        The base needs none.
+        """
+        del index, a, tensor, cache_attribute, whole
 
     def _stream_region(
         self, name: str, index: int, a: int, tensor: torch.Tensor, context: RegionContext
@@ -328,8 +362,12 @@ class DataAugmentation(NeedDevice, ABC):
         name: str,
         index: int,
         tensors: list[torch.Tensor],
+        caches_attribute: list[Attribute] | None = None,
     ) -> list[torch.Tensor]:
-        return [self.compute(name, index, a, tensor) for a, tensor in enumerate(tensors)]
+        return [
+            self.compute(name, index, a, tensor, None if caches_attribute is None else caches_attribute[a])
+            for a, tensor in enumerate(tensors)
+        ]
 
     @abstractmethod
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:

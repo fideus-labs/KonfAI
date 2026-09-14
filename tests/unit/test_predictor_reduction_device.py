@@ -198,3 +198,19 @@ def test_reduction_declares_slab_locality_by_type() -> None:
             return tensors[0]
 
     assert _CustomReduction().voxel_local is False
+
+
+def test_the_cuda_cache_is_released_only_when_the_allocation_does_not_fit_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from konfai.predictor.output import _free_vram
+
+    released: list[int] = []
+    reports = iter([1000, 1000, 5000])
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda *a, **k: released.append(1))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (next(reports), 10_000))
+
+    # Fits in what is free already: the answer does not depend on the release, which is skipped.
+    assert _free_vram(torch.device("cuda", 0), 500) == 1000 and not released
+    # Does not fit: the cache is released once and the free memory asked again.
+    assert _free_vram(torch.device("cuda", 0), 2000) == 5000 and released == [1]

@@ -634,3 +634,40 @@ def test_statistics_streams_off_the_seeded_case_numbers(streaming_dataset_stub) 
     assert float(attribute["ImageMean"]) == pytest.approx(float(volume.mean()), rel=1e-6)
     assert float(attribute["ImageStd"]) == pytest.approx(float(volume.std(ddof=1)), rel=1e-6)
     assert stub.full_reads == 0 and stub.stats_reads == 1
+
+
+def test_a_sequential_reader_cuts_its_patches_from_slabs(build_streaming_manager, monkeypatch) -> None:
+    # A one-pass reader asks its patches in grid order: the streamed route replays a slab of rows once
+    # and cuts the patches from it. Each patch must equal the one replayed on its own, from fewer replays:
+    # bit for bit for a dilation, and within what the region tests allow for a resample, whose
+    # interpolation rounds with the region it is computed over on some platforms (Windows).
+    from konfai.data.transform import Dilate
+
+    replays = {"count": 0}
+    replay = DatasetManager._replay_streamed_region
+
+    def counted(self, *args, **kwargs):
+        replays["count"] += 1
+        return replay(self, *args, **kwargs)
+
+    monkeypatch.setattr(DatasetManager, "_replay_streamed_region", counted)
+    volume = (np.random.default_rng(3).random((1, 40, 30)) * 100).astype(np.float32)
+    for chain, atol in ((lambda: [Resample(shape=[24, 18])], 1e-6), (lambda: [Dilate(1)], 0.0)):
+        plain = build_streaming_manager(volume, chain(), [4, 6])
+        sequential = build_streaming_manager(volume, chain(), [4, 6])
+        sequential.sequential_patches = True
+        size = plain.patch.get_size(0)
+
+        replays["count"] = 0
+        expected = [plain._get_streamed_data(index, 0, True)[0] for index in range(size)]
+        replayed_alone = replays["count"]
+        replays["count"] = 0
+        got = [sequential._get_streamed_data(index, 0, True)[0] for index in range(size)]
+
+        for a, b in zip(got, expected, strict=True):
+            if atol == 0.0:
+                assert torch.equal(a, b)
+            else:
+                np.testing.assert_allclose(a.numpy(), b.numpy(), atol=atol)
+        assert replays["count"] < replayed_alone
+        assert not plain._landed_slabs

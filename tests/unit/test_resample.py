@@ -67,3 +67,39 @@ def test_an_axis_the_map_leaves_alone_is_left_alone() -> None:
     volume = torch.from_numpy(_volume())
     kept = Resample(spacing=[-1.0, -1.0, 1.0])("case", volume.clone(), Attribute(attribute))
     torch.testing.assert_close(kept, volume, rtol=0, atol=0)
+
+
+def test_a_case_recorded_again_with_the_same_header_is_not_judged_again(monkeypatch) -> None:
+    """Every plan records the case again; its coverage is counted once for the grid it was found on."""
+    from konfai.data.transform import Resample
+    from konfai.utils.dataset import Attribute
+
+    judged = []
+    count = Resample._coverage
+    monkeypatch.setattr(Resample, "_coverage", classmethod(lambda cls, *args: judged.append(args) or count(*args)))
+    stage = Resample(spacing=[2.0, 2.0, 2.0])
+    header = {"Origin": np.zeros(3), "Spacing": np.ones(3), "Direction": np.eye(3).ravel()}
+    for _ in range(3):
+        assert stage.transform_shape("CT", "CASE", [8, 8, 8], Attribute(header)) == [4, 4, 4]
+    assert len(judged) == 1
+
+    moved = dict(header, Origin=np.full(3, 1.0))
+    stage.transform_shape("CT", "CASE", [8, 8, 8], Attribute(moved))
+    assert len(judged) == 2
+
+
+def test_a_header_that_left_the_geometry_unsaid_is_not_the_identity_header_it_reads_as() -> None:
+    """Both read as the identity grid, and only the second cannot place a target grid: the memo of the
+    first must not answer for it."""
+    from konfai.data.transform import Resample
+    from konfai.utils.dataset import Attribute
+    from konfai.utils.errors import TransformError
+
+    stage = Resample(spacing=[2.0, 2.0, 2.0])
+    explicit = {"Origin": np.zeros(3), "Spacing": np.ones(3), "Direction": np.eye(3).ravel()}
+    stage.transform_shape("CT", "CASE", [8, 8, 8], Attribute(explicit))
+    stage._grids_of("CASE")
+
+    stage._record("CASE", [8, 8, 8], Attribute())
+    with pytest.raises(TransformError):
+        stage._grids_of("CASE")

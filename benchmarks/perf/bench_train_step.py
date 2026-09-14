@@ -24,8 +24,9 @@ logits head selected the way ONNX export selects it), with a synthetic batch of 
 shape. Five phases are timed with CUDA events, synchronized on both ends: host-to-device copy of a
 pinned batch, forward, loss (cross-entropy on the logits; the example's second term, a Dice on the
 softmax head, is not reproduced here and the audit measured the whole criteria phase at 4 % of the
-step), backward, optimizer step. Four variants: fp32, autocast (fp16 with a GradScaler),
-channels_last, both. ``torch.profiler`` then splits the CUDA kernel time of fp32 and autocast by
+step), backward, optimizer step. Six variants: fp32, autocast (fp16 with a GradScaler),
+channels_last, both, and over both ``cudnn`` (benchmarked kernels) and ``compile`` (``torch.compile``,
+its compilation paid in the warmup). ``torch.profiler`` then splits the CUDA kernel time of fp32 and autocast by
 family (``harness.kernel_families`` counts every kernel event once) and lists the ten heaviest kernels.
 """
 
@@ -135,6 +136,8 @@ def run_variant(
     profile_steps: int,
     classpath: str | None = None,
     sys_path: str | None = None,
+    cudnn_benchmark: bool = False,
+    compile_model: bool = False,
 ) -> dict[str, object]:
     import torch
 
@@ -146,6 +149,9 @@ def run_variant(
     )
     if channels_last:
         net = net.to(memory_format=memory_format)
+    torch.backends.cudnn.benchmark = cudnn_benchmark
+    if compile_model:
+        net = torch.compile(net)
     optimizer = torch.optim.AdamW(net.parameters(), lr=1e-3)
     scaler = torch.amp.GradScaler("cuda") if (autocast and device.type == "cuda") else None  # type: ignore[attr-defined]
     generator = torch.Generator().manual_seed(0)
@@ -206,7 +212,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--profile-steps", type=int, default=10)
-    parser.add_argument("--variants", default="fp32,autocast,channels_last,both")
+    parser.add_argument("--variants", default="fp32,autocast,channels_last,both,cudnn,compile")
     parser.add_argument("--repeats", type=int, default=1, help="steps are the repeats here")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--quick", action="store_true")
@@ -243,8 +249,10 @@ def main() -> None:
             shape,
             0,
             device=device,
-            autocast=variant in ("autocast", "both"),
-            channels_last=variant in ("channels_last", "both"),
+            autocast=variant in ("autocast", "both", "cudnn", "compile"),
+            channels_last=variant in ("channels_last", "both", "cudnn", "compile"),
+            cudnn_benchmark=variant == "cudnn",
+            compile_model=variant == "compile",
             warmup=warmup,
             steps=steps,
             profile_steps=profile_steps if variant in ("fp32", "autocast") else 0,

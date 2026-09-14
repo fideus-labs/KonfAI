@@ -23,13 +23,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from konfai.data import data_manager
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import (
     DataMetric,
     DataPrediction,
     DataTrain,
 )
+from konfai.data.patching import CASE_ELEMENT_BYTES
 from konfai.utils import budget, runtime
 from konfai.utils.budget import (
     AUTO_MEMORY_SAFETY_FRACTION,
@@ -215,13 +215,21 @@ def test_a_slurm_per_cpu_grant_is_multiplied_by_the_task_cpus(monkeypatch: pytes
 #   8 volumes x 512 elements x 4 bytes = 16384 bytes.
 _GROUP_SHAPE = [1, 8, 8, 8]
 _CASES = ["case_a", "case_b", "case_c", "case_d"]
-_DATASET_BYTES = 2 * len(_CASES) * 512 * data_manager.samples._CACHE_ELEMENT_BYTES
+_DATASET_BYTES = 2 * len(_CASES) * 512 * CASE_ELEMENT_BYTES
 
 
 def _make_train(memory_budget: str | float | None) -> DataTrain:
     """A DataTrain with an injected, header-free prepared dataset (no disk, no config file)."""
     data = DataTrain(augmentations=None, memory_budget=memory_budget)
-    managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
+    managers = {
+        group: [
+            SimpleNamespace(
+                base_shape=list(_GROUP_SHAPE), landed_channels=_GROUP_SHAPE[0], spatial_shape=list(_GROUP_SHAPE[1:])
+            )
+            for _ in _CASES
+        ]
+        for group in ("CT", "SEG")
+    }
     data._managers = managers  # type: ignore[assignment]
     data._validation_managers = {}
     data.case_names = list(_CASES)
@@ -244,7 +252,15 @@ def test_estimate_counts_one_copy_per_augmentation_draw() -> None:
         memory_budget=None,
         validation=None,
     )
-    managers = {group: [SimpleNamespace(base_shape=list(_GROUP_SHAPE)) for _ in _CASES] for group in ("CT", "SEG")}
+    managers = {
+        group: [
+            SimpleNamespace(
+                base_shape=list(_GROUP_SHAPE), landed_channels=_GROUP_SHAPE[0], spatial_shape=list(_GROUP_SHAPE[1:])
+            )
+            for _ in _CASES
+        ]
+        for group in ("CT", "SEG")
+    }
     data._managers = managers  # type: ignore[assignment]
     data._validation_managers = {}
     data.case_names = list(_CASES)
@@ -293,7 +309,7 @@ def test_one_pass_workflows_never_cache_whatever_the_budget() -> None:
         DataPrediction(augmentations=None, memory_budget=f"{_DATASET_BYTES * 100}b"),
         DataMetric(memory_budget=f"{_DATASET_BYTES * 100}b"),
     ):
-        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2])]}  # type: ignore[assignment]
+        data._managers = {"CT": [SimpleNamespace(base_shape=[1, 2, 2, 2], landed_channels=1, spatial_shape=[2, 2, 2])]}  # type: ignore[assignment]
         data._validation_managers = {}
         data.case_names = ["case_a"]
         data._validation_names = []
@@ -793,3 +809,53 @@ def test_a_machine_budget_the_process_has_already_spent_leaves_nothing(
     handing the sizing a figure below zero to divide by."""
     monkeypatch.setattr(budget, "resident_bytes", lambda: 8 << 30)
     assert budget.MemoryBudget(1 << 30, "auto", shared_across_ranks=True).work_bytes(1) == 0.0
+
+
+def test_the_allocator_is_told_a_gap_only_where_there_is_one() -> None:
+    """The threshold has to sit above what a step allocates and below a volume. A workflow whose every
+    step reads a volume has no room for one, and saying so is what keeps the loop from paying for a
+    pinning that buys nothing."""
+    from konfai.data.patching import DatasetPatch
+    from konfai.utils.runtime import bound_allocator_growth
+
+    def _pins(scales: tuple[int, int]) -> bool:
+        volume, loop = scales
+        return volume > 2 * max(2 * loop, 8 * 2**20)
+
+    big = [1, 256, 256, 256]  # 64 MiB a case
+    data = DataTrain(augmentations={}, memory_budget=None, validation=None, batch_size=2)
+    data.patch = DatasetPatch([1, 64, 64])
+    data._managers = {  # type: ignore[assignment]
+        "CT": [
+            SimpleNamespace(base_shape=list(big), landed_channels=big[0], spatial_shape=list(big[1:])) for _ in _CASES
+        ]
+    }
+    data._validation_managers = {}
+    data.case_names = list(_CASES)
+    data._validation_names = []
+    assert _pins(data.allocation_scales()), "a batch of small patches against a big case is the gap"
+
+    # The same source whose patch is the case itself: every step reads a volume, so there is no gap.
+    data.patch = DatasetPatch(list(big[1:]))
+    assert not _pins(data.allocation_scales())
+    assert bound_allocator_growth(*data.allocation_scales()) is False
+
+
+def test_the_estimate_counts_the_shape_the_chain_lands_on() -> None:
+    """A cache holds the chain's OUTPUT, so that is what it is charged, whether the chain shrinks the
+    case or grows it. Measured per case on a 3 mm resample of a 1 mm case, held for the life of the
+    run: 2.4 MiB against the 2.5 the landed shape counts."""
+    for landed, expected in (([extent // 2 for extent in _GROUP_SHAPE[1:]], 64), ([16, 16, 16], 4096)):
+        data = DataTrain(augmentations={}, memory_budget=None, validation=None)
+        data._managers = {  # type: ignore[assignment]
+            "CT": [
+                SimpleNamespace(
+                    base_shape=list(_GROUP_SHAPE), landed_channels=_GROUP_SHAPE[0], spatial_shape=list(landed)
+                )
+                for _ in _CASES
+            ]
+        }
+        data._validation_managers = {}
+        data.case_names = list(_CASES)
+        data._validation_names = []
+        assert data._estimate_cached_bytes() == len(_CASES) * expected * CASE_ELEMENT_BYTES

@@ -18,12 +18,11 @@
 """What a loader yields: items, batches, and the torch dataset over the cases' managers."""
 
 import os
-import threading
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 import tqdm
@@ -33,21 +32,37 @@ from torch.utils import data
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chains
 from konfai.data.data_manager.order import PatchReadOrder
+from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager
+from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.dataset import Attribute
-from konfai.utils.runtime import get_cpu_info, get_memory, get_memory_info, memory_forecast
+from konfai.utils.runtime import get_cpu_info, get_memory, get_memory_info, memory_forecast, return_freed_heap
 from konfai.utils.utils import OverlapSpec
 
-# A cached case is a float32 tensor (torch's default dtype, and the default TensorCast's target), so
-# bytes are counted at 4/element from the header shape alone, not the on-disk dtype, and without
-# modelling transforms that shrink or grow the cached tensor.
-_CACHE_ELEMENT_BYTES = 4
 
+def _cache_worker_count(cpu_count: int, device_count: int, case_bytes: float = 0.0) -> int:
+    """Number of caching threads: CPUs shared across devices, bounded by what they hold at once.
 
-def _cache_worker_count(cpu_count: int, device_count: int) -> int:
-    """Number of caching threads: CPUs shared across devices, but never below one."""
+    Each thread reads one case whole and runs the chain on it, so the fill holds that many volumes
+    plus what each chain allocates beside its own. The cache the run was sized against is the LANDED
+    cohort; this transient is not in that figure, and on a cohort of large cases a core per thread
+    would peak far above the budget. ``case_bytes`` is one case's read and its chain's working set:
+    zero means the caller cannot say, and the count is the core share alone.
+    """
     divisor = device_count if device_count > 0 else 1
-    return max(1, cpu_count // divisor)
+    cores = max(1, cpu_count // divisor)
+    budget = per_rank_budget_bytes()
+    if not case_bytes or budget is None:
+        return cores
+    return max(1, min(cores, int(budget / case_bytes)))
+
+
+#: Said once per process: a chain that cannot serve a region costs a whole case per patch, and the
+#: reader needs the refusing stage named once, not once per item.
+_said_why_a_case_is_materialized = False
+
+#: Said once per process, beside it: what a streamed case costs in reads of its own voxels.
+_said_what_streaming_reads = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +162,10 @@ class DatasetIter(data.Dataset):
         # A one-pass workflow never re-reads what a sample's tensor could alias, so its items may
         # batch as views; a training loader's items may alias the epoch-spanning cache and may not.
         self.single_pass = single_pass
+        if single_pass:
+            for managers in data.values():
+                for manager in managers:
+                    manager.sequential_patches = True
         self.patch_size = patch_size
         self.overlap = overlap
         self.groups_src = groups_src
@@ -156,10 +175,26 @@ class DatasetIter(data.Dataset):
         self.nb_dataset = len(data[next(iter(data.keys()))])
         self.buffer_size = buffer_size
         self._index_cache: list[int] = []
+        self._statistics_warmed = False
         self._index_cache_lookup: set[int] = set()
         self.inline_augmentations = inline_augmentations
         self.has_augmented_samples = self.apply_augmentations and any(a > 0 for _, a, _ in mapping)
         self.read_order = PatchReadOrder(mapping, batch_size)
+
+    def _fill_case_bytes(self) -> float:
+        """What one filling thread holds at its peak: a whole-volume pass over the case, priced the way
+        TRANSFORM prices its fallback. Taken over the largest case, because the threads are not told
+        which they will draw."""
+        return float(
+            max(
+                (
+                    CaseMaterializer(manager).fallback_working_set_bytes()
+                    for _group_src, group_dest, _chain in _chains(self.groups_src)
+                    for manager in self.data[group_dest]
+                ),
+                default=0,
+            )
+        )
 
     def get_patch_config(self) -> tuple[list[int] | None, OverlapSpec]:
         return self.patch_size, self.overlap
@@ -191,61 +226,76 @@ class DatasetIter(data.Dataset):
             self.load(label + " Augmentation")
 
     def load(self, label: str):
-        if self.use_cache:
-            memory_init = get_memory()
+        if not self.use_cache:
+            self._warm_stream_statistics(label)
+            return
+        memory_init = get_memory()
 
-            indexs = list(range(self.nb_dataset))
-            if len(indexs) > 0:
-                memory_lock = threading.Lock()
+        def describe(done: int) -> str:
+            return (
+                f"Caching {label}: {get_memory_info()} | "
+                f"{memory_forecast(memory_init, done, self.nb_dataset)} | {get_cpu_info()}"
+            )
 
-                def desc(i: int = 0):
-                    return (
-                        f"Caching {label}: "
-                        f"{get_memory_info()} | "
-                        f"{memory_forecast(memory_init, i, self.nb_dataset)} | "
-                        f"{get_cpu_info()}"
-                    )
+        self._on_fill_threads(f"caching {label}", list(range(self.nb_dataset)), self._load_data, describe)
 
-                pbar = tqdm.tqdm(total=len(indexs), desc=desc(), leave=False)
-                stop_event = threading.Event()
+    def _warm_stream_statistics(self, label: str) -> None:
+        """Read every streamed case's disk statistics here, where one process holds them for the run.
 
-                def process(index):
-                    if stop_event.is_set():
-                        return
-                    self._load_data(index)
-                    with memory_lock:
-                        pbar.set_description(desc(pbar.n + 1))
-                        pbar.update(1)
+        The memo lives on the manager, so a DataLoader worker forked for an epoch starts without it
+        and scans the case again: with W workers and E epochs a chain wanting a whole-volume mean
+        reads the cohort W x E times over. The scan is the same read whoever makes it, so making it
+        once, before the fork, is the whole fix. A chain wanting no statistic costs a plan here.
+        """
+        if self._statistics_warmed:
+            return  # the statistic describes the case as stored: one pass answers every epoch
+        self._statistics_warmed = True
+        # Every (case, copy) the epoch will ask for. A copy's statistic is its own: measured here it
+        # reaches every worker through the fork, where measured in a worker it dies with it.
+        copies: dict[int, set[int]] = {}
+        for case, copy, _patch in self.mapping:
+            copies.setdefault(case, set()).add(copy)
+        # One item per case: a copy's pass drops the plans of the case's other copies, and one manager
+        # is never walked by two threads.
+        work = [
+            (self.data[group_dest][case], sorted(drawn))
+            for _group_src, group_dest, _chain in _chains(self.groups_src)
+            for case, drawn in sorted(copies.items())
+        ]
+        self._on_fill_threads(
+            f"scanning {label}",
+            work,
+            lambda item: item[0].warm_stream_statistics(item[1], self.apply_augmentations),
+            lambda _done: f"Scanning {label}: {get_cpu_info()}",
+        )
 
-                cpu_count = os.cpu_count() or 1
+    def _on_fill_threads(
+        self, what: str, work: list[Any], run: Callable[[Any], object], describe: Callable[[int], str]
+    ) -> None:
+        """Run ``run`` over ``work`` on as many threads as the budget holds whole-volume passes, and
+        raise the first failure with the worker's traceback."""
+        if not work:
+            return
+        pbar = tqdm.tqdm(total=len(work), desc=describe(0), leave=False)
+        threads = _cache_worker_count(os.cpu_count() or 1, device_count(), self._fill_case_bytes())
+        executor = ThreadPoolExecutor(max_workers=threads)
+        futures = [executor.submit(run, item) for item in work]
+        try:
+            for fut in as_completed(futures):
                 try:
-                    with ThreadPoolExecutor(max_workers=_cache_worker_count(cpu_count, device_count())) as executor:
-                        future_to_index = {executor.submit(process, index): index for index in indexs}
-                        for fut in as_completed(future_to_index):
-                            index = future_to_index[fut]
-                            try:
-                                fut.result()
-                            except Exception as e:
-                                stop_event.set()
-                                for f in future_to_index:
-                                    f.cancel()
-                                tb = traceback.format_exc()
-                                raise RuntimeError(
-                                    f"Error while caching {label} (index={index})\n"
-                                    f"{type(e).__name__}: {e}\n\n"
-                                    f"Traceback (worker):\n{tb}"
-                                ) from e
-
-                except KeyboardInterrupt:
-                    stop_event.set()
-                    try:
-                        for f in future_to_index:
-                            f.cancel()
-                    except Exception:  # nosec B110
-                        pass
-                    raise
-                finally:
-                    pbar.close()
+                    fut.result()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Error while {what}\n{type(e).__name__}: {e}\n\nTraceback (worker):\n{traceback.format_exc()}"
+                    ) from e
+                pbar.update(1)
+                pbar.set_description(describe(pbar.n))
+        finally:
+            for fut in futures:
+                fut.cancel()
+            executor.shutdown(wait=True)
+            pbar.close()
+            return_freed_heap()
 
     def _load_data(self, index: int, augmentation_index: int | None = None) -> bool:
         loaded = False
@@ -285,6 +335,54 @@ class DatasetIter(data.Dataset):
     def unload_data(self, group_dest: str, index: int) -> None:
         return self.data[group_dest][index].unload()
 
+    def _say_why_a_case_is_materialized(self, case: int, a: int) -> None:
+        """Name the stage that costs a case its whole volume, once per process.
+
+        The check above has already resolved the plan, so the refusal is read from it rather than
+        asked for: naming it costs a dictionary lookup, and the flag makes it one boolean test per
+        item after the first. What a reader can act on is the chain, so the chain is what it names.
+        """
+        global _said_why_a_case_is_materialized
+        _said_why_a_case_is_materialized = True
+        for _group_src, group_dest, _chain in _chains(self.groups_src):
+            refusal = self.data[group_dest][case].stream_refusal(a, self.apply_augmentations)
+            if refusal is None:
+                continue
+            print(
+                f"[KonfAI] {group_dest}: a patch cannot be read as a region, so a case is materialized"
+                f" whole to serve its patches. {refusal}"
+            )
+            print(
+                f"[KonfAI] {group_dest}: declare the statistic on the stage that wants it, or move that"
+                " stage ahead of the one that changes the values, or cut the chain with a Save: each of"
+                " the three leaves the statistic describing what the stage is handed, which is what a"
+                " region needs to be read on its own."
+            )
+
+    def _say_what_streaming_reads(self, case: int, a: int) -> None:
+        """Say what a streamed case costs in reads, once per process.
+
+        A patch pulls the window its chain needs, not the patch: a resample widens it on every axis
+        and a 2.5D stack widens it again, so a case can be read many times over in one pass. Nothing
+        refuses on the figure, because materializing the case instead is what a shuffled order over a
+        cohort makes expensive. It is said so a reader can act on the budget, the patch or the chain.
+        """
+        global _said_what_streaming_reads
+        _said_what_streaming_reads = True
+        for _group_src, group_dest, chain in _chains(self.groups_src):
+            manager = self.data[group_dest][case]
+            factor = manager.streamed_read_amplification(a, chain.is_input, self.apply_augmentations)
+            if factor is None or factor < 2.0:
+                continue
+            print(
+                f"[KonfAI] {group_dest}: streaming reads this case {factor:.1f} times over per pass."
+                " A resample and a 2.5D stack each widen what a patch pulls. A 'shuffle_window' keeps"
+                " a few cases under the reader, so neighbouring patches fall on windows already in"
+                " hand, and it draws a batch from those cases rather than from the cohort; a larger"
+                " patch, a coarser target spacing or a budget that fits the case cost nothing in how"
+                " the batches are drawn."
+            )
+
     def _declare_case_reads(self, index: int) -> None:
         """Tell each group's store the patches this process will read of the case ``index`` enters,
         in the order it will read them: once per case, at the first patch of it that arrives."""
@@ -305,6 +403,10 @@ class DatasetIter(data.Dataset):
             not self.data[group_dest][x].can_stream_patch(a, self.apply_augmentations)
             for _group_src, group_dest, _chain in _chains(self.groups_src)
         )
+        if needs_full_load and not _said_why_a_case_is_materialized:
+            self._say_why_a_case_is_materialized(x, a)
+        elif not needs_full_load and not _said_what_streaming_reads:
+            self._say_what_streaming_reads(x, a)
         if x not in self._index_cache_lookup and needs_full_load:
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
                 self._unload_data(self._index_cache[0])

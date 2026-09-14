@@ -353,6 +353,7 @@ class Transformer(DistributedObject):
         name: str = "default|TRANSFORM_01",
         on_fallback: Literal["allow", "warn", "error"] = "warn",
         manual_seed: int = 0,
+        cudnn_benchmark: bool = False,
         dataset: DataTransform = DataTransform(),
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
@@ -361,6 +362,7 @@ class Transformer(DistributedObject):
         self.transform_path = transforms_directory() / self.name
         self.on_fallback = on_fallback
         self.manual_seed = int(manual_seed)
+        self.cudnn_benchmark = cudnn_benchmark
         self.dataset = dataset
         # The seed reaches the Expand draws by DERIVATION, not by seeding a global RNG. Handed over
         # before prepare(), where the chains are bound and the draws happen.

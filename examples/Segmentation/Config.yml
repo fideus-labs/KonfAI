@@ -126,6 +126,8 @@ Trainer:
   it_validation: None  # Validate once per epoch
   autocast: true  # Mixed precision: 1.9x per step on this example (benchmarks/perf/bench_train_step.py)
   channels_last: true  # With autocast, 2.25x per step against fp32 in the default layout (same bench)
+  cudnn_benchmark: false  # true: cuDNN picks the fastest kernels under manual_seed too, and the run no longer replays bit for bit
+  torch_compile: false  # true: the network runs compiled, about 10 % an epoch here once the first run has compiled it
   gradient_checkpoints: None
   gpu_checkpoints: None
   ema_decay: 0

@@ -18,8 +18,12 @@
 
 import contextlib
 import time
+from collections import Counter
 from collections.abc import Iterable, Iterator
 from typing import Any
+
+#: Height changes the regions line spells out one by one; past it, each height is counted instead.
+_REGION_PATH_RUNS = 8
 
 
 class SweepClock:
@@ -51,7 +55,12 @@ class SweepClock:
             return ""
         heights = [rows for rows, _ in self._regions]
         held = [bytes_ for _, bytes_ in self._regions if bytes_ is not None]
-        path = " -> ".join(str(rows) for rows, _ in _runs(heights))
+        runs = _runs(heights)
+        if len(runs) <= _REGION_PATH_RUNS:
+            path = " -> ".join(str(rows) for rows, _ in runs)
+        else:
+            # A cohort repeats one growth per case: the heights counted say it in a line that stays one.
+            path = ", ".join(f"{rows} x{count}" for rows, count in sorted(Counter(heights).items(), reverse=True))
         peak = f", peak held {max(held) / 2**30:.2f} GiB" if held else ", unmeasured"
         return f" | {len(heights)} region(s) of {path} row(s){peak}"
 

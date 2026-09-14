@@ -102,6 +102,15 @@ class RegionContext:
     source_shape: tuple[int, ...]
 
 
+#: The reason a stage that declared nothing gets: the base must answer WHOLE_VOLUME, and a reader
+#: told only that cannot tell a stage that truly needs the volume from one nobody described.
+_UNDECLARED_LOCALITY = (
+    "nothing on the class declares a locality, so the base answers with the one that is always safe."
+    " Set the class attribute 'locality' (POINTWISE for a per-voxel change, HALO with a 'halo' radius"
+    " for a neighbourhood one, REGRID for a geometric one) to let its patches stream"
+)
+
+
 @dataclass(frozen=True)
 class PatchLocality:
     """A transform's declared patch-locality contract (see :class:`LocalityKind`).
@@ -242,7 +251,7 @@ class Transform(NeedDevice, ABC):
         """
         if self.locality is not None:
             return PatchLocality(self.locality, halo=self.halo)
-        return PatchLocality(LocalityKind.WHOLE_VOLUME)
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_UNDECLARED_LOCALITY)
 
     def stream_region_source(
         self,

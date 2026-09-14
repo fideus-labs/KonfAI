@@ -582,6 +582,8 @@ class Network(ModuleArgsDict, ABC):
         self.pretrained_source: PretrainedFrom | None = None
         self._it = 0
         self._nb_lr_update = 0
+        #: The compiled graph walk ``get_layers`` reads, set by :meth:`compile_walk`.
+        self._walk: Callable[[list[torch.Tensor], tuple[str, ...]], list[tuple[str, torch.Tensor]]] | None = None
         self.outputsGroup: list[OutputsGroup] = []
 
     @_function_network()
@@ -989,6 +991,31 @@ class Network(ModuleArgsDict, ABC):
             for name, output_layer in super().named_forward(*inputs, attributes=attributes):
                 yield name, output_layer
 
+    def compile_walk(self) -> str | None:
+        """Compile the graph walk :meth:`get_layers` reads: the tensor path alone, the criteria, the
+        clocks and the patch assembly staying eager. Answers ``None`` once compiled, else why the walk
+        stays eager: a network cutting its input into patches (a ModelPatch) assembles them in Python
+        between modules, and a module reading attributes is handed objects rebuilt for every batch,
+        which the compiled walk would recompile on."""
+        if any(isinstance(module, Network) and module.patch for module in self.modules()):
+            return "a network of the graph declares a ModelPatch"
+        if any(getattr(module, "accepts_attributes", False) for module in self.modules()):
+            return "a module of the graph reads attributes"
+        self._walk = torch.compile(self._requested_outputs)
+        return None
+
+    def _requested_outputs(self, inputs: list[torch.Tensor], wanted: tuple[str, ...]) -> list[tuple[str, torch.Tensor]]:
+        """The ``wanted`` outputs of one walk, in execution order, the walk left once the last is out."""
+        found: list[tuple[str, torch.Tensor]] = []
+        left = set(wanted)
+        for name, output in self.named_forward(*inputs):
+            if name in left:
+                found.append((name, output))
+                left.discard(name)
+                if not left:
+                    break
+        return found
+
     def get_layers(
         self,
         inputs: list[torch.Tensor],
@@ -1000,7 +1027,12 @@ class Network(ModuleArgsDict, ABC):
         output_layer_patch_indexed: dict[str, PatchIndexed] = {}
         it = 0
         debug = "KONFAI_DEBUG" in os.environ
-        for name_tmp, output_layer in self.named_forward(*inputs, attributes=attributes):
+        walk = (
+            self._walk(inputs, tuple(layers_name))
+            if self._walk is not None and not debug
+            else self.named_forward(*inputs, attributes=attributes)
+        )
+        for name_tmp, output_layer in walk:
             name = strip_accumulated(name_tmp)
             if debug:
                 if "KONFAI_DEBUG_LAST_LAYER" in os.environ:

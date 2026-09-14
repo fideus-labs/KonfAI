@@ -176,7 +176,9 @@ def test_a_file_modified_during_deserialization_is_refused(tmp_path, monkeypatch
 
     def racing(source):
         state = read(source)
-        torch.save(_payload(7.0), source)
+        # A payload of another size: a write of the same size is told apart by its time stamps alone,
+        # which a filesystem may keep too coarsely to see a write this soon after the read (Windows).
+        torch.save(_payload(7.0, elements=8192), source)
         return state
 
     monkeypatch.setattr(composite, "_read_state_source", racing)

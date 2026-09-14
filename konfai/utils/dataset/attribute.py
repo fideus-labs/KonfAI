@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import functools
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,21 @@ def _attribute_text(value: Any) -> str:
         value = value.detach().cpu().numpy()
     if isinstance(value, np.generic | np.ndarray) and np.issubdtype(value.dtype, np.floating):
         value = np.asarray(value, dtype=np.float64)[()] if isinstance(value, np.generic) else value.astype(np.float64)
+    if isinstance(value, np.ndarray) and value.dtype.kind in "biuf" and value.size <= _PRINTED_ARRAYS_UP_TO:
+        return _array_text(value.dtype.str, value.shape, value.tobytes())
+    with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
+        return str(value).replace("\n", "")
+
+
+#: A cohort's geometry (a spacing, a direction, a size) repeats over its cases, their copies and every
+#: plan an epoch makes, and printing a small array costs tens of microseconds each time.
+_PRINTED_ARRAYS_UP_TO = 64
+
+
+@functools.lru_cache(maxsize=4096)
+def _array_text(dtype: str, shape: tuple[int, ...], data: bytes) -> str:
+    """The printed form of a small numeric array, from its bytes."""
+    value = np.frombuffer(data, dtype=np.dtype(dtype)).reshape(shape)
     with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
         return str(value).replace("\n", "")
 

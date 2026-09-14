@@ -979,3 +979,19 @@ def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
         clip = TransformLoader().get_transform("Clip", "T.transforms")
     assert not caught  # an unambiguous name stays silent
     assert clip.plan_note("G", "case", [4, 4, 4], Attribute()) is None
+
+
+def test_normalize_never_writes_into_the_tensor_it_is_handed() -> None:
+    """A patch transform is handed a view of the loaded case, which later patches read again."""
+    import torch
+    from konfai.data.transform import Normalize
+    from konfai.utils.dataset import Attribute
+
+    constant = torch.full((1, 4, 4), 5.0)
+    Normalize()("CASE", constant, Attribute())
+    assert torch.equal(constant, torch.full((1, 4, 4), 5.0))
+
+    channels = torch.arange(32, dtype=torch.float32).reshape(2, 4, 4)
+    before = channels.clone()
+    Normalize(channels=[0])("CASE", channels, Attribute())
+    assert torch.equal(channels, before)

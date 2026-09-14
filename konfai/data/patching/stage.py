@@ -55,6 +55,8 @@ class Stage(Protocol):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality: ...
 
+    def output_channels(self, channels: int) -> int: ...
+
     def stream_region_source(
         self,
         name: str,
@@ -114,6 +116,11 @@ class AugmentedStage:
     index: int
     a: int
 
+    @property
+    def selected(self) -> bool:
+        """Whether the draw selected this copy: for one it did not, the draw is the identity."""
+        return self.a in self.augmentation.who_index.get(self.index, ())
+
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         return self.augmentation.patch_locality(self.index, self.a, cache_attribute)
 
@@ -143,8 +150,7 @@ class AugmentedStage:
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
-        del cache_attribute  # a draw reads no case metadata; the place is what it may need
-        return self.augmentation.stream_region(name, self.index, self.a, tensor, context)
+        return self.augmentation.stream_region(name, self.index, self.a, tensor, context, cache_attribute)
 
     def plan_region_reads(self, name: str, contexts: Sequence[RegionContext]) -> None:
         """A draw reads no companion volume beside its region: nothing to declare."""
@@ -159,7 +165,7 @@ class AugmentedStage:
         return self.augmentation.stream_shape(self.index, self.a, shape)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return self.augmentation.compute(name, self.index, self.a, tensor)
+        return self.augmentation.compute(name, self.index, self.a, tensor, cache_attribute)
 
 
 # The pull maps are callable dataclasses, not closures: a plan is pickled whole by `mp.spawn`.
@@ -210,6 +216,15 @@ class _ReadStagePlan:
     out_shape: tuple[int, ...]
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
     run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
+    #: The statistics a whole-volume pass measured for this stage, on its own input.
+    measured: tuple[tuple[str, str], ...] = ()
+
+    def seed(self, scope: Attribute) -> None:
+        """Push what the pass measured for this stage, right before it runs: the whole-volume route
+        leaves each stage's statistic on top of the scope when that stage runs, and a scope seeded once
+        for the chain would hand one stage's number to every stage reading the same key."""
+        for key, value in self.measured:
+            scope[key] = value
 
     def region_context(self, source: Sequence[slice], target: Sequence[slice]) -> RegionContext:
         """Where one region of this stage sits: the part of its input read, the part of its output due."""

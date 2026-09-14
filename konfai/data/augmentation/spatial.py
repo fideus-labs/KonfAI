@@ -254,11 +254,12 @@ class Rotate(EulerTransform):
     extents it swaps, so the copy is cut on its own grid. A free angle resamples as a REGRID.
     """
 
-    def __init__(self, a_min: float = 0, a_max: float = 360, is_quarter: bool = False):
+    def __init__(self, a_min: float = 0, a_max: float = 360, is_quarter: bool = False, in_plane: bool = False):
         super().__init__()
         self.a_min = a_min
         self.a_max = a_max
         self.is_quarter = is_quarter
+        self.in_plane = in_plane
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         dim = len(shapes[0])
@@ -274,6 +275,10 @@ class Rotate(EulerTransform):
                 torch.rand((len(shapes), dim)) * torch.tensor(self.a_max - self.a_min) + torch.tensor(self.a_min)
             )
 
+        if self.in_plane and dim == 3:
+            # One angle, about the slice axis: a 2.5D stack carries neighbouring slices as channels,
+            # and a turn out of the plane draws each of them from a different place.
+            angles = torch.cat((torch.zeros((len(shapes), 2)), angles[:, 2:]), dim=1)
         self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in angles]
         # A quarter turn transposes the extents it swaps; a sampled draw keeps its grid.
         return [Rotate._draw_shape(self.matrix[index][a], shape) for a, shape in enumerate(shapes)]

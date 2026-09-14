@@ -271,15 +271,19 @@ class Normalize(TransformInverse):
             input_max = float(cache_attribute["Max"])
             norm = input_max - input_min
 
+            # Never into the tensor handed over: a patch transform is handed a view of the loaded case,
+            # which later patches read again.
             if norm == 0:
                 print(f"[WARNING] Norm is zero for case '{name}': input is constant with value = {self.min_value}.")
                 if self.channels:
+                    tensor = tensor.clone()
                     for channel in self.channels:
                         tensor[channel].fill_(self.min_value)
                 else:
-                    tensor.fill_(self.min_value)
+                    tensor = torch.full_like(tensor, self.min_value)
             else:
                 if self.channels:
+                    tensor = tensor.clone()
                     for channel in self.channels:
                         tensor[channel] = (self.max_value - self.min_value) * (
                             tensor[channel] - input_min

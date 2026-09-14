@@ -624,6 +624,9 @@ class Evaluator(DistributedObject):
             )
 
         self._iter_dataset = cast(DatasetIter, dataloader.dataset)
+        # The chains' statistics read here, before the loader forks its workers: read in a worker, the
+        # memo dies with it and every worker scans the case again, as prediction and training avoid.
+        self._iter_dataset.load(label)
         self._clock = SweepClock()
         # Cases an interrupted run scored are read back and skipped; each case scored from here on is
         # appended to this rank's own case file. The aggregate is built from the union.
