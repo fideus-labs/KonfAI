@@ -105,6 +105,50 @@ def test_attribute_holding_a_long_array_round_trips_past_numpys_print_threshold(
     np.testing.assert_allclose(attribute.get_np_array("Long"), np.arange(2000, dtype=float))
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        [-100.0, -120.0, 30.0],
+        [0.5, 1.25, -3.0],
+        [0.8, 0.8, 2.0],
+        [-0.0, 0.0],
+        [-0.9998476951563913, 0.017452406437283512, 0.0],
+        [1e8, 1.0],
+        [1e-5, 5.0],
+        [0.5, 2000.0],
+        [np.nan, 1.0],
+        list(np.linspace(-3.0, 3.0, 40)),
+    ],
+)
+def test_attribute_prints_a_float_vector_as_numpy_prints_it(values: list[float]) -> None:
+    # The vector fast path answers only where numpy prints positionally on one line; every other
+    # vector (exponents, a wrapped line, a NaN) still goes through the printer, and both must agree.
+    array = np.asarray(values, dtype=np.float64)
+    attribute = Attribute()
+    attribute["Origin"] = array
+
+    assert attribute["Origin"] == _attribute_text_through_printing(array)
+    np.testing.assert_array_equal(attribute.get_np_array("Origin"), array)
+
+
+def test_attribute_prints_random_float_vectors_as_numpy_prints_them() -> None:
+    rng = np.random.default_rng(7)
+    for _ in range(300):
+        size = int(rng.integers(1, 13))
+        kind = int(rng.integers(0, 4))
+        if kind == 0:
+            array = rng.integers(-500, 500, size).astype(np.float64)
+        elif kind == 1:
+            array = np.round(rng.uniform(-300.0, 300.0, size), int(rng.integers(0, 4)))
+        elif kind == 2:
+            array = rng.uniform(-2.0, 2.0, size)
+        else:
+            array = rng.choice([0.0, -0.0, 0.5, 1e-4, 999.0, 1000.5, 1e7, 12345678.5, -0.125], size)
+        attribute = Attribute()
+        attribute["Origin"] = array
+        assert attribute["Origin"] == _attribute_text_through_printing(array), array.tolist()
+
+
 def test_attribute_names_the_key_whose_value_does_not_parse_back_flat() -> None:
     """A >= 2-D value is stored as a nested print (Crop's ``box`` is read back through its own
     parser, so the write door cannot refuse the rank), and reading it back as an array used to be
