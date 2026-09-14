@@ -16,6 +16,51 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
+## v1.8.5 (2026-09-14)
+
+### Breaking Changes
+
+- The three app exceptions (`AppRepositoryError` among them) live in `konfai_apps` and no longer
+  resolve under `konfai.utils.errors`. SlicerKonfAI carries the one-line import fix; ship it before
+  this konfai reaches its users.
+- A config naming a built-in model by the pre-1.6.0 absolute path is refused. Write
+  `<kind>.<file>:<Class>` or `default|<Name>.yml`.
+
+### Performance
+
+- Training on streamed patches with a statistic behind a stage that changes the values (a
+  `Standardize` after a `Resample`, a `Clip('min', 'max')`) no longer loads every case whole: the
+  statistic is measured once per case and copy at the warm-up and serves every epoch, and a store
+  seed rides its own stage's plan, so a patch transform or a Save header never sees it. On a 60-case
+  bench the epoch goes from 36.0 to 29.5 s; planning per redraw 7.0 to 2.1 s, startup 11.7 to 6.6 s.
+- A free `Rotate` or `Scale` samples a region exactly where the whole volume lands, so their copies
+  stream bit for bit; a training `Elastix` draws its grid on the header the chain lands on.
+- The heap, the cache fill and the statistics scan are bounded and the cache sized as landed; one
+  element size and one device out-of-memory answer serve PREDICTION and TRANSFORM.
+- A streamed read's region record costs 17 us instead of 50, and a rotation settles its axis remap
+  with the draw instead of on every window.
+- Trainer: `cudnn_benchmark` and `torch_compile` knobs; a NaN loss stops the run instead of
+  training on.
+
+### Features
+
+- The intensity augmentations medical imaging needs: `GaussianNoise`, `GaussianBlur` (with
+  `in_plane`), `SimulateLowResolution`, `Gamma`, `ContrastAroundMean`; `Rotate(in_plane: true)` turns
+  a 2.5D stack about its slice axis. Each declares the locality its values need, so the copies stream.
+- impact-reg: `moments_init: none` for a pair the caller centred.
+
+### Bug Fixes
+
+- `Crop` on a case read from a dataset kept the source origin on every route, and its inverse then
+  dropped the geometry, so PREDICTION wrote `.npy` instead of `.mha`. The origin moves to the box's
+  near corner, ITK's own rule, on a sheared direction too; `Padding` shifts the same way.
+- `Resample` and an oblique `Canonical` with `interpolation` unset blended int64 (an `Argmax`
+  output) and bool volumes into labels that were in no input; they take the nearest voxel, as
+  `uint8` did.
+- The dependency self-check failed on a correct install; the elastix probe runs under the loader
+  path it needs; the DICOM plane cache charges no scope for what it filled.
+- A prediction pipe stage behind a region stage is told where its block sits.
+
 ## v1.8.4 (2026-09-09)
 
 ### Features
