@@ -218,14 +218,15 @@ class ImpactFeatureModel:
         _check_feature_model(model_path, in_channels, tile or [224] * len(shape), len(weights))
         return cls(model_path, in_channels, weights, tile, len(shape), denormalize)
 
-    def inputs(self, tensor: torch.Tensor, attributes: list[Attribute]) -> list[torch.Tensor]:
-        """The ``[tensor, nb_layer, stats]`` triple the extractor takes: one
-        ``[ImageMin, ImageMean, ImageMax, ImageStd]`` row per sample."""
+    def inputs(self, tensor: torch.Tensor, attribute: Attribute) -> list[torch.Tensor]:
+        """The ``[tensor, nb_layer, stats]`` triple the extractor takes, for ONE sample: the flat
+        ``[ImageMin, ImageMax, ImageMean, ImageStd]`` itk-impact passes, which a model reads only when
+        ``stats.numel() == 4`` and otherwise replaces with statistics of the tensor it is handed."""
         if tensor.shape[1] != self.in_channels:
             tensor = tensor.repeat(1, self.in_channels, *([1] * (tensor.dim() - 2)))
         if self.denormalize:
-            tensor = _denormalized(tensor, attributes)
-        stats = [[float(a[key]) for key in ("ImageMin", "ImageMean", "ImageMax", "ImageStd")] for a in attributes]
+            tensor = _denormalized(tensor, [attribute])
+        stats = [float(attribute[key]) for key in ("ImageMin", "ImageMax", "ImageMean", "ImageStd")]
         return [tensor, torch.tensor([len(self.weights)]), torch.tensor(stats)]
 
     def slice_losses(
@@ -238,22 +239,30 @@ class ImpactFeatureModel:
         loss_function: torch.nn.Module,
         project: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None = None,
     ) -> Iterator[tuple[torch.Tensor, int]]:
-        """The weighted feature distance and the number of scored patches: per 2-D slice of a 3-D batch
-        when the extractor is 2-D, once for the whole batch otherwise."""
+        """The weighted feature distance and the number of scored patches, per sample, and per 2-D slice
+        of it when the extractor is 2-D.
+
+        One sample at a time because a model reads the statistics it is given only for one image
+        (``stats.numel() == 4``): a whole batch at once would leave every sample normalized by the
+        batch's own min/max (MIND) or mean/std (the MRI TS models), which is another case's intensities.
+        Same work in the end, in more kernels: measured 5 % (B=2) to 17 % (B=4) of the model's time.
+        """
         if self.model is None:
             self.model = torch.jit.load(self.model_path, map_location="cpu").eval()  # nosec B614
         self.model.to(output.device)
-        for z in range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),):
-            yield _masked_feature_loss(
-                self.model,
-                self.inputs(output[:, :, z], output_attributes),
-                self.inputs(target[:, :, z], target_attributes),
-                self.weights,
-                loss_function,
-                mask[:, :, z] if mask is not None else None,
-                self.shape,
-                project,
-            )
+        slices = range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),)
+        for sample in range(output.shape[0]):
+            for z in slices:
+                yield _masked_feature_loss(
+                    self.model,
+                    self.inputs(output[sample : sample + 1, :, z], output_attributes[sample]),
+                    self.inputs(target[sample : sample + 1, :, z], target_attributes[sample]),
+                    self.weights,
+                    loss_function,
+                    mask[sample : sample + 1, :, z] if mask is not None else None,
+                    self.shape,
+                    project,
+                )
 
 
 class IMPACTReg(CriterionWithAttribute):

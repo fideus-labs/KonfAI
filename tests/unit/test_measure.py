@@ -1176,6 +1176,42 @@ class TestImpactMaskSniffing:
             _sniffed_mask((only,), only)
 
 
+def test_impact_stats_are_what_the_torchscript_models_read() -> None:
+    # itk-impact's contract: flat [min, max, mean, std]. MIND takes stats[1] as the max, TS stats[2] as
+    # the mean; a [1, 4] row has numel 4 too, so stats[0] became a 4-vector subtracted from the image.
+    from konfai.metric.measure.impact import ImpactFeatureModel
+
+    model = ImpactFeatureModel("unused.pt", 1, [1.0], None, 3)
+    one = {"ImageMin": 0.0, "ImageMean": 2.0, "ImageMax": 10.0, "ImageStd": 3.0}
+
+    assert model.inputs(torch.zeros(1, 1, 2, 2, 2), one)[2].tolist() == [0.0, 10.0, 2.0, 3.0]
+
+
+def test_impact_scores_a_batch_one_sample_at_a_time_with_its_own_statistics() -> None:
+    # A model reads the statistics it is handed only when numel() == 4, so a whole batch at once left
+    # every sample normalized by the batch's min/max (MIND) or mean/std (the MRI TS models).
+    from konfai.metric.measure.impact import ImpactFeatureModel
+
+    seen: list[list[float]] = []
+
+    class Recorder(torch.nn.Module):
+        def forward(self, tensor: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            seen.append(stats.tolist())
+            return [tensor]
+
+    model = ImpactFeatureModel("unused.pt", 1, [1.0], None, 3)
+    model.model = Recorder()
+    first = {"ImageMin": 0.0, "ImageMax": 10.0, "ImageMean": 2.0, "ImageStd": 3.0}
+    second = {"ImageMin": -5.0, "ImageMax": 5.0, "ImageMean": 1.0, "ImageStd": 4.0}
+    batch = torch.zeros(2, 1, 2, 2, 2)
+
+    scored = list(model.slice_losses(batch, [first, second], batch, [first, second], None, torch.nn.L1Loss()))
+
+    assert len(scored) == 2, "one score per sample"
+    # Per sample, the output then the target: each reads its own row, flat.
+    assert seen == [[0.0, 10.0, 2.0, 3.0]] * 2 + [[-5.0, 5.0, 1.0, 4.0]] * 2
+
+
 def test_psnr_and_ssim_share_the_ct_dynamic_range_default() -> None:
     # 4095 (12-bit CT, -1024..3071) for both: two different defaults quietly scored the standard
     # synthesis pair against two different ranges.

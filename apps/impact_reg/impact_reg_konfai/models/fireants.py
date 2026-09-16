@@ -385,20 +385,6 @@ class _ImpactCore(IMPACTReg):
         # shape=None: the whole (downsampled) tensor is scored, no ModelPatch tiling.
         self.model = ImpactFeatureModel(model_path, int(in_channels), [float(w) for w in weights], None, DIM)
 
-    def preprocessing(self, tensor: torch.Tensor, attribute: list) -> list[torch.Tensor]:
-        """KonfAI's preprocessing, with the intensity statistics FLATTENED for a single image.
-
-        ``IMPACTReg.preprocessing`` emits ``stats`` as ``[B, 4]``. The MIND TorchScript model branches on
-        ``stats.numel() == 4`` and then indexes ``stats[0]`` expecting a SCALAR minimum, so a ``[1, 4]``
-        tensor makes it subtract a 4-vector from the volume ("size of tensor a (32) must match the size
-        of tensor b (4)"). The C++ itk-impact metric passes the four values flat, which is what the model
-        was traced against; FireANTs always registers one pair at a time, so flatten that case here.
-        """
-        prepared = super().preprocessing(tensor, attribute)
-        if prepared[2].shape[0] == 1:
-            prepared[2] = prepared[2].reshape(-1)
-        return prepared
-
     @staticmethod
     def _stats(tensor: torch.Tensor) -> dict:
         detached = tensor.detach()
