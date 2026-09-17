@@ -18,7 +18,7 @@
 
 Studio drives konfai-mcp: arbitrary host reads and arbitrary compute, plus a real login shell. On
 loopback that is the operator's own machine. Exposed on a network, one shared token is the whole
-defence, and `studio/docs/REMOTE.md` states what it covers. These tests are that statement, executed.
+defence, and `konfai-studio/docs/REMOTE.md` states what it covers. These tests are that statement, executed.
 
 The terminal cases deliberately exercise only the *refusals*: a handshake that gets through spawns a
 real shell, which is not something a test suite should leave behind.

@@ -340,7 +340,7 @@ print(json.dumps(sorted(path.name for path in (package / "models" / "yaml").glob
 _SIBLING_SETUPS = (
     "konfai-apps/setup.py",
     "konfai-mcp/setup.py",
-    "studio/setup.py",
+    "konfai-studio/setup.py",
     "apps/impact_reg/setup.py",
     "apps/impact_seg/setup.py",
     "apps/impact_synth/setup.py",

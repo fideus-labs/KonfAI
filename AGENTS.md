@@ -20,7 +20,7 @@ Three pillars run through the codebase:
 | `konfai/` | Core package (config, data, network, metric, workflows, utils) |
 | `konfai-apps/` | **Independent** package `konfai_apps` (app management, HF repos, FastAPI server) with its own `pyproject.toml`, deps, and CI |
 | `konfai-mcp/` | **Independent** package `konfai_mcp` (FastMCP server exposing KonfAI to LLM agents) with its own `pyproject.toml`, tests, CI. On `main` since v1.6.0; published to PyPI by the release workflow. |
-| `studio/` | **Independent** package `konfai_studio` (FastAPI BFF + built React front: a chatbot web UI over `konfai-mcp`). Own `pyproject.toml`; the front (`konfai_studio/web/*`) is a CI `npm` build, not in git; wheel-only. |
+| `konfai-studio/` | **Independent** package `konfai_studio` (FastAPI BFF + built React front: a chatbot web UI over `konfai-mcp`). Own `pyproject.toml`; the front (`konfai_studio/web/*`) is a CI `npm` build, not in git; wheel-only. |
 | `apps/` | Ready-to-use model app bundles (excluded from the `konfai` wheel) |
 | `examples/` | Runnable `Segmentation` / `Synthesis` / `Registration` workflows (assume CWD = the example dir) |
 | `docs/` · `tests/` | Sphinx site · core test suite (`tests/unit`, `tests/integration`) |
@@ -126,9 +126,10 @@ pixi run test-fast                                                # dev loop (~1
 pixi run --environment dev typecheck                              # mypy konfai
 pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate)
 pip install -e ./konfai-mcp  && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
+pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or every test skips)
 ```
 
-The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run `konfai-apps/tests` or `konfai-mcp/tests`; install those packages first (they pull their own runtime deps), exactly as their CI does. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
+The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it every test skips and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
 
 ## 6b. Releasing
 
