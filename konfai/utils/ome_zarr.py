@@ -88,8 +88,9 @@ def _native_byteorder(array: np.ndarray) -> np.ndarray:
     return array.astype(_native_dtype(array.dtype), copy=False)
 
 
-# NGFF RFC-5 types the component axis of a vector field. Those types exist only from NGFF 0.6
-# (zarr v3); 0.4 (zarr v2 layout) stays the default, being what external readers most widely accept.
+# NGFF RFC-5 types the component axis of a vector field. Those types exist only from NGFF 0.6,
+# whose coordinate-systems metadata ngff-zarr still writes as a release candidate, so 0.6 is written
+# for a field and nothing else; 0.5 is the default, the same multiscales metadata on a zarr v3 store.
 _DISPLACEMENT_AXIS_TYPE = "displacement"
 
 # Every field store holds its components in the spec's order, the output axes' (dz, dy, dx for a zyx
@@ -104,7 +105,9 @@ _FIELD_COMPONENTS_KEY = "field_components"
 _FIELD_COMPONENTS = "output-axes"
 
 _RFC5_VERSION = "0.6"
-_DEFAULT_VERSION = "0.4"
+_DEFAULT_VERSION = "0.5"
+#: The layout a store written before the 0.5 default carries. Levels appended to one join it there.
+_V2_VERSION = "0.4"
 
 #: How a chunk is sized, whether the store is created from a shape alone or from the region shape a
 #: streamed writer declares (:func:`konfai.utils.dataset._store_chunks`). A chunk is the unit a
@@ -112,9 +115,10 @@ _DEFAULT_VERSION = "0.4"
 CHUNK_SPATIAL_TILE = 128
 CHUNK_TARGET_BYTES = 32 << 20
 
-#: zarr v2 stores keep byte-shuffled blosc-lz4 rather than the zarrista writer's zstd-0 default:
-#: measured on a CT-like uint16 volume, zstd-0 costs +19 % disk and ~+11 % on the streamed read.
-_V2_COMPRESSOR = {"id": "blosc", "cname": "lz4", "clevel": 5, "shuffle": 1, "blocksize": 0}
+#: Every image store keeps byte-shuffled blosc-lz4 rather than the zarrista writer's zstd-0 default:
+#: measured on a CT-like uint16 volume, zstd-0 costs +19 % disk and ~+11 % on the streamed read. The
+#: spelling is numcodecs'; ngff-zarr builds the v3 codec chain from it on a v3 store.
+_COMPRESSOR = {"id": "blosc", "cname": "lz4", "clevel": 5, "shuffle": 1, "blocksize": 0}
 
 
 def _require_zarr() -> None:
@@ -1027,8 +1031,7 @@ def create_ome_zarr_store(
         }
     elif attributes:
         multiscales.root_attributes = {_KONFAI_ATTR_KEY: {"attributes": dict(attributes)}}
-    # version is explicit because to_ngff_zarr defaults to 0.5; 0.4 stays the portable default.
-    compression = {} if displacement_field else {"compressor": _V2_COMPRESSOR}
+    compression = {} if displacement_field else {"compressor": _COMPRESSOR}
     _write_skeleton(store_path, multiscales, version, **compression)
 
     # The level-0 key comes from the metadata: ngff-zarr builds it from the image name.
@@ -1086,17 +1089,19 @@ def append_ome_zarr_levels(
             coordinateTransformations=multiscales.metadata.coordinateTransformations,
         )
     field = _has_displacement_axis(base)
-    # The coarse levels take level 0's own compressor; a v3 store keeps the writer's codec chain.
-    level_zero = zarr.open_group(str(store), mode="r")[multiscales.metadata.datasets[0].path]
-    compressor = level_zero.metadata.to_dict().get("compressor")
-    compressor_kwargs: dict[str, Any] = {"compressor": compressor} if compressor else {}
+    # The levels join the store as it stands, whatever this version writes today: its own layout, and
+    # level 0's own compressor when the metadata names one (v2 does; v3 holds a built codec chain
+    # instead, so the fallback is what the create path writes).
+    layout = zarr.open_group(str(store), mode="r")[multiscales.metadata.datasets[0].path].metadata.to_dict()
+    compressor = layout.get("compressor")
+    compression: dict[str, Any] = {} if field else {"compressor": _COMPRESSOR}
     ngff_zarr.to_ngff_zarr(
         str(store),
         derived,
         overwrite=False,
-        version=_RFC5_VERSION if field else _DEFAULT_VERSION,
+        version=_V2_VERSION if layout.get("zarr_format") == 2 else (_RFC5_VERSION if field else _DEFAULT_VERSION),
         start_level=1,
-        **compressor_kwargs,
+        **({"compressor": compressor} if compressor else compression),
     )
     clear_ome_zarr_cache(store)
 

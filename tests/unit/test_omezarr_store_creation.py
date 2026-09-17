@@ -138,7 +138,9 @@ def test_level_zero_key_is_taken_from_the_metadata_not_a_literal(tmp_path: Path)
     array[:] = 3
 
     group = zarr.open_group(str(path), mode="r")
-    multiscales = dict(group.attrs)["multiscales"][0]
+    attributes = dict(group.attrs)
+    # 0.4 wrote the OME metadata at the root; from 0.5 it lives under "ome".
+    multiscales = attributes.get("ome", attributes)["multiscales"][0]
     dataset_key = multiscales["datasets"][0]["path"]
     np.testing.assert_array_equal(np.asarray(group[dataset_key][:]), 3)
 
@@ -187,8 +189,18 @@ def test_a_store_is_not_a_field_unless_it_was_asked_to_be(tmp_path: Path) -> Non
 def test_stores_keep_the_byte_shuffled_blosc_compressor(tmp_path: Path) -> None:
     """The zarrista writer's default is zstd-0; measured on a CT-like uint16 volume that costs
     +19 % of disk and ~+11 % on the streamed read against the byte-shuffled lz4 every 1.8.2 store
-    carries, so the v2 compressor is pinned, and an appended level takes level 0's own."""
+    carries, so the compressor is pinned, for an appended level as much as for level 0."""
     from konfai.utils.ome_zarr import append_ome_zarr_levels, write_ome_zarr
+
+    def blosc_configuration(array: Any) -> dict[str, Any]:
+        """The blosc parameters, wherever the store's layout keeps them: a v2 store names a
+        compressor, a v3 one a chain of codecs."""
+        metadata = array.metadata.to_dict()
+        if "compressor" in metadata:
+            return dict(metadata["compressor"])
+        codecs = [codec for codec in metadata.get("codecs", ()) if codec.get("name") == "blosc"]
+        assert len(codecs) == 1, metadata.get("codecs")
+        return dict(codecs[0]["configuration"])
 
     volume = np.arange(1 * 16 * 16 * 16, dtype=np.uint16).reshape(1, 16, 16, 16)
     store = tmp_path / "v.ome.zarr"
@@ -196,6 +208,29 @@ def test_stores_keep_the_byte_shuffled_blosc_compressor(tmp_path: Path) -> None:
     append_ome_zarr_levels(store, [4])
     group = zarr.open_group(str(store), mode="r")
     for key in ("scale0/image", "scale1/image"):
-        compressor = group[key].metadata.to_dict().get("compressor")
-        assert compressor is not None and compressor["id"] == "blosc", (key, compressor)
-        assert compressor["cname"] == "lz4" and compressor["shuffle"] == 1, (key, compressor)
+        configuration = blosc_configuration(group[key])
+        # v2 spells the shuffle 1, v3 names it.
+        assert configuration["cname"] == "lz4", (key, configuration)
+        assert configuration["shuffle"] in (1, "shuffle"), (key, configuration)
+
+
+def test_levels_appended_to_a_pre_05_store_keep_its_v2_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store on disk keeps the layout it was written with.
+
+    Stores written before the 0.5 default are zarr v2, and a reader takes a pyramid as one store: a
+    level appended as v3 beside them would be a store no single format reads through.
+    """
+    from konfai.utils import ome_zarr
+    from konfai.utils.ome_zarr import append_ome_zarr_levels, write_ome_zarr
+
+    volume = np.arange(1 * 16 * 16 * 16, dtype=np.uint16).reshape(1, 16, 16, 16)
+    store = tmp_path / "legacy.ome.zarr"
+    monkeypatch.setattr(ome_zarr, "_DEFAULT_VERSION", ome_zarr._V2_VERSION)
+    write_ome_zarr(store, volume, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0])
+    monkeypatch.undo()
+
+    append_ome_zarr_levels(store, [4])
+
+    group = zarr.open_group(str(store), mode="r")
+    for key in ("scale0/image", "scale1/image"):
+        assert group[key].metadata.to_dict()["zarr_format"] == 2, key
