@@ -70,7 +70,7 @@ def test_neutral_mask_writes_tiny_all_ones_sentinel(tmp_path: Path) -> None:
 def test_the_sentinels_take_the_form_of_the_images_they_stand_beside(tmp_path: Path) -> None:
     # konfai-apps reads the staged dataset under the format of its first group: a .mha sentinel next
     # to OME-Zarr images was not listed, and the run stopped on "Volume_3 not found".
-    import zarr
+    ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
 
     store = tmp_path / "Fixed.ome.zarr"
     store.mkdir()
@@ -81,9 +81,8 @@ def test_the_sentinels_take_the_form_of_the_images_they_stand_beside(tmp_path: P
 
     assert [path.name for path in beside_a_store] == ["MovingMask_000.ome.zarr", "MovingMask_001.ome.zarr"]
     assert [path.name for path in beside_a_file] == ["FixedMask_000.mha"]
-    group = zarr.open_group(str(beside_a_store[0]), mode="r")
-    level = dict(group.attrs)["multiscales"][0]["datasets"][0]["path"]
-    ones = np.asarray(group[level])
+    # Through konfai's own reader: where the store keeps its metadata is the store's business.
+    ones, _ = ome_zarr.read_ome_zarr_data_slice(beside_a_store[0], (slice(None),) * 4)
     assert ones.shape == (1, 2, 2, 2) and (ones == 1).all()
 
 

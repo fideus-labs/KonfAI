@@ -256,6 +256,11 @@ without reading any pixels.
 `write_ome_zarr` writes a single-level OME-NGFF store with channel/spatial axes,
 chunking, scale, translation, and the original KonfAI attributes.
 
+Stores are written as **NGFF 0.5**, a zarr v3 layout, and a displacement field as
+**NGFF 0.6**, whose RFC-5 axis types name its component axis. Stores written by
+earlier KonfAI releases are zarr v2 and are read unchanged; levels appended to one
+join it in its own layout.
+
 A store written region by region (a streamed `TRANSFORM` `Write`, a streamed
 prediction) is chunked on the writer's region: a slab sweep declares
 `[C, slab_rows, Y, X]`, and an axis the region covers end to end is tiled to at
