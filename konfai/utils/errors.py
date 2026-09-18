@@ -17,6 +17,10 @@
 """Shared exception types used across the KonfAI runtime and datasets."""
 
 
+class KonfAIWarning(UserWarning):
+    """A warning KonfAI raises: the console capture spells it as KonfAI's own, whichever frame it names."""
+
+
 class KonfAIError(Exception):
     """Base class for user-facing KonfAI exceptions."""
 

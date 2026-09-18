@@ -25,7 +25,7 @@ import torch
 from konfai.data.transform.base import LocalityKind, PatchLocality, Transform, TransformInverse, sitk
 from konfai.utils.dataset import Attribute, Dataset, data_to_image, image_to_data
 from konfai.utils.dataset.statistics import read_masked_data_statistics
-from konfai.utils.errors import DatasetManagerError, TransformError
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformError
 from konfai.utils.ITK import _require_simpleitk
 
 
@@ -283,7 +283,9 @@ class Normalize(TransformInverse):
             # which later patches read again.
             if norm == 0:
                 warnings.warn(
-                    f"Norm is zero for case '{name}': input is constant with value = {self.min_value}.", stacklevel=2
+                    f"Norm is zero for case '{name}': input is constant with value = {self.min_value}.",
+                    KonfAIWarning,
+                    stacklevel=2,
                 )
                 if self.channels:
                     tensor = tensor.clone()

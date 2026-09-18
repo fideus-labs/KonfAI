@@ -32,7 +32,7 @@ import pytest
 from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -681,11 +681,18 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
         warnings.simplefilter("always")
         print("hello")
         rt_logg._show_warning("constant case", UserWarning, rt_logg.__file__, 1)
+        # A stacklevel names the caller's frame, outside KonfAI: the category still marks it as KonfAI's.
+        rt_logg._show_warning("from a caller", KonfAIWarning, "/elsewhere/script.py", 1)
         logging.getLogger("konfai.test").warning("head resized")
 
     header, *lines = (tmp_path / "RUN" / "log_0.txt").read_text().splitlines()
     assert header.startswith("[KonfAI] ==== TRAIN 'RUN'")
-    assert lines == ["hello", "[KonfAI] WARNING: constant case", "[KonfAI] WARNING: head resized"]
+    assert lines == [
+        "hello",
+        "[KonfAI] WARNING: constant case",
+        "[KonfAI] WARNING: from a caller",
+        "[KonfAI] WARNING: head resized",
+    ]
     assert rt_logg._CONSOLE_HANDLER not in logging.getLogger("konfai").handlers
 
 

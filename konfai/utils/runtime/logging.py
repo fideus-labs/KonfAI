@@ -45,7 +45,7 @@ from konfai import (
     statistics_directory,
     transforms_directory,
 )
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 
 
 class NullSummaryWriter:
@@ -150,8 +150,9 @@ _KONFAI_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 def _show_warning(message, category, filename, lineno, file=None, line=None) -> None:
-    """KonfAI's own warnings read as its other messages; a third party's keep Python's format."""
-    if str(filename).startswith(_KONFAI_ROOT):
+    """KonfAI's own warnings read as its other messages; a third party's keep Python's format. The
+    category decides, not the frame, which a ``stacklevel`` may place in the caller's code."""
+    if issubclass(category, KonfAIWarning) or str(filename).startswith(_KONFAI_ROOT):
         text = f"[KonfAI] WARNING: {message}\n"
     else:
         text = warnings.formatwarning(message, category, filename, lineno, line)

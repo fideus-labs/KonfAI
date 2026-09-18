@@ -46,7 +46,7 @@ from konfai.data.patching.sweep import (
 from konfai.data.transform import LocalityKind, Reduce, Resample, Save, Transform
 from konfai.utils.budget import format_bytes
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import PatchError
+from konfai.utils.errors import KonfAIWarning, PatchError
 
 
 class Verdict(StrEnum):
@@ -327,6 +327,7 @@ class CaseMaterializer:
             warnings.warn(
                 f"Shared-pass materialization of case '{manager.name}' failed ({failure});"
                 " its copies take their own passes.",
+                KonfAIWarning,
                 stacklevel=2,
             )
         return written

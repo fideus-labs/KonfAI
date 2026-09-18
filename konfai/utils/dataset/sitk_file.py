@@ -59,7 +59,7 @@ from konfai.utils.dataset.stream import (
     _MhaDataStream,
     _NiftiDataStream,
 )
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
 )
@@ -95,6 +95,7 @@ def _warn_unstreamed_region_read(path: str) -> None:
         "(NRRD, or any compressed file), so every patch decodes the whole volume again: many times "
         "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
         "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
+        KonfAIWarning,
         stacklevel=2,
     )
 

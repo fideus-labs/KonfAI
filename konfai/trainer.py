@@ -743,12 +743,17 @@ class _Trainer:
         _dataset(self.dataloader_validation).reset_augmentation("Validation")
         if dist.is_initialized():
             # Named, or NCCL warns that it guesses the device.
-            dist.barrier(device_ids=[torch.cuda.current_device()] if dist.get_backend() == "nccl" else None)
+            dist.barrier(device_ids=[self._collective_device] if dist.get_backend() == "nccl" else None)
         self.model.train()
         self.model.module.set_state(NetState.TRAIN)
         if self.model_ema is not None:
             _ema_network(self.model_ema).set_state(NetState.TRAIN)
         return self._validation_log(batch_sample)
+
+    @property
+    def _collective_device(self) -> int:
+        """The GPU this rank's collectives run on: the last of its model-parallel block."""
+        return self.local_rank * self.size + self.size - 1
 
     def _broadcast_from_master(self, value: Any) -> Any:
         """Rank 0's value on every rank, one broadcast of a pickled object; callers cast as they need."""
@@ -756,7 +761,7 @@ class _Trainer:
             return value
         payload = [value if self.global_rank == 0 else None]
         if torch.cuda.is_available():
-            torch.cuda.set_device(self.local_rank * self.size + self.size - 1)
+            torch.cuda.set_device(self._collective_device)
         dist.broadcast_object_list(payload, src=0)
         return payload[0]
 
@@ -945,7 +950,7 @@ class _Trainer:
         measures = DistributedObject.get_measure(
             self.world_size,
             self.global_rank,
-            self.local_rank * self.size + self.size - 1,
+            self._collective_device,
             models,
             (
                 self.it_validation

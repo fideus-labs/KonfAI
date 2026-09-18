@@ -83,7 +83,7 @@ from konfai.data.transform import (
 )
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.dataset.statistics import needs_moments
-from konfai.utils.errors import DatasetManagerError, PatchError
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
 from konfai.utils.runtime import return_freed_heap
 from konfai.utils.utils import env_flag
 
@@ -1513,7 +1513,7 @@ class DatasetManager:
         and it can only be as specific as what was kept here.
         """
         self._sweep_failure = f"'{sweep.group}/{sweep.entry}' could not be written region by region: {reason}"
-        warnings.warn(f"{self._sweep_failure} Falling back to the whole-volume path.", stacklevel=3)
+        warnings.warn(f"{self._sweep_failure} Falling back to the whole-volume path.", KonfAIWarning, stacklevel=3)
         return False
 
     def read_granularity(self) -> tuple[int, ...] | None:
