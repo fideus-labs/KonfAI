@@ -1035,7 +1035,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         support_files=support,
         support_root=args.get("support_root"),
     )
-    print(f"Bundle assembled at {bundle}")
+    print(f"[KonfAI-Apps] Bundle assembled at {bundle}")
 
     # If no requirements.txt was provided, draft one from the custom Model.py imports.
     if not args.get("requirements") and (bundle / "Model.py").exists():
@@ -1048,7 +1048,7 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
         drafted = [name for name in drafted if name.replace("-", "_") not in local_modules]
         if drafted:
             (bundle / "requirements.txt").write_text("\n".join(drafted) + "\n")
-            print(f"Drafted requirements.txt (review!): {', '.join(drafted)}")
+            print(f"[KonfAI-Apps] Drafted requirements.txt (review!): {', '.join(drafted)}")
 
     if args.get("onnx"):
         artifact = export_portable_into_bundle(
@@ -1058,4 +1058,4 @@ def run_bundle_cli(args: dict[str, Any]) -> None:
             in_channels=args.get("in_channels"),
             output_module=args.get("output_module"),
         )
-        print(f"Portable model exported: {artifact}")
+        print(f"[KonfAI-Apps] Portable model exported: {artifact}")
