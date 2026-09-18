@@ -702,7 +702,7 @@ def _bind_path(config: Config, param: inspect.Parameter) -> Path | None:
     path = Path(str(raw))
     if not path.exists():
         _log.warning(
-            "[Config] Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
+            "Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
             raw,
             param.name,
             path.resolve(),

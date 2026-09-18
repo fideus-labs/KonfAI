@@ -542,7 +542,7 @@ class CaseReduction:
                 folded = self._fold(region)
             except torch.cuda.OutOfMemoryError:
                 # A region the device could not hold: this region again, at half the height.
-                if not growth.halve_after_device_oom(device, f"[Reduce] '{self.reduce.output}'", stop - start):
+                if not growth.halve_after_device_oom(device, f"[KonfAI] Reduce '{self.reduce.output}'", stop - start):
                     raise
                 continue
             yield region, folded
@@ -639,7 +639,7 @@ class CaseReduction:
                 self._budget_bytes = declared
                 # The PLAN printed the host figure, so the run says which budget it worked under.
                 print(
-                    f"[Reduce] '{self.reduce.output}': regions re-sized for {device} --"
+                    f"[KonfAI] Reduce '{self.reduce.output}': regions re-sized for {device} --"
                     f" {self.slab_rows} row(s) under {capped / 2**30:.2f} GiB"
                     f" (min of the declared budget and half of what the card can give this process).",
                     flush=True,

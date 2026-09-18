@@ -642,6 +642,31 @@ def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatc
     assert (tmp_path / "RUN" / "log_0.txt").read_text() == "line one\nline two\nprinted\n"
 
 
+def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path, monkeypatch):
+    """A single rank runs inside the launcher's Log on the same file: each line lands there once, and
+    KonfAI's warnings and logger records carry the console's own prefix."""
+    import logging
+    import warnings
+
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+
+    with warnings.catch_warnings(), rt_dist.Log("RUN", 0), rt_dist.Log("RUN", 0):
+        warnings.simplefilter("always")
+        print("hello")
+        rt_logg._show_warning("constant case", UserWarning, rt_logg.__file__, 1)
+        logging.getLogger("konfai.test").warning("head resized")
+
+    assert (tmp_path / "RUN" / "log_0.txt").read_text() == (
+        "hello\n[KonfAI] WARNING: constant case\n[KonfAI] WARNING: head resized\n"
+    )
+    assert rt_logg._CONSOLE_HANDLER not in logging.getLogger("konfai").handlers
+
+
 # ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------

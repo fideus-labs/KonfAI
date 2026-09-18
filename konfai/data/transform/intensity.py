@@ -17,6 +17,8 @@
 
 """Value transforms: clipping, normalization, casting, histogram matching, statistics."""
 
+import warnings
+
 import numpy as np
 import torch
 
@@ -280,7 +282,9 @@ class Normalize(TransformInverse):
             # Never into the tensor handed over: a patch transform is handed a view of the loaded case,
             # which later patches read again.
             if norm == 0:
-                print(f"[WARNING] Norm is zero for case '{name}': input is constant with value = {self.min_value}.")
+                warnings.warn(
+                    f"Norm is zero for case '{name}': input is constant with value = {self.min_value}.", stacklevel=2
+                )
                 if self.channels:
                     tensor = tensor.clone()
                     for channel in self.channels:

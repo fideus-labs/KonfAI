@@ -17,6 +17,7 @@
 
 """Logs and TensorBoard: the console capture, the run log, the data-log strategies."""
 
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ import socket
 import subprocess  # nosec B404
 import sys
 import time
+import warnings
 from enum import Enum
 from pathlib import Path
 from typing import TextIO, cast
@@ -142,6 +144,33 @@ def _bar_key(line: str) -> str:
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
+_KONFAI_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def _show_warning(message, category, filename, lineno, file=None, line=None) -> None:
+    """KonfAI's own warnings read as its other messages; a third party's keep Python's format."""
+    if str(filename).startswith(_KONFAI_ROOT):
+        text = f"[KonfAI] WARNING: {message}\n"
+    else:
+        text = warnings.formatwarning(message, category, filename, lineno, line)
+    try:
+        (file or sys.stderr).write(text)
+    except (OSError, ValueError):
+        pass
+
+
+class _ConsoleHandler(logging.Handler):
+    """The ``konfai`` logger's records, spelled as the console's other messages, to the current stderr."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stderr.write(f"[KonfAI] {record.levelname}: {record.getMessage()}\n")
+        except (OSError, ValueError):
+            pass
+
+
+_CONSOLE_HANDLER = _ConsoleHandler(logging.WARNING)
+
 
 class MinimalLog:
     """Capture stdout/stderr while keeping a one-line rolling status buffer."""
@@ -166,11 +195,20 @@ class MinimalLog:
     def __enter__(self):
         sys.stdout = cast(TextIO, self)
         sys.stderr = cast(TextIO, self)
+        self._show_warning_bak = warnings.showwarning
+        warnings.showwarning = _show_warning
+        logger = logging.getLogger("konfai")
+        self._owns_handler = _CONSOLE_HANDLER not in logger.handlers
+        if self._owns_handler:
+            logger.addHandler(_CONSOLE_HANDLER)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         # The throttled frames are emitted here, so the sink ends on the bar's final state.
         self._mirror_emit_pending()
+        if self._owns_handler:
+            logging.getLogger("konfai").removeHandler(_CONSOLE_HANDLER)
+        warnings.showwarning = self._show_warning_bak
         sys.stdout = self._stdout_bak
         sys.stderr = self._stderr_bak
 
@@ -241,6 +279,8 @@ class MinimalLog:
 class Log(MinimalLog):
     """Mirror console output to a rank-specific log file."""
 
+    file: TextIO
+
     def __init__(self, name: str, rank: int) -> None:
         super().__init__(rank)
         if konfai_state() == "PREDICTION":
@@ -259,16 +299,25 @@ class Log(MinimalLog):
                 "Use a plain run name, without an absolute path or '..' segments.",
             )
         self.log_path.mkdir(parents=True, exist_ok=True)
+        file_path = self.log_path / f"log_{rank}.txt"
+        # A rank run inline under the launcher's Log on the same file: the outer one already writes it.
+        self.nested = isinstance(sys.stdout, Log) and Path(sys.stdout.file.name) == file_path
+        if self.nested:
+            return
         # Append, never truncate: this file is opened before the overwrite prompt runs.
-        self.file = open(self.log_path / f"log_{rank}.txt", "a", buffering=1)
+        self.file = open(file_path, "a", buffering=1)
         self._last_logged: str | None = None
 
     def __enter__(self):
+        if self.nested:
+            return self
         super().__enter__()
         self.file.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.nested:
+            return
         super().__exit__(exc_type, exc_val, exc_tb)
         self.file.__exit__(exc_type, exc_val, exc_tb)
 
