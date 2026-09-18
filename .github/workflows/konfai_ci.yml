@@ -70,8 +70,19 @@ jobs:
         # threads against the others (measured 8x slower on 24 cores).
         env:
           OMP_NUM_THREADS: "1"
+          # A native crash (the macOS workflow SIGSEGV) prints every thread's Python stack.
+          PYTHONFAULTHANDLER: "1"
         run: |
           pytest -q -n auto --dist loadfile tests
+
+      - name: Upload macOS crash reports
+        # The native backtrace of a crashed Python lives only in the runner's DiagnosticReports.
+        if: failure() && runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: crash-reports-${{ matrix.os }}-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ~/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
 
   lint:
     runs-on: ubuntu-latest
