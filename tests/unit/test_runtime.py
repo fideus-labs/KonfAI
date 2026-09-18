@@ -699,7 +699,15 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
 # ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
-def _execute_counting(monkeypatch, *, cpu: int, inline: str | None, gpu: list[int] | None = None, size: int = 1):
+def _execute_counting(
+    monkeypatch,
+    *,
+    cpu: int,
+    inline: str | None,
+    gpu: list[int] | None = None,
+    size: int = 1,
+    setups: list[int] | None = None,
+):
     """Run execute_distributed_object and report who executed: the rank ran here, or spawn was called.
 
     ``inline`` is the KONFAI_INLINE_SINGLE_RANK value, or None to leave it unset and exercise the default."""
@@ -712,7 +720,8 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None, gpu: list[in
             self.size = size
 
         def setup(self, world_size: int) -> None:
-            pass
+            if setups is not None:
+                setups.append(world_size)
 
         def __call__(self, rank: int | None = None) -> None:
             ran_here.append(rank)
@@ -740,12 +749,13 @@ def test_a_single_rank_runs_in_this_process(monkeypatch) -> None:
     assert spawned == [], "no child may be spawned for one rank"
 
 
-def test_a_model_split_over_gpus_takes_one_rank_per_replica(monkeypatch) -> None:
-    """A model split over two GPUs holds both: four GPUs are two replicas, not four ranks whose blocks
-    run past the visible devices."""
-    assert _execute_counting(monkeypatch, cpu=1, inline="1", gpu=[0, 1, 2, 3], size=2)[1] == [2]
-    ran_here, spawned = _execute_counting(monkeypatch, cpu=1, inline="1", gpu=[0, 1], size=2)
-    assert ran_here == [0] and spawned == []
+def test_a_model_split_over_gpus_is_set_up_with_every_gpu(monkeypatch) -> None:
+    """``setup`` takes the GPU count and divides it by ``size`` itself (one dataloader list per model
+    replica); a rank past the replicas finds no dataloader and returns. Dividing before ``setup`` too
+    left two GPUs x size 2 with no replica at all."""
+    seen: list[int] = []
+    _, spawned = _execute_counting(monkeypatch, cpu=1, inline="1", gpu=[0, 1, 2, 3], size=2, setups=seen)
+    assert seen == [4] and spawned == [4]
 
 
 def test_more_than_one_rank_still_spawns(monkeypatch) -> None:
