@@ -812,11 +812,14 @@ class FireANTsRegistration(torch.nn.Module):
                 moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
                 fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
                 moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-                dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
-                # FireANTs' registration objects keep their CUDA tensors in reference cycles that only the cyclic
-                # collector frees; it runs on Python allocation counts, not device memory, so without a collection
-                # per call several tiles' worth of fields stay allocated and a tiled run runs out of the card.
-                gc.collect()
+                try:
+                    dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
+                finally:
+                    # FireANTs' registration objects keep their CUDA tensors in reference cycles that only the cyclic
+                    # collector frees; it runs on Python allocation counts, not device memory, so without a collection
+                    # per call several tiles' worth of fields stay allocated and a tiled run runs out of the card. A
+                    # failed call collects too: an OOM restart retries with a smaller patch on the same card.
+                    gc.collect()
                 combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)
 
