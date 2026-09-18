@@ -676,7 +676,8 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
     monkeypatch.setenv("KONFAI_STATE", "TRAIN")
     monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
 
-    with warnings.catch_warnings(), rt_dist.Log("RUN", 0), rt_dist.Log("RUN", 0):
+    with warnings.catch_warnings(), rt_dist.Log("RUN", 0) as outer, rt_dist.Log("RUN", 0) as inner:
+        assert inner is outer
         warnings.simplefilter("always")
         print("hello")
         rt_logg._show_warning("constant case", UserWarning, rt_logg.__file__, 1)

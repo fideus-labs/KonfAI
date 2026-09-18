@@ -310,8 +310,8 @@ class Log(MinimalLog):
         self.log_path.mkdir(parents=True, exist_ok=True)
         file_path = self.log_path / f"log_{rank}.txt"
         # A rank run inline under the launcher's Log on the same file: the outer one already writes it.
-        self.nested = isinstance(sys.stdout, Log) and Path(sys.stdout.file.name) == file_path
-        if self.nested:
+        self.outer = sys.stdout if isinstance(sys.stdout, Log) and Path(sys.stdout.file.name) == file_path else None
+        if self.outer is not None:
             return
         # Append, never truncate: this file is opened before the overwrite prompt runs.
         self.file = open(file_path, "a", buffering=1)
@@ -323,14 +323,14 @@ class Log(MinimalLog):
         )
 
     def __enter__(self):
-        if self.nested:
-            return self
+        if self.outer is not None:
+            return self.outer
         super().__enter__()
         self.file.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.nested:
+        if self.outer is not None:
             return
         super().__exit__(exc_type, exc_val, exc_tb)
         self.file.__exit__(exc_type, exc_val, exc_tb)
