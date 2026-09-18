@@ -91,6 +91,8 @@ function Canvas({ path, onDims, onReady }: { path: string | null; onDims?: (d: s
   );
 }
 
+export type PaneId = "a" | "b";
+
 export default function Viewer({
   path,
   onPathChange,
@@ -98,6 +100,8 @@ export default function Viewer({
   onComparePathChange,
   compareMode,
   onCompareModeChange,
+  compareTarget = "b",
+  onCompareTargetChange,
 }: {
   path: string | null;
   onPathChange: (p: string) => void;
@@ -105,6 +109,8 @@ export default function Viewer({
   onComparePathChange?: (p: string) => void;
   compareMode?: boolean;
   onCompareModeChange?: (on: boolean) => void;
+  compareTarget?: PaneId; // the pane a tree click fills while comparing
+  onCompareTargetChange?: (pane: PaneId) => void;
 }) {
   const [field, setField] = useState("");
   const [field2, setField2] = useState("");
@@ -112,7 +118,14 @@ export default function Viewer({
   const [dims2, setDims2] = useState("");
   const [full, setFull] = useState(false);
   const [slicerNote, setSlicerNote] = useState("");
-  const compare = !!compareMode; // explicit toggle: when on, a second pane opens and tree clicks fill it
+  const compare = !!compareMode; // explicit toggle: when on, a second pane opens beside the first
+  // A pointer landing in a pane makes it the target, like the focused group of a split editor. Capture,
+  // so NiiVue still gets the same click for its crosshair.
+  const paneProps = (pane: PaneId) => ({
+    className: compare && compareTarget === pane ? "v-pane target" : "v-pane",
+    onPointerDownCapture: compare ? () => onCompareTargetChange?.(pane) : undefined,
+  });
+  const targetBadge = <span className="v-target">Tree clicks load here</span>;
   const nvA = useRef<Niivue | null>(null);
   const nvB = useRef<Niivue | null>(null);
 
@@ -208,27 +221,38 @@ export default function Viewer({
         </div>
       )}
       <div className={compare ? "v-split" : "v-single"}>
-        <Canvas
-          path={path}
-          onDims={setDims}
-          onReady={(nv) => {
-            nvA.current = nv;
-            couple();
-          }}
-        />
-        {compare &&
-          (comparePath ? (
-            <Canvas
-              path={comparePath}
-              onDims={setDims2}
-              onReady={(nv) => {
-                nvB.current = nv;
-                couple();
-              }}
-            />
-          ) : (
-            <div className="canvas-wrap v-empty">Click a volume in the tree to compare</div>
-          ))}
+        <div {...paneProps("a")}>
+          <Canvas
+            path={path}
+            onDims={setDims}
+            onReady={(nv) => {
+              nvA.current = nv;
+              couple();
+            }}
+          />
+          {compare && compareTarget === "a" && targetBadge}
+        </div>
+        {compare && (
+          <div {...paneProps("b")}>
+            {comparePath ? (
+              <Canvas
+                path={comparePath}
+                onDims={setDims2}
+                onReady={(nv) => {
+                  nvB.current = nv;
+                  couple();
+                }}
+              />
+            ) : (
+              <div className="canvas-wrap v-empty">
+                {compareTarget === "b"
+                  ? "Click a volume in the tree to compare"
+                  : "Click here, then a volume in the tree"}
+              </div>
+            )}
+            {compareTarget === "b" && targetBadge}
+          </div>
+        )}
       </div>
     </section>
   );

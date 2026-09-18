@@ -29,9 +29,11 @@ function FolderPicker() {
 
 function PanelProbe({ stream, session = "S" }: { stream: JobStream; session?: string }) {
   const [path, setPath] = useState<string | null>(null);
+  const [compare, setCompare] = useState<string | null>(null);
   return <section className="right-panel" style={{ height: "100vh" }}>
     <RightPanel session={session} stream={stream} volumePath={path} onVolumePathChange={setPath}
-      comparePath={null} onComparePathChange={() => undefined} />
+      comparePath={compare} onComparePathChange={(p) => setCompare(p || null)} />
+    <output id="volumes" hidden>{JSON.stringify({ path, compare })}</output>
   </section>;
 }
 
