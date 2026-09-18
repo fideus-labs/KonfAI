@@ -385,7 +385,12 @@ class ConvexAdamEngine:
             fine.AddObserver(itk.IterationEvent(), _update)
         except Exception:  # nosec B110 - progress is best-effort; never fail a run over the bar
             pass
-        fine.Update()
+        try:
+            fine.Update()
+        finally:
+            # The observer's closure holds ``fine`` and ``fine`` holds the observer: a cycle through C++ that
+            # Python's collector cannot see, so every call kept its filter and the filter's fields alive.
+            fine.RemoveAllObservers()
         progress.n = progress.total or self._iterations  # show completion even if no IterationEvent fired
         progress.refresh()
         progress.close()
