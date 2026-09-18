@@ -153,6 +153,9 @@ class VramAutoPatchMixin:
         Every rank rounds the same worst case to the same size, so no rendezvous is needed here
         (unlike the OOM shrink). True when the grids were re-cut: the caller re-fetches its loaders.
         """
+        if self._vram_patch_template is None:
+            # No free axis to size; also keeps non-image groups (fiducials, transforms) out of worst_case_shape.
+            return False
         sized = size_free_axes(self._vram_patch_template, self.dataset.worst_case_shape(), self._downsampling_factor)
         if sized is None:
             return False
