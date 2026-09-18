@@ -125,7 +125,7 @@ class AugmentedStage:
         return self.augmentation.patch_locality(self.index, self.a, cache_attribute)
 
     def output_channels(self, channels: int) -> int:
-        """Only Mask/Permute reshape, and neither folds the channel axis: a draw keeps it."""
+        """PlacedMask, Permute and a quarter-turn Rotate reshape, and none folds the channel axis."""
         return channels
 
     def case_working_multiple(self, name: str) -> float:

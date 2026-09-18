@@ -343,8 +343,8 @@ quarter turn are `ORIENTATION`; `ColorTransform` and its subclasses are
 `POINTWISE`; `Translate` is `HALO`. A free-angle `Rotate` and `Scale` are
 `REGRID`, pulling their own window through the affine; `Noise` and `CutOUT` are
 `POINTWISE`, their field and their box being functions of the voxel's position in
-the whole volume. The `Mask` DRAW and `Elastix` load the volume (the draw's output grid is the
-mask's own, which is already resident); the `Mask` TRANSFORM above is pointwise and reads its
+the whole volume. The `PlacedMask` draw and `Elastix` load the volume (the draw's output grid is the
+mask's own, which is already resident); the `Mask` transform above is pointwise and reads its
 mask by region, and declares those reads to the decoded-chunk cache ahead of a sweep or of a
 case's patches, as the reader declares its own.
 

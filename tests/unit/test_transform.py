@@ -1053,7 +1053,7 @@ def test_gradient_keeps_the_axis_dimension_apart_from_the_channels() -> None:
 def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flip/Mask/Permute/Foreign exist in BOTH stage namespaces, and an Expand marker flips which
+    """Flip/Permute/Foreign exist in BOTH stage namespaces, and an Expand marker flips which
     one a bare name means: the loader says which class won and how to spell the loser, because with
     default arguments neither the binder nor strict_config would ever say so. The sentence is also
     the stage's plan_note, so a TRANSFORM plan records which class ran."""
@@ -1090,6 +1090,28 @@ def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
         clip = TransformLoader().get_transform("Clip", "T.transforms")
     assert not caught  # an unambiguous name stays silent
     assert clip.plan_note("G", "case", [4, 4, 4], Attribute()) is None
+
+
+def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mask draw is PlacedMask: `Mask` names one class, so its bare name resolves without an
+    ambiguity warning, before an Expand marker and past it."""
+    import warnings as warnings_module
+
+    from konfai.data import augmentation
+    from konfai.data.transform import TransformLoader
+
+    assert not hasattr(augmentation, "Mask")
+    config = tmp_path / "Config.yml"
+    config.write_text("T:\n  transforms:\n    Mask:\n      path: MASK\n")
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+
+    for prefer_augmentation in (False, True):
+        with warnings_module.catch_warnings(record=True) as caught:
+            warnings_module.simplefilter("always")
+            stage = TransformLoader().get_transform("Mask", "T.transforms", prefer_augmentation=prefer_augmentation)
+        assert isinstance(stage, Mask)
+        assert not [w for w in caught if "resolved to" in str(w.message)]
 
 
 def test_normalize_never_writes_into_the_tensor_it_is_handed() -> None:

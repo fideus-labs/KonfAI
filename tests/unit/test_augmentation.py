@@ -15,8 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for ``konfai.data.augmentation``: per-sample state (draw/reset/inverse),
-Flip (incl. vector fields), Rotate, Translate, intensity augmentations, and the
-SimpleITK-backed Elastix/Mask augmentations."""
+Flip (incl. vector fields), Rotate, Translate, intensity augmentations, Elastix, and the
+SimpleITK-backed PlacedMask."""
 
 import itertools
 from pathlib import Path
@@ -30,8 +30,8 @@ from konfai.data.augmentation import (
     CutOUT,
     Elastix,
     Flip,
-    Mask,
     Noise,
+    PlacedMask,
     Rotate,
     Translate,
 )
@@ -421,7 +421,7 @@ def test_translate_is_int_rounds_to_whole_voxels():
 
 
 # --------------------------------------------------------------------------------------
-# SimpleITK-backed augmentations (Elastix / Mask)
+# SimpleITK-backed augmentations (Elastix / PlacedMask)
 # --------------------------------------------------------------------------------------
 
 
@@ -431,12 +431,12 @@ def test_simpleitk_augmentations_fail_clearly_when_dependency_is_missing(
     monkeypatch.setattr("konfai.data.augmentation.base.sitk", None)
 
     with pytest.raises(AugmentationError, match="SimpleITK"):
-        Mask("mask.mha", 0)
+        PlacedMask("mask.mha", 0)
     # Elastix evaluates its lattice with KonfAI's own kernel: no SimpleITK needed.
     Elastix()
 
 
-def test_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_placed_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sitk = pytest.importorskip("SimpleITK")
     mask_path = tmp_path / "mask.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.ones((2, 2), dtype=np.uint8)), str(mask_path))
@@ -450,7 +450,7 @@ def test_mask_reads_pixels_only_on_first_compute(tmp_path: Path, monkeypatch: py
         return original_read_image(path)
 
     monkeypatch.setattr(augmentation_module.sitk, "ReadImage", counting_read_image)
-    augmentation = Mask(str(mask_path), 0)
+    augmentation = PlacedMask(str(mask_path), 0)
     augmentation._state_init(0, [[2, 2]], [Attribute()])
 
     assert read_count == 0

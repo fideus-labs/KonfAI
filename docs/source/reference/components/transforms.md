@@ -215,7 +215,7 @@ consistency). `reset_state` re-samples each epoch. A subclass implements
 test-time augmentation reassembly.
 
 ```{important}
-**`Mask`, `Permute` and `Rotate` may change spatial shape.** `Rotate` only does so
+**`PlacedMask`, `Permute` and `Rotate` may change spatial shape.** `Rotate` only does so
 on a quarter turn, which transposes the extents it swaps (`is_quarter=True`); a
 sampled angle keeps the grid. Everything else preserves geometry.
 ```
@@ -243,7 +243,7 @@ Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
 | `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes**: index remap; no with `vector_field: true` (negating a channel changes values) |
 | `Elastix` | Random cubic-BSpline elastic warp, drawn as a control-point lattice. | `grid_spacing=16, max_displacement=16` (world units) | no | no | **yes**: the displacement is evaluated lazily from the lattice, and no voxel moves further than `max_displacement`, which bounds the source box a region pulls |
 | `Permute` | Random spatial-axis permutation (**3-D only**). | `prob_permute=[0.5,0.5]` | **yes** | **yes** | **yes**: index remap |
-| `Mask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | no | no: the output grid is the mask's, and the mask is already resident |
+| `PlacedMask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | no | no: the output grid is the mask's, and the mask is already resident |
 
 ### Intensity (colour transforms)
 
@@ -267,7 +267,7 @@ them streams: a voxel comes out the same whatever region it was read in.
 | `Noise` | Diffusion-style forward noising (zero-terminal-SNR β schedule). | `n_std` (required), `noise_step=1000` | Its `prob` is the max noise timestep, not an apply probability; it always applies. | **yes**: the field is a function of the voxel's position and the copy's seed, so a region draws the values it would have had in the whole volume |
 | `CutOUT` | Random cutout box filled with `value`. | `cutout_size` (a fraction of the extent per axis, in `(0, 1]`), `value` (both required) | Gating uses the base probability; a `cutout_size` outside `(0, 1]` is refused. | **yes**: the box is placed in the whole volume's coordinates, so a region sees the part of it that falls inside it |
 
-`Mask` requires SimpleITK. The `vector_field` flag on `Flip` should
+`PlacedMask` requires SimpleITK. The `vector_field` flag on `Flip` should
 only be enabled for single-channel or genuine vector-field groups.
 
 ## Next steps

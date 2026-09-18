@@ -84,7 +84,7 @@ EXTENSION_POINTS: dict[str, dict[str, Any]] = {
             "_state_init(self, index, shapes, caches_attribute) -> list[int]  # sample params per case, cache by index",
             "_compute(self, name, index, tensors) -> list[tensors]  # apply lazily",
         ],
-        "return_contract": "One output tensor per input; same spatial shape (only Mask/Permute may change shape).",
+        "return_contract": "One output tensor per input; same spatial shape (only PlacedMask, Permute and a quarter-turn Rotate may change shape).",
         "config_location": "Trainer.Dataset.augmentations.DataAugmentation_*.data_augmentations.<Name>",
         "direct_external": "External aug libs (albumentations/torchvision.transforms) do not match the index-keyed lazy contract: almost always needs a wrapper.",
         "local_wrapper": "Subclass DataAugmentation; sample params in _state_init keyed by index so all patches of a case stay consistent; apply in _compute.",
