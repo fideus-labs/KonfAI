@@ -327,7 +327,7 @@ requires authentication, because Studio drives arbitrary host compute.
 ```{warning}
 Binding a non-loopback address without `KONFAI_STUDIO_TOKEN` is refused, not
 warned about: an unauthenticated Studio is a shell on the host. Set a token and
-serve over TLS: see `studio/docs/REMOTE.md`.
+serve over TLS: see `konfai-studio/docs/REMOTE.md`.
 ```
 
 ## ONNX export is not a subcommand
@@ -447,7 +447,7 @@ are covered in {doc}`../usage/mcp`.
 
 `konfai-studio` reads its own family. The first two are security-relevant: Studio
 drives arbitrary host compute, so binding a non-loopback address without a token is
-refused unless you override it. See `studio/docs/REMOTE.md`.
+refused unless you override it. See `konfai-studio/docs/REMOTE.md`.
 
 | Variable | Effect |
 | --- | --- |

@@ -117,7 +117,7 @@ jobs:
       - name: Run mypy
         # The same command as the pixi `typecheck` task ([tool.mypy] governs).
         run: |
-          python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio
+          python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio
 
   format:
     runs-on: ubuntu-latest

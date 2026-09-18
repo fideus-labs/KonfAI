@@ -90,12 +90,12 @@ release tag.
 
 ```bash
 pip install -e ./konfai-mcp             # must precede studio: the pin is version-exact
-pip install -e ./studio                 # deps: fastapi, uvicorn, fastmcp, claude-agent-sdk
-npm --prefix studio/frontend install    # once
-npm --prefix studio/frontend run build  # builds the front into konfai_studio/web/
+pip install -e ./konfai-studio                 # deps: fastapi, uvicorn, fastmcp, claude-agent-sdk
+npm --prefix konfai-studio/frontend install    # once
+npm --prefix konfai-studio/frontend run build  # builds the front into konfai_studio/web/
 ```
 
-Front hot-reload during development: `npm --prefix studio/frontend run dev` (proxies to the BFF).
+Front hot-reload during development: `npm --prefix konfai-studio/frontend run dev` (proxies to the BFF).
 
 See [`docs/STUDIO_SPEC.md`](docs/STUDIO_SPEC.md) for the design, and
 [`docs/REMOTE.md`](docs/REMOTE.md) to serve it beyond loopback.

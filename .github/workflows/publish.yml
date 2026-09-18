@@ -68,7 +68,7 @@ jobs:
 
       - name: Install standalone Studio package
         run: |
-          pip install -e ./studio
+          pip install -e ./konfai-studio
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -79,14 +79,14 @@ jobs:
         # test_serves_the_built_frontend skips when web/index.html is absent -- build the front here
         # so the smoke test actually executes. The build job rebuilds it independently for the wheel.
         run: |
-          cd studio/frontend
+          cd konfai-studio/frontend
           npm ci
           npm run build
           test -f ../konfai_studio/web/index.html
 
       - name: Run konfai-studio tests
         run: |
-          python -m pytest -q studio/tests
+          python -m pytest -q konfai-studio/tests
 
   build:
     needs: test
@@ -115,7 +115,7 @@ jobs:
           # and the wheel is built directly (--wheel): web/ is git-ignored, so the sdist file-finder would
           # drop it, but the wheel picks it up from package-data on disk.
           - name: konfai-studio
-            pkg: "studio"
+            pkg: "konfai-studio"
             build_args: "--wheel"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -141,7 +141,7 @@ jobs:
       - name: Build the Studio front
         if: matrix.name == 'konfai-studio'
         run: |
-          cd studio/frontend
+          cd konfai-studio/frontend
           npm ci
           npm run build
 
@@ -159,7 +159,7 @@ jobs:
         run: |
           python -c "
           import glob, sys, zipfile
-          names = zipfile.ZipFile(glob.glob('studio/dist/*.whl')[0]).namelist()
+          names = zipfile.ZipFile(glob.glob('konfai-studio/dist/*.whl')[0]).namelist()
           ok = 'konfai_studio/web/index.html' in names and any(n.startswith('konfai_studio/web/assets/') for n in names)
           sys.exit(0 if ok else 'the studio wheel is missing konfai_studio/web/index.html or assets/')
           "

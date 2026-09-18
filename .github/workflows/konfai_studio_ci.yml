@@ -7,14 +7,14 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/konfai_studio_ci.yml"
-      - "studio/**"
+      - "konfai-studio/**"
       - "konfai-mcp/**"
       - "konfai/**"
       - "pyproject.toml"
   pull_request:
     paths:
       - ".github/workflows/konfai_studio_ci.yml"
-      - "studio/**"
+      - "konfai-studio/**"
       - "konfai-mcp/**"
       - "konfai/**"
       - "pyproject.toml"
@@ -35,12 +35,12 @@ jobs:
         # Vite emits into konfai_studio/web/ (vite.config.ts outDir); the trailing check keeps
         # test_serves_the_built_frontend from silently skipping if that output path ever drifts.
         run: |
-          cd studio/frontend
+          cd konfai-studio/frontend
           npm ci
           npm run build
           test -f ../konfai_studio/web/index.html
       - name: Browser tests of the front
-        working-directory: studio/frontend
+        working-directory: konfai-studio/frontend
         run: |
           npx playwright install --with-deps chromium
           npm run test:browser
@@ -49,7 +49,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: studio-front
-          path: studio/konfai_studio/web
+          path: konfai-studio/konfai_studio/web
           if-no-files-found: error
 
   konfai_studio_ci:
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          # studio/setup.py pins konfai-mcp to the setuptools_scm version -- tags must be reachable.
+          # konfai-studio/setup.py pins konfai-mcp to the setuptools_scm version -- tags must be reachable.
           fetch-depth: 0
           # PR CI runs untrusted build/test steps and never needs git auth.
           persist-credentials: false
@@ -75,14 +75,14 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
-            studio/pyproject.toml
+            konfai-studio/pyproject.toml
 
       - name: Take the Studio front the front job built
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: studio-front
-          path: studio/konfai_studio/web
-      - run: test -f studio/konfai_studio/web/index.html
+          path: konfai-studio/konfai_studio/web
+      - run: test -f konfai-studio/konfai_studio/web/index.html
 
       - name: Install core package
         # The CPU torch index: the default PyPI torch wheel bundles the multi-GB CUDA stack this
@@ -101,25 +101,25 @@ jobs:
 
       - name: Install standalone Studio package
         run: |
-          pip install -e ./studio
+          pip install -e ./konfai-studio
 
       - name: Build a throwaway studio wheel and verify it ships the front
         # The wheel is the only artifact that carries web/ (git-ignored, swept in by package-data),
         # so only inspecting a built wheel catches a packaging regression before release day.
         run: |
-          python -m build --wheel studio
+          python -m build --wheel konfai-studio
           python -c "
           import glob, sys, zipfile
-          names = zipfile.ZipFile(glob.glob('studio/dist/*.whl')[0]).namelist()
+          names = zipfile.ZipFile(glob.glob('konfai-studio/dist/*.whl')[0]).namelist()
           ok = 'konfai_studio/web/index.html' in names and any(n.startswith('konfai_studio/web/assets/') for n in names)
           sys.exit(0 if ok else 'the studio wheel is missing konfai_studio/web/index.html or assets/')
           "
 
       - name: Lint and format check
         run: |
-          ruff check studio/konfai_studio
-          ruff format --check studio/konfai_studio
+          ruff check konfai-studio/konfai_studio
+          ruff format --check konfai-studio/konfai_studio
 
       - name: Run studio tests
         run: |
-          python -m pytest studio/tests
+          python -m pytest konfai-studio/tests

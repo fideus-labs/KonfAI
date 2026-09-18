@@ -33,9 +33,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|studio/konfai_studio/|tests/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/|tests/)
       - id: ruff-format
-        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|studio/konfai_studio/|tests/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/|tests/)
 
   # mypy runs in the dev environment, where torch and the imaging stack are installed: the mirrors-mypy
   # hook type-checks in an environment of its own, without them, and reads every torch attribute as
@@ -44,10 +44,10 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: pixi run --environment dev python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio
+        entry: pixi run --environment dev python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio
         language: system
         pass_filenames: false
-        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|studio/konfai_studio/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/)
 
   - repo: https://github.com/PyCQA/bandit
     rev: 1.8.6

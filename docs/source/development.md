@@ -68,7 +68,7 @@ Run tasks with `pixi run <task>`:
 | `lint` | `ruff check konfai konfai-apps/konfai_apps` | Lint the source tree |
 | `format` | `ruff format konfai konfai-apps/konfai_apps` | Auto-format source files |
 | `format-check` | `ruff format --check ...` | Check formatting without modifying files |
-| `typecheck` | `python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp studio/konfai_studio` | Static type checking of the four packages; the pre-commit hook and the CI `typecheck` job run the same command |
+| `typecheck` | `python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio` | Static type checking of the four packages; the pre-commit hook and the CI `typecheck` job run the same command |
 | `build` | `python -m build` | Build sdist and wheel |
 | `test-apps` | `pytest -q konfai-apps/tests` | Run the konfai-apps test suite |
 | `check` | lint + format-check + test + test-apps | Full pre-push gate; run it once before finishing any change (needs konfai-apps installed) |

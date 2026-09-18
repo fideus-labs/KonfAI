@@ -133,4 +133,4 @@ unless you set an access token. To reach it over a network, set
 `KONFAI_STUDIO_TOKEN` and put it behind TLS / a reverse proxy. The full
 single-operator deployment guide (token auth, TLS with Caddy or nginx, a systemd
 unit, and the threat model) is in
-[`studio/docs/REMOTE.md`](https://github.com/fideus-labs/KonfAI/blob/main/studio/docs/REMOTE.md).
+[`konfai-studio/docs/REMOTE.md`](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/docs/REMOTE.md).
