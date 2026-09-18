@@ -587,6 +587,25 @@ def test_a_crlf_line_is_a_message_not_a_bar_frame(monkeypatch):
     assert log._buffered_line == "important warning"
 
 
+def test_a_bars_cursor_moves_leave_no_blank_line_off_a_terminal(monkeypatch):
+    """Nested tqdm bars position themselves with bare newlines and clear themselves with an empty frame;
+    off a terminal both left blank lines, more of them than lines of content."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    log = rt_logg.MinimalLog(rank=0)
+
+    log.write("[KonfAI] start")
+    log.write("\n")
+    log.write("\n")  # a nested bar moving down to its position
+    log.write("\rProgress: 1/2")
+    log.write("\r          \r")  # the bar clearing itself on close
+    log.write("\n")
+    log.write("done\n")
+
+    assert log._stdout_bak.written == "[KonfAI] start\nProgress: 1/2\ndone\n"
+
+
 def test_the_bar_state_held_by_the_throttle_lands_on_exit(monkeypatch):
     """A run's last writes are often throttled frames; dropped at __exit__, the job sink would freeze on
     a stale frame and misreport where the run actually stopped."""
@@ -639,7 +658,9 @@ def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatc
     assert "goes nowhere" not in mirror.written
     assert "line one" not in mirror.written, "recorded detail must not reach the console"
     assert "printed" in mirror.written
-    assert (tmp_path / "RUN" / "log_0.txt").read_text() == "line one\nline two\nprinted\n"
+    header, *lines = (tmp_path / "RUN" / "log_0.txt").read_text().splitlines()
+    assert header.startswith("[KonfAI] ==== TRAIN 'RUN' rank 0 |")
+    assert lines == ["line one", "line two", "printed"]
 
 
 def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path, monkeypatch):
@@ -661,9 +682,9 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
         rt_logg._show_warning("constant case", UserWarning, rt_logg.__file__, 1)
         logging.getLogger("konfai.test").warning("head resized")
 
-    assert (tmp_path / "RUN" / "log_0.txt").read_text() == (
-        "hello\n[KonfAI] WARNING: constant case\n[KonfAI] WARNING: head resized\n"
-    )
+    header, *lines = (tmp_path / "RUN" / "log_0.txt").read_text().splitlines()
+    assert header.startswith("[KonfAI] ==== TRAIN 'RUN'")
+    assert lines == ["hello", "[KonfAI] WARNING: constant case", "[KonfAI] WARNING: head resized"]
     assert rt_logg._CONSOLE_HANDLER not in logging.getLogger("konfai").handlers
 
 

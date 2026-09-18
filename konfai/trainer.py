@@ -742,7 +742,8 @@ class _Trainer:
                     batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}", refresh=False)
         _dataset(self.dataloader_validation).reset_augmentation("Validation")
         if dist.is_initialized():
-            dist.barrier()
+            # Named, or NCCL warns that it guesses the device.
+            dist.barrier(device_ids=[torch.cuda.current_device()] if dist.get_backend() == "nccl" else None)
         self.model.train()
         self.model.module.set_state(NetState.TRAIN)
         if self.model_ema is not None:

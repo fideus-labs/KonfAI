@@ -26,6 +26,7 @@ import subprocess  # nosec B404
 import sys
 import time
 import warnings
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import TextIO, cast
@@ -37,6 +38,7 @@ try:
 except ImportError:
     SummaryWriter = None  # type: ignore[assignment,misc]
 from konfai import (
+    __version__,
     evaluations_directory,
     konfai_state,
     predictions_directory,
@@ -189,6 +191,7 @@ class MinimalLog:
         except (AttributeError, ValueError, OSError):
             self._mirror_is_tty = False
         self._mirror_last_redraw = 0.0
+        self._mirror_at_line_start = True
         # Folded frames withheld by the throttle, one slot per bar (interleaved bars keep their own).
         self._mirror_pending: dict[str, str] = {}
 
@@ -230,6 +233,8 @@ class MinimalLog:
         # Off a terminal the mirror sends the folded line instead of every frame, throttled; a skipped
         # frame is kept pending so a bar's final state lands before whatever message follows it.
         if not self._mirror_is_tty:
+            if redraw and not self._buffered_line:
+                return  # a bar clearing itself: nothing to show
             if redraw:
                 now = time.monotonic()
                 if now - self._mirror_last_redraw < self._MIRROR_REDRAW_EVERY:
@@ -238,8 +243,12 @@ class MinimalLog:
                 self._mirror_last_redraw = now
                 held = self._mirror_take_pending(exclude=_bar_key(self._buffered_line))
                 msg = f"{held}{self._buffered_line}\n"
+            elif not msg.strip() and self._mirror_at_line_start:
+                # A bar's cursor positioning (a bare newline) would leave a blank line in a log.
+                return
             else:
                 msg = f"{self._mirror_take_pending()}{msg}"
+            self._mirror_at_line_start = msg.endswith("\n")
         # Best-effort: a broken pipe (the mirror's reader is gone) never stops the job.
         try:
             self._stdout_bak.write(msg)
@@ -307,6 +316,11 @@ class Log(MinimalLog):
         # Append, never truncate: this file is opened before the overwrite prompt runs.
         self.file = open(file_path, "a", buffering=1)
         self._last_logged: str | None = None
+        # Re-runs append to one file: each opens with a line saying which run follows.
+        self.file.write(
+            f"[KonfAI] ==== {konfai_state()} '{name}' rank {rank} | {datetime.now():%Y-%m-%d %H:%M:%S}"
+            f" | konfai {__version__} ====\n"
+        )
 
     def __enter__(self):
         if self.nested:
