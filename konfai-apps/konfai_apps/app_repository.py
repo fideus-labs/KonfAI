@@ -605,9 +605,13 @@ class LocalAppRepository(AppRepositoryInfo):
 
         predictor["combine"] = "Mean"
         for value in outputs.values():
-            value["OutputDataset"]["reduction"] = "Mean"
-            if "InferenceStack" in value["OutputDataset"]["after_reduction_transforms"]:
-                del value["OutputDataset"]["after_reduction_transforms"]["InferenceStack"]
+            output = value["OutputDataset"]
+            # The replaced operator's argument block would be a key nothing reads once Mean replaces it.
+            if output.get("reduction") != "Mean":
+                output.pop(output.get("reduction"), None)
+            output["reduction"] = "Mean"
+            if "InferenceStack" in output["after_reduction_transforms"]:
+                del output["after_reduction_transforms"]["InferenceStack"]
 
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
