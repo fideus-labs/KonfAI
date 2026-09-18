@@ -699,7 +699,7 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
 # ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
-def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
+def _execute_counting(monkeypatch, *, cpu: int, inline: str | None, gpu: list[int] | None = None, size: int = 1):
     """Run execute_distributed_object and report who executed: the rank ran here, or spawn was called.
 
     ``inline`` is the KONFAI_INLINE_SINGLE_RANK value, or None to leave it unset and exercise the default."""
@@ -709,6 +709,7 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
     class FakeObject(rt_dist.DistributedObject):
         def __init__(self) -> None:
             super().__init__("fake-inline")
+            self.size = size
 
         def setup(self, world_size: int) -> None:
             pass
@@ -726,7 +727,7 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
         monkeypatch.delenv("KONFAI_INLINE_SINGLE_RANK", raising=False)
     else:
         monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", inline)
-    rt_dist.execute_distributed_object(FakeObject(), gpu=None, cpu=cpu)
+    rt_dist.execute_distributed_object(FakeObject(), gpu=gpu, cpu=cpu)
     return ran_here, spawned
 
 
@@ -737,6 +738,14 @@ def test_a_single_rank_runs_in_this_process(monkeypatch) -> None:
 
     assert ran_here == [0], "the single rank must run here, as rank 0"
     assert spawned == [], "no child may be spawned for one rank"
+
+
+def test_a_model_split_over_gpus_takes_one_rank_per_replica(monkeypatch) -> None:
+    """A model split over two GPUs holds both: four GPUs are two replicas, not four ranks whose blocks
+    run past the visible devices."""
+    assert _execute_counting(monkeypatch, cpu=1, inline="1", gpu=[0, 1, 2, 3], size=2)[1] == [2]
+    ran_here, spawned = _execute_counting(monkeypatch, cpu=1, inline="1", gpu=[0, 1], size=2)
+    assert ran_here == [0] and spawned == []
 
 
 def test_more_than_one_rank_still_spawns(monkeypatch) -> None:

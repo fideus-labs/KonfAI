@@ -398,7 +398,8 @@ def execute_distributed_object(
                             executor.submit(configured_object)
                         return
 
-                    world_size = len(gpu_ids)
+                    # One rank per model replica: a model split over `size` GPUs takes that many.
+                    world_size = max(1, len(gpu_ids) // configured_object.size) if gpu_ids else 0
                     if world_size == 0:
                         world_size = cpu_workers
                     if not quiet:

@@ -283,7 +283,7 @@ class Normalize(TransformInverse):
             # which later patches read again.
             if norm == 0:
                 warnings.warn(
-                    f"Norm is zero for case '{name}': input is constant with value = {self.min_value}.",
+                    f"Norm is zero for case '{name}': input is constant with value = {input_min}.",
                     KonfAIWarning,
                     stacklevel=2,
                 )
