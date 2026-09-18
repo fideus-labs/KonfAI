@@ -34,9 +34,9 @@ from konfai.data.augmentation.intensity import GaussianBlur as GaussianBlur
 from konfai.data.augmentation.intensity import GaussianNoise as GaussianNoise
 from konfai.data.augmentation.intensity import SimulateLowResolution as SimulateLowResolution
 from konfai.data.augmentation.placed import CutOUT as CutOUT
-from konfai.data.augmentation.placed import Mask as Mask
 from konfai.data.augmentation.placed import Noise as Noise
 from konfai.data.augmentation.placed import PlacedDraw as PlacedDraw
+from konfai.data.augmentation.placed import PlacedMask as PlacedMask
 from konfai.data.augmentation.spatial import Elastix as Elastix
 from konfai.data.augmentation.spatial import EulerTransform as EulerTransform
 from konfai.data.augmentation.spatial import Flip as Flip
@@ -58,10 +58,10 @@ __all__ = [
     "Flip",
     "Foreign",
     "LumaFlip",
-    "Mask",
     "Noise",
     "Permute",
     "PlacedDraw",
+    "PlacedMask",
     "Prob",
     "Rotate",
     "Saturation",

@@ -503,7 +503,7 @@ class TransformLoader:
     @staticmethod
     def _ambiguity_sentence(name: str, winner: str, loser: str, prefer_augmentation: bool) -> str | None:
         """One sentence naming what a bare name resolved to and the qualified spelling of the loser,
-        when both stage namespaces define it (Flip, Mask, Permute, Foreign)."""
+        when both stage namespaces define it (Flip, Permute, Foreign)."""
         if not hasattr(importlib.import_module(loser), name):
             return None
         if prefer_augmentation:

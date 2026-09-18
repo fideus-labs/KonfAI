@@ -165,7 +165,7 @@ class CutOUT(PlacedDraw):
         return torch.where(result.unsqueeze(0).to(tensor.device), tensor, torch.tensor(self.value).to(tensor.device))
 
 
-class Mask(DataAugmentation):
+class PlacedMask(DataAugmentation):
     def __init__(self, mask: str, value: float, groups: list[str] | None = None) -> None:
         _require_simpleitk()
         super().__init__(groups)
@@ -221,4 +221,4 @@ class Mask(DataAugmentation):
         )
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("Mask augmentation has no inverse; do not use it for invertible TTA.")
+        raise NotImplementedError("PlacedMask has no inverse; do not use it for invertible TTA.")

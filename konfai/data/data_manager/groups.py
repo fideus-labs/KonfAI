@@ -162,7 +162,7 @@ class GroupTransform:
                     classpath,
                     konfai_args=f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}.transforms",
                     # Past an Expand marker the chain is the copies' draws: a name both packages have
-                    # (Flip, Mask, Permute) is the draw there, the transform before it.
+                    # (Flip, Permute) is the draw there, the transform before it.
                     prefer_augmentation=any(isinstance(stage, Expand) for stage in self.transforms),
                 )
                 self.transforms.append(transform)

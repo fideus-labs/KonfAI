@@ -675,7 +675,7 @@ resample between two draws is seen by the second. That is the same contract a
 transform has: a draw is a stage, not a separate phase.
 
 ```{note}
-`Flip`, `Permute`, `Mask` and `Foreign` exist as a transform and as a draw. A
+`Flip`, `Permute` and `Foreign` exist as a transform and as a draw. A
 bare name resolves against `konfai.data.transform` first **before** the
 `Expand` marker and against `konfai.data.augmentation` first **after** it, so
 `Flip: {f_prob: [0.33, 0.33, 0.33]}` past the marker is the draw. To force the
@@ -785,7 +785,7 @@ draws are not equal:
 | `Translate` | a halo around the slab | own pass |
 | `Flip` (not a vector field), `Permute`, `Rotate` with `is_quarter: true` | a permutation of the volume | own pass |
 | `Rotate` (free angle), `Scale` | the source box each region maps to (a slab of a rotated volume pulls a wide band, which the plan prices) | own pass |
-| `Elastix`, `Mask`, `Foreign`, `Flip` of a vector field | the whole volume | WHOLE-VOLUME |
+| `Elastix`, `PlacedMask`, `Foreign`, `Flip` of a vector field | the whole volume | WHOLE-VOLUME |
 
 Eight copies of `Brightness` or `Noise` are one read; eight copies of a free
 `Rotate` are eight bounded passes, each re-reading the band its slabs pull.

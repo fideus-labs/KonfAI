@@ -1595,8 +1595,8 @@ def _write_mask_file(tmp_path: Path) -> tuple[Path, np.ndarray]:
 def test_a_mask_draw_after_the_marker_lands_every_copy_on_the_masks_grid(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``Mask`` the DRAW (a window of the case under a stored mask, drawn per copy) is reachable
-    from a chain by its augmentation classpath, since the bare name is the transform of that name.
+    """``PlacedMask`` (a window of the case under a stored mask, drawn per copy) is reachable from a
+    chain by its bare name past the marker.
 
     It declares WHOLE_VOLUME, so the plan sends every copy down the fallback and the run agrees;
     what lands is on the mask's grid, zero outside the mask, and a window of the clipped case
@@ -1609,7 +1609,7 @@ def test_a_mask_draw_after_the_marker_lands_every_copy_on_the_masks_grid(
         "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
         "              Expand:\n                nb: 2\n"
         '                pattern: "{name}_r{a:02d}"\n'
-        "              konfai.data.augmentation:Mask:\n"
+        "              PlacedMask:\n"
         f"                mask: {mask_path}\n"
         "                value: 0.0\n"
         "              Write:\n"
@@ -1619,7 +1619,7 @@ def test_a_mask_draw_after_the_marker_lands_every_copy_on_the_masks_grid(
     plan = workflow.compute_plan(1, overwrite=False)
     assert len(plan.entries) == 4
     assert {entry.verdict for entry in plan.entries} == {"WHOLE-VOLUME"}
-    assert all(entry.reason and "'Mask'" in entry.reason for entry in plan.entries)
+    assert all(entry.reason and "'PlacedMask'" in entry.reason for entry in plan.entries)
 
     workflow.setup(1)
     capsys.readouterr()
