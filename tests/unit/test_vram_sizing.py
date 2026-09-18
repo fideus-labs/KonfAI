@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 from konfai.predictor import Mean, Predictor, Reduction
 from konfai.utils.utils import concretize_patch_size
-from konfai.utils.vram import next_patch_candidate, usable_vram
+from konfai.utils.vram import VramAutoPatchMixin, next_patch_candidate, usable_vram
 
 
 def _linear_probe(bytes_per_voxel: float):
@@ -203,3 +203,17 @@ class TestPredictorShrinkBudget:
         predictor = _predictor(None, nb_augmentation=2, reduction=Mean())
         assert predictor._accumulation_reserve([100, 100, 100], [100, 100, 100]) is None
         assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]
+
+
+class TestPresizeFreeAxes:
+    def test_without_a_free_axis_the_cases_are_not_scanned(self):
+        # Nothing to size, and the scan would take the extents of every group, non-image ones included
+        # (fiducials, transforms), whose shapes have no spatial axes to compare.
+        class Dataset:
+            def worst_case_shape(self):
+                raise AssertionError("the worst case was scanned without a free axis")
+
+        sizer = VramAutoPatchMixin()
+        sizer.dataset = Dataset()
+        sizer._capture_vram_patch_template(None)
+        assert sizer._presize_free_axes() is False
