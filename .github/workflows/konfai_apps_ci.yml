@@ -35,7 +35,10 @@ jobs:
       HF_HUB_DOWNLOAD_TIMEOUT: "300"
       HF_HUB_ETAG_TIMEOUT: "60"
 
-      HF_HUB_ENABLE_HF_TRANSFER: "1"
+      HF_XET_HIGH_PERFORMANCE: "1"
+
+      # A native crash (the macOS fine-tune SIGSEGV) prints every thread's Python stack.
+      PYTHONFAULTHANDLER: "1"
 
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HUGGINGFACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -85,6 +88,15 @@ jobs:
       - name: Run apps tests
         run: |
           python -m pytest -q konfai-apps/tests
+
+      - name: Upload macOS crash reports
+        # The native backtrace of a crashed Python lives only in the runner's DiagnosticReports.
+        if: failure() && runner.os == 'macOS'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: crash-reports-${{ matrix.os }}-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ~/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore
 
       - name: Install app bundles
         # Editable, so each bundle's scm-derived `konfai==`/`konfai-apps==` pin resolves against
