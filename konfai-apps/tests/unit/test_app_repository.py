@@ -1273,3 +1273,30 @@ def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspa
         env={"PATH": "/usr/bin:/bin"},
     )
     assert completed.stdout.strip() == "6"
+
+
+def test_disabling_uncertainty_drops_the_replaced_reduction_block(tmp_path: Path) -> None:
+    """Uncertainty off swaps the output reduction to Mean: the old operator's argument block goes with
+    it, else the run warns of a key nothing reads (`OutputDataset.Concat`)."""
+    from ruamel.yaml import YAML
+
+    prediction = tmp_path / "Prediction.yml"
+    prediction.write_text(
+        "Predictor:\n"
+        "  combine: Concat\n"
+        "  outputs_dataset:\n"
+        "    Tanh:\n"
+        "      OutputDataset:\n"
+        "        reduction: Concat\n"
+        "        Concat: {}\n"
+        "        after_reduction_transforms:\n"
+        "          InferenceStack:\n"
+        "            mode: mean\n"
+    )
+    app_repository_module.LocalAppRepository._disable_uncertainty(None, str(prediction))  # type: ignore[arg-type]
+
+    with open(prediction) as file:
+        output = YAML().load(file)["Predictor"]["outputs_dataset"]["Tanh"]["OutputDataset"]
+    assert output["reduction"] == "Mean"
+    assert "Concat" not in output
+    assert "InferenceStack" not in output["after_reduction_transforms"]
