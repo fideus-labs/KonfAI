@@ -6,6 +6,7 @@ import { lazyWithRetry } from "./lazy";
 // The viewer (NiiVue) loads when first shown, not with the shell.
 const Viewer = lazyWithRetry(() => import("./Viewer"));
 import type { JobStream, LiveStatus, Point, RunFeed, Series } from "./useJobStream";
+import type { PaneId } from "./Viewer";
 import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
 import { isRunning, jobState } from "./status";
@@ -553,7 +554,8 @@ function ExperimentView({
   const [treeKey, setTreeKey] = useState(0);
   const [showVolume, setShowVolume] = useState(false);
   const [viewerMounted, setViewerMounted] = useState(false);
-  const [compareMode, setCompareMode] = useState(false); // when on, a tree volume fills the second pane
+  const [compareMode, setCompareMode] = useState(false); // when on, the viewer shows two panes
+  const [compareTarget, setCompareTarget] = useState<PaneId>("b"); // the pane a tree volume fills
   const viewerRequested = showVolume && visible !== false;
   useEffect(() => {
     if (viewerRequested) setViewerMounted(true);
@@ -564,6 +566,7 @@ function ExperimentView({
   useEffect(() => {
     if (comparePath) {
       setCompareMode(true);
+      setCompareTarget("b");
       setShowVolume(true);
     }
   }, [comparePath]);
@@ -692,8 +695,8 @@ function ExperimentView({
       setSel(rel);
       setDoc(null);
       setShowVolume(true); // re-selecting the same volume must still show it (prop wouldn't change)
-      // Compare toggle on → the click fills the second pane; otherwise it opens the primary.
-      if (compareMode) onComparePathChange?.(abs);
+      // Comparing, the click fills the target pane (the one last clicked); otherwise it opens the primary.
+      if (compareMode && compareTarget === "b") onComparePathChange?.(abs);
       else onVolumePathChange(abs);
       return;
     }
@@ -782,8 +785,11 @@ function ExperimentView({
                   compareMode={compareMode}
                   onCompareModeChange={(on) => {
                     setCompareMode(on);
+                    setCompareTarget("b"); // a fresh compare starts by filling its empty second pane
                     if (!on) onComparePathChange?.(""); // leaving compare drops the second volume
                   }}
+                  compareTarget={compareTarget}
+                  onCompareTargetChange={setCompareTarget}
                 />
               </Suspense>
             </div>
