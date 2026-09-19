@@ -17,6 +17,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from konfai.network.network import Network
 from konfai.trainer import _ddp_kwargs
+from konfai.utils.runtime.distributed import pin_gloo_to_loopback
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 pytestmark = [
@@ -55,9 +56,12 @@ def _run_rank(rank: int, root: str, cadences: tuple[int, ...]) -> None:
     torch.set_num_threads(1)
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     path = Path(root)
-    dist.init_process_group(
-        "gloo", init_method=(path / "rendezvous").as_uri(), rank=rank, world_size=2, timeout=timedelta(seconds=30)
-    )
+    # Both ranks sit on this host: gloo binds loopback instead of resolving the runner's hostname,
+    # which the macOS runners serve slowly or not at all.
+    with pin_gloo_to_loopback(local=True):
+        dist.init_process_group(
+            "gloo", init_method=(path / "rendezvous").as_uri(), rank=rank, world_size=2, timeout=timedelta(seconds=30)
+        )
     try:
         model = _Graph(cadences)
         ddp = DDP(model, **_ddp_kwargs(model, local_rank=rank, size=1))
