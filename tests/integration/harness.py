@@ -166,7 +166,10 @@ def run_workflow(
         print(f"HANGDUMP tree\n{tree.stdout}", flush=True)
         for pid in pids:
             dump = subprocess.run(["sudo", "py-spy", "dump", "--pid", pid], capture_output=True, text=True)
-            native = subprocess.run(["sudo", "sample", pid, "2", "-mayDie"], capture_output=True, text=True)
+            report = out / f"sample_{proc.pid}_{pid}.txt"
+            native = subprocess.run(
+                ["sudo", "sample", pid, "2", "-mayDie", "-file", str(report)], capture_output=True, text=True
+            )
             text = f"{tree.stdout}\n== py-spy {pid}\n{dump.stdout}{dump.stderr}\n== sample {pid}\n{native.stdout}{native.stderr}"
             print(f"HANGDUMP pid={pid}\n{dump.stdout}", flush=True)
             (out / f"hang_{proc.pid}_{pid}.txt").write_text(text)

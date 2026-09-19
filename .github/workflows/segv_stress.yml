@@ -53,5 +53,6 @@ jobs:
           path: |
             resume_*.txt
             hang_*.txt
+            sample_*.txt
             ~/Library/Logs/DiagnosticReports/*.ips
           if-no-files-found: ignore
