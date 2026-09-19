@@ -159,10 +159,17 @@ def run_workflow(
     except subprocess.TimeoutExpired:
         children = subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True, text=True).stdout.split()
         pids = [str(proc.pid), *children]
+        out = Path(_os.environ.get("GITHUB_WORKSPACE", "."))
+        tree = subprocess.run(
+            ["ps", "-o", "pid,ppid,stat,etime,command", "-p", ",".join(pids)], capture_output=True, text=True
+        )
+        print(f"HANGDUMP tree\n{tree.stdout}", flush=True)
         for pid in pids:
-            dump = subprocess.run(["sudo", "py-spy", "dump", "--native", "--pid", pid], capture_output=True, text=True)
-            print(f"HANGDUMP pid={pid}\n{dump.stdout}\n{dump.stderr}", flush=True)
-            Path(_os.environ.get("GITHUB_WORKSPACE", "."), f"hang_{pid}.txt").write_text(dump.stdout + dump.stderr)
+            dump = subprocess.run(["sudo", "py-spy", "dump", "--pid", pid], capture_output=True, text=True)
+            native = subprocess.run(["sudo", "sample", pid, "2", "-mayDie"], capture_output=True, text=True)
+            text = f"{tree.stdout}\n== py-spy {pid}\n{dump.stdout}{dump.stderr}\n== sample {pid}\n{native.stdout}{native.stderr}"
+            print(f"HANGDUMP pid={pid}\n{dump.stdout}", flush=True)
+            (out / f"hang_{proc.pid}_{pid}.txt").write_text(text)
         proc.kill()
         raise
     if check and proc.returncode:
