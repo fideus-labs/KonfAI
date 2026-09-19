@@ -17,6 +17,7 @@
 
 """Logs and TensorBoard: the console capture, the run log, the data-log strategies."""
 
+import logging
 import os
 import re
 import shutil
@@ -24,6 +25,8 @@ import socket
 import subprocess  # nosec B404
 import sys
 import time
+import warnings
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import TextIO, cast
@@ -35,13 +38,14 @@ try:
 except ImportError:
     SummaryWriter = None  # type: ignore[assignment,misc]
 from konfai import (
+    __version__,
     evaluations_directory,
     konfai_state,
     predictions_directory,
     statistics_directory,
     transforms_directory,
 )
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 
 
 class NullSummaryWriter:
@@ -142,6 +146,34 @@ def _bar_key(line: str) -> str:
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
+_KONFAI_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def _show_warning(message, category, filename, lineno, file=None, line=None) -> None:
+    """KonfAI's own warnings read as its other messages; a third party's keep Python's format. The
+    category decides, not the frame, which a ``stacklevel`` may place in the caller's code."""
+    if issubclass(category, KonfAIWarning) or str(filename).startswith(_KONFAI_ROOT):
+        text = f"[KonfAI] WARNING: {message}\n"
+    else:
+        text = warnings.formatwarning(message, category, filename, lineno, line)
+    try:
+        (file or sys.stderr).write(text)
+    except (OSError, ValueError):
+        pass
+
+
+class _ConsoleHandler(logging.Handler):
+    """The ``konfai`` logger's records, spelled as the console's other messages, to the current stderr."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            sys.stderr.write(f"[KonfAI] {record.levelname}: {record.getMessage()}\n")
+        except (OSError, ValueError):
+            pass
+
+
+_CONSOLE_HANDLER = _ConsoleHandler(logging.WARNING)
+
 
 class MinimalLog:
     """Capture stdout/stderr while keeping a one-line rolling status buffer."""
@@ -160,17 +192,27 @@ class MinimalLog:
         except (AttributeError, ValueError, OSError):
             self._mirror_is_tty = False
         self._mirror_last_redraw = 0.0
+        self._mirror_at_line_start = True
         # Folded frames withheld by the throttle, one slot per bar (interleaved bars keep their own).
         self._mirror_pending: dict[str, str] = {}
 
     def __enter__(self):
         sys.stdout = cast(TextIO, self)
         sys.stderr = cast(TextIO, self)
+        self._show_warning_bak = warnings.showwarning
+        warnings.showwarning = _show_warning
+        logger = logging.getLogger("konfai")
+        self._owns_handler = _CONSOLE_HANDLER not in logger.handlers
+        if self._owns_handler:
+            logger.addHandler(_CONSOLE_HANDLER)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         # The throttled frames are emitted here, so the sink ends on the bar's final state.
         self._mirror_emit_pending()
+        if self._owns_handler:
+            logging.getLogger("konfai").removeHandler(_CONSOLE_HANDLER)
+        warnings.showwarning = self._show_warning_bak
         sys.stdout = self._stdout_bak
         sys.stderr = self._stderr_bak
 
@@ -192,6 +234,8 @@ class MinimalLog:
         # Off a terminal the mirror sends the folded line instead of every frame, throttled; a skipped
         # frame is kept pending so a bar's final state lands before whatever message follows it.
         if not self._mirror_is_tty:
+            if redraw and not self._buffered_line:
+                return  # a bar clearing itself: nothing to show
             if redraw:
                 now = time.monotonic()
                 if now - self._mirror_last_redraw < self._MIRROR_REDRAW_EVERY:
@@ -200,8 +244,12 @@ class MinimalLog:
                 self._mirror_last_redraw = now
                 held = self._mirror_take_pending(exclude=_bar_key(self._buffered_line))
                 msg = f"{held}{self._buffered_line}\n"
+            elif not msg.strip() and self._mirror_at_line_start:
+                # A bar's cursor positioning (a bare newline) would leave a blank line in a log.
+                return
             else:
                 msg = f"{self._mirror_take_pending()}{msg}"
+            self._mirror_at_line_start = msg.endswith("\n")
         # Best-effort: a broken pipe (the mirror's reader is gone) never stops the job.
         try:
             self._stdout_bak.write(msg)
@@ -241,6 +289,8 @@ class MinimalLog:
 class Log(MinimalLog):
     """Mirror console output to a rank-specific log file."""
 
+    file: TextIO
+
     def __init__(self, name: str, rank: int) -> None:
         super().__init__(rank)
         if konfai_state() == "PREDICTION":
@@ -259,16 +309,30 @@ class Log(MinimalLog):
                 "Use a plain run name, without an absolute path or '..' segments.",
             )
         self.log_path.mkdir(parents=True, exist_ok=True)
+        file_path = self.log_path / f"log_{rank}.txt"
+        # A rank run inline under the launcher's Log on the same file: the outer one already writes it.
+        self.outer = sys.stdout if isinstance(sys.stdout, Log) and Path(sys.stdout.file.name) == file_path else None
+        if self.outer is not None:
+            return
         # Append, never truncate: this file is opened before the overwrite prompt runs.
-        self.file = open(self.log_path / f"log_{rank}.txt", "a", buffering=1)
+        self.file = open(file_path, "a", buffering=1)
         self._last_logged: str | None = None
+        # Re-runs append to one file: each opens with a line saying which run follows.
+        self.file.write(
+            f"[KonfAI] ==== {konfai_state()} '{name}' rank {rank} | {datetime.now():%Y-%m-%d %H:%M:%S}"
+            f" | konfai {__version__} ====\n"
+        )
 
     def __enter__(self):
+        if self.outer is not None:
+            return self.outer
         super().__enter__()
         self.file.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.outer is not None:
+            return
         super().__exit__(exc_type, exc_val, exc_tb)
         self.file.__exit__(exc_type, exc_val, exc_tb)
 

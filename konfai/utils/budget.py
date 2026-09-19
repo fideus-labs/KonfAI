@@ -32,7 +32,7 @@ from pathlib import Path
 
 import psutil
 
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 
 # Fraction of the detected node memory an ``"auto"`` budget offers the cache; the rest is reserved for
 # the model's optimizer/gradient state, DataLoader worker copies, pinned staging buffers and allocator slack.
@@ -473,7 +473,7 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
             f" ({MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB): the process floor alone is several times"
             " this figure, and what the sizing model cannot see may exceed it. Declare at least"
             " 512 MiB, or 'auto' to size from the detected memory.",
-            UserWarning,
+            KonfAIWarning,
             stacklevel=2,
         )
     return MemoryBudget(float(declared), f"{memory_budget!r}", shared_across_ranks=False)

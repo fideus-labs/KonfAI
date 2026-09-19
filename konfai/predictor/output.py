@@ -58,7 +58,7 @@ from konfai.utils.budget import node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
-from konfai.utils.errors import PredictorError
+from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
 )
@@ -632,6 +632,7 @@ class OutputDataset(Dataset, NeedDevice):
         except ValueError:
             warnings.warn(
                 f"KONFAI_STREAM_WORTH_THRESHOLD={raw!r} is not a number; using {_STREAM_WORTH_MIN_FRACTION}.",
+                KonfAIWarning,
                 stacklevel=2,
             )
             fraction = _STREAM_WORTH_MIN_FRACTION

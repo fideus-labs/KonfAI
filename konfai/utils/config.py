@@ -37,7 +37,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 
 import ruamel.yaml
 
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 
 yaml = ruamel.yaml.YAML()
 _log = logging.getLogger(__name__)
@@ -287,7 +287,7 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
 def _report(refuse: bool, *messages: str) -> None:
     if refuse:
         raise ConfigError(*messages)
-    warnings.warn(str(ConfigError(*messages)), UserWarning, stacklevel=4)
+    warnings.warn(str(ConfigError(*messages)), KonfAIWarning, stacklevel=4)
 
 
 class Config:
@@ -702,7 +702,7 @@ def _bind_path(config: Config, param: inspect.Parameter) -> Path | None:
     path = Path(str(raw))
     if not path.exists():
         _log.warning(
-            "[Config] Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
+            "Path '%s' for field '%s' does not exist (resolved: '%s'; %s).",
             raw,
             param.name,
             path.resolve(),

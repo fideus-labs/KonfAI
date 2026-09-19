@@ -32,7 +32,7 @@ import pytest
 from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -587,6 +587,25 @@ def test_a_crlf_line_is_a_message_not_a_bar_frame(monkeypatch):
     assert log._buffered_line == "important warning"
 
 
+def test_a_bars_cursor_moves_leave_no_blank_line_off_a_terminal(monkeypatch):
+    """Nested tqdm bars position themselves with bare newlines and clear themselves with an empty frame;
+    off a terminal both left blank lines, more of them than lines of content."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    log = rt_logg.MinimalLog(rank=0)
+
+    log.write("[KonfAI] start")
+    log.write("\n")
+    log.write("\n")  # a nested bar moving down to its position
+    log.write("\rProgress: 1/2")
+    log.write("\r          \r")  # the bar clearing itself on close
+    log.write("\n")
+    log.write("done\n")
+
+    assert log._stdout_bak.written == "[KonfAI] start\nProgress: 1/2\ndone\n"
+
+
 def test_the_bar_state_held_by_the_throttle_lands_on_exit(monkeypatch):
     """A run's last writes are often throttled frames; dropped at __exit__, the job sink would freeze on
     a stale frame and misreport where the run actually stopped."""
@@ -639,13 +658,56 @@ def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatc
     assert "goes nowhere" not in mirror.written
     assert "line one" not in mirror.written, "recorded detail must not reach the console"
     assert "printed" in mirror.written
-    assert (tmp_path / "RUN" / "log_0.txt").read_text() == "line one\nline two\nprinted\n"
+    header, *lines = (tmp_path / "RUN" / "log_0.txt").read_text().splitlines()
+    assert header.startswith("[KonfAI] ==== TRAIN 'RUN' rank 0 |")
+    assert lines == ["line one", "line two", "printed"]
+
+
+def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path, monkeypatch):
+    """A single rank runs inside the launcher's Log on the same file: each line lands there once, and
+    KonfAI's warnings and logger records carry the console's own prefix."""
+    import logging
+    import warnings
+
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setattr(sys, "stderr", sys.stdout)
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+
+    with warnings.catch_warnings(), rt_dist.Log("RUN", 0) as outer, rt_dist.Log("RUN", 0) as inner:
+        assert inner is outer
+        warnings.simplefilter("always")
+        print("hello")
+        rt_logg._show_warning("constant case", UserWarning, rt_logg.__file__, 1)
+        # A stacklevel names the caller's frame, outside KonfAI: the category still marks it as KonfAI's.
+        rt_logg._show_warning("from a caller", KonfAIWarning, "/elsewhere/script.py", 1)
+        logging.getLogger("konfai.test").warning("head resized")
+
+    header, *lines = (tmp_path / "RUN" / "log_0.txt").read_text().splitlines()
+    assert header.startswith("[KonfAI] ==== TRAIN 'RUN'")
+    assert lines == [
+        "hello",
+        "[KonfAI] WARNING: constant case",
+        "[KonfAI] WARNING: from a caller",
+        "[KonfAI] WARNING: head resized",
+    ]
+    assert rt_logg._CONSOLE_HANDLER not in logging.getLogger("konfai").handlers
 
 
 # ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
-def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
+def _execute_counting(
+    monkeypatch,
+    *,
+    cpu: int,
+    inline: str | None,
+    gpu: list[int] | None = None,
+    size: int = 1,
+    setups: list[int] | None = None,
+):
     """Run execute_distributed_object and report who executed: the rank ran here, or spawn was called.
 
     ``inline`` is the KONFAI_INLINE_SINGLE_RANK value, or None to leave it unset and exercise the default."""
@@ -655,9 +717,11 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
     class FakeObject(rt_dist.DistributedObject):
         def __init__(self) -> None:
             super().__init__("fake-inline")
+            self.size = size
 
         def setup(self, world_size: int) -> None:
-            pass
+            if setups is not None:
+                setups.append(world_size)
 
         def __call__(self, rank: int | None = None) -> None:
             ran_here.append(rank)
@@ -672,7 +736,7 @@ def _execute_counting(monkeypatch, *, cpu: int, inline: str | None):
         monkeypatch.delenv("KONFAI_INLINE_SINGLE_RANK", raising=False)
     else:
         monkeypatch.setenv("KONFAI_INLINE_SINGLE_RANK", inline)
-    rt_dist.execute_distributed_object(FakeObject(), gpu=None, cpu=cpu)
+    rt_dist.execute_distributed_object(FakeObject(), gpu=gpu, cpu=cpu)
     return ran_here, spawned
 
 
@@ -683,6 +747,15 @@ def test_a_single_rank_runs_in_this_process(monkeypatch) -> None:
 
     assert ran_here == [0], "the single rank must run here, as rank 0"
     assert spawned == [], "no child may be spawned for one rank"
+
+
+def test_a_model_split_over_gpus_is_set_up_with_every_gpu(monkeypatch) -> None:
+    """``setup`` takes the GPU count and divides it by ``size`` itself (one dataloader list per model
+    replica); a rank past the replicas finds no dataloader and returns. Dividing before ``setup`` too
+    left two GPUs x size 2 with no replica at all."""
+    seen: list[int] = []
+    _, spawned = _execute_counting(monkeypatch, cpu=1, inline="1", gpu=[0, 1, 2, 3], size=2, setups=seen)
+    assert seen == [4] and spawned == [4]
 
 
 def test_more_than_one_rank_still_spawns(monkeypatch) -> None:

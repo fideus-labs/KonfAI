@@ -26,6 +26,8 @@ import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
+from konfai.utils.errors import KonfAIWarning
+
 #: The suffix an entry is moved to while its replacement is published. Per pid, so two writers of
 #: one entry never share a backup.
 _REPLACED_MARKER = ".replaced-"
@@ -105,7 +107,7 @@ def _recover_orphaned_backup(final: Path) -> bool:
         f"'{final}' was missing and its previous version was recovered from '{backups[0]}': a writer "
         "was killed between moving the entry aside and publishing its replacement. The entry is the one "
         "that was there BEFORE that write; run the write again to replace it.",
-        UserWarning,
+        KonfAIWarning,
         stacklevel=2,
     )
     return True

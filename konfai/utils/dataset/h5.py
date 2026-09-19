@@ -43,7 +43,7 @@ from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import Attribute, _encode_transform_leaves, image_to_data
 from konfai.utils.dataset.staging import _REPLACED_MARKER, _orphaned_backup_names, _replaced_name, is_staging_entry
 from konfai.utils.dataset.stream import DataStream
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning
 
 
 def _open_h5(path: str, mode: str, **kwargs: Any) -> Any:
@@ -408,7 +408,7 @@ class H5File(AbstractFile):
             f"'{backups[0]}': a writer was killed between moving the entry aside and publishing its "
             "replacement. The entry is the one that was there BEFORE that write; run the write again "
             "to replace it.",
-            UserWarning,
+            KonfAIWarning,
             stacklevel=3,
         )
         if not self.read:

@@ -52,7 +52,7 @@ from konfai.utils.budget import (
 from konfai.utils.clock import startup_clock
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import DatasetManagerError, TransformerError
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
 from konfai.utils.utils import SUPPORTED_FORMATS, resolve_patch, split_path_spec
 
@@ -327,6 +327,7 @@ class DataSources(ABC):
                         warnings.warn(
                             f"Case '{name}' of group '{group_src}' is in '{first}' and in '{filename}':"
                             f" reading '{first}' (dataset_filenames order).",
+                            KonfAIWarning,
                             stacklevel=2,
                         )
         return source_filename_by_group
@@ -495,6 +496,7 @@ class Data(DataSources):
                         "persistent_workers=True is dropped: inline augmentations redraw once per epoch and a"
                         " persistent worker holds a fork-time copy that never sees the redraw. Set"
                         " inline_augmentations=False to keep the workers alive across epochs.",
+                        KonfAIWarning,
                         stacklevel=2,
                     )
                 persistent_workers = False

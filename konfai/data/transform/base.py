@@ -33,7 +33,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import TransformError
+from konfai.utils.errors import KonfAIWarning, TransformError
 from konfai.utils.runtime import NeedDevice
 from konfai.utils.utils import get_module
 
@@ -463,7 +463,7 @@ class TransformLoader:
         if ":" not in classpath and hasattr(module, name):
             ambiguity = self._ambiguity_sentence(name, first, second, prefer_augmentation)
             if ambiguity is not None:
-                warnings.warn(ambiguity, stacklevel=2)
+                warnings.warn(ambiguity, KonfAIWarning, stacklevel=2)
         if not hasattr(module, name) and ":" not in classpath:
             module, name = get_module(classpath, second)
             if not hasattr(module, name):
