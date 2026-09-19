@@ -204,7 +204,10 @@ class DistributedObject(ABC):
 
     def __call__(self, rank: int | None = None) -> None:
         world_size = self.world_size
-        global_rank, local_rank = setup_gpu(world_size, rank, process_group=self.uses_collectives)
+        # A single rank has nobody to talk to. Its gloo threads also outlived the run on macOS, where the
+        # process then died in SimpleITK's static destructors at exit (SIGSEGV after a finished run).
+        process_group = self.uses_collectives and world_size > 1
+        global_rank, local_rank = setup_gpu(world_size, rank, process_group=process_group)
         if global_rank is None or local_rank is None:
             return
         apply_cpu_thread_budget(world_size)
