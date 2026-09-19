@@ -160,7 +160,10 @@ class Std(Reduction):
             return
         delta = value - self._mean
         self._mean.add_(delta / self._count)
-        self._m2.addcmul_(delta, value - self._mean)
+        # A multiply then an add, each rounded. addcmul_ may fuse them on one path of its loop and not on
+        # another, and the path a voxel takes depends on the tensor's size: on ARM a region-wise fold
+        # drifted from the whole volume by one ULP.
+        self._m2.add_(delta.mul_(value - self._mean))
 
     def finalize(self) -> torch.Tensor:
         if self._mean is None or self._m2 is None:
