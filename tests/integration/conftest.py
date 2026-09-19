@@ -27,13 +27,14 @@ if _INTEGRATION_DIR not in sys.path:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Every test here runs KonfAI as a spawned process, and on the macOS runners that process dies
-    with SIGSEGV often enough that no run of the suite completes: four different tests over six
-    runs, on four Python versions, where the same code passed the same tests on other runs. The
-    workflows they cover are not platform-specific and run in full on ubuntu and windows.
+    """Skipped on the macOS runners. The SIGSEGV this skip was added for is fixed (a single rank no
+    longer holds a gloo group at exit), but the suite still fails there on two counts of its own: the
+    multi-process gloo test of ``test_ddp_accumulation`` exceeds its 60 s, and the exact streamed
+    ``Std`` of ``test_streamed_oracle_dtype_reduction`` drifts by one ULP once this suite shares its
+    worker. The workflows it covers are not platform-specific and run in full on ubuntu and windows.
     """
     if sys.platform != "darwin":
         return
-    skip = pytest.mark.skip(reason="a spawned KonfAI process dies with SIGSEGV on the macOS runners")
+    skip = pytest.mark.skip(reason="the integration suite still fails on the macOS runners (see conftest)")
     for item in items:
         item.add_marker(skip)

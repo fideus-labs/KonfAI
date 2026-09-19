@@ -287,6 +287,30 @@ def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monke
     assert rt_dist.DistributedObject.uses_collectives is True
 
 
+@pytest.mark.parametrize(("ranks", "expected"), [(1, False), (2, True)])
+def test_only_several_ranks_rendezvous(monkeypatch, ranks: int, expected: bool):
+    """A single rank has nobody to talk to: no process group, as on Windows. Its gloo threads also
+    outlived the run on macOS, where the process then crashed at exit in SimpleITK's destructors."""
+    asked: list[bool] = []
+
+    def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True):
+        asked.append(process_group)
+        return None, None  # the rank returns before any work
+
+    class Workflow(rt_dist.DistributedObject):
+        def setup(self, world_size: int) -> None:
+            pass
+
+        def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - never reached
+            pass
+
+    workflow = Workflow("rendezvous")
+    workflow.dataloader = [[] for _ in range(ranks)]
+    monkeypatch.setattr(rt_dist, "setup_gpu", setup_gpu)
+    workflow(0)
+    assert asked == [expected]
+
+
 def _gloo_rendezvous(monkeypatch) -> dict[str, object]:
     """Drive ``setup_gpu`` down its gloo branch and report what it passed to torch, plus the
     interface gloo would have read as it built its device (``interface``)."""
