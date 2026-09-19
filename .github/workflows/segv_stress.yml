@@ -1,0 +1,57 @@
+name: segv_stress
+
+# Temporary: catch where RESUME hangs on the macOS runners. Not for main.
+on:
+  push:
+    branches: [ci/segv-stress]
+
+permissions:
+  contents: read
+
+jobs:
+  hang:
+    runs-on: macos-latest
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      OMP_NUM_THREADS: "1"
+      PYTHONFAULTHANDLER: "1"
+      KONFAI_STRESS_HANG_SECONDS: "180"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]" py-spy
+      - name: Loop RESUME
+        shell: bash
+        run: |
+          set +e
+          i=0
+          while [ $SECONDS -lt 3600 ]; do
+            i=$((i + 1))
+            python -m pytest -p no:cacheprovider -rA -s tests/integration/test_konfai_resume.py > "resume_$i.txt" 2>&1
+            code=$?
+            echo "iteration $i: exit=$code hangs=$(grep -c HANGDUMP resume_$i.txt) $(grep -cE '^PASSED' resume_$i.txt) passed $(grep -cE '^(FAILED|ERROR)' resume_$i.txt) failed"
+            [ $code -eq 0 ] && rm "resume_$i.txt"
+          done
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hang-${{ matrix.shard }}
+          path: |
+            resume_*.txt
+            hang_*.txt
+            ~/Library/Logs/DiagnosticReports/*.ips
+          if-no-files-found: ignore

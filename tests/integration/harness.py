@@ -148,7 +148,26 @@ def run_workflow(
     The children traverse ``run_distributed_app``/``mp.spawn``, where a deadlock would otherwise
     hold the CI job to the runner limit; the timeout turns it into a failure with a traceback.
     """
-    return subprocess.run(list(cmd), cwd=cwd, env=subprocess_env(), check=check, timeout=timeout, **kwargs)
+    import os as _os  # stress experiment only: dump the hung process tree before the timeout kills it
+
+    hang = float(_os.environ.get("KONFAI_STRESS_HANG_SECONDS", "0"))
+    if not hang:
+        return subprocess.run(list(cmd), cwd=cwd, env=subprocess_env(), check=check, timeout=timeout, **kwargs)
+    proc = subprocess.Popen(list(cmd), cwd=cwd, env=subprocess_env(), **kwargs)
+    try:
+        proc.wait(timeout=hang)
+    except subprocess.TimeoutExpired:
+        children = subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True, text=True).stdout.split()
+        pids = [str(proc.pid), *children]
+        for pid in pids:
+            dump = subprocess.run(["sudo", "py-spy", "dump", "--native", "--pid", pid], capture_output=True, text=True)
+            print(f"HANGDUMP pid={pid}\n{dump.stdout}\n{dump.stderr}", flush=True)
+            Path(_os.environ.get("GITHUB_WORKSPACE", "."), f"hang_{pid}.txt").write_text(dump.stdout + dump.stderr)
+        proc.kill()
+        raise
+    if check and proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args)
+    return subprocess.CompletedProcess(proc.args, proc.returncode)
 
 
 def konfai_cli_command() -> list[str]:
