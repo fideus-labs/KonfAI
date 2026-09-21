@@ -23,6 +23,7 @@ from konfai.data.data_manager.groups import GroupOut as GroupOut
 from konfai.data.data_manager.groups import GroupTransform as GroupTransform
 from konfai.data.data_manager.groups import GroupTransformMetric as GroupTransformMetric
 from konfai.data.data_manager.groups import GroupTransformOut as GroupTransformOut
+from konfai.data.data_manager.order import GrowingBatchSampler as GrowingBatchSampler
 from konfai.data.data_manager.order import PatchReadOrder as PatchReadOrder
 from konfai.data.data_manager.order import WindowedCaseSampler as WindowedCaseSampler
 from konfai.data.data_manager.samples import BatchDataItem as BatchDataItem
@@ -31,6 +32,8 @@ from konfai.data.data_manager.samples import DataItem as DataItem
 from konfai.data.data_manager.samples import DatasetIter as DatasetIter
 from konfai.data.data_manager.samples import Sample as Sample
 from konfai.data.data_manager.samples import collate_konfai as collate_konfai
+from konfai.data.data_manager.samples import concatenate_batches as concatenate_batches
+from konfai.data.data_manager.samples import slice_batch as slice_batch
 from konfai.data.data_manager.sources import Data as Data
 from konfai.data.data_manager.sources import DataMetric as DataMetric
 from konfai.data.data_manager.sources import DataPrediction as DataPrediction
@@ -57,10 +60,13 @@ __all__ = [
     "GroupTransform",
     "GroupTransformMetric",
     "GroupTransformOut",
+    "GrowingBatchSampler",
     "PatchReadOrder",
     "PredictionSubset",
     "Sample",
     "Subset",
     "WindowedCaseSampler",
     "collate_konfai",
+    "concatenate_batches",
+    "slice_batch",
 ]

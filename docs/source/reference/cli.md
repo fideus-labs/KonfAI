@@ -238,8 +238,8 @@ you adapt a published App without editing its bundled config:
 | Option | Meaning |
 | --- | --- |
 | `--set NAME=VALUE` | Override any config value (repeatable). A bare `NAME` tunes a model parameter (`--set iterations=300`); a dotted `NAME` is a full path from the config root (`--set Predictor.Dataset.batch_size=2`). The value is parsed as YAML (int / float / bool / list / string). |
-| `--patch-size` | Override the inference `Patch.patch_size` (one value = an isotropic cube; else per-axis). Overrides the App's auto `vram_plan` choice. |
-| `--batch-size` | Override the inference batch size. |
+| `--patch-size` | Override the inference `Patch.patch_size` (one value = an isotropic cube; else per-axis). |
+| `--batch-size` | Override the inference batch size. Without it the app's config decides: `batch_size: 0` measures the batch on the GPU. |
 
 These are the same knobs SlicerKonfAI drives through its ⚙ **Advanced** dialog.
 

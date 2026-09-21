@@ -17,7 +17,7 @@
 
 """The order patches are read in, and the sampler that walks it per rank."""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sized
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -95,6 +95,13 @@ class PatchReadOrder:
         self._epoch = torch.zeros(1, dtype=torch.int64).share_memory_()
         self._epoch_read = 0
         self._entries: dict[int, list[tuple[int, int]]] = {}
+        self._batches_vary = False
+
+    def batches_vary(self) -> None:
+        """The batches will not keep one size (a measured batch grows): a worker cannot tell which
+        positions it is handed, so it declares none and its store evicts by recency. A single process
+        reads every position whatever the batches, and still declares them."""
+        self._batches_vary = True
 
     def publish(self, order: torch.Tensor) -> None:
         """The order the epoch is about to be walked in, from the sampler that drew it."""
@@ -118,6 +125,9 @@ class PatchReadOrder:
         self._epoch_read = epoch
         order = self._order.tolist()
         worker = data.get_worker_info()
+        if worker is not None and self._batches_vary:
+            self._entries = {}
+            return
         stride = self._batch_size * (worker.num_workers if worker is not None else 1)
         entries: dict[int, list[tuple[int, int]]] = {}
         for start in range(order.index(index), len(order), stride):
@@ -234,3 +244,32 @@ class WindowedCaseSampler(Sampler[int]):
         # cases, so any length read from the per-rank cases (their partitions, or even whether the
         # window engages at all) would differ and hang DDP's collectives.
         return len(self.mapping)
+
+
+class GrowingBatchSampler(Sampler[list[int]]):
+    """Batches of ``sampler``'s order, ``batch_size`` read as each one starts.
+
+    A prediction measuring its batch (``batch_size: 0``) sets 1, then 2, then what the device holds:
+    from there the loader collates and pins every batch itself, as it does a configured one, and the
+    predictor merges only the smaller batches the loader had already prefetched.
+    """
+
+    def __init__(self, sampler: Sampler[int], batch_size: int) -> None:
+        self.sampler = sampler
+        self.batch_size = batch_size
+        read_order = getattr(sampler, "read_order", None)
+        if read_order is not None:
+            read_order.batches_vary()
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batch: list[int] = []
+        for index in self.sampler:
+            batch.append(index)
+            if len(batch) >= self.batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def __len__(self) -> int:
+        return -(-len(cast(Sized, self.sampler)) // max(1, self.batch_size))

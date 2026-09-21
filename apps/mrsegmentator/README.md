@@ -141,7 +141,7 @@ If you use **MRSegmentator-KonfAI** in your work, please cite the original MRSeg
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body MR (295 × 259 × 219, 2 mm), patch `[96, 128, 160]`, 5-fold ensemble, half precision (autocast). The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body MR (295 × 259 × 219, 2 mm), patch `[96, 128, 160]`, 5-fold ensemble, half precision (autocast). The app **measures its batch size on your GPU** (a forward of one patch, then of two, then the largest power of two that fits half of the free VRAM); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
 
 | Free VRAM | Batch (auto) | Peak VRAM | Time / case |
 |:--|:--|:--|:--|

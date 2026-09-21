@@ -17,6 +17,8 @@
 
 """The per-rank prediction loop: fetch, forward, blend, finalize."""
 
+import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -32,9 +34,14 @@ except ImportError:
 from konfai.data.data_manager import (
     BatchSample,
     DatasetIter,
+    GrowingBatchSampler,
+    concatenate_batches,
+    slice_batch,
 )
 from konfai.network.network import Model, NetState
 from konfai.predictor.output import PREDICTION_CLOCK, OutputDataset
+from konfai.utils import vram
+from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.clock import SweepClock
 from konfai.utils.runtime import (
     DataLog,
@@ -65,6 +72,25 @@ def _prediction_report(clock: SweepClock, min_seconds: float = 1.0) -> str | Non
     )
 
 
+def _copied(batch_sample: BatchSample) -> BatchSample:
+    return {group: replace(item, tensor=item.tensor.clone()) for group, item in batch_sample.items()}
+
+
+def _patches(batch_sample: BatchSample) -> int:
+    return next(iter(batch_sample.values())).tensor.shape[0]
+
+
+def _host_cap(batch_sample: BatchSample) -> int:
+    """The patches a quarter of the rank's host budget holds: the loader prefetches batches of them, and
+    a merged batch holds each patch twice, its copy and the merged tensor, beside the cases the loader
+    keeps."""
+    bytes_per_patch = sum(item.tensor[0].numel() * item.tensor.element_size() for item in batch_sample.values())
+    budget = per_rank_budget_bytes()
+    if budget is None or bytes_per_patch == 0:
+        return sys.maxsize
+    return max(1, int(budget // (4 * bytes_per_patch)))
+
+
 class _Predictor:
     """
     Run distributed patch-wise inference over a dataset with a composite model, as a context manager.
@@ -79,6 +105,10 @@ class _Predictor:
         outputs_dataset (dict[str, OutputDataset]): Dictionary of output datasets to store predictions.
         model_composite (Model): Model container that wraps the prediction model(s).
         dataloader_prediction (DataLoader): DataLoader that provides prediction batches.
+        measure_batch_on (int | None): The CUDA device whose memory sizes the batch (``batch_size: 0``):
+            the loader's batches grow with it, the smaller ones it prefetched merged. ``None`` runs the
+            loader's batches.
+        batch_cap (int | None): The largest batch a measured one may take, after one ran out of memory.
     """
 
     def __init__(
@@ -92,6 +122,8 @@ class _Predictor:
         outputs_dataset: dict[str, OutputDataset],
         model_composite: Model,
         dataloader_prediction: DataLoader,
+        measure_batch_on: int | None = None,
+        batch_cap: int | None = None,
     ) -> None:
         self.world_size = world_size
         self.global_rank = global_rank
@@ -103,6 +135,16 @@ class _Predictor:
         self.outputs_dataset = outputs_dataset
         self.autocast = autocast
         self.it = 0
+        # A cap under two leaves nothing to measure: the run stays at one patch.
+        self.measure_batch_on = measure_batch_on if batch_cap is None or batch_cap >= 2 else None
+        self.batch_cap = batch_cap
+        #: Patches per forward: 1 then 2 while ``measure_batch_on`` measures, then what they measured.
+        self.batch = 1
+        #: What the one-patch forward claimed and what its case kept allocated after it.
+        self._one_patch: tuple[int, int] | None = None
+        #: The batch sizes a forward ran at; the first of each (past the first) starts from an empty cache.
+        self._sizes_run: set[int] = set()
+        self._on_cuda = False
 
         self.dataset = cast(DatasetIter, self.dataloader_prediction.dataset)
         patch_size, overlap = self.dataset.get_patch_config()
@@ -169,60 +211,117 @@ class _Predictor:
                 print(clock)
 
     def _run_batches(self) -> None:
+        # The loader's batches hold ``self.batch`` patches once its sampler is told the size; the smaller
+        # ones it had already prefetched (single patches while the batch is measured) merge, and the merge
+        # is cut to that size: a forward runs at 1, 2 and the measured size only, so the kernels cuDNN
+        # picks for a size serve the whole run. A prefetched batch over the size in force is cut too: a
+        # measure of 1 after the forward of 2 leaves pairs in the loader.
+        pending: list[BatchSample] = []
+        held = 0
         with tqdm.tqdm(
-            iterable=enumerate(PREDICTION_CLOCK.waiting("fetch", self.dataloader_prediction)),
+            total=len(self.dataset),
             leave=True,
             desc=f"Prediction : {description(self.model_composite)}",
-            total=len(self.dataloader_prediction),
             ncols=0,
-        ) as batch_iter:
+        ) as progress:
             with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=self.autocast):
-                    for batch_index, batch_sample in batch_iter:
-                        with PREDICTION_CLOCK.phase("forward"):
-                            outputs = self.model_composite(
-                                batch_sample,
-                                list(self.outputs_dataset.keys()),
-                            )
-                        self._predict_log(batch_sample)
-                        for name, number_of_channels_per_model, output in outputs:
-                            output_dataset = self.outputs_dataset[name]
-                            group = getattr(output_dataset, "group_dest", next(iter(batch_sample)))
-                            for i, (index, patch_augmentation, patch_index) in enumerate(
-                                [
-                                    (int(index), int(patch_augmentation), int(patch_index))
-                                    for index, patch_augmentation, patch_index in zip(
-                                        batch_sample[group].x,
-                                        batch_sample[group].a,
-                                        batch_sample[group].p,
-                                        strict=False,
-                                    )
-                                ]
-                            ):
-                                output_dataset.add_layer(
-                                    index,
-                                    patch_augmentation,
-                                    patch_index,
-                                    output[i],
-                                    self.dataset,
-                                    batch_sample[group].attribute[i],
-                                    number_of_channels_per_model,
-                                )
-                                if output_dataset.is_done(index):
-                                    with PREDICTION_CLOCK.phase("finalize(case)"):
-                                        output_dataset.write_prediction(
-                                            index,
-                                            batch_sample[group].name[i],
-                                            output_dataset.get_output(
-                                                index, number_of_channels_per_model, self.dataset
-                                            ),
-                                        )
-
+                    for batch_index, batch_sample in enumerate(
+                        PREDICTION_CLOCK.waiting("fetch", self.dataloader_prediction)
+                    ):
+                        patches = _patches(batch_sample)
+                        if not pending and patches == self.batch:
+                            self._step(batch_sample)
+                        else:
+                            # A loader batch is a view of its cases: a merged one holds copies, so the
+                            # cases it spans are released as the loader moves on.
+                            pending.append(_copied(batch_sample))
+                            held += patches
+                            while held >= self.batch:
+                                # The step may grow the batch: the cut is charged the size it ran at.
+                                size = self.batch
+                                merged = concatenate_batches(pending)
+                                self._step(slice_batch(merged, 0, size))
+                                held -= size
+                                pending = [slice_batch(merged, size, size + held)] if held else []
+                        progress.update(patches)
                         if batch_index % _DESCRIPTION_EVERY == 0:
-                            batch_iter.set_description(
-                                f"Prediction : {description(self.model_composite)}", refresh=False
-                            )
-                        self.it += 1
+                            progress.set_description(f"Prediction : {description(self.model_composite)}", refresh=False)
+                    if pending:
+                        self._step(concatenate_batches(pending))
+
+    def _step(self, batch_sample: BatchSample) -> None:
+        """Forward one batch and hand each patch to its writers; while the batch is measured, size it."""
+        device = self.measure_batch_on
+        if device is not None:
+            before = torch.cuda.memory_allocated(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        patches = _patches(batch_sample)
+        if patches not in self._sizes_run:
+            # The first forward of a size picks its cuDNN kernels among those whose workspace it can
+            # allocate then: give it the whole device. Under the leftovers of the measurement it picked
+            # slow ones for the whole run (5.0 s a step instead of 2.6 on MRSegmentator).
+            self._sizes_run.add(patches)
+            if self._on_cuda:
+                torch.cuda.empty_cache()
+        with PREDICTION_CLOCK.phase("forward"):
+            outputs = self.model_composite(
+                batch_sample,
+                list(self.outputs_dataset.keys()),
+            )
+        self._on_cuda = any(output.is_cuda for _, _, output in outputs)
+        if device is not None:
+            spent = torch.cuda.max_memory_allocated(device) - before
+        self._predict_log(batch_sample)
+        for name, number_of_channels_per_model, output in outputs:
+            output_dataset = self.outputs_dataset[name]
+            group = getattr(output_dataset, "group_dest", next(iter(batch_sample)))
+            for i, (index, patch_augmentation, patch_index) in enumerate(
+                [
+                    (int(index), int(patch_augmentation), int(patch_index))
+                    for index, patch_augmentation, patch_index in zip(
+                        batch_sample[group].x,
+                        batch_sample[group].a,
+                        batch_sample[group].p,
+                        strict=False,
+                    )
+                ]
+            ):
+                output_dataset.add_layer(
+                    index,
+                    patch_augmentation,
+                    patch_index,
+                    output[i],
+                    self.dataset,
+                    batch_sample[group].attribute[i],
+                    number_of_channels_per_model,
+                )
+                if output_dataset.is_done(index):
+                    with PREDICTION_CLOCK.phase("finalize(case)"):
+                        output_dataset.write_prediction(
+                            index,
+                            batch_sample[group].name[i],
+                            output_dataset.get_output(index, number_of_channels_per_model, self.dataset),
+                        )
+        self.it += 1
+        if device is None or patches != self.batch:
+            return  # a tail smaller than the batch says nothing about the batch
+        if self._one_patch is None:
+            # The case's accumulation, allocated by this first patch, is what the next case holds too.
+            self._one_patch = (spent, max(torch.cuda.memory_allocated(device) - before, 0))
+            self._grow(2)
+            return
+        spent_one, kept = self._one_patch
+        batch = vram.measured_batch(spent_one, spent, vram.usable_after_oom(device) - kept)
+        self._grow(vram.power_of_two_floor(min(batch, self.batch_cap or batch, _host_cap(batch_sample))))
+        self.measure_batch_on = None
+        if self.global_rank == 0:
+            print(f"[KonfAI] VRAM: measured batch {self.batch} patches.", flush=True)
+
+    def _grow(self, batch: int) -> None:
+        """From now on the loader's batches hold ``batch`` patches, and the loop merges up to it."""
+        self.batch = batch
+        cast(GrowingBatchSampler, self.dataloader_prediction.batch_sampler).batch_size = batch
 
     def _predict_log(
         self,

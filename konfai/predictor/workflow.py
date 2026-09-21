@@ -348,20 +348,25 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         # size valid too.
         if self._vram_patch_candidate is None and self._presize_free_axes():
             dataloader = self._rank_dataloader(world_size, global_rank)
+        measure_batch_on = device if self.dataset.measures_batch else None
+        batch_cap: int | None = None
         while True:
+            predictor = _Predictor(
+                world_size,
+                global_rank,
+                local_rank,
+                self.autocast,
+                self.predict_path,
+                self.data_log,
+                self.outputs_dataset,
+                model_composite,
+                dataloader,
+                measure_batch_on,
+                batch_cap,
+            )
             try:
-                with _Predictor(
-                    world_size,
-                    global_rank,
-                    local_rank,
-                    self.autocast,
-                    self.predict_path,
-                    self.data_log,
-                    self.outputs_dataset,
-                    model_composite,
-                    dataloader,
-                ) as p:
-                    p.run()
+                with predictor:
+                    predictor.run()
                 return
             except torch.cuda.OutOfMemoryError:
                 # The restart loop IS the sizing iteration: the run that just OOMed already measured the
@@ -370,6 +375,13 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 measured = vram.transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
+                if measure_batch_on is not None and predictor.batch > 1:
+                    # A measured batch over what the device holds halves before any patch shrinks.
+                    batch_cap = predictor.batch // 2
+                    vram.reset_peak(device)
+                    print(f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> batch {batch_cap}, restarting.")
+                    dataloader = self._rank_dataloader(world_size, global_rank)
+                    continue
                 if self._vram_patch_template is None:
                     raise  # no free axis declared: not auto-patched
                 candidate = self._shrunken_patch(measured, vram.usable_after_oom(device))

@@ -20,10 +20,13 @@ at construction, not surface minutes later as a cryptic subprocess or autograd f
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import SimpleITK as sitk
+import torch
 from impact_reg_konfai.models import elastix_engine as elastix_engine_module
 from impact_reg_konfai.models.elastix_engine import ElastixEngine
+from konfai.utils.dataset import Attribute
 
 
 def test_download_models_accepts_a_local_file_beside_hf_refs(tmp_path: Path, monkeypatch) -> None:
@@ -159,3 +162,66 @@ def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
 
     assert '(ImpactUseMixedPrecision "false")' in cpu and "(ImpactGPU -1)" in cpu
     assert '(ImpactUseMixedPrecision "true" "true")' in gpu and "(ImpactGPU 1)" in gpu
+
+
+def _registration_inputs(device: str = "cpu") -> tuple[torch.Tensor, list[list[Attribute]]]:
+    geometry = Attribute()
+    geometry["Origin"] = np.zeros(3)
+    geometry["Spacing"] = np.ones(3)
+    geometry["Direction"] = np.eye(3).flatten()
+    return torch.zeros(1, 1, 4, 4, 4, device=device), [[geometry] for _ in range(4)]
+
+
+@pytest.mark.parametrize(
+    ("on_cuda", "message", "translated"),
+    [
+        (True, "CUDA out of memory. Tried to allocate 224.00 MiB.", True),
+        (True, "elastix failed (code 1):\nDescription: ITK ERROR\nCUDA error: out of memory\n", True),
+        (False, "CUDA out of memory. Tried to allocate 224.00 MiB.", False),
+        (True, "elastix failed (code 1):\nno such parameter file", False),
+        (True, "std::bad_alloc: out of memory", False),
+    ],
+)
+def test_only_an_engine_s_cuda_out_of_memory_becomes_torch_s_class(
+    on_cuda: bool, message: str, translated: bool
+) -> None:
+    # An engine that allocates outside PyTorch (libtorch in itk-impact, the elastix subprocess) reports a
+    # plain RuntimeError, and konfai shrinks a free patch axis on torch.cuda.OutOfMemoryError only. A CPU
+    # run, a host allocation or any other failure keeps its class: none is a reason to cut a patch.
+    from impact_reg_konfai.models.engine_errors import out_of_memory_as_torch
+
+    with pytest.raises(RuntimeError) as raised, out_of_memory_as_torch(on_cuda):
+        raise RuntimeError(message)
+    assert isinstance(raised.value, torch.cuda.OutOfMemoryError) is translated
+
+
+_needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="the translation is for a CUDA run")
+
+
+@_needs_cuda
+def test_an_out_of_memory_inside_the_engine_reaches_konfai_as_torch_s_class() -> None:
+    pytest.importorskip("itk")
+    from impact_reg_konfai.models.convexadam import ConvexAdamRegistration
+
+    class Engine:
+        def register(self, fixed, moving, device):
+            raise RuntimeError("CUDA out of memory. Tried to allocate 224.00 MiB.")
+
+    image, attributes = _registration_inputs("cuda")
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="out of memory"):
+        ConvexAdamRegistration(Engine())(image, image, image, image, attributes)
+
+
+@_needs_cuda
+def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_class() -> None:
+    from impact_reg_konfai.models.elastix_engine import ElastixRegistration
+
+    class Engine:
+        def register(self, *pair):
+            raise RuntimeError(
+                "elastix failed (code 1):\nDescription: ITK ERROR\nCUDA out of memory. Tried to allocate 2.00 GiB.\n"
+            )
+
+    image, attributes = _registration_inputs("cuda")
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
+        ElastixRegistration.forward(SimpleNamespace(_engine=Engine()), image, image, image, image, attributes)

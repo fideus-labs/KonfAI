@@ -38,6 +38,7 @@ from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
 from .elastix import _is_local_ref, _model_key, _sorted_specs, generate_impact_parameter_map, load_models_registry
 from .elastix_install import get_elastix_bin, install_elastix_impact, loader_env, try_elastix
+from .engine_errors import out_of_memory_as_torch
 
 # Elastix + IMPACT binary is cached once here (heavy: binary + LibTorch) and reused across runs.
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
@@ -439,6 +440,7 @@ class ElastixRegistration(torch.nn.Module):
             moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
             fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
             moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-            dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
+            with out_of_memory_as_torch(device_index >= 0):
+                dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
             combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)

@@ -75,9 +75,10 @@ def main() -> None:
     with trainer as configured:
         configured.setup(1)
         configured(0)
-    # Attempt 1: the free axes at full extent; attempt 2: one fixed 0.8 shrink of the free Y/X axes
-    # (the pinned Z=1 never moves). Anything else means the restart loop did not do its job.
-    if ATTEMPTS != [[1, 0, 0], [1, 12, 12]]:
+    # Attempt 1: the free axes at full extent; attempt 2: one more patch along the first free axis, its
+    # 16 voxels cut into two equal parts (the pinned Z=1 never moves). Anything else means the restart
+    # loop did not do its job.
+    if ATTEMPTS != [[1, 0, 0], [1, 8, 16]]:
         raise RuntimeError(f"unexpected restart sequence: {ATTEMPTS}")
     checkpoints = sorted((root / "Checkpoints" / "__TRAIN_NAME__").glob("*.pt"))
     if not checkpoints:

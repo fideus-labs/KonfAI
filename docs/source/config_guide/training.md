@@ -290,10 +290,11 @@ the longest one. Ranks stay in step.
 ### Free patch axes: sizing by measurement
 
 `Patch.patch_size` accepts the same free-axis convention as prediction: `0`
-entries are sized by the framework, starting at the full extent and shrinking
-only on a CUDA out-of-memory: the failed step (forward, backward and optimizer)
-already measured its cost, so the shrink lands near the target and the run
-restarts on the re-planned grid. Training runs out of memory at the first step
+entries are sized by the framework, starting at the full extent and taking
+more patches only on a CUDA out-of-memory, the fewest that fit, each axis cut
+into equal parts: the failed step (forward, backward and optimizer) already
+measured its cost, so the split lands near the target and the run restarts on
+the re-planned grid. Training runs out of memory at the first step
 when it does at all (its memory is maximal from step one), so a restart loses no
 meaningful work. Under DDP the failing ranks agree on the per-axis minimum
 before restarting, so every rank trains the same grid; a single rank failing

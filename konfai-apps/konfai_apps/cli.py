@@ -181,8 +181,9 @@ def _add_mask(parser: argparse.ArgumentParser) -> None:
 def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
     """Add the optional patch/batch overrides (``--patch-size`` / ``--batch-size``).
 
-    When omitted the app follows its VRAM plan (or the config default); when given they force the
-    inference ``Patch.patch_size`` / ``batch_size``. A single ``--patch-size`` value is an isotropic cube.
+    When omitted the app keeps its config's patch and batch (``batch_size: 0`` there measures the batch on
+    the GPU); when given they force the inference ``Patch.patch_size`` / ``batch_size``. A single
+    ``--patch-size`` value is an isotropic cube.
     """
     parser.add_argument(
         "--patch-size",
@@ -191,7 +192,7 @@ def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
         type=int,
         nargs="+",
         default=None,
-        help="Override the inference patch size, e.g. '192' (cube) or '192 192 192'. Default: VRAM plan / config.",
+        help="Override the inference patch size, e.g. '192' (cube) or '192 192 192'. Default: the app's config.",
     )
     parser.add_argument(
         "--batch-size",
@@ -199,7 +200,7 @@ def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
         dest="batch_size",
         type=int,
         default=None,
-        help="Override the inference batch size. Default: VRAM plan / config.",
+        help="Override the inference batch size. Default: the app's config (`batch_size: 0` measures it on the GPU).",
     )
 
 

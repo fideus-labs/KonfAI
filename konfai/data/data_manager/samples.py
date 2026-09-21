@@ -137,6 +137,40 @@ def collate_konfai(batch: list[Sample]) -> BatchSample:
     return batch_sample
 
 
+def slice_batch(batch_sample: BatchSample, start: int, stop: int) -> BatchSample:
+    """The patches ``start`` to ``stop`` of a batch, in order, as a batch of their own."""
+    return {
+        group: BatchDataItem(
+            name=item.name[start:stop],
+            tensor=item.tensor[start:stop],
+            attribute=item.attribute[start:stop],
+            x=item.x[start:stop],
+            a=item.a[start:stop],
+            p=item.p[start:stop],
+            is_input=item.is_input,
+        )
+        for group, item in batch_sample.items()
+    }
+
+
+def concatenate_batches(batches: list[BatchSample]) -> BatchSample:
+    """One batch holding ``batches`` in order: the predictor's measured batch, merged from the loader's."""
+    if len(batches) == 1:
+        return batches[0]
+    return {
+        group: BatchDataItem(
+            name=[name for batch in batches for name in batch[group].name],
+            tensor=torch.cat([batch[group].tensor for batch in batches]),
+            attribute=[attribute for batch in batches for attribute in batch[group].attribute],
+            x=[x for batch in batches for x in batch[group].x],
+            a=[a for batch in batches for a in batch[group].a],
+            p=[p for batch in batches for p in batch[group].p],
+            is_input=batches[0][group].is_input,
+        )
+        for group in batches[0]
+    }
+
+
 class DatasetIter(data.Dataset):
     """Torch dataset view over KonfAI dataset managers and patch mappings."""
 

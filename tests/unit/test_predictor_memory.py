@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import numpy as np
@@ -475,6 +476,9 @@ def _loop_doubles(batches: int) -> tuple[_Predictor, Any, dict[str, Any], Any]:
         def load(self, label: str) -> None:
             self.labels.append(label)
 
+        def __len__(self) -> int:
+            return batches  # one patch per batch
+
     class DummyPredictionLoader:
         def __init__(self, batches: list[dict[str, BatchDataItem]], dataset: DummyPredictionDataset) -> None:
             self._batches = batches
@@ -567,6 +571,12 @@ def _loop_doubles(batches: int) -> tuple[_Predictor, Any, dict[str, Any], Any]:
     predictor_any.it = 0
     predictor_any.dataset = dataset
     predictor_any.tb = None
+    # What ``__init__`` sets for a run whose batch is the loader's (not measured).
+    predictor_any.batch = 1
+    predictor_any.measure_batch_on = None
+    predictor_any._one_patch = None
+    predictor_any._sizes_run = set()
+    predictor_any._on_cuda = False
     return predictor, dataset, outputs_dataset, model_composite
 
 
@@ -586,6 +596,83 @@ def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_out
     assert model_composite.eval_calls == 1
     assert outputs_dataset["out_a"].writes == 1
     assert outputs_dataset["out_b"].writes == 1
+
+
+@pytest.mark.parametrize(
+    ("sizes", "measured", "forwards_expected"),
+    [
+        # Single patches, then pairs, then batches of five: what a loader whose sampler was told 1, 2 and
+        # 5 in turn delivers, its prefetched batches first.
+        ([1] * 7 + [2] * 3 + [5] * 4 + [3], 5, [1, 2, 5, 5, 5, 5, 5, 5, 3]),
+        # The measure comes back as 1 after the forward of 2: the pairs already prefetched are cut to it.
+        ([1] * 3 + [2] * 3 + [1] * 4, 1, [1, 2] + [1] * 10),
+    ],
+)
+def test_a_measured_batch_merges_what_the_loader_prefetched_to_its_size_and_loses_no_patch(
+    monkeypatch: pytest.MonkeyPatch, sizes: list[int], measured: int, forwards_expected: list[int]
+) -> None:
+    """While the batch is measured the loader keeps handing over what it had prefetched at the old size:
+    the loop merges those batches, cut to the size in force, so a forward runs at 1, 2 and the measured
+    size only, and every patch reaches its writer exactly once. (Charging the cut the size the step had
+    just grown to lost ten patches of a case, whose stream then never closed.)"""
+    predictor, _dataset, outputs_dataset, _model_composite = _loop_doubles(batches=1)
+    patches = iter(range(sum(sizes)))
+    batches = []
+    for size in sizes:
+        indices = [next(patches) for _ in range(size)]
+        batches.append(
+            {
+                "input": BatchDataItem(
+                    name=["CASE_000"] * size,
+                    tensor=torch.ones(size, 1, 2, 2),
+                    attribute=[Attribute() for _ in indices],
+                    x=[0] * size,
+                    a=[0] * size,
+                    p=indices,
+                    is_input=True,
+                )
+            }
+        )
+    loader = predictor.dataloader_prediction
+    loader._batches = batches
+    loader.batch_sampler = SimpleNamespace(batch_size=1)
+
+    class Composite:
+        module = _model_composite.module
+
+        def eval(self) -> None:
+            pass
+
+        def __call__(self, batch_sample, output_layers):
+            size = len(batch_sample["input"].x)
+            return [("out_a", [1], torch.ones(size, 1, 2, 2)), ("out_b", [1], torch.ones(size, 1, 2, 2))]
+
+    predictor.model_composite = Composite()
+    monkeypatch.setattr(predictor, "_predict_log", lambda batch_sample: None)
+    monkeypatch.setattr("konfai.predictor.loop.description", lambda model: "stub")
+    seen: list[int] = []
+    forwards: list[int] = []
+    for output in outputs_dataset.values():
+        output.is_done = lambda index: False
+    outputs_dataset["out_a"].add_layer = lambda index, augmentation, patch, *rest: seen.append(patch)
+    outputs_dataset["out_b"].add_layer = lambda *args: None
+    step = predictor._step
+
+    def growing_step(batch_sample):
+        forwards.append(len(batch_sample["input"].x))
+        step(batch_sample)
+        if len(forwards) == 1:
+            predictor._grow(2)
+        elif len(forwards) == 2:
+            predictor._grow(measured)
+
+    monkeypatch.setattr(predictor, "_step", growing_step)
+
+    predictor.run()
+
+    assert forwards == forwards_expected, "1, 2, then the size measured; the tail is what is left"
+    assert seen == list(range(sum(sizes))), "every patch once, in order"
+    assert loader.batch_sampler.batch_size == measured
 
 
 def test_prediction_loop_refreshes_its_status_every_tenth_batch_and_clocks_its_phases(
