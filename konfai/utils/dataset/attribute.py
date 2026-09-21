@@ -300,7 +300,7 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     carries a unit. The store's own unit is kept under ``OMEUnits`` so that writing the geometry
     back out restores it. A store that declares no unit is taken at its numbers, as before.
     """
-    from konfai.utils.ome_zarr import DEFAULT_LENGTH_UNIT, millimetres_per_unit  # here: ome_zarr imports this
+    from konfai.utils.ome_zarr import NO_UNIT, millimetres_per_unit  # imported here: ome_zarr imports this
 
     attributes = Attribute(metadata.get("attributes", {}))
     axes = metadata["axes"]
@@ -330,8 +330,9 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     if units:
         # What the store called it, per spatial axis, so a store read and written back declares the
         # same unit it arrived with instead of KonfAI's millimetres.
-        # Space-joined, the form a sidecar stores: a list would come back as its own repr.
-        attributes["OMEUnits"] = " ".join(units.get(axis, DEFAULT_LENGTH_UNIT) for axis in spatial_axes)
+        # Space-joined, the form a sidecar stores: a list would come back as its own repr. An axis the
+        # store left silent is recorded as "-", so writing the geometry back leaves it silent too.
+        attributes["OMEUnits"] = " ".join(units.get(axis, NO_UNIT) for axis in spatial_axes)
     return attributes
 
 

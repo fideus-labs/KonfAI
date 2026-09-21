@@ -135,3 +135,33 @@ def test_known_units_convert(unit: str, millimetres: float) -> None:
 def test_an_unconvertible_unit_does_not_convert(unit: str | None) -> None:
     # Not a length, or not stated: the numbers stand as they are rather than being scaled by a guess.
     assert millimetres_per_unit(unit) is None
+
+
+def test_an_axis_the_source_left_silent_stays_silent(tmp_path: Path) -> None:
+    # NGFF states the unit per axis, and a store may state one only for some: filling the others in
+    # with millimetres would turn an absence into a claim, and the round trip would not be one.
+    source = tmp_path / "partial.ome.zarr"
+    image = nz.to_ngff_image(
+        np.zeros((4, 5, 6), np.uint16),
+        dims=["z", "y", "x"],
+        scale=MICRON_SPACING,
+        axes_units={"z": "micrometer"},
+    )
+    nz.to_ngff_zarr(str(source), nz.to_multiscales(image, scale_factors=[], cache=False), version="0.4")
+    clear_ome_zarr_cache(source)
+    attributes = ome_zarr_attributes(get_ome_zarr_info(source))
+    # Only z is converted; the silent axes keep their numbers.
+    assert np.allclose(attributes.get_np_array("Spacing"), [30.08, 30.08, 0.04])
+
+    destination = tmp_path / "partial-again.ome.zarr"
+    write_ome_zarr(
+        destination,
+        np.zeros((1, 4, 5, 6), np.uint16),
+        spacing=attributes.get_np_array("Spacing"),
+        origin=attributes.get_np_array("Origin"),
+        attributes=dict(attributes),
+    )
+
+    assert _axis_units(destination) == {"c": None, "z": "micrometer", "y": None, "x": None}
+    written = get_ome_zarr_info(destination)
+    assert np.allclose([written["geometry"][axis]["scale"] for axis in "zyx"], [40.0, 30.08, 30.08])

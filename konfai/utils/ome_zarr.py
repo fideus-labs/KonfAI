@@ -93,6 +93,9 @@ MILLIMETRES_PER_UNIT: dict[str, float] = {
 }
 #: What a store KonfAI writes declares when nothing says otherwise: the unit its numbers are in.
 DEFAULT_LENGTH_UNIT = "millimeter"
+#: An axis the source store left without a unit, in the sidecar's space-joined list. NGFF lets one
+#: axis state a unit and the next stay silent, and a round trip has to keep that difference.
+NO_UNIT = "-"
 
 
 def millimetres_per_unit(unit: str | None) -> float | None:
@@ -801,23 +804,25 @@ def read_ome_zarr_data_slice(
 
 
 def _declared_units(attributes: dict[str, Any] | None, spatial_axes: Sequence[str]) -> dict[str, str]:
-    """The unit to write per spatial axis: the one the source store declared, else millimetres.
+    """The unit to write per spatial axis, absent from the mapping where none is to be written.
 
-    KonfAI holds millimetres, so a store it writes says so rather than staying silent -- a store
-    without a unit is read by everyone under their own convention, which is how a volume in
-    micrometres ends up a thousand times too large in a viewer.
+    With nothing recorded from a source, KonfAI holds millimetres and the store says so rather than
+    staying silent -- a store without a unit is read by everyone under their own convention, which is
+    how a volume in micrometres ends up a thousand times too large in a viewer. With a source unit
+    recorded, that one is restored, axis by axis: an axis the source left silent stays silent, since
+    NGFF states the unit per axis and a round trip must not invent one.
     """
     from konfai.utils.dataset.attribute import Attribute  # imported here: attribute imports this module
 
     record = Attribute(attributes or {})
-    units = dict.fromkeys(spatial_axes, DEFAULT_LENGTH_UNIT)
     if "OMEUnits" not in record:
-        return units
+        return dict.fromkeys(spatial_axes, DEFAULT_LENGTH_UNIT)
+    units: dict[str, str] = {}
     # A sidecar is a stack of strings, so the value arrives space-joined whichever way it was set.
     declared = [unit.strip(" []'\",").lower() for unit in str(record["OMEUnits"]).split()]
     # Recorded in (x, y, z), the order `ome_zarr_attributes` wrote them in.
     for axis, unit in zip(("x", "y", "z"), declared, strict=False):
-        if axis in units and millimetres_per_unit(unit) is not None:
+        if axis in spatial_axes and millimetres_per_unit(unit) is not None:
             units[axis] = unit
     return units
 
@@ -1069,7 +1074,7 @@ def create_ome_zarr_store(
     # Out of KonfAI's millimetres and into the unit the store will declare, so the numbers and the
     # unit beside them describe the same grid.
     units = _declared_units(attributes, spatial_axes)
-    per_axis = [millimetres_per_unit(units[axis]) or 1.0 for axis in spatial_axes]
+    per_axis = [millimetres_per_unit(units.get(axis)) or 1.0 for axis in spatial_axes]
     scale: dict[Hashable, float] = {
         "c": 1.0,
         **{axis: value / factor for axis, value, factor in zip(spatial_axes, scale_values, per_axis, strict=True)},
