@@ -165,3 +165,32 @@ def test_an_axis_the_source_left_silent_stays_silent(tmp_path: Path) -> None:
     assert _axis_units(destination) == {"c": None, "z": "micrometer", "y": None, "x": None}
     written = get_ome_zarr_info(destination)
     assert np.allclose([written["geometry"][axis]["scale"] for axis in "zyx"], [40.0, 30.08, 30.08])
+
+
+def test_a_unit_that_cannot_be_converted_is_written_back_as_it_was(tmp_path: Path) -> None:
+    # Nothing was converted, so nothing about the geometry changed: dropping the unit, or replacing it
+    # with millimetres, would be this code restating a claim it never checked.
+    source = tmp_path / "pixels.ome.zarr"
+    image = nz.to_ngff_image(
+        np.zeros((4, 5, 6), np.uint16),
+        dims=["z", "y", "x"],
+        scale=MICRON_SPACING,
+        axes_units=dict.fromkeys("zyx", "pixel"),
+    )
+    nz.to_ngff_zarr(str(source), nz.to_multiscales(image, scale_factors=[], cache=False), version="0.4")
+    clear_ome_zarr_cache(source)
+    attributes = ome_zarr_attributes(get_ome_zarr_info(source))
+    assert np.allclose(attributes.get_np_array("Spacing"), [30.08, 30.08, 40.0])
+
+    destination = tmp_path / "pixels-again.ome.zarr"
+    write_ome_zarr(
+        destination,
+        np.zeros((1, 4, 5, 6), np.uint16),
+        spacing=attributes.get_np_array("Spacing"),
+        origin=attributes.get_np_array("Origin"),
+        attributes=dict(attributes),
+    )
+
+    assert _axis_units(destination) == {"c": None, "z": "pixel", "y": "pixel", "x": "pixel"}
+    written = get_ome_zarr_info(destination)
+    assert np.allclose([written["geometry"][axis]["scale"] for axis in "zyx"], [40.0, 30.08, 30.08])

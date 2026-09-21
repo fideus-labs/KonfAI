@@ -809,8 +809,10 @@ def _declared_units(attributes: dict[str, Any] | None, spatial_axes: Sequence[st
     With nothing recorded from a source, KonfAI holds millimetres and the store says so rather than
     staying silent -- a store without a unit is read by everyone under their own convention, which is
     how a volume in micrometres ends up a thousand times too large in a viewer. With a source unit
-    recorded, that one is restored, axis by axis: an axis the source left silent stays silent, since
-    NGFF states the unit per axis and a round trip must not invent one.
+    recorded, that one is restored verbatim, axis by axis: an axis the source left silent stays
+    silent, and one that declared a unit this cannot convert ("pixel", say) is written back as it
+    was, since its numbers were not converted either. NGFF states the unit per axis, and a round trip
+    must neither invent one nor drop one.
     """
     from konfai.utils.dataset.attribute import Attribute  # imported here: attribute imports this module
 
@@ -822,7 +824,7 @@ def _declared_units(attributes: dict[str, Any] | None, spatial_axes: Sequence[st
     declared = [unit.strip(" []'\",").lower() for unit in str(record["OMEUnits"]).split()]
     # Recorded in (x, y, z), the order `ome_zarr_attributes` wrote them in.
     for axis, unit in zip(("x", "y", "z"), declared, strict=False):
-        if axis in spatial_axes and millimetres_per_unit(unit) is not None:
+        if axis in spatial_axes and unit != NO_UNIT:
             units[axis] = unit
     return units
 
