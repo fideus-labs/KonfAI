@@ -168,6 +168,21 @@ def extract_archive(archive: Path, dst_dir: Path) -> None:
     archive.unlink()
 
 
+_NO_CUDA_ASSET = (
+    "The CUDA asset links the CUDA 12 runtime, which this environment's torch does not ship: it could not "
+    "load. For the GPU, point KONFAI_ELASTIX_DIR at an elastix-IMPACT built against this torch."
+)
+
+
+def torch_cuda_flavor() -> str | None:
+    """The CUDA asset the environment's torch can load, ``None`` for a CPU torch or one built for another
+    CUDA: no asset bundles LibTorch, so the binary finds the CUDA runtime where torch keeps its own."""
+    import torch
+
+    cuda = torch.version.cuda
+    return "cu128" if cuda is not None and cuda.split(".")[0] == "12" else None
+
+
 def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool):
     os_name = platform.system()
     arch = normalize_arch(platform.machine())
@@ -185,13 +200,13 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
             raise NameError(
                 "CUDA forced but NVIDIA driver/GPU not suitable. Detected: has_nvidia={has_nvidia}, driver={drv}"
             )
-
+        if torch_cuda_flavor() is None:
+            raise NameError(_NO_CUDA_ASSET)
         flavor = "cu128"
-    elif not force_cpu:
-        if has_nvidia and driver_ok_for_cuda(os_name, drv):
-            flavor = "cu128"
-        else:
-            flavor = "cpu"
+    elif not force_cpu and has_nvidia and driver_ok_for_cuda(os_name, drv):
+        flavor = torch_cuda_flavor() or "cpu"
+        if flavor == "cpu":
+            print(f"{_NO_CUDA_ASSET} Installing the CPU asset.", flush=True)
 
     print(f"System: {os_name} {arch}", flush=True)
     print(f"NVIDIA: {has_nvidia}, driver={drv}", flush=True)

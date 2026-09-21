@@ -69,6 +69,18 @@ def _displacement_on(fixed: sitk.Image, transform: sitk.Transform) -> np.ndarray
     return dvf_np
 
 
+def _cuda_hint(captured: list[str], root: Path) -> str:
+    """What to do about an install that cannot see the GPU it was asked to use. A CPU build answers ``-h``
+    and passes for a valid install, so the failure only comes once IMPACT asks for the device."""
+    if not any("CUDA is not available" in line for line in captured):
+        return ""
+    return (
+        f"\nThe elastix-IMPACT install at '{root}' cannot use CUDA with this environment's torch "
+        f"({torch.__version__}): it is a CPU build, or one made for another CUDA. Point KONFAI_ELASTIX_DIR at "
+        "an elastix-IMPACT built against this torch, or run on the CPU (--cpu)."
+    )
+
+
 class ElastixEngine:
     """Run the elastix-IMPACT binary on a fixed/moving pair; return the displacement field on the fixed grid.
 
@@ -345,6 +357,7 @@ class ElastixEngine:
             # progress line) shows real progress. A tuned max_iterations makes the declared budget stale ->
             # open-ended bar. The description mirrors KonfAI's bars: resolution level + the metric value.
             captured: list[str] = []
+            told: set[str] = set()
             iteration_line = re.compile(r"^\d+\s")
             budget = None if self._max_iterations > 0 else (self._iterations or None)
             progress = tqdm.tqdm(total=budget, desc="Registration", ncols=0, leave=True)
@@ -358,6 +371,11 @@ class ElastixEngine:
                         resolution = int(stripped.split(":", 1)[1])
                     except ValueError:
                         pass
+                elif stripped.startswith("IMPACT:") and stripped not in told:
+                    # IMPACT says when it ran out of device memory and went on with smaller patches: the run
+                    # is slower for it, and nothing else tells why.
+                    told.add(stripped)
+                    progress.write(stripped)
                 elif iteration_line.match(line):
                     progress.update(1)
                     columns = line.split()  # column 2 is the metric (header "1:ItNr 2:Metric ...")
@@ -371,7 +389,9 @@ class ElastixEngine:
             progress.close()
             returncode = proc.wait()
             if returncode != 0:
-                raise RuntimeError(f"elastix failed (code {returncode}):\n{''.join(captured[-40:])}")
+                raise RuntimeError(
+                    f"elastix failed (code {returncode}):\n{''.join(captured[-40:])}{_cuda_hint(captured, self._elastix_root)}"
+                )
 
             transforms = sorted(
                 work.glob("TransformParameters.*-Composite.itk.txt"),
