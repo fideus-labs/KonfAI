@@ -111,9 +111,13 @@ def millimetres_per_unit(unit: str | None) -> float | None:
 
 
 def _axis_units(image: Any) -> dict[str, str]:
-    """The store's declared unit per axis, lowercased; axes without one are left out."""
+    """The store's declared unit per axis, spelled as the store spells it; axes without one are out.
+
+    Only the axis name is normalised. The unit is carried through untouched so that a store read and
+    written again declares what it declared: the conversion lookup folds case on its own.
+    """
     declared = getattr(image, "axes_units", None) or {}
-    return {str(axis).lower(): str(unit).lower() for axis, unit in declared.items() if unit}
+    return {str(axis).lower(): str(unit) for axis, unit in declared.items() if unit}
 
 
 def _native_dtype(dtype: np.dtype) -> np.dtype:
@@ -821,7 +825,7 @@ def _declared_units(attributes: dict[str, Any] | None, spatial_axes: Sequence[st
         return dict.fromkeys(spatial_axes, DEFAULT_LENGTH_UNIT)
     units: dict[str, str] = {}
     # A sidecar is a stack of strings, so the value arrives space-joined whichever way it was set.
-    declared = [unit.strip(" []'\",").lower() for unit in str(record["OMEUnits"]).split()]
+    declared = [unit.strip(" []'\",") for unit in str(record["OMEUnits"]).split()]
     # Recorded in (x, y, z), the order `ome_zarr_attributes` wrote them in.
     for axis, unit in zip(("x", "y", "z"), declared, strict=False):
         if axis in spatial_axes and unit != NO_UNIT:

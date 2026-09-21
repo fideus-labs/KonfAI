@@ -175,7 +175,7 @@ def test_a_unit_that_cannot_be_converted_is_written_back_as_it_was(tmp_path: Pat
         np.zeros((4, 5, 6), np.uint16),
         dims=["z", "y", "x"],
         scale=MICRON_SPACING,
-        axes_units=dict.fromkeys("zyx", "pixel"),
+        axes_units=dict.fromkeys("zyx", "Pixel"),  # spelling included: a round trip restates it
     )
     nz.to_ngff_zarr(str(source), nz.to_multiscales(image, scale_factors=[], cache=False), version="0.4")
     clear_ome_zarr_cache(source)
@@ -191,6 +191,6 @@ def test_a_unit_that_cannot_be_converted_is_written_back_as_it_was(tmp_path: Pat
         attributes=dict(attributes),
     )
 
-    assert _axis_units(destination) == {"c": None, "z": "pixel", "y": "pixel", "x": "pixel"}
+    assert _axis_units(destination) == {"c": None, "z": "Pixel", "y": "Pixel", "x": "Pixel"}
     written = get_ome_zarr_info(destination)
     assert np.allclose([written["geometry"][axis]["scale"] for axis in "zyx"], [40.0, 30.08, 30.08])
