@@ -73,6 +73,52 @@ if TYPE_CHECKING:
 _KONFAI_ATTR_KEY = "konfai"
 _SPATIAL = ("z", "y", "x")
 
+#: Millimetres in one of each NGFF length unit. KonfAI's geometry is ITK's -- a Spacing and an Origin
+#: are plain numbers, and every consumer down the line (SimpleITK, the NIfTI writer, a registration's
+#: world frame) reads them as MILLIMETRES. A store states its unit instead, so the two only agree if
+#: the numbers are converted on the way in and back on the way out.
+MILLIMETRES_PER_UNIT: dict[str, float] = {
+    "angstrom": 1e-7,
+    "nanometer": 1e-6,
+    "micrometer": 1e-3,
+    "millimeter": 1.0,
+    "centimeter": 10.0,
+    "decimeter": 100.0,
+    "meter": 1e3,
+    "kilometer": 1e6,
+    "inch": 25.4,
+    "foot": 304.8,
+    "yard": 914.4,
+    "mile": 1609344.0,
+}
+#: What a store KonfAI writes declares when nothing says otherwise: the unit its numbers are in.
+DEFAULT_LENGTH_UNIT = "millimeter"
+#: An axis the source store left without a unit, in the sidecar's space-joined list. NGFF lets one
+#: axis state a unit and the next stay silent, and a round trip has to keep that difference.
+NO_UNIT = "-"
+
+
+def millimetres_per_unit(unit: str | None) -> float | None:
+    """Millimetres in one ``unit``; ``None`` for no unit, or one that is not a length.
+
+    ``None`` means "do not convert": a store that declares nothing (NGFF makes the unit optional) or
+    declares something outside the table is taken at its numbers, which is what KonfAI did before
+    units were read at all.
+    """
+    if unit is None:
+        return None
+    return MILLIMETRES_PER_UNIT.get(str(unit).strip().lower())
+
+
+def _axis_units(image: Any) -> dict[str, str]:
+    """The store's declared unit per axis, spelled as the store spells it; axes without one are out.
+
+    Only the axis name is normalised. The unit is carried through untouched so that a store read and
+    written again declares what it declared: the conversion lookup folds case on its own.
+    """
+    declared = getattr(image, "axes_units", None) or {}
+    return {str(axis).lower(): str(unit) for axis, unit in declared.items() if unit}
+
 
 def _native_dtype(dtype: np.dtype) -> np.dtype:
     """``dtype`` in the machine's own byte order."""
@@ -755,9 +801,36 @@ def read_ome_zarr_data_slice(
         "dtype": str(image.data.dtype),
         "scale": _ordered(dict(image.scale), dims),
         "translation": _ordered(dict(image.translation), dims),
+        "units": _axis_units(image),
         "attributes": _read_konfai_attributes(store_path),
     }
     return _native_byteorder(np.asarray(patch)), metadata
+
+
+def _declared_units(attributes: dict[str, Any] | None, spatial_axes: Sequence[str]) -> dict[str, str]:
+    """The unit to write per spatial axis, absent from the mapping where none is to be written.
+
+    With nothing recorded from a source, KonfAI holds millimetres and the store says so rather than
+    staying silent -- a store without a unit is read by everyone under their own convention, which is
+    how a volume in micrometres ends up a thousand times too large in a viewer. With a source unit
+    recorded, that one is restored verbatim, axis by axis: an axis the source left silent stays
+    silent, and one that declared a unit this cannot convert ("pixel", say) is written back as it
+    was, since its numbers were not converted either. NGFF states the unit per axis, and a round trip
+    must neither invent one nor drop one.
+    """
+    from konfai.utils.dataset.attribute import Attribute  # imported here: attribute imports this module
+
+    record = Attribute(attributes or {})
+    if "OMEUnits" not in record:
+        return dict.fromkeys(spatial_axes, DEFAULT_LENGTH_UNIT)
+    units: dict[str, str] = {}
+    # A sidecar is a stack of strings, so the value arrives space-joined whichever way it was set.
+    declared = [unit.strip(" []'\",") for unit in str(record["OMEUnits"]).split()]
+    # Recorded in (x, y, z), the order `ome_zarr_attributes` wrote them in.
+    for axis, unit in zip(("x", "y", "z"), declared, strict=False):
+        if axis in spatial_axes and unit != NO_UNIT:
+            units[axis] = unit
+    return units
 
 
 def _spatial_geometry(
@@ -767,7 +840,7 @@ def _spatial_geometry(
     origin: Sequence[float] | np.ndarray | None,
 ) -> tuple[list[SupportedDims], list[float], list[float]]:
     """The NGFF spatial axes of a channel-first array with ``ndim`` dims, and its per-axis
-    scale/translation in axis order: geometry arrives ``(x, y, z)`` (SimpleITK order)."""
+    scale/translation in axis order: geometry arrives ``(x, y, z)`` (SimpleITK order), in millimetres."""
     if ndim not in {3, 4}:
         raise DatasetManagerError(f"OME-Zarr writing expects a C-Y-X or C-Z-Y-X array, got {shape_label}.")
     spatial_axes: list[SupportedDims] = ["y", "x"] if ndim == 3 else ["z", "y", "x"]
@@ -1004,8 +1077,20 @@ def create_ome_zarr_store(
         len(shape), f"shape {list(shape)}", spacing, origin
     )
     dims: list[SupportedDims] = ["c", *spatial_axes]
-    scale: dict[Hashable, float] = {"c": 1.0, **dict(zip(spatial_axes, scale_values, strict=True))}
-    translation: dict[Hashable, float] = {"c": 0.0, **dict(zip(spatial_axes, translation_values, strict=True))}
+    # Out of KonfAI's millimetres and into the unit the store will declare, so the numbers and the
+    # unit beside them describe the same grid.
+    units = _declared_units(attributes, spatial_axes)
+    per_axis = [millimetres_per_unit(units.get(axis)) or 1.0 for axis in spatial_axes]
+    scale: dict[Hashable, float] = {
+        "c": 1.0,
+        **{axis: value / factor for axis, value, factor in zip(spatial_axes, scale_values, per_axis, strict=True)},
+    }
+    translation: dict[Hashable, float] = {
+        "c": 0.0,
+        **{
+            axis: value / factor for axis, value, factor in zip(spatial_axes, translation_values, per_axis, strict=True)
+        },
+    }
 
     if chunks is None:
         spatial_chunks = [min(extent, CHUNK_SPATIAL_TILE) for extent in shape[1:]]
@@ -1015,7 +1100,7 @@ def create_ome_zarr_store(
     chunks = tuple(chunks)
 
     data = dask.array.zeros(tuple(shape), dtype=np.dtype(dtype), chunks=chunks)
-    image = ngff_zarr.to_ngff_image(data, dims=dims, scale=scale, translation=translation)
+    image = ngff_zarr.to_ngff_image(data, dims=dims, scale=scale, translation=translation, axes_units=units)
     version = _DEFAULT_VERSION
     if displacement_field:
         # Typing the component axis (NGFF RFC-5, so version 0.6) declares the channels a field.
@@ -1145,6 +1230,9 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
         "dtype": str(image.data.dtype),
         "scale": scale,
         "translation": translation,
+        # Per axis, as the store declares it; absent where it declares none. The geometry above is
+        # in the STORE's unit, not in millimetres: `ome_zarr_attributes` is what converts.
+        "units": _axis_units(image),
         # Keyed by axis name, so no caller has to know which of the two orders it is holding.
         "geometry": {
             axis: {"scale": float(value), "translation": float(offset)}

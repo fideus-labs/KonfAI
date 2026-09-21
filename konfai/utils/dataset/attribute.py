@@ -294,14 +294,23 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     other key it recorded; Direction defaults to identity without it. The sidecar describes one
     level, the finest: its Spacing and Origin are trusted only where its Spacing is this level's
     scale, and any other level takes both from its own transforms.
+
+    Spacing and Origin come out in MILLIMETRES, whatever the store declares: they are handed to
+    SimpleITK, written into NIfTI headers and composed with other volumes' frames, none of which
+    carries a unit. The store's own unit is kept under ``OMEUnits`` so that writing the geometry
+    back out restores it. A store that declares no unit is taken at its numbers, as before.
     """
+    from konfai.utils.ome_zarr import NO_UNIT, millimetres_per_unit  # imported here: ome_zarr imports this
+
     attributes = Attribute(metadata.get("attributes", {}))
     axes = metadata["axes"]
     scale = dict(zip(axes, metadata.get("scale", []), strict=False))
     translation = dict(zip(axes, metadata.get("translation", []), strict=False))
     spatial_axes = [axis for axis in ("x", "y", "z") if axis in axes]
-    level_spacing = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes])
-    level_origin = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes])
+    units = {axis: unit for axis, unit in (metadata.get("units") or {}).items() if axis in spatial_axes}
+    factors = np.asarray([millimetres_per_unit(units.get(axis)) or 1.0 for axis in spatial_axes])
+    level_spacing = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes]) * factors
+    level_origin = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes]) * factors
     if "Spacing" in attributes:
         recorded = attributes.get_np_array("Spacing")
         if recorded.shape != level_spacing.shape or not np.allclose(recorded, level_spacing, rtol=1e-6, atol=0.0):
@@ -318,6 +327,12 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     if "Direction" not in attributes:
         attributes["Direction"] = np.eye(len(spatial_axes), dtype=np.float64).flatten()
     attributes["OMEAxes"] = np.asarray(axes)
+    if units:
+        # What the store called it, per spatial axis, so a store read and written back declares the
+        # same unit it arrived with instead of KonfAI's millimetres.
+        # Space-joined, the form a sidecar stores: a list would come back as its own repr. An axis the
+        # store left silent is recorded as "-", so writing the geometry back leaves it silent too.
+        attributes["OMEUnits"] = " ".join(units.get(axis, NO_UNIT) for axis in spatial_axes)
     return attributes
 
 
