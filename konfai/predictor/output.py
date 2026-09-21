@@ -252,6 +252,8 @@ class OutputDataset(Dataset, NeedDevice):
         self.after_reduction_transforms: list[Transform] = []
         self.final_transforms: list[Transform] = []
         self.patch_combine: PathCombine | None = None
+        #: The declared window, kept while a single patch needs none: a re-plan may tile the axes later.
+        self._window: PathCombine | None = None
 
         self.output_layer_accumulator: dict[int, dict[int, Accumulator]] = {}
         self.attributes: dict[int, dict[int, dict[int, Attribute]]] = {}
@@ -395,12 +397,14 @@ class OutputDataset(Dataset, NeedDevice):
     ) -> None:
         # A single patch covering the volume takes no combine. Anything else keeps EVERY axis, the
         # untiled ones as a single broadcast entry.
+        if self.patch_combine is not None:
+            self._window = self.patch_combine
+        self.patch_combine = None
         if patch_size and any(size > 1 for size in patch_size) and overlap is not None:
+            self.patch_combine = self._window
             if self.patch_combine is not None:
                 axes = blend_axes(patch_size)
                 self.patch_combine.set_patch_config(axes, blend_overlap(overlap, axes))
-        else:
-            self.patch_combine = None
         self.nb_data_augmentation = nb_data_augmentation
 
     def to(self, device: int):
