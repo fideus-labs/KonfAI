@@ -189,6 +189,21 @@ level `0` being full resolution and each higher level a downsampled copy. Each
 level carries its own physical `scale` (spacing) and `translation` (origin) in the
 `.zattrs` metadata, so geometry stays correct at every level.
 
+### Units
+
+OME-NGFF states a length unit per axis, and makes it optional. KonfAI reads it
+and converts `scale` and `translation` into the millimetres its `Attribute`
+carries: a store in micrometres — ExaSPIM's published volumes, for instance —
+would otherwise arrive a thousand times too large, silently, since nothing else
+in the chain carries a unit to contradict it. The store's own unit is kept in the
+sidecar (`OMEUnits`) and restored when KonfAI writes the geometry back out, so a
+store read and written again is unchanged on disk.
+
+A store that declares no unit is taken at its numbers, as before. A store KonfAI
+writes without one to restore declares `millimeter`, rather than leaving the
+reader to assume: the same numbers are read as millimetres by 3D Slicer and as
+metres by Neuroglancer.
+
 ### Regional reads through `Dataset`
 
 ```python
@@ -321,9 +336,14 @@ travel with the array so predictions can be written back into the same space.
 `Attribute` is a `dict[str, Any]` subclass that stores, among other metadata, the
 three values that define an image in physical space:
 
-- **`Origin`**: physical position of the first voxel
-- **`Spacing`**: voxel size along each axis, in `(x, y, z)` order
+- **`Origin`**: physical position of the first voxel, in millimetres
+- **`Spacing`**: voxel size along each axis, in `(x, y, z)` order, in millimetres
 - **`Direction`**: the flattened direction-cosine matrix
+
+The unit is millimetres because that is what every consumer reads these numbers
+as: SimpleITK, the NIfTI header, and any registration composing two volumes'
+frames. A format that states its own unit is converted on the way in and back on
+the way out — see [Units](#units) for OME-Zarr.
 
 Numeric values are stored as strings and recovered with `get_np_array(key)` or
 `get_tensor(key)`. Keys use a stack-like naming scheme (`Origin_0`, `Origin_1`,
