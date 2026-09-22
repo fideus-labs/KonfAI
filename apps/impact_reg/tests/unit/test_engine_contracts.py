@@ -277,27 +277,25 @@ def test_fireants_static_mode_reaches_the_engine() -> None:
     # still succeeds, on a card it may not fit, so nothing points at the setting having been ignored.
     from impact_reg_konfai.models.fireants import RegistrationNet
 
-    for mode, patch in (("online", 0), ("static", 128)):
-        engine = RegistrationNet(impact_mode=mode, feature_patch=patch)["Registration"]._engine
-        assert (engine._impact_mode, engine._feature_patch) == (mode, patch)
+    for mode, patch in (("Jacobian", 0), ("Static", 128)):
+        engine = RegistrationNet(mode=mode, feature_patch=patch)["Registration"]._engine
+        assert (engine._mode, engine._feature_patch) == (mode, patch)
 
 
-def test_fireants_refuses_an_unknown_impact_mode() -> None:
-    # An unrecognised value would otherwise fall through to the online path, which is the one that does
-    # not fit the volume the caller asked static for.
+def test_fireants_refuses_an_unknown_mode() -> None:
+    # An unrecognised value would otherwise fall through to Jacobian, which is the mode that does not fit
+    # the volume the caller asked Static for. The elastix engine spells these two the same way.
     import pytest
-
     from impact_reg_konfai.models.fireants import RegistrationNet
 
-    with pytest.raises(ValueError, match="impact_mode"):
-        RegistrationNet(impact_mode="statique")
+    with pytest.raises(ValueError, match="mode"):
+        RegistrationNet(mode="static")
 
 
 def test_fireants_tiles_cover_every_voxel_once_blended() -> None:
     # A gap between tiles would leave a band of the image with no features at all, and the cosine blend
     # is what keeps a seam from showing where they meet.
     import torch
-
     from impact_reg_konfai.models.fireants import _cosine_window, _tiles
 
     shape = (40, 24, 70)

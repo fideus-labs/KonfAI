@@ -387,7 +387,7 @@ class _ImpactCore(IMPACTReg):
         self.model = ImpactFeatureModel(model_path, int(in_channels), [float(w) for w in weights], None, DIM)
 
     def pca_project(self, output: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """IMPACTReg's own PCA reduction, for the static path: the basis is fitted on ``target``."""
+        """IMPACTReg's own PCA reduction, for Static mode: the basis is fitted on ``target``."""
         return self._pca_project(output, target)
 
     @staticmethod
@@ -447,12 +447,12 @@ class ImpactFeatureLoss(torch.nn.Module):
 
     @property
     def cores(self) -> list["_ImpactCore"]:
-        """The per-model feature cores, for the static path, which extracts instead of scoring."""
+        """The per-model feature cores, for Static mode, which extracts instead of scoring."""
         return [cast("_ImpactCore", core) for core in self._cores]
 
     @property
     def model_weights(self) -> list[float]:
-        """Each model's weight in the fusion, applied to its features in the static path."""
+        """Each model's weight in the fusion, applied to its features in Static mode."""
         return self._model_weights
 
     def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
@@ -470,7 +470,7 @@ class ImpactFeatureLoss(torch.nn.Module):
 class _FeatureCC(torch.nn.Module):
     """Local cross-correlation over feature channels, a few channels at a time.
 
-    The static path hands FireANTs volumes of features, and comparing all their channels at once is what
+    Static mode hands FireANTs volumes of features, and comparing all their channels at once is what
     sets the peak: the windowed sums of a 28-channel pair at full resolution are several times the volume
     itself. This evaluates ``chunk`` channels per pass and re-runs each pass during the backward instead
     of keeping its intermediates, so the peak follows ``chunk`` rather than the channel count, for the
@@ -567,7 +567,7 @@ def _feature_volumes(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The fixed and moving feature volumes of every model, concatenated along the channel axis.
 
-    This is the static path: each network runs once per image here, instead of once per optimiser step
+    This is Static mode: each network runs once per image here, instead of once per optimiser step
     inside the loss, and the registration then works on the feature volumes themselves. It is what makes
     a large pair affordable -- no autograd graph through an extractor is kept -- and what a whole-image
     model needs, since the features are never differentiated with respect to the warp.
@@ -664,7 +664,7 @@ class FireANTsEngine:
         smooth_grad_sigma: float,
         seed: int,
         impact_specs: list["ModelSpec"],
-        impact_mode: str = "online",
+        mode: str = "Jacobian",
         feature_patch: int = 0,
         feature_chunk: int = 0,
     ) -> None:
@@ -700,11 +700,11 @@ class FireANTsEngine:
         # IMPACT deformable metric (only used when deformable_metric == "impact"): KonfAI IMPACT feature
         # models drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
         self._impact_specs = impact_specs
-        self._impact_mode = impact_mode
+        self._mode = mode
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
-        if impact_mode not in ("online", "static"):
-            raise ValueError(f"Unknown impact_mode '{impact_mode}' (expected 'online' or 'static').")
+        if mode not in ("Static", "Jacobian"):
+            raise ValueError(f"Unknown mode '{mode}' (expected 'Static' or 'Jacobian').")
 
     @staticmethod
     def _center_of_mass_translation(
@@ -909,8 +909,8 @@ class FireANTsEngine:
             # (the linear pre-align keeps its own affine_metric); the fixed mask restricts it too.
             loss_type: str = deformable_loss
             custom_loss: torch.nn.Module | None = None
-            if self._deformable_metric == "impact" and self._impact_mode == "static":
-                # Static: extract once, then register the feature volumes with FireANTs' own metric. The
+            if self._deformable_metric == "impact" and self._mode == "Static":
+                # Static: extract once, then register the feature volumes. The
                 # images are re-read unmasked because the masked pair carries the mask as a channel, and
                 # the mask is concatenated back afterwards so ``masked_`` still means what it says.
                 extractor = ImpactFeatureLoss(self._impact_specs).to(device)
@@ -1126,23 +1126,24 @@ class RegistrationNet(network.Network):
             "convergence.",
         ] = 1.0,
         seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
-        impact_mode: Annotated[
-            Literal["online", "static"],
-            "How the IMPACT deformable metric reads its features. 'online' extracts them inside the loss at "
-            "every optimiser step, so the warp is differentiated through the network. 'static' extracts them "
-            "once per image and registers the feature volumes themselves: far less device memory, no network "
-            "in the optimisation loop, and the only path a whole-image feature model can take.",
-        ] = "online",
+        mode: Annotated[
+            Literal["Static", "Jacobian"],
+            "How the IMPACT deformable metric reads its features, as the elastix engine means it. 'Jacobian' "
+            "extracts them inside the loss at every optimiser step, so the warp is differentiated through the "
+            "network. 'Static' extracts them once per image and registers the feature volumes themselves: far "
+            "less device memory, no network in the optimisation loop, and the only path a whole-image feature "
+            "model can take.",
+        ] = "Jacobian",
         feature_patch: Annotated[
             int,
-            "Static mode only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
+            "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
             "at once. Tiles share a quarter of their width and are blended by a cosine window, so a volume "
             "larger than the card still goes through.",
             Range(0, 1024),
         ] = 0,
         feature_chunk: Annotated[
             int,
-            "Static mode only: how many feature channels the local cross-correlation compares at a time, 0 "
+            "Static only: how many feature channels the local cross-correlation compares at a time, 0 "
             "for all of them at once. A smaller chunk trades a little time for a peak that follows the chunk "
             "instead of the channel count, which is what lets several feature models share one card.",
             Range(0, 64),
@@ -1178,7 +1179,7 @@ class RegistrationNet(network.Network):
             smooth_grad_sigma,
             seed,
             _sorted_specs(models),
-            impact_mode,
+            mode,
             feature_patch,
             feature_chunk,
         )
