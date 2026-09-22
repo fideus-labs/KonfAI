@@ -467,6 +467,56 @@ class ImpactFeatureLoss(torch.nn.Module):
         return total
 
 
+class _FeatureCC(torch.nn.Module):
+    """Local cross-correlation over feature channels, a few channels at a time.
+
+    The static path hands FireANTs volumes of features, and comparing all their channels at once is what
+    sets the peak: the windowed sums of a 28-channel pair at full resolution are several times the volume
+    itself. This evaluates ``chunk`` channels per pass and re-runs each pass during the backward instead
+    of keeping its intermediates, so the peak follows ``chunk`` rather than the channel count, for the
+    same objective and the same gradient.
+
+    The correlation itself is the usual windowed one, ``cov(a, b)^2 / (var(a) var(b))`` over a cube of
+    ``kernel`` voxels, averaged over channels and voxels and negated, since FireANTs minimises.
+    """
+
+    def __init__(self, kernel: int, chunk: int, masked: bool = False) -> None:
+        super().__init__()
+        self._kernel = int(kernel)
+        self._chunk = max(1, int(chunk))
+        self._masked = masked
+
+    def _windowed(self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        kernel, padding = self._kernel, self._kernel // 2
+        mean = lambda t: torch.nn.functional.avg_pool3d(t, kernel, stride=1, padding=padding, count_include_pad=False)  # noqa: E731
+        moved_mean, fixed_mean = mean(moved), mean(fixed)
+        covariance = mean(moved * fixed) - moved_mean * fixed_mean
+        moved_var = (mean(moved * moved) - moved_mean * moved_mean).clamp_min(1e-5)
+        fixed_var = (mean(fixed * fixed) - fixed_mean * fixed_mean).clamp_min(1e-5)
+        correlation = covariance * covariance / (moved_var * fixed_var)
+        if mask is not None:
+            return -(correlation * mask).sum() / mask.sum().clamp_min(1.0) / correlation.shape[1]
+        return -correlation.mean()
+
+    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
+        mask: torch.Tensor | None = None
+        if self._masked:
+            mask = (fixed[:, -1:] > 0.5).to(moved.dtype)
+            moved, fixed = moved[:, :-1], fixed[:, :-1]
+        channels = moved.shape[1]
+        total: torch.Tensor | None = None
+        for start in range(0, channels, self._chunk):
+            stop = min(start + self._chunk, channels)
+            piece = torch.utils.checkpoint.checkpoint(
+                self._windowed, moved[:, start:stop], fixed[:, start:stop], mask, use_reentrant=False
+            )
+            weighted = piece * (stop - start) / channels
+            total = weighted if total is None else total + weighted
+        if total is None:
+            raise RuntimeError("the feature volumes carry no channel to correlate")
+        return total
+
+
 @torch.no_grad()
 def _one_volume(core: "_ImpactCore", weight: float, image: torch.Tensor, patch: int, overlap: float) -> torch.Tensor:
     """One model's selected feature layers for one image, tiled and blended.
@@ -616,6 +666,7 @@ class FireANTsEngine:
         impact_specs: list["ModelSpec"],
         impact_mode: str = "online",
         feature_patch: int = 0,
+        feature_chunk: int = 0,
     ) -> None:
         self._scales = [int(s) for s in scales]
         self._affine_iterations = [int(i) for i in affine_iterations]
@@ -651,6 +702,7 @@ class FireANTsEngine:
         self._impact_specs = impact_specs
         self._impact_mode = impact_mode
         self._feature_patch = int(feature_patch)
+        self._feature_chunk = int(feature_chunk)
         if impact_mode not in ("online", "static"):
             raise ValueError(f"Unknown impact_mode '{impact_mode}' (expected 'online' or 'static').")
 
@@ -876,10 +928,15 @@ class FireANTsEngine:
                 del extractor
                 gc.collect()
                 bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
-                # The channels ARE the features now, so FireANTs' own local cross-correlation compares
-                # them (``cc_kernel`` sets its window): "impact" names where the channels came from, not
-                # a metric FireANTs knows.
-                loss_type = "masked_cc" if masked else "cc"
+                # The channels ARE the features now, so a local cross-correlation compares them
+                # (``cc_kernel`` sets its window): "impact" names where the channels came from, not a
+                # metric FireANTs knows. With ``feature_chunk`` the correlation runs a few channels at a
+                # time, which is what lets two feature models share one card.
+                if self._feature_chunk > 0:
+                    loss_type = "custom"
+                    custom_loss = _FeatureCC(self._cc_kernel, self._feature_chunk, masked=masked)
+                else:
+                    loss_type = "masked_cc" if masked else "cc"
             elif self._deformable_metric == "impact":
                 loss_type = "custom"
                 custom_loss = ImpactFeatureLoss(self._impact_specs, masked=masked)
@@ -1083,6 +1140,13 @@ class RegistrationNet(network.Network):
             "larger than the card still goes through.",
             Range(0, 1024),
         ] = 0,
+        feature_chunk: Annotated[
+            int,
+            "Static mode only: how many feature channels the local cross-correlation compares at a time, 0 "
+            "for all of them at once. A smaller chunk trades a little time for a peak that follows the chunk "
+            "instead of the channel count, which is what lets several feature models share one card.",
+            Range(0, 64),
+        ] = 0,
         models: dict[str, ModelSpec] = {},
     ) -> None:
         super().__init__(
@@ -1116,6 +1180,7 @@ class RegistrationNet(network.Network):
             _sorted_specs(models),
             impact_mode,
             feature_patch,
+            feature_chunk,
         )
         self.add_module(
             "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]
