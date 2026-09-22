@@ -1061,3 +1061,26 @@ def test_model_composite_caches_only_the_inference_entries_of_a_checkpoint() -> 
     custom.load([{"scale": 3.0, "extra": 1}])
     custom._model_for_index(0)
     assert set(custom._state_cache[0]) == {"scale", "extra"}
+
+
+def test_a_window_set_aside_for_a_single_patch_is_back_once_a_replan_tiles_the_axes(tmp_path) -> None:
+    # A free patch ([0, 0, 0]) spans the volume and takes no combine. The restart that tiles it after an
+    # out-of-memory must blend again: without its window, each patch overwrites the one before it.
+    from konfai.data.patching import Cosinus
+
+    output = OutputDataset(
+        same_as_group="src:dest",
+        dataset_filename=f"{tmp_path}/output:mha",
+        group="out",
+        patch_combine="Cosinus",
+        reduction="Mean",
+    )
+    window = Cosinus()
+    output.patch_combine = window
+
+    output.set_patch_config([0, 0, 0], "20%", 1)
+    assert output.patch_combine is None
+
+    output.set_patch_config([100, 80, 100], "20%", 1)
+    assert output.patch_combine is window
+    assert window.overlaps == [20, 16, 20]
