@@ -28,12 +28,17 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from konfai import konfai_state
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chains
-from konfai.data.data_manager.order import WindowedCaseSampler, _balanced_case_partitions, _interleaved_case_entries
+from konfai.data.data_manager.order import (
+    GrowingBatchSampler,
+    WindowedCaseSampler,
+    _balanced_case_partitions,
+    _interleaved_case_entries,
+)
 from konfai.data.data_manager.samples import DatasetIter, collate_konfai
 from konfai.data.data_manager.subset import PredictionSubset, Subset
 from konfai.data.patching import CASE_ELEMENT_BYTES, DatasetManager, DatasetPatch
@@ -999,22 +1004,22 @@ class Data(DataSources):
                     ),
                     apply_augmentations=loader_index == 0 or self.validation_augmentations,
                 )
+                sampler = WindowedCaseSampler(
+                    mapping,
+                    self.subset.shuffle,
+                    window,
+                    self.batch_size,
+                    self.resolved_num_workers,
+                    dataset_iter.read_order,
+                )
                 data_loaders[i].append(
-                    DataLoader(
-                        dataset=dataset_iter,
-                        sampler=WindowedCaseSampler(
-                            mapping,
-                            self.subset.shuffle,
-                            window,
-                            self.batch_size,
-                            self.resolved_num_workers,
-                            dataset_iter.read_order,
-                        ),
-                        batch_size=self.batch_size,
-                        **self.dataLoader_args,
-                    )
+                    DataLoader(dataset=dataset_iter, **self._batching(sampler), **self.dataLoader_args)
                 )
         return data_loaders, self.case_names, self._validation_names
+
+    def _batching(self, sampler: Sampler[int]) -> dict[str, Any]:
+        """How a loader batches ``sampler``'s order: the configured batch size."""
+        return {"sampler": sampler, "batch_size": self.batch_size}
 
     def _params(self) -> dict[str, object]:
         return {
@@ -1091,7 +1096,11 @@ class DataPrediction(Data):
         prefetch_factor: int | None = None,
         persistent_workers: bool | None = None,
     ) -> None:
-
+        if batch_size < 0:
+            raise DatasetManagerError(
+                f"batch_size: {batch_size} is negative.",
+                "Give a positive count, or 0 to have the batch measured on the GPU.",
+            )
         super().__init__(
             dataset_filenames,
             groups_src,
@@ -1099,7 +1108,7 @@ class DataPrediction(Data):
             memory_budget,
             patch=patch,
             use_cache=False,
-            batch_size=batch_size,
+            batch_size=max(1, batch_size),
             validation=None,
             num_workers=num_workers,
             pin_memory=pin_memory,
@@ -1107,6 +1116,14 @@ class DataPrediction(Data):
             persistent_workers=False if persistent_workers is None else persistent_workers,
             data_augmentations_list=augmentations,
         )
+        #: ``batch_size: 0``: the predictor measures the batch on its device and grows the loader's.
+        self.measures_batch = batch_size == 0
+
+    def _batching(self, sampler: Sampler[int]) -> dict[str, Any]:
+        if not self.measures_batch:
+            return super()._batching(sampler)
+        # One patch, then two, then the measured batch: the predictor sets the size as it measures.
+        return {"batch_sampler": GrowingBatchSampler(sampler, 1)}
 
 
 @config("Dataset")

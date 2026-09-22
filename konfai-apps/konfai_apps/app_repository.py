@@ -165,10 +165,9 @@ def is_app_repo(filenames: list[str]) -> bool:
 
 
 def current_free_vram(devices: list[int], remote_server: RemoteServer | None = None) -> float | None:
-    """Free VRAM (GB) available on ``devices``: the minimum across them, mirroring how inference picks
-    its VRAM plan. Returns ``None`` on CPU (no devices) or when VRAM cannot be read; a device whose VRAM
-    query fails is skipped rather than failing the whole measurement. UIs pair it with
-    :meth:`AppRepositoryInfo.resolve_vram_plan` to preview the plan for the current machine."""
+    """Free VRAM (GB) available on ``devices``: the minimum across them. Returns ``None`` on CPU (no
+    devices) or when VRAM cannot be read; a device whose VRAM query fails is skipped rather than failing
+    the whole measurement."""
     from konfai import get_vram
 
     frees = []
@@ -187,12 +186,6 @@ class VolumeType(Enum):
     VOLUME = "VOLUME"
     FIDUCIALS = "FIDUCIALS"
     TRANSFORM = "TRANSFORM"
-
-
-@dataclass
-class VRAMPlanEntry:
-    patch_size: list[int]
-    batch_size: int
 
 
 @dataclass
@@ -270,7 +263,6 @@ class AppRepositoryInfo(ABC):
         outputs: dict[str, DataEntry],
         inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]],
         terminology: dict[int, TerminologyEntry] | None = None,
-        vram_plan: dict[int, VRAMPlanEntry] | None = None,
         patch_size: list[int] | None = None,
         task: str | None = None,
         icon_path: Path | None = None,
@@ -288,7 +280,6 @@ class AppRepositoryInfo(ABC):
         self._outputs = outputs
         self._inputs_evaluations = inputs_evaluations
         self._terminology = terminology
-        self._vram_plan = vram_plan
         self._patch_size = patch_size
         self._task = task
         self._icon_path = icon_path
@@ -306,8 +297,7 @@ class AppRepositoryInfo(ABC):
             f"  inputs={self._inputs!r},\n"
             f"  outputs={self._outputs!r},\n"
             f"  inputs_evaluations={self._inputs_evaluations!r},\n"
-            f"  terminology={self._terminology!r},\n"
-            f"  vram_plan={self._vram_plan!r}\n"
+            f"  terminology={self._terminology!r}\n"
             f")"
         )
 
@@ -347,26 +337,6 @@ class AppRepositoryInfo(ABC):
         """Whether the app can be fine-tuned from its bundled train config. Conservative default for
         adapters that cannot know; local/HF check the bundle, the remote adapter relays the server's answer."""
         return False
-
-    def resolve_vram_plan(self, available_vram: float | None) -> tuple[list[int], int] | None:
-        """Return the ``(patch_size, batch_size)`` the app's VRAM plan would select for ``available_vram``
-        (the largest declared threshold, in GB, that fits the free VRAM), or ``None`` when the app declares
-        no VRAM plan or the free VRAM is unknown.
-
-        This is the exact selection inference uses; UIs call it to preview/seed the plan that will actually
-        run on the current machine.
-        """
-        if self._vram_plan is None or available_vram is None:
-            return None
-        thresholds = sorted(self._vram_plan.keys())
-        selected_t = thresholds[0]
-        for threshold in thresholds:
-            if threshold <= available_vram:
-                selected_t = threshold
-            else:
-                break
-        entry = self._vram_plan[selected_t]
-        return list(entry.patch_size), entry.batch_size
 
     def get_mc_dropout(self) -> int:
         return self._mc_dropout
@@ -471,16 +441,6 @@ class LocalAppRepository(AppRepositoryInfo):
                 for key, value in app_repository_metadata["terminology"].items()
             }
 
-        vram_plan: dict[int, VRAMPlanEntry] | None = None
-        if "vram_plan" in app_repository_metadata:
-            vram_plan = {
-                int(key): VRAMPlanEntry(
-                    patch_size=list(map(int, value["patch_size"])),
-                    batch_size=int(value["batch_size"]),
-                )
-                for key, value in app_repository_metadata["vram_plan"].items()
-            }
-
         patch_size = app_repository_metadata.get("patch_size")
         patch_size = [int(x) for x in patch_size] if isinstance(patch_size, list) else None
 
@@ -506,7 +466,6 @@ class LocalAppRepository(AppRepositoryInfo):
             outputs=outputs,
             inputs_evaluations=inputs_evaluations,
             terminology=terminology,
-            vram_plan=vram_plan,
             patch_size=patch_size,
             task=app_repository_metadata.get("task"),
             icon_path=icon_path,
@@ -1056,7 +1015,6 @@ class LocalAppRepository(AppRepositoryInfo):
         number_of_mc_dropout: int,
         uncertainty: bool,
         prediction_file: str,
-        available_vram: float | None,
         forced_patch_size: list[int] | None = None,
         forced_batch_size: int | None = None,
         config_overrides: list[str] | None = None,
@@ -1079,16 +1037,10 @@ class LocalAppRepository(AppRepositoryInfo):
         # `number_of_mc_dropout` is plumbed through but not applied to the prediction config.
         if not uncertainty:
             self._disable_uncertainty(prediction_file)
-        # Patch/batch precedence: an explicit override wins; otherwise the app's VRAM plan (largest
-        # threshold that fits the detected free VRAM); otherwise the config's own defaults are left as-is.
-        plan = self.resolve_vram_plan(available_vram)
-        plan_patch_size, plan_batch_size = plan if plan is not None else (None, None)
-        self._set_patch_size_and_batch_size(
-            prediction_file,
-            forced_patch_size if forced_patch_size is not None else plan_patch_size,
-            forced_batch_size if forced_batch_size is not None else plan_batch_size,
-        )
-        # Applied last, after the VRAM plan / patch-batch override, so an explicit --set always wins.
+        # An explicit patch or batch wins; otherwise the app's config decides (``batch_size: 0`` there
+        # measures the batch on the GPU).
+        self._set_patch_size_and_batch_size(prediction_file, forced_patch_size, forced_batch_size)
+        # Applied last, after the patch/batch override, so an explicit --set always wins.
         self._apply_config_overrides(prediction_file, config_overrides)
 
         return models_path

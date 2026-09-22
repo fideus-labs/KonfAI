@@ -24,8 +24,14 @@ primitive itself runs on a real CUDA device when one is present.
 import numpy as np
 import pytest
 from konfai.predictor import Mean, Predictor, Reduction
-from konfai.utils.utils import concretize_patch_size
-from konfai.utils.vram import VramAutoPatchMixin, next_patch_candidate, usable_vram
+from konfai.utils.utils import concretize_patch_size, get_patch_slices_from_shape
+from konfai.utils.vram import (
+    VramAutoPatchMixin,
+    balanced_patch,
+    measured_batch,
+    next_patch_candidate,
+    usable_vram,
+)
 
 
 def _linear_probe(bytes_per_voxel: float):
@@ -67,10 +73,25 @@ class TestShrinkLoop:
         assert all(1 <= p < 64 for p in sized)
         assert probe(sized) <= usable
 
-    def test_a_measured_transient_scales_straight_to_the_target(self):
-        # 8x over budget with 3 free axes -> one isotropic step of (1/8)^(1/3) halves each axis.
+    def test_a_measured_transient_splits_straight_to_the_target(self):
+        # 8x over budget: the longest axis splits first, each into equal parts with a 20 % overlap
+        # (64 = two 36s, three 24s), until the patch holds an eighth of the voxels, in one step.
         shrunk = next_patch_candidate([64, 64, 64], [0, 0, 0], [64, 64, 64], measured_bytes=800, usable_bytes=100)
-        assert shrunk == [32, 32, 32]
+        assert shrunk == [24, 36, 36]
+
+    @pytest.mark.parametrize("overlap", [None, 16, 0.25, "10%", [16, 8, 0.3]])
+    @pytest.mark.parametrize("count", [2, 3, 5])
+    def test_a_balanced_patch_covers_its_axis_in_exactly_its_count(self, count, overlap):
+        # The grid the tiler cuts from the balanced patch: `count` patches per axis, where the largest
+        # patch that fits cuts as many with a wider overlap (two 392s over 531 overlap by 253).
+        shape = [531, 512, 300]
+        axis_overlap = [overlap[a] if isinstance(overlap, list) else overlap for a in range(3)]
+        patch = [balanced_patch(extent, count, spec) for extent, spec in zip(shape, axis_overlap, strict=True)]
+        tiles = get_patch_slices_from_shape(patch, shape, overlap, None, True)
+        assert [len({tile[a].start for tile in tiles}) for a in range(3)] == [count] * 3
+        # And it is the shortest that does: one voxel less takes one more patch.
+        tiles = get_patch_slices_from_shape([size - 1 for size in patch], shape, overlap, None, True)
+        assert [len({tile[a].start for tile in tiles}) for a in range(3)] == [count + 1] * 3
 
     def test_pinned_axes_never_move(self):
         probe = _linear_probe(1000)
@@ -89,7 +110,7 @@ class TestShrinkLoop:
         assert shrunk is not None
         assert shrunk[0] == 9
 
-    def test_oom_without_a_number_walks_down_by_the_fixed_step(self):
+    def test_oom_without_a_number_splits_once_per_restart(self):
         calls = []
 
         def probe(patch_size):
@@ -98,14 +119,14 @@ class TestShrinkLoop:
 
         sized = run_until_fits([0, 0, 0], [64, 64, 64], probe, usable=20**3 * 10)
         assert np.prod(sized) <= 20**3
-        assert len(calls) > 2  # it actually walked down through the OOMs, one step per restart
+        # The fewest patches first: one more along the longest axis per restart.
+        assert calls[:4] == [[64, 64, 64], [36, 64, 64], [36, 36, 64], [36, 36, 36]]
 
     def test_a_stale_fitting_measurement_still_shrinks(self):
         # The last measured batch "fits" yet an OOM happened -> the kernel must not return the same
-        # candidate (scaling by >= 1 would); it falls back to the fixed step.
+        # candidate; it splits once, as without a measurement.
         shrunk = next_patch_candidate([64, 64, 64], [0, 0, 0], [64, 64, 64], measured_bytes=50, usable_bytes=100)
-        assert shrunk is not None
-        assert all(p < 64 for p in shrunk)
+        assert shrunk == [36, 64, 64]
 
     def test_the_floor_is_reported_as_none_not_a_loop(self):
         assert run_until_fits([0, 0, 0], [64, 64, 64], _linear_probe(1e9), usable=10.0) is None
@@ -166,6 +187,7 @@ def _predictor(out_channels, nb_augmentation, reduction, candidate=None):
     predictor = Predictor.__new__(Predictor)
     predictor._vram_patch_template = [0, 0, 0]
     predictor._vram_patch_candidate = candidate
+    predictor._vram_patch_overlap = None
     predictor._downsampling_factor = None
     predictor.dataset = _Data([100, 100, 100])
     predictor.model = _Model(out_channels)
@@ -181,28 +203,28 @@ class TestPredictorShrinkBudget:
 
     def test_an_assembled_writer_reserves_the_whole_volume(self):
         # reserve = (3+1)ch x 100^3 x 2B x 2aug = 1.6e7 -> usable 1e6 of the 1.7e7 margined budget;
-        # measured 8e6 -> exact isotropic step (1/8)^(1/3) halves each axis. Without the reserve the
-        # measurement would claim a fit and only the fixed 0.8 step would apply.
+        # measured 8e6 -> the axes split until the patch holds an eighth of the voxels. Without the
+        # reserve the measurement would claim a fit and the axes would split only once.
         predictor = _predictor(3, nb_augmentation=2, reduction=Mean())
-        assert predictor._shrunken_patch(8_000_000, usable=1.7e7) == [50, 50, 50]
+        assert predictor._shrunken_patch(8_000_000, usable=1.7e7) == [38, 56, 56]
 
     def test_a_streaming_writer_reserves_only_its_window(self):
         # Single augmentation + voxel-local reduction -> window = candidate_z x cross-section:
-        # reserve 8e5 -> usable 3.2e6, measured 6.4e6 -> per-axis (1/2)^(1/3). A volume reserve
-        # (8e6) would not fit the 4e6 budget and would have fallen back to [8, 85, 85].
+        # reserve 8e5 -> usable 3.2e6, measured 6.4e6 -> half the voxels: Y and X take two patches each,
+        # Z keeps the window's extent. A volume reserve (8e6) would not fit the 4e6 budget.
         predictor = _predictor(3, nb_augmentation=1, reduction=Mean(), candidate=[10, 100, 100])
-        assert predictor._shrunken_patch(6_400_000, usable=4e6) == [7, 79, 79]
+        assert predictor._shrunken_patch(6_400_000, usable=4e6) == [10, 56, 56]
 
     def test_an_unfittable_reserve_falls_back_to_the_forward_alone(self):
         # The non-streamable volume reserve (1.6e7) exceeds the whole budget (1e6): the writer will
         # blend on the CPU, and the patch is still sized for the forward instead of refusing.
         predictor = _predictor(3, nb_augmentation=2, reduction=_SpatialReduction())
-        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]
+        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [38, 56, 56]
 
     def test_unpriceable_channels_skip_the_reserve(self):
         predictor = _predictor(None, nb_augmentation=2, reduction=Mean())
         assert predictor._accumulation_reserve([100, 100, 100], [100, 100, 100]) is None
-        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [50, 50, 50]
+        assert predictor._shrunken_patch(8_000_000, usable=1e6) == [38, 56, 56]
 
 
 class TestPresizeFreeAxes:
@@ -217,3 +239,13 @@ class TestPresizeFreeAxes:
         sizer.dataset = Dataset()
         sizer._capture_vram_patch_template(None)
         assert sizer._presize_free_axes() is False
+
+
+def test_a_measured_batch_is_the_largest_power_of_two_whose_forward_fits_half_the_memory():
+    # A forward holding 300 bytes whatever its batch and 100 per patch: 400 for one, 500 for two.
+    # Half of 2200 usable bytes is 1100: eight patches fit (1100 bytes), so eight.
+    assert measured_batch(400, 500, usable=2200) == 8
+    # Half of 2198 holds seven: the batch is the power of two under it, four.
+    assert measured_batch(400, 500, usable=2198) == 4
+    # Nothing beyond the fixed part fits: one patch still runs, and an OOM halves from there.
+    assert measured_batch(400, 500, usable=100) == 1

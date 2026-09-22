@@ -113,7 +113,7 @@ If you use **IMPACT-Synth-KonfAI** in your work, please cite:
 
 ## ⚡ Performance & VRAM
 
-Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body MR (295 × 259 × 219, 2 mm), patch `[1, 512, 512]`. The app **auto-selects the batch size from your free GPU VRAM** (`vram_plan`); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
+Benchmarked on a single **NVIDIA RTX PRO 5000 (24 GB)** with a real whole-body MR (295 × 259 × 219, 2 mm), patch `[1, 512, 512]`. The app **measures its batch size on your GPU** (a forward of one patch, then of two, then the largest power of two that fits half of the free VRAM); override it in SlicerKonfAI (⚙ **Advanced**) or on the CLI with `--patch-size` / `--batch-size`.
 
 | Free VRAM | Batch (auto) | Peak VRAM | Time / case |
 |:--|:--|:--|:--|

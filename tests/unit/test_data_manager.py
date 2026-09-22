@@ -39,11 +39,14 @@ from konfai.data.data_manager import (
     DataTrain,
     Group,
     GroupTransform,
+    GrowingBatchSampler,
     PatchReadOrder,
     PredictionSubset,
     Subset,
     WindowedCaseSampler,
     collate_konfai,
+    concatenate_batches,
+    slice_batch,
 )
 from konfai.data.data_manager.samples import _cache_worker_count
 from konfai.data.patching import DatasetManager, DatasetPatch
@@ -1055,6 +1058,23 @@ def test_a_worker_declares_the_batches_it_is_handed_and_not_the_others(monkeypat
     assert read_order.entering(2) is None, "batch 1 goes to the other worker"
 
 
+def test_a_worker_of_a_growing_batch_declares_nothing_and_a_single_process_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A measured batch runs 1, 2, then what the device holds: a worker cannot tell which positions it
+    is handed, and a wrong declaration is worse than none. One process reads them all, in order."""
+    mapping = _case_major_mapping(2, 2)
+    read_order = PatchReadOrder(mapping, batch_size=1)
+    GrowingBatchSampler(WindowedCaseSampler(mapping, False, None, 1, 2, read_order), 1)
+    read_order.publish(torch.as_tensor(list(range(len(mapping))), dtype=torch.int64))
+
+    assert read_order.entering(0) == [(0, 0), (0, 1)], "no worker: every position is this process's"
+
+    read_order.publish(torch.as_tensor(list(range(len(mapping))), dtype=torch.int64))
+    monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: SimpleNamespace(id=0, num_workers=2))
+    assert read_order.entering(0) is None
+
+
 def _entering_at_each_draw(read_order: PatchReadOrder, draws, opening, answer) -> None:
     for drawn in draws:
         drawn.wait(30)
@@ -1449,6 +1469,42 @@ def test_collate_batches_a_one_pass_singleton_as_a_view_and_a_training_singleton
     assert torch.equal(copy[0], tensor)
 
 
+def test_concatenated_batches_keep_their_patches_in_order() -> None:
+    """The predictor's measured batch merges the loader's: the patch at row i keeps its own indices."""
+    batches = [
+        collate_konfai([{"CT": DataItem(f"case{i}", torch.full((1, 2, 2), float(i)), Attribute(), i, 0, i, True)}])
+        for i in range(3)
+    ]
+    merged = concatenate_batches(batches)["CT"]
+    assert merged.tensor[:, 0, 0, 0].tolist() == [0.0, 1.0, 2.0]
+    assert (merged.name, merged.x, merged.p) == (["case0", "case1", "case2"], [0, 1, 2], [0, 1, 2])
+
+
+def test_a_growing_batch_sampler_reads_its_size_as_each_batch_starts() -> None:
+    """The measured batch grows the loader's: one patch, then two, then what the device holds."""
+    sampler = GrowingBatchSampler(range(12), 1)  # type: ignore[arg-type]
+    sizes = iter([2, 4])
+    lengths = []
+    for batch in sampler:
+        lengths.append(len(batch))
+        sampler.batch_size = next(sizes, sampler.batch_size)
+
+    assert lengths == [1, 2, 4, 4, 1]
+    assert len(sampler) == 3
+
+
+def test_a_sliced_batch_keeps_its_patches_indices() -> None:
+    """The merged transition batches are cut to the measured size: row i of the cut keeps its own indices."""
+    batches = [
+        collate_konfai([{"CT": DataItem(f"case{i}", torch.full((1, 2, 2), float(i)), Attribute(), i, 0, i, True)}])
+        for i in range(5)
+    ]
+    cut = slice_batch(concatenate_batches(batches), 2, 4)["CT"]
+
+    assert cut.tensor[:, 0, 0, 0].tolist() == [2.0, 3.0]
+    assert (cut.name, cut.x, cut.p) == (["case2", "case3"], [2, 3], [2, 3])
+
+
 def test_collate_still_copies_inside_a_dataloader_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     # A worker's batch travels by STORAGE, and a patch-view's storage is the whole resident case.
     monkeypatch.setattr(torch.utils.data, "get_worker_info", lambda: SimpleNamespace(id=0, num_workers=2))
@@ -1705,3 +1761,9 @@ def test_a_case_present_in_two_roots_is_read_from_the_first_and_said_so() -> Non
     with pytest.warns(UserWarning, match="Case 'P001' of group 'CT' is in 'A' and in 'B'"):
         chosen = Data._get_source_filename_by_group({"CT": {"A": ["P001", "P002"], "B": ["P001", "P003"]}})
     assert chosen == {"CT": {"P001": "A", "P002": "A", "P003": "B"}}
+
+
+def test_a_negative_prediction_batch_is_refused_not_read_as_one() -> None:
+    # 0 asks for a measured batch; anything below it is a typo, not a batch of one.
+    with pytest.raises(DatasetManagerError, match="batch_size: -2 is negative"):
+        DataPrediction(augmentations=None, batch_size=-2)

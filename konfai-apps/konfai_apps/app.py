@@ -33,7 +33,7 @@ from typing import Any, cast
 import numpy as np
 import requests
 import SimpleITK as sitk
-from konfai import RemoteServer, check_server, cuda_visible_devices, get_vram
+from konfai import RemoteServer, check_server, cuda_visible_devices
 from konfai.utils.dataset import Dataset
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
 from konfai.utils.utils import (
@@ -1254,14 +1254,6 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inputs_to_dataset(inputs)
-        available_vram = None
-        if len(gpu):
-            available_vram_per_device: list[float] = []
-            for device in gpu:
-                used_gb, total_gb = get_vram([device])
-                available_vram_per_device.append(total_gb - used_gb)
-
-            available_vram = min(available_vram_per_device)
         models_path = self.app_repository.install_inference(
             tta,
             ensemble,
@@ -1269,7 +1261,6 @@ class KonfAIApp(AbstractKonfAIApp):
             mc,
             uncertainty,
             prediction_file,
-            available_vram,
             forced_patch_size=patch_size,
             forced_batch_size=batch_size,
             config_overrides=config_overrides,

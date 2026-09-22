@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from konfai_apps import app_repository as app_repository_module
 from konfai_apps.errors import AppMetadataError, AppRepositoryError
+from ruamel.yaml import YAML
 
 
 def test_get_app_repository_info_rejects_missing_required_metadata_keys(tmp_path: Path) -> None:
@@ -356,9 +357,15 @@ def test_local_hf_download_inference_refreshes_selected_remote_model(
     assert get_filenames_calls == [False, False, True]
 
 
+@pytest.mark.parametrize(
+    ("config_batch_size", "forced_batch_size", "batch_size"), [(1, None, 1), (0, None, 0), (0, 4, 4)]
+)
 def test_local_directory_install_inference_preserves_nested_python_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    config_batch_size: int,
+    forced_batch_size: int | None,
+    batch_size: int,
 ) -> None:
     app_root = tmp_path / "repo" / "demo_app"
     (app_root / "pkg").mkdir(parents=True)
@@ -376,7 +383,8 @@ def test_local_directory_install_inference_preserves_nested_python_files(
         encoding="utf-8",
     )
     (app_root / "Inference.yml").write_text(
-        "Predictor:\n  Dataset:\n    augmentations: {}\n    Patch:\n      patch_size: [1, 1, 1]\n    batch_size: 1\n",
+        "Predictor:\n  Dataset:\n    augmentations: {}\n    Patch:\n      patch_size: [1, 1, 1]\n"
+        f"    batch_size: {config_batch_size}\n",
         encoding="utf-8",
     )
     (app_root / "model.pt").write_text("weights", encoding="utf-8")
@@ -395,11 +403,13 @@ def test_local_directory_install_inference_preserves_nested_python_files(
         number_of_mc_dropout=0,
         uncertainty=True,
         prediction_file="Inference.yml",
-        available_vram=None,
+        forced_batch_size=forced_batch_size,
     )
 
     assert (workspace / "pkg" / "__init__.py").exists()
     assert (workspace / "pkg" / "helper.py").exists()
+    # The app's config decides its batch (0 measures it on the GPU) unless one is forced.
+    assert YAML().load(Path("Inference.yml"))["Predictor"]["Dataset"]["batch_size"] == batch_size
 
 
 def test_local_directory_nested_uncertainty_file_is_detected(tmp_path: Path) -> None:

@@ -22,23 +22,32 @@ prediction and training, is ``transient(step) + resident(patch) <= free_VRAM x m
 workflow declares its step (a forward; a forward+backward+optimizer step) and its resident set
 (accumulators and the streamed assembly window; parameters, gradients and optimizer state). The
 provisional grid starts at the worst case's full extent; when a step runs out of memory, the caller
-catches it, asks :func:`next_patch_candidate` for one shrink step (scaled by the last measured
-transient when there is one, a fixed factor when the OOM left no number) re-plans the grid and
+catches it, asks :func:`next_patch_candidate` for one shrink step (more patches along the free axes, as
+many as the last measured transient says, one more when the OOM left no number) re-plans the grid and
 restarts. When everything fits (the common case) nothing here runs at all.
+
+A prediction's batch is measured the same way (``batch_size: 0``): its first forward runs one patch,
+its second two, and :func:`measured_batch` extrapolates the batch the rest run at.
 """
 
+import math
+from bisect import bisect_left
 from typing import Any
 
 import torch
 
-from konfai.utils.utils import concretize_patch_size, size_free_axes
+from konfai.utils.errors import ConfigError
+from konfai.utils.utils import (
+    OverlapSpec,
+    concretize_patch_size,
+    free_axis_rounding,
+    resolve_overlap,
+    size_free_axes,
+)
 
 #: Fraction of the free VRAM a step may claim; the reserve absorbs allocator fragmentation and
 #: transients the measured run did not exercise (mirrors the accumulation gate's margin).
 VRAM_BUDGET_SAFETY_FRACTION = 0.8
-
-#: Per-axis shrink applied when an OOM left no usable measurement to scale from.
-_OOM_SHRINK_STEP = 0.8
 
 
 def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = VRAM_BUDGET_SAFETY_FRACTION) -> float:
@@ -49,13 +58,33 @@ def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = 
     return free_bytes * margin - resident_bytes
 
 
+#: The share of the usable VRAM a measured batch's forward may claim. The rest stays free for the convolution
+#: workspace and the allocator: at the edge of memory a batch runs slower per patch (ImpactSynth, 64 slices
+#: against 32: 5 % slower), and past the half the throughput has nothing left to gain.
+BATCH_SHARE = 0.5
+
+
+def power_of_two_floor(value: int) -> int:
+    """The largest power of two not above ``value`` (1 for anything under 2)."""
+    return 1 << (max(1, value).bit_length() - 1)
+
+
+def measured_batch(spent_one: int, spent_two: int, usable: float) -> int:
+    """The largest power of two whose forward fits ``BATCH_SHARE`` of ``usable``, from what the forwards of
+    one patch and of two claimed: what the second patch added is what each patch costs, the rest of the
+    first what any batch costs."""
+    per_patch = max(spent_two - spent_one, 1)
+    fits = int((usable * BATCH_SHARE - max(spent_one - per_patch, 0)) // per_patch)
+    return power_of_two_floor(fits)
+
+
 def transient_at_oom(device: int | None) -> int | None:
     """The failed step's transient (CUDA peak over resident), ``None`` off CUDA or when unreadable."""
     if device is None:
         return None
     try:
         transient = int(torch.cuda.max_memory_allocated(device) - torch.cuda.memory_allocated(device))
-    except Exception:  # nosec B110 - an unreadable measurement falls back to the fixed shrink step
+    except Exception:  # nosec B110 - an unreadable measurement falls back to one split per restart
         return None
     return transient if transient > 0 else None
 
@@ -84,6 +113,32 @@ def usable_after_oom(device: int | None) -> float:
     return usable_vram(free)
 
 
+def balanced_patch(extent: int, count: int, overlap: OverlapSpec) -> int:
+    """The shortest patch that covers ``extent`` in ``count`` patches overlapping as ``overlap`` says (20 % when
+    ``None``): the axis cut into equal parts, the fewest voxels that count computes."""
+
+    def covers(size: int) -> bool:
+        try:
+            voxels = resolve_overlap(overlap, [size], [extent])[0]
+        except ConfigError:  # an overlap as long as the patch
+            return False
+        return size + (count - 1) * (size - voxels) >= extent
+
+    return bisect_left(range(extent + 1), True, key=covers)
+
+
+def _split(extent: int, size: int, overlap: OverlapSpec, multiple: int) -> int | None:
+    """The patch an axis takes with one more patch along it: the balanced patch of the next count that is shorter
+    than ``size``, rounded up to the model's ``multiple``; ``None`` at the floor."""
+    if size <= multiple:
+        return None
+    for count in range(max(2, extent // size + 1), extent + 1):
+        shorter = -(-balanced_patch(extent, count, overlap) // multiple) * multiple
+        if shorter < size:
+            return shorter
+    return None
+
+
 def next_patch_candidate(
     candidate: list[int],
     patch_size: list[int] | None,
@@ -91,35 +146,43 @@ def next_patch_candidate(
     measured_bytes: int | None,
     usable_bytes: float,
     snap: list[int] | None = None,
+    overlap: OverlapSpec = None,
 ) -> list[int] | None:
     """One shrink step toward a patch whose step fits ``usable_bytes``; ``None`` = nothing smaller.
 
     ``candidate`` is the size that just failed; ``patch_size`` is the user's per-axis convention
-    (``0`` = free, ``N`` = pinned, ``None`` = all free): only free axes move. With a measured
-    transient the free axes scale ISOTROPICALLY by ``(usable / measured) ** (1 / n_free)`` (the
-    volume ratio activations follow, ~linear in voxels: one step lands near the target); without one: or when
-    the measurement claims the candidate already fits, so scaling would not shrink: each
-    free axis takes the fixed OOM step. Sizes snap DOWN to the model's valid multiples, floored at
-    ``min(snap, extent)``. ``None`` means no smaller candidate exists (every free axis at its floor,
-    or ``usable_bytes`` leaves the step no memory at all): the caller owns the error message.
+    (``0`` = free, ``N`` = pinned, ``None`` = all free): only free axes move, and they move by patch
+    COUNT. The free axis whose patch is the longest takes one more patch, and each patch of an axis is the
+    shortest that covers it in that count with its ``overlap``: the fewest patches, the axis cut into
+    equal parts (two patches of 295 voxels cover 531 overlapping by 59, where two of 392 overlap by 253).
+    With a measured transient the axes split until the patch's voxels fit ``usable / measured`` of the
+    failed one (activations are ~linear in voxels: one restart); without one, or when the measurement
+    claims the candidate already fits, one split per restart. Sizes round up to the model's valid
+    multiples (``snap``). ``None`` means no smaller candidate exists (every free axis at its floor, or
+    ``usable_bytes`` leaves the step no memory at all): the caller owns the error message.
     """
     free = [d for d, p in enumerate(patch_size) if p == 0] if patch_size is not None else list(range(len(candidate)))
     if not free or usable_bytes <= 0:
         return None
+    fits = None
     if measured_bytes is not None and measured_bytes > usable_bytes:
-        ratio = (usable_bytes / measured_bytes) ** (1.0 / len(free))
-    else:
-        ratio = _OOM_SHRINK_STEP
-
-    def snapped(axis: int, value: int) -> int:
-        if snap is None or snap[axis] <= 1:
-            return max(1, value)
-        return max(min(snap[axis], int(shape[axis])), (value // snap[axis]) * snap[axis])
-
-    shrunk = list(candidate)
-    for axis in free:
-        shrunk[axis] = min(snapped(axis, int(candidate[axis] * ratio)), candidate[axis])
-    return shrunk if shrunk != list(candidate) else None
+        fits = math.prod(candidate) * usable_bytes / measured_bytes
+    sizes = list(candidate)
+    while True:
+        splits = {}
+        for axis in free:
+            axis_overlap = overlap[axis] if isinstance(overlap, list) else overlap
+            multiple = free_axis_rounding(snap, axis, len(candidate))
+            shorter = _split(int(shape[axis]), sizes[axis], axis_overlap, multiple)
+            if shorter is not None:
+                splits[axis] = shorter
+        if not splits:
+            break
+        longest = max(splits, key=lambda axis: sizes[axis])
+        sizes[longest] = splits[longest]
+        if fits is None or math.prod(sizes) <= fits:
+            break
+    return sizes if sizes != list(candidate) else None
 
 
 class VramAutoPatchMixin:
@@ -142,6 +205,7 @@ class VramAutoPatchMixin:
             if patch is not None and patch.patch_size is not None and any(size == 0 for size in patch.patch_size)
             else None
         )
+        self._vram_patch_overlap: OverlapSpec = patch.overlap if patch is not None else None
         self._vram_patch_candidate: list[int] | None = None
         #: Per-axis input multiple the model needs (its downsampling factor); a free axis snaps to
         #: it. The subclass sets it once the model graph is final.
@@ -182,5 +246,11 @@ class VramAutoPatchMixin:
             self._vram_patch_template, worst, self._downsampling_factor
         )
         return next_patch_candidate(
-            candidate, self._vram_patch_template, worst, measured, usable, self._downsampling_factor
+            candidate,
+            self._vram_patch_template,
+            worst,
+            measured,
+            usable,
+            self._downsampling_factor,
+            self._vram_patch_overlap,
         )

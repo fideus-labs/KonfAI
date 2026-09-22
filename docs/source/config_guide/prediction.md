@@ -127,7 +127,7 @@ Key fields:
 | `augmentations` | mapping | Test-time augmentation definitions. |
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
 | `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
-| `batch_size` | int | Number of patches per inference batch. |
+| `batch_size` | int | Number of patches per inference batch. `0` measures it on the GPU: a forward of one patch, then of two, then the largest power of two whose forward fits half of the usable VRAM (80 % of the free memory once the case's accumulation is reserved); the other half is headroom for the convolution workspace. Halved if it still runs out. On CPU, `0` runs one patch at a time. |
 
 Use `Dataset.Patch` when:
 
@@ -148,10 +148,14 @@ Patch:
 ```
 
 There is no budget key: the budget is the GPU's measured free VRAM. On a CUDA
-out-of-memory the run reads what the failed forward cost (the measurement is
-free (it already ran), shrinks the free axes by that ratio (pinned axes never
-move), re-plans the patch grid and re-runs the rank's cases) typically one
-restart. The chosen size also reserves room for the accumulation, so the blend
+out-of-memory the free axes take more patches, the fewest that fit: the axis
+whose patch is the longest splits first, and each axis is cut into equal parts
+with its overlap (531 voxels in two patches of 295 overlapping by 59 compute
+1.1 times the axis; two of 392, the largest that fits, overlap by 253 and
+compute 1.5 times it). The run reads what the failed forward cost (the measurement is free, it
+already ran) and splits until the patch fits, typically one restart; an OOM
+that leaves no number (a library allocating outside PyTorch) splits once per
+restart. Pinned axes never move. The chosen size also reserves room for the accumulation, so the blend
 stays on the GPU; when that reservation cannot fit (or cannot be measured), the
 forward is sized alone and the writer blends on the host instead. `overlap`
 accepts a voxel count (`8`), a percent string (`"20%"`), or `null` (a 20%

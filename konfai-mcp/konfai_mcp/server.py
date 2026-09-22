@@ -1381,8 +1381,10 @@ _APP_FORCE_UPDATE_DESC = "Re-download the app files instead of reusing the local
 _APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's maximum_tta)."
 _APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
 _APP_ENSEMBLE_MODELS_DESC = "Explicit checkpoint names to ensemble (see describe_app checkpoints; overrides ensemble)."
-_APP_PATCH_SIZE_DESC = "Force the inference patch size (overrides the app's VRAM plan and config default)."
-_APP_BATCH_SIZE_DESC = "Force the inference batch size (overrides the app's VRAM plan and config default)."
+_APP_PATCH_SIZE_DESC = "Force the inference patch size (overrides the app's config default)."
+_APP_BATCH_SIZE_DESC = (
+    "Force the inference batch size (overrides the app's config, whose `batch_size: 0` measures it on the GPU)."
+)
 _APP_SET_PARAMETERS_DESC = "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see list_app_parameters."
 _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 

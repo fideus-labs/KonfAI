@@ -104,8 +104,8 @@ window of it.
    rows, so the height settles on what the run actually holds rather than on a
    prediction of it.
 2. `patch_size`: leave an axis at `0` and KonfAI sizes it, taking the whole
-   volume when it fits and shrinking on OOM. Otherwise pin the largest size your
-   model and context need.
+   volume when it fits and otherwise the fewest patches that fit, each axis cut
+   into equal parts. Otherwise pin the largest size your model and context need.
 3. `batch_size: 1` to start, raise it while watching throughput and VRAM.
 4. Overlap only when the borders need it: more overlap is more reads and more
    forward passes.

@@ -51,6 +51,7 @@ from konfai.utils.config import Choices, Range
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
 
 from .elastix import _is_local_ref
+from .engine_errors import out_of_memory_as_torch
 
 DIM = 3
 # The feature model's input channel count is an intrinsic property of the pretrained model (grayscale
@@ -505,7 +506,8 @@ class ConvexAdamRegistration(torch.nn.Module):
             for b in range(fixed.shape[0]):
                 fixed_img = data_to_image(fixed[b].detach().cpu().numpy(), fixed_attrs[b])
                 moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
-                dvf_np = self._engine.register(fixed_img, moving_img, device_index)
+                with out_of_memory_as_torch(device_index >= 0):
+                    dvf_np = self._engine.register(fixed_img, moving_img, device_index)
                 combined.append(torch.from_numpy(dvf_np))
         return torch.stack(combined, dim=0).to(fixed.device)
 
