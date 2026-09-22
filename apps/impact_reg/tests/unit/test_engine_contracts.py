@@ -172,6 +172,14 @@ def _plain_inputs(tensor, attribute):
     return [tensor, torch.tensor([1]), torch.tensor([0.0, 1.0, 0.5, 0.2])]
 
 
+def test_fireants_deformable_masked_reaches_the_engine() -> None:
+    # Dropped at RegistrationNet, the deformable stage would stay masked: a silent no-op.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    for value in (True, False):
+        assert RegistrationNet(deformable_masked=value)["Registration"]._engine._deformable_masked is value
+
+
 def test_fireants_refuses_an_unknown_linear_method() -> None:
     # Every unrecognised value would otherwise fall through to the rigid-then-affine branch, so a
     # typo registers with a stage the caller did not ask for and returns a plausible result. The
