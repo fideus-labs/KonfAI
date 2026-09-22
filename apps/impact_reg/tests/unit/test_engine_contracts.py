@@ -82,6 +82,51 @@ def test_an_empty_fixed_mask_is_a_zero_field_and_never_reaches_elastix(monkeypat
     assert not field.any()
 
 
+def _elastix_run(monkeypatch, lines: list[str], code: int):
+    """``ElastixEngine.register`` over a subprocess that prints ``lines`` and exits with ``code``."""
+
+    class Process:
+        stdout = iter(lines)
+
+        def wait(self) -> int:
+            return code
+
+    monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
+    engine = SimpleNamespace(
+        _local_models=[],
+        _elastix_bin="elastix",
+        _elastix_root=Path("/opt/elastix-impact"),
+        _stage_parameter_maps=lambda work, device_index: [],
+        _max_iterations=0,
+        _iterations=None,
+    )
+    fixed = sitk.Image([6, 5, 4], sitk.sitkFloat32)
+    return ElastixEngine.register(engine, fixed, sitk.Image(fixed), 0)
+
+
+def test_what_impact_says_about_device_memory_is_shown_once(monkeypatch, capsys) -> None:
+    # IMPACT goes on with smaller patches when the device runs out of memory: the run is slower for it, and
+    # elastix's output is otherwise shown on a failure only.
+    retry = "IMPACT: the model ran out of device memory on the whole image; retrying with a patch of (96 160 192).\n"
+    with pytest.raises(FileNotFoundError, match="no composite transform"):
+        _elastix_run(monkeypatch, ["Resolution: 0\n", retry, retry, "1 -0.25 3.0\n"], 0)
+
+    assert capsys.readouterr().out.count("retrying with a patch of (96 160 192)") == 1
+
+
+def test_a_gpu_the_install_cannot_see_says_what_to_do(monkeypatch) -> None:
+    # A CPU build answers `-h` and passes for a valid install: the failure only comes mid-registration.
+    unseen = "Description: ITK ERROR: ImpactMetric(0x5e): CUDA is not available. Please check your CUDA installation.\n"
+    with pytest.raises(RuntimeError, match="KONFAI_ELASTIX_DIR") as raised:
+        _elastix_run(monkeypatch, [unseen], 1)
+    assert str(Path("/opt/elastix-impact")) in str(raised.value)
+
+    with pytest.raises(RuntimeError) as other:
+        _elastix_run(monkeypatch, ["no such parameter file\n"], 1)
+    assert "KONFAI_ELASTIX_DIR" not in str(other.value)
+
+
 def test_elastix_engine_refuses_an_empty_parameter_map_list() -> None:
     # 'resolutions' rewrites a template's resolution-dependent lines; it never creates one. Without a
     # map elastix would launch with no -p and die in a cryptic subprocess error.
