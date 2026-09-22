@@ -70,7 +70,7 @@ import tempfile
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import numpy as np
 import SimpleITK as sitk
@@ -386,6 +386,10 @@ class _ImpactCore(IMPACTReg):
         # shape=None: the whole (downsampled) tensor is scored, no ModelPatch tiling.
         self.model = ImpactFeatureModel(model_path, int(in_channels), [float(w) for w in weights], None, DIM)
 
+    def pca_project(self, output: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """IMPACTReg's own PCA reduction, for the static path: the basis is fitted on ``target``."""
+        return self._pca_project(output, target)
+
     @staticmethod
     def _stats(tensor: torch.Tensor) -> dict:
         detached = tensor.detach()
@@ -441,6 +445,16 @@ class ImpactFeatureLoss(torch.nn.Module):
             self._cores.append(_ImpactCore(spec.ref, in_channels, weights, spec.distance, spec.pca))
             self._model_weights.append(float(spec.layers_weight))
 
+    @property
+    def cores(self) -> list["_ImpactCore"]:
+        """The per-model feature cores, for the static path, which extracts instead of scoring."""
+        return [cast("_ImpactCore", core) for core in self._cores]
+
+    @property
+    def model_weights(self) -> list[float]:
+        """Each model's weight in the fusion, applied to its features in the static path."""
+        return self._model_weights
+
     def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
         mask: torch.Tensor | None = None
         if self._masked:
@@ -451,6 +465,107 @@ class ImpactFeatureLoss(torch.nn.Module):
             term = weight * core(moved, fixed, mask)
             total = term if total is None else total + term
         return total
+
+
+@torch.no_grad()
+def _one_volume(core: "_ImpactCore", weight: float, image: torch.Tensor, patch: int, overlap: float) -> torch.Tensor:
+    """One model's selected feature layers for one image, tiled and blended.
+
+    The intensity statistics come from the WHOLE image, never from a tile, so every tile is normalised
+    identically -- a per-tile normalisation would make the same anatomy score differently on either side
+    of a seam. Tiles share ``overlap`` of their width and cross-fade through a cosine window.
+    """
+    model = core.model
+    if model.model is None:
+        model.model = torch.jit.load(model.model_path, map_location="cpu").eval()  # nosec B614
+    model.model.to(image.device)
+    stats = torch.tensor(
+        [float(image.min()), float(image.max()), float(image.mean()), float(image.std())], device=image.device
+    )
+    nb_layers = torch.tensor([len(model.weights)], device=image.device)
+    tensor = image
+    if tensor.shape[1] != model.in_channels:
+        tensor = tensor.repeat(1, model.in_channels, *([1] * (tensor.dim() - 2)))
+
+    extracted: torch.Tensor | None = None
+    weights: torch.Tensor | None = None
+    for window in _tiles(tuple(tensor.shape[2:]), patch, overlap):
+        tile = tensor[(slice(None), slice(None), *window)]
+        layers = [
+            layer
+            for layer_weight, layer in zip(model.weights, model.model(tile, nb_layers, stats), strict=False)
+            if layer_weight != 0
+        ]
+        tile_features = weight * torch.nn.functional.normalize(torch.cat(layers, dim=1), dim=1)
+        if extracted is None:  # the channel count is only known once a tile has been through
+            shape = (tile_features.shape[0], tile_features.shape[1], *tensor.shape[2:])
+            extracted = torch.zeros(shape, device=image.device, dtype=tile_features.dtype)
+        if weights is None:
+            weights = torch.zeros((1, 1, *tensor.shape[2:]), device=image.device, dtype=tile_features.dtype)
+        blend = _cosine_window(tuple(tile_features.shape[2:]), image.device, tile_features.dtype)
+        extracted[(slice(None), slice(None), *window)] += tile_features * blend
+        weights[(slice(None), slice(None), *window)] += blend
+        del tile_features, layers
+    if extracted is None or weights is None:
+        raise RuntimeError(f"no tile covered an image of shape {tuple(tensor.shape[2:])}")
+    return extracted / weights.clamp_min(1e-6)
+
+
+@torch.no_grad()
+def _feature_volumes(
+    loss: "ImpactFeatureLoss", fixed: torch.Tensor, moving: torch.Tensor, patch: int, overlap: float = 0.25
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The fixed and moving feature volumes of every model, concatenated along the channel axis.
+
+    This is the static path: each network runs once per image here, instead of once per optimiser step
+    inside the loss, and the registration then works on the feature volumes themselves. It is what makes
+    a large pair affordable -- no autograd graph through an extractor is kept -- and what a whole-image
+    model needs, since the features are never differentiated with respect to the warp.
+
+    A model asking for ``pca`` has both its volumes projected onto the basis of the FIXED one, exactly as
+    the online metric fits its basis on the reference side. The channel count is what the comparison then
+    costs, so this is also the lever when a pair of models does not fit.
+    """
+    fixed_sides: list[torch.Tensor] = []
+    moving_sides: list[torch.Tensor] = []
+    for weight, core in zip(loss.model_weights, loss.cores, strict=True):
+        fixed_features = _one_volume(core, weight, fixed, patch, overlap)
+        moving_features = _one_volume(core, weight, moving, patch, overlap)
+        if core.pca > 0:
+            moving_features, fixed_features = core.pca_project(moving_features, fixed_features)
+        fixed_sides.append(fixed_features)
+        moving_sides.append(moving_features)
+    return torch.cat(fixed_sides, dim=1), torch.cat(moving_sides, dim=1)
+
+
+def _tiles(shape: tuple[int, ...], patch: int, overlap: float):
+    """The windows the extraction runs on: the whole image when ``patch`` is 0, otherwise tiles of
+    ``patch`` voxels stepping by ``patch * (1 - overlap)``, the last one flush with the far face."""
+    if patch <= 0 or all(size <= patch for size in shape):
+        yield tuple(slice(0, size) for size in shape)
+        return
+    step = max(1, round(patch * (1.0 - overlap)))
+    starts = [
+        sorted({*range(0, max(size - patch, 0) + 1, step), max(size - patch, 0)}) if size > patch else [0]
+        for size in shape
+    ]
+    for first in starts[0]:
+        for second in starts[1]:
+            for third in starts[2]:
+                yield tuple(
+                    slice(start, min(start + patch, size))
+                    for start, size in zip((first, second, third), shape, strict=True)
+                )
+
+
+def _cosine_window(shape: tuple[int, ...], device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
+    """A separable cosine taper, 1 at the tile's centre and near 0 at its faces, so overlapping tiles
+    cross-fade instead of stepping."""
+    window = torch.ones((1, 1, *shape), device=device, dtype=dtype)
+    for axis, size in enumerate(shape):
+        taper = torch.hann_window(size + 2, periodic=False, device=device, dtype=dtype)[1:-1].clamp_min(1e-3)
+        window = window * taper.reshape([1, 1] + [size if i == axis else 1 for i in range(len(shape))])
+    return window
 
 
 def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
@@ -499,6 +614,8 @@ class FireANTsEngine:
         smooth_grad_sigma: float,
         seed: int,
         impact_specs: list["ModelSpec"],
+        impact_mode: str = "online",
+        feature_patch: int = 0,
     ) -> None:
         self._scales = [int(s) for s in scales]
         self._affine_iterations = [int(i) for i in affine_iterations]
@@ -532,6 +649,10 @@ class FireANTsEngine:
         # IMPACT deformable metric (only used when deformable_metric == "impact"): KonfAI IMPACT feature
         # models drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
         self._impact_specs = impact_specs
+        self._impact_mode = impact_mode
+        self._feature_patch = int(feature_patch)
+        if impact_mode not in ("online", "static"):
+            raise ValueError(f"Unknown impact_mode '{impact_mode}' (expected 'online' or 'static').")
 
     @staticmethod
     def _center_of_mass_translation(
@@ -734,11 +855,34 @@ class FireANTsEngine:
                 )
             # "impact" swaps the analytic metric for a KonfAI IMPACT feature loss on the deformable stage
             # (the linear pre-align keeps its own affine_metric); the fixed mask restricts it too.
-            if self._deformable_metric == "impact":
-                loss_type: str = "custom"
-                custom_loss: torch.nn.Module | None = ImpactFeatureLoss(self._impact_specs, masked=masked)
-            else:
-                loss_type, custom_loss = deformable_loss, None
+            loss_type: str = deformable_loss
+            custom_loss: torch.nn.Module | None = None
+            if self._deformable_metric == "impact" and self._impact_mode == "static":
+                # Static: extract once, then register the feature volumes with FireANTs' own metric. The
+                # images are re-read unmasked because the masked pair carries the mask as a channel, and
+                # the mask is concatenated back afterwards so ``masked_`` still means what it says.
+                extractor = ImpactFeatureLoss(self._impact_specs).to(device)
+                volumes = _feature_volumes(
+                    extractor,
+                    Image(fixed, device=device).array,
+                    Image(moving, device=device).array,
+                    self._feature_patch,
+                )
+                for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
+                    if masked:
+                        features = torch.cat([features, image.array[:, -1:]], dim=1)
+                    image.array = features
+                    image.channels = features.shape[1]
+                del extractor
+                gc.collect()
+                bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
+                # The channels ARE the features now, so FireANTs' own local cross-correlation compares
+                # them (``cc_kernel`` sets its window): "impact" names where the channels came from, not
+                # a metric FireANTs knows.
+                loss_type = "masked_cc" if masked else "cc"
+            elif self._deformable_metric == "impact":
+                loss_type = "custom"
+                custom_loss = ImpactFeatureLoss(self._impact_specs, masked=masked)
             reg = Deformable(
                 scales=self._scales,
                 iterations=self._deformable_iterations,
@@ -925,6 +1069,20 @@ class RegistrationNet(network.Network):
             "convergence.",
         ] = 1.0,
         seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
+        impact_mode: Annotated[
+            Literal["online", "static"],
+            "How the IMPACT deformable metric reads its features. 'online' extracts them inside the loss at "
+            "every optimiser step, so the warp is differentiated through the network. 'static' extracts them "
+            "once per image and registers the feature volumes themselves: far less device memory, no network "
+            "in the optimisation loop, and the only path a whole-image feature model can take.",
+        ] = "online",
+        feature_patch: Annotated[
+            int,
+            "Static mode only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
+            "at once. Tiles share a quarter of their width and are blended by a cosine window, so a volume "
+            "larger than the card still goes through.",
+            Range(0, 1024),
+        ] = 0,
         models: dict[str, ModelSpec] = {},
     ) -> None:
         super().__init__(
@@ -956,6 +1114,8 @@ class RegistrationNet(network.Network):
             smooth_grad_sigma,
             seed,
             _sorted_specs(models),
+            impact_mode,
+            feature_patch,
         )
         self.add_module(
             "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]

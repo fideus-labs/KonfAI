@@ -270,3 +270,41 @@ def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_cl
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
         ElastixRegistration.forward(SimpleNamespace(_engine=Engine()), image, image, image, image, attributes)
+
+
+def test_fireants_static_mode_reaches_the_engine() -> None:
+    # Dropped at RegistrationNet, the deformable stage would keep extracting inside the loss: the run
+    # still succeeds, on a card it may not fit, so nothing points at the setting having been ignored.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    for mode, patch in (("online", 0), ("static", 128)):
+        engine = RegistrationNet(impact_mode=mode, feature_patch=patch)["Registration"]._engine
+        assert (engine._impact_mode, engine._feature_patch) == (mode, patch)
+
+
+def test_fireants_refuses_an_unknown_impact_mode() -> None:
+    # An unrecognised value would otherwise fall through to the online path, which is the one that does
+    # not fit the volume the caller asked static for.
+    import pytest
+
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="impact_mode"):
+        RegistrationNet(impact_mode="statique")
+
+
+def test_fireants_tiles_cover_every_voxel_once_blended() -> None:
+    # A gap between tiles would leave a band of the image with no features at all, and the cosine blend
+    # is what keeps a seam from showing where they meet.
+    import torch
+
+    from impact_reg_konfai.models.fireants import _cosine_window, _tiles
+
+    shape = (40, 24, 70)
+    covered = torch.zeros((1, 1, *shape))
+    for window in _tiles(shape, patch=32, overlap=0.25):
+        covered[(slice(None), slice(None), *window)] += _cosine_window(
+            tuple(stop - start for start, stop in ((w.start, w.stop) for w in window)), "cpu", torch.float32
+        )
+    assert float(covered.min()) > 0.0
+    assert list(_tiles(shape, patch=0, overlap=0.25)) == [tuple(slice(0, size) for size in shape)]
