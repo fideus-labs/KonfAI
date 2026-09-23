@@ -318,6 +318,31 @@ def test_fireants_tiled_extraction_leaves_no_seam() -> None:
     assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
 
 
+def test_fireants_rounds_the_extraction_up_for_a_model_that_needs_it() -> None:
+    # anatomix halves its input four times and its skip connections only meet on a multiple of 16: handed
+    # a 40-voxel image it raises inside the network. The padding must not reach the result.
+    import pytest
+    import torch
+    from impact_reg_konfai.models.fireants import RegistrationNet, _one_volume
+
+    class NeedsSixteen(torch.nn.Module):
+        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            if any(size % 16 for size in tile.shape[2:]):
+                raise RuntimeError(f"sizes of tensors must match: {tuple(tile.shape[2:])}")
+            return [tile.repeat(1, 4, 1, 1, 1)]
+
+    model = SimpleNamespace(
+        model=NeedsSixteen(), weights=[1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3
+    )
+    core = SimpleNamespace(model=model, _stats=lambda t: {})
+    image = torch.rand(1, 1, 40, 40, 40)
+    with pytest.raises(RuntimeError, match="sizes of tensors"):
+        _one_volume(core, 1.0, image, patch=0, overlap=0.25, normalization="none")
+    volume = _one_volume(core, 1.0, image, patch=0, overlap=0.25, normalization="none", multiple=16)
+    assert volume.shape == (1, 4, 40, 40, 40)
+    assert RegistrationNet(feature_multiple=16)["Registration"]._engine._feature_multiple == 16
+
+
 def test_fireants_static_settings_reach_the_engine() -> None:
     # Dropped at RegistrationNet, each of these would silently keep its default: the run still produces a
     # field, computed with settings the caller did not ask for.

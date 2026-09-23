@@ -518,15 +518,21 @@ class _FeatureCC(torch.nn.Module):
         return total
 
 
-def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float) -> ModelPatch:
+def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: int) -> ModelPatch:
     """The grid one extraction runs on: KonfAI's own, configured from ``feature_patch``.
 
     ``patch`` 0 leaves every axis free, which is one patch over the whole image. Otherwise the volume
     is cut exactly as the predictor cuts a network's input -- same border padding, same raised-cosine
     window tapering over the overlap alone, so the tiles sum to one everywhere.
+
+    ``multiple`` is the free axes' rounding, KonfAI's ``free_axis_multiple``: an encoder-decoder that
+    halves its input a few times only accepts a size its skip connections divide, and anatomix is one
+    (a multiple of 16). The padding is cropped back off at blend time.
     """
     size = [int(patch)] * len(shape)
     grid = ModelPatch(size, round(patch * overlap) if patch > 0 else 0)
+    if multiple > 1:
+        grid.free_axis_multiple = [int(multiple)] * len(shape)
     grid.patch_combine = Cosinus()
     kept = blend_axes(grid.patch_size)
     grid.patch_combine.set_patch_config(kept, blend_overlap(cast(int, grid.overlap), kept))
@@ -536,7 +542,13 @@ def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float) -> ModelPa
 
 @torch.no_grad()
 def _one_volume(
-    core: "_ImpactCore", weight: float, image: torch.Tensor, patch: int, overlap: float, normalization: str
+    core: "_ImpactCore",
+    weight: float,
+    image: torch.Tensor,
+    patch: int,
+    overlap: float,
+    normalization: str,
+    multiple: int = 0,
 ) -> torch.Tensor:
     """One model's selected feature layers for one image, tiled and blended.
 
@@ -551,7 +563,7 @@ def _one_volume(
     model.model.to(image.device)
     statistics = Attribute(core._stats(image))
 
-    grid = _feature_grid(tuple(image.shape[2:]), patch, overlap)
+    grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, multiple)
     accumulator = Accumulator(grid.get_patch_slices(), grid.patch_size, grid.patch_combine)
     for index, (tile,) in enumerate(grid.disassemble(image)):
         # The model's own input triple: the channel replication and the [min, max, mean, std] order
@@ -587,6 +599,7 @@ def _feature_volumes(
     patch: int,
     overlap: float,
     normalization: str,
+    multiple: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The fixed and moving feature volumes of every model, concatenated along the channel axis.
 
@@ -602,8 +615,8 @@ def _feature_volumes(
     fixed_sides: list[torch.Tensor] = []
     moving_sides: list[torch.Tensor] = []
     for weight, core in zip(loss.model_weights, loss.cores, strict=True):
-        fixed_features = _one_volume(core, weight, fixed, patch, overlap, normalization)
-        moving_features = _one_volume(core, weight, moving, patch, overlap, normalization)
+        fixed_features = _one_volume(core, weight, fixed, patch, overlap, normalization, multiple)
+        moving_features = _one_volume(core, weight, moving, patch, overlap, normalization, multiple)
         if core.pca > 0:
             moving_features, fixed_features = core.pca_project(moving_features, fixed_features)
         fixed_sides.append(fixed_features)
@@ -661,6 +674,7 @@ class FireANTsEngine:
         feature_patch: int = 0,
         feature_chunk: int = 0,
         feature_overlap: float = 0.25,
+        feature_multiple: int = 0,
         feature_normalization: str = "l2",
         feature_metric: str = "cc",
     ) -> None:
@@ -712,6 +726,7 @@ class FireANTsEngine:
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
         self._feature_overlap = float(feature_overlap)
+        self._feature_multiple = int(feature_multiple)
         self._feature_normalization = feature_normalization
         self._feature_metric = feature_metric
         if feature_normalization not in ("l2", "standardized", "none"):
@@ -938,6 +953,7 @@ class FireANTsEngine:
                     self._feature_patch,
                     self._feature_overlap,
                     self._feature_normalization,
+                    self._feature_multiple,
                 )
                 for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
                     if masked:
@@ -1176,6 +1192,14 @@ class RegistrationNet(network.Network):
             "through in one pass.",
             Range(0.0, 0.9),
         ] = 0.25,
+        feature_multiple: Annotated[
+            int,
+            "Static only: the voxel multiple every feature model needs its input rounded up to, 0 or 1 for "
+            "none. An encoder-decoder that halves its input a few times only accepts a size its skip "
+            "connections divide: anatomix wants a multiple of 16, while the TotalSegmentator models and MIND "
+            "take any size. Set the largest of the models in use; the padding never reaches the result.",
+            Range(0, 64),
+        ] = 0,
         feature_normalization: Annotated[
             Literal["l2", "standardized", "none"],
             "Static only: how each voxel's feature vector is scaled before the two volumes are compared. "
@@ -1227,6 +1251,7 @@ class RegistrationNet(network.Network):
             feature_patch,
             feature_chunk,
             feature_overlap,
+            feature_multiple,
             feature_normalization,
             feature_metric,
         )
