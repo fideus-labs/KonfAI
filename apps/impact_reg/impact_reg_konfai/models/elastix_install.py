@@ -33,27 +33,33 @@ from tqdm import tqdm
 # Key format: (OS, ARCH, FLAVOR)
 #   - OS     : platform.system() -> "Linux", "Windows", "Darwin"
 #   - ARCH   : normalized architecture -> "x86_64"
-#   - FLAVOR : "cpu" or "cu128"
+#   - FLAVOR : "cpu", "cu128" or "cu130"
 #
 # No asset bundles LibTorch: both flavors link it from the environment's pip ``torch`` (loader_env).
-# The flavors differ in linkage, cu128 additionally needing libtorch_cuda and the CUDA runtime.
+# The flavors differ in linkage, a CUDA one additionally needing libtorch_cuda and the CUDA runtime.
+# The CUDA flavor has to match the CUDA the environment's torch was built against: a CUDA 13 torch
+# ships no CUDA 12 runtime, so the cu128 binary cannot load beside it, and the reverse holds too.
 # -----------------------------------------------------------------------------
 ELX_ASSET_TEMPLATE = {
     ("Linux", "x86_64", "cpu"): "elastix-impact-linux-x86_64-cpu.zip",
     ("Linux", "x86_64", "cu128"): "elastix-impact-linux-x86_64-cu128.zip",
+    ("Linux", "x86_64", "cu130"): "elastix-impact-linux-x86_64-cu130.zip",
     ("Windows", "x86_64", "cpu"): "elastix-impact-windows-x86_64-cpu.zip",
     ("Windows", "x86_64", "cu128"): "elastix-impact-windows-x86_64-cu128.zip",
+    ("Windows", "x86_64", "cu130"): "elastix-impact-windows-x86_64-cu130.zip",
     ("Darwin", "x86_64", "cpu"): "elastix-impact-macos-14-x86_64-cpu.zip",
 }
 
 # -----------------------------------------------------------------------------
-# Minimum NVIDIA driver versions required for CUDA 12.8.
-#
-# The CUDA Toolkit itself is NOT required.
-# Only a sufficiently recent NVIDIA driver must be installed.
+# Minimum NVIDIA driver versions per CUDA flavor, from NVIDIA's own compatibility
+# table. The CUDA Toolkit itself is NOT required, only a recent enough driver.
 # -----------------------------------------------------------------------------
-CUDA128_MIN_DRIVER_LINUX = (570, 26)
-CUDA128_MIN_DRIVER_WINDOWS = (570, 65)
+CUDA_MIN_DRIVER = {
+    "cu128": {"Linux": (570, 26), "Windows": (570, 65)},
+    "cu130": {"Linux": (580, 65), "Windows": (580, 88)},
+}
+CUDA128_MIN_DRIVER_LINUX = CUDA_MIN_DRIVER["cu128"]["Linux"]
+CUDA128_MIN_DRIVER_WINDOWS = CUDA_MIN_DRIVER["cu128"]["Windows"]
 
 GITHUB_OWNER = "vboussot"
 GITHUB_REPO = "ImpactElastix"
@@ -93,18 +99,16 @@ def detect_nvidia_driver() -> tuple[bool, tuple[int, int] | None]:
     return (True, (int(m.group(1)), int(m.group(2))))
 
 
-def driver_ok_for_cuda(os_name: str, drv: tuple[int, int] | None) -> bool:
-    """
-    Check whether the detected NVIDIA driver satisfies the minimum
-    requirement for CUDA 12.8 on the given operating system.
+def driver_ok_for_cuda(os_name: str, drv: tuple[int, int] | None, flavor: str | None = None) -> bool:
+    """Whether the detected NVIDIA driver meets the minimum for the CUDA the asset links.
+
+    ``flavor`` is the asset that would be installed (``torch_cuda_flavor``); without one the CUDA 12.8
+    floor is used, which is what every caller asked for before a CUDA 13 asset existed.
     """
     if drv is None:
         return False
-    if os_name == "Linux":
-        return drv >= CUDA128_MIN_DRIVER_LINUX
-    if os_name == "Windows":
-        return drv >= CUDA128_MIN_DRIVER_WINDOWS
-    return False
+    minimums = CUDA_MIN_DRIVER.get(flavor or "cu128", CUDA_MIN_DRIVER["cu128"])
+    return drv >= minimums[os_name] if os_name in minimums else False
 
 
 def normalize_arch(machine: str) -> str:
@@ -169,8 +173,9 @@ def extract_archive(archive: Path, dst_dir: Path) -> None:
 
 
 _NO_CUDA_ASSET = (
-    "The CUDA asset links the CUDA 12 runtime, which this environment's torch does not ship: it could not "
-    "load. For the GPU, point KONFAI_ELASTIX_DIR at an elastix-IMPACT built against this torch."
+    "No elastix-IMPACT asset is published for the CUDA this environment's torch was built against, and a "
+    "binary linking another CUDA cannot load beside it. For the GPU, point KONFAI_ELASTIX_DIR at an "
+    "elastix-IMPACT built against this torch."
 )
 
 
@@ -180,7 +185,9 @@ def torch_cuda_flavor() -> str | None:
     import torch
 
     cuda = torch.version.cuda
-    return "cu128" if cuda is not None and cuda.split(".")[0] == "12" else None
+    if cuda is None:
+        return None
+    return {"12": "cu128", "13": "cu130"}.get(cuda.split(".")[0])
 
 
 def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool):
@@ -194,19 +201,30 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
     if arch not in ("x86_64", "arm64"):
         raise NameError(f"Unsupported arch: {arch} (expected x86_64, arm64)")
 
+    # The asset the environment's torch can load at all, then whether the driver is recent enough for
+    # the CUDA that asset links -- a CUDA 13 binary needs a newer driver than a CUDA 12 one.
+    wanted = torch_cuda_flavor()
     flavor = "cpu"
     if force_cuda:
-        if not has_nvidia or not driver_ok_for_cuda(os_name, drv):
-            raise NameError(
-                "CUDA forced but NVIDIA driver/GPU not suitable. Detected: has_nvidia={has_nvidia}, driver={drv}"
-            )
-        if torch_cuda_flavor() is None:
+        if wanted is None:
             raise NameError(_NO_CUDA_ASSET)
-        flavor = "cu128"
-    elif not force_cpu and has_nvidia and driver_ok_for_cuda(os_name, drv):
-        flavor = torch_cuda_flavor() or "cpu"
-        if flavor == "cpu":
+        if not has_nvidia or not driver_ok_for_cuda(os_name, drv, wanted):
+            raise NameError(
+                f"CUDA forced but NVIDIA driver/GPU not suitable for {wanted}. Detected: "
+                f"has_nvidia={has_nvidia}, driver={drv}"
+            )
+        flavor = wanted
+    elif not force_cpu and has_nvidia:
+        if wanted is None:
             print(f"{_NO_CUDA_ASSET} Installing the CPU asset.", flush=True)
+        elif not driver_ok_for_cuda(os_name, drv, wanted):
+            print(
+                f"The NVIDIA driver {drv} is older than the {CUDA_MIN_DRIVER[wanted][os_name]} the "
+                f"{wanted} asset needs. Installing the CPU asset.",
+                flush=True,
+            )
+        else:
+            flavor = wanted
 
     print(f"System: {os_name} {arch}", flush=True)
     print(f"NVIDIA: {has_nvidia}, driver={drv}", flush=True)
@@ -222,7 +240,19 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
     elx_asset = ELX_ASSET_TEMPLATE[key]
     elx_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{GITHUB_TAG}/{elx_asset}"
     elx_archive = install_path / elx_asset
-    download_file(elx_url, elx_archive)
+    try:
+        download_file(elx_url, elx_archive)
+    except Exception as failure:
+        # A CUDA flavor this release does not carry yet: the CPU asset still registers, and a run says
+        # what it would take to use the card. Forced CUDA has no fallback to fall back to.
+        if flavor == "cpu" or force_cuda:
+            raise
+        print(f"{GITHUB_TAG} carries no {elx_asset} ({failure}). Installing the CPU asset.", flush=True)
+        flavor = "cpu"
+        elx_asset = ELX_ASSET_TEMPLATE[(os_name, arch, "cpu")]
+        elx_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{GITHUB_TAG}/{elx_asset}"
+        elx_archive = install_path / elx_asset
+        download_file(elx_url, elx_archive)
     # Extracting over a previous install keeps whatever the new asset does not overwrite. An older asset
     # bundled its own LibTorch under lib/, which then shadowed the environment's torch on the loader
     # path: a CUDA build ran CPU-only, and a build of another torch failed to link at all.

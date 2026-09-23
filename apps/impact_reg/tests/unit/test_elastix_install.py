@@ -51,12 +51,15 @@ def test_a_reinstall_drops_what_the_previous_asset_left_behind(tmp_path: Path, m
     assert (install / "bin" / "elastix").read_bytes() == b"new"
 
 
-@pytest.mark.parametrize(("torch_cuda", "asset"), [("12.8", "cu128"), ("13.0", "cpu"), (None, "cpu")])
+@pytest.mark.parametrize(
+    ("torch_cuda", "asset"), [("12.8", "cu128"), ("13.0", "cu130"), ("11.8", "cpu"), (None, "cpu")]
+)
 def test_the_cuda_asset_is_fetched_only_for_a_torch_that_can_load_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, torch_cuda: str | None, asset: str
 ) -> None:
-    # The CUDA asset links the CUDA 12 runtime from where torch keeps its own. Under a torch built for
-    # CUDA 13 it could not load at all, and the install failed where the CPU asset would have run.
+    # A CUDA asset links the CUDA runtime from where torch keeps its own, so it has to be built against
+    # the same CUDA: the cu128 binary cannot load beside a CUDA 13 torch, and the cu130 one cannot load
+    # beside a CUDA 12 torch. A CUDA this release carries no asset for takes the CPU one.
     import torch
 
     fetched: list[str] = []
@@ -85,7 +88,58 @@ def test_a_forced_cuda_install_refuses_a_torch_that_cannot_load_the_asset(
     monkeypatch.setattr(elastix_install, "detect_nvidia_driver", lambda: (True, (595, 84)))
     monkeypatch.setattr(elastix_install.platform, "system", lambda: "Linux")
     monkeypatch.setattr(elastix_install.platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(torch.version, "cuda", "13.0")
+    monkeypatch.setattr(torch.version, "cuda", "11.8")
 
     with pytest.raises(NameError, match="KONFAI_ELASTIX_DIR"):
         elastix_install.install_elastix_impact(tmp_path / "elastix-impact", force_cuda=True, force_cpu=False)
+
+
+def test_a_cuda_asset_this_release_does_not_carry_falls_back_to_the_cpu_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The flavor a torch can load is decided before the release is asked for it. A release cut before
+    # that CUDA existed carries no such asset, and stopping there would leave no elastix at all.
+    import torch
+
+    fetched: list[str] = []
+
+    def fake_download(url: str, dst: Path) -> None:
+        fetched.append(url)
+        if "cu130" in url:
+            raise RuntimeError("404 Client Error: Not Found")
+        with zipfile.ZipFile(dst, "w") as archive:
+            archive.writestr("bin/elastix", b"new")
+
+    monkeypatch.setattr(elastix_install, "download_file", fake_download)
+    monkeypatch.setattr(elastix_install, "detect_nvidia_driver", lambda: (True, (595, 84)))
+    monkeypatch.setattr(elastix_install.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(elastix_install.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(torch.version, "cuda", "13.0")
+
+    elastix_install.install_elastix_impact(tmp_path / "elastix-impact", force_cuda=False, force_cpu=False)
+
+    assert [url.rsplit("-", 1)[-1] for url in fetched] == ["cu130.zip", "cpu.zip"]
+
+
+def test_a_driver_older_than_the_cuda_the_asset_links_takes_the_cpu_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A CUDA 13 binary needs a newer driver than a CUDA 12 one; 575 runs cu128 and not cu130.
+    import torch
+
+    fetched: list[str] = []
+
+    def fake_download(url: str, dst: Path) -> None:
+        fetched.append(url)
+        with zipfile.ZipFile(dst, "w") as archive:
+            archive.writestr("bin/elastix", b"new")
+
+    monkeypatch.setattr(elastix_install, "download_file", fake_download)
+    monkeypatch.setattr(elastix_install, "detect_nvidia_driver", lambda: (True, (575, 0)))
+    monkeypatch.setattr(elastix_install.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(elastix_install.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(torch.version, "cuda", "13.0")
+
+    elastix_install.install_elastix_impact(tmp_path / "elastix-impact", force_cuda=False, force_cpu=False)
+
+    assert fetched[0].endswith("-cpu.zip")

@@ -52,6 +52,11 @@ written replaces it.
   the field regular while it moves, and it shapes the regulariser too. The filter could do it and no
   preset could ask for it, so the stage ran on an unsmoothed grid; `control_grid_smoothing` exposes it
   and defaults to the method's three passes.
+- impact-reg: the elastix-IMPACT install knows a CUDA 13 torch. It only ever asked for the CUDA 12.8
+  asset, so `pip install torch`'s current default -- a CUDA 13 build -- silently got the CPU binary and
+  the IMPACT presets ran without a card. The installer now picks the asset that matches the CUDA torch
+  was built against, checks the driver against that CUDA's own floor, and falls back to the CPU asset,
+  saying so, when the release carries no such asset.
 - impact-reg: elastix's own messages reach the log, and a GPU the engine cannot see is explained
   rather than reported as an absent CUDA.
 - impact-reg: an empty fixed mask gives a zero field rather than a registration of the whole patch,
