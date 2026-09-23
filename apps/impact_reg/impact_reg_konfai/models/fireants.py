@@ -70,11 +70,12 @@ import tempfile
 from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 import numpy as np
 import SimpleITK as sitk
 import torch
+from konfai.data.patching import Accumulator, Cosinus, ModelPatch, blend_axes, blend_overlap
 from konfai.metric.measure import ImpactFeatureModel, IMPACTReg
 from konfai.network import network
 from konfai.utils.config import Choices, Range
@@ -386,6 +387,10 @@ class _ImpactCore(IMPACTReg):
         # shape=None: the whole (downsampled) tensor is scored, no ModelPatch tiling.
         self.model = ImpactFeatureModel(model_path, int(in_channels), [float(w) for w in weights], None, DIM)
 
+    def pca_project(self, output: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """IMPACTReg's own PCA reduction, for Static mode: the basis is fitted on ``target``."""
+        return self._pca_project(output, target)
+
     @staticmethod
     def _stats(tensor: torch.Tensor) -> dict:
         detached = tensor.detach()
@@ -441,6 +446,16 @@ class ImpactFeatureLoss(torch.nn.Module):
             self._cores.append(_ImpactCore(spec.ref, in_channels, weights, spec.distance, spec.pca))
             self._model_weights.append(float(spec.layers_weight))
 
+    @property
+    def cores(self) -> list["_ImpactCore"]:
+        """The per-model feature cores, for Static mode, which extracts instead of scoring."""
+        return [cast("_ImpactCore", core) for core in self._cores]
+
+    @property
+    def model_weights(self) -> list[float]:
+        """Each model's weight in the fusion, applied to its features in Static mode."""
+        return self._model_weights
+
     def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
         mask: torch.Tensor | None = None
         if self._masked:
@@ -451,6 +466,162 @@ class ImpactFeatureLoss(torch.nn.Module):
             term = weight * core(moved, fixed, mask)
             total = term if total is None else total + term
         return total
+
+
+class _FeatureCC(torch.nn.Module):
+    """Local cross-correlation over feature channels, a few channels at a time.
+
+    Static mode hands FireANTs volumes of features, and comparing all their channels at once is what
+    sets the peak: the windowed sums of a 28-channel pair at full resolution are several times the volume
+    itself. This evaluates ``chunk`` channels per pass and re-runs each pass during the backward instead
+    of keeping its intermediates, so the peak follows ``chunk`` rather than the channel count, for the
+    same objective and the same gradient.
+
+    The correlation itself is the usual windowed one, ``cov(a, b)^2 / (var(a) var(b))`` over a cube of
+    ``kernel`` voxels, averaged over channels and voxels and negated, since FireANTs minimises.
+    """
+
+    def __init__(self, kernel: int, chunk: int, masked: bool = False) -> None:
+        super().__init__()
+        self._kernel = int(kernel)
+        self._chunk = max(1, int(chunk))
+        self._masked = masked
+
+    def _windowed(self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        kernel, padding = self._kernel, self._kernel // 2
+        mean = lambda t: torch.nn.functional.avg_pool3d(t, kernel, stride=1, padding=padding, count_include_pad=False)  # noqa: E731
+        moved_mean, fixed_mean = mean(moved), mean(fixed)
+        covariance = mean(moved * fixed) - moved_mean * fixed_mean
+        moved_var = (mean(moved * moved) - moved_mean * moved_mean).clamp_min(1e-5)
+        fixed_var = (mean(fixed * fixed) - fixed_mean * fixed_mean).clamp_min(1e-5)
+        correlation = covariance * covariance / (moved_var * fixed_var)
+        if mask is not None:
+            return -(correlation * mask).sum() / mask.sum().clamp_min(1.0) / correlation.shape[1]
+        return -correlation.mean()
+
+    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
+        mask: torch.Tensor | None = None
+        if self._masked:
+            mask = (fixed[:, -1:] > 0.5).to(moved.dtype)
+            moved, fixed = moved[:, :-1], fixed[:, :-1]
+        channels = moved.shape[1]
+        total: torch.Tensor | None = None
+        for start in range(0, channels, self._chunk):
+            stop = min(start + self._chunk, channels)
+            piece = torch.utils.checkpoint.checkpoint(
+                self._windowed, moved[:, start:stop], fixed[:, start:stop], mask, use_reentrant=False
+            )
+            weighted = piece * (stop - start) / channels
+            total = weighted if total is None else total + weighted
+        if total is None:
+            raise RuntimeError("the feature volumes carry no channel to correlate")
+        return total
+
+
+def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: int) -> ModelPatch:
+    """The grid one extraction runs on: KonfAI's own, configured from ``feature_patch``.
+
+    ``patch`` 0 leaves every axis free, which is one patch over the whole image. Otherwise the volume
+    is cut exactly as the predictor cuts a network's input -- same border padding, same raised-cosine
+    window tapering over the overlap alone, so the tiles sum to one everywhere.
+
+    ``multiple`` is the free axes' rounding, KonfAI's ``free_axis_multiple``: an encoder-decoder that
+    halves its input a few times only accepts a size its skip connections divide, and anatomix is one
+    (a multiple of 16). The padding is cropped back off at blend time.
+    """
+    size = [int(patch)] * len(shape)
+    grid = ModelPatch(size, round(patch * overlap) if patch > 0 else 0)
+    if multiple > 1:
+        grid.free_axis_multiple = [int(multiple)] * len(shape)
+    grid.patch_combine = Cosinus()
+    kept = blend_axes(grid.patch_size)
+    grid.patch_combine.set_patch_config(kept, blend_overlap(cast(int, grid.overlap), kept))
+    grid.load(list(shape))
+    return grid
+
+
+@torch.no_grad()
+def _one_volume(
+    core: "_ImpactCore",
+    weight: float,
+    image: torch.Tensor,
+    patch: int,
+    overlap: float,
+    normalization: str,
+    multiple: int = 0,
+) -> torch.Tensor:
+    """One model's selected feature layers for one image, tiled and blended.
+
+    The intensity statistics come from the WHOLE image, never from a tile, so every tile is normalised
+    identically -- a per-tile normalisation would make the same anatomy score differently on either side
+    of a seam. The tiling, the cosine window and the weighted accumulation are KonfAI's, the same ones
+    the predictor assembles a network's output with.
+    """
+    model = core.model
+    if model.model is None:
+        model.model = torch.jit.load(model.model_path, map_location="cpu").eval()  # nosec B614
+    model.model.to(image.device)
+    statistics = Attribute(core._stats(image))
+
+    grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, multiple)
+    accumulator = Accumulator(grid.get_patch_slices(), grid.patch_size, grid.patch_combine)
+    for index, (tile,) in enumerate(grid.disassemble(image)):
+        # The model's own input triple: the channel replication and the [min, max, mean, std] order
+        # itk-impact reads are the metric's business, not this engine's.
+        inputs = model.inputs(tile, statistics)
+        # A segmentation network hands back coarser deeper layers (M730 returns 64, 32 and 16 voxels
+        # for a 64-voxel tile) and they have to share one grid to be concatenated and blended. The
+        # online metric never faces this: it scores each layer against its own counterpart.
+        layers = [
+            layer
+            if layer.shape[2:] == tile.shape[2:]
+            else torch.nn.functional.interpolate(layer, size=tile.shape[2:], mode="trilinear", align_corners=False)
+            for layer_weight, layer in zip(model.weights, model.model(*inputs), strict=False)
+            if layer_weight != 0
+        ]
+        features = torch.cat(layers, dim=1)
+        if normalization == "l2":
+            features = torch.nn.functional.normalize(features, dim=1)
+        elif normalization == "standardized":
+            features = (features - features.mean(dim=1, keepdim=True)) / features.std(dim=1, keepdim=True).clamp_min(
+                1e-6
+            )
+        accumulator.add_layer(index, weight * features)
+        del features, layers
+    return accumulator.assemble()
+
+
+@torch.no_grad()
+def _feature_volumes(
+    loss: "ImpactFeatureLoss",
+    fixed: torch.Tensor,
+    moving: torch.Tensor,
+    patch: int,
+    overlap: float,
+    normalization: str,
+    multiple: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The fixed and moving feature volumes of every model, concatenated along the channel axis.
+
+    This is Static mode: each network runs once per image here, instead of once per optimiser step
+    inside the loss, and the registration then works on the feature volumes themselves. It is what makes
+    a large pair affordable -- no autograd graph through an extractor is kept -- and what a whole-image
+    model needs, since the features are never differentiated with respect to the warp.
+
+    A model asking for ``pca`` has both its volumes projected onto the basis of the FIXED one, exactly as
+    the online metric fits its basis on the reference side. The channel count is what the comparison then
+    costs, so this is also the lever when a pair of models does not fit.
+    """
+    fixed_sides: list[torch.Tensor] = []
+    moving_sides: list[torch.Tensor] = []
+    for weight, core in zip(loss.model_weights, loss.cores, strict=True):
+        fixed_features = _one_volume(core, weight, fixed, patch, overlap, normalization, multiple)
+        moving_features = _one_volume(core, weight, moving, patch, overlap, normalization, multiple)
+        if core.pca > 0:
+            moving_features, fixed_features = core.pca_project(moving_features, fixed_features)
+        fixed_sides.append(fixed_features)
+        moving_sides.append(moving_features)
+    return torch.cat(fixed_sides, dim=1), torch.cat(moving_sides, dim=1)
 
 
 def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
@@ -499,7 +670,20 @@ class FireANTsEngine:
         smooth_grad_sigma: float,
         seed: int,
         impact_specs: list["ModelSpec"],
+        mode: str = "Jacobian",
+        feature_patch: int = 0,
+        feature_chunk: int = 0,
+        feature_overlap: float = 0.25,
+        feature_multiple: int = 0,
+        feature_normalization: str = "l2",
+        feature_metric: str = "cc",
     ) -> None:
+        """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
+
+        The settings that name a choice rather than a number -- the linear and deformable methods, the
+        mode, the feature normalisation and metric -- are checked here rather than at the first run, so a
+        typo in a preset stops before a card is taken.
+        """
         self._scales = [int(s) for s in scales]
         self._affine_iterations = [int(i) for i in affine_iterations]
         self._deformable_iterations = [int(i) for i in deformable_iterations]
@@ -518,6 +702,12 @@ class FireANTsEngine:
             raise ValueError(
                 f"Unknown linear_method '{linear_method}' (expected {', '.join(map(repr, _LINEAR_METHODS))})."
             )
+        if cc_kernel % 2 == 0:
+            # FireANTs' own cross-correlation refuses an even window ("kernel_size must be odd"), and
+            # an even one has no centre voxel: the correlation would sit half a voxel off the point it
+            # is attributed to. Raised here so both the library metric and the chunked one below fail
+            # the same way, at build time rather than minutes into a registration.
+            raise ValueError(f"cc_kernel must be odd, got {cc_kernel}: an even window has no centre voxel.")
         if linear_method == "none" and deformable_method == "none":
             # Left to run this optimises nothing and returns the identity: a Moved equal to the moving
             # image and a zero field, which no downstream check tells apart from a pair that needed no
@@ -532,6 +722,21 @@ class FireANTsEngine:
         # IMPACT deformable metric (only used when deformable_metric == "impact"): KonfAI IMPACT feature
         # models drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
         self._impact_specs = impact_specs
+        self._mode = mode
+        self._feature_patch = int(feature_patch)
+        self._feature_chunk = int(feature_chunk)
+        self._feature_overlap = float(feature_overlap)
+        self._feature_multiple = int(feature_multiple)
+        self._feature_normalization = feature_normalization
+        self._feature_metric = feature_metric
+        if feature_normalization not in ("l2", "standardized", "none"):
+            raise ValueError(
+                f"Unknown feature_normalization '{feature_normalization}' (expected 'l2', 'standardized' or 'none')."
+            )
+        if feature_metric not in ("cc", "mi", "mse"):
+            raise ValueError(f"Unknown feature_metric '{feature_metric}' (expected 'cc', 'mi' or 'mse').")
+        if mode not in ("Static", "Jacobian"):
+            raise ValueError(f"Unknown mode '{mode}' (expected 'Static' or 'Jacobian').")
 
     @staticmethod
     def _center_of_mass_translation(
@@ -734,11 +939,43 @@ class FireANTsEngine:
                 )
             # "impact" swaps the analytic metric for a KonfAI IMPACT feature loss on the deformable stage
             # (the linear pre-align keeps its own affine_metric); the fixed mask restricts it too.
-            if self._deformable_metric == "impact":
-                loss_type: str = "custom"
-                custom_loss: torch.nn.Module | None = ImpactFeatureLoss(self._impact_specs, masked=masked)
-            else:
-                loss_type, custom_loss = deformable_loss, None
+            loss_type: str = deformable_loss
+            custom_loss: torch.nn.Module | None = None
+            if self._deformable_metric == "impact" and self._mode == "Static":
+                # Static: extract once, then register the feature volumes. The
+                # images are re-read unmasked because the masked pair carries the mask as a channel, and
+                # the mask is concatenated back afterwards so ``masked_`` still means what it says.
+                extractor = ImpactFeatureLoss(self._impact_specs).to(device)
+                volumes = _feature_volumes(
+                    extractor,
+                    Image(fixed, device=device).array,
+                    Image(moving, device=device).array,
+                    self._feature_patch,
+                    self._feature_overlap,
+                    self._feature_normalization,
+                    self._feature_multiple,
+                )
+                for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
+                    if masked:
+                        features = torch.cat([features, image.array[:, -1:]], dim=1)
+                    image.array = features
+                    image.channels = features.shape[1]
+                del extractor
+                gc.collect()
+                bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
+                # The channels ARE the features now, so a local cross-correlation compares them
+                # (``cc_kernel`` sets its window): "impact" names where the channels came from, not a
+                # metric FireANTs knows. With ``feature_chunk`` the correlation runs a few channels at a
+                # time, which is what lets two feature models share one card.
+                metric = self._feature_metric
+                if self._feature_chunk > 0 and metric == "cc":
+                    loss_type = "custom"
+                    custom_loss = _FeatureCC(self._cc_kernel, self._feature_chunk, masked=masked)
+                else:
+                    loss_type = f"masked_{metric}" if masked else metric
+            elif self._deformable_metric == "impact":
+                loss_type = "custom"
+                custom_loss = ImpactFeatureLoss(self._impact_specs, masked=masked)
             reg = Deformable(
                 scales=self._scales,
                 iterations=self._deformable_iterations,
@@ -925,8 +1162,62 @@ class RegistrationNet(network.Network):
             "convergence.",
         ] = 1.0,
         seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
+        mode: Annotated[
+            Literal["Static", "Jacobian"],
+            "How the IMPACT deformable metric reads its features, as the elastix engine means it. 'Jacobian' "
+            "extracts them inside the loss at every optimiser step, so the warp is differentiated through the "
+            "network. 'Static' extracts them once per image and registers the feature volumes themselves: far "
+            "less device memory, no network in the optimisation loop, and the only path a whole-image feature "
+            "model can take.",
+        ] = "Jacobian",
+        feature_patch: Annotated[
+            int,
+            "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
+            "at once. Tiles share the 'feature_overlap' share of their width and are blended by a cosine "
+            "window, so a volume "
+            "larger than the card still goes through.",
+            Range(0, 1024),
+        ] = 0,
+        feature_chunk: Annotated[
+            int,
+            "Static only: how many feature channels the local cross-correlation compares at a time, 0 "
+            "for all of them at once. A smaller chunk trades a little time for a peak that follows the chunk "
+            "instead of the channel count, which is what lets several feature models share one card.",
+            Range(0, 64),
+        ] = 0,
+        feature_overlap: Annotated[
+            float,
+            "Static only: the share of its width two neighbouring extraction tiles have in common. More "
+            "overlap costs time and blends the seams further; it is ignored when the whole image goes "
+            "through in one pass.",
+            Range(0.0, 0.9),
+        ] = 0.25,
+        feature_multiple: Annotated[
+            int,
+            "Static only: the voxel multiple every feature model needs its input rounded up to, 0 or 1 for "
+            "none. An encoder-decoder that halves its input a few times only accepts a size its skip "
+            "connections divide: anatomix wants a multiple of 16, while the TotalSegmentator models and MIND "
+            "take any size. Set the largest of the models in use; the padding never reaches the result.",
+            Range(0, 64),
+        ] = 0,
+        feature_normalization: Annotated[
+            Literal["l2", "standardized", "none"],
+            "Static only: how each voxel's feature vector is scaled before the two volumes are compared. "
+            "'l2' gives every voxel a unit vector, so only the direction counts; 'standardized' centres and "
+            "scales it; 'none' compares the raw activations, where a few loud channels dominate.",
+        ] = "l2",
+        feature_metric: Annotated[
+            Literal["cc", "mi", "mse"],
+            "Static only: what compares the feature volumes once they are extracted. 'cc' is a local "
+            "cross-correlation over a cube of 'cc_kernel' voxels, and the only one 'feature_chunk' can "
+            "split by channel.",
+        ] = "cc",
         models: dict[str, ModelSpec] = {},
     ) -> None:
+        """Build the graph a FireANTs preset runs: registration, then the moved image and the field.
+
+        Every argument is a preset knob; the annotations beside them are what SlicerKonfAI renders.
+        """
         super().__init__(
             in_channels=1,
             optimizer=optimizer,
@@ -956,6 +1247,13 @@ class RegistrationNet(network.Network):
             smooth_grad_sigma,
             seed,
             _sorted_specs(models),
+            mode,
+            feature_patch,
+            feature_chunk,
+            feature_overlap,
+            feature_multiple,
+            feature_normalization,
+            feature_metric,
         )
         self.add_module(
             "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]

@@ -165,6 +165,13 @@ def test_fireants_moments_init_reaches_the_engine() -> None:
         assert net["Registration"]._engine._moments_init == seed
 
 
+def _plain_inputs(tensor, attribute):
+    """What ``ImpactFeatureModel.inputs`` returns, for a stub model that has no registry entry."""
+    import torch
+
+    return [tensor, torch.tensor([1]), torch.tensor([0.0, 1.0, 0.5, 0.2])]
+
+
 def test_fireants_refuses_an_unknown_linear_method() -> None:
     # Every unrecognised value would otherwise fall through to the rigid-then-affine branch, so a
     # typo registers with a stage the caller did not ask for and returns a plausible result. The
@@ -270,3 +277,135 @@ def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_cl
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
         ElastixRegistration.forward(SimpleNamespace(_engine=Engine()), image, image, image, image, attributes)
+
+
+def test_fireants_static_mode_reaches_the_engine() -> None:
+    # Dropped at RegistrationNet, the deformable stage would keep extracting inside the loss: the run
+    # still succeeds, on a card it may not fit, so nothing points at the setting having been ignored.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    for mode, patch in (("Jacobian", 0), ("Static", 128)):
+        engine = RegistrationNet(mode=mode, feature_patch=patch)["Registration"]._engine
+        assert (engine._mode, engine._feature_patch) == (mode, patch)
+
+
+def test_fireants_refuses_an_unknown_mode() -> None:
+    # An unrecognised value would otherwise fall through to Jacobian, which is the mode that does not fit
+    # the volume the caller asked Static for. The elastix engine spells these two the same way.
+    import pytest
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="mode"):
+        RegistrationNet(mode="static")
+
+
+def test_fireants_tiled_extraction_leaves_no_seam() -> None:
+    # The tiles are blended by KonfAI's own cosine window, which sums to one over the overlap: features
+    # constant over the image must come back constant, or a seam shows as a band of half-weight voxels.
+    import torch
+    from impact_reg_konfai.models.fireants import _one_volume
+
+    class Constant(torch.nn.Module):
+        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            return [torch.full((tile.shape[0], 2, *tile.shape[2:]), 3.0)]
+
+    model = SimpleNamespace(model=Constant(), weights=[1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3)
+    image = torch.rand(1, 1, 40, 24, 70)
+    volume = _one_volume(
+        SimpleNamespace(model=model, _stats=lambda t: {}), 1.0, image, patch=32, overlap=0.25, normalization="none"
+    )
+    assert volume.shape == (1, 2, 40, 24, 70)
+    assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
+
+
+def test_fireants_rounds_the_extraction_up_for_a_model_that_needs_it() -> None:
+    # anatomix halves its input four times and its skip connections only meet on a multiple of 16: handed
+    # a 40-voxel image it raises inside the network. The padding must not reach the result.
+    import pytest
+    import torch
+    from impact_reg_konfai.models.fireants import RegistrationNet, _one_volume
+
+    class NeedsSixteen(torch.nn.Module):
+        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            if any(size % 16 for size in tile.shape[2:]):
+                raise RuntimeError(f"sizes of tensors must match: {tuple(tile.shape[2:])}")
+            return [tile.repeat(1, 4, 1, 1, 1)]
+
+    model = SimpleNamespace(
+        model=NeedsSixteen(), weights=[1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3
+    )
+    core = SimpleNamespace(model=model, _stats=lambda t: {})
+    image = torch.rand(1, 1, 40, 40, 40)
+    with pytest.raises(RuntimeError, match="sizes of tensors"):
+        _one_volume(core, 1.0, image, patch=0, overlap=0.25, normalization="none")
+    volume = _one_volume(core, 1.0, image, patch=0, overlap=0.25, normalization="none", multiple=16)
+    assert volume.shape == (1, 4, 40, 40, 40)
+    assert RegistrationNet(feature_multiple=16)["Registration"]._engine._feature_multiple == 16
+
+
+def test_fireants_static_settings_reach_the_engine() -> None:
+    # Dropped at RegistrationNet, each of these would silently keep its default: the run still produces a
+    # field, computed with settings the caller did not ask for.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    engine = RegistrationNet(
+        mode="Static", feature_overlap=0.5, feature_normalization="standardized", feature_metric="mi"
+    )["Registration"]._engine
+    assert (engine._feature_overlap, engine._feature_normalization, engine._feature_metric) == (
+        0.5,
+        "standardized",
+        "mi",
+    )
+
+
+def test_fireants_refuses_unknown_static_settings() -> None:
+    import pytest
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="feature_normalization"):
+        RegistrationNet(feature_normalization="zscore")
+    with pytest.raises(ValueError, match="feature_metric"):
+        RegistrationNet(feature_metric="ncc")
+
+
+def test_fireants_refuses_an_even_correlation_window() -> None:
+    # FireANTs' own cross-correlation raises on an even window; the chunked one would instead pool a
+    # voxel wider than the image, which crashes on a masked pair and shifts the correlation by half a
+    # voxel on an unmasked one. Both paths have to refuse it, and before the run starts.
+    import pytest
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="cc_kernel"):
+        RegistrationNet(cc_kernel=4)
+
+
+def test_fireants_static_puts_every_feature_layer_on_the_image_grid() -> None:
+    # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel
+    # tile). Concatenated as they come, the second layer would fail torch.cat outright.
+    import torch
+    from impact_reg_konfai.models.fireants import _one_volume
+
+    class TwoResolutions(torch.nn.Module):
+        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            coarse = torch.nn.functional.avg_pool3d(tile, 2)
+            return [tile.repeat(1, 3, 1, 1, 1), coarse.repeat(1, 5, 1, 1, 1)]
+
+    model = SimpleNamespace(
+        model=TwoResolutions(), weights=[1.0, 1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3
+    )
+    core = SimpleNamespace(model=model, _stats=lambda t: {})
+    volume = _one_volume(core, 1.0, torch.rand(1, 1, 16, 16, 16), patch=0, overlap=0.25, normalization="none")
+    assert volume.shape == (1, 8, 16, 16, 16)
+
+
+def test_the_jacobian_patch_covers_the_deepest_selected_layer() -> None:
+    # A patch smaller than the receptive field crops the context the feature was trained to see. Measured
+    # on TS/M730, one output voxel's sensitivity to the input stays above 1 % of its peak over 5 voxels for
+    # the first layer and 11 for the second -- the study's own recommended map sets 11 for this mask.
+    from impact_reg_konfai.models.elastix import _fov_value
+
+    fov = {"formula": "2^l+3"}
+    assert _fov_value(fov, "1") == 5
+    assert _fov_value(fov, "01") == 11
+    assert _fov_value(fov, "001") == 23
+    assert _fov_value({"formula": "2*r*d+1", "r": 1, "d": 2}, "1") == 5

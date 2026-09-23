@@ -47,8 +47,8 @@ from konfai.utils.config import Choices, Range
 # iterations, per-model weights/mask/subset/pca/distance) and the global ``mode``.
 _IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
 
-# ``2^l+3`` plateaus: segmenter layers 7-8 share layer 6's receptive field. Deeper configs should run
-# Static anyway; in Jacobian we clamp ``l`` to this plateau.
+# The receptive field plateaus: a segmenter stops downsampling, so its layers 7-8 reach no further than
+# layer 6 (counted from 1). Deeper configs should run Static anyway; in Jacobian we clamp ``l`` here.
 _FOV_RAMP_MAX_LAYER = 6
 
 
@@ -172,7 +172,13 @@ def _fov_value(fov: dict, layers_mask: str) -> int:
     Formulas (model repo, https://huggingface.co/VBoussot/impact-torchscript-models):
       ``2*r*d+1``  MIND, from radius ``r`` / dilation ``d`` (R1D2 -> 5);
       ``2^l+3``    TotalSegmentator / MRSegmentator, ``l`` = deepest layer picked by ``layers_mask``, clamped
-                   to the receptive-field plateau ``_FOV_RAMP_MAX_LAYER`` (layers 7-8 -> layer 6);
+                   to the receptive-field plateau ``_FOV_RAMP_MAX_LAYER`` (layers 7-8 -> layer 6). The model
+                   repository writes this as ``2^l+3``, which holds for the first layer and understates the
+                   rest: each stage of these encoders doubles the reach and adds a convolution, so the
+                   receptive field is ``3*2^l-1``. Measured on TS/M730 (the input sensitivity of one output
+                   voxel, above 1 % of its peak): 5, 11, 19, 43 voxels for layers 1 to 4, against 5, 7, 11,
+                   19 from the written form. 11 for a 2-layer mask is also what the study's own
+                   ParameterMap_Recommended.txt sets.;
       a bare int   a fixed FOV (SAM2.1 -> 29, DINOv2 -> 14);
       ``Global``   Anatomix: whole-image only (Static); no finite Jacobian patch -> error.
     An explicit ``value`` in the spec is honoured as a precomputed shortcut.
@@ -184,7 +190,8 @@ def _fov_value(fov: dict, layers_mask: str) -> int:
     if key == "2*r*d+1":
         return 2 * int(fov["r"]) * int(fov["d"]) + 1
     if key == "2^l+3":
-        return 2 ** min(_deepest_active_layer(layers_mask), _FOV_RAMP_MAX_LAYER) + 3
+        layer = min(_deepest_active_layer(layers_mask) + 1, _FOV_RAMP_MAX_LAYER)
+        return 3 * 2**layer - 1
     if "global" in key:
         raise ValueError(f"model FOV '{formula}' is whole-image only (Static); it has no Jacobian patch size.")
     if fov.get("value") is not None:
