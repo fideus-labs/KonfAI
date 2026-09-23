@@ -670,7 +670,6 @@ class FireANTsEngine:
         smooth_grad_sigma: float,
         seed: int,
         impact_specs: list["ModelSpec"],
-        deformable_masked: bool = True,
         mode: str = "Jacobian",
         feature_patch: int = 0,
         feature_chunk: int = 0,
@@ -678,6 +677,7 @@ class FireANTsEngine:
         feature_multiple: int = 0,
         feature_normalization: str = "l2",
         feature_metric: str = "cc",
+        deformable_masked: bool = True,
     ) -> None:
         """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
 
@@ -1174,12 +1174,6 @@ class RegistrationNet(network.Network):
             "convergence.",
         ] = 1.0,
         seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
-        deformable_masked: Annotated[
-            bool,
-            "Restrict the deformable metric to the masks as well. False keeps them for the centre of mass, rigid "
-            "and affine only: a tight or ragged mask hides the subject's outline, and the deformable stage "
-            "cannot pull into place an end it does not see.",
-        ] = True,
         mode: Annotated[
             Literal["Static", "Jacobian"],
             "How the IMPACT deformable metric reads its features, as the elastix engine means it. 'Jacobian' "
@@ -1230,6 +1224,12 @@ class RegistrationNet(network.Network):
             "cross-correlation over a cube of 'cc_kernel' voxels, and the only one 'feature_chunk' can "
             "split by channel.",
         ] = "cc",
+        deformable_masked: Annotated[
+            bool,
+            "Restrict the deformable metric to the masks as well. False keeps them for the centre of mass, rigid "
+            "and affine only: a tight or ragged mask hides the subject's outline, and the deformable stage "
+            "cannot pull into place an end it does not see.",
+        ] = True,
         models: dict[str, ModelSpec] = {},
     ) -> None:
         """Build the graph a FireANTs preset runs: registration, then the moved image and the field.
@@ -1265,7 +1265,6 @@ class RegistrationNet(network.Network):
             smooth_grad_sigma,
             seed,
             _sorted_specs(models),
-            deformable_masked,
             mode,
             feature_patch,
             feature_chunk,
@@ -1273,6 +1272,7 @@ class RegistrationNet(network.Network):
             feature_multiple,
             feature_normalization,
             feature_metric,
+            deformable_masked,
         )
         self.add_module(
             "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]
