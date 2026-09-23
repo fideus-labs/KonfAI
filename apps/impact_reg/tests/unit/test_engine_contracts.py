@@ -165,6 +165,13 @@ def test_fireants_moments_init_reaches_the_engine() -> None:
         assert net["Registration"]._engine._moments_init == seed
 
 
+def _plain_inputs(tensor, attribute):
+    """What ``ImpactFeatureModel.inputs`` returns, for a stub model that has no registry entry."""
+    import torch
+
+    return [tensor, torch.tensor([1]), torch.tensor([0.0, 1.0, 0.5, 0.2])]
+
+
 def test_fireants_refuses_an_unknown_linear_method() -> None:
     # Every unrecognised value would otherwise fall through to the rigid-then-affine branch, so a
     # typo registers with a stage the caller did not ask for and returns a plausible result. The
@@ -292,20 +299,23 @@ def test_fireants_refuses_an_unknown_mode() -> None:
         RegistrationNet(mode="static")
 
 
-def test_fireants_tiles_cover_every_voxel_once_blended() -> None:
-    # A gap between tiles would leave a band of the image with no features at all, and the cosine blend
-    # is what keeps a seam from showing where they meet.
+def test_fireants_tiled_extraction_leaves_no_seam() -> None:
+    # The tiles are blended by KonfAI's own cosine window, which sums to one over the overlap: features
+    # constant over the image must come back constant, or a seam shows as a band of half-weight voxels.
     import torch
-    from impact_reg_konfai.models.fireants import _cosine_window, _tiles
+    from impact_reg_konfai.models.fireants import _one_volume
 
-    shape = (40, 24, 70)
-    covered = torch.zeros((1, 1, *shape))
-    for window in _tiles(shape, patch=32, overlap=0.25):
-        covered[(slice(None), slice(None), *window)] += _cosine_window(
-            tuple(stop - start for start, stop in ((w.start, w.stop) for w in window)), "cpu", torch.float32
-        )
-    assert float(covered.min()) > 0.0
-    assert list(_tiles(shape, patch=0, overlap=0.25)) == [tuple(slice(0, size) for size in shape)]
+    class Constant(torch.nn.Module):
+        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            return [torch.full((tile.shape[0], 2, *tile.shape[2:]), 3.0)]
+
+    model = SimpleNamespace(model=Constant(), weights=[1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3)
+    image = torch.rand(1, 1, 40, 24, 70)
+    volume = _one_volume(
+        SimpleNamespace(model=model, _stats=lambda t: {}), 1.0, image, patch=32, overlap=0.25, normalization="none"
+    )
+    assert volume.shape == (1, 2, 40, 24, 70)
+    assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
 
 
 def test_fireants_static_settings_reach_the_engine() -> None:
@@ -355,7 +365,9 @@ def test_fireants_static_puts_every_feature_layer_on_the_image_grid() -> None:
             coarse = torch.nn.functional.avg_pool3d(tile, 2)
             return [tile.repeat(1, 3, 1, 1, 1), coarse.repeat(1, 5, 1, 1, 1)]
 
-    model = SimpleNamespace(model=TwoResolutions(), weights=[1.0, 1.0], in_channels=1, model_path="")
-    core = SimpleNamespace(model=model)
+    model = SimpleNamespace(
+        model=TwoResolutions(), weights=[1.0, 1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3
+    )
+    core = SimpleNamespace(model=model, _stats=lambda t: {})
     volume = _one_volume(core, 1.0, torch.rand(1, 1, 16, 16, 16), patch=0, overlap=0.25, normalization="none")
     assert volume.shape == (1, 8, 16, 16, 16)

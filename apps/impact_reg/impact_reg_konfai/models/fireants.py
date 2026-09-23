@@ -75,6 +75,7 @@ from typing import Annotated, Literal, cast
 import numpy as np
 import SimpleITK as sitk
 import torch
+from konfai.data.patching import Accumulator, Cosinus, ModelPatch, blend_axes, blend_overlap
 from konfai.metric.measure import ImpactFeatureModel, IMPACTReg
 from konfai.network import network
 from konfai.utils.config import Choices, Range
@@ -517,6 +518,22 @@ class _FeatureCC(torch.nn.Module):
         return total
 
 
+def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float) -> ModelPatch:
+    """The grid one extraction runs on: KonfAI's own, configured from ``feature_patch``.
+
+    ``patch`` 0 leaves every axis free, which is one patch over the whole image. Otherwise the volume
+    is cut exactly as the predictor cuts a network's input -- same border padding, same raised-cosine
+    window tapering over the overlap alone, so the tiles sum to one everywhere.
+    """
+    size = [int(patch)] * len(shape)
+    grid = ModelPatch(size, round(patch * overlap) if patch > 0 else 0)
+    grid.patch_combine = Cosinus()
+    kept = blend_axes(grid.patch_size)
+    grid.patch_combine.set_patch_config(kept, blend_overlap(cast(int, grid.overlap), kept))
+    grid.load(list(shape))
+    return grid
+
+
 @torch.no_grad()
 def _one_volume(
     core: "_ImpactCore", weight: float, image: torch.Tensor, patch: int, overlap: float, normalization: str
@@ -525,55 +542,41 @@ def _one_volume(
 
     The intensity statistics come from the WHOLE image, never from a tile, so every tile is normalised
     identically -- a per-tile normalisation would make the same anatomy score differently on either side
-    of a seam. Tiles share ``overlap`` of their width and cross-fade through a cosine window.
+    of a seam. The tiling, the cosine window and the weighted accumulation are KonfAI's, the same ones
+    the predictor assembles a network's output with.
     """
     model = core.model
     if model.model is None:
         model.model = torch.jit.load(model.model_path, map_location="cpu").eval()  # nosec B614
     model.model.to(image.device)
-    stats = torch.tensor(
-        [float(image.min()), float(image.max()), float(image.mean()), float(image.std())], device=image.device
-    )
-    nb_layers = torch.tensor([len(model.weights)], device=image.device)
-    tensor = image
-    if tensor.shape[1] != model.in_channels:
-        tensor = tensor.repeat(1, model.in_channels, *([1] * (tensor.dim() - 2)))
+    statistics = Attribute(core._stats(image))
 
-    extracted: torch.Tensor | None = None
-    weights: torch.Tensor | None = None
-    for window in _tiles(tuple(tensor.shape[2:]), patch, overlap):
-        tile = tensor[(slice(None), slice(None), *window)]
-        # A segmentation network's deeper layers come out coarser than its input -- M730 hands back
-        # 64/32/16 voxels for a 64-voxel tile -- and Static needs them all on one grid to concatenate
-        # and to blend into the accumulator. The online metric never faces this: it scores each layer
-        # against its own counterpart, at whatever resolution the network chose.
+    grid = _feature_grid(tuple(image.shape[2:]), patch, overlap)
+    accumulator = Accumulator(grid.get_patch_slices(), grid.patch_size, grid.patch_combine)
+    for index, (tile,) in enumerate(grid.disassemble(image)):
+        # The model's own input triple: the channel replication and the [min, max, mean, std] order
+        # itk-impact reads are the metric's business, not this engine's.
+        inputs = model.inputs(tile, statistics)
+        # A segmentation network hands back coarser deeper layers (M730 returns 64, 32 and 16 voxels
+        # for a 64-voxel tile) and they have to share one grid to be concatenated and blended. The
+        # online metric never faces this: it scores each layer against its own counterpart.
         layers = [
             layer
             if layer.shape[2:] == tile.shape[2:]
             else torch.nn.functional.interpolate(layer, size=tile.shape[2:], mode="trilinear", align_corners=False)
-            for layer_weight, layer in zip(model.weights, model.model(tile, nb_layers, stats), strict=False)
+            for layer_weight, layer in zip(model.weights, model.model(*inputs), strict=False)
             if layer_weight != 0
         ]
-        tile_features = torch.cat(layers, dim=1)
+        features = torch.cat(layers, dim=1)
         if normalization == "l2":
-            tile_features = torch.nn.functional.normalize(tile_features, dim=1)
+            features = torch.nn.functional.normalize(features, dim=1)
         elif normalization == "standardized":
-            tile_features = (tile_features - tile_features.mean(dim=1, keepdim=True)) / tile_features.std(
-                dim=1, keepdim=True
-            ).clamp_min(1e-6)
-        tile_features = weight * tile_features
-        if extracted is None:  # the channel count is only known once a tile has been through
-            shape = (tile_features.shape[0], tile_features.shape[1], *tensor.shape[2:])
-            extracted = torch.zeros(shape, device=image.device, dtype=tile_features.dtype)
-        if weights is None:
-            weights = torch.zeros((1, 1, *tensor.shape[2:]), device=image.device, dtype=tile_features.dtype)
-        blend = _cosine_window(tuple(tile_features.shape[2:]), image.device, tile_features.dtype)
-        extracted[(slice(None), slice(None), *window)] += tile_features * blend
-        weights[(slice(None), slice(None), *window)] += blend
-        del tile_features, layers
-    if extracted is None or weights is None:
-        raise RuntimeError(f"no tile covered an image of shape {tuple(tensor.shape[2:])}")
-    return extracted / weights.clamp_min(1e-6)
+            features = (features - features.mean(dim=1, keepdim=True)) / features.std(dim=1, keepdim=True).clamp_min(
+                1e-6
+            )
+        accumulator.add_layer(index, weight * features)
+        del features, layers
+    return accumulator.assemble()
 
 
 @torch.no_grad()
@@ -606,36 +609,6 @@ def _feature_volumes(
         fixed_sides.append(fixed_features)
         moving_sides.append(moving_features)
     return torch.cat(fixed_sides, dim=1), torch.cat(moving_sides, dim=1)
-
-
-def _tiles(shape: tuple[int, ...], patch: int, overlap: float):
-    """The windows the extraction runs on: the whole image when ``patch`` is 0, otherwise tiles of
-    ``patch`` voxels stepping by ``patch * (1 - overlap)``, the last one flush with the far face."""
-    if patch <= 0 or all(size <= patch for size in shape):
-        yield tuple(slice(0, size) for size in shape)
-        return
-    step = max(1, round(patch * (1.0 - overlap)))
-    starts = [
-        sorted({*range(0, max(size - patch, 0) + 1, step), max(size - patch, 0)}) if size > patch else [0]
-        for size in shape
-    ]
-    for first in starts[0]:
-        for second in starts[1]:
-            for third in starts[2]:
-                yield tuple(
-                    slice(start, min(start + patch, size))
-                    for start, size in zip((first, second, third), shape, strict=True)
-                )
-
-
-def _cosine_window(shape: tuple[int, ...], device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
-    """A separable cosine taper, 1 at the tile's centre and near 0 at its faces, so overlapping tiles
-    cross-fade instead of stepping."""
-    window = torch.ones((1, 1, *shape), device=device, dtype=dtype)
-    for axis, size in enumerate(shape):
-        taper = torch.hann_window(size + 2, periodic=False, device=device, dtype=dtype)[1:-1].clamp_min(1e-3)
-        window = window * taper.reshape([1, 1] + [size if i == axis else 1 for i in range(len(shape))])
-    return window
 
 
 def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
