@@ -16,20 +16,54 @@ draft, then say what a user of the package gets that they did not have -- and re
 against the commits that landed *after* you drafted it. Running the command over a section already
 written replaces it.
 
-## Unreleased
+## v1.8.6 (2026-09-23)
+
+### Features
+
+- impact-reg: the FireANTs engine reads IMPACT features the way the elastix engine does, in one of two
+  modes. `Jacobian` extracts them inside the loss at every optimiser step, as before. `Static` extracts
+  them once per image and registers the feature volumes themselves: no network in the optimisation
+  loop, far less device memory, and the only path a whole-image model such as anatomix can take. The
+  extraction is tiled and blended with KonfAI's own patch grid, so a volume larger than the card still
+  goes through, and `feature_multiple` rounds it up to the size a model accepts (anatomix wants a
+  multiple of 16). `feature_chunk` compares the feature channels a few at a time, which is what lets
+  two feature models share one card, and `pca` reduces each model's channels instead. Measured on ten
+  PSMAReg pairs: 0.145 Dice unregistered, 0.743 with anatomix and MIND features in Static.
+- impact-reg: `deformable_masked` keeps the masks for the centre of mass, the rigid and the affine
+  stages but lets the deformable stage see the whole image. A tight or ragged mask hides the subject's
+  outline, and the deformable stage cannot pull into place an end it does not see.
+- predictor: the batch is measured on the GPU -- one patch, then two, then what the free memory holds
+  -- instead of being declared ahead of time, and a case with free axes splits them evenly.
+- ome-zarr: stores are written as NGFF 0.5 in a zarr v3 layout.
+- studio: `compare` fills the pane that was clicked last.
 
 ### Bug Fixes
 
-- impact-reg: an empty fixed mask is a zero field rather than a registration of the whole patch,
-  background included (in a tiled run every patch the tissue did not reach dragged its neighbours'
-  tissue edge through the blend); the mask sentinels take the form of the images they stand beside,
-  OME-Zarr included; half precision is off on the CPU and an exact override cannot turn it back on;
-  a previous elastix install is replaced instead of extracted over.
+- impact: the IMPACT models were handed their intensity statistics in the wrong order and nested,
+  `[min, mean, max, std]` where itk-impact reads a flat `[min, max, mean, sigma]`. Every model that
+  normalises from them -- the MRI TotalSegmentator models among them -- was normalising from the wrong
+  two numbers.
+- impact-reg: a Jacobian patch is sized by the receptive field it has to cover. The field of view the
+  model repository publishes, `2^l+3`, holds for a segmenter's first layer and understates every layer
+  after it; measured on TS/M730 the reach is 5, 11, 19 and 43 voxels for layers 1 to 4. A two-layer
+  mask now asks for 11 voxels instead of 5.
+- impact-reg: elastix's own messages reach the log, and a GPU the engine cannot see is explained
+  rather than reported as an absent CUDA.
+- impact-reg: an empty fixed mask gives a zero field rather than a registration of the whole patch,
+  background included; the mask sentinels take the form of the images they stand beside, OME-Zarr
+  included; half precision is off on the CPU and an exact override cannot turn it back on; a previous
+  elastix install is replaced instead of extracted over.
+- predictor: a re-plan that tiles free axes keeps its blend window, and registration memory is freed
+  between tiles.
+- omezarr: a store's geometry is read in millimetres, and the unit is declared when one is written.
+- reduction: `Std` folds a region the way it folds the whole volume.
+- runtime: a single rank starts no process group.
+- logging: one line per write and one prefix, so a run log reads.
 
 ### Documentation
 
-- OME-Zarr: the `Direction` matrix travels in the attributes sidecar, and a store written without
-  one reads back axis-aligned; `write_ome_zarr` names its keyword-only arguments.
+- OME-Zarr: the `Direction` matrix travels in the attributes sidecar, and a store written without one
+  reads back axis-aligned; `write_ome_zarr` names its keyword-only arguments.
 
 ## v1.8.5 (2026-09-14)
 
