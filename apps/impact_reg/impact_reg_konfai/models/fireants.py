@@ -543,8 +543,14 @@ def _one_volume(
     weights: torch.Tensor | None = None
     for window in _tiles(tuple(tensor.shape[2:]), patch, overlap):
         tile = tensor[(slice(None), slice(None), *window)]
+        # A segmentation network's deeper layers come out coarser than its input -- M730 hands back
+        # 64/32/16 voxels for a 64-voxel tile -- and Static needs them all on one grid to concatenate
+        # and to blend into the accumulator. The online metric never faces this: it scores each layer
+        # against its own counterpart, at whatever resolution the network chose.
         layers = [
             layer
+            if layer.shape[2:] == tile.shape[2:]
+            else torch.nn.functional.interpolate(layer, size=tile.shape[2:], mode="trilinear", align_corners=False)
             for layer_weight, layer in zip(model.weights, model.model(tile, nb_layers, stats), strict=False)
             if layer_weight != 0
         ]
@@ -709,6 +715,12 @@ class FireANTsEngine:
             raise ValueError(
                 f"Unknown linear_method '{linear_method}' (expected {', '.join(map(repr, _LINEAR_METHODS))})."
             )
+        if cc_kernel % 2 == 0:
+            # FireANTs' own cross-correlation refuses an even window ("kernel_size must be odd"), and
+            # an even one has no centre voxel: the correlation would sit half a voxel off the point it
+            # is attributed to. Raised here so both the library metric and the chunked one below fail
+            # the same way, at build time rather than minutes into a registration.
+            raise ValueError(f"cc_kernel must be odd, got {cc_kernel}: an even window has no centre voxel.")
         if linear_method == "none" and deformable_method == "none":
             # Left to run this optimises nothing and returns the identity: a Moved equal to the moving
             # image and a zero field, which no downstream check tells apart from a pair that needed no
@@ -1172,7 +1184,8 @@ class RegistrationNet(network.Network):
         feature_patch: Annotated[
             int,
             "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
-            "at once. Tiles share a quarter of their width and are blended by a cosine window, so a volume "
+            "at once. Tiles share the 'feature_overlap' share of their width and are blended by a cosine "
+            "window, so a volume "
             "larger than the card still goes through.",
             Range(0, 1024),
         ] = 0,

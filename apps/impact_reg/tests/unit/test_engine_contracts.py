@@ -331,3 +331,31 @@ def test_fireants_refuses_unknown_static_settings() -> None:
         RegistrationNet(feature_normalization="zscore")
     with pytest.raises(ValueError, match="feature_metric"):
         RegistrationNet(feature_metric="ncc")
+
+
+def test_fireants_refuses_an_even_correlation_window() -> None:
+    # FireANTs' own cross-correlation raises on an even window; the chunked one would instead pool a
+    # voxel wider than the image, which crashes on a masked pair and shifts the correlation by half a
+    # voxel on an unmasked one. Both paths have to refuse it, and before the run starts.
+    import pytest
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="cc_kernel"):
+        RegistrationNet(cc_kernel=4)
+
+
+def test_fireants_static_puts_every_feature_layer_on_the_image_grid() -> None:
+    # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel
+    # tile). Concatenated as they come, the second layer would fail torch.cat outright.
+    import torch
+    from impact_reg_konfai.models.fireants import _one_volume
+
+    class TwoResolutions(torch.nn.Module):
+        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+            coarse = torch.nn.functional.avg_pool3d(tile, 2)
+            return [tile.repeat(1, 3, 1, 1, 1), coarse.repeat(1, 5, 1, 1, 1)]
+
+    model = SimpleNamespace(model=TwoResolutions(), weights=[1.0, 1.0], in_channels=1, model_path="")
+    core = SimpleNamespace(model=model)
+    volume = _one_volume(core, 1.0, torch.rand(1, 1, 16, 16, 16), patch=0, overlap=0.25, normalization="none")
+    assert volume.shape == (1, 8, 16, 16, 16)
