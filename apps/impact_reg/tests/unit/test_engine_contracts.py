@@ -396,3 +396,16 @@ def test_fireants_static_puts_every_feature_layer_on_the_image_grid() -> None:
     core = SimpleNamespace(model=model, _stats=lambda t: {})
     volume = _one_volume(core, 1.0, torch.rand(1, 1, 16, 16, 16), patch=0, overlap=0.25, normalization="none")
     assert volume.shape == (1, 8, 16, 16, 16)
+
+
+def test_the_jacobian_patch_covers_the_deepest_selected_layer() -> None:
+    # A patch smaller than the receptive field crops the context the feature was trained to see. Measured
+    # on TS/M730, one output voxel's sensitivity to the input stays above 1 % of its peak over 5 voxels for
+    # the first layer and 11 for the second -- the study's own recommended map sets 11 for this mask.
+    from impact_reg_konfai.models.elastix import _fov_value
+
+    fov = {"formula": "2^l+3"}
+    assert _fov_value(fov, "1") == 5
+    assert _fov_value(fov, "01") == 11
+    assert _fov_value(fov, "001") == 23
+    assert _fov_value({"formula": "2*r*d+1", "r": 1, "d": 2}, "1") == 5
