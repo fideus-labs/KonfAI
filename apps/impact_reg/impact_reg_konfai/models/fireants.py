@@ -518,7 +518,9 @@ class _FeatureCC(torch.nn.Module):
 
 
 @torch.no_grad()
-def _one_volume(core: "_ImpactCore", weight: float, image: torch.Tensor, patch: int, overlap: float) -> torch.Tensor:
+def _one_volume(
+    core: "_ImpactCore", weight: float, image: torch.Tensor, patch: int, overlap: float, normalization: str
+) -> torch.Tensor:
     """One model's selected feature layers for one image, tiled and blended.
 
     The intensity statistics come from the WHOLE image, never from a tile, so every tile is normalised
@@ -546,7 +548,14 @@ def _one_volume(core: "_ImpactCore", weight: float, image: torch.Tensor, patch: 
             for layer_weight, layer in zip(model.weights, model.model(tile, nb_layers, stats), strict=False)
             if layer_weight != 0
         ]
-        tile_features = weight * torch.nn.functional.normalize(torch.cat(layers, dim=1), dim=1)
+        tile_features = torch.cat(layers, dim=1)
+        if normalization == "l2":
+            tile_features = torch.nn.functional.normalize(tile_features, dim=1)
+        elif normalization == "standardized":
+            tile_features = (tile_features - tile_features.mean(dim=1, keepdim=True)) / tile_features.std(
+                dim=1, keepdim=True
+            ).clamp_min(1e-6)
+        tile_features = weight * tile_features
         if extracted is None:  # the channel count is only known once a tile has been through
             shape = (tile_features.shape[0], tile_features.shape[1], *tensor.shape[2:])
             extracted = torch.zeros(shape, device=image.device, dtype=tile_features.dtype)
@@ -563,7 +572,12 @@ def _one_volume(core: "_ImpactCore", weight: float, image: torch.Tensor, patch: 
 
 @torch.no_grad()
 def _feature_volumes(
-    loss: "ImpactFeatureLoss", fixed: torch.Tensor, moving: torch.Tensor, patch: int, overlap: float = 0.25
+    loss: "ImpactFeatureLoss",
+    fixed: torch.Tensor,
+    moving: torch.Tensor,
+    patch: int,
+    overlap: float,
+    normalization: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The fixed and moving feature volumes of every model, concatenated along the channel axis.
 
@@ -579,8 +593,8 @@ def _feature_volumes(
     fixed_sides: list[torch.Tensor] = []
     moving_sides: list[torch.Tensor] = []
     for weight, core in zip(loss.model_weights, loss.cores, strict=True):
-        fixed_features = _one_volume(core, weight, fixed, patch, overlap)
-        moving_features = _one_volume(core, weight, moving, patch, overlap)
+        fixed_features = _one_volume(core, weight, fixed, patch, overlap, normalization)
+        moving_features = _one_volume(core, weight, moving, patch, overlap, normalization)
         if core.pca > 0:
             moving_features, fixed_features = core.pca_project(moving_features, fixed_features)
         fixed_sides.append(fixed_features)
@@ -667,6 +681,9 @@ class FireANTsEngine:
         mode: str = "Jacobian",
         feature_patch: int = 0,
         feature_chunk: int = 0,
+        feature_overlap: float = 0.25,
+        feature_normalization: str = "l2",
+        feature_metric: str = "cc",
     ) -> None:
         self._scales = [int(s) for s in scales]
         self._affine_iterations = [int(i) for i in affine_iterations]
@@ -703,6 +720,15 @@ class FireANTsEngine:
         self._mode = mode
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
+        self._feature_overlap = float(feature_overlap)
+        self._feature_normalization = feature_normalization
+        self._feature_metric = feature_metric
+        if feature_normalization not in ("l2", "standardized", "none"):
+            raise ValueError(
+                f"Unknown feature_normalization '{feature_normalization}' (expected 'l2', 'standardized' or 'none')."
+            )
+        if feature_metric not in ("cc", "mi", "mse"):
+            raise ValueError(f"Unknown feature_metric '{feature_metric}' (expected 'cc', 'mi' or 'mse').")
         if mode not in ("Static", "Jacobian"):
             raise ValueError(f"Unknown mode '{mode}' (expected 'Static' or 'Jacobian').")
 
@@ -919,6 +945,8 @@ class FireANTsEngine:
                     Image(fixed, device=device).array,
                     Image(moving, device=device).array,
                     self._feature_patch,
+                    self._feature_overlap,
+                    self._feature_normalization,
                 )
                 for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
                     if masked:
@@ -932,11 +960,12 @@ class FireANTsEngine:
                 # (``cc_kernel`` sets its window): "impact" names where the channels came from, not a
                 # metric FireANTs knows. With ``feature_chunk`` the correlation runs a few channels at a
                 # time, which is what lets two feature models share one card.
-                if self._feature_chunk > 0:
+                metric = self._feature_metric
+                if self._feature_chunk > 0 and metric == "cc":
                     loss_type = "custom"
                     custom_loss = _FeatureCC(self._cc_kernel, self._feature_chunk, masked=masked)
                 else:
-                    loss_type = "masked_cc" if masked else "cc"
+                    loss_type = f"masked_{metric}" if masked else metric
             elif self._deformable_metric == "impact":
                 loss_type = "custom"
                 custom_loss = ImpactFeatureLoss(self._impact_specs, masked=masked)
@@ -1148,6 +1177,25 @@ class RegistrationNet(network.Network):
             "instead of the channel count, which is what lets several feature models share one card.",
             Range(0, 64),
         ] = 0,
+        feature_overlap: Annotated[
+            float,
+            "Static only: the share of its width two neighbouring extraction tiles have in common. More "
+            "overlap costs time and blends the seams further; it is ignored when the whole image goes "
+            "through in one pass.",
+            Range(0.0, 0.9),
+        ] = 0.25,
+        feature_normalization: Annotated[
+            Literal["l2", "standardized", "none"],
+            "Static only: how each voxel's feature vector is scaled before the two volumes are compared. "
+            "'l2' gives every voxel a unit vector, so only the direction counts; 'standardized' centres and "
+            "scales it; 'none' compares the raw activations, where a few loud channels dominate.",
+        ] = "l2",
+        feature_metric: Annotated[
+            Literal["cc", "mi", "mse"],
+            "Static only: what compares the feature volumes once they are extracted. 'cc' is a local "
+            "cross-correlation over a cube of 'cc_kernel' voxels, and the only one 'feature_chunk' can "
+            "split by channel.",
+        ] = "cc",
         models: dict[str, ModelSpec] = {},
     ) -> None:
         super().__init__(
@@ -1182,6 +1230,9 @@ class RegistrationNet(network.Network):
             mode,
             feature_patch,
             feature_chunk,
+            feature_overlap,
+            feature_normalization,
+            feature_metric,
         )
         self.add_module(
             "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]

@@ -306,3 +306,28 @@ def test_fireants_tiles_cover_every_voxel_once_blended() -> None:
         )
     assert float(covered.min()) > 0.0
     assert list(_tiles(shape, patch=0, overlap=0.25)) == [tuple(slice(0, size) for size in shape)]
+
+
+def test_fireants_static_settings_reach_the_engine() -> None:
+    # Dropped at RegistrationNet, each of these would silently keep its default: the run still produces a
+    # field, computed with settings the caller did not ask for.
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    engine = RegistrationNet(
+        mode="Static", feature_overlap=0.5, feature_normalization="standardized", feature_metric="mi"
+    )["Registration"]._engine
+    assert (engine._feature_overlap, engine._feature_normalization, engine._feature_metric) == (
+        0.5,
+        "standardized",
+        "mi",
+    )
+
+
+def test_fireants_refuses_unknown_static_settings() -> None:
+    import pytest
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    with pytest.raises(ValueError, match="feature_normalization"):
+        RegistrationNet(feature_normalization="zscore")
+    with pytest.raises(ValueError, match="feature_metric"):
+        RegistrationNet(feature_metric="ncc")
