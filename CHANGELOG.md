@@ -47,6 +47,11 @@ written replaces it.
   model repository publishes, `2^l+3`, holds for a segmenter's first layer and understates every layer
   after it; measured on TS/M730 the reach is 5, 11, 19 and 43 voxels for layers 1 to 4. A two-layer
   mask now asks for 11 voxels instead of 5.
+- impact-reg: the ConvexAdam refinement smooths its control grid the way ConvexAdam does. The method
+  averages the grid over a 3x3x3 window three times at every iteration -- that smoothing is what keeps
+  the field regular while it moves, and it shapes the regulariser too. The filter could do it and no
+  preset could ask for it, so the stage ran on an unsmoothed grid; `control_grid_smoothing` exposes it
+  and defaults to the method's three passes.
 - impact-reg: elastix's own messages reach the log, and a GPU the engine cannot see is explained
   rather than reported as an absent CUDA.
 - impact-reg: an empty fixed mask gives a zero field rather than a registration of the whole patch,

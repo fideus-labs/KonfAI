@@ -223,6 +223,7 @@ class ConvexAdamEngine:
         learning_rate: float,
         regularization_weight: float,
         grid_shrink: int,
+        control_grid_smoothing: int,
         distance: list[str],
         layers_weight: list[float],
         subset_features: list[int],
@@ -247,6 +248,7 @@ class ConvexAdamEngine:
         self._learning_rate = learning_rate
         self._regularization_weight = regularization_weight
         self._grid_shrink = grid_shrink
+        self._control_grid_smoothing = control_grid_smoothing
         self._distance = distance
         self._layers_weight = layers_weight
         self._subset_features = subset_features
@@ -366,6 +368,7 @@ class ConvexAdamEngine:
         fine.SetLearningRate(self._learning_rate)
         fine.SetRegularizationWeight(self._regularization_weight)
         fine.SetGridShrinkFactor(self._grid_shrink)
+        fine.SetControlGridSmoothingIterations(self._control_grid_smoothing)
         fine.SetDevice(device)
         fine.SetSeed(self._seed)
 
@@ -583,8 +586,15 @@ class RegistrationNet(network.Network):
             int,
             Range(1, 128),
             "Downsampling factor of the coarse optimisation grid; higher = a coarser, faster initialisation, "
-            "lower = finer.",
+            "lower = finer. ConvexAdam optimises on a grid half the image ('grid_sp_adam' 2).",
         ] = 4,
+        control_grid_smoothing: Annotated[
+            int,
+            Range(0, 8),
+            "3x3x3 average-pool passes over the control grid at every Adam iteration, which is what keeps the "
+            "field smooth while it moves: ConvexAdam applies three, and the same smoothing shapes the "
+            "regulariser. 0 optimises the grid unsmoothed.",
+        ] = 3,
         subset_features: Annotated[
             list[int],
             "Feature-channel indices to keep (empty = all); a hand-picked subset of channels, NOT a count.",
@@ -624,6 +634,7 @@ class RegistrationNet(network.Network):
             learning_rate,
             regularization_weight,
             grid_shrink,
+            control_grid_smoothing,
             [spec.distance for spec in specs],
             [float(spec.layers_weight) for spec in specs],
             subset_features,
