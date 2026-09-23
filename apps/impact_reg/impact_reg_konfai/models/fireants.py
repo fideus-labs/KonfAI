@@ -670,6 +670,7 @@ class FireANTsEngine:
         smooth_grad_sigma: float,
         seed: int,
         impact_specs: list["ModelSpec"],
+        deformable_masked: bool = True,
         mode: str = "Jacobian",
         feature_patch: int = 0,
         feature_chunk: int = 0,
@@ -722,6 +723,7 @@ class FireANTsEngine:
         # IMPACT deformable metric (only used when deformable_metric == "impact"): KonfAI IMPACT feature
         # models drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
         self._impact_specs = impact_specs
+        self._deformable_masked = bool(deformable_masked)
         self._mode = mode
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
@@ -861,7 +863,6 @@ class FireANTsEngine:
         bf = BatchedImages([fixed_img])
         bm = BatchedImages([moving_img])
         affine_loss = f"masked_{self._affine_metric}" if masked else self._affine_metric
-        deformable_loss = f"masked_{self._deformable_metric}" if masked else self._deformable_metric
 
         # Linear: Rigid(MI) -> Affine(MI, seeded by the rigid), mirroring ANTs. The affine seeds the
         # deformable stage (or is the whole transform when deformable_method == "none").
@@ -939,7 +940,10 @@ class FireANTsEngine:
                 )
             # "impact" swaps the analytic metric for a KonfAI IMPACT feature loss on the deformable stage
             # (the linear pre-align keeps its own affine_metric); the fixed mask restricts it too.
-            loss_type: str = deformable_loss
+            loss_type: str
+            # The masks drive the deformable stage only when the caller asks: a tight mask hides the
+            # outline the stage needs to pull an end into place.
+            deformable_masked = masked and self._deformable_masked
             custom_loss: torch.nn.Module | None = None
             if self._deformable_metric == "impact" and self._mode == "Static":
                 # Static: extract once, then register the feature volumes. The
@@ -956,7 +960,7 @@ class FireANTsEngine:
                     self._feature_multiple,
                 )
                 for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
-                    if masked:
+                    if deformable_masked:
                         features = torch.cat([features, image.array[:, -1:]], dim=1)
                     image.array = features
                     image.channels = features.shape[1]
@@ -970,12 +974,20 @@ class FireANTsEngine:
                 metric = self._feature_metric
                 if self._feature_chunk > 0 and metric == "cc":
                     loss_type = "custom"
-                    custom_loss = _FeatureCC(self._cc_kernel, self._feature_chunk, masked=masked)
+                    custom_loss = _FeatureCC(self._cc_kernel, self._feature_chunk, masked=deformable_masked)
                 else:
-                    loss_type = f"masked_{metric}" if masked else metric
-            elif self._deformable_metric == "impact":
-                loss_type = "custom"
-                custom_loss = ImpactFeatureLoss(self._impact_specs, masked=masked)
+                    loss_type = f"masked_{metric}" if deformable_masked else metric
+            else:
+                if masked and not deformable_masked:
+                    # Fresh images: the masked ones carry the mask as a channel, and concatenate may have
+                    # reused their storage.
+                    bf = BatchedImages([Image(fixed, device=device)])
+                    bm = BatchedImages([Image(moving, device=device)])
+                if self._deformable_metric == "impact":
+                    loss_type = "custom"
+                    custom_loss = ImpactFeatureLoss(self._impact_specs, masked=deformable_masked)
+                else:
+                    loss_type = f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
             reg = Deformable(
                 scales=self._scales,
                 iterations=self._deformable_iterations,
@@ -1162,6 +1174,12 @@ class RegistrationNet(network.Network):
             "convergence.",
         ] = 1.0,
         seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
+        deformable_masked: Annotated[
+            bool,
+            "Restrict the deformable metric to the masks as well. False keeps them for the centre of mass, rigid "
+            "and affine only: a tight or ragged mask hides the subject's outline, and the deformable stage "
+            "cannot pull into place an end it does not see.",
+        ] = True,
         mode: Annotated[
             Literal["Static", "Jacobian"],
             "How the IMPACT deformable metric reads its features, as the elastix engine means it. 'Jacobian' "
@@ -1247,6 +1265,7 @@ class RegistrationNet(network.Network):
             smooth_grad_sigma,
             seed,
             _sorted_specs(models),
+            deformable_masked,
             mode,
             feature_patch,
             feature_chunk,
