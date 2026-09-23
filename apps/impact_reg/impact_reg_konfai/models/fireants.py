@@ -685,6 +685,12 @@ class FireANTsEngine:
         feature_normalization: str = "l2",
         feature_metric: str = "cc",
     ) -> None:
+        """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
+
+        The settings that name a choice rather than a number -- the linear and deformable methods, the
+        mode, the feature normalisation and metric -- are checked here rather than at the first run, so a
+        typo in a preset stops before a card is taken.
+        """
         self._scales = [int(s) for s in scales]
         self._affine_iterations = [int(i) for i in affine_iterations]
         self._deformable_iterations = [int(i) for i in deformable_iterations]
@@ -1198,6 +1204,10 @@ class RegistrationNet(network.Network):
         ] = "cc",
         models: dict[str, ModelSpec] = {},
     ) -> None:
+        """Build the graph a FireANTs preset runs: registration, then the moved image and the field.
+
+        Every argument is a preset knob; the annotations beside them are what SlicerKonfAI renders.
+        """
         super().__init__(
             in_channels=1,
             optimizer=optimizer,
