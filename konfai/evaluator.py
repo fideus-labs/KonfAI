@@ -728,7 +728,7 @@ class Evaluator(DistributedObject):
         self._map_sinks = {}
 
     def _flush_pending(self, statistics: Statistics) -> None:
-        """Combine the pending case's partial states into its exact values and record them."""
+        """Combine the pending case's partial states into its values, to float32 rounding, and record them."""
         if self._pending_name is None:
             return
         result: dict[str, float] = {}

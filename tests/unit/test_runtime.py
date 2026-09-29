@@ -1379,3 +1379,68 @@ def test_tensorboard_without_its_executable_is_refused_before_the_setup(monkeypa
     with pytest.raises(ConfigError, match=r"pip install konfai\[tensorboard\]"):
         rt_dist.execute_distributed_object(Workflow("no-tensorboard"), cpu=1, quiet=True, tensorboard=True)
     assert set_up == []
+
+
+@pytest.mark.parametrize(
+    ("host", "bound", "shown"),
+    [
+        (None, "127.0.0.1", "127.0.0.1"),
+        ("", "127.0.0.1", "127.0.0.1"),
+        ("0.0.0.0", "0.0.0.0", "192.0.2.7"),
+        ("10.1.2.3", "10.1.2.3", "10.1.2.3"),
+        ("::1", "::1", "[::1]"),
+    ],
+)
+def test_tensorboard_binds_loopback_unless_an_address_is_asked_for(
+    monkeypatch, tmp_path, capsys, host: str | None, bound: str, shown: str
+) -> None:
+    """TensorBoard serves the curves and the DataLog images without authentication: -tb binds 127.0.0.1,
+    KONFAI_TENSORBOARD_HOST names another address, and the printed URL is one a browser reaches (the
+    network address for a wildcard bind)."""
+    commands: list[list[str]] = []
+
+    class Process:
+        def __init__(self, command, **_kwargs) -> None:
+            commands.append(command)
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    class Route:
+        """The UDP socket that names this host's address on its default route."""
+
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            pass
+
+        def connect(self, _address) -> None:
+            pass
+
+        def getsockname(self) -> tuple[str, int]:
+            return ("192.0.2.7", 40000)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("KONFAI_TENSORBOARD_PORT", "6123")
+    if host is None:
+        monkeypatch.delenv("KONFAI_TENSORBOARD_HOST", raising=False)
+    else:
+        monkeypatch.setenv("KONFAI_TENSORBOARD_HOST", host)
+    monkeypatch.setattr(rt_logg.shutil, "which", lambda name: "/opt/bin/tensorboard")
+    monkeypatch.setattr(rt_logg.subprocess, "Popen", Process)
+    monkeypatch.setattr(rt_logg.socket, "socket", Route)
+    with rt_logg.TensorBoard("RUN"):
+        pass
+    assert commands == [["/opt/bin/tensorboard", "--logdir", str(tmp_path / "RUN"), "--port", "6123", "--host", bound]]
+    assert capsys.readouterr().out == f"[KonfAI] Tensorboard : http://{shown}:6123/\n"

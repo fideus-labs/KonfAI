@@ -24,7 +24,7 @@ from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import torch
@@ -477,6 +477,14 @@ class OutputsGroup(list):
         self.layers.clear()
 
 
+@cache
+def _takes_key_and_root(function: Callable) -> tuple[bool, bool]:
+    """Whether a function ``Network._apply_network`` runs takes ``key`` and ``root``: a property of the
+    function, read once, where every network of every step would otherwise read its signature."""
+    parameters = inspect.signature(function).parameters
+    return "key" in parameters, "root" in parameters
+
+
 class Network(ModuleArgsDict, ABC):
     """Base class for KonfAI networks participating in a routed model graph."""
 
@@ -518,10 +526,10 @@ class Network(ModuleArgsDict, ABC):
                     **kwargs,
                 ).items():
                     results.update({name_function(self) + "." + k: v})
-        param_names = {param.name for param in inspect.signature(function).parameters.values()}
-        if "key" in param_names:
+        takes_key, takes_root = _takes_key_and_root(function)
+        if takes_key:
             function = partial(function, key=key)
-        if "root" in param_names:
+        if takes_root:
             function = partial(function, root=root)
 
         results[name_function(self)] = function(self, *args, **kwargs)

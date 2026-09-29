@@ -31,15 +31,11 @@ from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TextIO, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 import numpy as np
 import tqdm
 
-try:
-    from torch.utils.tensorboard.writer import SummaryWriter
-except ImportError:
-    SummaryWriter = None  # type: ignore[assignment,misc]
 from konfai import (
     __version__,
     evaluations_directory,
@@ -49,6 +45,10 @@ from konfai import (
     transforms_directory,
 )
 from konfai.utils.errors import ConfigError, KonfAIWarning
+
+if TYPE_CHECKING:
+    # TRAIN and PREDICTION import the writer they open; TensorBoard stays out of the other workflows.
+    from torch.utils.tensorboard.writer import SummaryWriter
 
 
 class NullSummaryWriter:
@@ -403,6 +403,19 @@ def record(message: str) -> Path | None:
     return Path(sink.file.name)
 
 
+def _network_address(family: socket.AddressFamily = socket.AF_INET) -> str:
+    """This host's address on its default route: where a browser on another machine reaches a wildcard bind."""
+    probe_target, loopback = (
+        (("10.255.255.255", 1), "127.0.0.1") if family == socket.AF_INET else (("2001:db8::1", 1), "::1")
+    )
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect(probe_target)
+            return probe.getsockname()[0]
+    except OSError:
+        return loopback
+
+
 class TensorBoard:
     """Lifecycle helper that optionally starts a TensorBoard side process."""
 
@@ -422,24 +435,17 @@ class TensorBoard:
             if not port or not port.isdigit():
                 raise ValueError("Invalid or missing KONFAI_TENSORBOARD_PORT.")
 
-            command = [
-                tensorboard_exe,
-                "--logdir",
-                str(logdir),
-                "--port",
-                port,
-                "--bind_all",
-            ]
+            # TensorBoard has no authentication: the network is opened only on an explicit address.
+            host = os.environ.get("KONFAI_TENSORBOARD_HOST") or "127.0.0.1"
+            command = [tensorboard_exe, "--logdir", str(logdir), "--port", port, "--host", host]
             self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # nosec B603
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("10.255.255.255", 1))
-                ip = s.getsockname()[0]
-            except Exception:
-                ip = "127.0.0.1"
-            finally:
-                s.close()
-            print(f"[KonfAI] Tensorboard : http://{ip}:{os.environ['KONFAI_TENSORBOARD_PORT']}/")
+            if host == "0.0.0.0":  # nosec B104 - reads the address asked for, binds nothing
+                host = _network_address()
+            elif host == "::":
+                host = f"[{_network_address(socket.AF_INET6)}]"
+            elif ":" in host:
+                host = f"[{host}]"
+            print(f"[KonfAI] Tensorboard : http://{host}:{port}/")
         return self
 
     def __exit__(self, exc_type, value, traceback):

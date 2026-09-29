@@ -209,6 +209,15 @@ class SitkFile(AbstractFile):
 
     def _resolve_data_path(self, name: str) -> str | None:
         base = f"{self.filename}{name}"
+        memo = self.resolved_paths
+        path = memo.get(base) if memo is not None else None
+        if path is None:
+            path = self._probe_data_path(base)
+            if memo is not None and path is not None:  # an absent entry stays a fresh question
+                memo[base] = path
+        return path
+
+    def _probe_data_path(self, base: str) -> str | None:
         for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
             candidate = f"{base}{suffix}"
             if os.path.exists(candidate):

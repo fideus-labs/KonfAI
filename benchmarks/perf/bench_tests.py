@@ -19,12 +19,12 @@
     python benchmarks/perf/bench_tests.py [--force] [--quick] [--with-full] [--skip-unpinned]
 
 Runs ``pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/`` twice from the
-repository root: pinned (``OMP_NUM_THREADS=1``, ``MKL_NUM_THREADS=1``) and unpinned (both unset,
-today's default), and records the wall, the CPU-seconds of the whole worker tree (``RUSAGE_CHILDREN``,
-which counts the waited-for descendants pytest-xdist leaves behind) and the failures. Nothing pins
-pytest's threads today, so every worker runs torch with every core; the audit measured the pin at
-8.4x on a quiet 24-core machine, and three tests of ``test_sweep_tiling.py`` that read the core count
-fail under it. ``--with-full`` adds the full suite, pinned. The unpinned run takes minutes.
+repository root: pinned (``OMP_NUM_THREADS=1``, ``MKL_NUM_THREADS=1``, what the pixi test tasks set)
+and unpinned (both unset, a bare ``pytest``), and records the wall, the CPU-seconds of the whole worker
+tree (``RUSAGE_CHILDREN``, which counts the waited-for descendants pytest-xdist leaves behind) and the
+failures. Unpinned, every worker runs torch with every core: the audit of 2026-09-06 measured the pin
+at 8.4x on a quiet 24-core machine. ``--with-full`` adds the full suite, pinned. The unpinned run takes
+minutes.
 """
 
 from __future__ import annotations

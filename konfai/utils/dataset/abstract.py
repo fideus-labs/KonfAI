@@ -74,6 +74,10 @@ class AbstractFile(ABC):
     #: entry, whatever its depth): what the SimpleITK backend files an uncompressed twin under.
     case: str = ""
 
+    #: Where that dataset keeps the file each entry resolved to, until it writes: the SimpleITK
+    #: backend probes an entry's sidecar suffixes once instead of at every read.
+    resolved_paths: dict[str, str] | None = None
+
     @abstractmethod
     def __init__(self, filename: str, read: bool) -> None:
         pass

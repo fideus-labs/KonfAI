@@ -1127,6 +1127,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         it_validation (int | None): Validation interval.
         it_lr_update (int | None): Learning rate update interval.
         autocast (bool): Enable AMP training.
+        channels_last (bool): Lay the convolution weights and inputs out channels-last; cuDNN then picks other
+            kernels, faster or slower depending on the model.
         cudnn_benchmark (bool): Let cuDNN benchmark its kernels under ``manual_seed``: faster, no bit-for-bit replay.
         torch_compile (bool): Compile the graph walk with torch.compile; the first steps pay the compilation.
         gradient_checkpoints (list[str] | None): Modules to use gradient checkpointing on.

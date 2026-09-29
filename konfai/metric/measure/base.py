@@ -65,7 +65,7 @@ class Criterion(torch.nn.Module, ABC):
     # never per-patch final values), so evaluation may feed it disjoint patches instead of the whole
     # volume. Default ``False``: an unknown metric evaluates whole: a wrong ``True`` would corrupt
     # the reported value, so only a metric whose ``partial_metric``/``combine_metric`` reproduce
-    # ``forward`` exactly may set it.
+    # ``forward`` to float32 rounding may set it.
     reducible: bool = False
 
     # ``True`` declares that the reported value and the loss are each the mean of one value per patch
@@ -110,7 +110,7 @@ class Criterion(torch.nn.Module, ABC):
         raise NotImplementedError(f"{self.get_name()} is not reducible: it has no partial state.")
 
     def combine_metric(self, states: list[Any]) -> Any:
-        """Combine per-patch states into exactly what ``forward`` returns on the whole volume."""
+        """Combine per-patch states into what ``forward`` returns on the whole volume, to float32 rounding."""
         raise NotImplementedError(f"{self.get_name()} is not reducible: it cannot combine states.")
 
     @abstractmethod

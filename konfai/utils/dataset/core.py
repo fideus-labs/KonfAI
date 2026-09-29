@@ -230,6 +230,8 @@ class Dataset:
         #: drops the caches (one round-trip each on a remote root).
         self._root_seen = False
         self._case_paths: dict[tuple[str, str], str] = {}
+        #: The file an entry of a case resolved to, kept under the same rule.
+        self._entry_paths: dict[str, str] = {}
         #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
         #: ``(group, name)``: computed once per volume.
         self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
@@ -303,6 +305,15 @@ class Dataset:
         flush one entry while another thread writes elsewhere (the backend's own declaration)."""
         return self._backend.concurrent_write_safe
 
+    def _forget_paths(self) -> None:
+        """Drop what this dataset memoised of its files: a write, before it starts and once it has published,
+        may change which file an entry resolves to."""
+        self._names_cache.clear()
+        self._infos_cache.clear()
+        self._case_paths.clear()
+        self._entry_paths.clear()
+        self.case_facts.clear()
+
     def _write_target(self, group: str, name: str) -> tuple[_File, str]:
         """The file a ``(group, name)`` write lands in and the entry name inside it, caches dropped.
 
@@ -310,10 +321,7 @@ class Dataset:
         per case); a single store keeps one file and a ``group/name`` entry.
         """
         uri.refuse_write(self.filename)
-        self._names_cache.clear()
-        self._infos_cache.clear()
-        self._case_paths.clear()
-        self.case_facts.clear()
+        self._forget_paths()
         if self.is_directory:
             os.makedirs(self.filename, exist_ok=True)
             s_group = group.split("/")
@@ -349,6 +357,7 @@ class Dataset:
         target, entry = self._write_target(group, name)
         with target as file:
             file.data_to_file(entry, data, attributes)
+        self._forget_paths()
 
     def can_stream_data(self, attributes: Attribute) -> bool:
         """Whether ``open_data_stream`` can serve this dataset's write format: H5 and OME-Zarr always;
@@ -386,6 +395,7 @@ class Dataset:
             file.__exit__(None, None, None)
             return None
         stream._file = file
+        stream._on_finish = self._forget_paths
         return stream
 
     def _case_path(self, sub_directory: str, name: str) -> str | None:
@@ -437,6 +447,7 @@ class Dataset:
                 if path is not None:
                     with self._unreadable_named(path, groups, name), self._file(path, True) as file:
                         file.case = name
+                        file.resolved_paths = self._entry_paths
                         return action(file, "", groups.split("/")[-1])
             raise DatasetManagerError(
                 f"The entry '{groups}/{name}' is not in '{self.filename}'.",

@@ -45,7 +45,7 @@ it writes no TensorBoard events.
 | `--gpu` | One or more GPU ids. |
 | `--cpu` | Number of CPU worker processes when no `--gpu` is given; the run stays on CPU unless `--gpu` is passed. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
 | `-q`, `--quiet` | Reduce console output. |
-| `-tb`, `--tensorboard` | Launch TensorBoard. Needs the `tensorboard` extra, checked before the run starts. Not accepted by `EVALUATION` or `TRANSFORM`. |
+| `-tb`, `--tensorboard` | Launch TensorBoard on `127.0.0.1` (`KONFAI_TENSORBOARD_HOST` names another address). Needs the `tensorboard` extra, checked before the run starts. Not accepted by `EVALUATION` or `TRANSFORM`. |
 | `--init` | Create the config file if missing, resolve every default into it, and exit without running. |
 
 ### Default config file per command
@@ -424,6 +424,14 @@ Where runs keep the uncompressed twins of the compressed files they read by
 region (`.nii.gz`, a compressed MetaImage). Default `~/.cache/konfai/decompressed`
 (`$XDG_CACHE_HOME/konfai/decompressed` when that is set). See
 [compressed files](components/storage-backends.md#compressed-files).
+
+#### `KONFAI_TENSORBOARD_HOST`
+
+The address TensorBoard binds under `-tb`. Unset or empty, it is `127.0.0.1`:
+only this machine reaches it. TensorBoard has no authentication, so from another
+machine forward the port over SSH (`ssh -N -L <port>:127.0.0.1:<port> user@server`)
+and open `http://127.0.0.1:<port>/` on your own computer. `0.0.0.0` serves every
+interface, and KonfAI prints the machine's network address.
 
 #### Streaming and write-path switches
 

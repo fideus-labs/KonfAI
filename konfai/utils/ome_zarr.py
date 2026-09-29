@@ -55,17 +55,6 @@ except ImportError:
     zarr = None  # type: ignore[assignment]
     _ZARR_AVAILABLE = False
 
-try:
-    # dask is ngff-zarr's own hard dependency: it describes a store and derives a label map's levels.
-    import dask.array
-    import ngff_zarr  # type: ignore[import-untyped]
-
-    _NGFF_ZARR_AVAILABLE = True
-except ImportError:
-    dask = None  # type: ignore[assignment]
-    ngff_zarr = None  # type: ignore[assignment]
-    _NGFF_ZARR_AVAILABLE = False
-
 if TYPE_CHECKING:
     from ngff_zarr.v06.zarr_metadata import Metadata as MetadataV06
     from ngff_zarr.v06.zarr_metadata import SupportedDims
@@ -175,9 +164,22 @@ def _require_zarr() -> None:
         )
 
 
+@lru_cache(maxsize=1)
+def _ngff_zarr_available() -> bool:
+    """Whether ngff-zarr and dask, its own hard dependency, import. They are imported where a store is
+    described or written and not with this module: some 700 modules and 50 MB that every rank of a run
+    reading no store would otherwise load."""
+    try:
+        import dask.array  # noqa: F401
+        import ngff_zarr  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _require_ngff_zarr() -> None:
     _require_zarr()
-    if not _NGFF_ZARR_AVAILABLE:
+    if not _ngff_zarr_available():
         raise DatasetManagerError(
             "ngff-zarr is required for OME-Zarr support.",
             "Install it with: pip install konfai[omezarr]",
@@ -197,6 +199,8 @@ def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
 def _from_ngff_zarr(store_path: str | Path) -> Any:
     """ngff-zarr's multiscales for ``store_path``. A remote root goes in as a key-to-bytes mapping
     over its own filesystem, and as its URL when ngff-zarr refuses the mapping."""
+    import ngff_zarr
+
     if not uri.is_uri(store_path):
         return ngff_zarr.from_ngff_zarr(str(store_path))
     # Through uri.filesystem, so a missing fsspec backend is a structured DatasetManagerError.
@@ -208,7 +212,13 @@ def _from_ngff_zarr(store_path: str | Path) -> Any:
         return ngff_zarr.from_ngff_zarr(str(store_path))
 
 
-@lru_cache(maxsize=8)
+#: Stores whose parse and level arrays stay memoised: one per case and group a run reads, 20 to 35 KiB
+#: each. An epoch shuffles its patches across cases, so a memo smaller than the cohort reparses a
+#: store at nearly every read.
+_MEMOISED_STORES = 1024
+
+
+@lru_cache(maxsize=_MEMOISED_STORES)
 def _multiscales(store_path: str) -> Any:
     """ngff-zarr's multiscales for a store, memoised per path: the images, their metadata and the
     root attributes, all from one parse. The key is the path alone, so anything that puts a
@@ -270,7 +280,7 @@ def is_displacement_field(store_path: str | Path) -> bool:
     This is what lets a DVF be read back as a transform rather than as a 3-channel image. A store
     that predates RFC-5, or one that cannot be read, answers False; this never raises.
     """
-    if not _NGFF_ZARR_AVAILABLE:
+    if not _ngff_zarr_available():
         return False
     try:
         image = _multiscales(str(store_path)).images[0]
@@ -291,7 +301,7 @@ def _component_flip(store_path: str) -> bool:
     Marked by the ``displacements`` entry when the grid could be declared, by the sidecar's
     ``field_components`` when it could not; a store carrying neither is refused rather than read.
     """
-    if not _NGFF_ZARR_AVAILABLE:
+    if not _ngff_zarr_available():
         return False
     try:
         multiscales = _multiscales(store_path)
@@ -388,6 +398,8 @@ class _DecodedChunkCache:
         self._bytes = 0
         self._lock = threading.Lock()
         self._schedules: dict[Any, _ReadSchedule] = {}
+        #: Chunks a read found here, chunks it had to decode, chunks dropped under the cap.
+        self.hits = self.misses = self.evictions = 0
 
     def get(self, key: tuple) -> np.ndarray | None:
         with self._lock:
@@ -405,6 +417,12 @@ class _DecodedChunkCache:
             self._entries[key] = chunk
             self._bytes += chunk.nbytes
             self._trim()
+
+    def count_lookups(self, hits: int, misses: int) -> None:
+        """Chunks a read took from here, and chunks it decoded."""
+        with self._lock:
+            self.hits += hits
+            self.misses += misses
 
     @property
     def held_bytes(self) -> int:
@@ -455,16 +473,20 @@ class _DecodedChunkCache:
         while self._bytes > self.capacity and self._entries:
             key = self._furthest() if self._schedules else next(iter(self._entries))
             self._bytes -= self._entries.pop(key).nbytes
+            self.evictions += 1
 
     def _furthest(self) -> tuple:
         """The chunk whose next use is furthest: a declared chunk by its schedule, an undeclared one
         by its recency, the ``n``-th most recently used taken as ``n`` reads away, a declared chunk
-        nothing reads again first of all. The older wins a tie."""
+        nothing reads again first of all. The older wins a tie, so the oldest chunk nothing reads
+        again ends the scan: a sweep leaves the chunks it has passed at the old end."""
         newer = len(self._entries)
         furthest, distance = next(iter(self._entries)), 0
         for key in self._entries:
             newer -= 1
             steps = self._steps_to_next_use(key, undeclared=newer + 1)
+            if steps == _NEVER_AGAIN:
+                return key
             if steps > distance:
                 furthest, distance = key, steps
         return furthest
@@ -486,6 +508,13 @@ def chunk_cache_held_bytes() -> int:
     """What the decoded-chunk cache holds resident right now, or 0 with no cache. The cache outlives
     the scope an instrument measures, so what it gained there is not that scope's own cost."""
     return _CHUNK_CACHE.held_bytes if _CHUNK_CACHE is not None else 0
+
+
+def chunk_cache_counts() -> tuple[int, int, int]:
+    """The chunks this process's reads found in the cache, decoded, and evicted: (0, 0, 0) with no
+    cache."""
+    cache = _CHUNK_CACHE
+    return (cache.hits, cache.misses, cache.evictions) if cache is not None else (0, 0, 0)
 
 
 def bound_chunk_cache() -> int:
@@ -519,7 +548,7 @@ def _chunk_cache() -> _DecodedChunkCache:
     return _CHUNK_CACHE
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=_MEMOISED_STORES)
 def _level_array(store_path: str, level_path: str) -> Any:
     """The zarr array behind one level, opened once: chunk-wise reads go to it directly, not through
     the dask graph ngff-zarr wraps it in (which rebuilds a task per chunk per read)."""
@@ -636,6 +665,7 @@ def _assemble_window(
         # destinations); the cache is touched for each in read order, leaving the same recency.
         map_over_rank_pool(lambda coords: window_of(coords, from_hull[coords]), list(from_hull))
         placed_from_hull.update(from_hull)
+        cache.count_lookups(0, len(from_hull))
         for coords in wanted:
             if coords in from_hull:
                 cache.get((identity, coords))
@@ -643,6 +673,7 @@ def _assemble_window(
 
     def place(coords: tuple) -> None:
         chunk = cache.get((identity, coords))
+        cache.count_lookups(int(chunk is not None), int(chunk is None))
         if chunk is None:  # evicted between the fill and the read (cache smaller than one hull)
             window = tuple(
                 slice(c * ch, min((c + 1) * ch, extent)) for c, ch, extent in zip(coords, chunks, shape, strict=True)
@@ -719,7 +750,7 @@ def ome_zarr_read_granularity(store_path: str | Path, *, level: int = 0) -> tupl
     Read from the level's metadata, so it is answerable at plan time. ``None`` when the store cannot
     be opened, where a read is priced at what it asks for.
     """
-    if not _NGFF_ZARR_AVAILABLE:
+    if not _ngff_zarr_available():
         return None
     with contextlib.suppress(Exception):  # a store this cannot read simply has no granularity to state
         image = _load_image(str(store_path), level)
@@ -740,7 +771,7 @@ def plan_ome_zarr_reads(
     The decoded-chunk cache then evicts the chunk whose next declared use is furthest away instead
     of the least recently used. Declaring nothing costs nothing: the cache stays LRU.
     """
-    if not _NGFF_ZARR_AVAILABLE or not windows:
+    if not windows or not _ngff_zarr_available():
         return
     with contextlib.suppress(Exception):  # a store this cannot read is simply not scheduled
         image = _load_image(str(store_path), level)
@@ -869,6 +900,8 @@ def _downsample_method(downsample_method: str | None) -> Any:
     method takes the block majority over the same windows instead (:func:`append_ome_zarr_levels`).
     """
     _require_ngff_zarr()
+    import ngff_zarr
+
     if downsample_method is None:
         return ngff_zarr.Methods.DASK_BIN_SHRINK
     try:
@@ -909,6 +942,8 @@ def _block_majority(block: np.ndarray, axis: tuple[int, ...] | None = None) -> n
 def _vote_levels(multiscales: Any, scale_factors: Sequence[int]) -> None:
     """Replace each derived level by the block majority of the level above it: the windows, shapes and
     chunks the block mean has, so the metadata describing them stays true."""
+    import dask.array
+
     images = multiscales.images
     spatial = [index for index, dim in enumerate(images[0].dims) if dim in _SPATIAL]
     source = images[0].data
@@ -982,6 +1017,8 @@ def _write_skeleton(store_path: str | Path, multiscales: Any, version: str, **kw
     """The store's metadata and empty arrays, written in place (``to_ngff_zarr(metadata_only=True)``
     describes every level and creates its array without computing a voxel). ngff-zarr writes local
     directories only, so a remote root gets the skeleton written locally and uploaded."""
+    import ngff_zarr
+
     if not uri.is_uri(store_path):
         ngff_zarr.to_ngff_zarr(
             str(store_path), multiscales, overwrite=True, version=version, metadata_only=True, **kwargs
@@ -1112,6 +1149,9 @@ def create_ome_zarr_store(
     """
     clear_ome_zarr_cache(store_path)
     _require_ngff_zarr()
+    import dask.array
+    import ngff_zarr
+
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
     )
@@ -1190,6 +1230,8 @@ def append_ome_zarr_levels(
     _require_ngff_zarr()
     if not scale_factors:
         return
+    import ngff_zarr
+
     store = Path(store_path)
     clear_ome_zarr_cache(store)
     multiscales = _from_ngff_zarr(store)

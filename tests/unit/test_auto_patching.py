@@ -238,7 +238,7 @@ class TestPatchedReductionIdentity:
 
 
 class TestMetricReductionContract:
-    """partial_metric/combine_metric must reproduce forward exactly on disjoint patches."""
+    """partial_metric/combine_metric must reproduce forward on disjoint patches, to float32 rounding."""
 
     @staticmethod
     def _patches(shape, patch):
