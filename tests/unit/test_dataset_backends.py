@@ -65,26 +65,6 @@ def test_a_memmapped_store_declares_the_band_a_region_read_touches(tmp_path: "Pa
     assert chunk_hull_voxels(slab, granularity[1:], spatial) == 8 * 24 * 16, "a full-plane slab costs itself"
 
 
-def test_a_compressed_store_declares_no_grain_because_it_serves_no_bounded_region(tmp_path: "Path") -> None:
-    """Compressed, ITK decodes forward from the start and stops on the region, so a read costs its
-    END offset: 14.6 / 41.8 / 70.5 / 112.6 ms for one 32^3 region at z = 0 / 64 / 128 / 224 of a
-    256^3 volume whose whole decode is 102 ms. There is no block to align to, only a prefix, and
-    ``bounded_region_reads`` is what says so -- the grain stays unstated."""
-    import numpy as np
-    import SimpleITK as sitk
-    from konfai.utils.dataset import Dataset
-
-    case = tmp_path / "Dataset" / "CASE_000"
-    case.mkdir(parents=True)
-    image = sitk.GetImageFromArray(np.zeros((40, 24, 16), dtype=np.int16))
-    image.SetSpacing((1.0, 1.0, 1.0))
-    sitk.WriteImage(image, str(case / "CT.mha"), useCompression=True)
-
-    dataset = Dataset(str(tmp_path / "Dataset"), "mha")
-    assert dataset.read_granularity("CT", "CASE_000") is None
-    assert not dataset.bounded_region_reads("CT", "CASE_000")
-
-
 def test_a_chunked_h5_entry_declares_its_chunk_and_a_contiguous_one_declares_none(tmp_path: "Path") -> None:
     """An HDF5 hyperslab decodes every chunk it touches whole, so a chunked entry (a third-party
     store, or a cache a region write chunked on its region) declares its chunk as the grain a sweep
