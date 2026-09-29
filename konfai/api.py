@@ -282,8 +282,8 @@ def _stage_sequence(stages: object, where: str) -> Sequence[object]:
 def list_components(kind: str) -> "list[Component]":
     """Enumerate the shipped components of one kind, spelled as a YAML config references them.
 
-    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``model`` or ``block``
-    (plural spellings accepted). Records carry ``name``, ``config_reference``, ``module`` and ``doc``.
+    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``scheduler``, ``model`` or
+    ``block`` (plural spellings accepted). Records carry ``name``, ``config_reference``, ``module`` and ``doc``.
     """
     from konfai.utils.catalog import list_components as _list_components
 

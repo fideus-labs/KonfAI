@@ -85,11 +85,12 @@ server URL and key, stored `0600` under the workspaces root. The environment win
 ## Develop from a checkout
 
 The front is git-ignored, so a checkout has to build it. `konfai-mcp` comes first:
-Studio pins it to its own setuptools_scm version, which only exists on PyPI at a
-release tag.
+from a checkout Studio asks for `konfai-mcp` at the checkout's last release tag or
+newer, which the checkout's own satisfies once installed; otherwise pip fetches a
+release from PyPI. At a release tag the pin is exact.
 
 ```bash
-pip install -e ./konfai-mcp             # must precede studio: the pin is version-exact
+pip install -e ./konfai-mcp             # must precede studio, see above
 pip install -e ./konfai-studio                 # deps: fastapi, uvicorn, fastmcp, claude-agent-sdk
 npm --prefix konfai-studio/frontend install    # once
 npm --prefix konfai-studio/frontend run build  # builds the front into konfai_studio/web/

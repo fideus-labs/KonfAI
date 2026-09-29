@@ -1578,6 +1578,13 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     if app_id.count(":") == 1:
         repo_id, name = app_id.split(":", 1)
         return LocalAppRepositoryFromHF(repo_id, name, force_update)
+    if ":" not in app_id:
+        # Worded apart from "not found": SlicerKonfAI drops a saved app whose error reads so, and a
+        # directory can be missing for a while (an unmounted drive).
+        raise AppRepositoryError(
+            f"No app directory at '{Path(app_id).expanduser().resolve()}': an app id without ':' names a local "
+            "directory. The other forms are repo_id:app_name, host:port:app_name and host:port:app_name|token."
+        )
     raise AppRepositoryError(
         "Invalid app_id format. Expected one of:\n"
         "  - repo_id:app_name\n"

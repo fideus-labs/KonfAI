@@ -28,6 +28,7 @@ if str(MODULE_ROOT) not in sys.path:
     sys.path.insert(0, str(MODULE_ROOT))
 
 from konfai_mcp.capabilities import describe_config_schema, describe_konfai_capabilities  # noqa: E402
+from konfai_mcp.catalog import COMPONENT_KINDS  # noqa: E402
 
 
 def test_describe_konfai_capabilities_is_a_router_not_a_workflow() -> None:
@@ -38,6 +39,10 @@ def test_describe_konfai_capabilities_is_a_router_not_a_workflow() -> None:
     # Surfaces the safe vs human-confirmation boundary.
     assert payload["safe_actions"]
     assert payload["risky_actions_prefer_human_confirmation"]
+
+
+def test_the_overview_names_every_kind_list_components_accepts() -> None:
+    assert describe_konfai_capabilities()["components"]["kinds"] == COMPONENT_KINDS
 
 
 def test_describe_config_schema_is_generated_from_the_reflection_engine() -> None:

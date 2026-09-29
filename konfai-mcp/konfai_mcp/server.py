@@ -29,20 +29,24 @@ import time
 import uuid
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 
 import konfai as konfai_pkg
 from pydantic import Field
 
 try:
     from fastmcp import FastMCP
+    from fastmcp import settings as fastmcp_settings
     from fastmcp.server.auth import StaticTokenVerifier
     from fastmcp.utilities.types import Image as FastMCPImage
+    from starlette.middleware import Middleware
+    from starlette.responses import PlainTextResponse
 except ImportError as exc:  # pragma: no cover - depends on optional install
     raise RuntimeError(
         "KonfAI MCP requires 'fastmcp'. Install the MCP server with: pip install -e ./konfai-mcp"
     ) from exc
 
-from . import _env_flag
+from . import LOOPBACK_HOSTS, _env_flag
 from .capabilities import describe_config_schema as _describe_config_schema
 from .capabilities import describe_konfai_capabilities as _describe_konfai_capabilities
 from .catalog import COMPONENT_KINDS
@@ -116,7 +120,6 @@ _JOBS = JOB_REGISTRY.jobs
 
 
 SESSION = SessionService(
-    repo_root=REPO_ROOT,
     examples_root=EXAMPLES_ROOT,
     workspace_layout=WORKSPACE_LAYOUT,
     job_registry=JOB_REGISTRY,
@@ -153,7 +156,6 @@ def _activate_session_locked(name: str) -> None:
     workspace_layout = WorkspaceLayout(WORKSPACES_ROOT, name)
     job_registry = JobRegistry(ACTIVE_JOB_STATES, workspace_layout=workspace_layout)
     session = SessionService(
-        repo_root=REPO_ROOT,
         examples_root=EXAMPLES_ROOT,
         workspace_layout=workspace_layout,
         job_registry=job_registry,
@@ -225,12 +227,7 @@ def _normalize_string_list(value: str | list[str] | None, *, field_name: str) ->
     return normalized
 
 
-def _build_bearer_auth_provider(
-    bearer_token: str | None,
-    *,
-    host: str | None = None,
-    port: int | None = None,
-) -> StaticTokenVerifier | None:
+def _build_bearer_auth_provider(bearer_token: str | None) -> StaticTokenVerifier | None:
     token = (bearer_token or "").strip()
     if not token:
         return None
@@ -247,16 +244,34 @@ def _build_bearer_auth_provider(
 def _configure_transport_auth(
     transport: Literal["stdio", "sse", "streamable-http"],
     *,
-    host: str | None = None,
-    port: int | None = None,
     bearer_token: str | None = None,
 ) -> StaticTokenVerifier | None:
     if transport == "stdio":
         mcp.auth = None
         return None
-    auth_provider = _build_bearer_auth_provider(bearer_token, host=host, port=port)
+    auth_provider = _build_bearer_auth_provider(bearer_token)
     mcp.auth = auth_provider
     return auth_provider
+
+
+class _LoopbackHostsOnly:
+    """ASGI gate of an HTTP server bound to loopback with no bearer token: only a loopback Host reaches it,
+    since a DNS-rebound page sends its own name as Host."""
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        host = dict(scope.get("headers", [])).get(b"host") if scope["type"] == "http" else None
+        try:
+            allowed = host is None or urlsplit(f"//{host.decode('latin-1')}").hostname in LOOPBACK_HOSTS
+        except ValueError:
+            allowed = False
+        if allowed:
+            await self._app(scope, receive, send)
+            return
+        refusal = "unknown host: connect through 127.0.0.1 or localhost, or start the server with a bearer token"
+        await PlainTextResponse(refusal, status_code=400)(scope, receive, send)
 
 
 _DEFAULT_TRANSPORT = os.environ.get("KONFAI_MCP_TRANSPORT", "stdio")
@@ -1186,7 +1201,7 @@ def list_components(
         ),
     ],
 ) -> dict[str, Any]:
-    """Enumerate the available KonfAI components of one kind (loss/metric/transform/augmentation/scheduler/model/block)."""
+    """Enumerate the available KonfAI components of one kind (loss/metric/transform/augmentation/reduction/scheduler/model/block)."""
     return {**_catalog_list_components(kind), "session": WORKSPACE_LAYOUT.current_session}
 
 
@@ -1794,7 +1809,11 @@ def initialize_session(
     workflows: Annotated[
         str | list[str] | None,
         Field(
-            description="Workflow files to seed from the example: train/prediction/evaluation (string or list; default: train only)."
+            description=(
+                "Workflow files to seed from the example: train/prediction/evaluation/transform (string or list). "
+                "Default: train, or every workflow config of an example that has no training config. A workflow "
+                "the example has no config for is refused."
+            )
         ),
     ] = None,
     include_support_files: Annotated[
@@ -1805,6 +1824,8 @@ def initialize_session(
     ] = False,
 ) -> dict[str, Any]:
     """Create or reset the current session workspace, optionally seeded from one example template."""
+    template = template_dir(EXAMPLES_ROOT, from_example) if from_example is not None else None
+    selected_workflows = SESSION.seeded_workflows(template, workflows) if template is not None else []
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
     if workspace.exists() and any(workspace.iterdir()):
         if not overwrite:
@@ -1820,11 +1841,10 @@ def initialize_session(
 
     copied_files: list[str] = []
     skipped_python: list[str] = []
-    selected_workflows = SESSION.normalize_requested_workflows(workflows) if from_example else []
-    if from_example is not None:
+    if template is not None:
         copied_files, skipped_python = copy_template_subset(
             workspace,
-            template_dir(EXAMPLES_ROOT, from_example),
+            template,
             overwrite,
             include_python=include_support_files,
             workflows=selected_workflows,
@@ -2152,8 +2172,7 @@ def export_run_record(
     manifest: dict[str, Any] = {}
     if job.manifest_path is not None and job.manifest_path.exists():
         manifest = json.loads(read_text(job.manifest_path))
-    # Bounded previews, each with what the bound cut: a 50,000-character config once came back as
-    # 40,000 with nothing saying so. The path is where the whole artifact is.
+    # Bounded previews, each saying whether the bound cut it; the path is where the whole artifact is.
     previews = {
         name: read_text_range(Path(path), max_chars=40000)
         for name, path in (manifest.get("config_snapshots") or {}).items()
@@ -3391,11 +3410,8 @@ def main(
             "stateless_http and json_response only apply to the 'streamable-http' transport "
             "(stdio is inherently per-process and the deprecated SSE transport requires sessions)."
         )
-    _configure_transport_auth(
-        transport,
-        host=host,
-        port=port,
-        bearer_token=bearer_token or os.environ.get("KONFAI_MCP_BEARER_TOKEN"),
+    auth_provider = _configure_transport_auth(
+        transport, bearer_token=bearer_token or os.environ.get("KONFAI_MCP_BEARER_TOKEN")
     )
     transport_kwargs: dict[str, Any] = {}
     if transport == "stdio":
@@ -3417,6 +3433,8 @@ def main(
         if transport == "streamable-http":
             transport_kwargs["stateless_http"] = stateless_http
             transport_kwargs["json_response"] = json_response
+        if auth_provider is None and (host if host is not None else fastmcp_settings.host) in LOOPBACK_HOSTS:
+            transport_kwargs["middleware"] = [Middleware(_LoopbackHostsOnly)]
     # MCP stdio transports must keep stdout protocol-clean for the client.
     mcp.run(transport, show_banner=False, **transport_kwargs)
 

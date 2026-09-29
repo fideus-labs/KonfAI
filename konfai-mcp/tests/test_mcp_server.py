@@ -408,7 +408,7 @@ def test_http_bearer_token_protects_http_transports(
     monkeypatch.setenv("KONFAI_MCP_BEARER_TOKEN", "dev-token")
 
     mcp_server = load_mcp_server()
-    mcp_server._configure_transport_auth("streamable-http", host="127.0.0.1", port=8123, bearer_token="dev-token")
+    mcp_server._configure_transport_auth("streamable-http", bearer_token="dev-token")
     app = mcp_server.mcp.http_app(transport="streamable-http", path="/mcp")
 
     with TestClient(app) as client:
@@ -418,3 +418,31 @@ def test_http_bearer_token_protects_http_transports(
 
         authorized = client.get("/mcp", headers={"Authorization": "Bearer dev-token"})
         assert authorized.status_code != 401
+
+
+@pytest.mark.usefixtures("workspace_root")
+@pytest.mark.parametrize("bearer_token", [None, "dev-token"])
+def test_a_loopback_server_without_a_token_answers_only_loopback_hosts(
+    monkeypatch: pytest.MonkeyPatch, load_mcp_server: Callable[[], ModuleType], bearer_token: str | None
+) -> None:
+    monkeypatch.delenv("KONFAI_MCP_BEARER_TOKEN", raising=False)
+    mcp_server = load_mcp_server()
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(mcp_server.mcp, "run", lambda transport, **kwargs: captured.update(kwargs))
+    mcp_server.main(transport="streamable-http", host="127.0.0.1", bearer_token=bearer_token)
+    app = mcp_server.mcp.http_app(
+        transport="streamable-http", stateless_http=True, json_response=True, middleware=captured.get("middleware")
+    )
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+    }
+    headers = {"Accept": "application/json, text/event-stream", "Authorization": f"Bearer {bearer_token}"}
+
+    with TestClient(app) as client:
+        for host, answered in (("127.0.0.1:8000", True), ("localhost:8000", True), ("attacker.example:8000", False)):
+            response = client.post("/mcp", json=initialize, headers={**headers, "Host": host})
+            # A DNS-rebound page sends its own name as Host; a bearer token is what guards a server instead.
+            assert (response.status_code == 200) is (answered or bearer_token is not None), host

@@ -40,6 +40,8 @@ from konfai.transformer import build_transform
 from konfai.utils.errors import KonfAIError
 from konfai.utils.runtime import State, execute_distributed_object
 
+from .workspace import WORKFLOW_CONFIG_FILES
+
 
 def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any], output_path: str = "") -> None:
     """Run one runner API and post its result back, with the child's stdio off the server's.
@@ -211,9 +213,8 @@ _OUTPUT_TAIL = 4000  # enough for a traceback and the lines around it, short eno
 
 
 def _tail(output: Path) -> str:
-    """The tail of the child's captured stdio: read from near the end of the file, never whole (a
-    verbose failing child once handed the parent its entire output to keep 4,000 characters of it).
-    '' when it printed nothing."""
+    """The tail of the child's captured stdio, read from near the end of the file so that a verbose child's
+    output is never loaded whole. '' when it printed nothing."""
     try:
         with output.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -533,11 +534,7 @@ def import_app_api(
     destination = Path(target).resolve()
     filenames = info.download_bundle(destination, display_name=display_name, config_overrides=config_overrides)
     checkpoints = sorted(name for name in filenames if name.endswith(".pt"))
-    configs = {
-        key: name
-        for key, name in (("train", "Config.yml"), ("prediction", "Prediction.yml"), ("evaluation", "Evaluation.yml"))
-        if (destination / name).is_file()
-    }
+    configs = {key: name for key, name in WORKFLOW_CONFIG_FILES.items() if (destination / name).is_file()}
     return {"files": filenames, "checkpoints": checkpoints, "configs": configs}
 
 

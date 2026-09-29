@@ -153,3 +153,30 @@ def test_cli_rejects_stateless_http_on_session_transports(monkeypatch: pytest.Mo
     monkeypatch.delenv("KONFAI_MCP_STATELESS_HTTP", raising=False)
     with pytest.raises(SystemExit):
         konfai_mcp.main(["--transport", transport, "--stateless-http"])
+
+
+@pytest.mark.parametrize(
+    ("arguments", "refused"),
+    [
+        (["--host", "0.0.0.0"], True),
+        (["--host", "0.0.0.0", "--bearer-token", "dev-token"], False),
+        (["--host", "0.0.0.0", "--i-know-this-is-insecure"], False),
+        (["--host", "127.0.0.1"], False),
+        ([], False),  # FastMCP binds 127.0.0.1 by default
+    ],
+)
+def test_cli_refuses_a_public_bind_without_a_token(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], refused: bool
+) -> None:
+    fake_server = ModuleType("konfai_mcp.server")
+    fake_server.main = lambda **_: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "konfai_mcp.server", fake_server)
+    for key in ("KONFAI_MCP_TRANSPORT", "KONFAI_MCP_HOST", "KONFAI_MCP_BEARER_TOKEN", "FASTMCP_HOST"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(os, "environ", os.environ.copy())  # main exports its options
+
+    if refused:
+        with pytest.raises(SystemExit):
+            konfai_mcp.main(["--transport", "streamable-http", *arguments])
+    else:
+        konfai_mcp.main(["--transport", "streamable-http", *arguments])

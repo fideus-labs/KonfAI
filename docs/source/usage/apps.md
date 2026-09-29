@@ -191,8 +191,9 @@ workspace and are cleaned up after a grace period. The server comes with the
 `server` extra (`pip install "konfai-apps[server]"`); the client needs nothing more.
 
 ```bash
+echo '{"apps": ["VBoussot/ImpactSynth:CBCT"]}' > apps.json   # the apps the server exposes
 export KONFAI_API_TOKEN="my-secret-token"
-konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json
+konfai-apps-server --host 0.0.0.0 --port 8000 --apps apps.json
 
 konfai-apps infer VBoussot/ImpactSynth:CBCT -i input.mha -o ./Output \
   --host my.server.org --port 8000 --token "$KONFAI_API_TOKEN"

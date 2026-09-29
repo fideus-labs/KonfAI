@@ -134,28 +134,35 @@ def _add_device(parser: argparse.ArgumentParser) -> None:
     device.add_argument("--cpu", type=_positive_int, default=None, help="Run on CPU using N worker processes.")
 
 
-def _add_app_io(parser: argparse.ArgumentParser) -> None:
-    """Add the input/output/device options shared by every app operation."""
-    parser.add_argument(
-        "-i",
-        "--inputs",
-        type=_resolved_path,
-        nargs="+",
-        action="append",
-        required=True,
-        help="Input path(s): one or multiple volume files, or a dataset directory.",
-    )
+def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> None:
+    """Add the input/output/device options shared by every app operation. Fine-tuning reads a dataset
+    instead of inputs and works in its output directory, so it takes no temporary directory."""
+    if fine_tune:
+        parser.add_argument(
+            "-d", "--dataset", type=_resolved_path, required=True, help="Dataset directory to fine-tune on."
+        )
+    else:
+        parser.add_argument(
+            "-i",
+            "--inputs",
+            type=_resolved_path,
+            nargs="+",
+            action="append",
+            required=True,
+            help="Input path(s): one or multiple volume files, or a dataset directory.",
+        )
     parser.add_argument(
         "-o", "--output", type=_resolved_path, default=Path("./Output").resolve(), help="Output directory / file."
     )
-    parser.add_argument(
-        "--tmp-dir",
-        "--tmp_dir",
-        dest="tmp_dir",
-        type=_resolved_path,
-        default=None,
-        help="Temporary directory (optional).",
-    )
+    if not fine_tune:
+        parser.add_argument(
+            "--tmp-dir",
+            "--tmp_dir",
+            dest="tmp_dir",
+            type=_resolved_path,
+            default=None,
+            help="Temporary directory (optional).",
+        )
     _add_device(parser)
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output.")
     parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront.")
@@ -435,52 +442,7 @@ def main_apps() -> None:
             default=os.environ.get("KONFAI_API_TOKEN"),
             help="Bearer token (or use KONFAI_API_TOKEN env var)",
         )
-
-        if not is_fine_tune:
-            parser.add_argument(
-                "-i",
-                "--inputs",
-                type=lambda x: Path(x).resolve(),
-                nargs="+",
-                action="append",
-                required=True,
-                help="Input path(s): provide one or multiple volume files, or a dataset directory.",
-            )
-        else:
-            parser.add_argument(
-                "-d",
-                "--dataset",
-                type=lambda x: Path(x).resolve(),
-                required=True,
-                help="dataset path(s): provide a dataset directory.",
-            )
-        parser.add_argument(
-            "-o",
-            "--output",
-            type=lambda x: Path(x).resolve(),
-            default=Path("./Output").resolve(),
-            help="Output directory / file",
-        )
-
-        if not is_fine_tune:
-            parser.add_argument(
-                "--tmp-dir",
-                "--tmp_dir",
-                type=lambda x: Path(x).resolve(),
-                default=None,
-                help="Temporary directory (optional).",
-            )
-        _add_device(parser)
-
-        parser.add_argument(
-            "-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution"
-        )
-        parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront")
-        parser.add_argument(
-            "--force_update",
-            action="store_true",
-            help="Ensure required files are updated to the latest version during execution",
-        )
+        _add_app_io(parser, fine_tune=is_fine_tune)
 
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
     add_common_args(infer_p)
@@ -508,21 +470,8 @@ def main_apps() -> None:
 
     eval_p = subparsers.add_parser("eval", help="Evaluate a KonfAI App using ground-truth labels.")
     add_common_args(eval_p)
-    eval_p.add_argument(
-        "--gt",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
-    )
-    eval_p.add_argument(
-        "--mask",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
-    )
+    _add_gt(eval_p, required=True)
+    _add_mask(eval_p)
     eval_p.add_argument(
         "--evaluation-file",
         "--evaluation_file",
@@ -565,21 +514,8 @@ def main_apps() -> None:
         default="Prediction.yml",
         help="Optional prediction config filename",
     )
-    pipe_p.add_argument(
-        "--gt",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
-    )
-    pipe_p.add_argument(
-        "--mask",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
-    )
+    _add_gt(pipe_p, required=True)
+    _add_mask(pipe_p)
     pipe_p.add_argument(
         "--evaluation-file",
         "--evaluation_file",

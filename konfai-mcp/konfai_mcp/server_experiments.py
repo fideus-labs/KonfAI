@@ -50,7 +50,6 @@ YAML_SAFE = YAML(typ="safe")
 class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
     """Encapsulate dataset, validation, summary, and leaderboard helpers for the current session workspace."""
 
-    repo_root: Path
     examples_root: Path
     workspace_layout: WorkspaceLayout
     job_registry: JobRegistry
@@ -174,18 +173,20 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             configs[cfg.name] = result
         return configs, semantic_reviews
 
-    def example_options(self, dataset_groups: list[str]) -> list[dict[str, Any]]:
+    def example_options(self, dataset_groups: list[str], workflows: list[str]) -> list[dict[str, Any]]:
+        """The templates providing every one of ``workflows`` (any template when none is named), ranked by
+        how well their input groups match ``dataset_groups``."""
         options: list[dict[str, Any]] = []
         for template_name in available_templates(self.examples_root):
             configs = load_template_configs(self.examples_root, template_name)
-            if not configs:
+            if not configs or not set(workflows) <= set(configs):
                 continue
             groups_by_workflow = template_groups(configs)
             expected_groups = sorted(
                 {
                     group
                     for workflow, groups in groups_by_workflow.items()
-                    if workflow in {"train", "prediction"}
+                    if workflow in {"train", "prediction", "transform"}
                     for group in groups
                 }
             )
@@ -196,6 +197,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             options.append(
                 {
                     "name": template_name,
+                    "workflows": list(configs),
                     "expected_groups": expected_groups,
                     "matched_groups": matched_groups,
                     "missing_groups": missing_groups,
@@ -338,7 +340,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "workflows": requested_workflows,
             "group_roles": normalized_roles,
             "modeling_intent": modeling_intent,
-            "compatible_examples": self.example_options(dataset_groups),
+            "compatible_examples": self.example_options(dataset_groups, requested_workflows),
             "selected_example": (
                 {"name": example, "summary_resource": f"template://{example}/summary"} if example is not None else None
             ),
@@ -418,6 +420,22 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             if workflow not in unique:
                 unique.append(workflow)
         return unique
+
+    def seeded_workflows(self, template: Path, values: list[str] | str | None) -> list[str]:
+        """The workflows to seed from ``template``: the requested ones, each of which it must provide, or
+        by default its training config, else every workflow config it has."""
+        provided = [workflow for workflow, filename in WORKFLOW_CONFIG_FILES.items() if (template / filename).is_file()]
+        if values is None:
+            requested = ["train"] if "train" in provided else provided
+        else:
+            requested = self.normalize_requested_workflows(values)
+        missing = [workflow for workflow in requested if workflow not in provided]
+        if missing or not requested:
+            raise ValueError(
+                f"Example '{template.name}' has no config for {missing or 'any workflow'}; "
+                f"it provides {provided or 'none'}."
+            )
+        return requested
 
     def normalize_group_roles(
         self,

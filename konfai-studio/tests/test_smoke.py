@@ -56,6 +56,16 @@ def test_serves_the_built_frontend() -> None:
     assert "text/html" in response.headers.get("content-type", "")
 
 
+def test_an_unbuilt_front_names_the_build_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import konfai_studio.server as server
+
+    monkeypatch.setattr(server, "WEB_DIR", tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/")
+    assert response.status_code == 503
+    assert "npm --prefix konfai-studio/frontend run build" in response.json()["detail"]
+
+
 def test_a_workspace_created_outside_studio_joins_the_rail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """konfai-mcp creates workspaces from the command line too. Adopted only at startup, one appeared
     nowhere in a running Studio, and no amount of clicking would reveal it."""

@@ -75,3 +75,17 @@ def test_list_components_provides_inspect_classpath_and_aliases() -> None:
 def test_list_components_rejects_unknown_kind() -> None:
     with pytest.raises(ValueError, match="Unknown component kind"):
         list_components("widget")
+
+
+def test_list_components_offers_the_kinds_konfai_list_offers() -> None:
+    from konfai.utils import catalog
+
+    assert COMPONENT_KINDS == list(catalog.COMPONENT_KINDS)
+    for kind in COMPONENT_KINDS:
+        assert [c["name"] for c in list_components(kind)["components"]] == [
+            c.name for c in catalog.list_components(kind)
+        ]
+
+    median = next(c for c in list_components("reductions")["components"] if c["name"] == "Median")
+    assert median["inspect_classpath"] == "konfai.data.reduction:Median"
+    assert {"Constant", "CosineAnnealing"} <= {c["name"] for c in list_components("scheduler")["components"]}
