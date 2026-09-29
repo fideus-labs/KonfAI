@@ -768,7 +768,13 @@ def _configure_server_auth_env(auth: str, token: str | None, token_env: str) -> 
 
 def main_apps_server() -> None:
     """Entry point for launching the KonfAI Apps FastAPI server."""
-    import uvicorn
+    try:
+        import fastapi  # noqa: F401  # the server app imports it
+        import uvicorn
+    except ModuleNotFoundError as error:
+        raise SystemExit(
+            f"konfai-apps-server needs the server extra ({error.name} is missing): pip install 'konfai-apps[server]'"
+        ) from None
 
     parser = argparse.ArgumentParser(description="KonfAI apps server", allow_abbrev=False)
     parser.add_argument("--host", type=str, default="127.0.0.1")

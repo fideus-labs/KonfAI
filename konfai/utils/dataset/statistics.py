@@ -360,7 +360,7 @@ def read_masked_data_statistics(
     ``Dataset.iter_data_blocks`` serves such stores.
 
     The mask must sit on the volume's own grid (same spatial extent) and the channel counts must
-    agree, since selection is ``volume[mask == 1]``. ``source`` and ``mask_source`` are Datasets
+    agree, since selection is ``volume[mask != 0]``. ``source`` and ``mask_source`` are Datasets
     (duck typed: this module is below the Dataset class).
     """
     shape, _ = source.get_infos(group, name)
@@ -395,7 +395,7 @@ def read_masked_data_statistics(
         )
         if len(shape) < 2:
             slices = (slice(None),)
-        selected = read_volume(slices)[read_mask(slices) == 1]
+        selected = read_volume(slices)[read_mask(slices) != 0]
         if selected.size:
             state = _update_running_statistics(state, selected.reshape(1, -1))
     return _finalize_running_statistics(state)

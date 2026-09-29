@@ -35,13 +35,19 @@ From PyPI:
 python -m pip install konfai-apps
 ```
 
+The HTTP job server is an extra; running apps, locally or against a server, does not need it:
+
+```bash
+python -m pip install "konfai-apps[server]"
+```
+
 From a local checkout of this monorepo:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 python -m pip install -e .
-python -m pip install -e ./konfai-apps
+python -m pip install -e "./konfai-apps[server]"
 ```
 
 Check the entrypoints:
@@ -181,7 +187,7 @@ client = KonfAIAppClient(
 
 ## Remote Server
 
-`konfai-apps-server` exposes packaged apps through a FastAPI service.
+`konfai-apps-server` exposes packaged apps through a FastAPI service (the `server` extra).
 
 Minimal example:
 
@@ -257,7 +263,7 @@ Install both packages in editable mode:
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ./konfai-apps
+python -m pip install -e "./konfai-apps[server]"
 ```
 
 Run the package test suite:

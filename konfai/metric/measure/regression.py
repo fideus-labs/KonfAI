@@ -115,7 +115,7 @@ class MAESaveMap(MAE):
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return difference, None
-        mask = mask.to(device=output.device) == 1
+        mask = mask.to(device=output.device)
         return difference.mul_(mask), mask
 
     @staticmethod
@@ -321,7 +321,7 @@ class SSIM(MaskedLoss):
             raise ValueError("SSIM expects at least one target tensor.")
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
-        mask = None if mask is None else mask.to(device=output.device) == 1
+        mask = None if mask is None else mask.to(device=output.device)
         for batch in range(output.shape[0]):
             mask_b = None if mask is None else mask[batch, ...]
             if mask_b is not None and not torch.any(mask_b):

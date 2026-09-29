@@ -135,21 +135,6 @@ def test_mcp_package_metadata_exposes_entrypoint() -> None:
     assert 'konfai-mcp = "konfai_mcp:main"' in content
 
 
-def test_patch_transforms_lint_skips_evaluator_configs() -> None:
-    # Evaluator groups_dest entries bind to GroupTransformMetric (no patch_transforms parameter),
-    # so the missing-patch_transforms trap does not exist there and must not be reported.
-    evaluator = {"Evaluator": {"metrics": {"PRED": {"targets_criterions": {"SEG": {"groups_dest": {"SEG": {}}}}}}}}
-    assert server_support._lint_config_data(evaluator) == []
-    # A Transformer chain has `transforms` only: its strict grammar would REFUSE the advised
-    # `patch_transforms: None`, so the lint must not fire there either.
-    transformer = {"Transformer": {"Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {"transforms": None}}}}}}}
-    assert server_support._lint_config_data(transformer) == []
-
-    trainer = {"Trainer": {"Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {"transforms": None}}}}}}}
-    warnings = server_support._lint_config_data(trainer)
-    assert [w["code"] for w in warnings] == ["missing_patch_transforms"]
-
-
 def test_prediction_default_outputs_criterions_lint() -> None:
     # A Predictor Model without an explicit outputs_criterions binds KonfAI's default, which references
     # target group 'Labels'; if the dataset does not load 'Labels', prediction raises MeasureError.
@@ -159,8 +144,7 @@ def test_prediction_default_outputs_criterions_lint() -> None:
             "Dataset": {"groups_src": {"CT": {"groups_dest": {"CT": {}}}}},
         }
     }
-    # Membership, not equality: an unrelated lint (missing_patch_transforms) also fires on these groups.
-    assert "prediction_default_outputs_criterions" in {w["code"] for w in server_support._lint_config_data(trap)}
+    assert [w["code"] for w in server_support._lint_config_data(trap)] == ["prediction_default_outputs_criterions"]
 
     # Silent when the trap cannot occur: explicit outputs_criterions, a .yml model builder (defaults to
     # None), a loaded 'Labels' group, or a non-prediction root.

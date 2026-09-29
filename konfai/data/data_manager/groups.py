@@ -129,16 +129,13 @@ def _check_patch_transform_invertible(
 
 
 class GroupTransform:
-    """Collection of transforms attached to one source-to-destination group path."""
+    """Collection of transforms attached to one source-to-destination group path. No chain by default:
+    an absent key leaves the tensor as stored."""
 
     def __init__(
         self,
-        transforms: dict[str, TransformLoader] | None = {
-            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
-        },
-        patch_transforms: dict[str, TransformLoader] | None = {
-            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
-        },
+        transforms: dict[str, TransformLoader] | None = None,
+        patch_transforms: dict[str, TransformLoader] | None = None,
         is_input: bool = True,
     ) -> None:
         self._transforms = transforms
@@ -211,12 +208,7 @@ class GroupTransformOut(GroupTransform):
 
     Every group of a dataset-preparation workflow is an input."""
 
-    def __init__(
-        self,
-        transforms: dict[str, TransformLoader] = {
-            "default|Normalize|Standardize|TensorCast|ResampleIsotropic|Write": TransformLoader()
-        },
-    ):
+    def __init__(self, transforms: dict[str, TransformLoader] | None = None):
         super().__init__(transforms, {})
 
 

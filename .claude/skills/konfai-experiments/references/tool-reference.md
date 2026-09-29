@@ -2,7 +2,7 @@
 
 > GENERATED from the registry by `konfai-mcp/scripts/generate_tool_reference.py`: do not edit by hand.
 
-62 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
+59 tools, 4 prompts, 23 resources. The live equivalent is the `guide://tool-index` resource.
 
 ## Tools
 
@@ -36,7 +36,7 @@ Use when you want to remove the current session workspace. This deletes the work
 
 ### `describe_app`
 
-Use to read one app's manifest so you can decide whether it matches the user's task: the app's free-text description is the primary signal, with the input/output modality confirming the fit. This resolves a single app and returns its app.json: display name, description, input and output modality (with volume types), inference/evaluation/uncertainty capabilities, checkpoints, and segmentation terminology. It is metadata-only and SAFE: it does not import the app's model code and does not pip-install its requirements (those happen only later, behind an explicit trust gate). Outputs: display_name, description, inputs, outputs, capabilities, checkpoints, terminology, next_actions. Next: run_app_infer / list_app_parameters / import_app / fine_tune_app when it fits (next_actions reflect the app's capabilities), or design_config_strategy if no app fits the task.
+Use to read one app's manifest so you can decide whether it matches the user's task: the app's free-text description is the primary signal, with the input/output modality confirming the fit. This resolves a single app and returns its app.json: display name, description, input and output modality (with volume types), inference/evaluation/uncertainty capabilities, checkpoints, and segmentation terminology. It is metadata-only and SAFE: it does not import the app's model code and does not pip-install its requirements (those happen only later, behind an explicit trust gate). Outputs: display_name, description, inputs, outputs, capabilities, checkpoints, terminology, next_actions. Next: run_app / list_app_parameters / import_app / fine_tune_app when it fits (next_actions reflect the app's capabilities), or design_config_strategy if no app fits the task.
 
 ### `describe_config_schema`
 
@@ -64,7 +64,7 @@ Use to DIFF the exact configs two jobs ran with, from their immutable launch-tim
 
 ### `export_app`
 
-Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters) as a local, editable app bundle: the reproducibility artifact a challenge submission wants. It copies the app's files and, when set_parameters is given, bakes those values into the copied config. Distinct from package_app_from_session, which packages a model YOU trained this session. It copies files and rewrites config only (no model-code import). Local/HuggingFace apps only. Outputs: exported_to, next_actions. Next: describe_app / run_app_infer / import_app / register_app_source.
+Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters) as a local, editable app bundle: the reproducibility artifact a challenge submission wants. It copies the app's files and, when set_parameters is given, bakes those values into the copied config. Distinct from package_app_from_session, which packages a model YOU trained this session. It copies files and rewrites config only (no model-code import). Local/HuggingFace apps only. Outputs: exported_to, next_actions. Next: describe_app / run_app / import_app / register_app_source.
 
 ### `export_run_record`
 
@@ -72,7 +72,7 @@ Use to EXPORT the full reproducibility record of one run: the job manifest (comm
 
 ### `fine_tune_app`
 
-Use to TRAIN by starting from a published app instead of a blank slate: fine-tune an existing app's checkpoint(s) on the user's dataset, WITHOUT authoring or editing a config. This is the middle option between run_app_infer (use as-is, no training) and design_config_strategy (author a config and train from scratch). The produced training runs like any app fine-tune; for full control (custom losses, config surgery) use import_app + run_resume(weights_only=True) instead. It launches a tracked training job and writes a resolvable app bundle (config + code + fine-tuned checkpoint) to the output directory, which you can then run with run_app_infer. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only. It does not author a config or adapt the dataset layout for you. Training knobs are first-class parameters (epochs, it_validation, lr, batch_size); set_parameters is for the app's MODEL tunables (bare names) or any config key by its full dotted path. Outputs: a job payload (status, resources, next_actions) plus the bundle output path. Next: wait_for_job, then run_app_infer on the produced bundle (then run_app_evaluate to score and rank this fine-tune against other training trials via leaderboard / compare_runs).
+Use to TRAIN by starting from a published app instead of a blank slate: fine-tune an existing app's checkpoint(s) on the user's dataset, WITHOUT authoring or editing a config. This is the middle option between run_app (use as-is, no training) and design_config_strategy (author a config and train from scratch). The produced training runs like any app fine-tune; for full control (custom losses, config surgery) use import_app + run_resume(weights_only=True) instead. It launches a tracked training job and writes a resolvable app bundle (config + code + fine-tuned checkpoint) to the output directory, which you can then run with run_app. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only. It does not author a config or adapt the dataset layout for you. Training knobs are first-class parameters (epochs, it_validation, lr, batch_size); set_parameters is for the app's MODEL tunables (bare names) or any config key by its full dotted path. Outputs: a job payload (status, resources, next_actions) plus the bundle output path. Next: wait_for_job, then run_app on the produced bundle (action infer, then evaluate to score and rank this fine-tune against other training trials via leaderboard / compare_runs).
 
 ### `generate_folds`
 
@@ -88,7 +88,7 @@ Use to read the FULL evaluation metrics (per-case values + aggregates) of ONE na
 
 ### `import_app`
 
-Use to RUN a published KonfAI app as a NORMAL experiment in this session. Prefer run_app_* when the app is used exactly as published; import_app is the full-control tier: editing the config, fine-tuning with custom losses or config surgery (run_resume with weights_only=True; fine_tune_app is the one-call path when the app trains as published), or wiring the app into a larger experiment. It copies the app's config(s), custom code, and .pt checkpoints into the session root and pip-installs its requirements, so predict / fine-tune / evaluate then go through the ordinary run_prediction / run_resume / run_evaluation tools (no app-specific wrapper, no extra sub-folder). The copied checkpoints are returned so run_prediction can pass them as models, and run_resume(weights_only=True) warm-starts a fine-tune from them. TRUST GATE: copying+running the app's Python code and installing its requirements is the trust boundary, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only: a remote server keeps its code remote and cannot be imported (drive a remote app with konfai-apps directly). Outputs: imported_to, files, checkpoints, configs, next_actions. Next: run_prediction (pass checkpoints as models) / run_resume (fine-tune) / run_evaluation.
+Use to RUN a published KonfAI app as a NORMAL experiment in this session. Prefer run_app when the app is used exactly as published; import_app is the full-control tier: editing the config, fine-tuning with custom losses or config surgery (run_resume with weights_only=True; fine_tune_app is the one-call path when the app trains as published), or wiring the app into a larger experiment. It copies the app's config(s), custom code, and .pt checkpoints into the session root and pip-installs its requirements, so predict / fine-tune / evaluate then go through the ordinary run_prediction / run_resume / run_evaluation tools (no app-specific wrapper, no extra sub-folder). The copied checkpoints are returned so run_prediction can pass them as models, and run_resume(weights_only=True) warm-starts a fine-tune from them. TRUST GATE: copying+running the app's Python code and installing its requirements is the trust boundary, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local/HuggingFace apps only: a remote server keeps its code remote and cannot be imported (drive a remote app with konfai-apps directly). Outputs: imported_to, files, checkpoints, configs, next_actions. Next: run_prediction (pass checkpoints as models) / run_resume (fine-tune) / run_evaluation.
 
 ### `import_experiment`
 
@@ -112,7 +112,7 @@ Use after evaluation when you want ranked metrics across completed runs. This re
 
 ### `list_app_parameters`
 
-Use to DISCOVER an app's tunable model parameters (and their allowed values) before tuning a run with set_parameters. Returns {values, constraints}: current values plus Literal/Range/Choices constraints derived from the model's typed signature. TRUST GATE: deriving constraints imports the app's model code, so pass allow_untrusted_code=True; the import runs in an isolated spawn subprocess, never in the server process. Local/HuggingFace apps only (a remote server does not expose this). Outputs: values, constraints, next_actions. Next: run_app_infer / run_app_pipeline / import_app with set_parameters.
+Use to DISCOVER an app's tunable model parameters (and their allowed values) before tuning a run with set_parameters. Returns {values, constraints}: current values plus Literal/Range/Choices constraints derived from the model's typed signature. TRUST GATE: deriving constraints imports the app's model code, so pass allow_untrusted_code=True; the import runs in an isolated spawn subprocess, never in the server process. Local/HuggingFace apps only (a remote server does not expose this). Outputs: values, constraints, next_actions. Next: run_app (infer or pipeline) / import_app with set_parameters.
 
 ### `list_apps`
 
@@ -128,7 +128,7 @@ Use when you need the current job registry state. This lists jobs for the curren
 
 ### `package_app_from_session`
 
-Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle: the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app_infer / import_app can consume. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app_infer on the produced bundle.
+Use to PACKAGE a model trained in the current session (the train-from-scratch branch) into a resolvable KonfAI app bundle: the same endpoint fine_tune_app produces, so a from-scratch run can also finish as a reusable app. It gathers the session's checkpoints and a config, writes an app.json from the metadata you give, and assembles a bundle (app.json + config + checkpoint + optional Model.py/requirements) that describe_app / run_app / import_app can consume. Declare local helper packages and assets with support_files (bundle-relative destination -> workspace-relative source); folders copy recursively, with no recursive import discovery. It does not train, and it does not upload the bundle anywhere. Outputs: bundle_path, the packaged checkpoints/configs, next_actions (and onnx path if requested). Next: describe_app or run_app on the produced bundle.
 
 ### `plan_transform`
 
@@ -178,21 +178,9 @@ Request an on-demand validation pass on a running training job. Sends SIGUSR1 to
 
 Use immediately after writing or editing a workflow config. This performs lightweight semantic checks and returns warnings plus blocking issues. It does not instantiate KonfAI runtime objects. Outputs: summary, warnings, blocking_issues, next_checks, and next_actions. Next: validate_config_semantics if there are no blocking issues.
 
-### `run_app_evaluate`
+### `run_app`
 
-Use to score an app's predictions against ground truth with the app's OWN evaluation config (its shipped Evaluation.yml and metrics), after describe_app reported capabilities.evaluation. This is distinct from run_evaluation, which needs a hand-authored session Evaluation.yml. It launches a tracked job and writes the metric JSON to the output directory. TRUST GATE: resolving the app imports its code and pip-installs its requirements (pass allow_untrusted_code=True). Local and HuggingFace apps only. Outputs: a job payload plus the output directory. Next: wait_for_job, then read the metric JSON.
-
-### `run_app_infer`
-
-Use to RUN a published KonfAI app on the user's data (the 'use an existing model instead of training' path), after describe_app confirmed the app fits. This launches a tracked inference job and reassembles the app's outputs into the given output directory. It runs the app AS PUBLISHED: prefer it over import_app + run_prediction, which requires hand-editing the copied config. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only: a remote 'host:port:name' app server is not driven from the MCP (run it with konfai-apps directly). It does not choose the app or prepare the data for you. Outputs: a job payload (status, resources, next_actions) plus the output directory. Next: wait_for_job, then inspect the output directory.
-
-### `run_app_pipeline`
-
-Use to run an app end to end in one shot: inference, then evaluation (when gt is given), then uncertainty. It writes Predictions / Evaluations / Uncertainties under the output directory. Prefer run_app_infer for a plain prediction; use this when you want the app's full scoring loop in a single call. TRUST GATE: resolving the app imports its code and pip-installs its requirements (pass allow_untrusted_code=True). Local and HuggingFace apps only. Outputs: a job payload plus the output directory. Next: wait_for_job, then inspect the output subdirectories.
-
-### `run_app_uncertainty`
-
-Use to produce uncertainty maps from an app, after describe_app reported capabilities.uncertainty. This runs the app's Uncertainty.yml on multi-channel inference stacks (typically produced by run_app_infer with uncertainty=True). It is the separate step that consumes those stacks; run_app_infer's uncertainty flag only keeps the stack during inference. TRUST GATE: resolving the app imports its code and pip-installs its requirements (pass allow_untrusted_code=True). Local and HuggingFace apps only. Outputs: a job payload plus the output directory. Next: wait_for_job, then inspect the uncertainty maps.
+Use to RUN a published KonfAI app on the user's data (the 'use an existing model instead of training' path), after describe_app confirmed the app fits. It runs the app AS PUBLISHED, its own configs with only the bounded parameters below: prefer it over import_app + run_prediction, which requires hand-editing the copied config. action picks what runs: infer (predictions; uncertainty=True keeps the inference stacks), evaluate (score predictions against gt with the app's OWN Evaluation.yml when describe_app reported capabilities.evaluation; distinct from run_evaluation, which needs a hand-authored session config), uncertainty (maps from kept inference stacks when capabilities.uncertainty), or pipeline (infer, then evaluate when gt is given, then uncertainty, in one job). A parameter the action does not read is refused. It writes inside the session workspace. TRUST GATE: resolving the app imports its Python code and pip-installs its requirements, so you MUST pass allow_untrusted_code=True to confirm you trust the source. Local and HuggingFace apps only: a remote 'host:port:name' app server is not driven from the MCP (run it with konfai-apps directly). It does not choose the app or prepare the data for you. Outputs: a job payload (status, resources, next_actions) plus the output directory. Next: wait_for_job, then inspect the output directory.
 
 ### `run_batch`
 

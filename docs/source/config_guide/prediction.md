@@ -124,7 +124,7 @@ Key fields:
 | --- | --- | --- |
 | `dataset_filenames` | list[str] | Input dataset sources. |
 | `groups_src` | mapping | Input groups and preprocessing transforms. |
-| `augmentations` | mapping | Test-time augmentation definitions. |
+| `augmentations` | mapping | Test-time augmentation definitions. None when absent. |
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
 | `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `batch_size` | int | Number of patches per inference batch. `0` measures it on the GPU: a forward of one patch, then of two, then the largest power of two whose forward fits half of the usable VRAM (80 % of the free memory once the case's accumulation is reserved); the other half is headroom for the convolution workspace. Halved if it still runs out. On CPU, `0` runs one patch at a time. |
@@ -223,9 +223,9 @@ Important nested fields:
 | `group` | Output group name written to disk. |
 | `dataset_filename` | Destination dataset path and format. |
 | `same_as_group` | Geometry reference group for exported volumes. |
-| `before_reduction_transforms` | Applied before combining ensemble or TTA outputs. |
-| `after_reduction_transforms` | Applied after reduction. |
-| `final_transforms` | Final transforms applied before writing. |
+| `before_reduction_transforms` | Applied before combining ensemble or TTA outputs. None when absent. |
+| `after_reduction_transforms` | Applied after reduction. None when absent. |
+| `final_transforms` | Final transforms applied before writing. None when absent. |
 | `reduction` | Combines multiple predictions, usually `Mean` or `Median`. |
 | `patch_combine` | Optional patch reassembly strategy. |
 

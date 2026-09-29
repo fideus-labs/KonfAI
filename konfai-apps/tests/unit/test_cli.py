@@ -95,6 +95,15 @@ def _run_apps_server(monkeypatch: pytest.MonkeyPatch, apps_config: Path) -> str:
     return str(excinfo.value)
 
 
+def test_the_app_server_names_its_extra_when_it_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The HTTP job server is an extra: without it, konfai-apps-server says how to install it."""
+    monkeypatch.setitem(sys.modules, "uvicorn", None)
+    monkeypatch.setattr(sys, "argv", ["konfai-apps-server", "--apps", "apps.json"])
+
+    with pytest.raises(SystemExit, match=r"konfai-apps\[server\]"):
+        apps_cli_module.main_apps_server()
+
+
 def test_main_apps_server_rejects_a_missing_apps_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # A mistyped --apps must name the path it could not find, not start a server with no apps.
     missing = tmp_path / "absent.json"

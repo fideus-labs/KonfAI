@@ -143,7 +143,8 @@ refused and nothing is deleted.
 Any command becomes remote when you pass `--host`. The CLI is unchanged; the
 client uploads the inputs, schedules the job, streams the logs over SSE and
 downloads the result. Server side, jobs queue, get a GPU, run in an isolated
-workspace and are cleaned up after a grace period.
+workspace and are cleaned up after a grace period. The server comes with the
+`server` extra (`pip install "konfai-apps[server]"`); the client needs nothing more.
 
 ```bash
 export KONFAI_API_TOKEN="my-secret-token"

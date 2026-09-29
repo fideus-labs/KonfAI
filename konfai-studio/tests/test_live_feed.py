@@ -466,7 +466,7 @@ def test_the_result_pair_wins_over_the_input_the_run_was_given(tmp_path: Path) -
 
     events = volume_events(
         [
-            {"type": "tool_call", "name": "run_app_infer", "input": {"input_path": str(mr)}},
+            {"type": "tool_call", "name": "run_app", "input": {"input_path": str(mr)}},
             {"type": "text", "text": f"sCT: {sct}\nreal CT: {ct}"},
             {"type": "done"},
         ]
@@ -577,7 +577,7 @@ def test_the_pane_follows_the_last_pair_named_however_it_is_streamed(tmp_path: P
 
     events = volume_events(
         [
-            {"type": "tool_call", "name": "run_app_uncertainty", "input": {"inputs": [str(stack)]}},
+            {"type": "tool_call", "name": "run_app", "input": {"inputs": [str(stack)]}},
             {"type": "text", "text": f"Carte d'incertitude : {unc}"},
             {"type": "text", "text": f"\nsCT synthétique : {sct}"},
             {"type": "done"},
@@ -597,7 +597,7 @@ def test_a_run_input_can_be_half_of_the_comparison_that_follows(tmp_path: Path) 
 
     events = volume_events(
         [
-            {"type": "tool_call", "name": "run_app_infer", "input": {"fixed": str(ct), "moving": str(mr)}},
+            {"type": "tool_call", "name": "run_app", "input": {"fixed": str(ct), "moving": str(mr)}},
             {"type": "text", "text": f"IRM recalée : {moved}"},
             {"type": "text", "text": f"\nCT (référence) : {ct}"},
             {"type": "done"},

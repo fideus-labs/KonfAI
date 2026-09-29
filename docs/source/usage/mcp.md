@@ -41,8 +41,8 @@ with a dataset and a goal, the `solve_task` prompt frames a three-way decision a
 agent takes the cheapest path that genuinely fits:
 
 1. **Use a published app as-is**: no training. `list_apps` → `describe_app` (judge fit
-   from the app's own description and its declared inputs/outputs) → `run_app_infer`
-   (or `run_app_pipeline` to also score it), which runs the app **as published** and takes a
+   from the app's own description and its declared inputs/outputs) → `run_app` (action
+   `infer`, or `pipeline` to also score it), which runs the app **as published** and takes a
    local directory or a Hugging Face reference: a remote `host:port:name` server is driven
    with `konfai-apps` directly, not through these tools: and
    tracks it as a job. Tune per run by reading `list_app_parameters`, then passing
@@ -55,7 +55,7 @@ agent takes the cheapest path that genuinely fits:
 
 Both training paths finish at the **same reusable artifact: a KonfAI app bundle**
 (`package_app_from_session` packages a from-scratch model), which the agent can
-immediately re-run with `run_app_infer`, share, or snapshot with `export_app`. No submission service
+immediately re-run with `run_app`, share, or snapshot with `export_app`. No submission service
 is involved: the bundle is the KonfAI-native deliverable.
 
 Apps resolve from a **local path, a HuggingFace repo, or a remote server**, read from a
@@ -145,7 +145,7 @@ calls consistently, or run a single replica for job-heavy workflows.
 | Author | `design_config_strategy`, `initialize_session`, `write_workflow_config`, `write_session_file` |
 | Validate | `review_config_semantics`, `validate_config_semantics` |
 | Run & monitor | `run_train`, `run_prediction`, `run_evaluation`, `plan_transform` → `run_transform`, `wait_for_job`, `read_live_metrics`, `leaderboard` |
-| Use an app | `list_apps`, `describe_app`, `list_app_parameters`, `run_app_infer`, `run_app_evaluate`, `run_app_uncertainty`, `run_app_pipeline`, `import_app` (modify-then-run) |
+| Use an app | `list_apps`, `describe_app`, `list_app_parameters`, `run_app` (`infer`, `evaluate`, `uncertainty`, `pipeline`), `import_app` (modify-then-run) |
 | Adapt & package | `fine_tune_app`, `import_app` → `run_resume` (`weights_only=True`), `package_app_from_session`, `export_app`, `register_app_source` |
 
 Most payloads include a `next_actions` list so the agent can chain calls without

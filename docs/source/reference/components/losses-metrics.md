@@ -64,7 +64,9 @@ metrics:
 ## Pixelwise / regression
 
 All subclass `MaskedLoss` and return `(Tensor, float)` (dual-use). Extra target
-groups act as a mask.
+groups act as a mask: a voxel is inside wherever the mask is not 0 (0/1 and 0/255
+alike), and several masks keep the voxels inside all of them. The same rule holds for
+every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
 
 | Name | Purpose | Key args (defaults) |
 | --- | --- | --- |
@@ -117,6 +119,8 @@ These download TorchScript feature extractors from Hugging Face at construction
 extractor runs on the **CPU**: deliberately, since touching a GPU there crashed
 CPU-only hosts and pinned every DDP rank to the same device.
 All are `CriterionWithAttribute` and consume per-group `Attribute` statistics.
+The mask, when given, is the target after the image (`Reference;Mask`), after the
+content and style images for `IMPACTSynth`, whatever its type.
 
 | Name | Purpose | Key args (defaults) |
 | --- | --- | --- |

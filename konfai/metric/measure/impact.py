@@ -31,7 +31,6 @@ from konfai.metric.measure.adversarial import Gram
 from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import MeasureError
 from konfai.utils.utils import get_module
 
 
@@ -39,25 +38,6 @@ def _hf_hub_download(criterion: str):
     """The ``hf_hub_download`` callable, imported at the call site: huggingface_hub is only needed
     by the IMPACT criteria, never by the rest of the metric package."""
     return _require_optional("huggingface_hub", criterion=criterion, extra="all").hf_hub_download
-
-
-def _sniffed_mask(targets: tuple[torch.Tensor, ...], candidate: torch.Tensor) -> torch.Tensor | None:
-    """The uint8-mask convention, checked: a target sniffed as a mask must be a {0, 1} map and a
-    tensor of its own, never the scored target itself (an 8-bit intensity target would otherwise be
-    consumed as a mask in silence)."""
-    if candidate.dtype != torch.uint8:
-        return None
-    if candidate is targets[0]:
-        raise MeasureError(
-            "The only target is uint8, so it would be read as both the scored target and its mask.",
-            "Pass the image target first and the {0, 1} uint8 mask last, or cast the image off uint8.",
-        )
-    if bool(torch.any(candidate > 1)):
-        raise MeasureError(
-            "A uint8 target is read as a foreground mask, but it holds values above 1.",
-            "IMPACT masks are {0, 1} uint8 maps; cast an 8-bit intensity target to another dtype.",
-        )
-    return candidate
 
 
 def _check_feature_model(model_path: str, in_channels: int, shape: list[int], nb_layer: int) -> None:
@@ -84,9 +64,9 @@ def _check_feature_model(model_path: str, in_channels: int, shape: list[int], nb
 
 
 def _feature_mask(mask: torch.Tensor, feature: torch.Tensor) -> torch.Tensor:
-    """Nearest-resample a {0,1} mask to a feature map's spatial size, repeated over its channels."""
+    """Nearest-resample a mask to a feature map's spatial size, repeated over its channels."""
     resampled = F.interpolate(mask.float(), mode="nearest", size=tuple(feature.shape[2:]))
-    return resampled.repeat((1, feature.shape[1], *([1] * (mask.dim() - 2)))) == 1
+    return resampled.repeat((1, feature.shape[1], *([1] * (mask.dim() - 2)))) != 0
 
 
 def _patch_views(
@@ -127,7 +107,7 @@ def _masked_feature_loss(
     loss = torch.zeros(1, device=output[0].device, requires_grad=True)
     true_nb = 0
     for output_patch, target_patch, mask_patch in _patch_views(output[0], target[0], mask, patch_shape):
-        if mask_patch is not None and not torch.any(mask_patch == 1):
+        if mask_patch is not None and not torch.any(mask_patch != 0):
             continue
         for weight, output_feature, target_feature in zip(
             weights, model(output_patch, *output[1:]), model(target_patch, *target[1:]), strict=False
@@ -322,7 +302,8 @@ class IMPACTReg(CriterionWithAttribute):
     def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
-        mask = _sniffed_mask(targets, targets[-1])
+        # The mask is the target after the image, by position as for every masked criterion (CT;MASK).
+        mask = targets[1] if len(targets) > 1 else None
         # The prediction and the target share the same intensity space, so a single target attribute
         # (single-group target such as ``CT``) is reused to normalize both output and target; a second
         # attribute set is honored when the target is multi-group.
@@ -367,7 +348,7 @@ class IMPACTSynth(CriterionWithAttribute):
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
         if len(targets) < 2:
             raise ValueError("At least two target tensors are required.")
-        mask = _sniffed_mask(targets, targets[2]) if len(targets) == 3 else None
+        mask = targets[2] if len(targets) > 2 else None  # after the content and style images
         return _feature_loss_mean(
             chain(
                 self.content.slice_losses(output, attributes[0], targets[0], attributes[1], mask, self.content_loss),
@@ -404,7 +385,7 @@ class SAM_Perceptual(CriterionWithAttribute):
     def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
-        mask = _sniffed_mask(targets, targets[-1])
+        mask = targets[1] if len(targets) > 1 else None
         # ``targets[0]`` is the reference (e.g. CT), normalized with its own stats; the same stats
         # normalize the prediction since both live in the same intensity space.
         return _feature_loss_mean(

@@ -1,6 +1,7 @@
 # App server HTTP API
 
-The `konfai-apps-server` command launches a FastAPI server
+The `konfai-apps-server` command, installed with the `server` extra
+(`pip install "konfai-apps[server]"`), launches a FastAPI server
 (`konfai_apps.app_server:app`) that exposes packaged apps as **remote,
 asynchronous jobs**. This page is the complete endpoint contract. Start the
 server with {doc}`cli` and drive it with the {doc}`../usage/python-api` (`KonfAIAppClient`)

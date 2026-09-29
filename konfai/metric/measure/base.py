@@ -140,13 +140,12 @@ class MaskedLoss(Criterion):
 
     @staticmethod
     def get_mask(targets: list[torch.Tensor]) -> torch.Tensor | None:
+        """The voxels inside every mask, as bool: a mask counts a voxel in when it is not 0."""
         if len(targets) == 0:
             return None
-
-        mask = targets[0]
+        mask = targets[0] != 0
         for target in targets[1:]:
-            mask = mask * target
-
+            mask = mask & (target != 0)
         return mask
 
     def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
@@ -194,7 +193,7 @@ class MaskedLoss(Criterion):
             return loss_b, loss_b.detach()
 
         target = target.to(device=output.device)
-        mask = mask.to(device=output.device) == 1
+        mask = mask.to(device=output.device)
 
         kernel = None if self.mode_image_masked else self._kernel(output.float(), target.float())
         if kernel is not None:
@@ -261,7 +260,7 @@ class MaskedLoss(Criterion):
         mask = mask.to(device=output.device)
         items = []
         for batch in range(output.shape[0]):
-            mask_b = mask[batch, ...] == 1
+            mask_b = mask[batch, ...]
             if not torch.any(mask_b):
                 items.append((0.0, 0, False))
                 continue

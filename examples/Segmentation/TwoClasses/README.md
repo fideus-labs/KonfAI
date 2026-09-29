@@ -24,9 +24,7 @@ predictions, checks their labels and physical geometry against `CT` and `SEG`, a
 recomputes the Dice values `Metric_TRAIN.json` reports.
 
 A run writes its resolved defaults back into the YAML files: copy the directory again
-for another fresh run. Three keys are pinned to `None` on purpose, `patch_transforms` on
-every group and the two `*_reduction_transforms` on the output: an absent key defaults
-to a `Normalize` to `[-1, 1]`.
+for another fresh run.
 
 To adapt the three configs together:
 
