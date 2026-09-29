@@ -28,7 +28,7 @@ from konfai.metric.schedulers import Scheduler
 from konfai.network.network.base import batched_step
 from konfai.utils.config import _escape_key_component, apply_config, config, write_back
 from konfai.utils.errors import MeasureError, TrainerError
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 
 
 @config("optimizer")
@@ -94,7 +94,7 @@ def build_configured_criterions(
         if configure_attr is not None:
             configure_attr(module_classpath, criterions_attr)
         criterions[
-            apply_config(f"{config_key_prefix}.criterions_loader.{module_classpath}")(getattr(module, name))()
+            apply_config(f"{config_key_prefix}.criterions_loader.{module_classpath}")(module_attribute(module, name))()
         ] = criterions_attr
     return criterions
 

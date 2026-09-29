@@ -35,6 +35,7 @@ from konfai.utils.utils import (
     free_axis_rounding,
     get_module,
     get_patch_slices_from_shape,
+    module_attribute,
 )
 
 
@@ -269,7 +270,7 @@ class ModelPatch(Patch):
     def init(self, key: str):
         if self._patch_combine is not None:
             module, name = get_module(self._patch_combine, "konfai.data.patching")
-            self.patch_combine = apply_config(key)(getattr(module, name))()
+            self.patch_combine = apply_config(key)(module_attribute(module, name))()
         if self.patch_size is not None and self.overlap is not None:
             if self.patch_combine is not None:
                 kept = blend_axes(self.patch_size)

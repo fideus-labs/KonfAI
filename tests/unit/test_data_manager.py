@@ -493,6 +493,29 @@ def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(t
     assert dataset._validation_managers["CT"][0].total_augmentations == 0
 
 
+@pytest.mark.parametrize("root_exists", [False, True])
+def test_a_missing_dataset_root_is_named_where_an_empty_one_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_exists: bool
+) -> None:
+    """A local root that is not there (an example run before its Dataset/ is downloaded) lists as empty:
+    the refusal names it, resolved from the working directory; an empty root that is there is not named."""
+    monkeypatch.chdir(tmp_path)
+    if root_exists:
+        (tmp_path / "Dataset").mkdir()
+    dataset = DataTrain(
+        dataset_filenames=["./Dataset:mha"],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        augmentations=None,
+        patch=None,
+        validation=None,
+    )
+
+    with pytest.raises(DatasetManagerError, match="Group source 'CT' not found in any dataset") as refusal:
+        dataset.prepare()
+    named = f"Dataset root './Dataset' does not exist (resolved: '{tmp_path.resolve() / 'Dataset'}'"
+    assert (named in str(refusal.value)) is not root_exists
+
+
 @pytest.mark.parametrize(("validation_augmentations", "built"), [(True, 20), (False, 24)])
 def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validation_augmentations: bool, built: int

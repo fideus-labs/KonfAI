@@ -496,10 +496,10 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
         # one imaging backend is already several hundred MiB resident before the first voxel. Warned
         # rather than refused: tests and probes size tiny fixtures under tiny declarations on purpose.
         warnings.warn(
-            f"memory_budget {memory_budget!r} is below the smallest supported declaration"
-            f" ({MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB): the process floor alone is several times"
-            " this figure, and what the sizing model cannot see may exceed it. Declare at least"
-            " 512 MiB, or 'auto' to size from the detected memory.",
+            f"memory_budget {memory_budget!r} is below {MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB: the process"
+            " floor alone is several times this figure, and what the sizing model cannot see may exceed it."
+            " Declare 512 MiB or more (a declaration of that size was measured to hold), or 'auto' to size"
+            " from the detected memory.",
             KonfAIWarning,
             stacklevel=2,
         )

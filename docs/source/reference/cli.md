@@ -35,7 +35,8 @@ Use `konfai` when you are still designing a workflow directly from YAML.
 
 These apply to `TRAIN`, `RESUME`, `PREDICTION`, and `EVALUATION`. `TRANSFORM`
 builds its own parser: it takes `-c`, `-y`, `--gpu`, `--cpu` and `-q` with the
-meanings noted below, and has **no** `-tb`.
+meanings noted below, and has **no** `-tb`. `EVALUATION` has no `-tb` either:
+it writes no TensorBoard events.
 
 | Option | Meaning |
 | --- | --- |
@@ -44,7 +45,7 @@ meanings noted below, and has **no** `-tb`.
 | `--gpu` | One or more GPU ids. |
 | `--cpu` | Number of CPU worker processes when no `--gpu` is given; the run stays on CPU unless `--gpu` is passed. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
 | `-q`, `--quiet` | Reduce console output. |
-| `-tb`, `--tensorboard` | Launch TensorBoard. Not accepted by `TRANSFORM`. |
+| `-tb`, `--tensorboard` | Launch TensorBoard. Needs the `tensorboard` extra, checked before the run starts. Not accepted by `EVALUATION` or `TRANSFORM`. |
 | `--init` | Create the config file if missing, resolve every default into it, and exit without running. |
 
 ### Default config file per command
@@ -69,6 +70,8 @@ command's config file when missing (seeded with its root key), binds the
 workflow once so every default resolves into the file, and exits without
 running anything. `-c` picks the filename. A binding error after partial
 resolution still leaves what resolved on disk, plus the error naming the key.
+An error that is not a KonfAI refusal (a bug in your own `Model.py`, say) prints
+its traceback, as a run does.
 
 ```bash
 konfai TRAIN --init -c Config.yml
@@ -153,6 +156,10 @@ lets several processes write a single-file output (`h5`): every rank would
 write into the same file. The `KONFAI_*` variables the wrappers set on the way
 are listed under [Environment variables](#environment-variables). Ctrl+C stops
 a run with exit code 130, so `konfai TRAIN && konfai PREDICTION` stops there.
+A designed refusal raised on a spawned rank reads as it would on a single rank:
+its message alone, exit code 1 (the Python API raises it as itself). A rank
+killed by `SIGKILL`, the signal the kernel's out-of-memory killer sends, ends
+the run with a message naming the likely lack of RAM.
 
 ## `konfai-apps`
 
@@ -357,7 +364,9 @@ or machines, or when you are debugging the runtime wrappers themselves.
 
 Controls which GPUs are visible to PyTorch and therefore to KonfAI.
 
-KonfAI also rewrites this variable internally when you pass `--gpu`.
+KonfAI also rewrites this variable internally when you pass `--gpu`. It reads
+the entries as integer indices, the ones `--gpu` takes: a GPU named by UUID
+(`GPU-...`, `MIG-...`) is refused with a message naming the variable.
 
 #### `KONFAI_API_TOKEN`
 

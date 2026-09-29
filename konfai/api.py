@@ -23,7 +23,7 @@ see ``record_given_arguments``), the equivalent mapping, or a tree loaded from a
 
 The contract:
 
-- A designed refusal raises ``KonfAIError``; only the CLI catches and exits.
+- A designed refusal raises ``KonfAIError``; only the decorated entrypoints the CLIs call catch it and exit.
 - Results come back structured, read from the run's own record (``outputs.json``, ``Metric_*.json``).
 - The ``KONFAI_*`` environment and the published per-rank memory budget are restored around every
   call; one workflow runs at a time per process, a second concurrent call is refused.
@@ -34,6 +34,7 @@ import importlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -99,6 +100,24 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
 
 
 @contextmanager
+def _working_directory_importable() -> Iterator[None]:
+    """A ``module:Class`` classpath finds a local ``.py`` in the working directory, as under the CLI
+    (``konfai.main`` puts it on ``sys.path``). Held for the whole call: spawned ranks import the
+    workflow's classes through the ``sys.path`` they copy from this process. Searched last, so a module
+    that already resolves keeps resolving to the same file."""
+    cwd = os.getcwd()
+    if cwd in sys.path:
+        yield
+        return
+    sys.path.append(cwd)
+    try:
+        yield
+    finally:
+        if cwd in sys.path:
+            sys.path.remove(cwd)
+
+
+@contextmanager
 def _workflow_scope(ranks: int) -> Iterator[None]:
     """Own build-time RNG draws, scratch files and the resident peak until execution and result
     extraction finish."""
@@ -106,7 +125,7 @@ def _workflow_scope(ranks: int) -> Iterator[None]:
     from konfai.utils.runtime.distributed import forget_memoised_inputs, preserved_rng
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, release_scratch_configs
 
-    with _one_workflow_at_a_time(ranks), preserved_rng(), run_peak_scope():
+    with _one_workflow_at_a_time(ranks), preserved_rng(), run_peak_scope(), _working_directory_importable():
         mark = len(_SCRATCH_CONFIGS)
         try:
             forget_memoised_inputs()
@@ -130,11 +149,29 @@ def _launch(
     from konfai.utils.clock import restart_startup_clock
     from konfai.utils.runtime import execute_distributed_object
 
+    _check_gpu_ids(gpu)
     with _workflow_scope(ranks):
         with restart_startup_clock().phase("build"):  # this call's own clock, not the previous workflow's
             workflow = build()
         execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
         return finish(workflow)
+
+
+def _check_gpu_ids(gpu: Sequence[int] | None) -> None:
+    """The ids ``CUDA_VISIBLE_DEVICES`` lists, as the CLI's ``--gpu`` takes. The launcher writes the chosen
+    ids into it, so any other id unmasks a GPU the caller hid, or runs on CPU. Unset, nothing is checked:
+    counting the devices initializes CUDA, which fixes the visible set before the launcher narrows it."""
+    if not gpu or "CUDA_VISIBLE_DEVICES" not in os.environ:
+        return
+    from konfai import cuda_visible_devices
+
+    visible = cuda_visible_devices()
+    unknown = [device for device in gpu if device not in visible]
+    if unknown:
+        raise ConfigError(
+            f"gpu={list(gpu)} names {unknown}, which this process does not see (visible: {visible or 'none'}).",
+            "Pick among the ids CUDA_VISIBLE_DEVICES lists, as the CLI's --gpu does, or leave gpu out to run on CPU.",
+        )
 
 
 def _yaml_safe(value: object, where: str) -> object:
@@ -860,10 +897,12 @@ def predict(
     ``config`` is a ``Prediction.yml`` path or the same tree as a dict.
     """
     from konfai.predictor import build_predict
+    from konfai.predictor.workflow import checkpoint_sources
 
     # A bare str is a Sequence[str]: "best.pt" would expand per character.
     if isinstance(models, (str, Path)):
         models = [models]
+    checkpoint_sources([Path(model) for model in models])
     return _launch(
         len(gpu or []) or cpu,
         lambda: build_predict(

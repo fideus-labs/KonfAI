@@ -27,7 +27,7 @@ from konfai.metric.measure.base import Criterion
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.config import apply_config
 from konfai.utils.runtime.environment import safe_torch_load
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 
 
 class PatchGanLoss(Criterion):
@@ -76,7 +76,7 @@ class PerceptualLoss(Criterion):
             result: dict[torch.nn.Module, float] = {}
             for loss, loss_value in self.losses.items():
                 module, name = get_module(loss, "konfai.metric.measure")
-                result[apply_config(self.konfai_args)(getattr(module, name))()] = loss_value
+                result[apply_config(self.konfai_args)(module_attribute(module, name))()] = loss_value
             return result
 
     def __init__(

@@ -23,6 +23,9 @@ import importlib
 import importlib.metadata
 import os
 import sys
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from konfai.utils import State
@@ -50,8 +53,9 @@ class _VersionAction(argparse.Action):
         parser.exit()
 
 
-def _add_common_args(parser: argparse.ArgumentParser) -> None:
-    """The arguments TRAIN / RESUME / PREDICTION / EVALUATION share; TRANSFORM declares its own set."""
+def _add_common_args(parser: argparse.ArgumentParser, tensorboard: bool = True) -> None:
+    """The arguments TRAIN / RESUME / PREDICTION / EVALUATION share; TRANSFORM declares its own set.
+    ``tensorboard=False`` leaves ``-tb`` out: a workflow that writes no events has nothing to show."""
     parser.add_argument(
         "-c",
         "--config",
@@ -81,7 +85,8 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Number of CPU worker processes when no --gpu is given; the run stays on CPU unless --gpu is passed.",
     )
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
-    parser.add_argument("-tb", "--tensorboard", action="store_true", help="Launch TensorBoard.")
+    if tensorboard:
+        parser.add_argument("-tb", "--tensorboard", action="store_true", help="Launch TensorBoard.")
     parser.add_argument(
         "--init",
         action="store_true",
@@ -139,7 +144,7 @@ def _add_predict(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_evaluate(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(str(State.EVALUATION), help="Evaluate model.")
-    _add_common_args(parser)
+    _add_common_args(parser, tensorboard=False)
     _add_dir_argument(parser, "evaluations", "Directory where evaluation outputs are written")
 
 
@@ -244,6 +249,8 @@ def _run_init(args: dict[str, Any]) -> None:
     import inspect
     from pathlib import Path
 
+    from konfai.utils.errors import KonfAIError
+
     command = args["command"]
     module_name, _, config_key = _COMMANDS[command]
     default_name, root, builder_name = _INIT_TARGETS[command]
@@ -257,7 +264,9 @@ def _run_init(args: dict[str, Any]) -> None:
     try:
         builder(**{name: value for name, value in args.items() if name in accepted})
     except Exception as error:
-        print(f"[KonfAI] Wrote what resolved before the error to '{config_path}'.")
+        print(f"[KonfAI] Wrote what resolved before the error to '{config_path}'.", flush=True)
+        if not isinstance(error, KonfAIError):
+            raise  # not a designed refusal: its type and traceback are the message, as on the run path
         print(f"[KonfAI] {error}")
         sys.exit(1)
     print(f"[KonfAI] Resolved default configuration written to '{config_path}'.")
@@ -268,12 +277,28 @@ def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
     if not gpu:
         return
     from konfai import cuda_visible_devices
+    from konfai.utils.errors import ConfigError
 
-    visible = cuda_visible_devices()
+    try:
+        visible = cuda_visible_devices()
+    except ConfigError as error:
+        parser.error(str(error).strip())
     unknown = [device for device in gpu if device not in visible]
     if unknown:
         choices = ", ".join(str(device) for device in visible) or "no GPU visible"
         parser.error(f"argument --gpu: invalid choice: {unknown[0]} (choose from {choices})")
+
+
+@contextmanager
+def _konfai_warning_format() -> Iterator[None]:
+    """A workflow's build warns before its run Log captures the console: its warnings read as KonfAI's."""
+    from konfai.utils.runtime.logging import _show_warning
+
+    previous, warnings.showwarning = warnings.showwarning, _show_warning
+    try:
+        yield
+    finally:
+        warnings.showwarning = previous
 
 
 def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
@@ -281,9 +306,6 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         # Before the workflow machinery: `list` declares only its kind, none of the run flags.
         _run_list(args["kind"])
         return
-    if args["command"] not in _COMMANDS:
-        # Exhaustive on purpose: a fallback would silently launch the trainer for an unknown command.
-        parser.error(f"Unknown command '{args['command']}'.")
     _check_gpu_ids(parser, args["gpu"])
     module_name, function_name, config_key = _COMMANDS[args["command"]]
     if args["config"] is None:
@@ -291,7 +313,8 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
     elif config_key != "config":
         args[config_key] = args.pop("config")
     if args.pop("init", False):
-        _run_init(args)
+        with _konfai_warning_format():
+            _run_init(args)
         return
     if args.pop("plan", False):
         # --plan must SHORT-CIRCUIT here: the distributed wrapper filters kwargs by the entrypoint's
@@ -302,7 +325,21 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         del args["command"]
         function_name = "plan_transform"
     entrypoint = getattr(importlib.import_module(module_name), function_name)
-    entrypoint(**args)
+    from konfai.utils.errors import KonfAIError
+    from konfai.utils.utils import env_flag
+
+    with _konfai_warning_format():
+        try:
+            entrypoint(**args)
+        except KeyboardInterrupt:
+            print("\n[KonfAI] Manual interruption (Ctrl+C)")
+            sys.exit(130)
+        except KonfAIError as error:
+            # A designed refusal: the message alone, the traceback only under KONFAI_DEBUG=1.
+            if env_flag("KONFAI_DEBUG", False):
+                raise
+            print(str(error).strip(), file=sys.stderr)
+            sys.exit(1)
 
 
 def _run(parser: argparse.ArgumentParser) -> None:

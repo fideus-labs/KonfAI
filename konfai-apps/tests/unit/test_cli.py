@@ -23,7 +23,6 @@ from typing import Any, cast
 import konfai_apps.app as app_module
 import konfai_apps.cli as apps_cli_module
 import pytest
-from konfai_apps.errors import AppRepositoryError
 
 
 def test_main_apps_dispatches_local_infer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -132,7 +131,7 @@ def test_main_apps_server_rejects_a_config_without_an_apps_list(
     ids=["fine-tune-own-dataset", "fine-tune-other-dataset", "infer-tmp-dir"],
 )
 def test_an_app_run_in_a_project_refuses_to_delete_its_dataset(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: list[str]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: list[str], capsys
 ) -> None:
     """fine-tune works in its --output and infer in its --tmp-dir, and both stage their inputs as
     ./Dataset: in a project directory that is the user's own data, refused and left in place."""
@@ -147,7 +146,9 @@ def test_an_app_run_in_a_project_refuses_to_delete_its_dataset(
     monkeypatch.setattr(app_module.KonfAIApp, "__init__", lambda self, *args: None)
     monkeypatch.setattr(sys, "argv", ["konfai-apps", *command, "--cpu", "1"])
 
-    with pytest.raises(AppRepositoryError, match="not staged by konfai-apps"):
+    with pytest.raises(SystemExit) as exited:
         apps_cli_module.main_apps()
 
+    assert exited.value.code == 1
+    assert "not staged by konfai-apps" in capsys.readouterr().err
     assert user_file.read_text(encoding="utf-8") == "the only copy"

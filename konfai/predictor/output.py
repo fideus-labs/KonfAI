@@ -62,7 +62,7 @@ from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
 )
-from konfai.utils.utils import env_flag, get_module, split_path_spec
+from konfai.utils.utils import env_flag, get_module, module_attribute, split_path_spec
 
 #: This rank's prediction loop, phase by phase, summed over the cases it ran (see ``_prediction_report``).
 PREDICTION_CLOCK = SweepClock()
@@ -374,12 +374,12 @@ class OutputDataset(Dataset, NeedDevice):
         # The overlap needs an owner whether or not a combine is declared: Trim keeps each patch's
         # central band and never averages.
         module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
-        self.patch_combine = apply_config(konfai_args)(getattr(module, name))()
+        self.patch_combine = apply_config(konfai_args)(module_attribute(module, name))()
 
         module, name = get_module(self.reduction_classpath, "konfai.predictor")
         # The classpath is one key, dots and all: escaped so the dotted path is not split through it.
         subtree = f"{konfai_args}.{_escape_key_component(self.reduction_classpath)}"
-        self.reduction = apply_config(subtree)(getattr(module, name))()
+        self.reduction = apply_config(subtree)(module_attribute(module, name))()
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         for transform in self.before_reduction_transforms:
@@ -1287,4 +1287,4 @@ class OutputDatasetLoader:
 
     def get_output_dataset(self, layer_name: str) -> OutputDataset:
         module, name = get_module(self.name_class, "konfai.predictor")
-        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(getattr(module, name))()
+        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(module_attribute(module, name))()

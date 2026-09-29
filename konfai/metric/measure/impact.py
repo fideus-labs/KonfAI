@@ -31,7 +31,7 @@ from konfai.metric.measure.adversarial import Gram
 from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 
 
 def _hf_hub_download(criterion: str):
@@ -262,7 +262,7 @@ class IMPACTReg(CriterionWithAttribute):
         super().__init__()
         self.name = name
         loss_module, loss_class = get_module(loss, "konfai.metric.measure")
-        self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(getattr(loss_module, loss_class))()
+        self.loss = apply_config(os.environ["KONFAI_CONFIG_PATH"])(module_attribute(loss_module, loss_class))()
         self.pca = int(pca)
         self.model = ImpactFeatureModel.download(model_name, in_channels, weights, shape)
 
