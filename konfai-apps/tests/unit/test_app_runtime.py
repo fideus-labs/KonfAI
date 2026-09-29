@@ -83,6 +83,26 @@ def test_run_distributed_app_cleans_auto_created_temporary_workspace(
     assert auto_dir.exists() is False
 
 
+def test_run_distributed_app_removes_auto_created_workspace_when_a_path_does_not_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auto_dir = tmp_path / "konfai_test_auto_workspace"
+    auto_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
+    monkeypatch.setattr(app_module.tempfile, "mkdtemp", lambda prefix: str(auto_dir))
+
+    @app_module.run_distributed_app
+    def wrapped(inputs: list[list[str]]) -> None:
+        raise AssertionError("never reached: the input path does not resolve")
+
+    with pytest.raises(ValueError):
+        wrapped(inputs=[["CT\x00.mha"]])
+
+    assert auto_dir.exists() is False
+
+
 def test_run_distributed_app_restores_cwd_after_keyboard_interrupt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -163,6 +183,18 @@ def test_run_distributed_app_resolves_relative_inputs_before_chdir(
     assert seen["inputs"] == [[user_dir / "a.mha"], [user_dir / "b.mha"]]
     assert seen["mask"] is None
     assert seen["dataset"] == user_dir / "Dataset"
+
+
+def test_run_distributed_app_refuses_an_unknown_keyword(tmp_path: Path) -> None:
+    called: list[int] = []
+
+    @app_module.run_distributed_app
+    def wrapped(ensemble: int = 0, tmp_dir: Path | None = None) -> None:
+        called.append(ensemble)
+
+    with pytest.raises(TypeError, match="ensembel"):
+        wrapped(ensembel=5, tmp_dir=tmp_path)
+    assert called == []
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,8 @@ auth in the BFF + TLS at a reverse proxy**.
 
 Set one environment variable. Empty/unset ⇒ auth is off (local behaviour, unchanged). Set ⇒ every
 request needs a valid session cookie or bearer token; the UI shows a lock screen until you enter it.
+Without a token, a loopback bind answers only to `127.0.0.1`, `localhost` and `::1` (anything else gets a
+400), so a proxy or a forwarded port that keeps its own host name needs the token.
 
 ```bash
 export KONFAI_STUDIO_TOKEN="$(openssl rand -hex 24)"   # a strong shared secret; keep it out of shell history
@@ -152,7 +154,7 @@ environment wins on start-up.
 ## Threat model: what this does and does not do
 
 - **Does:** gate every data/compute/terminal endpoint behind a shared token; reject cross-origin terminal
-  WebSocket handshakes; keep the token out of the browser (httpOnly cookie); reap the whole job process
+  WebSocket handshakes; without a token, answer a loopback bind only under a loopback name (DNS rebinding); keep the token out of the browser (httpOnly cookie); reap the whole job process
   group on cancel; jail `/api/config/save` **writes** to the session workspace.
 - **Does not:** provide per-user isolation (one token, one trust level), rate-limit login (the token's
   entropy is the defence: use a strong one), give real session revocation (sign-out is client-side; rotate

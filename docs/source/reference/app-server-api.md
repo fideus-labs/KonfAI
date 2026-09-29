@@ -17,6 +17,9 @@ Every route (including `/health`) is behind a bearer-token dependency:
 - If set, every request needs `Authorization: Bearer <token>`; a missing or
   non-bearer header returns **401 "Missing bearer token"**, a wrong value **401
   "Invalid token"**.
+- Set it whenever anyone but the server's owner can reach the server: a job's
+  `config_overrides` can point the app's config at any path the server process
+  can read or write (see Job submission below).
 
 ```{warning}
 The server speaks **plain HTTP**: the token and the uploaded medical volumes
@@ -72,7 +75,8 @@ client knows the tunables it sent were applied. A server too old to send it make
 `KonfAIAppClient` abort the job rather than let the overrides be ignored.
 
 **Multipart fields** (files via `File`, scalars via `Form`; `*_groups` are CSV
-group-size lists used to re-split the flat file list into per-group folders):
+group-size lists used to re-split the flat file list into per-group folders; each
+size is a positive integer and they add up to the files sent, else **422**):
 
 - **infer**: `inputs` (files, required), `inputs_groups`, `ensemble` (0),
   `ensemble_models` (CSV), `tta` (0), `mc` (0), `uncertainty` (false),
@@ -84,14 +88,27 @@ group-size lists used to re-split the flat file list into per-group folders):
 - **pipeline**: union of the above; here `gt` is **required** and `uncertainty`
   defaults to **true**.
 - **fine_tune**: `dataset` (single zip, required: extracted with zip-slip
-  protection), `name` (`Finetune`), `epochs` (10), `it_validation` (1000),
-  `models` (CSV), `config_file` (`Config.yml`), `lr` (optional), `gpu`/`cpu`/`quiet`.
+  protection and bounded by `KONFAI_APPS_MAX_DATASET_BYTES`, see the limits below),
+  `name` (`Finetune`), `epochs` (10), `it_validation` (1000), `models` (CSV),
+  `config_file` (`Config.yml`), `lr` (optional), `gpu`/`cpu`/`quiet`.
 
 Every one of the five also takes **`options`** (a JSON object, default `"{}"`): the
 only channel for the tunables the plain form fields cannot carry: `patch_size` on
 `infer`/`pipeline`, `batch_size` on those two and on `fine_tune` (where it writes the
 training `Trainer.Dataset.batch_size`), and `config_overrides` on all three. An
 unknown key, or a malformed value, is rejected with **422**.
+
+`config_overrides` is a list of `NAME=VALUE` strings, the `--set` of `konfai-apps`.
+A bare `NAME` is a parameter of the app's model; a dotted `NAME` is a path from the
+config root and reaches any key the app's config holds, dataset paths, the model
+classpath and output paths included. Whoever can submit a job can therefore make the server read and
+write wherever its process can. That is why `KONFAI_API_TOKEN` should be set
+whenever the server is reachable by anyone but its owner.
+
+The config-file fields (`prediction_file`, `evaluation_file`, `uncertainty_file`,
+`config_file`) name a file of the app, installed in the job workspace: each must be
+a relative path without `..`. An entry of `ensemble_models` or `models` must not
+start with `-`. Either mistake is rejected with **422** naming the field.
 
 ### Job control
 
@@ -100,7 +117,7 @@ unknown key, or a malformed value, is rejected with **422**.
 | `GET` | `/jobs/{job_id}` | `{"job_id","status","error"}`: status ∈ `queued/waiting/running/done/error/killed`. 404 unknown. |
 | `GET` | `/jobs/{job_id}/logs` | `text/event-stream` (SSE): see below. |
 | `GET` | `/jobs/{job_id}/result` | `application/zip` (`result.zip`); **202** while running; **500** on error. |
-| `POST` | `/jobs/{job_id}/kill` | `{"job_id","status","message"}`: SIGTERM → SIGKILL the process group. |
+| `POST` | `/jobs/{job_id}/kill` | `{"job_id","status","message"}`: SIGTERM → SIGKILL the process group (on Windows, kills the job and its descendants). |
 
 **SSE log stream**: each event is `data: <line>\n\n`; a `: keepalive` comment is
 sent every 15 s of silence. Terminal markers are `__DONE__` and `__ERROR__ <msg>`.
@@ -112,8 +129,10 @@ Admission control: at most one stream per job (else 429), and a global cap of 20
 | --- | --- | --- |
 | Active jobs | `MAX_ACTIVE_JOBS = 32` | **429 "Server busy"** beyond it |
 | Unknown/malformed `options` key | validated per operation | **422** with the offending key |
+| Config-file field outside the workspace, model entry starting with `-` | checked per request | **422** naming the field |
 | Per-file upload | 2 GB | **413** on overflow |
 | Total upload | 6 GB | **413** on overflow |
+| Fine-tune `dataset` zip | 64 GiB, set `KONFAI_APPS_MAX_DATASET_BYTES` (bytes) to change it | the archive, each member and the total extracted bytes are counted while written: **413** naming the variable on overflow |
 | GPU scheduling | one semaphore per visible GPU | auto mode waits for any free GPU; explicit mode acquires all requested (400 unknown id, 503 if none) |
 | Result grace period | 120 s after completion | workspace and job are then removed: **download promptly** |
 

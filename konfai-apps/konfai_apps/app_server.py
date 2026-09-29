@@ -28,14 +28,15 @@ import time
 import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from functools import wraps
 from pathlib import Path
 from threading import RLock
-from typing import Annotated, TypeVar, cast
+from typing import Annotated, TypeVar
 
 import konfai
+import psutil
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -118,15 +119,47 @@ app = FastAPI(lifespan=lifespan)
 MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024  # 2GB
 MAX_TOTAL_BYTES = 6 * 1024 * 1024 * 1024  # 6GB
 MAX_ARCHIVE_MEMBERS = 1_000_000
+MAX_DATASET_BYTES = 64 * 1024 * 1024 * 1024  # 64GB, overridden by KONFAI_APPS_MAX_DATASET_BYTES
 
 _T = TypeVar("_T")
 
 
-def split_into_groups(items: list[_T], groups: str) -> list[list[_T]]:
-    """Re-split a flat, ordered list into consecutive groups from a size CSV."""
+# Form fields naming a config file the job installs in its workspace (the job's working directory).
+_WORKSPACE_FILE_FIELDS = ("prediction_file", "evaluation_file", "uncertainty_file", "config_file")
+# Comma-separated form fields whose entries become separate tokens of the job command.
+_COMMAND_LIST_FIELDS = ("ensemble_models", "models")
+
+
+def _check_job_fields(fields: dict) -> None:
+    """Refuse (422) a form field that would write outside the job workspace or add an option to the job command."""
+    for name in _WORKSPACE_FILE_FIELDS:
+        value = fields.get(name)
+        if isinstance(value, str) and (Path(value).anchor or ".." in Path(value).parts):
+            raise HTTPException(422, f"'{name}' must be a relative path without '..', got '{value}'")
+    for name in _COMMAND_LIST_FIELDS:
+        value = fields.get(name)
+        if isinstance(value, str) and any(x.strip().startswith("-") for x in value.split(",")):
+            raise HTTPException(422, f"'{name}' entries must not start with '-', got '{value}'")
+
+
+def split_into_groups(items: list[_T], groups: str | None) -> list[list[_T]]:
+    """Re-split a flat, ordered list into consecutive groups from a size CSV.
+
+    Refused (422) unless the sizes are positive integers adding up to ``len(items)``.
+    """
+    try:
+        sizes = [int(s) for s in (groups or "").split(",")]
+    except ValueError:
+        sizes = []
+    if not sizes or min(sizes) < 1 or sum(sizes) != len(items):
+        raise HTTPException(
+            422,
+            f"Group sizes '{groups}' do not match the {len(items)} uploaded file(s): "
+            "send '<name>_groups' as comma-separated positive integers adding up to the file count",
+        )
     out: list[list[_T]] = []
     idx = 0
-    for size in (int(s) for s in groups.split(",")):
+    for size in sizes:
         out.append(list(items[idx : idx + size]))
         idx += size
     return out
@@ -134,7 +167,7 @@ def split_into_groups(items: list[_T], groups: str) -> list[list[_T]]:
 
 def save_upload_groups(
     files: list[UploadFile],
-    groups: str,
+    groups: str | None,
     base: Path,
     max_file_bytes: int = MAX_FILE_BYTES,
     max_total_bytes: int = MAX_TOTAL_BYTES,
@@ -244,7 +277,9 @@ def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
 
     Every archive member is validated so its resolved destination stays inside
     ``dest``; absolute paths or ``..`` traversal entries are rejected before any
-    extraction happens (zip-slip protection).
+    extraction happens (zip-slip protection). The archive, each member and the
+    total extracted bytes are bounded by ``KONFAI_APPS_MAX_DATASET_BYTES``
+    (``MAX_DATASET_BYTES`` when unset), counted while writing.
 
     Parameters
     ----------
@@ -261,31 +296,30 @@ def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
     Raises
     ------
     HTTPException
-        If the payload is not a valid zip or contains an unsafe member path.
+        400 if the payload is not a valid zip or contains an unsafe member path,
+        413 if it exceeds the dataset bound.
     """
+    max_bytes = int(os.environ.get("KONFAI_APPS_MAX_DATASET_BYTES", MAX_DATASET_BYTES))
+    hint = f" (limit {max_bytes} bytes, set KONFAI_APPS_MAX_DATASET_BYTES on the server to raise it)"
     dest.mkdir(parents=True, exist_ok=True)
     dest = dest.resolve()
 
     fd, tmp_name = tempfile.mkstemp(suffix=".zip", dir=dest.parent)
     archive_path = Path(tmp_name)
     try:
+        received = 0
         with os.fdopen(fd, "wb") as w:
             while True:
                 chunk = upload.file.read(1024 * 1024)
                 if not chunk:
                     break
+                received += len(chunk)
+                if received > max_bytes:
+                    raise HTTPException(413, f"Dataset archive too large{hint}")
                 w.write(chunk)
 
         try:
-            with zipfile.ZipFile(archive_path) as zf:
-                members = zf.namelist()
-                if len(members) > MAX_ARCHIVE_MEMBERS:
-                    raise HTTPException(400, "Archive contains too many members")
-                for member in members:
-                    target = (dest / member).resolve()
-                    if target != dest and dest not in target.parents:
-                        raise HTTPException(400, f"Unsafe path in archive: {member}")
-                zf.extractall(dest)
+            _extract_zip_bounded(archive_path, dest, max_bytes, max_bytes, hint)
         except zipfile.BadZipFile as exc:
             raise HTTPException(400, "Uploaded dataset is not a valid zip archive") from exc
     finally:
@@ -294,13 +328,15 @@ def extract_zip_safely(upload: UploadFile, dest: Path) -> Path:
     return dest
 
 
-def _extract_zip_bounded(archive_path: Path, dest: Path, max_file_bytes: int, max_total_bytes: int) -> int:
+def _extract_zip_bounded(
+    archive_path: Path, dest: Path, max_file_bytes: int, max_total_bytes: int, hint: str = ""
+) -> int:
     """Extract every member of ``archive_path`` under ``dest``, streaming each member and enforcing the size
     limits on the EXTRACTED bytes.
 
     A zip bomb inflates far past its on-wire size, so a limit checked on the compressed upload is no limit at
-    all: the guard has to count what actually lands on disk. Each member is zip-slip checked before any
-    write. Returns the total number of bytes written.
+    all: the guard has to count what actually lands on disk. Every member is zip-slip checked before the first
+    write. ``hint`` is appended to a 413 detail. Returns the total number of bytes written.
     """
     dest = dest.resolve()
     extracted = 0
@@ -308,10 +344,11 @@ def _extract_zip_bounded(archive_path: Path, dest: Path, max_file_bytes: int, ma
         infos = zf.infolist()
         if len(infos) > MAX_ARCHIVE_MEMBERS:
             raise HTTPException(400, "Archive contains too many members")
-        for info in infos:
-            target = (dest / info.filename).resolve()
+        targets = [(dest / info.filename).resolve() for info in infos]
+        for info, target in zip(infos, targets, strict=True):
             if target != dest and dest not in target.parents:
                 raise HTTPException(400, f"Unsafe path in archive: {info.filename}")
+        for info, target in zip(infos, targets, strict=True):
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
@@ -325,9 +362,9 @@ def _extract_zip_bounded(archive_path: Path, dest: Path, max_file_bytes: int, ma
                     member_written += len(chunk)
                     extracted += len(chunk)
                     if member_written > max_file_bytes:
-                        raise HTTPException(413, f"File too large in archive: {info.filename}")
+                        raise HTTPException(413, f"File too large in archive: {info.filename}{hint}")
                     if extracted > max_total_bytes:
-                        raise HTTPException(413, "Total upload too large")
+                        raise HTTPException(413, f"Total upload too large{hint}")
                     out.write(chunk)
     return extracted
 
@@ -949,6 +986,8 @@ def submit_job():
     - Saves uploaded files with size quotas
     - Validates the ``options`` tunables against ``REMOTE_OPTION_FIELDS`` (422 on
       an unknown key) and appends them to the command line
+    - Refuses (422) a config-file field that leaves the job workspace and a model
+      entry starting with ``-``
     - Builds the final command line
     - Spawns the asynchronous job execution task
     - Returns job metadata (id, URLs, and the ``accepted_options`` names)
@@ -973,6 +1012,7 @@ def submit_job():
                 options = parse_remote_options(fn.__name__, kwargs.get("options") or "{}")
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
+            _check_job_fields(kwargs)
 
             job_id = uuid.uuid4().hex[:12]
             run_dir = Path(tempfile.mkdtemp(prefix=f"konfai_job_{job_id}_")).resolve()
@@ -996,20 +1036,18 @@ def submit_job():
                 inputs = None
                 if inputs_upload_files:
                     inputs = save_upload_groups(
-                        inputs_upload_files, cast(str, kwargs.get("inputs_groups")), job.input_dir / "inputs"
+                        inputs_upload_files, kwargs.get("inputs_groups"), job.input_dir / "inputs"
                     )
 
                 gt_upload_files = kwargs.get("gt")
                 gt = None
                 if gt_upload_files:
-                    gt = save_upload_groups(gt_upload_files, cast(str, kwargs.get("gt_groups")), job.input_dir / "gt")
+                    gt = save_upload_groups(gt_upload_files, kwargs.get("gt_groups"), job.input_dir / "gt")
 
                 mask_upload_files = kwargs.get("mask")
                 mask = None
                 if mask_upload_files:
-                    mask = save_upload_groups(
-                        mask_upload_files, cast(str, kwargs.get("mask_groups")), job.input_dir / "mask"
-                    )
+                    mask = save_upload_groups(mask_upload_files, kwargs.get("mask_groups"), job.input_dir / "mask")
 
                 dataset_upload = kwargs.get("dataset")
                 dataset_dir = None
@@ -1568,6 +1606,21 @@ def _process_group_exists(pgid: int) -> bool:
     return True
 
 
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a job and its descendants where there are no process groups (Windows).
+
+    The descendants are listed before the leader dies: afterwards nothing ties them to the job.
+    """
+    try:
+        descendants = psutil.Process(proc.pid).children(recursive=True)
+    except psutil.Error:
+        descendants = []
+    proc.kill()
+    for child in descendants:
+        with suppress(psutil.Error):
+            child.kill()
+
+
 @protected.post("/jobs/{job_id}/kill")
 def kill_job(job_id: str):
     """
@@ -1581,6 +1634,8 @@ def kill_job(job_id: str):
     3. Sends SIGKILL if any process-group member remains
     4. Marks the job as killed
     5. Emits termination markers in the log stream
+
+    Without process groups (Windows), steps 1 to 3 become killing the job and its descendants.
 
     This guarantees that:
     - All child processes are terminated
@@ -1609,6 +1664,9 @@ def kill_job(job_id: str):
         return {"job_id": job.job_id, "status": "killed", "message": "Kill requested"}
 
     try:
+        if not hasattr(os, "killpg"):
+            _kill_process_tree(proc)
+            return {"job_id": job.job_id, "status": "killed", "message": "Kill requested"}
         os.killpg(proc.pid, signal.SIGTERM)
 
         # The leader can exit first while a descendant still owns CUDA or stdout. Reap the

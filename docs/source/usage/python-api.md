@@ -227,6 +227,15 @@ it).
 It exports a **single, static-shape** head of a feed-forward model; custom-`forward`
 models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
 
+The manifest tiles with the `Patch.overlap` the inference config declares. A config that
+declares none exports an overlap of 0: the exported app tiles without overlap, where KonfAI
+spreads the remainder of the last patch between the tiles of each axis, so values near tile
+borders can differ from KonfAI's. Declare `overlap` to export the overlap KonfAI tiles with.
+
+A `Resample` or `Canonical` whose `fill` is not 0 carries it in its op (`"fill": -1024.0`): the
+value written where the stage reads outside the source. A stage left at 0 carries none, so its
+op is unchanged.
+
 ### Trust model
 
 ```{danger}

@@ -151,3 +151,10 @@ calls consistently, or run a single replica for job-heavy workflows.
 Most payloads include a `next_actions` list so the agent can chain calls without
 guessing the next valid step. The full per-tool contract is not duplicated here: it is
 generated from the registry (`guide://tool-index` live, `tool-reference.md` in the repo).
+
+`import_experiment` adopts an experiment directory made outside the server: its configs
+and code are copied into the session, and its artifact directories (`Checkpoints/`,
+`Predictions/`, ...) are linked, so large checkpoints are not duplicated. Where the system
+refuses the link (Windows without developer mode), the directory is copied instead and
+the result lists it under `copied_instead_of_linked`. Pass `include_artifacts='copy'` to
+always copy, or `'none'` to import configs and code only.
