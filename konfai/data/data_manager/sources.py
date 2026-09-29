@@ -47,6 +47,7 @@ from konfai.data.transform import (
     Expand,
     Reduce,
     Save,
+    Transform,
     Write,
 )
 from konfai.utils import uri
@@ -403,27 +404,15 @@ class Data(DataSources):
     hold the first partition (the training cases); the validation split has its own.
     """
 
-    @staticmethod
-    def _configured_transform_requires_single_process(classpath: str) -> bool:
-        for transform_name in classpath.split("|"):
-            candidate = transform_name.split(":")[-1].split(".")[-1].split("/")[0]
-            if candidate == "KonfAIInference":
-                return True
-        return False
-
-    @classmethod
-    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric | GroupOut]) -> bool:
-        for group in groups_src.values():
-            for group_transform in group.values():
-                for configured_transforms in (group_transform._transforms, group_transform._patch_transforms):
-                    if configured_transforms is None:
-                        continue
-                    if any(
-                        cls._configured_transform_requires_single_process(classpath)
-                        for classpath in configured_transforms
-                    ):
-                        return True
-        return False
+    @property
+    def requires_single_process_loading(self) -> bool:
+        """Whether a bound stage must run in the main process (:attr:`Transform.single_process`).
+        ``False`` until ``prepare`` binds the chains."""
+        return any(
+            isinstance(stage, Transform) and stage.single_process
+            for _group_src, _group_dest, chain in _chains(self.groups_src)
+            for stage in (*chain.transforms, *chain.patch_transforms)
+        )
 
     @abstractmethod
     def __init__(
@@ -451,7 +440,6 @@ class Data(DataSources):
         self.data_augmentations_list = data_augmentations_list or {}
         self.batch_size = batch_size
         self.inline_augmentations = inline_augmentations
-        self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
 
         # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
         # large or a window would evict its own cases before their patches are consumed. Unwindowed,

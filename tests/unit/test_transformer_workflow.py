@@ -1731,7 +1731,7 @@ _SNAPSHOT_REPORT = """\
     (1 cop(ies)) own pass: the only copy of this case still to write; a shared pass with one member is its own sweep.
   CT -> D (Clip -> Reduce -> Write <tmp>/out_d:h5): REDUCE 3 case(s) -> 1 output 'atlas': REDUCE
     4.5 resident region(s) of 1 row(s) = 0.00 GiB  (incremental accumulator)
-    reads: 1 of 3 member(s) sit on nrrd, which decodes the whole volume behind every region read: 8 decodes per member (one per region), 8 in all
+    reads: 1 of 3 member(s) sit on nrrd, which decodes the whole volume behind every region read: 8 decodes per member (one per region), 8 in all, at the starting height
     put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first
     peak ~= 22.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
     cases: CASE_000, CASE_001, CASE_002

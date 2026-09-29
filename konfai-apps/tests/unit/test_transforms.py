@@ -200,3 +200,29 @@ def test_konfai_inference_bare_name_resolves_through_core() -> None:
     import konfai.data.transform as transform_package
 
     assert transform_package.KonfAIInference is KonfAIInference
+
+
+def test_a_bound_konfai_inference_turns_the_loader_workers_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stage spawns the nested run itself, which a daemonic DataLoader worker cannot: bound from
+    the bare name a published config spells, it keeps the loader in the main process."""
+    from konfai.data.data_manager import DataPrediction, Group, GroupTransform
+    from konfai.data.transform import TransformLoader
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text(
+        "Predictor:\n  Dataset:\n    groups_src:\n      Volume_0:\n        groups_dest:\n          MASK:\n"
+        "            transforms:\n              KonfAIInference: {}\n"
+    )
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    chain = GroupTransform(transforms={"KonfAIInference": TransformLoader()}, patch_transforms=None)
+    dataset = DataPrediction(
+        augmentations=None, num_workers=2, groups_src={"Volume_0": Group(groups_dest={"MASK": chain})}
+    )
+
+    chain.prepare("Volume_0", "MASK")
+    dataset._configure_data_loading(use_cache=False)
+
+    assert isinstance(chain.transforms[0], KonfAIInference)
+    assert dataset.dataLoader_args["num_workers"] == 0

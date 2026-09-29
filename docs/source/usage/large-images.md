@@ -320,10 +320,15 @@ Six things send a chain back to the whole volume:
 5. a `REGRID` that cannot size the region it reads (no geometry, no bound);
 6. a chain whose folded shapes do not land on the target grid.
 
-Rule 3 is the one that surprises people. `[Clip(-200, 400), Standardize()]` does
-not stream: the statistic on disk belongs to the **stored** volume, while
-`Standardize`'s input here is the clipped one, and `Clip` moves values. Streaming
-would standardize every patch by the wrong statistic, so KonfAI loads instead.
+Rule 3 is the one that surprises people. `[Clip(-200, 400), Standardize()]`
+cannot seed from disk: the statistic on disk belongs to the **stored** volume,
+while `Standardize`'s input here is the clipped one, and `Clip` moves values.
+Streaming with it would standardize every patch by the wrong statistic. TRANSFORM
+runs such a chain on the whole volume. TRAIN, PREDICTION and EVALUATION read each
+case whole once, before its patches, to measure the statistic on the stage's own
+input, then stream the case with it, and the loader prints how many cases it read
+whole. A random draw ahead of the statistic changes every epoch, so no measurement
+outlives it: that case is loaded whole to serve its patches.
 `[Canonical(), Normalize()]` does stream, because a reorientation is the one kind
 that preserves every statistic: it moves voxels without changing any of them.
 `TensorCast` declares the same for itself, but only for a target that holds every

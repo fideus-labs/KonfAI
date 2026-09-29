@@ -34,6 +34,7 @@ from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chain
 from konfai.data.data_manager.order import PatchReadOrder
 from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager
+from konfai.data.patching.manager import STATISTIC_AFTER_A_VALUE_CHANGE
 from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import CaseReadError, KonfAIError
@@ -296,7 +297,8 @@ class DatasetIter(data.Dataset):
         The memo lives on the manager, so a DataLoader worker forked for an epoch starts without it
         and scans the case again: with W workers and E epochs a chain wanting a whole-volume mean
         reads the cohort W x E times over. The scan is the same read whoever makes it, so making it
-        once, before the fork, is the whole fix. A chain wanting no statistic costs a plan here.
+        once, before the fork, is the whole fix. A chain wanting no statistic costs a plan here; a case
+        whose statistic only a whole-volume pass gives is read whole here, and said when it then streams.
         """
         if self._statistics_warmed:
             return  # the statistic describes the case as stored: one pass answers every epoch
@@ -314,12 +316,15 @@ class DatasetIter(data.Dataset):
             for case, drawn in sorted(copies.items())
         ]
 
+        read_whole: set[int] = set()
+
         def scan(item: tuple[int, DatasetManager, list[int]]) -> None:
             case, manager, drawn = item
             if case in self._unreadable:
                 return
             try:
-                manager.warm_stream_statistics(drawn, self.apply_augmentations)
+                if manager.warm_stream_statistics(drawn, self.apply_augmentations):
+                    read_whole.add(case)
             except Exception as error:
                 if not self._set_aside(case, error):
                     raise
@@ -327,6 +332,11 @@ class DatasetIter(data.Dataset):
                 manager.release_case()  # the cohort's twins are never on disk at once
 
         self._on_fill_threads(f"scanning {label}", work, scan, lambda _done: f"Scanning {label}: {get_cpu_info()}")
+        if read_whole:
+            print(
+                f"[KonfAI] {label}: {len(read_whole)} case(s) read whole once before streaming: a stage wants a"
+                " statistic of an input an earlier stage changes, which only the whole volume gives."
+            )
 
     def _on_fill_threads(
         self, what: str, work: list[Any], run: Callable[[Any], object], describe: Callable[[int], str]
@@ -417,12 +427,13 @@ class DatasetIter(data.Dataset):
                 f"[KonfAI] {group_dest}: a patch cannot be read as a region, so a case is materialized"
                 f" whole to serve its patches. {refusal}"
             )
-            print(
-                f"[KonfAI] {group_dest}: declare the statistic on the stage that wants it, or move that"
-                " stage ahead of the one that changes the values, or cut the chain with a Save: each of"
-                " the three leaves the statistic describing what the stage is handed, which is what a"
-                " region needs to be read on its own."
-            )
+            if STATISTIC_AFTER_A_VALUE_CHANGE in refusal:
+                print(
+                    f"[KonfAI] {group_dest}: declare the statistic on the stage that wants it, or move that"
+                    " stage ahead of the one that changes the values, or cut the chain with a Save: each of"
+                    " the three leaves the statistic describing what the stage is handed, which is what a"
+                    " region needs to be read on its own."
+                )
 
     def _say_what_streaming_reads(self, case: int, a: int) -> None:
         """Say what a streamed case costs in reads, once per process.
