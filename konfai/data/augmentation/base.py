@@ -29,6 +29,7 @@ try:
 except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai import konfai_root
+from konfai.data.geometry import AxisRemap
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.data.transform.base import _UNDECLARED_LOCALITY
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
@@ -152,6 +153,10 @@ class DataAugmentationsList:
         self.nb = nb
         self.data_augmentations: list[DataAugmentation] = []
         self.data_augmentationsLoader = data_augmentations
+        #: Set by PREDICTION: each case's draws are then keyed by this seed and the case name, so a
+        #: case's copies do not depend on the cases drawn before it. ``None`` draws from the global
+        #: RNG, which TRAIN seeds and redraws every epoch.
+        self.draw_seed: int | None = None
 
     def prepare(self, key: str) -> None:
         self.data_augmentations = []
@@ -295,6 +300,16 @@ class DataAugmentation(NeedDevice, ABC):
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
         return shape
+
+    def axis_remap(self, index: int, a: int) -> AxisRemap | None:
+        """The index remap copy *a*'s draw is when it reorders the axes (a Permute, a quarter turn), or
+        ``None``: any other draw, and a copy the draw did not select."""
+        if a not in self.who_index[index]:
+            return None
+        return self._axis_remap(index, self._slot(index, a))
+
+    def _axis_remap(self, index: int, a: int) -> AxisRemap | None:
+        return None
 
     def _stream_region_source(
         self,

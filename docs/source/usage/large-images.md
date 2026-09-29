@@ -335,7 +335,7 @@ extent that is 8× in 3D, against the single load streaming was avoiding. At pat
 | `HALO` | `Dilate(n>0)`, `Gradient` |
 | `ORIENTATION` | `Flip`, `Permute`, `Canonical` on axis-aligned direction cosines |
 | `CROP` | `Crop`, once its box is on the case |
-| `REGRID` | `Resample`; `Padding` in every mode (`constant` is a translation into a filled, larger volume; `reflect` and `replicate` pull the border they mirror, which the region's own window carries) |
+| `REGRID` | `Resample`; `Padding` in every mode (`constant` is a translation into a filled, larger volume; `reflect` and `replicate` pull the border they mirror, which the region's own window carries; a `circular` pad fills a border from the opposite end of its axis, so a region reaching it pulls that whole axis) |
 
 Augmentations declare per **(case, draw)**, so two copies of one case can answer
 differently. `Permute`, `Flip` (with `vector_field: false`) and `Rotate` on a

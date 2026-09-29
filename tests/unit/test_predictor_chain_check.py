@@ -130,6 +130,18 @@ def test_a_shipped_example_preprocesses_its_inputs_the_way_it_trained(
             "'CT:CT' transforms[0] custom_b:Normalize: the training chain has 'custom_a:Normalize' at this position",
             id="the-same-class-name-from-another-module",
         ),
+        pytest.param(
+            {"Canonical": {"inverse": True}},
+            {"Canonical": {"inverse": True, "fill": -1024.0}},
+            "'CT:CT' transforms[0] Canonical: fill: 0.0 in training, -1024.0 here",
+            id="an-argument-the-training-config-predates-set-away-from-its-default",
+        ),
+        pytest.param(
+            {"custom:Stage": {}},
+            {"custom:Stage": {"level": 1}},
+            "'CT:CT' transforms[0] Stage: level: '(unset)' in training, 1 here",
+            id="an-argument-of-a-class-konfai-does-not-own",
+        ),
     ],
 )
 def test_a_differing_stage_is_named_with_its_group_index_and_arguments(
@@ -178,6 +190,16 @@ def test_a_differing_stage_is_named_with_its_group_index_and_arguments(
             {"Noise": {"prob": 1}},
             {"konfai.data.augmentation:Noise": {"prob": 1}},
             id="the-module-qualified-spelling-of-a-draw-declared-before-the-marker",
+        ),
+        pytest.param(
+            {"Canonical": {"inverse": True}},
+            {"Canonical": {"inverse": True, "fill": 0.0}},
+            id="an-argument-the-training-config-predates-bound-to-its-default",
+        ),
+        pytest.param(
+            {"Standardize": {"lazy": False}},
+            {"Standardize": {"lazy": False, "mask": "None"}},
+            id="an-argument-the-training-config-predates-bound-to-its-none-default",
         ),
     ],
 )

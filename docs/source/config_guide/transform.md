@@ -306,7 +306,7 @@ Under `Dataset:`:
 | Field | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `dataset_filenames` | list of `path[:format]` | `["./Dataset:mha"]` | Where cases are read. |
-| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, the OME-Zarr decoded-chunk cache included (a third of it, printed in the plan's header), not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB; `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. A declared budget below 256 MiB warns: the process floor alone exceeds it (declare at least 512 MiB, or `auto`). |
+| `memory_budget` | size string or number | `auto` | Per-rank ceiling on the buffers the sweep holds, the OME-Zarr decoded-chunk cache included (a third of it, printed in the plan's header), not on the process: peak RSS is this plus a floor (interpreter, torch, the chain's own working set). A bare number is GiB (one above `1048576`, 1 PiB, is refused: give bytes as `"8000000000b"`); `"8G"` is decimal (8 x 10^9 = 7.45 GiB), `"8GiB"` binary; `"512MB"` also works. `auto` is 80% of the node's memory, split across ranks. A declared budget below 256 MiB warns: the process floor alone exceeds it (declare at least 512 MiB, or `auto`). |
 | `subset` | string / list / null | `null` | Restricts which cases run: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. **Not** a nested mapping; a block written under it is refused. |
 | `groups_src` | mapping |: | The chains, keyed by source group then destination group. |
 
@@ -670,9 +670,16 @@ That writes `./Augmented/<case>_r01/CT_aug.ome.zarr/` … `_r08/`, eight entries
 per case.
 
 Each stage is parameterised on the grid and the case state the stages before it
-leave: a draw that permutes axes hands the next stage its own extent, and a
-resample between two draws is seen by the second. That is the same contract a
-transform has: a draw is a stage, not a separate phase.
+leave: a transform before the marker is seen by the first draw, a draw that
+permutes axes hands the next stage its own extent and header, and a resample
+between two draws is seen by the second. That is the same contract a transform
+has: a draw is a stage, not a separate phase. A draw that swaps axes (a `Permute`,
+a quarter-turn `Rotate`) restates the copy's header as the `Permute` transform
+does: Spacing, Direction and Origin follow the axes, so every voxel keeps its
+physical point, the copy is written on its own geometry, and a resample, a
+`Permute` or a free `Rotate` after it reads the spacing of the swapped grid. A draw
+that swaps no axis (a `Flip`, a `Rotate` that lands on a half turn) keeps the
+case's header.
 
 ```{note}
 `Flip`, `Permute` and `Foreign` exist as a transform and as a draw. A
@@ -748,6 +755,10 @@ other, does not desynchronise the `Rotate` they share. And it is keyed on the
 case's **name**, not on its position in the run's case list, so a `subset`, a
 case that fails, or an image and a mask run over different subsets hand a case
 the same copies.
+
+A free-angle `Rotate` and `Elastix` are drawn in world units, from each chain's
+own header: the two chains draw the same copies when both groups carry the same
+geometry.
 
 `Expand` also takes a `seed` of its own. Leave it out and the chain inherits
 `manual_seed`, which is what makes the two chains above agree; set it when you

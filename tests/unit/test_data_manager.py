@@ -53,7 +53,7 @@ from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, Resample, Standardize, TensorCast, Transform, TransformLoader
 from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.errors import DatasetManagerError, TransformError
 from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
 from oracle_support import geometry
@@ -1553,6 +1553,47 @@ def test_dataset_iter_marks_items_from_its_single_pass_flag() -> None:
 
     assert dataset_iter(single_pass=True)[0]["dest"].aliases_cache is False
     assert dataset_iter(single_pass=False)[0]["dest"].aliases_cache is True
+
+
+class _RefusingTransform(_WholeVolumeTransform):
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        raise TransformError(f"no mask for case '{name}'.")
+
+
+@pytest.mark.parametrize("use_cache", [True, False], ids=["cache-fill", "fifo-load"])
+def test_a_stage_refusal_on_a_loaded_case_arrives_as_its_own_error(use_cache: bool) -> None:
+    # The streamed route raises the stage's KonfAIError as is; the loaded route must raise the same.
+    chain = GroupTransform(transforms=None, patch_transforms=None)
+    chain.transforms = [_RefusingTransform()]
+    manager = DatasetManager(
+        index=0,
+        group_src="src",
+        group_dest="dest",
+        name="case_000",
+        dataset=cast(Dataset, _DummyDataset(np.zeros((1, 2, 2), np.float32))),
+        patch=None,
+        transforms=chain.transforms,
+        data_augmentations_list=[],
+    )
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"dest": [manager]},
+        mapping=[(0, 0, 0)],
+        groups_src={"src": Group(groups_dest={"dest": chain})},
+        inline_augmentations=False,
+        data_augmentations_list=[],
+        patch_size=None,
+        overlap=None,
+        buffer_size=1,
+        use_cache=use_cache,
+    )
+
+    with pytest.raises(TransformError, match="no mask for case 'case_000'") as refusal:
+        if use_cache:
+            dataset_iter.load("Train")
+        else:
+            dataset_iter[0]
+    assert "Traceback" not in str(refusal.value)
 
 
 # --------------------------------------------------------------------------------------

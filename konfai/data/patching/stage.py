@@ -26,6 +26,7 @@ from typing import Any, Protocol, TypeGuard, cast
 import torch
 
 from konfai.data.augmentation import DataAugmentation
+from konfai.data.augmentation.spatial import _restate_swapped_header
 from konfai.data.transform import (
     LocalityKind,
     PatchLocality,
@@ -115,6 +116,8 @@ class AugmentedStage:
     augmentation: DataAugmentation
     index: int
     a: int
+    #: Bound to a copy an ``Expand`` writes as a case of its own, whose header follows its draw.
+    expanded: bool = False
 
     @property
     def selected(self) -> bool:
@@ -158,13 +161,19 @@ class AugmentedStage:
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
     ) -> None:
-        """An augmentation draws a copy of the case rather than restating its geometry: nothing to record."""
+        """A copy an ``Expand`` writes follows a draw that swaps axes with its header, every voxel on its
+        world point. Any other draw, and a training copy, keep the case's."""
+        del name
+        remap = self.augmentation.axis_remap(self.index, self.a) if self.expanded else None
+        if remap is not None:
+            _restate_swapped_header(cache_attribute, remap, source_spatial_shape)
 
     def stream_shape(self, shape: list[int]) -> list[int]:
         """The spatial shape this copy's draw produces from ``shape`` (its slot in the shape fold)."""
         return self.augmentation.stream_shape(self.index, self.a, shape)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return self.augmentation.compute(name, self.index, self.a, tensor, cache_attribute)
 
 

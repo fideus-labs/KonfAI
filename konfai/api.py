@@ -25,8 +25,8 @@ The contract:
 
 - A designed refusal raises ``KonfAIError``; only the CLI catches and exits.
 - Results come back structured, read from the run's own record (``outputs.json``, ``Metric_*.json``).
-- The ``KONFAI_*`` environment is restored around every call; one workflow runs at a time per
-  process, a second concurrent call is refused.
+- The ``KONFAI_*`` environment and the published per-rank memory budget are restored around every
+  call; one workflow runs at a time per process, a second concurrent call is refused.
 - Every call materializes the resolved YAML in the run's workspace, the record of the experiment.
 """
 
@@ -65,7 +65,11 @@ _ACTIVE = threading.Lock()
 def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
     """Serialize workflows within the process and leave the environment as found. Two in-process runs
     would corrupt the process-wide ``KONFAI_*`` state, so a second is refused. ``ranks`` is exported
-    as ``KONFAI_LOCAL_RANKS`` for build-time budget sizing."""
+    as ``KONFAI_LOCAL_RANKS`` for build-time budget sizing. The per-rank memory budget a run publishes
+    is process state too: the call starts without one, as a fresh process does, and the caller's is
+    restored with the environment."""
+    from konfai.utils.budget import per_rank_budget_bytes, set_per_rank_budget
+
     if not _ACTIVE.acquire(blocking=False):
         raise ConfigError(
             "A KonfAI workflow is already running in this process.",
@@ -74,6 +78,8 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
             " corrupt each other.",
         )
     saved = {key: value for key, value in os.environ.items() if key.startswith("KONFAI")}
+    saved_budget = per_rank_budget_bytes()
+    set_per_rank_budget(None)
     os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, ranks))
     try:
         yield
@@ -88,16 +94,19 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
                 if key not in saved:
                     del os.environ[key]
             os.environ.update(saved)
+            set_per_rank_budget(saved_budget)
             _ACTIVE.release()
 
 
 @contextmanager
 def _workflow_scope(ranks: int) -> Iterator[None]:
-    """Own build-time RNG draws and scratch files until execution and result extraction finish."""
+    """Own build-time RNG draws, scratch files and the resident peak until execution and result
+    extraction finish."""
+    from konfai.utils.budget import run_peak_scope
     from konfai.utils.runtime.distributed import preserved_rng
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, release_scratch_configs
 
-    with _one_workflow_at_a_time(ranks), preserved_rng():
+    with _one_workflow_at_a_time(ranks), preserved_rng(), run_peak_scope():
         mark = len(_SCRATCH_CONFIGS)
         try:
             yield

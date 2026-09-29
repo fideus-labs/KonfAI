@@ -150,6 +150,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         # Cut the grids with the model's downsampling multiple known, so each case's free axis rounds up
         # to a valid input size.
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
+        # The TTA draws happen in prepare(), before the run seeds anything: keyed by this seed and the
+        # case name, a case's copies depend neither on the cases drawn before it nor on the caller's RNG.
+        for augmentations in self.dataset.data_augmentations_list.values():
+            augmentations.draw_seed = 0 if manual_seed is None else manual_seed
         self.dataset.prepare()
         self.model.bind(
             self.autocast, State.PREDICTION, self.dataset.get_groups_dest(), gpu_checkpoints=self.gpu_checkpoints

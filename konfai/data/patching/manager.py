@@ -148,9 +148,11 @@ class DatasetManager:
         for transform_function in self._expand_pre:
             _shape = self._fold_case_state(transform_function, _shape, folding)
         self._adopt_case_facts(folding, cache_attribute)
-        # The grid and case state at the Expand point: what the first per-copy stage is handed.
+        # The grid at the Expand point, the case baseline a copy starts from, and the case state the
+        # first per-copy stage is handed: the stages before the marker may have moved the grid.
         self._shape_at_expand = list(_shape)
         self._attributes_at_expand = Attribute(cache_attribute)
+        self._folding_at_expand = Attribute(folding)
         # The un-augmented landing of the per-copy tail. A draw is the identity here, because copy 0
         # carries none: the real per-copy grids are folded in reset_augmentation, stage by stage.
         for transform_function in self._expand_post:
@@ -300,7 +302,7 @@ class DatasetManager:
         attributes = [copy.deepcopy(self._attributes_at_expand) for _ in range(expand.nb)]
         # The copies' walk states, apart from the baselines above: the landing fold evolves the
         # geometry, and a streamed replay must start from the case as stored.
-        foldings = [Attribute(attribute) for attribute in attributes]
+        foldings = [Attribute(self._folding_at_expand) for _ in range(expand.nb)]
         drawn: dict[str, int] = {}
         for stage in self._expand_post:
             if _is_draw(stage):
@@ -312,8 +314,15 @@ class DatasetManager:
                 # One draw, every copy at once: state_init IS the per-copy sampler, and it wants the
                 # copies' current grids. Keyed by the case's NAME, not its index: a different
                 # `subset` must not hand a case other copies.
+                before = [list(shape) for shape in shapes]
                 with _drawn_from(expand.draw_seed, self.name, kind, occurrence):
-                    shapes = stage.state_init(self.index, shapes, foldings)
+                    # A copy of the walk state: a draw that swaps axes carries the spacing on what it is
+                    # handed, and the copy's own header follows the swap below.
+                    shapes = stage.state_init(self.index, shapes, [Attribute(folding) for folding in foldings])
+                for index in range(expand.nb):
+                    AugmentedStage(stage, self.index, index, expanded=True).write_stream_cache_attribute(
+                        foldings[index], before[index], self.name
+                    )
                 continue
             for index in range(expand.nb):
                 shapes[index] = self._fold_case_state(stage, shapes[index], foldings[index])
@@ -328,8 +337,9 @@ class DatasetManager:
 
     def _draw_augmentation_lists(self, reset_state: bool) -> None:
         """The training form: copies declared as ``Dataset.augmentations`` lists, applied after the
-        whole chain."""
+        whole chain. A list with a ``draw_seed`` keys each draw as :meth:`_draw_expand_copies` does."""
         i = 1
+        drawn: dict[str, int] = {}
         for data_augmentations in self.data_augmentations_list:
             shape = []
             caches_attribute = []
@@ -344,7 +354,12 @@ class DatasetManager:
             for data_augmentation in data_augmentations.data_augmentations:
                 if reset_state:
                     data_augmentation.reset_state(self.index)
-                shape = data_augmentation.state_init(self.index, shape, foldings)
+                kind = type(data_augmentation).__name__
+                occurrence = drawn.get(kind, 0)
+                drawn[kind] = occurrence + 1
+                seed = data_augmentations.draw_seed
+                with contextlib.nullcontext() if seed is None else _drawn_from(seed, self.name, kind, occurrence):
+                    shape = data_augmentation.state_init(self.index, shape, foldings)
             for it, s in enumerate(shape):
                 self._adopt_case_facts(foldings[it], caches_attribute[it])
                 self.cache_attributes.append(caches_attribute[it])
@@ -539,7 +554,10 @@ class DatasetManager:
             # Copy 0 is the case itself: it carries no draw, so the tail is its transforms alone --
             # the same landing __init__ folds, and what a probe or a header asks for by default.
             return [stage for stage in self._expand_post if not _is_draw(stage)]
-        return [AugmentedStage(stage, self.index, a - 1) if _is_draw(stage) else stage for stage in self._expand_post]
+        return [
+            AugmentedStage(stage, self.index, a - 1, expanded=True) if _is_draw(stage) else stage
+            for stage in self._expand_post
+        ]
 
     def _get_tensor(self, a: int) -> torch.Tensor:
         if a == 0:
@@ -852,8 +870,7 @@ class DatasetManager:
         left rather than on the stored header: a second ``Resample`` sees the first one's spacing.
         """
         out = self._stage_out_shape(stage, shape, attribute)
-        if isinstance(stage, Transform):
-            stage.write_stream_cache_attribute(attribute, list(shape), self.name)
+        stage.write_stream_cache_attribute(attribute, list(shape), self.name)
         return out
 
     @staticmethod
@@ -1436,6 +1453,7 @@ class DatasetManager:
                             # LAST member is the last reader, so its clone would protect nothing.
                             member_tensor = tensor if position == len(members) - 1 else tensor.clone()
                             scope = Attribute(region_attribute)
+                            restated = set(keys_before)
                             # Dispatched exactly as the stages before the marker are, so a tail stage
                             # reading a companion volume (Mask) or drawing from the voxel's place
                             # (Noise, CutOUT) is told where its block sits.
@@ -1446,13 +1464,14 @@ class DatasetManager:
                                 member_tensor,
                                 scope,
                                 None,
+                                restated,
                             )
                         # Its own phase, not the chain's: on a device the chain only ENQUEUES,
                         # and this is where the run waits for it as well as for the copy home.
                         with SWEEP_CLOCK.phase("fetch"):
                             block = landing.take(member_tensor)
                         if member.key not in headers:
-                            headers[member.key] = _sweep_header(member.evolved, scope, keys_before)
+                            headers[member.key] = _sweep_header(member.evolved, scope, restated)
                         block = _channel_first_block(
                             block,
                             spatial,
@@ -1931,13 +1950,20 @@ class DatasetManager:
 
         ``cache_attribute`` is the region's scope, evolved by the chain; ``case_attribute``, when
         given, receives each region stage's case-level geometry. Returns the tensor, the evolved
-        scope, and the keys the scope held before.
+        scope, and the keys the scope held before or that a region stage restated on it: the case
+        state holds those, so none is something the chain added.
         """
         cache_attribute.update(attributes)
         cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above
         keys_before = set(cache_attribute.keys())
         tensor = self._run_streamed_stages(
-            stream_source.stages, stream_source.stage_plans, spans, tensor, cache_attribute, case_attribute
+            stream_source.stages,
+            stream_source.stage_plans,
+            spans,
+            tensor,
+            cache_attribute,
+            case_attribute,
+            keys_before,
         )
         return tensor, cache_attribute, keys_before
 
@@ -1949,11 +1975,14 @@ class DatasetManager:
         tensor: torch.Tensor,
         cache_attribute: Attribute,
         case_attribute: Attribute | None,
+        restated: set[str],
     ) -> torch.Tensor:
         """Walk STAGES over a region already read, each on the region pair the fold computed for it:
         HALO reads the enlarged region and is cropped back, ORIENTATION remaps what it read, a CROP's
         remap is its action (not re-applied), REGRID interpolates to its target extent, a per-voxel
         stage is told where its region sits.
+
+        ``restated`` receives the keys a region stage's case-level geometry adds to the scope.
 
         The one dispatch: a chain read through the store and a member's per-copy tail both come here.
         """
@@ -1981,6 +2010,11 @@ class DatasetManager:
             if case_attribute is not None:
                 stage.write_stream_cache_attribute(case_attribute, list(plan.in_shape), self.name)
                 self._check_region_geometry_reaches_the_case(stage, scoped, cache_attribute)
+            # The stages after it read the geometry this one leaves, as they do on the whole volume
+            # (a Canonical reorients from the Direction a Permute restated).
+            held = set(cache_attribute.keys())
+            stage.write_stream_cache_attribute(cache_attribute, list(plan.in_shape), self.name)
+            restated.update(set(cache_attribute.keys()) - held)
 
         return tensor
 
@@ -2005,6 +2039,10 @@ class DatasetManager:
             "Record the case's answer in write_stream_cache_attribute(): it is given the whole volume's"
             " shape, where a patch's extent cannot say it.",
         )
+
+    def release_slabs(self) -> None:
+        """Drop the slabs a one-pass reader cut this case's patches from, once it has left the case."""
+        self._landed_slabs.clear()
 
     def unload(self) -> None:
         self._landed_slabs.clear()

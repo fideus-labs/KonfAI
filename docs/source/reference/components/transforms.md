@@ -93,12 +93,12 @@ until it declares otherwise.
 
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
-| `Padding` | `F.pad`; updates Origin. `mode` supports `"constant:<val>"`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | **yes** | **yes** | **yes**, `REGRID`: a region pulls the source rows it covers (clamped, kept wide enough for a reflection) and fills the border itself |
-| `Crop` | Crop to foreground bounding box; caches the box; updates Origin. | `inverse=True` | **yes** | **yes** (pads back) | **yes**: once the `box` is on the case; the region is the patch translated |
+| `Padding` | `F.pad`; updates Origin. `mode` supports `"constant:<val>"`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | **yes** | **yes** | **yes**, `REGRID`: a region pulls the source rows it covers (clamped, kept wide enough for a reflection) and fills the border itself; in `circular` mode a region reaching a border pulls that whole axis |
+| `Crop` | Crop to foreground bounding box; caches the box; updates Origin. The box is measured on the stored volume, so a stage before it that changes the grid (`Resample`, `Padding`, `Canonical`) is refused. | `inverse=True` | **yes** | **yes** (pads back) | **yes**: once the `box` is on the case; the region is the patch translated |
 | `Resample` | **The one resample.** Pick the grid, and optionally a map to write it through. See below. | `spacing=None`, `shape=None`, `reference=None`, `reference_group=None`, `reference_dataset=None`, `transforms=None`, `field=None`, `field_group=None`, `align="extent"`, `interpolation=None`, `fill=0.0`, `inverse=True` | **yes** | **yes**, the grid change | **yes**, `REGRID` |
-| `Canonical` | Reorient to RAS, the orientation NIfTI is canonical in (3-D); updates Origin/Direction. | `inverse=True` | **yes**: a remap that transposes extents moves the patch grid | **yes** | **yes**: when the case's direction is a signed axis permutation; no on an oblique one (it is resampled) |
-| `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** | **yes**: index remap |
-| `Flip` | Flip spatial axes. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) | **yes**: index remap |
+| `Canonical` | Reorient to RAS, the orientation NIfTI is canonical in (3-D); updates Origin/Direction. | `inverse=True, fill=0.0` | **yes**: a remap that transposes extents moves the patch grid, and so does an oblique direction nearest such a remap | **yes** | **yes**: when the case's direction is a signed axis permutation; no on an oblique one (it is resampled in world space onto the grid of the axis permutation nearest it, `fill` where the source does not reach, zero on the inverse) |
+| `Permute` | Permute spatial axes. `dims` is a pipe-separated axis list. Spacing and Direction follow the axes, so every voxel keeps its physical point. | `dims="1\|0\|2", inverse=True` | **yes** | **yes** | **yes**: index remap |
+| `Flip` | Flip spatial axes. Direction and Origin follow the axes, so every voxel keeps its physical point. | `dims="1\|0\|2", inverse=True` | no | **yes** (self-inverse) | **yes**: index remap |
 | `Squeeze` | `tensor.squeeze(dim)`. `transform_shape` drops a squeezed spatial axis and leaves a channel-axis squeeze shape-preserving, so the patch grid folds it. | `dim` (required), `inverse=True` | **yes** | **yes** | no‡ |
 | `Flatten` | Flatten to 1-D. |: | **yes** | no | no‡ |
 
@@ -158,7 +158,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 
 | Name | Purpose | Key args | Shape | Stream |
 | --- | --- | --- | --- | --- |
-| `InferenceStack` | Aggregate an ensemble stack (mean / median / seg-argmax); writes an `InferenceStack` volume. | `dataset, name, mode="mean"` | no | no, it writes the whole per-member stack |
+| `InferenceStack` | Aggregate an ensemble stack; writes an `InferenceStack` volume. `mode` is `mean`, `median` or `Seg` (spelled so; any other is refused). `Seg` writes each member's argmax to the stack and returns the members' mean. | `dataset, name, mode="mean"` | no | no, it writes the whole per-member stack |
 | `Norm` | Vector magnitude over the trailing axis (drops it). |: | **yes** | no‡ |
 | `Magnitude` | Vector magnitude over the **channel** axis (`[C, …]` → `[1, …]`): the channel-first sibling of `Norm`, for a stored vector volume such as a displacement field read as a case. |: | no† | **yes**: pointwise |
 | `Variance` | Per-voxel variance over N. |: | no† | **yes** |
@@ -217,7 +217,12 @@ test-time augmentation reassembly.
 ```{important}
 **`PlacedMask`, `Permute` and `Rotate` may change spatial shape.** `Rotate` only does so
 on a quarter turn, which transposes the extents it swaps (`is_quarter=True`); a
-sampled angle keeps the grid. Everything else preserves geometry.
+sampled angle keeps the grid. Everything else preserves geometry. Behind an `Expand`,
+a draw that swaps axes restates the copy's header as the `Permute` transform does
+(Spacing, Direction and Origin follow the axes), so the copy is written on its own
+geometry and every stage after it reads the spacing of the swapped grid. A training copy
+keeps the case's header, and the draws after it are handed the spacing along the
+swapped axes.
 ```
 
 **Patch streaming.** The **Stream** column says whether a copy's patches can be
@@ -238,7 +243,7 @@ Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
 | `Translate` | Random translation (voxels). | `t_min=-10, t_max=10, is_int=False` | no | **yes** | **yes**: a halo of the drawn shift (plus a voxel for interpolation), while that stays within half the patch |
-| `Rotate` | Random rotation (degrees). | `a_min=0, a_max=360, is_quarter=False` | **yes** with `is_quarter: true` | **yes** | **yes**: an index remap with `is_quarter: true`, and a free angle streams through the affine's own pull box |
+| `Rotate` | Random rotation (degrees) about the centre, in world units: the spacing of the grid it is handed, voxels without one. A header that does not describe the grid (a Squeeze leaves the 3D one on a 2D grid) turns the angle as drawn, in normalised coordinates. | `a_min=0, a_max=360, is_quarter=False` | **yes** with `is_quarter: true` | **yes** | **yes**: an index remap with `is_quarter: true`, and a free angle streams through the affine's own pull box |
 | `Scale` | Random log2-normal isotropic scale. | `s_std=0.2` | no | **yes** | **yes**: the region pulls its own window through the affine, so no fixed halo is needed |
 | `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes**: index remap; no with `vector_field: true` (negating a channel changes values) |
 | `Elastix` | Random cubic-BSpline elastic warp, drawn as a control-point lattice. | `grid_spacing=16, max_displacement=16` (world units) | no | no | **yes**: the displacement is evaluated lazily from the lattice, and no voxel moves further than `max_displacement`, which bounds the source box a region pulls |

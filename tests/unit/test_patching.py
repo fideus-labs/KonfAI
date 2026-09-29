@@ -370,6 +370,45 @@ def test_gaussian_blend_in_fp16_has_no_nan_at_single_coverage_corners() -> None:
     torch.testing.assert_close(out.float(), torch.full((16, 16, 16), 3.0), rtol=0.02, atol=0.02)
 
 
+@pytest.mark.parametrize("combine_cls", [Mean, Cosinus, Gaussian])
+@pytest.mark.parametrize("dtype", [torch.int64, torch.uint8])
+def test_a_weighted_blend_refuses_an_integer_layer(combine_cls, dtype) -> None:
+    # A fractional share cast to an integer dtype is 0: the overlap band of a label map (an Argmax
+    # head) came back erased, even where every patch agrees.
+    labels = torch.full((1, 1, 14, 14), 2, dtype=dtype)
+    patch_slices, patches = _tile_2d(labels, [8, 8], overlap=2)
+    combine = combine_cls()
+    combine.set_patch_config([8, 8], 2)
+    accumulator = Accumulator(patch_slices, [8, 8], patch_combine=combine, batch=True)
+    with pytest.raises(PatchError, match="Trim"):
+        for index, patch in enumerate(patches):
+            accumulator.add_layer(index, patch)
+
+
+@pytest.mark.parametrize(
+    ("combine_cls", "overlap", "dtype"),
+    [
+        (None, 2, torch.int64),
+        (Trim, 2, torch.int64),
+        (Mean, 0, torch.int64),
+        (Cosinus, 0, torch.int64),
+        (Mean, 2, torch.bool),
+        (Cosinus, 2, torch.bool),
+    ],
+)
+def test_an_integer_layer_reassembles_exactly_without_a_fractional_share(combine_cls, overlap, dtype) -> None:
+    labels = torch.randint(0, 5, (1, 1, 14, 14), generator=torch.Generator().manual_seed(0)).to(dtype)
+    patch_slices, patches = _tile_2d(labels, [8, 8], overlap=overlap)
+    combine = None
+    if combine_cls is not None:
+        combine = combine_cls()
+        combine.set_patch_config(blend_axes([8, 8]), blend_overlap(overlap, blend_axes([8, 8])))
+    accumulator = Accumulator(patch_slices, [8, 8], patch_combine=combine, batch=True)
+    for index, patch in enumerate(patches):
+        accumulator.add_layer(index, patch)
+    assert torch.equal(accumulator.assemble(), labels)
+
+
 # --------------------------------------------------------------------------------------
 # StreamingAccumulator: slab-by-slab finalization must equal whole-volume assembly
 # --------------------------------------------------------------------------------------
@@ -723,7 +762,7 @@ def test_trim_keeps_the_patch_whole_when_there_is_nothing_to_trim():
         assert torch.equal(Trim()._window_1d(size, overlap), torch.ones(size)), (size, overlap)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int16, torch.uint8])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int16, torch.uint8, torch.uint16, torch.uint32])
 def test_border_patches_pad_with_the_patch_minimum_kept_on_the_device(dtype):
     """Under ``pad_value=None`` a border patch pads with its own minimum (a uint8 map with zero).
 
@@ -734,7 +773,11 @@ def test_border_patches_pad_with_the_patch_minimum_kept_on_the_device(dtype):
     """
     torch.manual_seed(0)
     shape = [7, 9, 10]
-    data = (torch.randn(2, *shape) * 40).to(dtype)
+    data = torch.randn(2, *shape) * 40
+    if dtype in (torch.uint16, torch.uint32):
+        # torch has no min for these: a minimum above zero tells it from a zero pad.
+        data = data.abs() + 100
+    data = data.to(dtype)
     patch = DatasetPatch(patch_size=[4, 4, 4], overlap=0)
     assert patch.pad_value is None
     patch.load(shape)
@@ -743,7 +786,7 @@ def test_border_patches_pad_with_the_patch_minimum_kept_on_the_device(dtype):
     for index in range(patch.get_size()):
         plan = patch.get_read_plan(list(data.shape), index, 0, True)
         window = data[plan.data_slices]
-        pad_with = 0 if dtype is torch.uint8 else float(window.min().item())
+        pad_with = 0 if dtype is torch.uint8 else float(window.double().min().item())
         oracle = torch.nn.functional.pad(window, plan.constant_padding, "constant", pad_with)
         padded += any(plan.constant_padding)
         assert torch.equal(patch.get_data(data, index, 0, True), oracle)

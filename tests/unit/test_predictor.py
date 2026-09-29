@@ -27,18 +27,22 @@ import math
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
+import numpy as np
 import pytest
 import torch
 from konfai.data.augmentation import Flip
 from konfai.data.patching import Accumulator, blend_axes
+from konfai.network.network import Network
 from konfai.predictor import PREDICTION_CLOCK, OutputDataset
 from konfai.predictor.loop import _Predictor
 from konfai.predictor.output import _AsyncWriter
-from konfai.predictor.workflow import Predictor
-from konfai.utils.dataset import Dataset
+from konfai.predictor.workflow import Predictor, build_predict
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import PredictorError
 from konfai.utils.utils import get_patch_slices_from_shape
+from ruamel.yaml import YAML
 
 
 def test_async_writer_charges_its_writes_to_the_writer_s_own_phase() -> None:
@@ -207,3 +211,61 @@ def test_two_rank_prediction_refuses_a_single_file_output(tmp_path: Path) -> Non
     with pytest.raises(PredictorError, match="single-file store"):
         predictor.setup(2)
     assert not any(tmp_path.iterdir())
+
+
+class TTANet(Network):
+    """The smallest network a Predictor builds: the TTA tests below read the draws, not its output."""
+
+    def __init__(self) -> None:
+        super().__init__(in_channels=1, dim=2)
+        self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
+
+
+def _tta_draws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subset: list[str] | None, manual_seed: int | None = None
+) -> dict[str, list[list[int]]]:
+    """Build the Predictor of a flip TTA over ``subset`` of a three-case cohort, from a global RNG in
+    one fixed state, and answer each case's draw (the axes each of its eight copies flips) by name."""
+    for key in ("KONFAI_config_file", "KONFAI_ROOT", "KONFAI_STATE", "KONFAI_CONFIG_MODE"):
+        monkeypatch.setenv(key, "")
+    monkeypatch.chdir(tmp_path)
+    source = Dataset(str(tmp_path / "Dataset"), "mha")
+    for name in ("CASE_000", "CASE_001", "CASE_002"):
+        source.write("CT", name, np.ones((1, 2, 4, 4), dtype=np.float32), Attribute())
+    predictor_tree: dict[str, object] = {
+        "check_training_transforms": False,
+        "Model": {"classpath": "test_predictor:TTANet"},
+        "Dataset": {
+            "dataset_filenames": ["./Dataset:a:mha"],
+            "groups_src": {"CT": {"groups_dest": {"CT": {"is_input": True}}}},
+            "augmentations": {
+                "DataAugmentation_0": {"nb": 8, "data_augmentations": {"Flip": {"f_prob": [0.5] * 3, "prob": 1}}}
+            },
+            "Patch": {"patch_size": [1, 4, 4], "overlap": 0},
+            "subset": subset if subset is not None else "None",
+            "num_workers": 0,
+        },
+        "outputs_dataset": {
+            "Conv": {"OutputDataset": {"same_as_group": "CT:CT", "group": "OUT", "dataset_filename": "Out:mha"}}
+        },
+    }
+    if manual_seed is not None:
+        predictor_tree["manual_seed"] = manual_seed
+    config = tmp_path / "Prediction.yml"
+    YAML().dump({"Predictor": predictor_tree}, config)
+    torch.manual_seed(0)
+    predictor = cast(Predictor, build_predict([tmp_path / "fold.pt"], config, tmp_path / "Predictions"))
+    flip = predictor.dataset.data_augmentations_list["DataAugmentation_0"].data_augmentations[0]
+    assert isinstance(flip, Flip)
+    return {manager.name: flip.flip[manager.index] for manager in next(iter(predictor.dataset._managers.values()))}
+
+
+def test_a_case_s_tta_draw_does_not_depend_on_the_cases_predicted_before_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The draws were taken from the global RNG in case order, so CASE_001 predicted alone was handed
+    the copies CASE_000 gets in the cohort, and its prediction changed with the subset."""
+    alone = _tta_draws(tmp_path, monkeypatch, ["CASE_001"])
+    cohort = _tta_draws(tmp_path, monkeypatch, None)
+    assert alone["CASE_001"] == cohort["CASE_001"]
+    assert cohort["CASE_000"] != cohort["CASE_001"], "two cases are handed two draws"

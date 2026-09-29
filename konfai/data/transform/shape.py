@@ -17,6 +17,7 @@
 
 """Extent and orientation transforms: padding, cropping, axis permutation, flips, canonical orientation, gradients."""
 
+import itertools
 from typing import Any
 
 import numpy as np
@@ -33,8 +34,9 @@ from konfai.data.geometry import (
     remap_shape,
     signed_permutation,
 )
-from konfai.data.sampling import default_interpolation
-from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse
+from konfai.data.sampling import default_interpolation, gather, source_index_rows, walk_rows
+from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse, sitk
+from konfai.data.transform.resample import _resample_with_sitk
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 
@@ -97,6 +99,7 @@ class Padding(TransformInverse):
         self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
         del name, cache_attribute
+        circular = self._mode()[0] == "circular"
         pull: list[slice] = []
         for target, (before, _after), extent in zip(
             target_slices, self._pairs(len(target_slices)), source_spatial_shape, strict=False
@@ -106,6 +109,8 @@ class Padding(TransformInverse):
                 low, high = 0, max(high, min(extent, before - target.start + 1))
             if target.stop > extent + before:  # reaches the high border
                 high, low = extent, min(low, max(0, extent - (target.stop - extent - before) - 1))
+            if circular and (target.start < before or target.stop > extent + before):
+                low, high = 0, extent  # a circular border is filled from the opposite end of the axis
             pull.append(slice(low, max(high, low + 1)))
         return pull
 
@@ -186,7 +191,8 @@ class Crop(TransformInverse):
 
     The content-dependent box is computed once (``transform_shape``) and kept on the case as ``box``
     margins; cropping is then the translation ``out[o] = volume[o + start]``. Dropped voxels make it
-    a ``LocalityKind.CROP``, the stored volume's statistics not being the output's.
+    a ``LocalityKind.CROP``, the stored volume's statistics not being the output's. The box is
+    measured on the stored volume, so an input a stage before moved onto another grid is refused.
 
     Spacing and direction are kept and the origin moves to the box's near corner,
     ``O + D (start * spacing)`` (ITK's ``RegionOfInterest``); the inverse restores it.
@@ -248,12 +254,40 @@ class Crop(TransformInverse):
         source = next((dataset for dataset in self.datasets if dataset.is_dataset_exist(group_src, name)), None)
         if source is None:
             return shape
+        Crop._require_the_stored_grid(source, group_src, name, shape, cache_attribute)
         box = self._foreground_box(source, group_src, name)
         for i, ((_, b), s) in enumerate(zip(box, shape, strict=False)):
             # The scan reports the last foreground index; the box carries the margin after it.
             box[i][1] = max(int(s - b - 1), 0)
         cache_attribute["box"] = box
         return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
+
+    @staticmethod
+    def _require_the_stored_grid(
+        source: Dataset, group_src: str, name: str, shape: list[int], cache_attribute: Attribute
+    ) -> None:
+        """Refuse an input on another grid than the stored volume's: the box is measured on the stored
+        volume, so it would land elsewhere. The tolerance absorbs a geometry carried through float32."""
+        stored_shape, stored = source.get_infos(group_src, name)
+        spatial = [int(extent) for extent in stored_shape[1:]]
+        if [int(extent) for extent in shape] == spatial:
+            handed, _ = Grid.from_header(spatial, cache_attribute, "the input of 'Crop'")
+            kept, _ = Grid.from_header(spatial, stored, f"'{group_src}/{name}'")
+            if all(
+                np.allclose(a, b, rtol=1e-6, atol=1e-6)
+                for a, b in (
+                    (handed.origin_xyz, kept.origin_xyz),
+                    (handed.spacing_xyz, kept.spacing_xyz),
+                    (handed.direction_xyz, kept.direction_xyz),
+                )
+            ):
+                return
+        raise TransformError(
+            f"'Crop' measures its box on the stored volume '{group_src}/{name}', but a stage before it moved"
+            " the volume onto another grid: the box would cut the wrong region.",
+            "Place Crop before the stages that change the grid (Resample, Padding, Canonical),"
+            " or crop the written volume in a second TRANSFORM run.",
+        )
 
     @staticmethod
     def _foreground_box(source: Dataset, group_src: str, name: str) -> np.ndarray:
@@ -315,8 +349,46 @@ class Crop(TransformInverse):
         return result
 
 
+def _has_geometry(cache_attribute: Attribute, rank: int) -> bool:
+    """Whether the case carries a header of ``rank`` spatial axes, the one a remap can restate."""
+    return Grid.readable(cache_attribute) and cache_attribute.get_np_array("Direction").size == rank * rank
+
+
+def _record_remap_geometry(cache_attribute: Attribute, remap: AxisRemap, source_spatial_shape: list[int]) -> None:
+    """Record the header of the volume ``remap`` reindexes, every voxel kept on its physical point
+    (SimpleITK's ``PermuteAxes`` and ``Flip``): output axis ``k`` takes the spacing and direction
+    column of the axis it reads, negated where it reads it backwards, and the origin moves to the far
+    end of each mirrored axis. A case with no header of that rank is left alone."""
+    rank = len(remap)
+    if not _has_geometry(cache_attribute, rank):
+        return
+    origin = cache_attribute.get_np_array("Origin")
+    spacing = cache_attribute.get_np_array("Spacing")
+    matrix = cache_attribute.get_np_array("Direction").reshape((rank, rank))
+    new_origin, new_spacing, new_matrix = origin.copy(), spacing.copy(), matrix.copy()
+    for axis, (source, mirrored) in enumerate(remap):  # array order; the geometry is in (x, y, z)
+        target, read = rank - 1 - axis, rank - 1 - source
+        new_spacing[target] = spacing[read]
+        new_matrix[:, target] = -matrix[:, read] if mirrored else matrix[:, read]
+        if mirrored:
+            new_origin += matrix[:, read] * spacing[read] * (int(source_spatial_shape[source]) - 1)
+    cache_attribute["Origin"] = new_origin
+    cache_attribute["Spacing"] = new_spacing
+    cache_attribute["Direction"] = new_matrix.reshape(-1)
+
+
+def _pop_remap_geometry(cache_attribute: Attribute, rank: int) -> None:
+    """Hand back the header :func:`_record_remap_geometry` recorded over."""
+    if _has_geometry(cache_attribute, rank):
+        for key in ("Origin", "Spacing", "Direction"):
+            cache_attribute.pop(key)
+
+
 class Permute(TransformInverse):
-    """Reorder the spatial axes: ``dims`` names the new order, ``|``-separated (``"1|0|2"``)."""
+    """Reorder the spatial axes: ``dims`` names the new order, ``|``-separated (``"1|0|2"``).
+
+    The header follows the axes, so every voxel keeps its physical point (SimpleITK's ``PermuteAxes``).
+    """
 
     working_multiple = 0.0
 
@@ -361,14 +433,27 @@ class Permute(TransformInverse):
         # The write mirror pulls through the inverse remap.
         return remap_region(target_slices, source_spatial_shape, invert_remap(self._remap()))
 
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
+        del name
+        _record_remap_geometry(cache_attribute, self._remap(), source_spatial_shape)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return tensor.permute(tuple(self.dims))
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        _pop_remap_geometry(cache_attribute, len(self.dims) - 1)
         return tensor.permute(tuple(np.argsort(self.dims)))
 
 
 class Flip(TransformInverse):
+    """Reverse the spatial axes ``dims`` names, ``|``-separated (``"0|2"``).
+
+    The header follows the axes, so every voxel keeps its physical point (SimpleITK's ``Flip``).
+    """
+
     working_multiple = 0.0
 
     locality = LocalityKind.ORIENTATION
@@ -378,6 +463,10 @@ class Flip(TransformInverse):
 
         self.dims = [int(d) + 1 for d in str(dims).split("|")]
 
+    def _remap(self, rank: int) -> AxisRemap:
+        # The identity permutation, mirrored on the flipped axes.
+        return [(k, (k + 1) in self.dims) for k in range(rank)]
+
     def stream_region_source(
         self,
         name: str,
@@ -385,9 +474,7 @@ class Flip(TransformInverse):
         source_spatial_shape: list[int],
         cache_attribute: Attribute,
     ) -> list[slice]:
-        # The remap is the identity permutation, mirrored on the flipped axes.
-        remap: AxisRemap = [(k, (k + 1) in self.dims) for k in range(len(target_slices))]
-        return remap_region(target_slices, source_spatial_shape, remap)
+        return remap_region(target_slices, source_spatial_shape, self._remap(len(target_slices)))
 
     def stream_region_target(
         self,
@@ -399,10 +486,18 @@ class Flip(TransformInverse):
         # A flip is its own inverse: a written region pulls exactly the region the forward would read.
         return self.stream_region_source(name, target_slices, source_spatial_shape, cache_attribute)
 
+    def write_stream_cache_attribute(
+        self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
+    ) -> None:
+        del name
+        _record_remap_geometry(cache_attribute, self._remap(len(source_spatial_shape)), source_spatial_shape)
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return tensor.flip(tuple(self.dims))
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        _pop_remap_geometry(cache_attribute, tensor.dim() - 1)
         return tensor.flip(tuple(self.dims))
 
 
@@ -413,14 +508,19 @@ class Canonical(TransformInverse):
     RAS is ``diag(-1, -1, 1)`` there and a volume already in LPS is reoriented by this stage.
 
     An orthogonal reorientation is a signed permutation of the axes, an exact index remap; only an
-    oblique direction is resampled. A remap that permutes axes transposes the extents it swaps, so
-    ``transform_shape`` folds the patch grid onto the reoriented shape.
+    oblique direction is resampled, in world space onto the grid it records, ``fill`` where the source
+    does not reach (the corners the turn uncovers: ``-1024`` is air for a CT). The inverse reads a
+    prediction back, whose values are not the source's, so it writes zero there. That grid takes its
+    extents and spacing from the signed permutation nearest the oblique direction, so a slightly
+    oblique sagittal case keeps its field of view. A remap that permutes axes transposes the extents
+    it swaps, so ``transform_shape`` folds the patch grid onto the reoriented shape.
     """
 
     working_multiple = 3.0  # an oblique case is resampled: the resample's own figure
 
-    def __init__(self, inverse: bool = True) -> None:
+    def __init__(self, inverse: bool = True, fill: float = 0.0) -> None:
         super().__init__(inverse)
+        self.fill_value = float(fill)
         self.canonical_direction = torch.diag(torch.tensor([-1, -1, 1])).to(torch.double)
 
     def _reorientation(self, cache_attribute: Attribute) -> torch.Tensor:
@@ -435,6 +535,25 @@ class Canonical(TransformInverse):
         if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
             return None
         return signed_permutation(self._reorientation(cache_attribute), SIGNED_PERMUTATION_ATOL_FLOAT64)
+
+    def _grid_remap(self, cache_attribute: Attribute) -> AxisRemap | None:
+        """The remap the canonical grid takes its extents and spacing from: the exact one, or for an
+        oblique case the nearest, so the grid it is resampled onto holds its field of view. ``None``
+        where the case has no usable direction cosines."""
+        if "Direction" not in cache_attribute or cache_attribute.get_np_array("Direction").size != 9:
+            return None
+        return Canonical._nearest_remap(self._reorientation(cache_attribute))
+
+    @staticmethod
+    def _nearest_remap(reorientation: torch.Tensor) -> AxisRemap:
+        """The signed permutation carrying the most of the reorientation's weight, in the array order
+        ``signed_permutation`` answers in, and equal to its answer where there is one."""
+        linear = reorientation.numpy()
+        rows = max(
+            itertools.permutations(range(3)),
+            key=lambda candidate: sum(abs(linear[row, column]) for column, row in enumerate(candidate)),
+        )
+        return [(2 - rows[column], bool(linear[rows[column], column] < 0)) for column in reversed(range(3))]
 
     @staticmethod
     def _carried(per_physical_axis: torch.Tensor, remap: list[tuple[int, bool]] | None) -> torch.Tensor:
@@ -454,44 +573,28 @@ class Canonical(TransformInverse):
         )
 
     @staticmethod
-    def _affine_matrix(matrix: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:
-        return torch.cat(
-            (
-                torch.cat((matrix, translation.unsqueeze(0).T), dim=1),
-                torch.tensor([[0, 0, 0, 1]]),
-            ),
-            dim=0,
-        )
-
-    @staticmethod
-    def _resample_affine(data: torch.Tensor, matrix: torch.Tensor):
-        mode = "nearest" if default_interpolation(data) == "nearest" else "bilinear"
-        # Sample in the data's own device and float dtype; an integer input still needs a float grid. A
-        # nearest pick copies voxels, so an int64 label travels in float64: float32 rounds past 2**24.
-        if data.is_floating_point():
-            work = data
-        else:
-            work = data.type(torch.float64 if data.dtype == torch.int64 else torch.float32)
-        grid = torch.nn.functional.affine_grid(
-            matrix[:, :-1, ...].to(device=work.device, dtype=work.dtype),
-            [1, *list(data.shape)],
-            align_corners=True,
-        )
-        return (
-            torch.nn.functional.grid_sample(
-                work.unsqueeze(0),
-                grid,
-                align_corners=True,
-                mode=mode,
-                padding_mode="reflection",
-            )
-            .squeeze(0)
-            .type(data.dtype)
-        )
+    def _resample(tensor: torch.Tensor, target: Grid, source: Grid, fill: float) -> torch.Tensor:
+        """``tensor``, on ``source``, read onto ``target`` in world space as ``sitk.Resample`` reads it:
+        the dtype's interpolation, ``fill`` outside ``source``. Resample's samplers: ITK's filter on the
+        host, the torch walk slab by slab elsewhere."""
+        mode = default_interpolation(tensor)
+        starts, extent = [0] * source.rank, list(source.size_zyx)
+        if tensor.device.type == "cpu" and sitk is not None:
+            resampled = _resample_with_sitk(tensor, target, source, (), starts, mode, fill)
+            if resampled is not None:
+                return resampled
+        out = torch.empty((int(tensor.shape[0]), *target.size_zyx), dtype=tensor.dtype, device=tensor.device)
+        rows_total = int(target.size_zyx[0])
+        rows = walk_rows(target, (), tensor.device)
+        for start in range(0, rows_total, rows):
+            stop = min(rows_total, start + rows)
+            coordinates = source_index_rows(target, source, (), tensor.device, start, stop)
+            out[:, start:stop] = gather(tensor, coordinates, starts, extent, mode, fill)
+        return out
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # The patch grid is folded from what this returns.
-        remap = self._orthogonal_remap(cache_attribute)
+        remap = self._grid_remap(cache_attribute)
         if remap is None:
             return shape
         return remap_shape(shape, remap)
@@ -532,7 +635,7 @@ class Canonical(TransformInverse):
         initial_matrix = cache_attribute.get_tensor("Direction").reshape(3, 3).to(torch.double)
         initial_origin = cache_attribute.get_tensor("Origin")
         spacing = cache_attribute.get_tensor("Spacing").to(torch.double)
-        remap = self._orthogonal_remap(cache_attribute)
+        remap = self._grid_remap(cache_attribute)
         half_extent = Canonical._half_extent(source_spatial_shape, spacing)
         cache_attribute["Direction"] = self.canonical_direction.flatten()
         cache_attribute["Spacing"] = Canonical._carried(spacing, remap)
@@ -541,14 +644,15 @@ class Canonical(TransformInverse):
         center = initial_matrix @ half_extent + initial_origin
         cache_attribute["Origin"] = center - self.canonical_direction @ Canonical._carried(half_extent, remap)
 
-    def _inverse_remap(self, cache_attribute: Attribute) -> AxisRemap | None:
+    def _inverse_remap(self, cache_attribute: Attribute, grid: bool = False) -> AxisRemap | None:
         """The forward remap judged on the state ``inverse`` runs from, evaluated on a copy since a
-        declaration never mutates the case. ``None`` where the case is oblique or has no direction."""
+        declaration never mutates the case: the exact one, or with ``grid`` the one the canonical grid
+        took its extents from. ``None`` where there is none or the case has no direction."""
         scoped = Attribute(cache_attribute)
         if "Direction" not in scoped:
             return None
         scoped.pop("Direction")
-        return self._orthogonal_remap(scoped)
+        return self._grid_remap(scoped) if grid else self._orthogonal_remap(scoped)
 
     def inverse_patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         if self._inverse_remap(cache_attribute) is None:
@@ -561,7 +665,7 @@ class Canonical(TransformInverse):
 
     def inverse_transform_shape(self, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # The inverse puts each extent back on the axis it came from.
-        remap = self._inverse_remap(cache_attribute)
+        remap = self._inverse_remap(cache_attribute, grid=True)
         if remap is None:
             return shape
         return remap_shape(shape, invert_remap(remap))
@@ -582,27 +686,48 @@ class Canonical(TransformInverse):
             )
         return remap_region(target_slices, source_spatial_shape, invert_remap(remap))
 
-    def _reorient(self, tensor: torch.Tensor, reorientation: torch.Tensor) -> torch.Tensor:
-        """Apply a reorientation: an exact index remap where it is one, a resample where it is not.
-        An orthogonal one reproduces the input's values bit for bit."""
+    def _reorient(
+        self,
+        tensor: torch.Tensor,
+        reorientation: torch.Tensor,
+        onto: Attribute,
+        off: Attribute,
+        grid: AxisRemap,
+        fill: float,
+    ) -> torch.Tensor:
+        """Apply a reorientation: an exact index remap where it is one, where it is not a resample from
+        the grid ``off`` describes onto the one ``onto`` does, whose extents are the tensor's carried
+        along ``grid``, ``fill`` where ``off`` does not reach. An orthogonal one reproduces the input's
+        values bit for bit."""
         remap = signed_permutation(reorientation, SIGNED_PERMUTATION_ATOL_FLOAT64)
         if remap is None:
-            matrix = Canonical._affine_matrix(reorientation, torch.tensor([0, 0, 0]))
-            return Canonical._resample_affine(tensor, matrix.unsqueeze(0))
+            shape = [int(extent) for extent in tensor.shape[1:]]
+            return Canonical._resample(
+                tensor,
+                Grid.of(remap_shape(shape, grid), onto, "the reoriented case"),
+                Grid.of(shape, off, "the case"),
+                fill,
+            )
         return apply_remap(tensor, remap)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Read the source geometry before recording the canonical one over it: the attribute stacks.
         reorientation = self._reorientation(cache_attribute)
+        source = Attribute(cache_attribute)
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
-        return self._reorient(tensor, reorientation)
+        return self._reorient(
+            tensor, reorientation, cache_attribute, source, Canonical._nearest_remap(reorientation), self.fill_value
+        )
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # Popping restores the source geometry, which is what the inverse remap is then read from.
+        held = Attribute(cache_attribute)
         cache_attribute.pop("Direction")
         cache_attribute.pop("Spacing")
         cache_attribute.pop("Origin")
-        return self._reorient(tensor, self._reorientation(cache_attribute).inverse())
+        reorientation = self._reorientation(cache_attribute)
+        back = invert_remap(Canonical._nearest_remap(reorientation))
+        return self._reorient(tensor, reorientation.inverse(), cache_attribute, held, back, 0.0)
 
 
 class Gradient(Transform):
