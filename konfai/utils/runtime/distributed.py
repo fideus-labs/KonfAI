@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from functools import wraps
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import torch
@@ -154,33 +154,28 @@ class DistributedObject(ABC):
         sync: bool = True,
     ) -> dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]]:
         """Per network, its loss and metric tables: criterion -> (weight, reported value, minimized value),
-        averaged over the ranks."""
-        data: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
+        each value the mean over every rank's patches (``Measure.format_totals``)."""
+        data: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for label, model in models.items():
             for name, network in model.get_networks().items():
                 if network.measure is not None:
                     data[f"{name}{label}"] = (
-                        network.measure.format_loss(True, n),
-                        network.measure.format_loss(False, n),
+                        network.measure.format_totals(True, n),
+                        network.measure.format_totals(False, n),
                     )
         # `sync=False` skips the cross-rank all_gather: prediction shards have unequal batch counts, and a
         # per-batch collective would hang.
         outputs: list[Any] = synchronize_data(world_size, gpu, data) if sync else [data]
         result: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
         if global_rank == 0:
+            totals: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
             for output in outputs:
                 for k, tables in output.items():
-                    if k not in result:
-                        result[k] = ({}, {})
-                    for table, entries in zip(result[k], tables, strict=True):
-                        for u, entry in entries.items():
-                            triple = cast(tuple[float, float, float], entry)
-                            weight, reported, minimized = table.get(u, (triple[0], 0.0, 0.0))
-                            table[u] = (
-                                weight,
-                                reported + triple[1] / world_size,
-                                minimized + triple[2] / world_size,
-                            )
+                    for table, entries in zip(totals.setdefault(k, ({}, {})), tables, strict=True):
+                        for u, (weight, values, losses) in entries.items():
+                            weight, summed_values, summed_losses = table.get(u, (weight, (0.0, 0), (0.0, 0)))
+                            table[u] = (weight, _add(summed_values, values), _add(summed_losses, losses))
+            result = {k: (_means(losses), _means(metrics)) for k, (losses, metrics) in totals.items()}
         return result
 
     @property
@@ -190,6 +185,14 @@ class DistributedObject(ABC):
 
     def rank_dataloaders(self, global_rank: int) -> "list[DataLoader]":
         return self.dataloader[global_rank]
+
+    def launch_ranks(self, world_size: int) -> None:
+        """Run the ranks on this machine and return once they all ended: here when a single rank runs
+        inline, else one spawned process each."""
+        if _runs_inline(world_size):
+            self(0)
+        else:
+            mp.spawn(self, nprocs=world_size)
 
     def _bound_chunk_cache(self, world_size: int) -> None:
         """Bound the decoded-chunk cache by this rank's share of the memory budget. Set on the rank: a
@@ -246,13 +249,14 @@ class DistributedObject(ABC):
 
 def run_distributed_app(
     func: Callable[..., DistributedObject],
-) -> Callable[..., None]:
-    """Wrap a workflow factory so it executes with KonfAI runtime conventions."""
+) -> Callable[..., DistributedObject | None]:
+    """Wrap a workflow factory so it executes with KonfAI runtime conventions; the wrapper returns
+    the workflow it ran, ``None`` when interrupted."""
 
     sig = inspect.signature(func)
 
     @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> None:
+    def wrapper(*args: Any, **kwargs: Any) -> DistributedObject | None:
         params = sig.parameters
         # A kwarg the entrypoint does not declare is refused. Tolerated beside the signature: the cluster
         # kwargs (read from the raw kwargs below) and 'command', which only the TRAIN/RESUME entrypoint declares.
@@ -295,8 +299,10 @@ def run_distributed_app(
                     else None
                 ),
             )
+            return workflow
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
+            sys.exit(130)
         except KonfAIError as error:
             # A designed refusal: the message alone, the traceback only under KONFAI_DEBUG=1.
             if env_flag("KONFAI_DEBUG", False):
@@ -354,6 +360,11 @@ def execute_distributed_object(
     cpu_workers = 1 if cpu is None else int(cpu)
     if cpu_workers < 1:
         raise ConfigError(f"cpu={cpu!r} is not a rank count.", "Pass cpu=1 or more (the CLI refuses it the same way).")
+    if cluster_kwargs is not None and not gpu_ids:
+        raise ConfigError(
+            "A cluster job runs one rank per GPU of each node, and no GPU was given: it would submit zero tasks.",
+            "Pass the GPU ids each node uses, e.g. --gpu 0 1 for two GPUs per node.",
+        )
 
     managed_env = [
         "CUDA_VISIBLE_DEVICES",
@@ -436,10 +447,7 @@ def execute_distributed_object(
                     clock.launch()
                     configured_object.startup_clock = clock
                     with TensorBoard(configured_object.name):
-                        if _runs_inline(world_size):
-                            configured_object(0)
-                        else:
-                            mp.spawn(configured_object, nprocs=world_size)
+                        configured_object.launch_ranks(world_size)
         finally:
             for key, value in previous_env.items():
                 if value is None:
@@ -607,12 +615,14 @@ def pin_gloo_to_loopback(local: bool) -> Iterator[None]:
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:
     """Resolve the rank and, with ``process_group``, initialize torch distributed on it."""
+    num_nodes = 1
     if rank is None:
         import submitit
 
         job_env = submitit.JobEnvironment()
         global_rank = job_env.global_rank
         local_rank = job_env.local_rank
+        num_nodes = job_env.num_nodes
     else:
         global_rank = rank
         local_rank = rank
@@ -635,7 +645,14 @@ def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = Tr
             .strip()
             .splitlines()[0]
         )
-    except Exception:
+    except Exception as error:
+        if num_nodes > 1:
+            # localhost would put every node's ranks on a rendezvous of their own, waiting until the timeout.
+            raise ConfigError(
+                f"This {num_nodes}-node job cannot name its rendezvous host: {error}",
+                "Make scontrol reachable on the job's PATH (a container needs the host's Slurm client),"
+                " or run on one node.",
+            ) from error
         host_name = "localhost"
     port = os.environ.get("KONFAI_MASTER_PORT")
     if not port:
@@ -673,6 +690,19 @@ def cleanup():
     """Destroy the active torch distributed process group when present."""
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def _add(total: tuple[float, int], more: tuple[float, int]) -> tuple[float, int]:
+    return total[0] + more[0], total[1] + more[1]
+
+
+def _ratio(total: tuple[float, int]) -> float:
+    return total[0] / total[1] if total[1] else float("nan")
+
+
+def _means(table: dict[str, Any]) -> dict[str, tuple[float, float, float]]:
+    """(weight, reported, minimized) from (weight, reported total, minimized total)."""
+    return {u: (weight, _ratio(values), _ratio(losses)) for u, (weight, values, losses) in table.items()}
 
 
 def synchronize_data(world_size: int, gpu: int, data: Any) -> list[Any]:

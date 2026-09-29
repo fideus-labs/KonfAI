@@ -28,7 +28,6 @@ from konfai.metric.measure.base import CriterionWithAttribute as CriterionWithAt
 from konfai.metric.measure.base import CriterionWithInit as CriterionWithInit
 from konfai.metric.measure.base import LabelledValues as LabelledValues
 from konfai.metric.measure.base import MaskedLoss as MaskedLoss
-from konfai.metric.measure.base import models_register as models_register
 from konfai.metric.measure.impact import ImpactFeatureModel as ImpactFeatureModel
 from konfai.metric.measure.impact import IMPACTReg as IMPACTReg
 from konfai.metric.measure.impact import IMPACTSynth as IMPACTSynth
@@ -88,5 +87,4 @@ __all__ = [
     "PerceptualLoss",
     "SAM_Perceptual",
     "Variance",
-    "models_register",
 ]

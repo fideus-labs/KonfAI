@@ -17,8 +17,9 @@
 """Tests for konfai.trainer: checkpoint save/bootstrap, early stopping, EMA, and RESUME
 learning-rate/checkpoint handling."""
 
+import shutil
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -74,6 +75,7 @@ def _build_trainer(
     model: Any = None,
     it_validation: int = 1,
     dataloader_validation: Any = None,
+    resume_state: dict[str, Any] | None = None,
 ) -> _Trainer:
     checkpoints_dir = tmp_path / "Checkpoints"
     statistics_dir = tmp_path / "Statistics"
@@ -104,6 +106,7 @@ def _build_trainer(
         config_snapshot=tmp_path / "Config.yml",
         dataloader_training=[object()],
         dataloader_validation=dataloader_validation,
+        resume_state=resume_state,
     )
 
 
@@ -928,6 +931,251 @@ def test_resume_reuses_the_recorded_split_seed(tmp_path: Path, monkeypatch) -> N
     assert unseeded._recorded_split_seed() is None
 
 
+_EMBEDDING_NET = """
+import torch
+from konfai.network import network
+
+
+class Head(network.ModuleArgsDict):
+    def __init__(self):
+        super().__init__()
+        self.add_module("Tanh", torch.nn.Tanh())
+
+
+class Scaled(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(1))
+        # Drawn at construction; the load(init=True) of a TRAIN redraws Conv, Linear and BatchNorm only.
+        self.table = torch.nn.Embedding(3, 2)
+
+    def forward(self, x):
+        return x * self.weight
+
+
+class EmbeddingNet(network.Network):
+    def __init__(
+        self,
+        optimizer: network.OptimizerLoader = network.OptimizerLoader(),
+        schedulers: dict[str, network.LRSchedulersLoader] = {"default|ConstantLR": network.LRSchedulersLoader(0)},
+        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"Head:Tanh": network.TargetCriterionsLoader()},
+    ) -> None:
+        super().__init__(
+            in_channels=1, optimizer=optimizer, schedulers=schedulers, outputs_criterions=outputs_criterions, dim=2
+        )
+        self.add_module("Projection", Scaled())
+        self.add_module("Head", Head())
+"""
+
+
+def _embedding_train_config(dataset: Path) -> dict:
+    group = {"transforms": "None", "patch_transforms": "None"}
+    mae = {
+        "is_loss": True,
+        "schedulers": {"Constant": {"nb_step": 0, "value": 1}},
+        "group": 0,
+        "start": 0,
+        "stop": "None",
+        "accumulation": False,
+        "reduction": "mean",
+    }
+    return {
+        "Trainer": {
+            "Model": {
+                "classpath": "EmbeddingSeedNet:EmbeddingNet",
+                "EmbeddingNet": {
+                    "outputs_criterions": {
+                        "Head:Tanh": {"targets_criterions": {"CT": {"criterions_loader": {"MAE": mae}}}}
+                    },
+                    "optimizer": {"name": "AdamW", "lr": 0.01, "weight_decay": 0.0},
+                    "schedulers": {"ConstantLR": {"factor": 1.0, "total_iters": 1, "nb_step": 0}},
+                },
+            },
+            "Dataset": {
+                "groups_src": {
+                    "MR": {"groups_dest": {"MR": {**group, "is_input": True}}},
+                    "CT": {"groups_dest": {"CT": {**group, "is_input": False}}},
+                },
+                "augmentations": "None",
+                "Patch": {"patch_size": [1, 8, 8], "overlap": "None", "pad_value": 0, "extend_slice": 0},
+                "subset": "None",
+                "shuffle": False,
+                "dataset_filenames": [f"{dataset}:a:mha"],
+                "inline_augmentations": False,
+                "batch_size": 2,
+                "validation": "None",
+            },
+            "train_name": "EMBEDDING",
+            "manual_seed": 0,
+            "epochs": 1,
+            "it_validation": "None",
+            "autocast": False,
+            "gradient_checkpoints": "None",
+            "gpu_checkpoints": "None",
+            "ema_decay": 0,
+            "data_log": "None",
+            "save_checkpoint_mode": "BEST",
+            "EarlyStopping": "None",
+        }
+    }
+
+
+def test_a_seeded_train_starts_from_the_same_weights_whatever_the_process_state(tmp_path: Path, monkeypatch) -> None:
+    """``manual_seed`` covers the weights a TRAIN does not redraw at load (an Embedding, an attention
+    projection): they are drawn when the model is built, which must come after the seed, not from the
+    state the process started in (a fresh interpreter seeds torch at random)."""
+    import numpy as np
+    from konfai import api
+    from konfai.utils.runtime.distributed import preserved_rng, seed_all
+
+    sitk = pytest.importorskip("SimpleITK")
+    (tmp_path / "EmbeddingSeedNet.py").write_text(_EMBEDDING_NET, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    dataset = tmp_path / "Dataset"
+    ramp = np.linspace(0.0, 1.0, 2 * 8 * 8, dtype=np.float32).reshape(2, 8, 8)
+    for case in ("P000", "P001"):
+        (dataset / case).mkdir(parents=True)
+        sitk.WriteImage(sitk.GetImageFromArray(ramp), str(dataset / case / "MR.mha"))
+        sitk.WriteImage(sitk.GetImageFromArray(ramp * 0.5), str(dataset / case / "CT.mha"))
+
+    tables = []
+    for start in (1, 2):
+        with preserved_rng():
+            seed_all(start)  # two processes, two generator states
+            workspace = api.train(
+                _embedding_train_config(dataset),
+                cpu=1,
+                quiet=True,
+                overwrite=True,
+                checkpoints_dir=tmp_path / f"Checkpoints_{start}",
+                statistics_dir=tmp_path / f"Statistics_{start}",
+            )
+        state = torch.load(workspace / "resume_latest.pt", map_location="cpu", weights_only=False)["Model"]
+        tables.append(next(value for key, value in state["EmbeddingNet"].items() if key.endswith("table.weight")))
+    assert torch.equal(tables[0], tables[1])
+
+
+def test_a_seeded_train_draws_the_same_order_whatever_the_worker_regime(tmp_path: Path, monkeypatch) -> None:
+    """A persistent worker pool draws the loader's base seed once, a fresh iterator (no workers, or
+    workers that do not persist, or a RESUME) draws it every epoch. Drawn from the global generator,
+    that count moved the shuffle of every epoch after the first, so the weights depended on the regime."""
+    import numpy as np
+    from konfai import api
+
+    sitk = pytest.importorskip("SimpleITK")
+    (tmp_path / "EmbeddingSeedNet.py").write_text(_EMBEDDING_NET, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    dataset = tmp_path / "Dataset"
+    ramp = np.linspace(0.0, 1.0, 2 * 8 * 8, dtype=np.float32).reshape(2, 8, 8)
+    for index in range(4):
+        (dataset / f"P{index:03d}").mkdir(parents=True)
+        sitk.WriteImage(sitk.GetImageFromArray(ramp * (index + 1)), str(dataset / f"P{index:03d}" / "MR.mha"))
+        sitk.WriteImage(sitk.GetImageFromArray(ramp * 0.5), str(dataset / f"P{index:03d}" / "CT.mha"))
+
+    def weights(run: str, num_workers: int, epochs: int = 3, resume: Path | None = None) -> dict[str, torch.Tensor]:
+        config = _embedding_train_config(dataset)
+        config["Trainer"]["epochs"] = epochs
+        config["Trainer"]["Dataset"].update(
+            shuffle=True, batch_size=1, num_workers=num_workers, persistent_workers=num_workers > 0
+        )
+        workspace = api.train(
+            config,
+            resume=resume is not None,
+            model=resume,
+            cpu=1,
+            quiet=True,
+            overwrite=True,
+            checkpoints_dir=tmp_path / f"Checkpoints_{run}",
+            statistics_dir=tmp_path / f"Statistics_{run}",
+        )
+        return torch.load(workspace / "resume_latest.pt", map_location="cpu", weights_only=False)["Model"][
+            "EmbeddingNet"
+        ]
+
+    single = weights("single", 0)
+    persistent = weights("persistent", 2)
+    again = weights("again", 2)
+    weights("resumed", 2, epochs=1)
+    resumed = weights("resumed", 2, resume=tmp_path / "Checkpoints_resumed" / "EMBEDDING" / "resume_latest.pt")
+    for key, value in single.items():
+        assert torch.equal(value, persistent[key]), key
+        assert torch.equal(persistent[key], again[key]), key
+        assert torch.equal(persistent[key], resumed[key]), key
+
+
+def _split_cohort(tmp_path: Path, monkeypatch) -> tuple[Callable[[str], None], Callable[..., str]]:
+    """Eight cases split 3:1 by ``manual_seed``: a way to add a case, and a run over the cohort that
+    returns what the run's log gained."""
+    import numpy as np
+    from konfai import api
+
+    sitk = pytest.importorskip("SimpleITK")
+    (tmp_path / "EmbeddingSeedNet.py").write_text(_EMBEDDING_NET, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    dataset = tmp_path / "Dataset"
+    ramp = np.linspace(0.0, 1.0, 2 * 8 * 8, dtype=np.float32).reshape(2, 8, 8)
+
+    def add_case(name: str) -> None:
+        (dataset / name).mkdir(parents=True)
+        sitk.WriteImage(sitk.GetImageFromArray(ramp), str(dataset / name / "MR.mha"))
+        sitk.WriteImage(sitk.GetImageFromArray(ramp * 0.5), str(dataset / name / "CT.mha"))
+
+    for index in range(8):
+        add_case(f"P{index:03d}")
+    log = tmp_path / "Statistics" / "EMBEDDING" / "log_0.txt"
+
+    def run(resume: Path | None = None) -> str:
+        config = _embedding_train_config(dataset)
+        config["Trainer"]["Dataset"].update(shuffle=True, validation=0.25)
+        before = log.read_text() if log.exists() else ""
+        api.train(
+            config,
+            resume=resume is not None,
+            model=resume,
+            cpu=1,
+            quiet=True,
+            overwrite=True,
+            checkpoints_dir=tmp_path / "Checkpoints",
+            statistics_dir=tmp_path / "Statistics",
+        )
+        return log.read_text()[len(before) :]
+
+    return add_case, run
+
+
+def _recorded_split(tmp_path: Path, it: int) -> tuple[set[str], set[str]]:
+    statistics = tmp_path / "Statistics" / "EMBEDDING"
+    return set((statistics / f"Train_{it}.txt").read_text().split()), set(
+        (statistics / f"Validation_{it}.txt").read_text().split()
+    )
+
+
+def test_a_resume_names_the_cases_a_changed_cohort_moved_between_training_and_validation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """RESUME redraws the split from the seed on the cases found today: one case replaced since TRAIN
+    moves others between training and validation, and validation then scores cases the checkpoint
+    trained on. The run goes on with that split, and says which cases moved. (Replaced, not added: a
+    RESUME from an epoch cursor refuses a cohort whose batch count per epoch changed.)"""
+    add_case, run = _split_cohort(tmp_path, monkeypatch)
+    run()
+    checkpoint = tmp_path / "Checkpoints" / "EMBEDDING" / "resume_latest.pt"
+    it = torch.load(checkpoint, map_location="cpu", weights_only=False)["it"]
+    add_case("P008")
+    shutil.rmtree(tmp_path / "Dataset" / "P000")
+
+    log = run(resume=checkpoint)
+
+    trained, validated = _recorded_split(tmp_path, 0)
+    now_trained, now_validated = _recorded_split(tmp_path, it)
+    moved = sorted((trained & now_validated) | (validated & now_trained))
+    assert moved, "the added case moved no other one: this cohort does not show the redraw"
+    warning = log[log.index("redrew the train/validation split") :]
+    for name in [*moved, "P008", "P000"]:
+        assert name in warning
+    assert "give 'validation' by case names" in warning
+
+
 def _read_for_resume(path: Path) -> Trainer:
     trainer = Trainer.__new__(Trainer)
     trainer.path_to_model = str(path)
@@ -1027,6 +1275,44 @@ def test_pending_accumulation_keeps_prior_best_resume_and_never_steps_or_clears_
     scored = [p for p in latest.parent.glob("*.pt") if p.name != latest.name]
     assert len(scored) == 1
     assert torch.load(scored[0], weights_only=True)["it"] == 2
+
+
+@pytest.mark.parametrize(
+    ("how", "patience", "stopped"),
+    [
+        ("patience", 50, False),  # a larger patience trains on
+        ("patience", 1, True),  # the same patience stops again
+        ("elsewhere", 50, True),  # the learning rate at zero, no finite loss: the stop stands
+        ("running", 1, False),  # a run that had not stopped is not stopped by a smaller patience
+    ],
+)
+def test_resume_decides_a_patience_stop_again_under_the_configured_patience(
+    tmp_path, monkeypatch, how: str, patience: int, stopped: bool
+) -> None:
+    stopper = EarlyStopping(patience=1 if how == "patience" else 5, min_delta=1.0)
+    trainer = _build_trainer(tmp_path, monkeypatch, ["epoch"], early_stopping=stopper)
+    # The training loop's calls at the epoch's last validation.
+    assert stopper(0.5) is False
+    stop = stopper(0.4)  # no improvement beyond min_delta: counter 1
+    if how == "elsewhere":
+        stopper.stop()
+        stop = True
+    if stop:
+        stopper.stop()  # every rank adopts rank 0's decision
+    trainer._deferred_score = 0.4
+    trainer._save_epoch_boundary()
+    trainer._checkpoint_writer.join()
+    cursor = _read_for_resume(tmp_path / "Checkpoints/RUN/resume_latest.pt")._resume_state
+
+    resumed = _build_trainer(
+        tmp_path,
+        monkeypatch,
+        ["unused"],
+        early_stopping=EarlyStopping(patience=patience, min_delta=1.0),
+        resume_state=cursor,
+    ).early_stopping
+    assert resumed.is_stopped() is stopped
+    assert (resumed.counter, resumed.best_score) == (1, 0.5)
 
 
 def test_best_bootstrap_keeps_the_independent_latest_resume_file(tmp_path, monkeypatch) -> None:

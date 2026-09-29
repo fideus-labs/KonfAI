@@ -29,7 +29,7 @@ examples/Synthesis/
 ├── Prediction.yml
 ├── Evaluation.yml
 ├── Model.py
-├── UNetpp.yml
+├── UNetpp5.yml
 ├── README.md
 ├── Synthesis_demo.ipynb
 └── UnNormalize.py
@@ -40,22 +40,25 @@ examples/Synthesis/
 - `Prediction.yml`: shared inference workflow for both the baseline checkpoint and the generator extracted from a GAN checkpoint
 - `Evaluation.yml`: shared evaluation workflow for both synthesis variants
 - `Model.py`: local model module defining the baseline `UNetpp5`, the `Discriminator`, and the full `Gan`
-- `UNetpp.yml`: the baseline `UNetpp5` generator as a declarative YAML (weight-identical)
+- `UNetpp5.yml`: the baseline `UNetpp5` generator as a declarative YAML (same layers, different state names)
 - `UnNormalize.py`: example of a local custom postprocessing transform
 
 ## Two ways to define the model
 
 The **baseline generator** ships in both forms, like the Segmentation UNet: swap the
-`classpath` in `Config.yml`, they are weight-identical and both expose the `Head:Tanh` output:
+`classpath` in `Config.yml`. A YAML model reads the block named after its file, so both forms read
+the same `Trainer.Model.UNetpp5` block, and both expose the `Head:Tanh` output. They hold the same
+layers under different state names, so a checkpoint trained with one form does not load into the
+other:
 
 ```yaml
 Model:
   classpath: Model:UNetpp5  # Python form (Model.py)
-  # classpath: UNetpp.yml   # declarative form: the same smp UNet++ + Tanh, node-for-node
+  # classpath: UNetpp5.yml  # declarative form: the same smp UNet++ + Tanh, node-for-node
 ```
 
 `UNetpp5` wraps `segmentation_models_pytorch.UnetPlusPlus` (a ResNet-34-encoder UNet++, ~117
-conv layers) with a `Tanh` head, so `UNetpp.yml` is large, and it shows that **even an
+conv layers) with a `Tanh` head, so `UNetpp5.yml` is large, and it shows that **even an
 encoder-backed model can be fully declarative**. In practice `classpath: segmentation.smp.SMP`
 (with `arch`/`encoder_name` as parameters) is the compact way to declare the smp backbone.
 
@@ -161,10 +164,11 @@ This creates:
 ### 2. Predict
 
 Checkpoints are named after the moment they were written, and this example keeps only the best one, so
-a glob resolves to exactly one file:
+a glob on the date resolves to exactly one file (`resume_latest.pt` beside it is a training continuation,
+not a model to predict with):
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_01/*.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_01/[0-9]*.pt
 ```
 
 This creates:
@@ -253,7 +257,7 @@ Predict from the generator weights saved inside the GAN checkpoint with the shar
 Before running prediction, set `train_name` in `Prediction.yml` to `TRAIN_GAN_01` so the outputs are written to the right folder.
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_GAN_01/*.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/TRAIN_GAN_01/[0-9]*.pt
 ```
 
 Then evaluate the GAN predictions with the shared evaluation workflow:

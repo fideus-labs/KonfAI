@@ -41,6 +41,7 @@ from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     SUPPORTED_FORMATS,
     directory_volume_form,
+    get_module,
     is_dicom_file,
     split_format_level,
     split_path_spec,
@@ -241,10 +242,21 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
     runs forward-only, updates no weights, yet still writes back a checkpoint identical to its input. Scan
     every ``outputs_criterions`` in the subtree (a nested sub-network (a GAN) carries its own one level
     deeper) and accept on the first real loss: a concrete criterion (not the ``default|a|b|c`` placeholder
-    key) whose ``is_loss`` is not ``false``. Optimizer presence is not required: nested GANs and inference
+    key) whose ``is_loss`` is not ``false``, or, when the config leaves it unset, whose own role is a loss
+    (``CriterionsAttr.settle_role``). Optimizer presence is not required: nested GANs and inference
     engines legitimately omit it, so it is no trainability signal.
     """
     found = False
+
+    def is_loss(classpath: str, attrs: dict) -> bool:
+        if attrs.get("is_loss") not in (None, "None"):
+            return attrs["is_loss"] is not False
+        try:
+            module, name = get_module(classpath, "konfai.metric.measure")
+            criterion = getattr(module, name)
+        except Exception:
+            return True  # the RESUME reports what it cannot resolve
+        return bool(getattr(criterion, "loss_capable", True) and getattr(criterion, "default_is_loss", True))
 
     def scan_criterions(node: Any, in_criterions_loader: bool) -> None:
         nonlocal found
@@ -254,8 +266,7 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
             if found:
                 return
             if in_criterions_loader and "|" not in str(key):
-                attrs = value if isinstance(value, dict) else {}
-                if attrs.get("is_loss", True) is not False:
+                if is_loss(str(key), value if isinstance(value, dict) else {}):
                     found = True
                     return
             scan_criterions(value, key == "criterions_loader")
@@ -830,6 +841,8 @@ class KonfAIApp(AbstractKonfAIApp):
         - LocalAppRepositoryFromHF
         - LocalAppRepositoryFromDirectory
         """
+        #: The cases the last `infer` predicted, ``None`` when it was interrupted.
+        self._predicted: list[str] | None = None
         self.app_repository: LocalAppRepository
         # `download` means "make sure the bundle is here", `force_update` means "refresh it from the Hub".
         # Folding the first into the second made every app job revalidate the cache file by file against
@@ -1321,7 +1334,7 @@ class KonfAIApp(AbstractKonfAIApp):
         # first imported, so a host that imports it before this chdir'd workspace (e.g. the konfai-mcp
         # job runner) would silently write predictions outside ./Predictions and break collection below.
         result_dir = self._stage_result_dir(output, tmp_dir, "Predictions")
-        predict(
+        predictor = predict(
             models_path,
             True,
             gpu,
@@ -1331,6 +1344,7 @@ class KonfAIApp(AbstractKonfAIApp):
             Path(prediction_file).resolve(),
             predictions_dir=result_dir,
         )
+        self._predicted = getattr(predictor, "predicted", None)
         self._collect_result(output, tmp_dir, "Predictions")
 
     @run_distributed_app
@@ -1489,6 +1503,17 @@ class KonfAIApp(AbstractKonfAIApp):
         predictions_dir = output / "Predictions"
         if predictions_dir.exists():
             _collect(predictions_dir)
+        # The stages below stage the predictions by position: a case the prediction set aside would put
+        # every later prediction on the next case's reference, or score what an earlier run left in its place.
+        staged = {f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))}
+        missing = staged - set(self._predicted) if self._predicted is not None else set()
+        if (gt is not None or uncertainty) and missing:
+            raise AppRepositoryError(
+                f"Case(s) {', '.join(sorted(missing))} have no prediction: their inputs could not be"
+                " read, and evaluation and uncertainty pair each prediction with its case by position.",
+                f"Fix or leave out those inputs and run the pipeline again; the other predictions are in"
+                f" '{predictions_dir}'.",
+            )
         if gt is not None:
             self.evaluate([outputs], gt, output / "Evaluations", mask, evaluation_file, gpu, cpu, quiet, tmp_dir)
         if uncertainty:

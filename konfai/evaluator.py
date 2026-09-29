@@ -19,6 +19,7 @@
 import json
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,12 +32,12 @@ from konfai import config_file, cuda_visible_devices, evaluations_directory, kon
 from konfai.data.data_manager import BatchDataItem, BatchSample, DataMetric, DatasetIter
 from konfai.metric.measure.base import Criterion
 from konfai.network.network import build_configured_criterions
-from konfai.network.network.measure import CriterionResult
+from konfai.network.network.measure import CriterionResult, call_criterion, criterion_keys
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config, strict_config
-from konfai.utils.dataset import Attribute, Dataset, DataStream, refuse_shared_single_file
-from konfai.utils.errors import ConfigError, EvaluatorError
+from konfai.utils.dataset import Attribute, Dataset, DataStream, is_an_image, refuse_shared_single_file
+from konfai.utils.errors import ConfigError, EvaluatorError, KonfAIWarning
 from konfai.utils.ome_zarr import bound_chunk_cache
 from konfai.utils.runtime import (
     DistributedObject,
@@ -49,6 +50,9 @@ from konfai.utils.runtime import (
     synchronize_data,
 )
 from konfai.utils.utils import split_path_spec
+
+# SimpleITK reads the default origin and direction back from these: they store none to compare.
+_NO_GEOMETRY_FORMATS = frozenset({"png", "jpg", "jpeg", "bmp", "tif", "tiff"})
 
 
 class CriterionsLoader:
@@ -119,6 +123,8 @@ class Statistics:
         # Per-metric optimisation direction ("max"/"min"), from each criterion's `maximize` property.
         self.directions: dict[str, str] = {}
         self._incremental_path: Path | None = None
+        #: The cases of the split that could not be read, and why: listed beside the aggregate.
+        self.set_aside: dict[str, str] = {}
 
     def open_incremental(self, path: Path) -> None:
         """Append every case recorded from now on to ``path``, one JSON object per line, as it completes."""
@@ -232,9 +238,17 @@ class Statistics:
         directions = {name: self.directions[name] for name in result["aggregates"] if name in self.directions}
         if directions:
             result["directions"] = directions
+        if self.set_aside:
+            result["set_aside"] = dict(sorted(self.set_aside.items()))
 
-        with open(self.filename, "w") as f:
-            f.write(json.dumps(Statistics._to_serializable(result), indent=4, allow_nan=False))
+        # Staged, then renamed: a report on disk marks its split complete, so it is never left partial.
+        staging = self.filename.with_name(f"{self.filename.name}.{os.getpid()}.tmp")
+        try:
+            with open(staging, "w") as f:
+                f.write(json.dumps(Statistics._to_serializable(result), indent=4, allow_nan=False))
+            os.replace(staging, self.filename)
+        finally:
+            staging.unlink(missing_ok=True)
 
     def read(self) -> dict[str, float]:
         with open(self.filename) as f:
@@ -405,21 +419,24 @@ class Evaluator(DistributedObject):
                 return statistics.measures.get(name, {})
         result: dict[str, float] = {}
         moved = self._groups_on(batch_sample)
+        self._refuse_other_grids(batch_sample, moved)
+        self._warn_other_geometries(batch_sample, moved)
         for output_group in self.metrics:
             output_tensor = moved[output_group]
             for target_group in self.metrics[output_group]:
                 targets = [moved[group] for group in target_group.split(";") if group in batch_sample]
-                target_attribute = [batch_sample[output_group].attribute] + [
+                target_attribute = [
                     batch_sample[group].attribute for group in target_group.split(";") if group in batch_sample
                 ]
                 name = batch_sample[output_group].name[0]
-                for metric in self.metrics[output_group][target_group]:
+                criteria = self.metrics[output_group][target_group]
+                keys = criterion_keys(output_group, target_group, (metric.get_name() for metric in criteria))
+                for metric, base_key in zip(criteria, keys, strict=True):
                     metric_name: str = metric.get_name()
                     with self._clock.phase(metric_name), torch.no_grad():
-                        if getattr(metric, "accepts_attributes", False):
-                            loss = metric(output_tensor, *targets, attributes=target_attribute)
-                        else:
-                            loss = metric(output_tensor, *targets)
+                        loss = call_criterion(
+                            metric, output_tensor, targets, target_attribute, batch_sample[output_group].attribute
+                        )
                     outcome = CriterionResult.of(loss, metric_name)
                     true_loss = outcome.materialized()
                     if outcome.map is not None and getattr(metric, "dataset", None):
@@ -427,7 +444,6 @@ class Evaluator(DistributedObject):
                             self._write_map(metric, output_group, name, outcome.map)
 
                     direction = "max" if getattr(metric, "maximize", False) else "min"
-                    base_key = f"{output_group}:{target_group}:{metric_name}"
                     Evaluator._record_value(result, statistics, base_key, true_loss, direction)
         if len(self.metrics) > 0:
             statistics.add(result, name)
@@ -444,6 +460,92 @@ class Evaluator(DistributedObject):
                     _, cache_attribute = dataset.get_infos(g, name)
                     map_dataset.write(group, name, map_.squeeze(0).numpy(), cache_attribute)
                     return
+
+    def _voxelwise_pairs(self, tensors: dict[str, torch.Tensor]) -> dict[tuple[str, str], list[str]]:
+        """Each output and target group a metric compares voxel to voxel, with those metrics' names. A metric
+        reading the geometry or taking a target on any grid is left out, and so is one resampling a target of
+        another shape, and a pair that is not two images (landmarks, a transform, a label): fewer than two
+        spatial axes."""
+        pairs: dict[tuple[str, str], list[str]] = {}
+        for output_group, targets in self.metrics.items():
+            for target_group, criterions in targets.items():
+                for group in target_group.split(";"):
+                    # [B, C] then at least two spatial axes on each side
+                    if group not in tensors or min(tensors[output_group].dim(), tensors[group].dim()) < 4:
+                        continue
+                    same_shape = tensors[output_group].shape[2:] == tensors[group].shape[2:]
+                    voxelwise = [
+                        metric.get_name()
+                        for metric in criterions
+                        if not getattr(metric, "accepts_attributes", False)
+                        and not getattr(metric, "any_target_grid", False)
+                        and (same_shape or not getattr(metric, "resamples_target", False))
+                    ]
+                    if voxelwise:
+                        names = pairs.setdefault((output_group, group), [])
+                        names.extend(name for name in voxelwise if name not in names)
+        return pairs
+
+    def _refuse_other_grids(self, batch_sample: BatchSample, tensors: dict[str, torch.Tensor]) -> None:
+        """Refuse a case whose output and a target a metric compares voxel to voxel lie on two grids:
+        torch raises on most pairs and broadcasts an axis of one in silence. Leading axes of one are no
+        mismatch: [Y, X] and [1, Y, X] hold the same voxels."""
+        for (output_group, group), voxelwise in self._voxelwise_pairs(tensors).items():
+            output = tuple(tensors[output_group].shape[2:])
+            target = tuple(tensors[group].shape[2:])
+            rank = max(len(output), len(target))
+            if (1,) * (rank - len(output)) + output == (1,) * (rank - len(target)) + target:
+                continue
+            where = " (one patch of each)" if self._streamed else ""
+            name = batch_sample[output_group].name[0]
+            raise EvaluatorError(
+                f"Case '{name}': output '{output_group}' {list(output)} and target '{group}' {list(target)}"
+                f" are not on one voxel grid{where}, and {', '.join(voxelwise)} compare them voxel to voxel.",
+                f"Put both on one grid first: a Resample with a 'reference' in the chain of '{output_group}',"
+                " or the prediction written on the reference grid.",
+            )
+
+    def _geometry(self, batch_sample: BatchSample, group: str) -> dict[str, np.ndarray] | None:
+        """The Origin, Spacing and Direction ``group``'s case lands on, or None when it has none."""
+        item = batch_sample[group]
+        if not is_an_image(item.attribute[0]) or self._manager(group, item).dataset.file_format in _NO_GEOMETRY_FORMATS:
+            return None
+        return {key: item.attribute[0].get_np_array(key) for key in ("Origin", "Spacing", "Direction")}
+
+    def _warn_other_geometries(self, batch_sample: BatchSample, tensors: dict[str, torch.Tensor]) -> None:
+        """Warn, once for the case, about each output and target a metric compares voxel to voxel on one
+        shape but two geometries: each voxel is scored against one at another place. The origin is compared
+        within a thousandth of the smallest spacing, as a header stored in float32 (NIfTI) moves it by more
+        than ITK's 1e-6 times the spacing; the spacing keeps ITK's tolerance (1e-6 times the first spacing)
+        and so does the direction (1e-6)."""
+        differences = []
+        for (output_group, group), voxelwise in self._voxelwise_pairs(tensors).items():
+            output, target = self._geometry(batch_sample, output_group), self._geometry(batch_sample, group)
+            if output is None or target is None or any(output[k].shape != target[k].shape for k in output):
+                continue
+            tolerance = {
+                "Origin": 1e-3 * np.abs(output["Spacing"]).min(),
+                "Spacing": 1e-6 * abs(output["Spacing"][0]),
+                "Direction": 1e-6,
+            }
+            differing = [
+                f"{key} {output[key].tolist()} and {target[key].tolist()}"
+                for key in output
+                if np.any(np.abs(output[key] - target[key]) > tolerance[key])
+            ]
+            if differing:
+                differences.append(
+                    f"output '{output_group}' and target '{group}' ({', '.join(voxelwise)}) share a shape but not"
+                    f" a geometry: {', '.join(differing)}"
+                )
+        if differences:
+            warnings.warn(
+                f"Case '{next(iter(batch_sample.values())).name[0]}': {'; '.join(differences)}. Each voxel is scored"
+                " against one at another place. Put both on one grid first: a Resample with a 'reference' in the"
+                " output's chain, or the prediction written on the reference grid.",
+                KonfAIWarning,
+                stacklevel=2,
+            )
 
     @staticmethod
     def _on(tensor: torch.Tensor, metric_device: torch.device | int) -> torch.Tensor:
@@ -495,13 +597,17 @@ class Evaluator(DistributedObject):
         shard whole per rank and their patches arrive contiguously, so a change of case name completes
         the previous one; ``_flush_pending`` closes the split's last case."""
         name = batch_sample[next(iter(self.metrics))].name[0]
-        if name in self._scored_names:
+        if name in self._scored_names or name in statistics.set_aside:
             return self._last_result
         if self._pending_name is not None and name != self._pending_name:
             with self._clock.phase("flush"):
                 self._flush_pending(statistics)
+        first_patch = name != self._pending_name
         self._pending_name = name
         moved = self._groups_on(batch_sample)
+        self._refuse_other_grids(batch_sample, moved)
+        if first_patch:  # every patch carries the case's header
+            self._warn_other_geometries(batch_sample, moved)
         for output_group in self.metrics:
             output_tensor = moved[output_group]
             core = self._core_in_read(output_group, batch_sample[output_group])
@@ -579,6 +685,20 @@ class Evaluator(DistributedObject):
         region = manager.patch.get_patch_slices(int(item.a[0]))[int(item.p[0])]
         sink.write_slice((slice(0, array.shape[0]), *region), array)
 
+    def _set_aside(self, batch_sample: BatchSample, statistics: Statistics) -> bool:
+        """Set aside each case the loader could not read for this batch, a partial streamed case
+        dropped with its maps; whether the batch holds nothing left to score."""
+        item = next(iter(batch_sample.values()))
+        for _, name, why in item.unreadable:
+            if name in statistics.set_aside or name in self._scored_names:
+                continue
+            statistics.set_aside[name] = why
+            warnings.warn(f"Case '{name}' is set aside, the others go on: {why}", KonfAIWarning, stacklevel=2)
+            if name == self._pending_name:
+                self._pending, self._pending_name = {}, None
+                self._abort_map_sinks(EvaluatorError(f"case '{name}' set aside"))
+        return not item.name
+
     def _abort_map_sinks(self, error: BaseException) -> None:
         """Close open map sinks WITH the error so the backends remove their partial entries."""
         for sink in self._map_sinks.values():
@@ -590,10 +710,11 @@ class Evaluator(DistributedObject):
         if self._pending_name is None:
             return
         result: dict[str, float] = {}
-        for (output_group, target_group, _index), (metric, states) in self._pending.items():
+        for (output_group, target_group, index), (metric, states) in self._pending.items():
             true_loss = CriterionResult.of(metric.combine_metric(states), metric.get_name()).materialized()
             direction = "max" if getattr(metric, "maximize", False) else "min"
-            base_key = f"{output_group}:{target_group}:{metric.get_name()}"
+            criteria = self.metrics[output_group][target_group]
+            base_key = criterion_keys(output_group, target_group, (m.get_name() for m in criteria))[index]
             Evaluator._record_value(result, statistics, base_key, true_loss, direction)
         for sink in self._map_sinks.values():
             sink.close()
@@ -642,8 +763,19 @@ class Evaluator(DistributedObject):
         self._iter_dataset.load(label)
         self._clock = SweepClock()
         # Cases an interrupted run scored are read back and skipped; each case scored from here on is
-        # appended to this rank's own case file. The aggregate is built from the union.
-        scored = Statistics.load_incremental(self._incremental_case_files(statistics))
+        # appended to this rank's own case file. The aggregate is built from the union. A row scored with
+        # other metrics than the config names now is scored again.
+        keys = {
+            f"{output_group}:{target_group}:{metric.get_name()}"
+            for output_group, targets in self.metrics.items()
+            for target_group, metrics in targets.items()
+            for metric in metrics
+        }
+        scored = {
+            name: values
+            for name, values in Statistics.load_incremental(self._incremental_case_files(statistics)).items()
+            if keys <= values.keys() and all(any(key == k or key.startswith(f"{k}:") for k in keys) for key in values)
+        }
         self._scored_names = set(scored)
         if scored:
             statistics.measures.update(scored)
@@ -653,6 +785,8 @@ class Evaluator(DistributedObject):
                     " skipped (--overwrite recomputes)."
                 )
         statistics.open_incremental(self.metric_path / f"{statistics.filename.stem}.cases.rank{global_rank}.jsonl")
+        if global_rank == 0:
+            statistics.set_aside.update(self.dataset.unreadable[1 if label == "VALIDATION" else 0])
         try:
             with (
                 self._clock.phase("split"),
@@ -665,6 +799,8 @@ class Evaluator(DistributedObject):
                 ) as batch_iter,
             ):
                 for _, batch_sample in self._clock.waiting("wait(load)", batch_iter):
+                    if self._set_aside(batch_sample, statistics):
+                        continue
                     batch_iter.set_description(description(self.update(batch_sample, statistics)))
                 with self._clock.phase("flush"):
                     self._flush_pending(statistics)  # close the split's last case
@@ -676,9 +812,27 @@ class Evaluator(DistributedObject):
             report = self._clock_report(label)
             if report is not None:
                 print(report)
-        outputs = synchronize_data(world_size, gpu, statistics.measures)
+        if statistics.set_aside:
+            who = f"rank {global_rank}: " if world_size > 1 else ""
+            warnings.warn(
+                f"{who}{len(statistics.set_aside)} {label} case(s) could not be read and are left out of the"
+                f" metrics: {', '.join(sorted(statistics.set_aside))} (listed under 'set_aside' in"
+                f" {statistics.filename.name}).",
+                KonfAIWarning,
+                stacklevel=2,
+            )
+        outputs = synchronize_data(world_size, gpu, (statistics.measures, statistics.set_aside))
+        set_aside = {name: why for _, rank_set_aside in outputs for name, why in rank_set_aside.items()}
+        if set_aside and self.metrics and not any(measures for measures, _ in outputs):
+            # Every rank holds what all gathered, so every rank refuses alike.
+            raise EvaluatorError(
+                f"None of the {len(set_aside)} {label} case(s) could be read, so nothing was scored."
+                f" First: {set_aside[min(set_aside)]}",
+                "Check the dataset paths and the files' permissions; the warnings above name each case.",
+            )
         if global_rank == 0:
-            statistics.write(outputs)
+            statistics.set_aside.update(set_aside)
+            statistics.write([measures for measures, _ in outputs])
 
     def _clock_report(self, label: str, min_seconds: float = 1.0) -> str | None:
         """One line accounting for a split's wall clock, or ``None`` below ``min_seconds``: the wait for

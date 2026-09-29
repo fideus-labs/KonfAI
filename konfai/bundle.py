@@ -179,18 +179,20 @@ def export_bundle(
     output in execution order unless ``output_module`` names one. The bundle carries
     ``models/model.ts``, a ``metadata.json`` and a ``configs/inference.json`` that loads the traced
     module. Preprocessing is not exported; the traced module expects what the KonfAI chain fed the
-    network, which the bundle's metadata states.
+    network, which the bundle's metadata states. When a ModelPatch of the graph cuts ``example_input``
+    into several patches, an export whose head would see only the last one is refused.
     """
     import monai
     import numpy
 
-    from konfai.export import _NamedHead, select_inference_head
+    from konfai.export import _NamedHead, _refuse_one_patch_of_several, list_output_modules, select_inference_head
 
+    model = model.eval()
+    head = output_module or select_inference_head(model, example_input)
+    _refuse_one_patch_of_several(model, list_output_modules(model, example_input), head)
     root = Path(out)
     (root / "models").mkdir(parents=True, exist_ok=True)
     (root / "configs").mkdir(parents=True, exist_ok=True)
-    model = model.eval()
-    head = output_module or select_inference_head(model, example_input)
     wrapped = _NamedHead(model, head).eval()
     with torch.no_grad():
         traced = torch.jit.trace(wrapped, example_input)

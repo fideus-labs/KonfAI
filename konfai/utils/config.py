@@ -22,13 +22,14 @@ import functools
 import inspect
 import logging
 import os
+import stat
 import sys
 import time
 import types
 import typing
 import warnings
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
@@ -95,11 +96,19 @@ def _load_tree(filename: Path | str) -> dict:
 
 def _write_tree(target: Path, tree: dict) -> None:
     """Write TREE to TARGET atomically (a sibling temp file, then ``os.replace``); a concurrent reader
-    never observes it truncated."""
+    never observes it truncated. A file the writer owns keeps its group and mode."""
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    before = target.stat() if target.exists() else None
     try:
-        with open(tmp, "w", encoding="utf-8") as yml:
-            yaml.dump(tree, yml)
+        try:
+            with open(tmp, "w", encoding="utf-8") as yml:
+                yaml.dump(tree, yml)
+        except OSError as error:
+            raise ConfigError(
+                f"Could not write the resolved config beside '{target}': {error}.",
+                "The config is written back through a temporary file in its own directory, which must accept"
+                " a new file; the config was left unchanged.",
+            ) from error
         # Windows can deny the replace while the target is briefly held: retried, then refused.
         for attempt in range(5):
             try:
@@ -115,6 +124,15 @@ def _write_tree(target: Path, tree: dict) -> None:
     finally:
         if tmp.exists():
             tmp.unlink()
+    if before is not None:
+        # The new file has the writer's group and the umask's mode. The config's mode grants what it granted only
+        # on the config's owner and group: it is restored with them, and the new file's stays when either cannot be.
+        with suppress(OSError):
+            after = target.stat()
+            if after.st_uid == before.st_uid:
+                if after.st_gid != before.st_gid:
+                    os.chown(target, -1, before.st_gid)
+                os.chmod(target, stat.S_IMODE(before.st_mode))
 
 
 def _merge_into(target: MutableMapping, source: Mapping) -> None:
@@ -160,6 +178,7 @@ def _occurrence_mapping(entries: list, where: str) -> dict:
     order is the list's."""
     mapping: dict = {}
     seen: dict[str, int] = {}
+    entry_of: dict[str, int] = {}
     for index, entry in enumerate(entries):
         kwargs: object
         if isinstance(entry, str):
@@ -173,15 +192,22 @@ def _occurrence_mapping(entries: list, where: str) -> dict:
                 "Write one stage per item ('- Clip: {min_value: 0}'), or the mapping form.",
             )
         seen[name] = seen.get(name, 0) + 1
-        mapping[name if seen[name] == 1 else f"{name}#{seen[name]}"] = kwargs if kwargs is not None else {}
+        key = name if seen[name] == 1 else f"{name}#{seen[name]}"
+        if key in entry_of:
+            raise ConfigError(
+                f"Entries {entry_of[key]} and {index} of '{where}' both bind under '{key}': one would replace the other.",
+                "In a list, name each stage without a '#n' suffix: the list order numbers a repeated class.",
+            )
+        entry_of[key] = index
+        mapping[key] = kwargs if kwargs is not None else {}
     return mapping
 
 
 def _normalize_chain_lists(tree: object, keys: Sequence[str]) -> None:
-    """Along ``keys``, a list where a block is walked (a chain spelled as a YAML list) becomes its
-    occurrence mapping, in place."""
+    """Along ``keys``, a list the walk passes through (a chain spelled as a YAML list) becomes its
+    occurrence mapping, in place. The last key's value is left as written: it is one object's block."""
     node = tree
-    for index, key in enumerate(keys):
+    for index, key in enumerate(keys[:-1]):
         if not isinstance(node, collections.abc.MutableMapping) or key not in node:
             return
         child = node[key]
@@ -258,6 +284,12 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
                 f"'{filename}' declares no '{root}' root (found: {sorted(str(key) for key in tree)}).",
                 f"This workflow reads the '{root}:' block; anything else is ignored and a full default"
                 " block appended to the file in its place.",
+            )
+        elif tree[root] in (None, "None"):
+            # An empty root binds the workflow itself to None: refused whatever `refuse` says.
+            raise ConfigError(
+                f"'{filename}' declares an empty '{root}' root: there is no workflow to build.",
+                f"Write its settings under '{root}:', or '{root}: {{}}' to bind every default.",
             )
     ledger = _KeyLedger()
     shared = _SharedTree(Path(filename), tree) if filename and outer is None else None
@@ -405,6 +437,19 @@ class Config:
         return value
 
 
+def _binds_from_file() -> bool:
+    """Whether a workflow reads its values from the config file; otherwise a callable takes its Python defaults."""
+    return "KONFAI_config_file" in os.environ and os.environ.get("KONFAI_CONFIG_MODE", "Import") != "Import"
+
+
+def write_back(key: str, name: str, value: object) -> None:
+    """Record ``name: value`` under ``key`` in the config file: a value settled after its key was bound, written
+    back as the binder writes a default it used. Nothing is written when no workflow reads the file."""
+    if _binds_from_file():
+        with Config(key) as config:
+            config.config[name] = _recordable(value)
+
+
 def config(key: str | None = None):
     """
     Attach a KonfAI configuration key to a class or callable.
@@ -426,6 +471,8 @@ def config(key: str | None = None):
 
     return decorator
 
+
+_WORKFLOW_ROOTS = frozenset({"Trainer", "Predictor", "Evaluator", "Transformer"})
 
 _CONFIG_PRIMITIVE_TYPES = {
     int,
@@ -509,6 +556,13 @@ def _unwrap_optional(annotation) -> tuple[Any, bool]:
     if len(args) == 1:
         return args[0], True
     return annotation, False
+
+
+def _admits_none(annotation: object) -> bool:
+    """Whether an annotation takes None: ``Any``, or a union with a None member."""
+    return annotation is Any or (
+        get_origin(annotation) in {Union, types.UnionType} and type(None) in get_args(annotation)
+    )
 
 
 def _value_matches_annotation(value: object, annotation: object) -> bool:
@@ -754,12 +808,19 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
 
 
 def _bind_config_object(config: Config, param: inspect.Parameter, annotation, is_optional: bool, section_key: str):
+    annotation_key = getattr(annotation, "_key", None)
     # ``X | None = None`` declares an object the config must ask for: unbound unless the file names it.
     # A non-None default (``X | None = X()``) still binds.
     if is_optional and param.default is None:
-        annotation_key = getattr(annotation, "_key", None)
         if annotation_key is None or config.get_value(annotation_key, None) is None:
             return None
+    # A workflow cannot run without its own objects (Dataset, Model): an empty block there is refused.
+    # Deeper down, an empty block still binds None (a frozen network's optimizer, no model patch).
+    if not is_optional and section_key in _WORKFLOW_ROOTS and config.config.get(annotation_key, {}) in (None, "None"):
+        raise ConfigError(
+            f"'{section_key}.{annotation_key}' is empty: the workflow cannot run without it.",
+            f"Write its settings under '{annotation_key}:', or '{annotation_key}: {{}}' to bind every default.",
+        )
     try:
         return apply_config(section_key)(annotation)()
     except Exception as exc:
@@ -779,12 +840,36 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
     if annotation == inspect._empty:
         return _SKIP if param.name == "self" else config.get_value(param.name, param.default)
 
-    if get_origin(annotation) in {Union, types.UnionType}:
+    origin = get_origin(annotation)
+    tensor = _tensor_type()
+    is_tensor = tensor is not None and annotation is tensor
+    if not (
+        origin in {Union, types.UnionType, list, tuple, Sequence, dict}
+        or annotation in _CONFIG_PRIMITIVE_TYPES
+        or annotation is Any
+        or annotation is Path
+        or is_tensor
+    ):
+        return _bind_config_object(config, param, annotation, is_optional, section_key)
+
+    # A value the file lacks binds None: refused where the parameter has no default and takes no None.
+    if (
+        param.default is inspect.Parameter.empty
+        and not is_optional
+        and not _admits_none(annotation)
+        and param.name not in config.config
+    ):
+        raise ConfigError(
+            f"missing required key '{section_key}.{param.name}': the parameter has no default and does not take None.",
+            f"Write '{param.name}: <value>' under '{section_key.rsplit('.', 1)[-1]}:',"
+            f" or '{param.name}: None' to bind None on purpose.",
+        )
+
+    if origin in {Union, types.UnionType}:
         value = config.get_value(param.name, param.default)
         return None if value is None else _convert_union_sequence_value(value, get_args(annotation), param.name)
 
-    tensor = _tensor_type()
-    if tensor is not None and annotation is tensor:
+    if is_tensor:
         # A bare (or Optional) Tensor parameter is a value: the YAML scalar/list binds through torch.tensor.
         value = config.get_value(param.name, param.default)
         return None if value is None else _convert_union_sequence_value(value, (tensor,), param.name)
@@ -795,13 +880,9 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
     if annotation is Path:
         return _bind_path(config, param)
 
-    origin = get_origin(annotation)
-    if origin in {list, tuple, Sequence, collections.abc.Sequence}:
+    if origin in {list, tuple, Sequence}:
         return _bind_sequence(config, param, annotation, section_key)
-    if origin is dict:
-        return _bind_dict(config, param, annotation, section_key)
-
-    return _bind_config_object(config, param, annotation, is_optional, section_key)
+    return _bind_dict(config, param, annotation, section_key)
 
 
 def apply_config(konfai_args: str | None = None):
@@ -823,12 +904,7 @@ def apply_config(konfai_args: str | None = None):
         def new_function(*args, **kwargs):
             key = getattr(function, "_key", None)
             key_tmp = konfai_args + ("." + key if key is not None else "") if konfai_args is not None else key
-            if (
-                "KONFAI_config_file" in os.environ
-                and "KONFAI_CONFIG_MODE" in os.environ
-                and os.environ["KONFAI_CONFIG_MODE"] != "Import"
-                and key_tmp is not None
-            ):
+            if _binds_from_file() and key_tmp is not None:
                 previous_path = os.environ.get("KONFAI_CONFIG_PATH")
                 os.environ["KONFAI_CONFIG_PATH"] = key_tmp
                 without = kwargs["konfai_without"] if "konfai_without" in kwargs else []
@@ -837,11 +913,19 @@ def apply_config(konfai_args: str | None = None):
                         if not isinstance(config.config, collections.abc.Mapping):
                             if config.config in (None, "None"):
                                 return None
+                            name = key_tmp.rsplit(".", 1)[-1]
+                            if isinstance(config.config, list):
+                                # The list form spells a chain; the key of one object takes a mapping.
+                                raise ConfigError(
+                                    f"'{key_tmp}' holds a list where a block is expected: only a chain is"
+                                    " written as a list.",
+                                    f"Write its settings as a mapping under '{name}:' ('{name}: {{}}' binds"
+                                    " every default).",
+                                )
                             # `optimizer: AdamW` where a block is expected is refused, never bound to None.
                             raise ConfigError(
                                 f"'{key_tmp}' holds the value '{config.config}' where a block is expected.",
-                                f"Nest its settings under '{key_tmp.rsplit('.', 1)[-1]}:' as a mapping"
-                                " (or write 'None' to disable it).",
+                                f"Nest its settings under '{name}:' as a mapping (or write 'None' to disable it).",
                             )
                         for ledger in _ledgers:  # a parameter the caller supplies itself is a read one
                             ledger.read(tuple(config.keys), *without)

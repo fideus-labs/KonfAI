@@ -157,7 +157,7 @@ class Norm(Transform):
 class InferenceStack(Transform):
     working_multiple = 0.0
 
-    def __init__(self, dataset: str, name: str, mode: str = "mean"):
+    def __init__(self, dataset: str | None = None, name: str | None = None, mode: str = "mean"):
         super().__init__()
         if mode not in ("mean", "median", "Seg"):
             raise TransformError(

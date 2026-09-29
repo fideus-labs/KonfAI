@@ -29,6 +29,10 @@ from typing import Any
 import numpy as np
 
 try:
+    from zarrista.exceptions import ZarristaError
+except ImportError:  # no omezarr extra: nothing raises it
+    ZarristaError = OSError  # type: ignore[assignment,misc]
+try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
@@ -157,6 +161,8 @@ class OmeZarrFile(AbstractFile):
     reads_remote = True  # a store is addressed by key, so fsspec serves a URI root
     writes_pyramid = True  # the one format with levels
     lists_case_entries = True  # a case is a directory of stores this backend enumerates
+    # zarr's errors are ValueError or OSError, a chunk the codec cannot decode is zarrista's.
+    read_errors = (OSError, ValueError, KeyError, RuntimeError, ZarristaError)
 
     @classmethod
     def can_stream(cls, file_format: str, attributes: Attribute) -> bool:

@@ -219,6 +219,7 @@ class H5File(AbstractFile):
     single_store = True  # one .h5 file holds every case
     concurrent_write_safe = False  # entries share the file's handles and metadata
     case_file_suffix = ".h5"  # what a case file carries when a directory keeps one per case
+    read_errors = (OSError, KeyError)  # h5py
 
     @classmethod
     def can_stream(cls, file_format: str, attributes: Attribute) -> bool:

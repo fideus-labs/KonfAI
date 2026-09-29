@@ -66,6 +66,10 @@ class AbstractFile(ABC):
     #: the case), rather than plain files the dataset walks.
     lists_case_entries: bool = False
 
+    #: What the backend's library raises on an entry it cannot open or decode (a truncated or
+    #: corrupt file): the one-pass workflows set such a case aside, where anything else stops them.
+    read_errors: tuple[type[Exception], ...] = (OSError,)
+
     @abstractmethod
     def __init__(self, filename: str, read: bool) -> None:
         pass

@@ -124,6 +124,23 @@ This structure lets you express:
 - multiple losses or metrics per target
 - independent scheduler weights per criterion
 
+A target can also be another output of the model, named by its module path with `:` as an output
+key is. `Representation` trains this way: the anchor embedding is the output, and the positive and
+negative embeddings are the targets, in the order the criterion takes them:
+
+```yaml
+outputs_criterions:
+  Model:Anchor:
+    targets_criterions:
+      Model:Positive;Model:Negative:
+        criterions_loader:
+          torch:nn:TripletMarginLoss:
+            margin: 1.0
+```
+
+A target output reaches the criterion detached, as a dataset group does: the gradient flows through
+the output the criterion is attached to.
+
 ### Dataset patching vs model patching
 
 KonfAI supports patching at two different levels:
@@ -235,7 +252,7 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 
 | Model | Classpath | Purpose | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- |
-| `Representation` | `representation.representation.Representation` | Self-supervised / triplet-style representation learner: a frozen conv encoder + trainable linear projection head. | 3D | No |
+| `Representation` | `representation.representation.Representation` | Triplet representation learner: a frozen conv encoder + trainable linear projection head, shared by three inputs whose embeddings are the outputs `Model:Anchor`, `Model:Positive` and `Model:Negative` (see [Targets and metrics](#targets-and-metrics)). | 3D | No |
 
 ### Features: `konfai.models.python.features`
 
@@ -480,7 +497,9 @@ reusable pieces are the vocabulary:
   a `";"`-separated spec (`"LeakyReLU;0.2;True"`), a callable, or `None`.
 - **Enums:** `NormMode` (`NONE/BATCH/INSTANCE/GROUP/LAYER/SYNCBATCH/INSTANCE_AFFINE`),
   `UpsampleMode` (`CONV_TRANSPOSE/UPSAMPLE`), `DownsampleMode`
-  (`MAXPOOL/AVGPOOL/CONV_STRIDE`).
+  (`MAXPOOL/AVGPOOL/CONV_STRIDE`). `SYNCBATCH` builds a `torch.nn.SyncBatchNorm`,
+  which synchronises its statistics across GPUs and refuses CPU tensors in
+  training: for a multi-process CPU run (`--cpu N` with N > 1) use `BATCH`.
 - **Tensor ops** (leaf modules): `Add`, `Multiply`, `Concat`, `Detach`,
   `ArgMax`, `Select`, `View`, `Permute`, `NormalNoise`, and more.
 
@@ -491,6 +510,17 @@ framework, from config alone. `Model.pretrained_from` builds the reference
 network, loads the checkpoint into it, and transfers the weights into the
 KonfAI graph by forward-execution order (no key map): the bridge fills **every**
 target tensor or raises, so a partial transfer is never reported as success.
+It then runs the reference and the seeded model on the same input and raises a
+`ConfigError` unless each tensor the reference returns (every head of an nnU-Net
+deep-supervision list) is reproduced by a named output of the model, to 1e-3 of
+its largest magnitude. Layers paired in the wrong order are caught there when that
+changes a tensor the reference returns (two same-shaped heads that trade places
+each still find a match); heads the KonfAI graph adds of its own (Softmax, ArgMax)
+do not matter. A ModelPatch that tiles the input, on the model or on a network
+nested in it, is lifted for the check, which runs the input whole, as the reference
+did. A ModelPatch with an axis of 1 (a 2D or 2.5D graph in a 3D workflow) squeezes
+that axis, so the graph cannot run the input whole: such a model is seeded without
+this check.
 
 ```yaml
 Trainer:

@@ -16,6 +16,10 @@
 
 """Tests for the built-in model definitions in ``konfai.models``."""
 
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 import torch
 from konfai.models.python.classification.convNeXt import ConvNeXt, LayerScaler
@@ -30,7 +34,10 @@ from konfai.models.python.segmentation.NestedUNet import NestedUNet
 from konfai.models.python.segmentation.residualencoderunet import ResidualEncoderUNet
 from konfai.models.python.segmentation.UNet import UNet
 from konfai.models.python.segmentation.unetplusplus import UNetPlusPlus
+from konfai.network.network import Measure, ModelLoader
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
+from konfai.utils.runtime import State
 
 # --------------------------------------------------------------------------------------
 # UNet
@@ -107,6 +114,49 @@ def test_adaptation_sets_requires_grad_at_construction():
     # State is correct immediately after construction, before any forward pass.
     assert all(not p.requires_grad for p in adaptation.Encoder_1.parameters())
     assert all(p.requires_grad for p in adaptation.FCT_1.parameters())
+
+
+_TRIPLET_CONFIG = """\
+Trainer:
+  Model:
+    Representation:
+      outputs_criterions:
+        Model:Anchor:
+          targets_criterions:
+            Model:Positive;Model:Negative:
+              criterions_loader:
+                torch:nn:TripletMarginLoss: {}
+"""
+
+
+def test_representation_trains_one_step_under_torch_triplet_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The embeddings are three named outputs: torch's TripletMarginLoss attaches to the anchor, takes
+    the positive and the negative as its targets, and one step moves the projection head only."""
+    config = tmp_path / "Config.yml"
+    config.write_text(_TRIPLET_CONFIG, encoding="utf-8")
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    torch.manual_seed(0)
+    model = ModelLoader("representation.representation.Representation").get_model(train=True)
+    model.bind(False, State.TRAIN, ["A", "P", "N"])
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+
+    batch = {
+        group: SimpleNamespace(tensor=torch.randn(2, 1, 8, 8, 8), is_input=True, attribute=[Attribute()])
+        for group in ("A", "P", "N")
+    }
+    model.forward(batch)
+    (loss,) = cast(Measure, model.measure).get_loss()
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    gradients = torch.autograd.grad(loss.sum(), trainable, retain_graph=True, allow_unused=True)
+    assert torch.isfinite(loss).all() and all(g is not None and g.abs().sum() > 0 for g in gradients)
+    model.backward(model)
+
+    moved = {name for name, parameter in model.named_parameters() if not torch.equal(parameter, before[name])}
+    assert moved and all(".FCT_1." in name for name in moved), moved  # the encoder stays frozen
 
 
 # --------------------------------------------------------------------------------------

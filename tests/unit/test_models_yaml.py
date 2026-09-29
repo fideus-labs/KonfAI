@@ -428,6 +428,26 @@ def test_example_unet_yaml_matches_python_unet_param_count():
     assert n_yaml == n_python, f"yaml={n_yaml} python={n_python}"
 
 
+def test_example_unet_checkpoint_loads_into_its_python_form():
+    """examples/Segmentation says Config.yml and Prediction.yml take either 'UNet.yml' or 'Model:UNet':
+    the two forms must hold the same state names, so a checkpoint trained with one predicts with the
+    other, and compute the same outputs from it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("segmentation_example_model", UNET_YML.parent / "Model.py")
+    assert spec is not None and spec.loader is not None
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+    yaml_net = _build_yaml_unet()
+    python_net = example.UNet()
+
+    assert list(python_net.state_dict()) == list(yaml_net.state_dict())
+    python_net.load_state_dict(yaml_net.state_dict())
+    x = torch.randn(1, 1, 32, 32)
+    for name in ("UNetBlock_0.Head.Softmax", "UNetBlock_0.UNetBlock_1.Head.Softmax"):
+        assert torch.equal(capture_output(python_net, x, name), capture_output(yaml_net, x, name))
+
+
 # =========================================================================================== #
 # Built-ins: the declarative NestedUNet.yml and ResNet.yml must equal the Python models.
 #

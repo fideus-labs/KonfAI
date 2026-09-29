@@ -351,6 +351,17 @@ class ModelComposite(Network):
                     channels[key].append(tensor.shape[1])
                     if key not in sum_acc:
                         sum_acc[key] = tensor
+                    elif not (sum_acc[key].is_floating_point() or sum_acc[key].is_complex()):
+                        raise PredictorError(
+                            f"combine: Mean cannot average '{key.replace('.', ':')}' over {n_replicas} checkpoints:"
+                            f" it is a {sum_acc[key].dtype} label map (an Argmax head), and a mean of class indices"
+                            " is another class.",
+                            "Several --models run an ensemble; resume_latest.pt is a training continuation,"
+                            " not a model to predict with.",
+                            "To ensemble a segmentation, write the Softmax output and apply Argmax in"
+                            " final_transforms (the members' probabilities are averaged, then the labels drawn),"
+                            " or fold the label maps with combine: Vote.",
+                        )
                     else:
                         sum_acc[key].add_(tensor)
                     count[key] += 1

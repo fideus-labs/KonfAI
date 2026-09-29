@@ -47,8 +47,14 @@ konfai RESUME -y --config Config.yml \
 A run preserves its preparation seed: the seed every preparation draw comes from
 (the train/validation split first) is recorded in
 `Statistics/<train_name>/Seed.txt`, and RESUME of an unseeded run reads it
-back, so resuming never re-splits the cohort. Set `manual_seed` only to pick
-the seed yourself. A save on an exceptional exit is named `crash_<date>.pt` and
+back, so resuming on the same cases draws the same split. Set `manual_seed`
+only to pick the seed yourself. The split is drawn on the cases found at each
+launch: a case added, removed or renamed since moves others between training
+and validation. RESUME of a training that continues compares its split with the
+latest `Train_<it>.txt` and `Validation_<it>.txt` of the run and warns, naming
+the cases that changed side, appeared or went; the run goes on with the new
+split. To change a cohort on purpose, give `validation` by case names: a named
+case keeps its side. A save on an exceptional exit is named `crash_<date>.pt` and
 sits outside the `save_checkpoint_mode` pruning: never a contender for best,
 and yours to delete.
 
@@ -64,6 +70,14 @@ storage with the dated file when they are the same epoch):
 konfai RESUME -y --config Config.yml \
   --model Checkpoints/SEG_BASELINE/resume_latest.pt
 ```
+
+An early stop the `patience` made is decided again under the configured
+`patience`, so a RESUME with a larger one trains on. A stop because the learning
+rate reached zero or no loss stayed finite stands.
+
+`epochs` counts from the start of the run, not from the RESUME. A RESUME from a
+checkpoint that already completed `epochs` epochs trains nothing and ends
+normally; raise `epochs` to continue.
 
 A checkpoint saved mid-epoch, or at an epoch end that left an accumulation
 window open (`nb_batch_per_step` not dividing the batch count), holds weights
@@ -88,7 +102,7 @@ konfai TRAIN -y --config Config.yml \
 | `Model` | mapping | `ModelLoader()` | Yes | Selects and configures the model graph. |
 | `Dataset` | mapping | `DataTrain()` | Yes | Defines training data loading, transforms, augmentation, and patching. |
 | `train_name` | string | `TRAIN_01` | No | Names the run and its output folders. |
-| `manual_seed` | int or null | `None` | No | Seeds training generators and preparation. With `None`, TRAIN still records its preparation seed in `Statistics/<train_name>/Seed.txt` for RESUME's cohort split; this does not promise deterministic GPU training. |
+| `manual_seed` | int or null | `None` | No | Seeds the model's construction, training generators and preparation. The batch order it draws is the same whether the workers persist or not, and whatever `num_workers` unless a `shuffle_window` deals the cases to the workers. With `None`, TRAIN still records its preparation seed in `Statistics/<train_name>/Seed.txt` for RESUME's cohort split; this does not promise deterministic GPU training. |
 | `epochs` | int | `100` | No | Number of training epochs. |
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
 | `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |
@@ -168,9 +182,13 @@ Several criteria can share one output, and several outputs can each carry their 
 Structure:
 
 - output key → model output or module path
-- `targets_criterions` → one or more target groups
+- `targets_criterions` → one or more target groups, or other model outputs by their `:` path
 - `criterions_loader` → one or more criteria for that target
-- each criterion can define `is_loss`, `group`, `start`, `stop`, `accumulation`, and scheduler weights
+- each criterion can define `is_loss`, `group`, `start`, `stop`, `accumulation`, and scheduler weights;
+  `is_loss` left out takes the criterion's own role (a loss, except `PSNR` and `SSIM`, which are metrics)
+
+TRAIN and RESUME refuse a model on which no criterion has `is_loss: true`, on the
+root network or a nested one: without a loss no weight would change.
 
 ## `Trainer.Dataset`
 
@@ -192,7 +210,7 @@ Common fields:
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
 | `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |
-| `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
+| `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. A float holds out the last cases of the run order at the case boundary closest to that share of the entries (a tie goes to validation, which keeps at least one case). |
 | `validation_augmentations` | bool | `false` | Whether validation also iterates over augmented variants. Set `true` to validate on every augmented copy as well as the base samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
 | `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Safe under DDP. |
@@ -289,6 +307,13 @@ worker. The buffer is sized to hold the window, so a non-streamable run holds
 `shuffle_window` works under DDP: the sampler's length is the mapping's length, so
 the window reorders without changing the count, and each training shard is padded to
 the longest one. Ranks stay in step.
+
+The validation shards are not padded that way: each patch is scored once, on one
+rank, and a rank a batch short runs one more batch that it does not score. For a
+criterion that averages its patches (`batch_mean`, see
+{doc}`../reference/components/losses-metrics`), the value logged, the checkpoint
+score and early stopping read the mean over every patch of every rank, as one rank
+computes it.
 
 ### Free patch axes: sizing by measurement
 

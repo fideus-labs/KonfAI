@@ -102,6 +102,9 @@ def _warn_unstreamed_region_read(path: str) -> None:
 
 
 class SitkFile(AbstractFile):
+    # SimpleITK raises RuntimeError; the npy, fcsv and xml sidecars ValueError, EOFError or ParseError.
+    read_errors = (OSError, RuntimeError, ValueError, EOFError, SyntaxError)
+
     def __init__(self, filename: str, read: bool, file_format: str) -> None:
         self.filename = filename
         self.read = read
@@ -129,7 +132,7 @@ class SitkFile(AbstractFile):
     @staticmethod
     def _normalize_slices(slices: tuple[slice, ...], shape: list[int]) -> tuple[slice, ...]:
         if len(slices) != len(shape):
-            raise ValueError(f"Expected {len(shape)} slices, got {len(slices)}.")
+            raise DatasetManagerError(f"Expected {len(shape)} slices, got {len(slices)}.")
 
         normalized = []
         for item, size in zip(slices, shape, strict=False):

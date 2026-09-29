@@ -34,7 +34,9 @@ import pytest
 import torch
 from konfai.data.augmentation import Flip
 from konfai.data.patching import Accumulator, blend_axes
-from konfai.network.network import Network
+from konfai.data.reduction import Reduction
+from konfai.network.blocks import ArgMax
+from konfai.network.network import ModuleArgsDict, Network
 from konfai.predictor import PREDICTION_CLOCK, OutputDataset
 from konfai.predictor.loop import _Predictor
 from konfai.predictor.output import _AsyncWriter
@@ -269,3 +271,217 @@ def test_a_case_s_tta_draw_does_not_depend_on_the_cases_predicted_before_it(
     cohort = _tta_draws(tmp_path, monkeypatch, None)
     assert alone["CASE_001"] == cohort["CASE_001"]
     assert cohort["CASE_000"] != cohort["CASE_001"], "two cases are handed two draws"
+
+
+_ASSETS = Path(__file__).resolve().parents[1] / "assets" / "Workflows"
+_CASES = ("CASE_000", "CASE_001")
+
+
+def _tiny_synthesis(root: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Two MR cases and the TinySynth prediction config that maps them to ``sCT``."""
+    import numpy as np
+    from konfai.utils.dataset import Attribute
+
+    monkeypatch.syspath_prepend(str(_ASSETS))  # where 'TinySynth:TinySynthNet' resolves
+    attributes = Attribute()
+    attributes["Origin"] = np.zeros(3)
+    attributes["Spacing"] = np.ones(3)
+    attributes["Direction"] = np.eye(3).reshape(-1)
+    volume = np.linspace(-1.0, 1.0, 2 * 16 * 16, dtype=np.float32).reshape(1, 2, 16, 16)
+    for name in _CASES:
+        Dataset(root / "Dataset", "mha").write("MR", name, volume, attributes)
+    return {
+        "Predictor": {
+            "Model": {"classpath": "TinySynth:TinySynthNet", "TinySynthNet": {"outputs_criterions": "None"}},
+            "Dataset": {
+                "groups_src": {"MR": {"groups_dest": {"MR": {"is_input": True}}}},
+                "Patch": {"patch_size": [1, 16, 16], "overlap": "None"},
+                "dataset_filenames": [f"{root / 'Dataset'}:a:mha"],
+                "batch_size": 4,
+                "num_workers": 0,
+            },
+            "outputs_dataset": {
+                "Head:Tanh": {
+                    "OutputDataset": {"dataset_filename": "Dataset:mha", "group": "sCT", "same_as_group": "MR:MR"}
+                }
+            },
+            "train_name": "RERUN",
+            "check_training_transforms": False,
+        }
+    }
+
+
+def _tiny_checkpoint(path: Path, weight: float) -> Path:
+    torch.save(
+        {"Model": {"TinySynthNet": {"Projection.weight": torch.tensor([weight]), "Projection.bias": torch.zeros(1)}}},
+        path,
+    )
+    return path
+
+
+def _predicted(root: Path, name: str):
+    return Dataset(root / "Predictions" / "RERUN" / "Dataset", "mha").read_data("sCT", name)[0]
+
+
+def test_a_rerun_with_the_same_checkpoint_still_resumes(tmp_path: Path, monkeypatch) -> None:
+    """The per-case resume itself: a case whose outputs the same checkpoint wrote is skipped, a missing
+    one is computed, and so after an overwrite run that replaced another checkpoint's outputs."""
+    import numpy as np
+    from konfai import api
+
+    config = _tiny_synthesis(tmp_path, monkeypatch)
+    first, other = _tiny_checkpoint(tmp_path / "a.pt", 1.0), _tiny_checkpoint(tmp_path / "b.pt", 0.5)
+    output = Dataset(tmp_path / "Predictions" / "RERUN" / "Dataset", "mha")
+
+    def predict(model: Path, overwrite: bool = False) -> None:
+        api.predict(model, config, cpu=1, quiet=True, overwrite=overwrite, predictions_dir=tmp_path / "Predictions")
+
+    for model, overwrite in ((first, False), (other, True)):
+        predict(model, overwrite)
+        expected = _predicted(tmp_path, _CASES[1])
+        # A sentinel where a skipped case keeps its file, and a case whose output is gone.
+        sentinel, attributes = output.read_data("sCT", _CASES[0])
+        output.write("sCT", _CASES[0], np.full_like(sentinel, 7.0), attributes)
+        (tmp_path / "Predictions" / "RERUN" / "Dataset" / _CASES[1] / "sCT.mha").unlink()
+
+        predict(model)
+
+        np.testing.assert_array_equal(_predicted(tmp_path, _CASES[0]), np.full_like(sentinel, 7.0))
+        np.testing.assert_array_equal(_predicted(tmp_path, _CASES[1]), expected)
+
+
+class _ArgmaxHead(ModuleArgsDict):
+    def __init__(self) -> None:
+        super().__init__()
+        self.add_module("Argmax", ArgMax(dim=1))
+
+
+class ArgmaxSegNet(Network):
+    """Two classes and a label-map head, the way the Segmentation example's UNet ends."""
+
+    def __init__(self) -> None:
+        super().__init__(in_channels=1, dim=2)
+        self.add_module("Logits", torch.nn.Conv2d(1, 2, 1))
+        self.add_module("Head", _ArgmaxHead())
+
+
+def _label_map_prediction(
+    root: Path, monkeypatch: pytest.MonkeyPatch, members: int, net: type[Network] = ArgmaxSegNet
+) -> list[Path]:
+    """The TinySynth cohort predicted by ``net`` (its last module's output), one checkpoint per ensemble member."""
+    config = _tiny_synthesis(root, monkeypatch)["Predictor"]
+    config["Model"] = {"classpath": f"test_predictor:{net.__name__}"}
+    output = "Head:Argmax" if net is ArgmaxSegNet else "Complex"
+    config["outputs_dataset"] = {
+        output: {"OutputDataset": {"dataset_filename": "Dataset:mha", "group": "SEG", "same_as_group": "MR:MR"}}
+    }
+    config["combine"] = "Mean"
+    checkpoints = []
+    for index in range(members):
+        torch.manual_seed(index)
+        checkpoints.append(root / f"member_{index}.pt")
+        torch.save({"Model": net().network_states()}, checkpoints[-1])
+    from konfai import api
+
+    api.predict(checkpoints, {"Predictor": config}, cpu=1, quiet=True, predictions_dir=root / "Predictions")
+    return sorted((root / "Predictions" / "RERUN" / "Dataset").rglob("SEG.mha"))
+
+
+def test_a_mean_ensemble_of_label_maps_is_refused(tmp_path: Path, monkeypatch) -> None:
+    """``combine: Mean`` summed the members' Argmax labels in the first one's int64 tensor, then died
+    dividing it (``result type Float can't be cast to the desired output type Long``); a mean of class
+    indices would be a third class anyway."""
+    with pytest.raises(PredictorError, match="final_transforms"):
+        _label_map_prediction(tmp_path, monkeypatch, members=2)
+
+
+class Maximum(Reduction):
+    """A fold of one's own, the extension point ``custom-models.md`` documents."""
+
+    voxel_local = True
+
+    def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
+        return torch.stack(tensors).amax(dim=0)
+
+
+def _tta_prediction_config(dataset: Path) -> dict:
+    """TinySynth through a Gamma test-time augmentation of two copies, averaged, under ``manual_seed``."""
+    return {
+        "Predictor": {
+            "Model": {"classpath": "TinySynth:TinySynthNet", "TinySynthNet": {"outputs_criterions": "None"}},
+            "Dataset": {
+                "groups_src": {
+                    "MR": {"groups_dest": {"MR": {"transforms": "None", "patch_transforms": "None", "is_input": True}}}
+                },
+                "augmentations": {
+                    "DataAugmentation_0": {
+                        "nb": 2,
+                        "data_augmentations": {
+                            "Gamma": {"gamma_min": 0.5, "gamma_max": 2.0, "groups": ["MR"], "prob": 1}
+                        },
+                    }
+                },
+                "Patch": {"patch_size": [1, 8, 8], "overlap": "None", "pad_value": 0, "extend_slice": 0},
+                "subset": "None",
+                "dataset_filenames": [f"{dataset}:a:mha"],
+                "batch_size": 4,
+            },
+            "outputs_dataset": {
+                "Head:Tanh": {
+                    "OutputDataset": {
+                        "name_class": "OutputDataset",
+                        "before_reduction_transforms": "None",
+                        "after_reduction_transforms": "None",
+                        "final_transforms": "None",
+                        "dataset_filename": "Dataset:mha",
+                        "group": "OUT",
+                        "same_as_group": "MR:MR",
+                        "reduction": "Mean",
+                        "Mean": {},
+                    }
+                }
+            },
+            "train_name": "TTA",
+            "manual_seed": 0,
+            "gpu_checkpoints": "None",
+            "autocast": False,
+            "combine": "Mean",
+            "data_log": "None",
+        }
+    }
+
+
+def test_a_seeded_prediction_replays_its_test_time_augmentation(tmp_path: Path, monkeypatch) -> None:
+    """``manual_seed`` replays a random TTA bit for bit. The copies are drawn while the workflow is
+    built, before the run seeds anything, so the draw must come from the seed and not from the state
+    the process started in (a fresh interpreter seeds torch at random)."""
+    import numpy as np
+    from konfai import api
+    from konfai.utils.runtime.distributed import preserved_rng, seed_all
+
+    sitk = pytest.importorskip("SimpleITK")
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "assets" / "Workflows"))
+    dataset = tmp_path / "Dataset"
+    ramp = np.linspace(0.0, 1.0, 2 * 8 * 8, dtype=np.float32).reshape(2, 8, 8)
+    for case in ("P000", "P001"):
+        (dataset / case).mkdir(parents=True)
+        sitk.WriteImage(sitk.GetImageFromArray(ramp), str(dataset / case / "MR.mha"))
+    checkpoint = tmp_path / "m.pt"
+    torch.save(
+        {"Model": {"TinySynthNet": {"Projection.weight": torch.ones(1), "Projection.bias": torch.zeros(1)}}}, checkpoint
+    )
+
+    outputs = []
+    for start in (1, 2):
+        with preserved_rng():
+            seed_all(start)  # two processes, two generator states
+            workspace = api.predict(
+                models=[checkpoint],
+                config=_tta_prediction_config(dataset),
+                cpu=1,
+                quiet=True,
+                overwrite=True,
+                predictions_dir=tmp_path / f"Predictions_{start}",
+            )
+        outputs.append(sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Dataset" / "P000" / "OUT.mha"))))
+    assert np.array_equal(outputs[0], outputs[1])

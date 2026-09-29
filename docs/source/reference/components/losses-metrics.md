@@ -23,7 +23,15 @@ still driving the gradient with the tensor.
 ```
 
 So most pixelwise criteria are **dual-use**: the same class is a training loss or
-a logged metric depending on `is_loss`.
+a logged metric depending on `is_loss`. Leaving `is_loss` out takes the criterion's
+own role: a loss for most of them, a metric for `PSNR` and `SSIM`. The resolved
+value is written back to the config.
+
+- `PSNR` is a metric only: it rises as the output nears the target, so minimising it
+  would push the output away. `is_loss: true` on it is refused; train on `MSE`, which
+  it is a function of.
+- `SSIM` becomes a loss only with `is_loss: true`: it then minimises `1 - SSIM` with
+  its gradient, and still reports the SSIM.
 
 ## Attaching a criterion (training)
 
@@ -34,7 +42,7 @@ outputs_criterions:
       SEG:                        # target group ("CT;MASK" to add a mask)
         criterions_loader:
           CrossEntropyLoss:       # criterion name (bare → konfai.metric.measure)
-            is_loss: true         # true → back-propagated; false → metric only
+            is_loss: true         # true → back-propagated; false → metric only; left out → the criterion's role
             schedulers:
               Constant: { nb_step: 0, value: 1 }   # weight schedule
             group: 0              # loss/optimizer group (e.g. GAN G vs D)
@@ -61,9 +69,39 @@ metrics:
           SSIM: { dynamic_range: None }
 ```
 
+Each criterion is logged and reported as `output:target:Name`. Two criteria of one class on
+one output and target (the list spelling, `- Dice: {labels: [1]}` then `- Dice: {labels: [2]}`)
+keep one entry each, the second as `Dice#2`: their losses add up, and each has its own row.
+
+## How a logged value averages batches
+
+The boards, the checkpoint score, early stopping and `ReduceLROnPlateau` read a
+criterion over a run of batches: a validation pass, or the last `it_validation`
+training steps. A criterion that declares `batch_mean` reports the mean of one
+value per patch of the batch, so each batch weighs its patch count and the value
+is the mean over every patch, whatever the batch size, a partial last batch, or
+the number of ranks the validation is split over. Any other criterion weighs one
+per batch.
+
+- Declared: `MAE` and `MSE` with `reduction: mean`, `ME`, `SSIM`, `TRE`, `BCE`,
+  `KLDivergence`, `FocalLoss` with `reduction: mean`, `CrossEntropyLoss` with
+  `reduction: mean` and no `weight`, `Variance`, `Mean`, `PatchGanLoss`,
+  `IMPACTReg`, `IMPACTSynth` and `SAM_Perceptual`. A masked mean runs over the
+  patches the mask reaches: it is the mean over every patch when each patch holds
+  a mask voxel.
+- One per batch: `Dice` and `DiceSaveMap` (a ratio of the batch's pooled sums),
+  `PSNR` and `LPIPS` (pooled over the batch without a mask), `GradientImages`,
+  `Gram` and `PerceptualLoss`, `Accuracy`, a `sum` reduction, a class-weighted
+  `CrossEntropyLoss`, and a criterion from another library (`torch:nn:L1Loss`).
+
+Under several ranks the validation is split without duplicates: each patch is
+scored once, and a rank a batch short runs one more batch, which it does not
+score, so the ranks still run as many forwards.
+
 ## Pixelwise / regression
 
-All subclass `MaskedLoss` and return `(Tensor, float)` (dual-use). Extra target
+All subclass `MaskedLoss` and return `(Tensor, float)` (dual-use, except `PSNR`,
+a metric only). Extra target
 groups act as a mask: a voxel is inside wherever the mask is not 0 (0/1 and 0/255
 alike), and several masks keep the voxels inside all of them. The same rule holds for
 every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
@@ -73,14 +111,14 @@ every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
 | `MSE` | Masked mean-squared error. | `reduction="mean"` |
 | `MAE` | Masked mean-absolute error. | `reduction="mean"` |
 | `ME` | Signed mean error `(x−y).mean()` (bias). |: |
-| `PSNR` | Peak SNR over the mask. Default `dynamic_range` falls back to `4095` (HU range). | `dynamic_range=None` |
+| `PSNR` | Peak SNR over the mask. Default `dynamic_range` falls back to `4095` (HU range). Metric only: `is_loss: true` is refused. | `dynamic_range=None` |
 | `MAESaveMap` | MAE that also returns a voxelwise L1 error map (a 3-tuple, for a save-map consumer). | `reduction="mean", dataset=None, group=None` |
 
 ## Segmentation / classification
 
 | Name | Role | Purpose | Key args (defaults) |
 | --- | --- | --- | --- |
-| `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). | `labels=None` (None → all present labels) |
+| `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). A one-channel output is read as a label map: a float one with non-integer values (a sigmoid probability) is refused, so give it two channels or threshold it first. | `labels=None` (None → all present labels) |
 | `CrossEntropyLoss` | `Tensor` loss | Wraps `nn.CrossEntropyLoss` (squeezes the target channel). | `weight=None, reduction="mean"` |
 | `FocalLoss` | `Tensor` loss | Multi-class focal loss. `alpha` is an optional per-label weight list indexed by label id; `None` weights every class equally, and a list shorter than the class count is refused. | `gamma=2.0, alpha=None, reduction="mean"` |
 | `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. |: |
@@ -118,7 +156,11 @@ These download TorchScript feature extractors from Hugging Face at construction
 (`hf_hub_download`), so they need **network access**. The sanity check that probes the
 extractor runs on the **CPU**: deliberately, since touching a GPU there crashed
 CPU-only hosts and pinned every DDP rank to the same device.
-All are `CriterionWithAttribute` and consume per-group `Attribute` statistics.
+All are `CriterionWithAttribute` and read the `Image*` statistics the `Statistics` transform
+records. A target is read with its own. The output is read with its own when it has any (a
+prediction under `EVALUATION`, for `IMPACTReg` and the content pass of `IMPACTSynth`), with the
+reference's otherwise; `SAM_Perceptual` reads both with the reference's, and the style pass of
+`IMPACTSynth` both with the style image's.
 The mask, when given, is the target after the image (`Reference;Mask`), after the
 content and style images for `IMPACTSynth`, whatever its type.
 
@@ -134,9 +176,22 @@ Imported lazily; a missing package raises a `MeasureError` with an install hint.
 
 | Name | Extra | Purpose | Key args |
 | --- | --- | --- | --- |
-| `SSIM` | `konfai[ssim]` (scikit-image) | Masked structural similarity. Default `dynamic_range → 4095`. | `dynamic_range=None` |
-| `LPIPS` | `konfai[lpips]` | Learned perceptual similarity (AlexNet by default), tiled over patches. | `model="alex"` |
+| `SSIM` | `konfai[ssim]` (scikit-image) | Masked structural similarity. Default `dynamic_range → 4095`. A metric unless `is_loss: true`, which minimises `1 - SSIM`. | `dynamic_range=None` |
+| `LPIPS` | `konfai[lpips]` | Learned perceptual similarity (AlexNet by default), tiled over patches: a 2-D image whole, a volume slice by slice. | `model="alex"` |
 | `torchmetrics.image.fid:FrechetInceptionDistance` | `torchmetrics` | Fréchet Inception Distance, by classpath. FID is defined over dataset-level feature distributions, so compute it over the whole prediction set, never per case. | see torchmetrics |
+
+`LPIPS` rescales the output and the target to [-1, 1], each with its own min and max taken over
+the whole batch. In training, one image's value therefore depends on the other images of its batch;
+a batch of one is rescaled per image. The rescaling also removes any global gain and offset of
+intensity (an output equal to `0.5 * target + 100` scores about 0), so pair it with `MAE` or
+`PSNR` when intensities matter. A constant output or target (a background patch in a batch of one)
+has no range. As a metric (`is_loss: false`, or in `Evaluation.yml`) it scores NaN, which the
+averages skip. As a loss (`is_loss: true`, or `is_loss` left out: `LPIPS` is a loss by default) it
+is rescaled to 0, so the loss and its gradient stay finite; any other input scores the same in both
+roles.
+Under a mask (`CT;MASK`), the voxels outside it are set to 0 in both images and each image of the
+batch is rescaled and scored on its own; the value is the mean over the images whose mask is not
+empty.
 
 None of these pins a device. The `IMPACT*` sanity check probes its TorchScript
 extractor on the CPU and discards the result; `LPIPS` follows the device

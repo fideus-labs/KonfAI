@@ -137,7 +137,12 @@ count, a per-leaf key or shape mismatch, a target tensor no traced leaf owns, an
 tensor the target ties across two leaves, and it fills every target tensor or
 raises, never reporting a partial load as success. What it cannot detect is
 **ordering**: two identically-shaped leaves swapped would pair silently, since the
-pairing is execution order itself. Unreached *source* branches (an nnU-Net
+pairing is execution order itself. `Model.pretrained_from` covers it: after the
+transfer it runs the reference and the seeded model on the same input and raises
+`ConfigError` when no named output of the model reproduces what the reference
+returns (except under a ModelPatch with an axis of 1, which it cannot run whole).
+A direct call of the function does not, so compare the outputs yourself
+there. Unreached *source* branches (an nnU-Net
 deep-supervision head) are ignored on purpose. Preserve
 the reference preprocessing, class order, normalization, and output convention
 when validating a transferred checkpoint.

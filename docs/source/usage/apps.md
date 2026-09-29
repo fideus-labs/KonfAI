@@ -281,7 +281,7 @@ konfai-apps bundle CT_SEG \
   --out dist \
   --app-json app.json \
   --config Prediction.yml Evaluation.yml \
-  --checkpoint Checkpoints/SEG_BASELINE/*.pt \
+  --checkpoint Checkpoints/SEG_BASELINE/[0-9]*.pt \
   --model-py Model.py
 ```
 

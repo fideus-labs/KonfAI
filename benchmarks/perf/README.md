@@ -14,7 +14,10 @@ transform bench here reuses the former.
    absolute number from the profile and the load alone; ratios measured back to back survive, absolute
    numbers do not.
 2. **A fingerprint beside every number.** Commit (and dirty flag), versions, CPU, GPU and driver,
-   power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`.
+   power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`. The
+   commit is this tree's, so the gate also refuses when the interpreter imports `konfai` from anywhere
+   else (an editable install of another checkout, for instance): run from a worktree with that
+   worktree on `PYTHONPATH`, or with its own environment.
 3. **Warmup, then the median of three**, every run kept in the JSON. Device timing is synchronized
    (`cuda_timer`, CUDA events on both ends).
 4. **Memory is the whole process tree** (`PeakSampler`, RSS at 50 ms; children count) and the GPU's

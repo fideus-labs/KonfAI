@@ -45,7 +45,7 @@ from konfai.data.patching import (
     blend_overlap,
 )
 from konfai.data.patching.stage import _halo_radii, _HaloPull, _RemapPull
-from konfai.data.reduction import Mean, Median, Reduction
+from konfai.data.reduction import Concat, Reduction
 from konfai.data.transform import (
     LocalityKind,
     PatchLocality,
@@ -1091,13 +1091,29 @@ class OutputDataset(Dataset, NeedDevice):
         self._reduce_device.clear()
         self._pin_buffer = None
 
-    def _close_stream(self, index: int) -> None:
-        """Finalize the case's sink and drop its bookkeeping (``is_done`` then reports nothing left)."""
+    def discard(self, index: int) -> None:
+        """Drop a case set aside before its last patch: its accumulation, and the streamed entry it
+        began, which the backend removes, so no partial output is left for a rerun to skip."""
+        if index not in self.output_layer_accumulator:
+            return
+        plan = self._stream_plans.get(index)
+        if plan is not None:
+            for position in plan.slab_stages:
+                with suppress(Exception):
+                    plan.stages[position].transform.stream_abort(self.names[index])
+        self._close_stream(index, PredictorError(f"case '{self.names[index]}' set aside"))
+        self.names.pop(index, None)
+
+    def _close_stream(self, index: int, error: BaseException | None = None) -> None:
+        """Finalize the case's sink, or abort it with ``error``, and drop its bookkeeping (``is_done``
+        then reports nothing left)."""
 
         def operation() -> None:
             sink = self._stream_sinks.pop(index, None)
-            if sink is not None:
+            if sink is not None and error is None:
                 sink.close()
+            elif sink is not None:
+                sink.abort(error)
 
         self._submit_write(operation)
         self._stream_plans.pop(index, None)
@@ -1135,11 +1151,11 @@ class OutputDataset(Dataset, NeedDevice):
         """The cross-copy reduction, identical for a slab and a whole volume.
 
         Mixed devices (a mid-case OOM fallback) reconcile on the host. Reduce, then drop the singleton
-        stack axis; Mean/Median also drop the singleton model axis, Concat keeps ``[M, C, ...]``."""
+        stack axis; a fold also drops the singleton model axis, Concat keeps ``[M, C, ...]``."""
         if len({copy.device for copy in copies}) > 1:
             copies = [copy.cpu() if copy.device.type != "cpu" else copy for copy in copies]
         result = self.reduction(copies).squeeze(0)
-        if isinstance(self.reduction, Mean | Median):
+        if not isinstance(self.reduction, Concat):
             result = result.squeeze(0)
         return result
 

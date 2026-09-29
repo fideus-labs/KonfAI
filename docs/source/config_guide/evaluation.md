@@ -29,7 +29,20 @@ The output directory is controlled by `Evaluator.train_name` in the YAML and
 
 Evaluation persists per case as it goes: each rank appends finished cases to a
 `*.cases.rank<N>.jsonl` file beside the metric JSON, so a rerun after an
-interruption pays only the cases that are not yet recorded.
+interruption pays only the cases that are not yet recorded. A case recorded with
+other metrics than the ones the config names now is scored again.
+
+A case whose prediction or reference cannot be read (a truncated, empty or
+corrupt file) is set aside and the other cases go on. A warning names the case,
+the file and the error when it happens, and a last warning lists every case set
+aside; the run exits 0. The per-case values and the aggregates cover the cases
+evaluated, and the metric JSON lists the others under `set_aside` (see Output
+files). Only a read error of the case's own files is set aside: a configuration
+error, an out-of-memory or an error raised by a transform or a metric still
+stops the run. Under several ranks, each rank warns about the cases of its own
+shard and the metric JSON lists them all. A split none of whose cases can be
+read fails instead, and writes no metric JSON, unless the config names no metric
+(`metrics: {}`): its metric JSON then lists the cases under `set_aside`.
 
 ## Top-level fields
 
@@ -63,6 +76,29 @@ Structure:
 
 Some metrics also accept attributes or write auxiliary datasets. This behavior is
 implemented in `konfai.evaluator.Evaluator.update()` and `konfai.metric.measure`.
+
+An output and each target it is scored against voxel to voxel must have the same
+spatial shape. A case where they differ is refused with an error naming the case,
+the two groups and their shapes, before any value of it is recorded. Left out of
+the check: a metric that reads the geometry itself (a `CriterionWithAttribute`,
+such as the IMPACT metrics), a metric that puts its target on the output grid
+itself (`Dice` and `FocalLoss`, nearest neighbour), a metric that never compares
+its target voxel to voxel (`Mean`, `Variance`, `Gram`, `BCE`, `PatchGanLoss`,
+`KLDivergence`), and a pair that is not two images (landmarks scored by `TRE`).
+
+The same pairs are then compared on their geometry, as each group lands after
+its `transforms`, and so are `Dice` and `FocalLoss` when the output and the
+target have the same shape: they then take the target as it is. When an output
+and a target have the same shape but a different origin, spacing or direction,
+each voxel is scored against one at another place: the case is still scored, and
+one warning per case names it, the output, the target and each value that
+differs, on both sides. The origin is compared within a thousandth of the
+smallest spacing (a thousandth of a voxel): a header stored in float32, as NIfTI
+stores it, moves the origin by more than ITK's tolerance without moving a voxel.
+The spacing and the direction keep ITK's tolerance: 1e-6 times the first spacing,
+and 1e-6. A group without a geometry is not compared: an h5 entry without
+attributes, a `.npy`, and the formats that store no origin (`png`, `jpg`,
+`jpeg`, `bmp`, `tif`, `tiff`). Nor is a 2D image against a single-slice 3D one.
 
 ## `Evaluator.Dataset`
 
@@ -120,6 +156,9 @@ The JSON structure contains:
   min, max, and count
 - `directions`: per metric, `"max"` or `"min"`, emitted whenever a metric declares
   one so a consumer can rank runs without guessing which way is better
+- `set_aside`: present only when some case of the split could not be read, each
+  such case with the error that set it aside, so an aggregate is never read as
+  the whole cohort's
 
 This behavior comes from `konfai.evaluator.Statistics.write()`.
 

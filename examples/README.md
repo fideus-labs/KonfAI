@@ -60,13 +60,14 @@ Every notebook only calls the CLI, so you can do the same by hand. From `Segment
 
 ```bash
 konfai TRAIN      -y --gpu 0 --config Config.yml
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/*.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/[0-9]*.pt
 konfai EVALUATION -y          --config Evaluation.yml
 ```
 
 `SEG_BASELINE` is that example's `train_name`; `Registration` uses `REG_BASELINE` and `Synthesis`
 `TRAIN_01`. Checkpoints are named after the moment they were written, so the glob is what saves you
-looking the filename up.
+looking the filename up. It starts with a digit to match that dated file only: `resume_latest.pt` beside it
+is a training continuation, and naming both runs an ensemble of the two.
 
 Each run writes a workspace keyed by `train_name`: `Checkpoints/`, `Statistics/` (TensorBoard logs
 and the resolved config), `Predictions/`, and `Evaluations/` (the metric JSON).

@@ -21,7 +21,7 @@ import os
 import traceback
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
 import torch
@@ -36,7 +36,7 @@ from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager
 from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import KonfAIError
+from konfai.utils.errors import CaseReadError, KonfAIError
 from konfai.utils.runtime import get_cpu_info, get_memory, get_memory_info, memory_forecast, return_freed_heap
 from konfai.utils.utils import OverlapSpec
 
@@ -81,6 +81,8 @@ class DataItem:
     #: re-read every epoch): the collate must then batch a COPY, never a view a downstream in-place
     #: op could write through. One-pass loaders clear it, and their singletons batch as views.
     aliases_cache: bool = True
+    #: Why the case cannot be read, on the empty item a one-pass loader hands back in its place.
+    unreadable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,9 @@ class BatchDataItem:
     a: list[int]
     p: list[int]
     is_input: bool
+    #: ``(case, name, why)`` of each case a one-pass loader could not read for this batch: its items
+    #: are left out of the tensor, and the consumer sets the case aside.
+    unreadable: list[tuple[int, str, str]] = field(default_factory=list)
 
     def pin_memory(self) -> "BatchDataItem":
         """The batch with its tensor in page-locked memory, so the upload is a real DMA.
@@ -122,18 +127,23 @@ def _batch_tensor(items: list[DataItem]) -> torch.Tensor:
 
 
 def collate_konfai(batch: list[Sample]) -> BatchSample:
-    """Collate KonfAI samples into the batch structure expected by the workflows."""
+    """Collate KonfAI samples into the batch structure expected by the workflows. An unreadable
+    case's items stay out of the tensors and are listed on every group's item instead."""
+    firsts = [next(iter(sample.values())) for sample in batch]
+    unreadable = [(item.x, item.name, item.unreadable) for item in firsts if item.unreadable is not None]
+    readable = [sample for sample, item in zip(batch, firsts, strict=True) if item.unreadable is None]
     batch_sample: BatchSample = {}
     for k in batch[0].keys():
-        items = [b[k] for b in batch]
+        items = [b[k] for b in readable]
         batch_sample[k] = BatchDataItem(
-            tensor=_batch_tensor(items),
+            tensor=_batch_tensor(items) if items else torch.empty(0),
             x=[it.x for it in items],
             a=[it.a for it in items],
             p=[it.p for it in items],
             attribute=[it.attribute for it in items],
             name=[it.name for it in items],
-            is_input=items[0].is_input,
+            is_input=batch[0][k].is_input,
+            unreadable=unreadable,
         )
     return batch_sample
 
@@ -218,6 +228,9 @@ class DatasetIter(data.Dataset):
         # The case whose slabs a one-pass reader holds: a streamed case never enters the FIFO, so
         # leaving it is what frees them.
         self._slab_case: int | None = None
+        #: The cases this process could not read, and why: a one-pass loader hands back an empty item
+        #: for each of their patches from then on.
+        self._unreadable: dict[int, str] = {}
 
     def _fill_case_bytes(self) -> float:
         """What one filling thread holds at its peak: a whole-volume pass over the case, priced the way
@@ -296,16 +309,22 @@ class DatasetIter(data.Dataset):
         # One item per case: a copy's pass drops the plans of the case's other copies, and one manager
         # is never walked by two threads.
         work = [
-            (self.data[group_dest][case], sorted(drawn))
+            (case, self.data[group_dest][case], sorted(drawn))
             for _group_src, group_dest, _chain in _chains(self.groups_src)
             for case, drawn in sorted(copies.items())
         ]
-        self._on_fill_threads(
-            f"scanning {label}",
-            work,
-            lambda item: item[0].warm_stream_statistics(item[1], self.apply_augmentations),
-            lambda _done: f"Scanning {label}: {get_cpu_info()}",
-        )
+
+        def scan(item: tuple[int, DatasetManager, list[int]]) -> None:
+            case, manager, drawn = item
+            if case in self._unreadable:
+                return
+            try:
+                manager.warm_stream_statistics(drawn, self.apply_augmentations)
+            except Exception as error:
+                if not self._set_aside(case, error):
+                    raise
+
+        self._on_fill_threads(f"scanning {label}", work, scan, lambda _done: f"Scanning {label}: {get_cpu_info()}")
 
     def _on_fill_threads(
         self, what: str, work: list[Any], run: Callable[[Any], object], describe: Callable[[int], str]
@@ -440,14 +459,52 @@ class DatasetIter(data.Dataset):
     def __len__(self) -> int:
         return len(self.mapping)
 
+    def _set_aside(self, case: int, error: BaseException) -> bool:
+        """Record ``case`` as unreadable when ``error`` is a read error of one of its entries and this
+        loader makes one pass: whether it did. Anything else is the caller's to raise."""
+        cause: BaseException | None = error
+        while cause is not None and not isinstance(cause, CaseReadError):
+            cause = cause.__cause__
+        if cause is None or not self.single_pass:
+            return False
+        self._unreadable[case] = str(cause.args[0])
+        return True
+
+    def _unreadable_sample(self, x: int, a: int, p: int) -> Sample:
+        """The empty item standing in for a patch of the unreadable case ``x``."""
+        return {
+            group_dest: DataItem(
+                self.data[group_dest][x].name,
+                torch.empty(0),
+                Attribute(),
+                x,
+                a,
+                p,
+                chain.is_input,
+                aliases_cache=False,
+                unreadable=self._unreadable[x],
+            )
+            for _group_src, group_dest, chain in _chains(self.groups_src)
+        }
+
     def __getitem__(self, index: int) -> Sample:
-        sample: Sample = {}
         x, a, p = self.mapping[index]
         if self.single_pass and x != self._slab_case:
             if self._slab_case is not None:
                 for _group_src, group_dest, _chain in _chains(self.groups_src):
                     self.data[group_dest][self._slab_case].release_slabs()
             self._slab_case = x
+        if x not in self._unreadable:
+            try:
+                return self._sample(index, x, a, p)
+            except Exception as error:
+                if not self._set_aside(x, error):
+                    raise
+                self._unload_data(x)  # a group read before the failing one holds its volume
+        return self._unreadable_sample(x, a, p)
+
+    def _sample(self, index: int, x: int, a: int, p: int) -> Sample:
+        sample: Sample = {}
         needs_full_load = any(
             not self.data[group_dest][x].can_stream_patch(a, self.apply_augmentations)
             for _group_src, group_dest, _chain in _chains(self.groups_src)

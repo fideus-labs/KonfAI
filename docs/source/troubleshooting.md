@@ -86,7 +86,7 @@ When in doubt:
 `Dataset.validation` is flexible. In code it can be:
 
 - `None`
-- a float ratio
+- a float ratio (a share of the patch entries, cut at the closest case boundary)
 - a `start:stop` slice string (a negative stop counts from the end)
 - a path to a text file (`~path.txt` excludes instead)
 - an explicit list of indices
