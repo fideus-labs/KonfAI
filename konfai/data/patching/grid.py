@@ -214,7 +214,8 @@ class Patch(ABC):
         if self.pad_value is not None:
             return F.pad(data, padding, "constant", self.pad_value)
         padded = F.pad(data, padding, "constant", 0)
-        lowest = data.min()
+        # torch has no min for uint16/uint32; int64 holds both exactly.
+        lowest = (data.to(torch.int64) if data.dtype in (torch.uint16, torch.uint32) else data).min()
         for pair, (before, after) in enumerate(zip(padding[::2], padding[1::2], strict=True)):
             dim = padded.dim() - 1 - pair
             if before:

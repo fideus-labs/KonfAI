@@ -33,9 +33,10 @@ in place. Two stages of the same class in one chain spell the second one module-
   caller decides. Only the CLI catches and exits.
 - **Results come back structured**: `transform` returns the `outputs.json` destinations and the
   workspace; `evaluate` returns the parsed `Metric_*.json` as a dict.
-- **The process is left as found**: the `KONFAI_*` environment is restored around every call, and
-  one workflow runs at a time per process: a second concurrent call is refused with the remedy
-  (subprocesses), never allowed to corrupt the first.
+- **The process is left as found**: the `KONFAI_*` environment and the per-rank memory budget a
+  run publishes are restored around every call, so one call's `memory_budget` never sizes the
+  next, and one workflow runs at a time per process: a second concurrent call is refused with the
+  remedy (subprocesses), never allowed to corrupt the first.
 - **The record remains.** Every call materializes the resolved YAML in the run's workspace:
   promoting a notebook run to a versioned experiment is copying `result.config`: nothing to
   rewrite, and the run stays resumable like any other.

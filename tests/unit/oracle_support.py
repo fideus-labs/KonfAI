@@ -536,11 +536,14 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "Mask": [StageCase(Mask(path="Labels", value_outside=-7))],
         "MergeLabels": [StageCase(MergeLabels(), group="Ensemble")],
         "OneHot": [StageCase(OneHot(4), group="Labels")],
-        # Pads reaching both borders of every axis, asymmetric and wider than the patch, constant and
-        # reflect: the fill and the mirror both need the source rows the clamp cut back to.
+        # Pads reaching both borders of every axis, asymmetric and wider than the patch, constant,
+        # reflect and replicate: the fill, the mirror and the edge all need the source rows the clamp
+        # cut back to; a circular pad reads the far end of the axis, which a region reaching a border pulls.
         "Padding": [
             StageCase(Padding(padding=[1, 2, 3, 0, 2, 4][: 2 * rank], mode="constant:-3")),
             StageCase(Padding(padding=[2, 1, 1, 2, 3, 2][: 2 * rank], mode="reflect")),
+            StageCase(Padding(padding=[2, 1, 1, 2, 3, 2][: 2 * rank], mode="replicate")),
+            StageCase(Padding(padding=[2, 1, 1, 2, 3, 2][: 2 * rank], mode="circular")),
             StageCase(Padding(padding=[0, 0, 0, 0, 0, 0][: 2 * rank])),
             StageCase(Padding([1, 2, 3, 4, 5, 6][: 2 * rank])),
             StageCase(Padding([5, 0, 0, 5, 2, 2][: 2 * rank], mode="constant:-7")),

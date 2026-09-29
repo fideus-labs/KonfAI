@@ -178,6 +178,39 @@ def test_the_environment_is_left_as_found(cohort: Path, monkeypatch: pytest.Monk
     assert [key for key in os.environ if key.startswith("KONFAI")] == []
 
 
+@pytest.mark.parametrize("second_budget", [None, "1GiB"])
+def test_a_calls_memory_budget_does_not_reach_the_next_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_budget: str | None
+) -> None:
+    """The per-rank budget a run publishes is process state: the next call's build reads it before
+    that call publishes its own, so it must find what a fresh process finds."""
+    from konfai.utils.budget import per_rank_budget_bytes
+
+    monkeypatch.chdir(tmp_path)
+    volume = np.zeros((24, 28, 32), dtype=np.float32)
+    volume[6:20, 4:22, 10:26] = 1.0
+    _write_case(tmp_path / "Raw" / "P001" / "CT.mha", volume)
+    api.transform(
+        "SMALL",
+        "./Raw:mha",
+        {"CT": {"CT": [Clip(min_value=0.0, max_value=1.0), Write(dataset="./OutSmall:mha")]}},
+        memory_budget="1MiB",
+        transforms_dir=tmp_path / "Transforms",
+        quiet=True,
+    )
+    # The Crop measures its foreground box while the chain is bound, before this call's plan runs.
+    api.transform(
+        "NEXT",
+        "./Raw:mha",
+        {"CT": {"CT": [Crop(inverse=False), Write(dataset="./OutNext:mha")]}},
+        memory_budget=second_budget,
+        transforms_dir=tmp_path / "Transforms",
+        quiet=True,
+    )
+    assert sitk.ReadImage(str(tmp_path / "OutNext" / "P001" / "CT.mha")).GetSize() == (16, 18, 14)
+    assert per_rank_budget_bytes() is None  # the caller's process is left as found
+
+
 def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A run's pooled h5 read handles are released when the call returns: HDF5 refuses to open for
     writing a file this process still holds for reading, so a notebook could not append to the

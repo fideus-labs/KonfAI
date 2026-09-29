@@ -24,6 +24,7 @@ import torch
 
 from konfai.data.transform.base import LocalityKind, Transform
 from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
 
 
@@ -158,6 +159,10 @@ class InferenceStack(Transform):
 
     def __init__(self, dataset: str, name: str, mode: str = "mean"):
         super().__init__()
+        if mode not in ("mean", "median", "Seg"):
+            raise TransformError(
+                f"InferenceStack mode '{mode}' is unknown.", "Set mode to 'mean', 'median' or 'Seg' (spelled so)."
+            )
         self.dataset = None
         if dataset:
             filename, _, file_format = split_path_spec(dataset)
