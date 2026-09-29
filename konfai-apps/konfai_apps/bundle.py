@@ -175,13 +175,14 @@ def _derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | 
     return patch_size, in_channels, extend_slice, pad_value
 
 
-# KonfAI transform name -> runtime op. A transform outside this curated map is refused by the export.
+# KonfAI transform name -> runtime op. A transform outside this curated map is refused by the export. The
+# export reads the raw config, so an unset parameter takes the default the core stage binds.
 def _op_cast(p: dict[str, Any]) -> dict[str, Any]:
     return {"op": "cast", "dtype": str(p.get("dtype", "float32"))}
 
 
 def _op_resample(p: dict[str, Any]) -> dict[str, Any]:
-    step = {"op": "resample", "spacing": [float(s) for s in p["spacing"]], "inverse": bool(p.get("inverse", False))}
+    step = {"op": "resample", "spacing": [float(s) for s in p["spacing"]], "inverse": bool(p.get("inverse", True))}
     return _with_fill(step, p)
 
 
@@ -209,7 +210,11 @@ def _op_normalize(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _op_unnormalize(p: dict[str, Any]) -> dict[str, Any]:
-    return {"op": "unnormalize", "min_value": float(p["min_value"]), "max_value": float(p["max_value"])}
+    return {
+        "op": "unnormalize",
+        "min_value": float(p.get("min_value", -1024)),
+        "max_value": float(p.get("max_value", 3071)),
+    }
 
 
 def _op_clip(p: dict[str, Any]) -> dict[str, Any]:
@@ -306,7 +311,7 @@ def _try_fold(name: str, params: Any) -> Callable[[Any], Any] | None:
     from konfai.utils.dataset import Attribute
     from konfai.utils.utils import get_module
 
-    base = name.split("/", 1)[0]  # drop the ``/N`` uniqueness suffix a repeated transform carries
+    base = _base(name)
     try:
         module, cls_name = get_module(base, "konfai.data.transform")
         cls = getattr(module, cls_name)

@@ -346,15 +346,14 @@ def test_the_index_is_never_cached_and_the_assets_always_are(studio: tuple[TestC
     previous build: an updated Studio silently serving the old front. The assets it names carry a hash,
     so their bytes never change and they can be cached for a year."""
     client, _agent, _ = studio
-
-    index = client.get("/")
-    assert "no-cache" in index.headers.get("cache-control", ""), "a cached index pins the old front"
-
     from konfai_studio.server import WEB_DIR
 
     built = sorted((WEB_DIR / "assets").glob("*.js")) if (WEB_DIR / "assets").is_dir() else []
     if not built:
         pytest.skip("front not built in this tree")
+
+    index = client.get("/")
+    assert "no-cache" in index.headers.get("cache-control", ""), "a cached index pins the old front"
     asset = client.get(f"/assets/{built[0].name}")
     assert "immutable" in asset.headers.get("cache-control", "")
 

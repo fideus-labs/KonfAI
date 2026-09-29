@@ -189,14 +189,15 @@ client = KonfAIAppClient(
 
 `konfai-apps-server` exposes packaged apps through a FastAPI service (the `server` extra).
 
-Minimal example:
+Minimal example, `apps.json` listing the apps the server exposes:
 
 ```bash
+echo '{"apps": ["VBoussot/ImpactSynth:CBCT"]}' > apps.json
 export KONFAI_API_TOKEN="secret"
 konfai-apps-server \
   --host 0.0.0.0 \
   --port 8000 \
-  --apps ./konfai-apps/tests/assets/apps.json
+  --apps apps.json
 ```
 
 Once the server is running, the client switches to remote mode as soon as

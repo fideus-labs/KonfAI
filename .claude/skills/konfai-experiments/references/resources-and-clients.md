@@ -74,10 +74,16 @@ Set `tool_timeout_sec` generously (training is long) and rely on `wait_for_job` 
 ## Transport note (security)
 
 `stdio` (the default, used by local Claude Code / Codex) needs no auth. For `sse` and
-`streamable-http` the bearer token is **optional and enforced only when set**: with
-`KONFAI_MCP_BEARER_TOKEN` set, unauthenticated requests get a `401` with a `Bearer`
-challenge; **with it unset, the HTTP transport starts fully unauthenticated (no `401`)**: there is no guard rejecting a tokenless HTTP start. Since this server executes real compute,
-**always set a token before exposing `sse` / `streamable-http`.**
+`streamable-http`, with `KONFAI_MCP_BEARER_TOKEN` (or `--bearer-token`) set, unauthenticated
+requests get a `401` with a `Bearer` challenge. With no token:
+
+- the CLI **refuses a non-loopback `--host`** (`0.0.0.0`, a LAN address) unless
+  `--i-know-this-is-insecure` is passed;
+- a loopback server answers only requests whose `Host` is `127.0.0.1`, `localhost` or `::1`
+  and returns `400` to any other `Host` (DNS rebinding). An SSH tunnel keeps working; a
+  reverse proxy that forwards the public `Host` header (Caddy by default, nginx with
+  `proxy_set_header Host $host`) gets `400` on every request, so give such a server a token
+  or have the proxy send a loopback `Host`.
 
 A bearer token is only as safe as the channel: over plain HTTP it travels in clear and is
 trivially sniffable, so the token alone protects nothing on the wire. **Keep `sse` /

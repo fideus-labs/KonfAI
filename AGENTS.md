@@ -128,10 +128,10 @@ pixi run test-fast                                                # dev loop (~1
 pixi run --environment dev typecheck                              # mypy konfai
 pixi run --environment dev python -m pip install -e "./konfai-apps[server]" && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate; [server] for the job-server tests)
 pixi run --environment dev python -m pip install -e ./konfai-mcp && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
-pixi run --environment dev python -m pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or every test skips)
+pixi run --environment dev python -m pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first, the tests that serve it need it)
 ```
 
-The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it every test skips and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
+The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it the tests that serve the front skip or fail. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
 
 ## 6b. Releasing
 
@@ -201,8 +201,9 @@ Conventional Commits only took hold at `v1.5.9`, and rendering further back emit
   SlicerKonfAI and SlicerImpactReg also import nine **core** symbols: `konfai.evaluator.Statistics`,
   `konfai.utils.dataset.image_to_data` and `get_infos`, `konfai.utils.runtime.MinimalLog`, and from `konfai`
   itself `get_available_devices`, `get_ram`, `get_vram`, `check_server`, `assert_konfai_install`, pinned by
-  `tests/unit/test_slicer_core_api_contract.py` (the `konfai_apps` names by
-  `konfai-apps/tests/test_slicer_api_contract.py`). A symbol whose only caller here is that test is still in use.
+  `tests/unit/test_slicer_core_api_contract.py`. `konfai-apps/tests/test_slicer_api_contract.py` pins the
+  `konfai_apps` names, the methods Slicer calls on an app repository with the arguments it passes, and the
+  attributes it reads. A symbol whose only caller here is such a test is still in use.
 - **HF bundles** (`hf_bundles/*`) carry `app.json` + config + `requirements.txt` + `.pt` + custom `.py`. Their
   configs use **bundle-relative** classpaths (`ResidualEncoderUNet.yml`, `model:Unet_TS_CT`,
   `Model:RegistrationNet`), never KonfAI's internal module paths, which is why the models→`models.python`
@@ -223,7 +224,9 @@ Three, and only three, places decide trust. Keep them honest:
    tools may *read* arbitrary host paths by design, but **writes must never widen** (any tool that composes
    a write target must reject path separators). Two tools take a free host destination, by design:
    `export_app` (`path`, which refuses to replace an existing file without `overwrite=True`) and
-   `package_app_from_session` (`output`). `cancel_job` reaps the whole process group.
+   `package_app_from_session` (`output`). `cancel_job` reaps the whole process group. Over SSE/HTTP
+   with no bearer token, the CLI refuses a non-loopback bind (`--i-know-this-is-insecure` overrides) and
+   the server answers only loopback `Host` names (DNS rebinding).
 
 ## 7d. Traps that have bitten before
 

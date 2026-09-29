@@ -242,6 +242,36 @@ def test_transform_manifest_reads_canonical_and_before_reduction_post():
     assert manifest["postprocessing"] == [{"op": "softmax", "dim": 0}, {"op": "argmax", "dim": 0}]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["TensorCast", "Clip", "Resample", "Canonical", "Standardize", "Normalize", "UnNormalize", "Softmax", "Argmax"],
+)
+def test_an_unset_parameter_exports_the_core_stages_default(name):
+    """The export reads the raw Prediction.yml, so a parameter the config leaves out must take the value
+    the core stage binds when it runs that config, or the portable runtime computes something else."""
+    import inspect
+
+    import konfai.data.transform as transforms
+    from konfai_apps.bundle import _OP_MAP
+
+    assert set(_OP_MAP) == {
+        "TensorCast",
+        "Clip",
+        "Resample",
+        "Canonical",
+        "Standardize",
+        "Normalize",
+        "UnNormalize",
+        "Softmax",
+        "Argmax",
+    }, "a new op needs its case here"
+    given = {"spacing": [1.5, 1.5, 1.5]} if name == "Resample" else {}
+    defaults = inspect.signature(getattr(transforms, name)).parameters
+    step = _OP_MAP[name](given)
+    exported = {key: value for key, value in step.items() if key in defaults and key not in given}
+    assert exported == {key: defaults[key].default for key in exported}
+
+
 def _regrid_preprocessing(fill):
     from konfai_apps.bundle import _transform_manifest
 

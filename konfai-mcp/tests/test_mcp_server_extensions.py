@@ -95,6 +95,9 @@ def test_inspect_distinguishes_konfai_component_from_foreign_class() -> None:
     assert "konfai.metric.measure.Criterion" in dice["bases"]
     assert dice["forward"] and dice["forward"].startswith("forward(")
 
+    median = summarize_classpath_signature("konfai.data.reduction:Median", workspace_dir=MODULE_ROOT)
+    assert median["konfai_base"] == "reduction"
+
     l1 = summarize_classpath_signature("torch:nn:L1Loss", workspace_dir=MODULE_ROOT)
     assert l1["ok"] is True
     assert l1["konfai_base"] is None

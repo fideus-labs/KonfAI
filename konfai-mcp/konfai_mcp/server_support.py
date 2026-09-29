@@ -28,6 +28,7 @@ from typing import Any
 
 import numpy as np
 
+from .catalog import COMPONENT_BASES, model_config_reference_to_inspect_classpath
 from .classpaths import public_module
 from .config_io import YAML_DUMP as YAML_DUMP
 from .config_io import YAML_SAFE
@@ -791,16 +792,6 @@ def _parse_classpath(classpath: str) -> tuple[str, str]:
     return module_name, object_name
 
 
-# Qualified name of each KonfAI extension base -> the component kind it provides.
-_KONFAI_COMPONENT_BASES = {
-    "konfai.metric.measure.Criterion": "criterion",
-    "konfai.data.transform.Transform": "transform",
-    "konfai.data.augmentation.DataAugmentation": "augmentation",
-    "konfai.network.network.Network": "model",
-    "konfai.metric.schedulers.Scheduler": "scheduler",
-}
-
-
 def _resolve_base(classpath: str) -> type:
     module, name = classpath.rsplit(".", 1)
     return getattr(importlib.import_module(module), name)
@@ -818,7 +809,7 @@ def _imported_object_extras(obj: Any) -> dict[str, Any]:
     mro = [f"{public_module(cls)}.{cls.__qualname__}" for cls in obj.__mro__ if cls is not object]
     extras["bases"] = mro
     extras["konfai_base"] = next(
-        (kind for classpath, kind in _KONFAI_COMPONENT_BASES.items() if issubclass(obj, _resolve_base(classpath))),
+        (kind for classpath, kind in COMPONENT_BASES.items() if issubclass(obj, _resolve_base(classpath))),
         None,
     )
     extras["integration_hint"] = (
@@ -988,8 +979,6 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
         # mapping list_components uses (catalog.model_config_reference_to_inspect_classpath) before
         # giving up; already-importable classpaths never reach here, so their behavior is unchanged.
         if ":" not in normalized:
-            from .catalog import model_config_reference_to_inspect_classpath
-
             builtin = model_config_reference_to_inspect_classpath(normalized)
             if builtin is not None and builtin != normalized:
                 fallback = summarize_classpath_signature(builtin, workspace_dir=workspace_dir)
@@ -1187,7 +1176,7 @@ def template_guidance_summary(examples_root: Path, name: str, workflows: set[str
         "notes": [
             "Dataset reads are extension-agnostic; the extension is only a supported file-format hint.",
             "Copy Python files only when you intentionally reuse template model code.",
-            "Create only the workflow configs you currently intend to run: train, prediction, or evaluation.",
+            "Create only the workflow configs you currently intend to run: train, prediction, evaluation or transform.",
             "Prediction and evaluation configs are optional until that intent is chosen.",
             "Local custom components can live directly in the session workspace and be referenced "
             "with Module:Object classpaths.",
@@ -1203,15 +1192,11 @@ def template_guidance_summary(examples_root: Path, name: str, workflows: set[str
 
 
 def load_template_configs(examples_root: Path, name: str) -> dict[str, dict[str, Any]]:
-    """Load every YAML config present in one template directory."""
+    """Load every workflow config present in one template directory, keyed by workflow."""
     template = template_dir(examples_root, name)
     configs: dict[str, dict[str, Any]] = {}
-    config_map = {
-        "train": template / "Config.yml",
-        "prediction": template / "Prediction.yml",
-        "evaluation": template / "Evaluation.yml",
-    }
-    for workflow, path in config_map.items():
+    for workflow, filename in WORKFLOW_CONFIG_FILES.items():
+        path = template / filename
         if path.exists():
             data = YAML_SAFE.load(path.read_text(encoding="utf-8")) or {}
             if not isinstance(data, dict):
@@ -1274,15 +1259,6 @@ def default_group_map(template_groups: list[str], dataset_groups: list[str]) -> 
         if len(dataset_groups) == 1:
             group_map[template_group] = dataset_groups[0]
     return group_map
-
-
-def label_output_dtype(label_count: int) -> str:
-    """Choose a compact unsigned integer dtype for a label map."""
-    if label_count <= 256:
-        return "uint8"
-    if label_count <= 65536:
-        return "uint16"
-    return "uint32"
 
 
 def _referenced_classpaths(node: Any) -> Iterator[str]:

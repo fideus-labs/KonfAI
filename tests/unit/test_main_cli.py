@@ -365,6 +365,7 @@ def test_predict_evaluate_expose_tensorboard_param():
         ("augmentations", "Flip"),
         ("criteria", "Dice"),
         ("reductions", "Median"),
+        ("schedulers", "CosineAnnealing"),
         ("models", "default|UNet.yml"),
         ("blocks", "Conv"),
     ],

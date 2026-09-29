@@ -23,6 +23,7 @@ from typing import Any, cast
 import konfai_apps.app as app_module
 import konfai_apps.cli as apps_cli_module
 import pytest
+from konfai_apps.errors import AppRepositoryError
 
 
 def test_main_apps_dispatches_local_infer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -151,7 +152,7 @@ def test_main_apps_server_check_validates_and_exits_without_serving(
     ids=["fine-tune-own-dataset", "fine-tune-other-dataset", "infer-tmp-dir"],
 )
 def test_an_app_run_in_a_project_refuses_to_delete_its_dataset(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: list[str], capsys
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, command: list[str]
 ) -> None:
     """fine-tune works in its --output and infer in its --tmp-dir, and both stage their inputs as
     ./Dataset: in a project directory that is the user's own data, refused and left in place."""
@@ -172,3 +173,39 @@ def test_an_app_run_in_a_project_refuses_to_delete_its_dataset(
     assert exited.value.code == 1
     assert "not staged by konfai-apps" in capsys.readouterr().err
     assert user_file.read_text(encoding="utf-8") == "the only copy"
+
+
+def _app_cli_mains() -> dict[str, Any]:
+    return {
+        "konfai-apps": apps_cli_module.main_apps,
+        "app-cli": apps_cli_module.build_app_cli("demo-konfai", "demo", resolve_app=lambda args: "./no_such_app"),
+    }
+
+
+@pytest.mark.parametrize("cli", ["konfai-apps", "app-cli"])
+def test_a_refusal_prints_its_message_and_exits_1(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path, cli: str
+) -> None:
+    """A mistyped app directory: the refusal names the path, with no traceback, like the konfai CLI. It does
+    not read "not found", which SlicerKonfAI takes for an app gone for good and drops from its list."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    app = ["./no_such_app"] if cli == "konfai-apps" else []
+    monkeypatch.setattr(sys, "argv", [cli, "infer", *app, "-i", "in.mha", "--cpu", "1"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        _app_cli_mains()[cli]()
+
+    message = capsys.readouterr().err.strip()
+    assert exit_info.value.code == 1
+    assert message.startswith(f"[App repository] No app directory at '{tmp_path / 'no_such_app'}'")
+    assert "not found" not in message.lower()
+
+
+def test_konfai_debug_keeps_the_refusal_traceback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KONFAI_DEBUG", "1")
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "infer", "./no_such_app", "-i", "in.mha", "--cpu", "1"])
+
+    with pytest.raises(AppRepositoryError, match="No app directory at"):
+        apps_cli_module.main_apps()
