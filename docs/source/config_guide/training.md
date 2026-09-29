@@ -206,7 +206,7 @@ Common fields:
 | `memory_budget` | number / string / null | `null` = `auto` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. An absent key (`null`) means `auto`: 80% of the detected memory decides. |
 | `subset` | string / list / null | `null` | Restricts which cases are used: a flat selector (a case-list file, a list of names, or a `start:end` slice), not a nested object. `shuffle` and `shuffle_window` are sibling `Dataset` keys. |
 | `batch_size` | int | `1` | Batch size. |
-| `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A `KonfAIInference` transform in any group forces `0` whatever the value. |
+| `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A stage that declares `single_process = True` (`KonfAIInference` does) in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
 | `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |

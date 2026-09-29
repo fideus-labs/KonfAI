@@ -237,7 +237,7 @@ def test_a_non_incremental_operator_holds_the_whole_cohort_per_region(tmp_path: 
 
     ``Median`` holds the cohort and what its route allocates beside it, so the buffer alone
     under-states its peak, and it is the operator a bare ``Reduce`` gets. The route depends on the
-    cohort's SIZE (a network up to five members, a sort past it), so the plan asks for this cohort's.
+    cohort's SIZE (a network up to five members, a window past it), so the plan asks for this cohort's.
     """
     engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Median", output="t"), [])
     plan = engine.plan()
@@ -620,8 +620,8 @@ def test_the_peak_is_charged_at_each_side_s_own_width(
 
 @pytest.mark.parametrize("cases", [1, 2, 3, 4, 5, 6, 7, 10, 16])
 def test_median_selects_the_middle_instead_of_sorting_the_stack(cases: int) -> None:
-    """Up to five members the middle is SELECTED by a network of element-wise min/max; past that a
-    sort finds it. The values are the same to the bit either way -- ``torch.quantile`` is the
+    """Up to five members the middle is SELECTED by a network of element-wise min/max; past that an
+    insertion window of the k + 1 smallest does. The values are the same to the bit either way -- ``torch.quantile`` is the
     reference the docstring names -- and the network holds far less, which is what
     ``working_multiple_for`` reports so the planner can cut taller slabs where it runs.
 
@@ -693,6 +693,34 @@ def _vote_by_sorting(tensors: list[torch.Tensor]) -> torch.Tensor:
         best = torch.where(better, member, best)
         best_count = torch.where(better, count, best_count)
     return best
+
+
+@pytest.mark.parametrize("cases", [2, 3, 4, 5, 6, 7, 10])
+@pytest.mark.parametrize(
+    ("dtype", "low", "high"),
+    [
+        (torch.uint8, 0, 256),
+        (torch.int8, -128, 128),
+        (torch.int16, -32768, 32768),
+        (torch.int32, -(2**31), 2**31 - 1),  # past 2**24, where float32 rounds
+    ],
+)
+def test_median_selects_integer_members_as_stored_to_the_widened_bit(
+    cases: int, dtype: torch.dtype, low: int, high: int
+) -> None:
+    """The cast to float32 is monotone, so it commutes with min/max: a fold selected in the members'
+    own dtype, then widened, lands on the bits of the fold of the widened members, without a float32
+    copy of every member (measured at three int32 members of 16 MiB: 9.1 member regions held
+    widened first, 6.1 selected as stored)."""
+    torch.manual_seed(cases)
+    members = [torch.randint(low, high, (1, 1, 4, 16, 16), dtype=torch.int64).to(dtype) for _ in range(cases)]
+
+    folded = Median()(members)
+
+    assert folded.dtype is torch.float32
+    assert torch.equal(folded, Median()([member.float() for member in members]))
+    mixed = [members[0].to(torch.int64), *members[1:]]
+    assert torch.equal(Median()(mixed), Median()([member.float() for member in mixed])), "a mixed cohort widens"
 
 
 def test_median_keeps_integer_members_narrow_and_holds_a_window_not_a_stack() -> None:

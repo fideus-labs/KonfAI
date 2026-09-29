@@ -166,9 +166,6 @@ class SegmentSizer:
         units = budget.GROWTH_CAP_UNITS * max(self.unit_rows(), int(budget.SWEEP_SLAB_ROWS))
         return max(1, min(int(self.spatial[0]), units))
 
-    def _priced(self, rows: int, depth: int) -> int:
-        return self.sweep_block_bytes(self.sweep_shape(rows), depth)
-
     def _slab(self, rows: int) -> list[int]:
         return [min(int(rows), int(self.spatial[0])), *(int(extent) for extent in self.spatial[1:])]
 

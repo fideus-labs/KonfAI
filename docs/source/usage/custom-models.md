@@ -249,6 +249,10 @@ groups_dest:
 - `self.datasets` is populated by KonfAI and can be used when the transform
   needs to read another group, as built-in transforms such as `Clip` and
   `Standardize` do.
+- `single_process = True` (class attribute) declares a stage that must run in
+  the main process, such as one that spawns processes of its own
+  (`KonfAIInference`): a daemonic DataLoader worker cannot, so the loader runs
+  no workers when a chain holds such a stage.
 
 ### A class that is not a `Transform`
 
@@ -739,8 +743,8 @@ over. The declarations:
   multiplies it into the peak it sizes regions against. The attribute is the
   worst case; an operator whose route depends on the member count overrides
   the method (`Median` selects the middle through element-wise min/max
-  networks up to five members and sorts the stack past that, so it answers
-  per count).
+  networks up to five members and an insertion window of the k + 1 smallest
+  past that, so it answers per count).
 - **`output_channels(channels, cases)`**: override when the fold changes the
   channel count (`Concat` returns `channels * cases`; the default returns
   `channels`).

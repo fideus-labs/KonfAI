@@ -47,6 +47,8 @@ class KonfAIInference(Transform):
     over a cohort is PREDICTION's job; this stage is for an inference that feeds a later stage.
     """
 
+    single_process = True
+
     def __init__(
         self,
         repo_id: str = DEFAULT_INFERENCE_REPO_ID,

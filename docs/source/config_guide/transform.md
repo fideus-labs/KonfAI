@@ -417,8 +417,9 @@ from every member. A member on a store that serves bounded region reads (`h5`,
 uncompressed copy) is read once. A member on a store that cannot (NRRD) decodes
 its whole volume behind every region read: once per region, twice that when a
 statistic of the result is seeded by a first pass, and a `memory_budget` that
-lowers the slab raises the count. The plan prices it (`reads: ... decodes per member`) and
-prints the remedy: put a `Save: {dataset: ./Cache:h5}` before the `Reduce`, so
+lowers the slab raises the count. The plan prices it at the first region's height
+(`reads: ... decodes per member ... at the starting height`; regions grown taller after it decode
+fewer times) and prints the remedy: put a `Save: {dataset: ./Cache:h5}` before the `Reduce`, so
 each member is materialized on a bounded store first and the fold reads the
 cache. A reduction is also one work item: `--cpu N` cannot split it over ranks.
 
