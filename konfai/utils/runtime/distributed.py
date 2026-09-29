@@ -88,15 +88,18 @@ def preserved_rng() -> Iterator[None]:
 
 
 def forget_earlier_workflows() -> None:
-    """Forget what an earlier workflow of this process left behind: the DICOM series it memoised (a
-    workflow reads a series as it is when it starts, and another tool may have rewritten it in place
-    since) and the streaming explanations it gave, which every run gives once."""
+    """Forget what an earlier workflow of this process left behind: the DICOM series and OME-Zarr stores
+    it memoised (a workflow reads its inputs as they are when it starts, and another tool may have
+    rewritten them in place since) and the streaming explanations it gave, which every run gives once."""
     dicom = sys.modules.get("konfai.utils.dicom")  # a process that never read DICOM memoised none
     if dicom is not None:
         dicom.forget_series()
     samples = sys.modules.get("konfai.data.data_manager.samples")  # nor explained a case
     if samples is not None:
         samples.forget_explanations()
+    ome_zarr = sys.modules.get("konfai.utils.ome_zarr")
+    if ome_zarr is not None:
+        ome_zarr.clear_ome_zarr_cache()
 
 
 def seed_all(seed: int) -> None:

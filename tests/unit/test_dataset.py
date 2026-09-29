@@ -202,6 +202,24 @@ def test_h5_missing_group_raises_the_designed_refusal_not_attributeerror(tmp_pat
                 read()
 
 
+@pytest.mark.parametrize("file_format", ["h5", "itktransform"])
+def test_an_h5_backed_entry_writes_and_reads_back_without_simpleitk(tmp_path: Path, file_format: str) -> None:
+    """``konfai[hdf5]`` alone: an array is written by h5py, so no SimpleITK type check may run."""
+    script = f"""
+import sys
+sys.modules["SimpleITK"] = None
+import numpy as np
+from konfai.utils.dataset import Attribute, Dataset
+attributes = Attribute()
+attributes["Origin"], attributes["Spacing"], attributes["Direction"] = np.zeros(3), np.ones(3), np.eye(3).ravel()
+field = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
+dataset = Dataset({str(tmp_path / "out")!r}, {file_format!r})
+dataset.write("Field", "CASE_000", field, attributes)
+assert np.array_equal(dataset.read_data("Field", "CASE_000")[0], field)
+"""
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+
+
 def test_h5_read_chunk_cache_takes_its_slice_of_the_declared_budget() -> None:
     """The HDF5 read pool's rdcc cache was the one decoded-block cache that ignored the declared
     budget: 128 MiB per handle, up to 8 handles, whatever the declaration. Declared, the pool at
@@ -1033,6 +1051,46 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
     assert dataset.is_dataset_exist("MASK", "P001")
 
 
+@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm", "nrrd.gz"])
+def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, image_attributes, file_format: str) -> None:
+    """A format SimpleITK has no writer for, or whose writer refuses this volume, answered with ITK's
+    trace and the name of a staging file the user never asked for."""
+    pytest.importorskip("SimpleITK")
+    dataset = Dataset(tmp_path / "store", file_format)
+    volume = np.ones((1, 4, 5, 6), np.float32)
+    with pytest.raises(DatasetManagerError, match=f"as '{file_format}'") as refusal:
+        dataset.write("CT", "CASE_001", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    assert ".tmp" not in str(refusal.value)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX directory permissions, not as root")
+@pytest.mark.parametrize("file_format", ["mha", "nii.gz"])
+def test_a_write_that_fails_on_the_disk_keeps_itks_error(tmp_path: Path, image_attributes, file_format: str) -> None:
+    """A format that holds the volume but a directory that refuses it: ITK's error, not a format refusal."""
+    pytest.importorskip("SimpleITK")
+    case = tmp_path / "store" / "CASE_001"
+    case.mkdir(parents=True)
+    case.chmod(0o555)
+    try:
+        with pytest.raises(RuntimeError):
+            Dataset(tmp_path / "store", file_format).write(
+                "CT", "CASE_001", np.ones((1, 4, 5, 6), np.float32), image_attributes([0.0] * 3, [1.0] * 3)
+            )
+    finally:
+        case.chmod(0o755)
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nii.gz", "nrrd"])
+def test_a_boolean_volume_is_refused_by_name_where_simpleitk_writes_it(
+    tmp_path: Path, image_attributes, file_format: str
+) -> None:
+    """SimpleITK has no boolean pixel type: its TypeError named no entry and no way out."""
+    pytest.importorskip("SimpleITK")
+    dataset = Dataset(tmp_path / "store", file_format)
+    with pytest.raises(DatasetManagerError, match="bool"):
+        dataset.write("MASK", "CASE_001", np.ones((1, 4, 5, 6), bool), image_attributes([0.0] * 3, [1.0] * 3))
+
+
 @pytest.mark.parametrize("file_format", ["mha", "h5", "nii.gz"])
 def test_read_data_quantile_is_numpys_without_holding_the_volume(
     tmp_path: Path, image_attributes, monkeypatch: pytest.MonkeyPatch, file_format: str
@@ -1507,10 +1565,12 @@ def test_an_h5_sidecar_is_read_once_per_pooled_handle_and_dropped_with_it(tmp_pa
     _, whole = dataset.read_data("CT", "P0")
 
     assert opens["attribute"] == len(attributes)
-    assert all(dict(record) == dict(attributes) for record in records)
+    # The sidecar, with the region's origin on top: (1, 2, 3) + (2, 0, 1) * (0.5, 1.5, 2.0), in (x, y, z).
+    assert all({key: record[key] for key in attributes} == dict(attributes) for record in records)
+    assert all(record.get_np_array("Origin").tolist() == [2.0, 2.0, 5.0] for record in records)
     assert dict(whole) == dict(attributes)
     records[0]["Origin"] = np.asarray([9.0, 9.0, 9.0])  # a copy: the caller's edits stay the caller's
-    assert dataset.read_data_slice("CT", "P0", region)[1]["Origin"] == attributes["Origin"]
+    assert dataset.read_data_slice("CT", "P0", region)[1]["Origin"] == records[1]["Origin"]
 
     attributes["Study"] = "rewritten"
     dataset.write("CT", "P0", volume + 1, attributes)

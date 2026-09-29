@@ -71,8 +71,8 @@ class _PixelBlock(NamedTuple):
     metadata: Attribute  # the header's own keys, as image_to_data imports them
     probe: Any  # a one-voxel sitk.Image carrying the header's geometry: ITK's own index-to-world arithmetic
     # Origin / Spacing / Direction as an attribute holds them, printed once for the file: every region
-    # of a volume records the same spacing and direction, and printing a float array costs 24 us for
-    # three elements and 30 us for nine (measured), against 0.04 us to hand text through the same door.
+    # of a volume records the same spacing and direction, and numpy's printer costs far more than
+    # handing the printed text over.
     geometry_text: dict[str, str]
 
     @property

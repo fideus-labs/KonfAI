@@ -35,7 +35,6 @@ except ImportError:
 from typing import TYPE_CHECKING
 
 from konfai.utils import uri
-from konfai.utils.budget import format_bytes, per_rank_budget_bytes
 from konfai.utils.dataset import statistics
 from konfai.utils.dataset.abstract import AbstractFile as _AbstractFile
 from konfai.utils.dataset.attribute import (
@@ -56,10 +55,8 @@ from konfai.utils.dataset.statistics import (
     _finalize_running_statistics,
     _lerp_like_numpy,
     _order_statistics,
-    _scan_block_on_the_store_grid,
-    _statistics_block_elements,
+    _scan_rows,
     _statistics_chunk_length,
-    _statistics_plane_elements,
     _update_pieces,
     _update_running_extrema,
     _update_running_statistics,
@@ -361,7 +358,8 @@ class Dataset:
 
     def can_stream_data(self, attributes: Attribute) -> bool:
         """Whether ``open_data_stream`` can serve this dataset's write format: H5 and OME-Zarr always;
-        MetaImage/NIfTI with image geometry; every other format only writes whole volumes."""
+        ``mha``, ``nii`` and ``itktransform`` (a displacement field) with image geometry; every other
+        format only writes whole volumes."""
         return self._backend.can_stream(self.file_format, attributes)
 
     def open_data_stream(
@@ -517,26 +515,9 @@ class Dataset:
             return whole
         # A whole number of update pieces: the fold sees the same pieces in the same order whatever
         # the read grain, so the budget never changes what the running mean and std answer.
-        budget = per_rank_budget_bytes()
-        # Only a declared budget pays the probe.
-        element_bytes = (
-            statistics._STATISTICS_ELEMENT_BYTES if budget is None else self._scanned_element_bytes(groups, name, shape)
+        rows = _scan_rows(
+            [(self, groups)], name, shape, _statistics_chunk_length(shape, 1, statistics._STATISTICS_UPDATE_ELEMENTS)
         )
-        piece = _statistics_chunk_length(shape, 1, statistics._STATISTICS_UPDATE_ELEMENTS)
-        rows = max(
-            piece, _statistics_chunk_length(shape, 1, _statistics_block_elements(element_bytes)) // piece * piece
-        )
-        plane = _statistics_plane_elements(shape, 1)
-        granularity = self.read_granularity(groups, name)
-        rows, held = _scan_block_on_the_store_grid(
-            rows, int(shape[1]), plane, granularity[1:2] if granularity else None, budget, element_bytes
-        )
-        if budget is not None and held > budget:
-            raise DatasetManagerError(
-                f"'{name}': the shortest block a whole-volume scan of '{groups}' can read holds"
-                f" {format_bytes(held)}, over the per-rank memory budget ({format_bytes(budget)}).",
-                "Raise 'memory_budget'.",
-            )
 
         def slabs() -> Iterator[np.ndarray]:
             for start in range(0, int(shape[1]), rows):
@@ -744,12 +725,11 @@ class Dataset:
         # The header read is memoised; copies go in and out so a caller cannot mutate the cache.
         cache_key = (groups, name)
         cached = self._infos_cache.get(cache_key)
-        if cached is not None:
-            shape, attr = cached
-            return list(shape), Attribute(attr)
-        result = self._resolve_entry(groups, name, lambda file, group, entry: file.get_infos(group, entry))
-        self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
-        return result
+        if cached is None:
+            shape, attr = self._resolve_entry(groups, name, lambda file, group, entry: file.get_infos(group, entry))
+            cached = self._infos_cache[cache_key] = (list(shape), Attribute(attr))
+        shape, attr = cached
+        return list(shape), Attribute(attr)
 
 
 def refuse_shared_single_file(world_size: int, destinations: Iterable[Dataset], error: type[KonfAIError]) -> None:

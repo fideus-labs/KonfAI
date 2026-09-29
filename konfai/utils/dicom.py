@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
@@ -61,9 +61,6 @@ _ORIENTATION_TOLERANCE = 1e-4
 
 #: Two slices closer than this along the normal sit at one position (float noise, not a spacing).
 _COINCIDENT_POSITION_MM = 1e-6
-
-if TYPE_CHECKING:
-    pass
 
 try:
     import pydicom
@@ -93,20 +90,26 @@ def discover_series(directory: str | Path) -> dict[str, list[Path]]:
     ``directory`` is scanned recursively for .dcm files. Raises ``DatasetManagerError`` when
     ``pydicom`` is not installed or the directory contains no DICOM.
     """
+    return {uid: [path for path, _ in members] for uid, members in _discover_headers(directory).items()}
+
+
+def _discover_headers(directory: str | Path) -> dict[str, list[tuple[Path, DicomDataset]]]:
+    """:func:`discover_series` with the header each file was grouped by (no pixel data), which the
+    slice sort reads as well."""
     _require_pydicom()
 
     root = Path(directory)
     if not root.is_dir():
         raise DatasetManagerError(f"DICOM directory '{root}' does not exist or is not a directory.")
 
-    series: dict[str, list[Path]] = {}
+    series: dict[str, list[tuple[Path, DicomDataset]]] = {}
     for dirpath, _, filenames in os.walk(root):
         for fname in filenames:
             fpath = Path(dirpath) / fname
             try:
                 ds = pydicom.dcmread(str(fpath), stop_before_pixels=True)
                 uid = str(ds.SeriesInstanceUID)
-                series.setdefault(uid, []).append(fpath)
+                series.setdefault(uid, []).append((fpath, ds))
             except Exception:  # nosec B112
                 # Skip unreadable or non-DICOM files; discovery must not crash on stray content.
                 continue
@@ -152,8 +155,9 @@ def sort_series(files: list[Path], *, stop_before_pixels: bool = False) -> list[
     return datasets
 
 
-def _select_series_files(directory: str | Path, series_uid: str | None = None) -> tuple[str, list[Path]]:
-    all_series = discover_series(directory)
+def _select_series(directory: str | Path, series_uid: str | None = None) -> tuple[str, list[tuple[Path, DicomDataset]]]:
+    """The series ``series_uid`` names, or the folder's only one: its UID, and its files with their headers."""
+    all_series = _discover_headers(directory)
     if series_uid is not None:
         if series_uid not in all_series:
             raise DatasetManagerError(
@@ -402,9 +406,10 @@ def plane_cache_held_bytes() -> int:
     return _plane_cache.held_bytes
 
 
-def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
+def _decoded_plane(path: Path, keep: bool = True) -> tuple[np.ndarray, float, float]:
     """One slice file's whole decoded plane and its rescale tags, parsed and decoded once per file
-    per pass."""
+    per pass. ``keep=False`` serves a cached plane but caches none: a whole read touches each plane
+    once."""
     stamp = os.stat(path)
     key = (str(path), stamp.st_mtime_ns, stamp.st_size)
     cached = _plane_cache.get(key)
@@ -415,18 +420,21 @@ def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
     plane.flags.writeable = False  # shared across every region that hits the cache
     slope = float(getattr(ds, "RescaleSlope", 1.0))
     intercept = float(getattr(ds, "RescaleIntercept", 0.0))
-    _plane_cache.put(key, plane, slope, intercept)
+    if keep:
+        _plane_cache.put(key, plane, slope, intercept)
     return plane, slope, intercept
 
 
-def _decode_cached_planes(files: list[Path], window: tuple[slice, slice], apply_rescale: bool) -> np.ndarray:
+def _decode_cached_planes(
+    files: list[Path], window: tuple[slice, slice], apply_rescale: bool, keep: bool = True
+) -> np.ndarray:
     """:func:`_decode_slices` off the plane cache: the same values, the same refusals, each plane
     parsed and decoded at most once per pass instead of once per touching region."""
     volume: np.ndarray | None = None
     expected_shape: tuple[int, ...] | None = None
     for i, path in enumerate(files):
         try:
-            plane, slope, intercept = _decoded_plane(path)
+            plane, slope, intercept = _decoded_plane(path, keep)
         except Exception as exc:
             raise DatasetManagerError(
                 f"Cannot read pixel data from DICOM slice {i}.",
@@ -462,8 +470,11 @@ def get_dicom_info(
     by case would miss on every patch past a bound. ``write_dicom_series`` and :func:`forget_series`
     clear it. Callers that mutate the result must copy it first.
     """
-    selected_uid, files = _select_series_files(directory, series_uid)
-    datasets = sort_series(files, stop_before_pixels=True)
+    selected_uid, members = _select_series(directory, series_uid)
+    # The headers the discovery parsed, in the order sort_series puts them in: a stable sort on the
+    # slice position.
+    ordered = sorted(members, key=lambda member: _slice_position(member[1]))
+    datasets = [header for _, header in ordered]
     origin, spacing, direction = extract_geometry(datasets)
     first = datasets[0]
     try:
@@ -471,11 +482,10 @@ def get_dicom_info(
         columns = int(first.Columns)
     except AttributeError as exc:
         raise DatasetManagerError("DICOM Rows/Columns tags are required to determine the volume shape.") from exc
-    by_name = {str(path): path for path in files}  # the discovery's own Path objects, once each
     return {
         "series_uid": selected_uid,
-        "files": files,
-        "sorted_files": [by_name[ds.filename] for ds in datasets],
+        "files": [path for path, _ in members],
+        "sorted_files": [path for path, _ in ordered],
         "shape": [1, len(datasets), rows, columns],
         "origin": origin,
         "spacing": spacing,
@@ -705,8 +715,8 @@ def read_dicom_series(
     """
     _require_pydicom()
 
-    _selected_uid, files = _select_series_files(directory, series_uid)
-    datasets = sort_series(files)
+    _selected_uid, members = _select_series(directory, series_uid)
+    datasets = sort_series([path for path, _ in members])
     origin, spacing, direction = extract_geometry(datasets)
     volume = read_volume(datasets, apply_rescale=apply_rescale)
     return volume, origin, spacing, direction

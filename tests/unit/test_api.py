@@ -263,6 +263,35 @@ def test_a_dicom_series_rewritten_between_two_calls_is_read_as_it_now_is(
     assert run("Second") == (2.0, 2.0, 1.0)
 
 
+def test_an_ome_zarr_store_replaced_between_two_calls_is_read_as_it_now_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another tool puts a store at the path between two calls: the second call reads the store that
+    is there, not the parse the first call memoised."""
+    pytest.importorskip("zarr")
+    import shutil
+
+    from konfai.utils.dataset import Attribute, Dataset
+
+    monkeypatch.chdir(tmp_path)
+    volume = np.zeros((1, 4, 8, 8), np.float32)
+    for root, spacing in (("Raw", 1.0), ("Other", 2.0)):
+        attributes = Attribute()
+        attributes["Origin"], attributes["Direction"] = np.zeros(3), np.eye(3).flatten()
+        attributes["Spacing"] = np.full(3, spacing)
+        Dataset(tmp_path / root, "omezarr").write("CT", "P000", volume, attributes)
+
+    def run(name: str) -> tuple[float, ...]:
+        chains = {"CT": {"CT": [Write(dataset=f"./{name}:mha")]}}
+        api.transform(name, "./Raw:omezarr", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+        return sitk.ReadImage(str(tmp_path / name / "P000" / "CT.mha")).GetSpacing()
+
+    assert run("First") == (1.0, 1.0, 1.0)
+    shutil.rmtree(tmp_path / "Raw")
+    shutil.copytree(tmp_path / "Other", tmp_path / "Raw")
+    assert run("Second") == (2.0, 2.0, 2.0)
+
+
 def test_one_workflow_at_a_time_per_process(cohort: Path) -> None:
     assert api._ACTIVE.acquire(blocking=False)
     try:

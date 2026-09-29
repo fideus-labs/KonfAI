@@ -26,7 +26,7 @@ import pytest
 
 
 def test_import_konfai_does_not_load_the_imaging_optional_deps() -> None:
-    """``konfai.utils.dicom`` and ``ome_zarr`` import pydicom and zarr at module level; the
+    """``konfai.utils.dicom`` imports pydicom and ``ome_zarr`` imports zarr at module level; the
     package must not pull them in for ``import konfai`` (or for the torch-free ``State``)."""
     script = """
 import sys
