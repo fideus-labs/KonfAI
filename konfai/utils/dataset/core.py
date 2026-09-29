@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections import Counter
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
@@ -64,13 +65,15 @@ from konfai.utils.dataset.statistics import (
     _update_running_statistics,
     needs_moments,
 )
-from konfai.utils.errors import DatasetManagerError, KonfAIError
+from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIError
 from konfai.utils.utils import (
     STORE_FORMS,
     SUPPORTED_EXTENSIONS,
     SUPPORTED_FORMATS,
-    directory_volume_form,
+    is_dir_entry,
+    is_file_entry,
     is_store_name,
+    listed_volume_form,
     split_format_level,
     storage_form,
 )
@@ -79,6 +82,97 @@ if TYPE_CHECKING:
     from konfai.utils.dataset.stream import DataStream
 
 _T = TypeVar("_T")
+
+
+#: How many of a local root's directories are probed for its store form, how many sub-directories of each
+#: that hold something are opened, and how many files of those are read for the DICOM magic: a probe costs a
+#: bounded number of listings and reads, whatever the cohort.
+_PROBED = 16
+
+_VOLUME_FILES = tuple(f".{extension}" for extension in SUPPORTED_EXTENSIONS)
+
+
+def _local_store_form(root: str) -> str | None:
+    """The store form (``omezarr`` / ``dicom``) most of a sample of ``root``'s directories hold, ``None``
+    when that is plain files or when none of them holds a volume.
+
+    The sample is spread evenly over the directories by name, hidden ones aside, and stops once a form holds
+    a majority of it; one that holds no volume or cannot be read does not vote, and a tie goes to the form
+    the first of them by name holds. A link is followed only once sampled, and one to a file or to nothing
+    does not vote. When no sampled directory could be read at all, the permission error is raised: nothing
+    was seen to decide on.
+    """
+    with os.scandir(root) as listing:
+        names = sorted(
+            entry.name
+            for entry in listing
+            if not entry.name.startswith(".") and (entry.is_symlink() or entry.is_dir(follow_symlinks=False))
+        )
+    count = min(_PROBED, len(names))
+    votes: Counter[str] = Counter()
+    denied: PermissionError | None = None
+    read = False
+    for index in range(count):
+        try:
+            form = _held_volume_form(os.path.join(root, names[index * len(names) // count]))
+        except PermissionError as error:
+            denied = denied or error
+            continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        read = True
+        if form is not None:
+            votes[form] += 1
+            if votes[form] > count // 2:
+                break
+    if not votes:
+        if denied is not None and not read:
+            raise denied
+        return None
+    form = max(votes, key=votes.__getitem__)
+    return None if form == "file" else form
+
+
+def _held_volume_form(directory: str) -> str | None:
+    """``omezarr`` / ``dicom`` for the first volume directory ``directory`` holds by name, ``file`` when it
+    holds volume files only, ``None`` when it holds no volume.
+
+    A sub-directory named as a store is told by its name; of the others, only the first ``_PROBED`` that
+    hold something are looked into (a directory of cases holds hundreds), with at most ``_PROBED`` of their
+    files read for the DICOM magic, and one that cannot be read is passed over. When nothing was found and
+    one was passed over, its permission error is raised.
+    """
+    with os.scandir(directory) as listing:
+        entries = sorted(listing, key=lambda entry: entry.name)
+    holds_file = False
+    opened = 0
+    denied: PermissionError | None = None
+    for entry in entries:
+        if not is_dir_entry(entry):
+            name = entry.name
+            holds_file |= not name.startswith(".") and name.lower().endswith(_VOLUME_FILES) and is_file_entry(entry)
+            continue
+        if is_store_name(entry.name):
+            return "omezarr"
+        if opened == _PROBED or (entry.name.startswith(".") and is_staging_entry(entry.name)):
+            continue  # a writer's staging directory holds another entry's files until it is moved in
+        try:
+            with os.scandir(entry.path) as listing:
+                held = list(listing)
+        except PermissionError as error:
+            denied = denied or error
+            continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        opened += bool(held)
+        volume = listed_volume_form(held, _PROBED)
+        if volume is not None:
+            return "dicom" if volume == "" else "omezarr"
+    if holds_file:
+        return "file"
+    if denied is not None:
+        raise denied
+    return None
 
 
 def _is_listed_name(name: str) -> bool:
@@ -169,30 +263,21 @@ class Dataset:
     @staticmethod
     def _detect_directory_store_format(root: str) -> str | None:
         """The store backend of a directory dataset, from disk (``omezarr`` / ``dicom``), or ``None`` for
-        plain per-file volumes. Probes the first case's entries only."""
+        plain per-file volumes."""
         if not uri.is_dir(root):
             return None
         if uri.is_uri(root):
             # A remote store is told by its name, never probed as a path.
             names = Dataset._first_case_entries(root)
             return "omezarr" if any(is_store_name(name.name) for name in names) else None
-        for entry in Dataset._first_case_entries(root):
-            if entry.name.startswith(".") and is_staging_entry(entry.name):
-                continue  # a writer's staging directory: another entry's files, removed once moved in
-            volume = directory_volume_form(entry)
-            if volume is not None:
-                return "dicom" if volume == "" else "omezarr"
-        return None
+        return _local_store_form(root)
 
     @staticmethod
     def _first_case_entries(root: str) -> list[Path]:
-        """What ``root``'s first case directory holds, empty when it has none."""
-        if uri.is_uri(root):
-            cases = (name for name in uri.list_names(root))
-            case = next((name for name in cases if uri.is_dir(uri.join(root, name))), None)
-            return [] if case is None else [Path(name) for name in uri.list_names(uri.join(root, case))]
-        case_path = next((child for child in Path(root).iterdir() if child.is_dir()), None)
-        return [] if case_path is None else sorted(case_path.iterdir())
+        """What remote ``root``'s first case directory by name holds, empty when it has none."""
+        cases = (name for name in uri.list_names(root))
+        case = next((name for name in cases if uri.is_dir(uri.join(root, name))), None)
+        return [] if case is None else [Path(name) for name in uri.list_names(uri.join(root, case))]
 
     @property
     def store_root(self) -> str:
@@ -350,13 +435,13 @@ class Dataset:
             for sub_directory in self._get_sub_directories(groups):
                 path = self._case_path(sub_directory, name)
                 if path is not None:
-                    with self._file(path, True) as file:
+                    with self._unreadable_named(path, groups, name), self._file(path, True) as file:
                         return action(file, "", groups.split("/")[-1])
             raise DatasetManagerError(
                 f"The entry '{groups}/{name}' is not in '{self.filename}'.",
                 "Check the groups_src spelling and that the case carries every group it names.",
             )
-        with self._file(self.filename, True) as file:
+        with self._unreadable_named(self.filename, groups, name), self._file(self.filename, True) as file:
             # is_exist would take a wildcard group's '*' literally.
             exists = name in file.get_names(groups) if "*" in groups else file.is_exist(groups, name)
             if not exists:
@@ -365,6 +450,18 @@ class Dataset:
                     "Check the groups_src spelling and that the case carries every group it names.",
                 )
             return action(file, groups, name)
+
+    @contextlib.contextmanager
+    def _unreadable_named(self, where: str, groups: str, name: str) -> Iterator[None]:
+        """Raise what the backend's library raises on an entry it cannot read as a ``CaseReadError``
+        naming the case, the entry and the file."""
+        try:
+            yield
+        except self._backend.read_errors as error:
+            detail = " ".join(str(error).split())
+            raise CaseReadError(
+                f"The '{groups}' entry of case '{name}' in '{where}' cannot be read: {type(error).__name__}: {detail}"
+            ) from error
 
     def read_data(self, groups: str, name: str) -> tuple[np.ndarray, Attribute]:
         return self._resolve_entry(groups, name, lambda file, group, entry: file.file_to_data(group, entry))

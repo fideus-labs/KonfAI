@@ -17,6 +17,13 @@ literal string `"None"`: it is written back as `"None"` and reparsed to
 `None` on the next read. An explicit `name: null` (or an empty `name:`) also
 binds `None`: null is the disabled spelling and is never replaced by the
 default.
+
+The rewrite replaces the file through a temporary file in its directory. On
+Linux and macOS, a config you own keeps its group and its mode: a read-only
+config (`0444`) is still resolved in place and stays read-only after the run,
+so a tool that must edit it afterwards has to make it writable first. A config
+another user owns, or whose group you do not belong to, is replaced by a file
+of yours with the group and mode a new file gets in that directory.
 ```
 
 ## Four files, four commands
@@ -199,16 +206,32 @@ creates the file when missing (seeded with its root key), binds the workflow
 once so every default resolves into it, and exits without running. The former
 generation modes (`default`, `interactive`, `remove`) are gone.
 
-Two binding rules worth knowing:
+Binding rules worth knowing:
 
 - **An explicit null stays null.** `name:` (empty) or `name: null` binds
   `None`, the disabled spelling, exactly like the string `"None"`. The default
   is not substituted: that would silently reactivate the very thing the line
-  was written to suppress.
+  was written to suppress. The root key is the exception: an empty `Trainer:`
+  would bind the workflow itself to `None`, so it is refused; `Trainer: {}`
+  binds every default. The same holds for the workflow's own `Dataset:` and
+  `Model:` blocks, directly under the root: an empty one is refused
+  (`'Trainer.Dataset' is empty`), and `Dataset: {}` binds every default.
+  Deeper down null keeps its meaning: an empty `optimizer:` on one network of
+  a composite freezes that network, `ModelPatch: None` removes the model's
+  patch.
 - **A wrong-shaped value is refused, by dotted path.** A key given a nested
   block or a list where its parameter takes a scalar raises `ConfigError`
   naming the path (`Parameter 'Trainer.Dataset.batch_size' was given a nested
-  block, but it takes a int.`) instead of binding something silently.
+  block, but it takes a int.`) instead of binding something silently. The
+  list form is reserved for chains: a list at the key of one object
+  (`optimizer: [SGD]`, `optimizer: []`) is refused the same way; write its
+  settings as a mapping (`optimizer: {name: SGD}`).
+- **A required key must be written.** A parameter with no default whose type
+  does not take `None` (`OneHot`'s `num_classes: int`) is refused when the file
+  lacks it (`missing required key '...OneHot.num_classes'`), instead of binding
+  `None` and failing later on an error that names no key. Write the key, or
+  `key: None` to bind `None` on purpose. A parameter without annotation, or
+  typed `X | None`, still binds `None`.
 
 ## `classpath`
 
@@ -462,7 +485,10 @@ From the dataset code, `subset` may be:
 From the dataset code, `validation` may be:
 
 - `None`
-- a float such as `0.2`
+- a float such as `0.2`: the share of the training entries (patches times
+  augmentation copies) to hold out. Validation takes the last cases of the run
+  order, cut at the case boundary closest to that share; a tie goes to
+  validation, which always keeps at least one case
 - a slice string such as `0:10` (a negative end counts from the end,
   Python-style: `0:-2`)
 - a path to a text file listing case names

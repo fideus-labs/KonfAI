@@ -572,6 +572,210 @@ def test_autodetect_plain_files_return_none(tmp_path: Path) -> None:
     assert Dataset._detect_directory_store_format(str(root)) is None
 
 
+class _Listing:
+    """What ``os.scandir`` hands back, over entries in a chosen order."""
+
+    def __init__(self, entries: list[os.DirEntry]) -> None:
+        self._entries = iter(entries)
+
+    def __iter__(self) -> "_Listing":
+        return self
+
+    def __next__(self) -> os.DirEntry:
+        return next(self._entries)
+
+    def __enter__(self) -> "_Listing":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _list_by_name(monkeypatch: pytest.MonkeyPatch, reverse: bool) -> None:
+    """Every directory listing in name order, or in reverse: a filesystem may list in any order."""
+    scandir = os.scandir
+
+    def listed(path: str = ".") -> _Listing:
+        with scandir(path) as entries:
+            return _Listing(sorted(entries, key=lambda entry: entry.name, reverse=reverse))
+
+    monkeypatch.setattr(os, "scandir", listed)
+
+
+def _store_cases(root: Path, names: list[str]) -> None:
+    for name in names:
+        (root / name / "CT.ome.zarr").mkdir(parents=True)
+
+
+def _file_cases(root: Path, names: list[str]) -> None:
+    for name in names:
+        (root / name).mkdir(parents=True)
+        (root / name / "CT.mha").write_bytes(b"")
+
+
+def _put(path: Path, data: bytes = b"") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _cases(prefix: str, count: int = 20) -> list[str]:
+    return [f"{prefix}_{index:03d}" for index in range(count)]
+
+
+def _atlas_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("CASE"))
+    _put(root / "Atlas" / "atlas.nii.gz")
+
+
+def _qc_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("patient"))
+    _put(root / "QC" / "overview.png")
+
+
+def _trash_beside_files(root: Path) -> None:
+    _file_cases(root, _cases("CASE"))
+    _put(root / ".Trash-1000" / "files" / "deleted.dcm")
+    (root / ".Trash-1000" / "info").mkdir()
+
+
+def _trash_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("CASE"))
+    _put(root / ".Trash-1000" / "files" / "deleted.dcm")
+
+
+def _git_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("CASE"))
+    _put(root / ".git" / "HEAD", b"ref: refs/heads/main\n")
+    _put(root / ".git" / "hooks" / "pre-commit.sample", b"#!/bin/sh\n")
+    (root / ".git" / "objects" / "ab").mkdir(parents=True)
+
+
+def _checkpoints_beside_files(root: Path) -> None:
+    _file_cases(root, _cases("CASE"))
+    _put(root / ".ipynb_checkpoints" / "labels-checkpoint.xml")
+
+
+def _one_store(root: Path) -> None:
+    _store_cases(root, ["CASE_000"])
+
+
+def _unreadable_in_every_store_case(root: Path) -> None:
+    _store_cases(root, _cases("CASE", 3))
+    for case in _cases("CASE", 3):
+        (root / case / ".private").mkdir(mode=0)
+
+
+@pytest.mark.parametrize(
+    ("layout", "token", "backend", "cases"),
+    [
+        (_atlas_beside_stores, "mha", "omezarr", 20),
+        (_qc_beside_stores, "mha", "omezarr", 20),
+        (_trash_beside_files, "mha", "mha", 20),
+        (_trash_beside_stores, "omezarr", "omezarr", 20),
+        (_git_beside_stores, "mha", "omezarr", 20),
+        (_checkpoints_beside_files, "mha", "mha", 20),
+        (_one_store, "mha", "omezarr", 1),
+        (_unreadable_in_every_store_case, "mha", "omezarr", 3),
+        (_unreadable_in_every_store_case, "omezarr", "omezarr", 3),
+    ],
+)
+def test_the_cases_decide_the_store_form_whatever_sits_beside_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout, token: str, backend: str, cases: int
+) -> None:
+    """A directory beside the cases (an atlas, a QC folder, a trash, a repository, a notebook's
+    checkpoints) or one a case holds and nobody may read never decides a root's store form, whatever
+    the filesystem's listing order: the form the cases hold does, and every case is listed."""
+    root = tmp_path / "ds"
+    layout(root)
+    found = []
+    try:
+        for reverse in (False, True):
+            _list_by_name(monkeypatch, reverse)
+            dataset = Dataset(f"{root}/", token)
+            found.append((dataset.file_format, len(dataset.get_names("CT"))))
+    finally:
+        for private in root.glob("*/.private"):
+            private.chmod(0o755)
+    assert found == [(backend, cases)] * 2
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads every directory")
+@pytest.mark.skipif(os.name == "nt", reason="chmod does not take away reading a directory on Windows")
+def test_a_root_none_of_whose_cases_can_be_read_is_refused_not_read_as_empty(tmp_path: Path) -> None:
+    """With no case readable, nothing was seen to decide the store form: the permission error is raised,
+    not a guess that would list no case."""
+    root = tmp_path / "ds"
+    _store_cases(root, _cases("CASE", 3))
+    for case in root.iterdir():
+        case.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            Dataset(f"{root}/", "mha")
+    finally:
+        for case in root.iterdir():
+            case.chmod(0o755)
+
+
+def test_a_large_root_is_probed_on_a_bounded_sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """At most 16 of a root's directories vote, and at most 16 sub-directories of each that hold something
+    are opened: a cohort of thousands, flat or grouped in folders, costs a few listings to probe."""
+    flat, nested = tmp_path / "flat", tmp_path / "nested"
+    _file_cases(flat, _cases("CASE", 40))
+    for fold in ("fold_0", "fold_1"):
+        _file_cases(nested / fold, _cases("CASE", 40))
+    scandir = os.scandir
+    listed: list[str] = []
+    monkeypatch.setattr(os, "scandir", lambda path=".": (listed.append(str(path)), scandir(path))[1])
+
+    assert Dataset._detect_directory_store_format(f"{flat}/") is None
+    assert len(listed) <= 1 + 16
+    listed.clear()
+    assert Dataset._detect_directory_store_format(f"{nested}/") is None
+    assert len(listed) <= 1 + 2 * (1 + 16)
+
+
+def test_a_series_beside_its_macos_twins_is_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An extensionless series extracted from a macOS archive holds a ``._`` twin per slice: the twins sort
+    first, yet the slices are the files read for the DICOM magic."""
+    root = tmp_path / "ds"
+    for case in _cases("CASE", 4):
+        for index in range(20):
+            _put(root / case / "CT" / f"IM{index:02d}", b"\0" * 128 + b"DICM")
+            _put(root / case / "CT" / f"._IM{index:02d}", b"\0" * 4096)
+
+    detected = []
+    for reverse in (False, True):
+        _list_by_name(monkeypatch, reverse)
+        detected.append(Dataset._detect_directory_store_format(f"{root}/"))
+    assert detected == ["dicom", "dicom"]
+
+
+class _Entry:
+    """A listing entry that records every link it is asked to follow."""
+
+    def __init__(self, entry: os.DirEntry, followed: list[str]) -> None:
+        self._entry, self._followed = entry, followed
+        self.name, self.path = entry.name, entry.path
+
+    def _follows(self, follow_symlinks: bool) -> None:
+        if follow_symlinks and self._entry.is_symlink():
+            self._followed.append(self.name)
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        self._follows(follow_symlinks)
+        return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+    def is_file(self, *, follow_symlinks: bool = True) -> bool:
+        self._follows(follow_symlinks)
+        return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+    def is_symlink(self) -> bool:
+        return self._entry.is_symlink()
+
+
 def test_init_overrides_mha_token_for_ome_zarr_store(tmp_path: Path) -> None:
     root = _make_case(tmp_path / "ds", "Volume_0.ome.zarr")
     # the token says mha, but the store on disk is OME-Zarr -> the read backend follows the disk

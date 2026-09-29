@@ -19,7 +19,7 @@
 
 import math
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from itertools import islice
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -118,9 +118,40 @@ class CriterionResult(NamedTuple):
         return self.value
 
 
+def call_criterion(
+    criterion: torch.nn.Module,
+    output: torch.Tensor,
+    targets: list[torch.Tensor],
+    attributes: list[list[Attribute]],
+    output_attributes: list[Attribute] | None,
+) -> CriterionOutput:
+    """``criterion`` scored on ``output`` against ``targets``, the one call of training and evaluation.
+    A ``CriterionWithAttribute`` receives ``attributes``, the per-sample attributes of each target in
+    the order of the target group, and the output's own as ``output_attributes`` when it declares
+    ``accepts_output_attributes``: ``None`` in training, where a model output has none."""
+    if not getattr(criterion, "accepts_attributes", False):
+        return criterion(output, *targets)
+    if getattr(criterion, "accepts_output_attributes", False):
+        return criterion(output, *targets, attributes=attributes, output_attributes=output_attributes)
+    return criterion(output, *targets, attributes=attributes)
+
+
+def criterion_keys(output_group: str, target_group: str, names: Iterable[str]) -> list[str]:
+    """The key of each criterion of ``output_group`` against ``target_group``, from their names in
+    order: ``output:target:Name``, the n-th of one name as ``Name#n`` (as a repeated class binds in a
+    chain), so two criteria of one class keep a record each."""
+    seen: dict[str, int] = {}
+    keys = []
+    for name in names:
+        seen[name] = seen.get(name, 0) + 1
+        keys.append(f"{output_group}:{target_group}:{name if seen[name] == 1 else f'{name}#{seen[name]}'}")
+    return keys
+
+
 class _RunningNanMean:
-    """The nan-aware mean of everything added, in O(1) per value: what ``np.nanmean`` over the whole
-    history returns, up to summation order (measured at most 3.2e-14 relative over 5e5 values)."""
+    """The nan-aware mean of everything added, each value weighing its ``patches``, in O(1) per
+    value: what ``_total`` over the whole history returns, up to summation order (measured at most
+    3.2e-14 relative over 5e5 values)."""
 
     __slots__ = ("count", "total")
 
@@ -128,22 +159,38 @@ class _RunningNanMean:
         self.total = 0.0
         self.count = 0
 
-    def add(self, value: float) -> None:
-        if not math.isnan(value):
-            self.total += value
-            self.count += 1
+    def add(self, value: float, patches: int = 1) -> None:
+        if patches and not math.isnan(value):
+            self.total += value * patches
+            self.count += patches
 
     def mean(self) -> float:
-        return self.total / self.count if self.count else float("nan")
+        return _ratio((self.total, self.count))
 
 
-def _tail(values: deque[float], n: int) -> list[float]:
+def _tail(values: deque[Any], n: int) -> list[Any]:
     """The last ``n`` values (``n > 0``)."""
     return list(islice(values, max(0, len(values) - n), None))
 
 
+def _total(values: list[float], patches: list[int]) -> tuple[float, int]:
+    """The sum of the values that are not NaN, each times its ``patches``, and the patches they hold:
+    ``np.nanmean``'s sum and count, bit for bit, when every value holds one patch."""
+    value = np.asarray(values, dtype=np.float64)
+    weight = np.asarray(patches, dtype=np.int64)
+    kept = ~np.isnan(value) & (weight > 0)
+    return float(np.sum(np.where(kept, value, 0.0) * weight)), int(np.sum(np.where(kept, weight, 0)))
+
+
+def _ratio(total: tuple[float, int]) -> float:
+    return total[0] / total[1] if total[1] else float("nan")
+
+
 class Measure:
     """Collect, validate, and aggregate losses or metrics across model outputs."""
+
+    # False while a batch is run only to keep the ranks' forwards in step: recorded, weighing nothing.
+    scored = True
 
     class Loss:
         def __init__(
@@ -168,6 +215,8 @@ class Measure:
             # the whole-history consumers read the running means instead, so nothing grows with the run.
             self._weight: deque[float] = deque()
             self._values: deque[float] = deque()
+            # The patches each value averages: a mean over batches weighs each by it (see ``Measure.update``).
+            self._patches: deque[int] = deque()
             # The minimized quantity beside the reported one: a Dice loss reports the coefficient
             # (higher is better) and minimizes one minus it. Checkpoint selection and a plateau
             # schedule read this window, the boards read ``_values``.
@@ -180,7 +229,7 @@ class Measure:
             # per-label metric as its LabelledValues), because reading it inside the forward stalls
             # the CPU on the whole graph before backward is enqueued. The consumers read them in one
             # transfer per device (``Measure._materialize``), the loss tensor beside each value.
-            self._unread: list[tuple[float | torch.Tensor | LabelledValues, torch.Tensor]] = []
+            self._unread: list[tuple[float | torch.Tensor | LabelledValues, torch.Tensor, int]] = []
 
         def reset_loss(self) -> None:
             self._loss.clear()
@@ -200,24 +249,37 @@ class Measure:
             self._values = deque(self._values, maxlen=n)
             self._weight = deque(self._weight, maxlen=n)
             self._losses = deque(self._losses, maxlen=n)
+            self._patches = deque(self._patches, maxlen=n)
 
-        def _record(self, value: float, loss: float) -> None:
+        def _record(self, value: float, loss: float, patches: int) -> None:
             self._values.append(value)
-            self._mean.add(value)
+            self._mean.add(value, patches)
             self._losses.append(loss)
-            self._mean_loss.add(loss)
+            self._mean_loss.add(loss, patches)
+            self._patches.append(patches)
+
+        def values_total(self, n: int) -> tuple[float, int]:
+            """The last ``n`` values as ``_total`` sums them, the whole history for ``n <= 0``."""
+            if n <= 0:
+                return self._mean.total, self._mean.count
+            return _total(_tail(self._values, n), _tail(self._patches, n))
+
+        def losses_total(self, n: int) -> tuple[float, int]:
+            """The last ``n`` minimized values as ``_total`` sums them, the whole history for ``n <= 0``."""
+            if n <= 0:
+                return self._mean_loss.total, self._mean_loss.count
+            tail = _tail(self._losses, n)
+            return _total(tail, _tail(self._patches, len(tail)))
 
         def values_mean(self, n: int) -> float:
-            """The nan-mean of the last ``n`` values, of the whole history for ``n <= 0``."""
-            return float(np.nanmean(_tail(self._values, n))) if n > 0 else self._mean.mean()
+            """The nan-mean of the last ``n`` values, each weighing its patches, of the whole history
+            for ``n <= 0``."""
+            return _ratio(self.values_total(n))
 
         def loss_mean(self, n: int) -> float:
             """The nan-mean of the last ``n`` minimized values (the loss the criterion returned, lower
-            is better whatever it reports), of the whole history for ``n <= 0``."""
-            if n <= 0:
-                return self._mean_loss.mean()
-            tail = list(_tail(self._losses, n))
-            return float(np.nanmean(tail)) if tail else float("nan")
+            is better whatever it reports), each weighing its patches, of the whole history for ``n <= 0``."""
+            return _ratio(self.losses_total(n))
 
         def learns(self, n: int) -> bool:
             """Whether any of the last ``n`` minimized values is finite."""
@@ -226,7 +288,7 @@ class Measure:
         def weights_mean(self, n: int) -> float:
             return float(np.nanmean(_tail(self._weight, n))) if n > 0 else self._mean_weight.mean()
 
-        def add(self, weight: float, value: CriterionOutput) -> None:
+        def add(self, weight: float, value: CriterionOutput, patches: int = 1) -> None:
             result = CriterionResult.of(value, self.name)
             true_value: float | torch.Tensor | LabelledValues
             if isinstance(result.value, dict):
@@ -239,7 +301,7 @@ class Measure:
                 true_value = result.value
 
             self._loss.append((weight, result.loss if self.is_loss else result.loss.detach()))
-            self._unread.append((true_value, result.loss.detach()))
+            self._unread.append((true_value, result.loss.detach(), patches))
             self._weight.append(weight)
             self._mean_weight.add(weight)
             self._recorded += 1
@@ -310,16 +372,19 @@ class Measure:
 
             for target_group in self.outputs_criterions[output_group]:
                 for target_group_tmp in target_group.split(";"):
-                    if target_group_tmp not in group_dest:
+                    # A target spelled with ':' names a model output, which the forward hands over.
+                    is_output = ":" in target_group_tmp and target_group_tmp.replace(":", ".") in modules
+                    if target_group_tmp not in group_dest and not is_output:
                         raise MeasureError(
                             f"The target_group {target_group_tmp} defined in "
-                            "'outputs_criterions.{output_group}.targets_criterions'"
+                            f"'outputs_criterions.{output_group}.targets_criterions'"
                             " was not found in the available destination groups.",
                             "This target_group is expected for loss or metric computation, "
                             "but was not loaded in 'group_dest'.",
                             f"Please make sure that the group {target_group_tmp} is defined in "
-                            "Dataset:groups_src:...:groups_dest: {target_group_tmp} "
-                            "and correctly loaded from the dataset.",
+                            f"Dataset:groups_src:...:groups_dest: {target_group_tmp} "
+                            "and correctly loaded from the dataset, or that a model output target "
+                            f"names a module path with ':' (available modules: {modules}).",
                         )
                 for criterion in self.outputs_criterions[output_group][target_group]:
                     # ``criterion`` is the criterion module (dict key); the flag lives on it, not on
@@ -335,13 +400,12 @@ class Measure:
             self.outputs_criterions.pop(old)
             self.outputs_criterions[new] = outputs_criterions_bak[old]
         for output_group in self.outputs_criterions:
-            for target_group in self.outputs_criterions[output_group]:
-                for criterion, criterions_attr in self.outputs_criterions[output_group][target_group].items():
+            for target_group, criteria in self.outputs_criterions[output_group].items():
+                keys = criterion_keys(output_group, target_group, (type(criterion).__name__ for criterion in criteria))
+                for (criterion, criterions_attr), key in zip(criteria.items(), keys, strict=True):
                     if criterions_attr.group not in self._loss:
                         self._loss[criterions_attr.group] = {}
-                    self._loss[criterions_attr.group][
-                        f"{output_group}:{target_group}:{criterion.__class__.__name__}"
-                    ] = Measure.Loss(
+                    self._loss[criterions_attr.group][key] = Measure.Loss(
                         criterion.__class__.__name__,
                         output_group,
                         target_group,
@@ -359,11 +423,12 @@ class Measure:
         nb_patch: int,
         training: bool,
     ) -> None:
-        for target_group in self.outputs_criterions[output_group]:
+        for target_group, criteria in self.outputs_criterions[output_group].items():
             groups = [group for group in target_group.split(";") if group in batch_data_with_attribute]
             target_attribute = [batch_data_with_attribute[group][1] for group in groups]
+            keys = criterion_keys(output_group, target_group, (type(criterion).__name__ for criterion in criteria))
 
-            for criterion, criterions_attr in self.outputs_criterions[output_group][target_group].items():
+            for (criterion, criterions_attr), key in zip(criteria.items(), keys, strict=True):
                 if it >= criterions_attr.start and (criterions_attr.stop is None or it <= criterions_attr.stop):
                     # Criteria live outside the model's module tree, so ``network.to(device)`` never
                     # reaches them: a criterion with its own tensors (``CrossEntropyLoss(weight=...)``)
@@ -376,13 +441,10 @@ class Measure:
                     target_data = [
                         self._target(group, batch_data_with_attribute[group][0], output.device) for group in groups
                     ]
-                    if getattr(criterion, "accepts_attributes", False):
-                        loss = criterion(output, *target_data, attributes=target_attribute)
-                    else:
-                        loss = criterion(output, *target_data)
-                    self._loss[criterions_attr.group][
-                        f"{output_group}:{target_group}:{criterion.__class__.__name__}"
-                    ].add(scheduler.get_value(), loss)
+                    loss = call_criterion(criterion, output, target_data, target_attribute, None)
+                    # What the value averages: the batch's patches (``Criterion.batch_mean``), else the batch.
+                    patches = (output.shape[0] if getattr(criterion, "batch_mean", False) else 1) if self.scored else 0
+                    self._loss[criterions_attr.group][key].add(scheduler.get_value(), loss, patches)
                     # Only the accumulation loss that completes the group's per-patch set may fire the
                     # accumulated backward: a plain (non-accumulation) loss added later in the SAME
                     # numeric group must not re-satisfy the uniform-count test and re-run backward over
@@ -432,14 +494,14 @@ class Measure:
         records = [record for _, record in self._records() if record._unread]
         tensors: dict[torch.device, list[torch.Tensor]] = {}
         for record in records:
-            for value, loss in record._unread:
+            for value, loss, _ in record._unread:
                 tensor = value.values if isinstance(value, LabelledValues) else value
                 if isinstance(tensor, torch.Tensor):
                     tensors.setdefault(tensor.device, []).append(tensor.reshape(-1))
                 tensors.setdefault(loss.device, []).append(loss.reshape(-1))
         read = {device: iter(torch.cat(batch).tolist()) for device, batch in tensors.items()}
         for record in records:
-            for value, loss in record._unread:
+            for value, loss, patches in record._unread:
                 if isinstance(value, LabelledValues):
                     values = list(islice(read[value.values.device], value.values.numel()))
                     reported = float(np.nanmean(values)) if values else float("nan")
@@ -447,7 +509,7 @@ class Measure:
                     reported = next(read[value.device])
                 else:
                     reported = value
-                record._record(reported, float(np.nanmean(list(islice(read[loss.device], loss.numel())))))
+                record._record(reported, float(np.nanmean(list(islice(read[loss.device], loss.numel())))), patches)
             record._unread.clear()
 
     def set_window(self, n: int) -> None:
@@ -470,6 +532,7 @@ class Measure:
                         "values": [float(value) for value in record._values],
                         "weights": [float(weight) for weight in record._weight],
                         "losses": [float(loss) for loss in record._losses],
+                        "patches": list(record._patches),
                         "window": record._values.maxlen,
                         "mean": (float(record._mean.total), record._mean.count),
                         "mean_weight": (float(record._mean_weight.total), record._mean_weight.count),
@@ -498,6 +561,8 @@ class Measure:
                 # A history without minimized losses (written before they were kept) restores none:
                 # a reported value is not what the criterion minimizes.
                 record._losses = deque(entry.get("losses", ()), maxlen=window)
+                # A history saved without patches weighed each value one.
+                record._patches = deque(entry.get("patches", [1] * len(entry["values"])), maxlen=window)
                 record._mean.total, record._mean.count = entry["mean"]
                 record._mean_weight.total, record._mean_weight.count = entry["mean_weight"]
                 record._mean_loss.total, record._mean_loss.count = entry.get("mean_loss", (0.0, 0))
@@ -533,7 +598,15 @@ class Measure:
     def format_loss(self, is_loss: bool, n: int) -> dict[str, tuple[float, float, float]]:
         """Per criterion: the mean weight, the reported value (the board's), the minimized value."""
         return {
-            name: (record.weights_mean(n), record.values_mean(n), record.loss_mean(n))
+            name: (weight, _ratio(values), _ratio(losses))
+            for name, (weight, values, losses) in self.format_totals(is_loss, n).items()
+        }
+
+    def format_totals(self, is_loss: bool, n: int) -> dict[str, tuple[float, tuple[float, int], tuple[float, int]]]:
+        """``format_loss`` before its two divisions: the reported and minimized values as (sum, patches),
+        which ranks add up."""
+        return {
+            name: (record.weights_mean(n), record.values_total(n), record.losses_total(n))
             for name, record in self._read(n)
             if record.is_loss == is_loss
         }
@@ -545,14 +618,15 @@ class Measure:
                 "Declare at least one scheduler window in the optimizer configuration.",
             )
         # Pick the window covering `it`; if `it` is past every window, the loop falls
-        # through and clamps to the last scheduler (stepped past its last window start).
-        step = 0
+        # through and clamps to the last scheduler, stepped from its window's start.
+        step = start = 0
         _scheduler: Scheduler | None = None
         for _scheduler, value in schedulers.items():
+            start = step
             if value is None or (it >= step and it < step + value):
                 break
             step += value
         if _scheduler is None:  # unreachable (schedulers is non-empty); kept for type-narrowing
             raise ConfigError(f"No scheduler matched iteration {it}.")
-        _scheduler.step(it - step)
+        _scheduler.step(it - start)
         return _scheduler

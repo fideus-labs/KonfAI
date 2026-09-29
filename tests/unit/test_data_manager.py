@@ -101,6 +101,46 @@ def test_train_split_single_process_keeps_everything(monkeypatch: pytest.MonkeyP
     assert Data._split(mapping, 1) == [mapping]  # world_size == 1 is a no-op
 
 
+@pytest.mark.parametrize(
+    "entries, world_size, batch_size", [(15, 2, 16), (3, 2, 1), (3, 4, 16), (8, 3, 2), (6, 3, 2), (5, 1, 2)]
+)
+def test_the_validation_split_scores_every_entry_once_in_step(
+    monkeypatch: pytest.MonkeyPatch, entries: int, world_size: int, batch_size: int
+) -> None:
+    # Every rank runs as many batches (DDP), yet each entry is scored once: a rank a batch short
+    # ends with one entry of padding, a batch of its own the trainer runs and does not score.
+    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
+    mapping = [(index, 0, 0) for index in range(entries)]
+    shards = Data._split_validation(mapping, world_size, batch_size)
+
+    assert [entry for shard, padding in shards for entry in shard[: len(shard) - padding]] == mapping
+    assert len({-(-len(shard) // batch_size) for shard, _ in shards}) == 1
+    for shard, padding in shards:
+        assert padding in (0, 1)
+        if padding:
+            assert (len(shard) - 1) % batch_size == 0  # the padding opens a batch of its own
+            assert shard[-1] == (shard[0] if len(shard) > 1 else mapping[0])
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_an_evaluation_validation_keeps_each_case_whole_and_unpadded(
+    monkeypatch: pytest.MonkeyPatch, world_size: int
+) -> None:
+    # EVALUATION scores a case from all its patches on one rank and runs no DDP: its validation is
+    # sharded by case like its training split, never cut inside a case nor padded with a duplicate.
+    monkeypatch.setenv("KONFAI_STATE", str(State.EVALUATION))
+    mapping = [(case, 0, patch) for case in range(3) for patch in range(3)]
+
+    shards = Data._split_validation(mapping, world_size, 16)
+
+    assert shards == [(shard, 0) for shard in Data._split(mapping, world_size)]
+    assert sorted(entry for shard, _ in shards for entry in shard) == mapping
+    owner: dict[int, int] = {}
+    for rank, (shard, _) in enumerate(shards):
+        for entry in shard:
+            assert owner.setdefault(entry[0], rank) == rank, f"case {entry[0]} split across ranks"
+
+
 # --------------------------------------------------------------------------------------
 # Data._split. PREDICTION/EVALUATION shards must keep every case whole on one rank
 # --------------------------------------------------------------------------------------
@@ -264,6 +304,38 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
     assert captured["population"] == sorted(names)
     assert data._validation_names == ["CASE_010", "CASE_005"]
     assert data.case_names == ["CASE_003", "CASE_002", "CASE_001"]
+
+
+@pytest.mark.parametrize(
+    ("counts", "share", "held_out"),
+    [
+        ([840, 848, 912, 840, 848], 0.2, 1),  # the Segmentation example: 848 of 4288 entries, not 1688
+        ([100, 100, 100, 101, 100], 0.2, 1),
+        ([100] * 5, 0.2, 1),
+        ([100] * 10, 0.2, 2),
+        ([1] * 10, 0.22, 2),
+        ([1] * 5, 0.3, 2),  # 1.5 cases: a tie goes to validation
+        ([1] * 30, 0.25, 8),  # 7.5 cases: the Registration example
+        ([1] * 4, 0.2, 1),
+        ([1] * 5, 0.05, 1),  # the closest cut is empty: validation keeps one case
+        ([10, 1, 1], 0.5, 2),
+    ],
+)
+def test_a_float_validation_share_cuts_at_the_case_boundary_closest_to_it(
+    counts: list[int], share: float, held_out: int
+) -> None:
+    """A float 'validation' holds out the tail of the run order whose entries come closest to the
+    share: a tie goes to validation, and validation keeps at least one case."""
+    from fractions import Fraction
+
+    target = Fraction(str(share)) * sum(counts)
+    closest = min(range(len(counts), 0, -1), key=lambda size: abs(sum(counts[-size:]) - target))
+    assert closest == held_out  # the table follows the rule it states
+    names = [f"CASE_{index:03d}" for index in range(len(counts))]
+
+    split = DataTrain(augmentations=None, validation=share)._split_train_validation_names(names, counts)
+
+    assert split == (names[:-held_out], names[-held_out:])
 
 
 def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path: Path) -> None:
@@ -1546,6 +1618,52 @@ def test_collate_still_copies_inside_a_dataloader_worker(monkeypatch: pytest.Mon
     assert batched.data_ptr() != tensor.data_ptr()
 
 
+def test_collate_leaves_an_unreadable_case_out_of_the_tensor_and_lists_it() -> None:
+    """A one-pass loader hands back an empty item for a patch it could not read: the batch holds the
+    others' rows only, in order, and names the case on every group for the consumer to set aside."""
+    readable = [
+        {"CT": DataItem(f"case{i}", torch.full((1, 2, 2), float(i)), Attribute(), i, 0, 0, True)} for i in (0, 2)
+    ]
+    unreadable = {"CT": DataItem("case1", torch.empty(0), Attribute(), 1, 0, 0, True, unreadable="why")}
+
+    batch = collate_konfai([readable[0], unreadable, readable[1]])["CT"]
+    alone = collate_konfai([unreadable])["CT"]
+
+    assert batch.tensor[:, 0, 0, 0].tolist() == [0.0, 2.0] and batch.name == ["case0", "case2"]
+    assert batch.unreadable == [(1, "case1", "why")]
+    assert alone.tensor.shape[0] == 0 and alone.name == [] and alone.unreadable == [(1, "case1", "why")]
+    assert collate_konfai(readable)["CT"].unreadable == []
+
+
+def _set_aside_by(single_pass: bool) -> DatasetIter:
+    loader = object.__new__(DatasetIter)
+    loader.single_pass = single_pass
+    loader._unreadable = {}
+    return loader
+
+
+def test_a_one_pass_loader_sets_aside_a_read_error_and_nothing_else() -> None:
+    """Only a read error of the case's own entries is set aside, wrapped or not; a stage's bug, an
+    out-of-memory, or any error of a training loader is the caller's to raise."""
+    from konfai.utils.errors import CaseReadError
+
+    def wrapped(error: BaseException) -> RuntimeError:
+        try:
+            raise RuntimeError("Error while loading data") from error
+        except RuntimeError as outer:
+            return outer
+
+    read = CaseReadError("The 'CT' entry of case 'case1' in 'Dataset/case1' cannot be read: OSError: eof")
+    loader = _set_aside_by(single_pass=True)
+
+    assert loader._set_aside(1, wrapped(read))
+    assert loader._unreadable == {1: read.args[0]}
+    assert not loader._set_aside(2, ValueError("a stage's bug"))
+    assert not loader._set_aside(3, wrapped(MemoryError()))
+    assert not loader._set_aside(4, torch.cuda.OutOfMemoryError())
+    assert not _set_aside_by(single_pass=False)._set_aside(1, read)
+
+
 def test_one_pass_loaders_mark_their_samples_as_cache_free() -> None:
     # The flag rides the DatasetIter factory: one-pass workflows read each case once, so their
     # items alias no tensor that is read again; training items may alias the cache.
@@ -1745,7 +1863,9 @@ def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, m
         },
     )
     data.prepare()
-    assert counts == {"datasets": 1, "parsed": 8, "cached": 8}
+    # Parsed by the sizing pass; then answered from the cache to the selection, which sets aside a case
+    # whose header does not read, and to the managers.
+    assert counts == {"datasets": 1, "parsed": 8, "cached": 16}
     roots = list(data.datasets.values())
     data.patch = DatasetPatch(patch_size=[2, 2])
     data.replan_patch([4, 4])

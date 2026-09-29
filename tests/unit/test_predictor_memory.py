@@ -577,6 +577,7 @@ def _loop_doubles(batches: int) -> tuple[_Predictor, Any, dict[str, Any], Any]:
     predictor_any._one_patch = None
     predictor_any._sizes_run = set()
     predictor_any._on_cuda = False
+    predictor_any.set_aside = {}
     return predictor, dataset, outputs_dataset, model_composite
 
 

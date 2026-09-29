@@ -18,6 +18,7 @@
 """The per-rank prediction loop: fetch, forward, blend, finalize."""
 
 import sys
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -43,6 +44,7 @@ from konfai.predictor.output import PREDICTION_CLOCK, OutputDataset
 from konfai.utils import vram
 from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.clock import SweepClock
+from konfai.utils.errors import KonfAIWarning
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
@@ -145,6 +147,8 @@ class _Predictor:
         #: The batch sizes a forward ran at; the first of each (past the first) starts from an empty cache.
         self._sizes_run: set[int] = set()
         self._on_cuda = False
+        #: The cases this rank could not read, by loader index: their name and why.
+        self.set_aside: dict[int, tuple[str, str]] = {}
 
         self.dataset = cast(DatasetIter, self.dataloader_prediction.dataset)
         patch_size, overlap = self.dataset.get_patch_config()
@@ -229,7 +233,11 @@ class _Predictor:
                     for batch_index, batch_sample in enumerate(
                         PREDICTION_CLOCK.waiting("fetch", self.dataloader_prediction)
                     ):
+                        unreadable = self._set_aside(batch_sample)
                         patches = _patches(batch_sample)
+                        if not patches:
+                            progress.update(unreadable)
+                            continue
                         if not pending and patches == self.batch:
                             self._step(batch_sample)
                         else:
@@ -244,11 +252,24 @@ class _Predictor:
                                 self._step(slice_batch(merged, 0, size))
                                 held -= size
                                 pending = [slice_batch(merged, size, size + held)] if held else []
-                        progress.update(patches)
+                        progress.update(patches + unreadable)
                         if batch_index % _DESCRIPTION_EVERY == 0:
                             progress.set_description(f"Prediction : {description(self.model_composite)}", refresh=False)
                     if pending:
                         self._step(concatenate_batches(pending))
+
+    def _set_aside(self, batch_sample: BatchSample) -> int:
+        """Set aside each case the loader could not read for this batch, its partial outputs dropped;
+        the number of its patches the batch left out."""
+        unreadable = next(iter(batch_sample.values())).unreadable
+        for index, name, why in unreadable:
+            if index in self.set_aside:
+                continue
+            self.set_aside[index] = (name, why)
+            warnings.warn(f"Case '{name}' is set aside, the others go on: {why}", KonfAIWarning, stacklevel=2)
+            for output_dataset in self.outputs_dataset.values():
+                output_dataset.discard(index)
+        return len(unreadable)
 
     def _step(self, batch_sample: BatchSample) -> None:
         """Forward one batch and hand each patch to its writers; while the batch is measured, size it."""
@@ -287,6 +308,8 @@ class _Predictor:
                     )
                 ]
             ):
+                if index in self.set_aside:
+                    continue  # read before its case failed: the forward ran, nothing is kept
                 output_dataset.add_layer(
                     index,
                     patch_augmentation,

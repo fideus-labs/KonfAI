@@ -39,6 +39,7 @@ class DicomFile(AbstractFile):
 
     concurrent_write_safe = False  # a series shares its directory and info memo across entries
     lists_case_entries = True  # a case is a directory of series this backend enumerates
+    read_errors = (OSError, RuntimeError)  # SimpleITK's series reader
 
     def __init__(self, filename: str, read: bool) -> None:
         self.filename = filename if filename.endswith("/") else f"{filename}/"

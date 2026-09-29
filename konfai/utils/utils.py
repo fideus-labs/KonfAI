@@ -405,16 +405,42 @@ def directory_volume_form(path: Path) -> str | None:
     form = storage_form(path)
     if form.lower() in _STORE_FORMS:
         return form
-    entries = sorted(path.iterdir(), key=lambda entry: entry.name)
+    with os.scandir(path) as listing:
+        return listed_volume_form(list(listing))
+
+
+def listed_volume_form(entries: list[os.DirEntry], sniffed: int | None = None) -> str | None:
+    """:func:`directory_volume_form` of a directory not named as a store, from its listing: every file is
+    read for the DICOM magic, or the first ``sniffed`` of them by name."""
+    entries = sorted(entries, key=lambda entry: entry.name)
     if {entry.name for entry in entries} & {".zgroup", ".zattrs", "zarr.json"}:
         return ".ome.zarr"
-    files = [entry for entry in entries if entry.is_file()]
-    if any(file.suffix.lower() in (".dcm", ".dicom") for file in files):
+    # A series holds hundreds of files: they are told apart by the listing, not by a stat or a Path each.
+    files = [entry for entry in entries if is_file_entry(entry)]
+    suffixes = (entry.name.lower().rpartition(".") for entry in files)
+    if any(stem and extension in ("dcm", "dicom") for stem, _, extension in suffixes):
         return ""
-    # A non-DICOM file may sort first, so probe every file, not only the first one.
-    if any(is_dicom_file(file) for file in files):
-        return ""
-    return None
+    # A non-DICOM file may sort first, so probe more than the first one; hidden files (macOS "._" twins
+    # sort before the slices they shadow) are read last.
+    sniffed_files = sorted(files, key=lambda entry: entry.name.startswith("."))[:sniffed]
+    return "" if any(is_dicom_file(Path(entry.path)) for entry in sniffed_files) else None
+
+
+def is_dir_entry(entry: os.DirEntry) -> bool:
+    """``Path.is_dir`` for a listing entry, read off the listing unless the entry is a link: a link is
+    followed, and one that cannot be followed is no directory."""
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
+def is_file_entry(entry: os.DirEntry) -> bool:
+    """``Path.is_file`` for a listing entry, as :func:`is_dir_entry` answers ``Path.is_dir``."""
+    try:
+        return entry.is_file()
+    except OSError:
+        return False
 
 
 def format_token(form: str, *, directory: bool = False) -> str:

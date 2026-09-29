@@ -25,7 +25,8 @@ count or shape raises.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -57,18 +58,27 @@ def _parametric_leaves_in_execution_order(model: torch.nn.Module, run: Callable[
             or next(module.buffers(recurse=False), None) is not None
         ):
             handles.append(module.register_forward_hook(hook))
+    try:
+        with _evaluating(model):
+            run()
+    finally:
+        for handle in handles:
+            handle.remove()
+    return order
+
+
+@contextmanager
+def _evaluating(model: torch.nn.Module) -> Iterator[None]:
+    """Run the block with ``model`` in eval mode and without grad, then restore each module's mode."""
     # Per-module modes are restored one by one: model.train(root_mode) would lose eval-only submodules.
     training_states = {module: module.training for module in model.modules()}
     model.eval()
     try:
         with torch.no_grad():
-            run()
+            yield
     finally:
-        for handle in handles:
-            handle.remove()
         for module, training in training_states.items():
             module.training = training
-    return order
 
 
 def _untraced_tensors(model: torch.nn.Module, leaves: list[torch.nn.Module]) -> list[str]:
@@ -148,6 +158,70 @@ def transfer_weights_by_execution_order(
             )
         target_leaf.load_state_dict(source_state)
     return len(target_leaves)
+
+
+def _tensors(output: object) -> list[torch.Tensor]:
+    """The tensors a forward returns: itself, or those of a list, tuple or dict (nnU-Net's deep supervision)."""
+    if isinstance(output, torch.Tensor):
+        return [output]
+    if isinstance(output, dict):
+        output = list(output.values())
+    if isinstance(output, list | tuple):
+        return [tensor for item in output for tensor in _tensors(item)]
+    return []
+
+
+# Relative to the largest magnitude of the reference's output. The shipped weight-exact pairs reproduce
+# it exactly on CPU; a pair whose same-shaped leaves run in another order misses it by order one.
+_OUTPUT_TOLERANCE = 1e-3
+
+
+def _check_reproduces(model: Network, inputs: torch.Tensor, expected: list[torch.Tensor]) -> None:
+    """Raise unless every tensor the reference returned is matched by a named output of ``model`` of the
+    same shape, the graph being free to add heads of its own (Softmax, ArgMax)."""
+    from konfai.network.network.network import Network
+
+    patched = [
+        (network, network.patch)
+        for network in model.modules()
+        if isinstance(network, Network) and network.patch is not None
+    ]
+    # A patch squeezes an axis of 1 (a 2D graph in a 3D workflow): the graph cannot run the input whole, as
+    # the reference did, so such a seed is not checked.
+    if any(1 in (patch.patch_size or []) or patch.extend_slice for _, patch in patched):
+        return
+    references = [tensor.float() for tensor in expected]
+    scales = [float(reference.abs().max()) or 1.0 for reference in references]
+    closest = [math.inf] * len(references)
+    # The reference ran the input whole, and so does the check: a ModelPatch pads each patch's edges and
+    # assembles only the end modules.
+    for network, _ in patched:
+        network.patch = None
+    try:
+        with _evaluating(model):
+            for _, output in model.named_forward(inputs):
+                for index, reference in enumerate(references):
+                    if isinstance(output, torch.Tensor) and output.shape == reference.shape:
+                        error = float((output.float() - reference).abs().max()) / scales[index]
+                        closest[index] = min(closest[index], error)
+    finally:
+        for network, patch in patched:
+            network.patch = patch
+    mismatches = [
+        f"{tuple(reference.shape)}: "
+        + (f"relative error {error:.3g}" if error < math.inf else "no output of this shape")
+        for reference, error in zip(references, closest, strict=True)
+        if error > _OUTPUT_TOLERANCE
+    ]
+    if mismatches:
+        raise ConfigError(
+            f"The seeded model does not reproduce the reference's output ({'; '.join(mismatches)}).",
+            "Every tensor was filled, but on the same input no named output of the model matches what the "
+            f"reference returns (tolerance {_OUTPUT_TOLERANCE:g} of its largest magnitude). Either execution "
+            "order paired the wrong layers (same-shaped layers on parallel branches run in another order, or "
+            "the graph combines them differently): order the graph's modules as the reference's forward runs "
+            "them; or the graph stops short of the reference's output: make it a named output of the graph.",
+        )
 
 
 @config("pretrained_from")
@@ -234,16 +308,20 @@ class PretrainedFrom:
         return torch.randn(1, model.in_channels, *spatial)
 
     def seed(self, model: Network) -> int:
-        """Fill every tensor of ``model`` from the reference, or raise naming the config key."""
+        """Fill every tensor of ``model`` from the reference and check that the seeded model reproduces
+        what the reference returns on the same input, or raise naming the config key."""
         reference = self._reference()
         inputs = self._example_input(model)
+        returned: list[object] = []
         try:
-            return transfer_weights_by_execution_order(
+            transferred = transfer_weights_by_execution_order(
                 target=model,
                 source=reference,
                 target_forward=lambda: list(model.named_forward(inputs)),
-                source_forward=lambda: reference(inputs),
+                source_forward=lambda: returned.append(reference(inputs)),
             )
+            _check_reproduces(model, inputs, _tensors(returned[0]))
+            return transferred
         except ConfigError as error:
             raise ConfigError(
                 f"Model.pretrained_from: the reference '{self.builder}' cannot seed this model.",

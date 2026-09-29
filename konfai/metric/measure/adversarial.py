@@ -23,13 +23,17 @@ import os
 import numpy as np
 import torch
 
-from konfai.metric.measure.base import Criterion, models_register
+from konfai.metric.measure.base import Criterion
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.config import apply_config
+from konfai.utils.runtime.environment import safe_torch_load
 from konfai.utils.utils import get_module
 
 
 class PatchGanLoss(Criterion):
+    batch_mean = True
+    any_target_grid = True  # scores the output against a constant, never a target
+
     def __init__(self, target: float = 0) -> None:
         super().__init__()
         self.loss = torch.nn.MSELoss()
@@ -41,6 +45,8 @@ class PatchGanLoss(Criterion):
 
 
 class Gram(Criterion):
+    any_target_grid = True  # compares channel-by-channel Gram matrices, whatever the spatial shapes
+
     @staticmethod
     def compute_gram(tensor: torch.Tensor):
         (_b, ch, w) = tensor.size()
@@ -84,29 +90,25 @@ class PerceptualLoss(Criterion):
     ) -> None:
         super().__init__()
         self.path_model = path_model
-        if self.path_model not in models_register:
-            self.model = model_loader.get_model(
-                train=False,
-                konfai_args=os.environ["KONFAI_CONFIG_PATH"].split("PerceptualLoss")[0] + "PerceptualLoss.Model",
-                konfai_without=[
-                    "optimizer",
-                    "schedulers",
-                    "nb_batch_per_step",
-                    "init_type",
-                    "init_gain",
-                    "outputs_criterions",
-                    "drop_p",
-                ],
-            )
-            if path_model.startswith("https"):
-                state_dict = torch.hub.load_state_dict_from_url(path_model)
-                state_dict = {"Model": {self.model.get_name(): state_dict["model"]}}
-            else:
-                state_dict = torch.load(path_model, weights_only=True)
-            self.model.load(state_dict)
-            models_register[self.path_model] = self.model
+        self.model = model_loader.get_model(
+            train=False,
+            konfai_args=os.environ["KONFAI_CONFIG_PATH"].split("PerceptualLoss")[0] + "PerceptualLoss.Model",
+            konfai_without=[
+                "optimizer",
+                "schedulers",
+                "nb_batch_per_step",
+                "init_type",
+                "init_gain",
+                "outputs_criterions",
+                "drop_p",
+            ],
+        )
+        if path_model.startswith("https"):
+            state_dict = safe_torch_load(path_model, "cpu")
+            state_dict = {"Model": {self.model.get_name(): state_dict["model"]}}
         else:
-            self.model = models_register[self.path_model]
+            state_dict = torch.load(path_model, weights_only=True)
+        self.model.load(state_dict)
 
         self.shape = shape
         self.mode = "trilinear" if len(shape) == 3 else "bilinear"

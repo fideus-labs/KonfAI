@@ -479,15 +479,17 @@ def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytes
         raise KeyboardInterrupt
 
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
-    factory(gpu=[0, 1])
-    factory(gpu=[], cpu=3)
+    for kwargs in ({"gpu": [0, 1]}, {"gpu": [], "cpu": 3}):
+        with pytest.raises(SystemExit):
+            factory(**kwargs)
     assert captured == ["2", "3"]
     assert "KONFAI_LOCAL_RANKS" not in os.environ
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "7")
-    factory(gpu=[0])
+    with pytest.raises(SystemExit):
+        factory(gpu=[0])
     assert captured[-1] == "1" and os.environ["KONFAI_LOCAL_RANKS"] == "7"
 
-    # A genuine factory failure (not the swallowed KeyboardInterrupt) must restore the variable too: # the restore lives in a finally, not in the interrupt handler.
+    # A genuine factory failure (not the KeyboardInterrupt) must restore the variable too: # the restore lives in a finally, not in the interrupt handler.
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
 
     @runtime.run_distributed_app

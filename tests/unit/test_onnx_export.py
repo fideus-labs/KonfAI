@@ -122,6 +122,35 @@ def test_fold_pre_bakes_a_custom_pointwise_op_into_the_graph(tmp_path):
     assert float(np.mean(np.abs(produced - reference))) < 1e-4  # the custom op is baked in the graph
 
 
+def test_any_module_exposing_named_forward_exports(tmp_path):
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+
+    from konfai.export import export_to_onnx
+
+    class Plain(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv = torch.nn.Conv2d(1, 2, 3, padding=1)
+
+        def named_forward(self, x):
+            y = self.conv(x)
+            yield "conv", y
+            yield "act", torch.tanh(y)
+
+    model = Plain().eval()
+    example = torch.randn(1, 1, 32, 32)
+    onnx_path, manifest = export_to_onnx(model, tmp_path, example)
+
+    assert manifest["output_module"] == "act"
+    produced = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]).run(
+        None, {"input": example.numpy()}
+    )[0]
+    with torch.no_grad():
+        np.testing.assert_allclose(produced, torch.tanh(model.conv(example)).numpy(), atol=1e-5)
+
+
 def test_export_unknown_head_raises(tmp_path):
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
@@ -133,3 +162,97 @@ def test_export_unknown_head_raises(tmp_path):
     model = UNet(dim=2, channels=[1, 8, 16], nb_class=2).eval()
     with pytest.raises(PredictorError):
         export_to_onnx(model, tmp_path, torch.randn(1, 1, 64, 64), "Does.Not.Exist")
+
+
+def test_a_model_patch_cutting_the_example_into_several_patches_is_refused(tmp_path):
+    # Each output of a patched pass is yielded once per patch; the export would keep the last patch
+    # while the manifest declares the whole example.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+
+    from konfai.data.patching import ModelPatch
+    from konfai.export import export_to_onnx
+    from konfai.models.python.segmentation.UNet import UNet
+    from konfai.utils.errors import PredictorError
+
+    torch.manual_seed(0)
+    plain = UNet(dim=2, channels=[1, 8, 16], nb_class=2).eval()
+    patched = UNet(dim=2, channels=[1, 8, 16], nb_class=2, patch=ModelPatch([16, 16], overlap=0)).eval()
+    patched.load_state_dict(plain.state_dict())
+
+    with pytest.raises(PredictorError, match="ModelPatch"):
+        export_to_onnx(patched, tmp_path / "several", torch.randn(1, 1, 32, 32))
+
+    # One patch covering the example: the export holds the whole pass, as the plain network computes it.
+    example = torch.randn(1, 1, 16, 16)
+    onnx_path, _ = export_to_onnx(patched, tmp_path / "one", example)
+    produced = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]).run(
+        None, {"input": example.numpy()}
+    )[0]
+    with torch.no_grad():
+        expected = dict(plain.named_forward(example))["UNetBlock_0.Head.Softmax"].numpy()
+    np.testing.assert_allclose(produced, expected, atol=1e-5)
+
+
+def _nested_patch_network(side_branch: bool = False, gated: bool = False):
+    """A root network holding ``Inner``, whose ModelPatch cuts a 32x32 example into four 16x16 patches,
+    then ``Post``, which reads Inner or, as a side branch Inner writes, the input beside it. The 1x1
+    convolutions make the assembled pass equal the unpatched one. ``gated`` skips Act, the module whose
+    patches Inner assembles once bound, outside prediction."""
+    from konfai.data.patching import ModelPatch
+    from konfai.network.network import Network
+
+    class Inner(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2, patch=ModelPatch([16, 16], overlap=0))
+            self.add_module("Conv", torch.nn.Conv2d(1, 2, 1))
+            self.add_module("Act", torch.nn.Tanh(), training=False if gated else None)
+
+    class Outer(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Inner", Inner(), out_branch=["aux"] if side_branch else [0])
+            self.add_module("Post", torch.nn.Conv2d(1 if side_branch else 2, 2, 1))
+
+    torch.manual_seed(0)
+    return Outer().eval()
+
+
+def test_a_nested_model_patch_is_refused_only_when_the_head_sees_one_patch(tmp_path, monkeypatch):
+    # A nested network assembles its patches once the model is bound (Trainer, Predictor, train_model
+    # bind it); unbound, it hands its last patch to what reads it.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    ort = pytest.importorskip("onnxruntime")
+
+    from konfai.export import export_to_onnx
+    from konfai.network.network import NetState
+    from konfai.utils.errors import PredictorError
+    from konfai.utils.runtime import State
+
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    example = torch.randn(1, 1, 32, 32)
+
+    with pytest.raises(PredictorError, match=r"ModelPatch of Inner .* head 'Post'"):
+        export_to_onnx(_nested_patch_network(), tmp_path / "unbound", example)
+    assert not (tmp_path / "unbound").exists()
+
+    gated = _nested_patch_network(gated=True)
+    gated.bind(False, State.PREDICTION, ["x"])
+    gated.set_state(NetState.TRAIN)
+    with pytest.raises(PredictorError, match=r"ModelPatch of Inner .* head 'Post'"):
+        export_to_onnx(gated, tmp_path / "gated", example)
+
+    bound = _nested_patch_network()
+    bound.bind(False, State.PREDICTION, ["x"])
+    for name, model in (("bound", bound), ("side_branch", _nested_patch_network(side_branch=True))):
+        onnx_path, manifest = export_to_onnx(model, tmp_path / name, example)
+        assert manifest["output_module"] == "Post"
+        produced = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"]).run(
+            None, {"input": example.numpy()}
+        )[0]
+        model.Inner.patch = None
+        with torch.no_grad():
+            expected = dict(model.named_forward(example))["Post"].numpy()
+        np.testing.assert_allclose(produced, expected, atol=1e-5)

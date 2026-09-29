@@ -28,7 +28,8 @@ import konfai.network.network as network_module
 import numpy as np
 import pytest
 import torch
-from konfai.metric.schedulers import Constant, PolyLRScheduler
+from konfai.metric.measure import Dice
+from konfai.metric.schedulers import Constant, CosineAnnealing, PolyLRScheduler
 from konfai.network.blocks import Add
 from konfai.network.network import CriterionsAttr, Measure, ModuleArgsDict, Network
 from konfai.network.network.network import _channels_last
@@ -452,7 +453,7 @@ def test_loss_add_summarises_dict_metric_payload() -> None:
     record.add(1.0, (torch.tensor([0.7]), {"1": 0.6, "2": 0.8, "3": float("nan")}))
 
     # The dict is summarised to a scalar (nan-mean of 0.6 and 0.8), and the logging mean is safe.
-    reported, minimized = record._unread[-1]
+    reported, minimized, _ = record._unread[-1]
     assert isinstance(reported, float)
     assert reported == pytest.approx(0.7)
     assert minimized.item() == pytest.approx(0.7)
@@ -516,7 +517,7 @@ def test_loss_add_does_not_read_a_loss_off_its_device() -> None:
     record = _loss_record()
     record.add(1.0, torch.tensor([3.0], requires_grad=True))
 
-    kept, minimized = record._unread[-1]
+    kept, minimized, _ = record._unread[-1]
     assert isinstance(kept, torch.Tensor) and not kept.requires_grad
     assert isinstance(minimized, torch.Tensor) and not minimized.requires_grad
     assert len(record._values) == 0 and record.recorded == 1
@@ -599,6 +600,23 @@ def test_get_loss_pairs_every_accumulated_loss_with_its_own_weight_under_a_narro
 
     assert record.get_loss().item() == pytest.approx((1.0 + 8.0 + 6.0) / 3)
     assert record.get_last_loss().item() == 6.0
+
+
+def test_a_mean_over_batches_weighs_each_by_its_patches() -> None:
+    # A batch of two patches scoring 1 and a partial batch of one scoring 4 average 2 over the three
+    # patches, not 2.5 over the two batches. A padding batch (no patch) weighs nothing, in the window
+    # and in the whole-history mean a plateau schedule steps on.
+    record = _loss_record()
+    measure = _measure_of(record)
+    record.add(1.0, torch.tensor(1.0), 2)
+    record.add(1.0, torch.tensor(4.0), 1)
+    record.add(1.0, torch.tensor(100.0), 0)
+
+    assert measure.get_last_values(3) == {"l": pytest.approx(2.0)}
+    assert measure.get_last_losses(3) == {"l": pytest.approx(2.0)}
+    assert measure.get_last_values(0) == {"l": pytest.approx(2.0)}
+    assert measure.get_last_losses(0) == {"l": pytest.approx(2.0)}
+    assert measure.format_totals(True, 3) == {"l": (1.0, (6.0, 3), (6.0, 3))}
 
 
 # --------------------------------------------------------------------------------------
@@ -684,6 +702,32 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None
     assert scaler.scale.call_count == 1
 
 
+def _two_dice_measure(accumulation: bool) -> Measure:
+    """Dice on label 1 and Dice on label 2 over one output and target: ``Dice`` and ``Dice#2`` in the
+    list spelling of ``criterions_loader``."""
+    graph = ModuleArgsDict()
+    graph.add_module("Softmax", torch.nn.Softmax(dim=1))
+    measure = Measure("Net", {})
+    criteria = {Dice(labels=[label]): _criterion_attr(accumulation=accumulation) for label in (1, 2)}
+    measure.outputs_criterions = {"Softmax": {"SEG": criteria}}
+    measure.init(graph, ["SEG"])
+    return measure
+
+
+def test_two_criteria_of_one_class_keep_a_record_each() -> None:
+    """Two criteria of one class once shared one record: the loss was their mean where two criteria
+    sum, and one value was logged for both."""
+    measure = _two_dice_measure(accumulation=False)
+    torch.manual_seed(0)
+    prob, seg = torch.softmax(torch.randn(1, 3, 8, 8), 1), torch.randint(0, 3, (1, 1, 8, 8))
+
+    measure.update("Softmax", prob, {"SEG": (seg, [])}, it=0, nb_patch=1, training=False)
+
+    losses = [criterion(prob, seg)[0] for criterion in measure.outputs_criterions["Softmax"]["SEG"]]
+    assert list(measure.get_last_values()) == ["Softmax:SEG:Dice", "Softmax:SEG:Dice#2"]
+    assert measure.get_loss()[0].item() == pytest.approx(sum(losses).item())
+
+
 # --------------------------------------------------------------------------------------
 # Measure.update_scheduler: loss-weight window selection
 # --------------------------------------------------------------------------------------
@@ -701,6 +745,18 @@ def test_update_scheduler_past_last_window_clamps_to_last() -> None:
     schedulers = {s0: 3, s1: 3}  # active windows [0,3) and [3,6)
     assert Measure.update_scheduler(None, schedulers, 4) is s1  # type: ignore[arg-type]
     assert Measure.update_scheduler(None, schedulers, 100) is s1  # type: ignore[arg-type]
+
+
+def test_update_scheduler_past_the_last_window_goes_on_from_its_start() -> None:
+    """Past its window the last scheduler once restarted from step 0: a weight annealed to its floor
+    jumped back to its start value."""
+    anneal = CosineAnnealing(start_value=1.0, eta_min=0.0, t_max=100)
+    schedulers = {Constant(1.0): 100, anneal: 100}  # active windows [0,100) and [100,200)
+
+    assert Measure.update_scheduler(None, schedulers, 199).get_value() < 1e-3  # type: ignore[arg-type]
+    assert Measure.update_scheduler(None, schedulers, 200) is anneal  # type: ignore[arg-type]
+    assert anneal.it == 100
+    assert anneal.get_value() == pytest.approx(0.0)
 
 
 # --------------------------------------------------------------------------------------
@@ -721,6 +777,7 @@ def test_network_criterion_loader_resets_scheduler_state(monkeypatch: pytest.Mon
             return f"{key}:{scheduler_classname}"
 
     monkeypatch.setattr("konfai.network.network.loaders.apply_config", lambda *args, **kwargs: lambda cls: cls)
+    monkeypatch.setattr("konfai.network.network.loaders.write_back", lambda *args: None)
     monkeypatch.setattr("konfai.network.network.loaders.konfai_root", lambda: "Trainer")
     monkeypatch.setattr(
         "konfai.network.network.loaders.get_module",
@@ -949,6 +1006,48 @@ def test_measure_validates_a_nested_loss_target_against_the_root_graph() -> None
     with pytest.raises(MeasureError):
         adversarial_measure().init(generator, ["CT"])  # owner scope: the discriminator is invisible here
     adversarial_measure().init(gan, ["CT"])  # root scope: Discriminator.Head resolves -> no error
+
+
+@pytest.mark.parametrize("target", ["Branch:Right", "CT;Branch:Right"])
+def test_measure_takes_a_model_output_named_with_colons_as_a_target(target: str) -> None:
+    from konfai.network.network import Measure
+
+    class Branches(ModuleArgsDict):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_module("Left", torch.nn.Identity(), out_branch=["Left"])
+            self.add_module("Right", torch.nn.Identity(), out_branch=["Right"])
+
+    class Net(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Branch", Branches())
+
+    model = Net()
+    measure = Measure("Net", {})
+    measure.outputs_criterions = {"Branch.Left": {target: {torch.nn.L1Loss(): _criterion_attr()}}}
+    measure.init(model, ["CT"])
+    model.measure = measure
+    model.init_outputs_group()
+    assert model.outputsGroup == [["Branch.Left", "Branch.Right"]]
+
+
+@pytest.mark.parametrize("target", ["Branch:Rihgt", "Rihgt", "Right"])
+def test_measure_refuses_a_target_that_is_neither_a_group_nor_a_named_output(target: str) -> None:
+    """A misspelt output, or a bare name, stays the actionable refusal a misspelt group gets: only a
+    ':' path names an output, the spelling the forward routes."""
+    from konfai.network.network import Measure
+
+    class Net(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Left", torch.nn.Identity())
+            self.add_module("Right", torch.nn.Identity())
+
+    measure = Measure("Net", {})
+    measure.outputs_criterions = {"Left": {target: {torch.nn.L1Loss(): _criterion_attr()}}}
+    with pytest.raises(MeasureError, match=f"target_group {target} "):
+        measure.init(Net(), ["CT"])
 
 
 class TestUnknownStringBranch:
@@ -1254,7 +1353,58 @@ def test_bind_accepts_a_composite_whose_nested_network_owns_the_optimizer() -> N
     root = Root()
     sub = cast(Network, root["Sub"])
     sub.optimizer = torch.optim.SGD(sub.parameters(), lr=0.1)  # what its own loader would build
+    _attach_criterion(sub, is_loss=True)  # a loss on the nested network alone counts
     root.bind(False, State.TRAIN, [])
+
+
+# ---- a TRAIN whose networks attach no loss ----
+
+
+def _attach_criterion(network: Network, is_loss: bool) -> None:
+    """One criterion on ``Conv`` with the given role, as a bound ``outputs_criterions`` leaves it."""
+    measure = Measure(network.get_name(), {})
+    measure.outputs_criterions = {"Conv": {"LABEL": {torch.nn.L1Loss(): CriterionsAttr(is_loss=is_loss)}}}
+    network.measure = measure
+
+
+def test_bind_refuses_a_train_whose_networks_attach_no_loss() -> None:
+    """A model with no criterion, or metrics only, trained every epoch without a step and wrote
+    checkpoints identical to its start: exit 0."""
+    from konfai.utils.runtime import State
+
+    for state in (State.TRAIN, State.RESUME):
+        for metric_only in (False, True):
+            net = _NoOptimizerNet()
+            net.optimizer = torch.optim.SGD(net.parameters(), lr=0.1)
+            if metric_only:
+                _attach_criterion(net, is_loss=False)
+            with pytest.raises(ConfigError, match=r"(?s)no training loss.*is_loss: true"):
+                net.bind(False, state, [])
+
+    net = _NoOptimizerNet()
+    _attach_criterion(net, is_loss=False)
+    net.bind(False, State.PREDICTION, [])  # nothing trains: nothing to refuse
+    net = _NoOptimizerNet()
+    net.optimizer = torch.optim.SGD(net.parameters(), lr=0.1)
+    _attach_criterion(net, is_loss=True)
+    net.bind(False, State.TRAIN, [])
+
+
+def test_bind_refuses_a_train_whose_optimizer_and_loss_sit_on_different_networks() -> None:
+    """A network steps only on its own losses with its own optimizer: the root's optimizer and a
+    nested network's loss trained nothing."""
+    from konfai.utils.runtime import State
+
+    class Root(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, optimizer=None, dim=2)
+            self.add_module("Sub", _NoOptimizerNet())
+
+    root = Root()
+    root.optimizer = torch.optim.SGD(root.parameters(), lr=0.1)
+    _attach_criterion(cast(Network, root["Sub"]), is_loss=True)
+    with pytest.raises(ConfigError, match="same network"):
+        root.bind(False, State.TRAIN, [])
 
 
 # ---- DDP synchronisation across an accumulation window ----
@@ -1361,3 +1511,35 @@ def test_a_graph_the_compiled_walk_cannot_serve_stays_eager_and_says_why() -> No
     patched = _WalkNet()
     patched.patch = cast(Any, SimpleNamespace())
     assert "ModelPatch" in (patched.compile_walk() or "") and patched._walk is None
+
+
+def test_the_custom_model_page_attaches_its_losses_to_outputs_with_a_gradient() -> None:
+    """docs/source/usage/custom-models.md builds MySegNet and attaches losses to outputs by name.
+    On an output with no gradient (Argmax) a loss reaches no weight: the run trains nothing and
+    says nothing."""
+    import re
+    from collections.abc import Iterator
+
+    from ruamel.yaml import YAML
+
+    page = Path(__file__).resolve().parents[2] / "docs" / "source" / "usage" / "custom-models.md"
+    blocks = re.findall(r"```(\w+)\n(.*?)```", page.read_text(encoding="utf-8"), re.S)
+    source = next(body for lang, body in blocks if lang == "python" and "class MySegNet" in body)
+    namespace: dict[str, Any] = {}
+    exec(compile(source, str(page), "exec"), namespace)
+
+    def attached(node: Any) -> Iterator[str]:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                yield from value if key == "outputs_criterions" else attached(value)
+
+    losses = [
+        name.replace(":", ".")
+        for lang, body in blocks
+        if lang == "yaml" and "is_loss: true" in body
+        for name in attached(YAML().load(body))
+    ]
+    outputs = dict(namespace["MySegNet"]().named_forward(torch.randn(1, 1, 8, 8)))
+
+    assert any(name in outputs for name in losses)
+    assert [name for name in losses if name in outputs and not outputs[name].requires_grad] == []

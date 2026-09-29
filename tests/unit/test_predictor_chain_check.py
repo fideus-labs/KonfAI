@@ -131,6 +131,12 @@ def test_a_shipped_example_preprocesses_its_inputs_the_way_it_trained(
             id="the-same-class-name-from-another-module",
         ),
         pytest.param(
+            {"Clip": {"min_value": 0}, "Clip#2": {"min_value": 1}},
+            {"Clip": {"min_value": 0}, "konfai.data.transform:Clip": {"min_value": 2}},
+            "'CT:CT' transforms[1] Clip: min_value: 1 in training, 2 here",
+            id="a-changed-argument-of-a-repeated-stage",
+        ),
+        pytest.param(
             {"Canonical": {"inverse": True}},
             {"Canonical": {"inverse": True, "fill": -1024.0}},
             "'CT:CT' transforms[0] Canonical: fill: 0.0 in training, -1024.0 here",
@@ -190,6 +196,16 @@ def test_a_differing_stage_is_named_with_its_group_index_and_arguments(
             {"Noise": {"prob": 1}},
             {"konfai.data.augmentation:Noise": {"prob": 1}},
             id="the-module-qualified-spelling-of-a-draw-declared-before-the-marker",
+        ),
+        pytest.param(
+            {"Clip": {"min_value": 0}, "Clip#2": {"min_value": 1}},
+            {"Clip": {"min_value": 0}, "konfai.data.transform:Clip": {"min_value": 1}},
+            id="the-occurrence-key-of-a-chain-spelled-as-a-list",
+        ),
+        pytest.param(
+            {"Save": {"dataset": "./A:mha"}, "Clip": {"min_value": 0}, "Save#2": {"dataset": "./B:mha"}},
+            {"Clip": {"min_value": 0}},
+            id="a-repeated-save-boundary",
         ),
         pytest.param(
             {"Canonical": {"inverse": True}},

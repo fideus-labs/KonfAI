@@ -47,6 +47,7 @@ from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 from konfai.utils.runtime import State, get_device, get_gpu_memory
+from konfai.utils.utils import env_flag
 
 if TYPE_CHECKING:
     from konfai.utils.pretrained import PretrainedFrom
@@ -238,7 +239,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def get_mapping(self):
         results: dict[str, str] = {}
         for name, module_args in self._modulesArgs.items():
-            module = self[name]
+            module = self._modules[name]
+            if module is None:  # an absent child (a NONE norm) holds no weight to map
+                continue
             if isinstance(module, ModuleArgsDict):
                 if len(module_args.alias):
                     count = dict.fromkeys(set(module.get_mapping().values()), 0)
@@ -300,6 +303,14 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             if module is not None:
                 ModuleArgsDict.init_func(module, init_type, init_gain)
 
+    def _runs(self, name: str) -> bool:
+        """Whether the module ``name`` runs in this graph's state: a ``training`` flag gates it to one."""
+        training = self._modulesArgs[name].training
+        return training is None or (
+            not (training and self._training == NetState.PREDICTION)
+            and not (not training and self._training == NetState.TRAIN)
+        )
+
     def named_forward(
         self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
     ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -320,10 +331,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 # Reset per module: ``tmp`` tracks out_branches a nested sibling already filled via
                 # inner-match. Kept across siblings, a later sibling's output would be silently dropped.
                 tmp = []
-                if self._modulesArgs[name].training is None or (
-                    not (self._modulesArgs[name].training and self._training == NetState.PREDICTION)
-                    and not (not self._modulesArgs[name].training and self._training == NetState.TRAIN)
-                ):
+                if self._runs(name):
                     requires_grad = self._modulesArgs[name].requires_grad
                     if requires_grad is not None and module:
                         module.requires_grad_(requires_grad)
@@ -403,7 +411,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         metadata where ``named_parameters`` does not: a module gated off by ``training=False`` is
         skipped, and ``pretrained=True`` keeps only the modules declared ``pretrained=False``."""
         for name, module_args in self._modulesArgs.items():
-            module = self[name]
+            module = self._modules[name]
             if isinstance(module, ModuleArgsDict):
                 for k, v in module.graph_parameters(pretrained=pretrained):
                     yield name + "." + k, v
@@ -1026,7 +1034,7 @@ class Network(ModuleArgsDict, ABC):
         output_layer_accumulator: dict[str, Accumulator] = {}
         output_layer_patch_indexed: dict[str, PatchIndexed] = {}
         it = 0
-        debug = "KONFAI_DEBUG" in os.environ
+        debug = env_flag("KONFAI_DEBUG", False)
         walk = (
             self._walk(inputs, tuple(layers_name))
             if self._walk is not None and not debug
@@ -1035,16 +1043,9 @@ class Network(ModuleArgsDict, ABC):
         for name_tmp, output_layer in walk:
             name = strip_accumulated(name_tmp)
             if debug:
-                if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
-                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
-                        f"{os.environ['KONFAI_DEBUG_LAST_LAYER']}|{name}:"
-                        f"{get_gpu_memory(output_layer.device)}:"
-                        f"{str(output_layer.device).replace('cuda:', '')}"
-                    )
-                else:
-                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
-                        f"{name}:{get_gpu_memory(output_layer.device)}:{str(output_layer.device).replace('cuda:', '')}"
-                    )
+                os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
+                    f"{name}:{get_gpu_memory(output_layer.device)}:{str(output_layer.device).replace('cuda:', '')}"
+                )
             it += 1
             if name in layers_name or name_tmp in layers_name:
                 if is_accumulated(name_tmp):
@@ -1107,14 +1108,41 @@ class Network(ModuleArgsDict, ABC):
         criteria and patch, the output groups the measures address, and the channel trace the
         checkpoints are placed on."""
         self.init(autocast, state, group_dest)
-        if state != State.PREDICTION and all(network.optimizer is None for network in self.get_networks().values()):
-            # A graph with no optimizer would run an epoch with the backward skipped: name the key.
+        if state != State.PREDICTION:
+            # A graph with no optimizer or no loss would run every epoch without a step: name the key.
             root = os.environ.get("KONFAI_ROOT", "Trainer")
-            raise ConfigError(
-                f"No optimizer resolved for '{self.get_name()}': nothing would train.",
-                f"Give '{root}.Model.{self.get_name()}.optimizer' (for instance "
-                "'optimizer: {name: AdamW}'), or remove the key to take the default.",
-            )
+            networks = self.get_networks().values()
+            if all(network.optimizer is None for network in networks):
+                raise ConfigError(
+                    f"No optimizer resolved for '{self.get_name()}': nothing would train.",
+                    f"Give '{root}.Model.{self.get_name()}.optimizer' (for instance "
+                    "'optimizer: {name: AdamW}'), or remove the key to take the default.",
+                )
+            losses = [
+                network
+                for network in networks
+                if network.measure is not None
+                and any(
+                    attr.is_loss
+                    for targets in network.measure.outputs_criterions.values()
+                    for criteria in targets.values()
+                    for attr in criteria.values()
+                )
+            ]
+            if not losses:
+                raise ConfigError(
+                    f"'{self.get_name()}' attaches no training loss: no criterion has 'is_loss: true', "
+                    "so no weight would change.",
+                    f"Declare one under '{root}.Model.{self.get_name()}.outputs_criterions.<output>"
+                    ".targets_criterions.<target>.criterions_loader.<Criterion>' with 'is_loss: true'.",
+                )
+            # A network steps on its own losses with its own optimizer (_backward).
+            if all(network.optimizer is None for network in losses):
+                raise ConfigError(
+                    f"No network of '{self.get_name()}' holds both an optimizer and a training loss: nothing would"
+                    " train.",
+                    "Give the optimizer and the 'is_loss: true' criterion to the same network.",
+                )
         self.init_outputs_group()
         self._compute_channels_trace(self, self.in_channels, gradient_checkpoints, gpu_checkpoints)
 
@@ -1126,8 +1154,11 @@ class Network(ModuleArgsDict, ABC):
                 outputs_group = OutputsGroup(network)
                 outputs_group.append(output_name)
                 for targets_group in network.measure.outputs_criterions[output_name].keys():
-                    if ":" in targets_group:
-                        outputs_group.append(targets_group.replace(":", "."))
+                    # Each model output a target group names, once: the group completes when every
+                    # name it lists has run.
+                    for target in targets_group.split(";"):
+                        if ":" in target and target.replace(":", ".") not in outputs_group:
+                            outputs_group.append(target.replace(":", "."))
 
                 self.outputsGroup.append(outputs_group)
 

@@ -246,6 +246,9 @@ class ImpactFeatureModel:
 
 
 class IMPACTReg(CriterionWithAttribute):
+    batch_mean = True
+    accepts_output_attributes = True
+
     def __init__(
         self,
         name: str = "Reg",
@@ -299,21 +302,22 @@ class IMPACTReg(CriterionWithAttribute):
             projected_target.append(self._pca_transform(target_feature[b : b + 1], basis))
         return torch.cat(projected_output), torch.cat(projected_target)
 
-    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
-        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    def forward(  # type: ignore[override]  # the added keywords are CriterionWithAttribute's contract
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Attribute]],
+        output_attributes: list[Attribute] | None = None,
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
         # The mask is the target after the image, by position as for every masked criterion (CT;MASK).
         mask = targets[1] if len(targets) > 1 else None
-        # The prediction and the target share the same intensity space, so a single target attribute
-        # (single-group target such as ``CT``) is reused to normalize both output and target; a second
-        # attribute set is honored when the target is multi-group.
-        target_attributes = attributes[1] if len(attributes) > 1 else attributes[0]
+        # An output without statistics of its own (a model output) is read with the target's.
         return _feature_loss_mean(
             self.model.slice_losses(
                 output,
-                attributes[0],
+                attributes[0] if output_attributes is None else output_attributes,
                 targets[0],
-                target_attributes,
+                attributes[0],
                 mask,
                 self.loss,
                 project=self._pca_project if self.pca > 0 else None,
@@ -322,6 +326,9 @@ class IMPACTReg(CriterionWithAttribute):
 
 
 class IMPACTSynth(CriterionWithAttribute):
+    batch_mean = True
+    accepts_output_attributes = True
+
     def __init__(
         self,
         model_content_name: str,
@@ -343,16 +350,23 @@ class IMPACTSynth(CriterionWithAttribute):
         self.content_loss = torch.nn.MSELoss()
         self.style_loss = Gram()
 
-    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
-        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    def forward(  # type: ignore[override]  # the added keywords are CriterionWithAttribute's contract
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Attribute]],
+        output_attributes: list[Attribute] | None = None,
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
         if len(targets) < 2:
             raise ValueError("At least two target tensors are required.")
         mask = targets[2] if len(targets) > 2 else None  # after the content and style images
+        content, style = attributes[0], attributes[1]
+        # An output without statistics of its own (a model output) is read with the content image's.
+        output_content = content if output_attributes is None else output_attributes
         return _feature_loss_mean(
             chain(
-                self.content.slice_losses(output, attributes[0], targets[0], attributes[1], mask, self.content_loss),
-                self.style.slice_losses(output, attributes[2], targets[1], attributes[2], mask, self.style_loss),
+                self.content.slice_losses(output, output_content, targets[0], content, mask, self.content_loss),
+                self.style.slice_losses(output, style, targets[1], style, mask, self.style_loss),
             )
         )
 
@@ -365,6 +379,8 @@ class SAM_Perceptual(CriterionWithAttribute):
     uses the raw feature extractor ``VBoussot/impact-torchscript-models`` / ``SAM2.1/<model_name>`` and
     applies per-layer ``weights`` (e.g. ``[0, 1, 1, 0]``); a weight of ``0`` skips that layer.
     """
+
+    batch_mean = True
 
     def __init__(
         self,

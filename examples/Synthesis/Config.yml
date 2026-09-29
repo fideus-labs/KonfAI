@@ -1,7 +1,7 @@
 Trainer:
   Model:
-    classpath: Model:UNetpp5  # The baseline generator in Python form (Model.py). Same model as UNetpp.yml
-    # classpath: UNetpp.yml   # ...its declarative YAML form (weight-identical; exposes the same Head:Tanh)
+    classpath: Model:UNetpp5  # The baseline generator in Python form (Model.py). Same model as UNetpp5.yml
+    # classpath: UNetpp5.yml  # ...its declarative YAML form (same layers and Head:Tanh; other state names, checkpoints do not cross)
     UNetpp5:
       outputs_criterions:
         Head:Tanh: # Model output layer used for loss computation
@@ -81,7 +81,6 @@ Trainer:
           gamma: 0.75
           last_epoch: -1
           nb_step: 0
-      dim: 2
       ModelPatch: None
   Dataset:
     groups_src: # Mapping between dataset modalities and how they are used by the model

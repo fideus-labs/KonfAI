@@ -110,7 +110,7 @@ def parse_model_metrics(body: str | None) -> list[dict[str, Any]]:
     """Each ``Name(lr) : Metric(weight) : value …`` model group inside a ``Loss (...)`` body."""
     if not body:
         return []
-    token_pattern = re.compile(r"([A-Za-z0-9_.-]+)\(([-+0-9.eE]+)\)\s*:\s*")
+    token_pattern = re.compile(r"([A-Za-z0-9_.#-]+)\(([-+0-9.eE]+)\)\s*:\s*")
     value_pattern = re.compile(r"[-+0-9.eE]+|nan|inf|-inf", flags=re.IGNORECASE)
     matches = list(token_pattern.finditer(body))
     models: list[dict[str, Any]] = []

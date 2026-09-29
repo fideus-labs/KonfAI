@@ -166,3 +166,45 @@ def test_a_bundle_without_its_config_or_weights_is_refused_by_name(tmp_path: Pat
     (tmp_path / "empty").mkdir()
     with pytest.raises(ConfigError, match=r"inference\.json"):
         import_bundle(tmp_path / "empty")
+
+
+def test_a_model_patch_cutting_the_example_into_several_patches_is_not_exported(tmp_path: Path) -> None:
+    from konfai.data.patching import ModelPatch
+    from konfai.models.python.segmentation.UNet import UNet
+    from konfai.utils.errors import PredictorError
+
+    network = UNet(dim=2, channels=[1, 8, 16], nb_class=2, patch=ModelPatch([16, 16], overlap=0))
+    with pytest.raises(PredictorError, match="ModelPatch"):
+        export_bundle(network, torch.randn(1, 1, 32, 32), tmp_path / "out_bundle", name="toy")
+
+
+def test_a_bound_nested_model_patch_is_exported_assembled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Bound (Trainer, Predictor, train_model), a nested network assembles its patches before Post reads them.
+    from konfai.data.patching import ModelPatch
+    from konfai.network.network import Network
+    from konfai.utils.runtime import State
+
+    class Inner(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2, patch=ModelPatch([16, 16], overlap=0))
+            self.add_module("Conv", torch.nn.Conv2d(1, 2, 1))
+
+    class Outer(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=2)
+            self.add_module("Inner", Inner())
+            self.add_module("Post", torch.nn.Conv2d(2, 2, 1))
+
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_config_file", str(tmp_path / "config.yml"))
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    network = Outer()
+    network.bind(False, State.PREDICTION, ["x"])
+    example = torch.randn(1, 1, 32, 32)
+
+    root = export_bundle(network, example, tmp_path / "out_bundle", name="toy")
+
+    network.Inner.patch = None
+    with torch.no_grad():
+        expected = dict(network.eval().named_forward(example))["Post"]
+        torch.testing.assert_close(torch.jit.load(str(root / "models" / "model.ts"))(example), expected)

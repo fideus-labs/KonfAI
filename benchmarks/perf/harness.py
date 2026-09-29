@@ -38,6 +38,7 @@ lines every workflow prints (parsed, never re-implemented). Nothing here is a be
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import os
 import platform
@@ -205,7 +206,8 @@ def cpu_hogs(threshold_percent: float = 50.0) -> list[str]:
 
 
 def machine_gate(*, max_load: float = 3.0, require_performance: bool = True, force: bool = False) -> GateReport:
-    """Refuse to time on a machine that is not quiet; ``force`` turns the refusal into a warning."""
+    """Refuse to time on a machine that is not quiet, or a konfai imported from another tree; ``force``
+    turns the refusal into a warning."""
     report = GateReport()
     load1 = os.getloadavg()[0]
     # A series (run_all) gates the load once, up front: the bench before this one leaves a load
@@ -221,6 +223,11 @@ def machine_gate(*, max_load: float = 3.0, require_performance: bool = True, for
     hogs = cpu_hogs()
     if hogs:
         report.warnings.append("CPU hogs: " + ", ".join(hogs[:4]))
+    # The fingerprint dates this tree, so the konfai the benches import must be this tree's.
+    spec = importlib.util.find_spec("konfai")
+    source = Path(spec.origin).resolve().parent if spec and spec.origin else None
+    if source != REPO / "konfai":
+        report.warnings.append(f"konfai is imported from {source}, not from this tree ({REPO})")
     if report.warnings and not force:
         raise SystemExit(
             "[perf] the machine is not quiet; refusing to time (pass --force to record the numbers anyway):\n  - "

@@ -1,12 +1,14 @@
 # The YAML form of this example's baseline generator (Model.py:UNetpp5): a
 # segmentation_models_pytorch UnetPlusPlus (resnet34 encoder, 5 input channels, 1 output)
 # followed by a Tanh head, reproduced node-for-node from the curated registry only.
-# It exposes the same 'Head:Tanh' output as UNetpp5, so Config.yml works unchanged with
-# either 'classpath: Model:UNetpp5' or 'classpath: UNetpp.yml'. Large because an smp UNet++
+# The file is named after the class, so both forms read the same 'Trainer.Model.UNetpp5' block, and
+# it exposes the same 'Head:Tanh' output: Config.yml works unchanged with either
+# 'classpath: Model:UNetpp5' or 'classpath: UNetpp5.yml'. The state names differ from Model.py's, so a
+# checkpoint of one form does not load into the other. Large because an smp UNet++
 # is genuinely ~117 conv layers -- this proves even an encoder-backed model can be declarative;
 # in practice 'classpath: segmentation.smp.SMP' is the compact alternative for the smp backbone.
 # The GAN training loop (Config_GAN.yml) stays Python: its adversarial forward is not a graph.
-name: UNetpp
+name: UNetpp5
 network:
   in_channels: 5
   dim: 2

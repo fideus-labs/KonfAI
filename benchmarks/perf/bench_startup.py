@@ -20,9 +20,9 @@
 
 Three measurements, each in a fresh interpreter so nothing is cached:
 
-- ``python -X importtime -c "import konfai.trainer"``: the cumulative self time of the top-level
-  modules that matter (konfai, torch, dask, ngff_zarr, zarr, SimpleITK), from the interpreter's own
-  import profiler, so a lazy-import change shows as a moved line, not a guess.
+- ``python -X importtime -c "import konfai.trainer"``: the cumulative time of each top-level package
+  that matters (konfai, torch, dask, ngff_zarr, zarr, SimpleITK), taken where the import enters it,
+  from the interpreter's own import profiler, so a lazy-import change shows as a moved line, not a guess.
 - ``import konfai`` and ``import konfai.trainer`` wall and resident set, measured by the child itself.
 - ``konfai --help`` wall through the installed entry point.
 """
@@ -48,16 +48,20 @@ def importtime(module: str) -> dict[str, float]:
         [sys.executable, "-X", "importtime", "-c", f"import {module}"], capture_output=True, text=True, check=False
     )
     totals: dict[str, float] = {}
-    pattern = re.compile(r"import time:\s+(\d+) \|\s+(\d+) \|(\s*)(\S+)")
-    for line in completed.stderr.splitlines():
+    pattern = re.compile(r"import time:\s+(\d+) \|\s+(\d+) \| ((?:  )*)(\S+)")
+    # A line is printed after its subtree, two spaces deeper per import level: read backwards, each
+    # line follows its ancestors. A package counts where it is entered from outside itself, and that
+    # line's cumulative time carries the whole subtree.
+    ancestors: list[str] = []
+    for line in reversed(completed.stderr.splitlines()):
         match = pattern.match(line)
         if not match:
             continue
-        cumulative_us, depth, name = int(match.group(2)), len(match.group(3)), match.group(4)
-        top = name.split(".")[0]
-        # a top-level package line (depth 1 = no indentation) carries its whole subtree in `cumulative`
-        if depth <= 1 and top in TOP_MODULES:
+        cumulative_us, level, top = int(match.group(2)), len(match.group(3)) // 2, match.group(4).split(".")[0]
+        del ancestors[level:]
+        if top in TOP_MODULES and top not in ancestors:
             totals[top] = totals.get(top, 0.0) + cumulative_us / 1e3
+        ancestors.append(top)
     return {k: round(v, 1) for k, v in totals.items()}
 
 

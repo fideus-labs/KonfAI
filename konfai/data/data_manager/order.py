@@ -161,9 +161,13 @@ class WindowedCaseSampler(Sampler[int]):
         batch_size: int,
         num_workers: int,
         read_order: PatchReadOrder | None = None,
+        padding: int = 0,
     ) -> None:
         self.mapping = mapping
         self.shuffle = shuffle
+        # The last ``padding`` entries keep a validation rank's forwards in step with the others
+        # (``Data._split_validation``): never shuffled in, they stay a batch of their own at the end.
+        self.padding = padding
         # Where the epoch's order is published for the processes that read the patches; a sampler
         # asked for nothing but its order publishes nowhere.
         self.read_order = read_order
@@ -231,7 +235,8 @@ class WindowedCaseSampler(Sampler[int]):
         if not self.shuffle:
             order = torch.arange(len(self.mapping))
         elif self.window is None:
-            order = torch.randperm(len(self.mapping))
+            scored = len(self.mapping) - self.padding
+            order = torch.cat((torch.randperm(scored), torch.arange(scored, len(self.mapping))))
         else:
             order = torch.as_tensor(self._windowed_order(), dtype=torch.int64)
         if self.read_order is not None:

@@ -73,14 +73,32 @@ class Adaptation(torch.nn.Module):
         self.Encoder_1.requires_grad_(False)
         self.FCT_1.requires_grad_(True)
 
-    def forward(
-        self, a: torch.Tensor, b: torch.Tensor, c: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return (
-            self.FCT_1(self.ToFeatures(self.Encoder_1(a))),
-            self.FCT_1(self.ToFeatures(self.Encoder_1(b))),
-            self.FCT_1(self.ToFeatures(self.Encoder_1(c))),
-        )
+    def forward(self, *tensors: torch.Tensor) -> torch.Tensor:
+        # One pass over the images stacked on the batch axis: every layer acts per sample.
+        return self.FCT_1(self.ToFeatures(self.Encoder_1(torch.cat(tensors, dim=0))))
+
+
+class Part(torch.nn.Module):
+    """The ``index``-th of ``parts`` equal slices of a batch."""
+
+    def __init__(self, index: int, parts: int) -> None:
+        super().__init__()
+        self.index = index
+        self.parts = parts
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.chunk(self.parts, dim=0)[self.index]
+
+
+class Triplet(network.ModuleArgsDict):
+    """The three images of a triplet embedded by one ``Adaptation``, each embedding a named output
+    (``Model:Anchor``, ``Model:Positive``, ``Model:Negative``) a criterion can address."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.add_module("Embedding", Adaptation(), in_branch=[0, 1, 2], out_branch=["Embedding"])
+        for index, name in enumerate(("Anchor", "Positive", "Negative")):
+            self.add_module(name, Part(index, 3), in_branch=["Embedding"], out_branch=[name])
 
 
 class Representation(network.Network):
@@ -105,4 +123,4 @@ class Representation(network.Network):
             dim=dim,
             init_type="kaiming",
         )
-        self.add_module("Model", Adaptation(), in_branch=[0, 1, 2])
+        self.add_module("Model", Triplet(), in_branch=[0, 1, 2])
