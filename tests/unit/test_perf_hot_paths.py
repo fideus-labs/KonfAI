@@ -199,7 +199,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     # is sorted from those headers. get_dicom_info is memoised, so the cache must be cleared for the
     # spy to see the cold cost at all.
     calls["discover"] = calls["headers"] = 0
-    dicom.get_dicom_info.cache_clear()
+    dicom.forget_series()
     data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 1
@@ -215,7 +215,7 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
 
     # statistics over Z: 1 cold discovery, not O(Z); numerics preserved (Welford, ddof=1)
     calls["discover"] = calls["headers"] = 0
-    dicom.get_dicom_info.cache_clear()
+    dicom.forget_series()
     stats = Dataset(tmp_path, "dicom").read_data_statistics("CT", "P000")
     assert calls["discover"] == 1
     assert np.isclose(stats["mean"], float(vol.mean()), atol=1e-4)

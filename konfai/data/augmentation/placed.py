@@ -27,7 +27,7 @@ try:
 except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.data.augmentation.base import DataAugmentation, _hashed_normal_field, _require_simpleitk
-from konfai.data.transform import LocalityKind, RegionContext
+from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import AugmentationError
 
@@ -115,7 +115,8 @@ class Noise(PlacedDraw):
     ) -> torch.Tensor:
         alpha_hat_t = self.alpha_hat[self.ts[index][a]].to(tensor.device).reshape(*[1 for _ in tensor.shape])
         field = _hashed_normal_field(self.field_seeds[index][a], tuple(tensor.shape), offsets, full, tensor.device)
-        return alpha_hat_t.sqrt() * tensor + (1 - alpha_hat_t).sqrt() * field * self.n_std
+        # The field is this draw's own buffer: scaled in place, so the sum is the only other volume.
+        return (alpha_hat_t.sqrt() * tensor).add_(field.mul_((1 - alpha_hat_t).sqrt()).mul_(self.n_std))
 
 
 class CutOUT(PlacedDraw):
@@ -162,7 +163,19 @@ class CutOUT(PlacedDraw):
         for mask in masks[1:]:
             result = torch.logical_or(result, mask)
         # The bool mask broadcasts over the channels, never repeated C times and re-tested.
-        return torch.where(result.unsqueeze(0).to(tensor.device), tensor, torch.tensor(self.value).to(tensor.device))
+        return torch.where(result.unsqueeze(0).to(tensor.device), tensor, self._fill(tensor))
+
+    def _fill(self, tensor: torch.Tensor) -> torch.Tensor:
+        """The fill, in an integer group's own dtype when that dtype holds it exactly: a label map
+        stays one. A value it cannot hold widens the copy to float."""
+        value = float(self.value)
+        try:
+            bounds = torch.iinfo(tensor.dtype)
+        except TypeError:  # a float, complex or bool group
+            bounds = None
+        if bounds is not None and value.is_integer() and bounds.min <= value <= bounds.max:
+            return torch.tensor(int(value), dtype=tensor.dtype, device=tensor.device)
+        return torch.tensor(self.value).to(tensor.device)
 
 
 class PlacedMask(DataAugmentation):
@@ -197,8 +210,11 @@ class PlacedMask(DataAugmentation):
         # The mask's own grid, the extent state_init gave the copy: the draw crops or pads to it.
         return list(self.mask_shape)
 
-    # WHOLE_VOLUME on purpose: the output grid is the mask's, and the mask volume is already
-    # resident at that extent.
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME, reason="the copy is cut on the mask's grid, and the mask is read whole"
+        )
+
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         mask = self._load_mask()
         position = self.positions[index][a]

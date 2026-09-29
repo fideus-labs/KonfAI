@@ -180,6 +180,8 @@ class _Predictor:
                         " (pip install konfai[tensorboard] to keep them)."
                     )
                 self.tb = NullSummaryWriter()
+            elif self.global_rank != 0:
+                self.tb = NullSummaryWriter()  # rank 0 alone writes the curves
             else:
                 self.tb = SummaryWriter(log_dir=predict_path / "Metric")
         else:

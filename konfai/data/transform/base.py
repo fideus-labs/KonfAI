@@ -49,7 +49,7 @@ class LocalityKind(Enum):
     - ``ORIENTATION``: flip/permute: the index-remapped source region.
     - ``CROP``: the source region is the target region translated, so the stage is not re-applied
       to it. It drops voxels, so the stored volume's statistics are not its output's.
-    - ``GLOBAL_STAT``: needs whole-volume statistics (``stat_keys``, a subset of Min/Max/Mean/Std),
+    - ``GLOBAL_STAT``: needs whole-volume statistics (``stat_keys``, a subset of Min/Max/Mean/Std or their PerChannel forms),
       read once from disk and cached: the exact patch plus the cached statistic.
     - ``REGRID``: resample onto another grid, possibly through a map. The stage owns both halves:
       the source region a target region pulls (:meth:`Transform.stream_region_source`) and the
@@ -110,6 +110,15 @@ _UNDECLARED_LOCALITY = (
     " for a neighbourhood one, REGRID for a geometric one) to let its patches stream"
 )
 
+#: Why a class from another framework, wrapped in ``Foreign``, needs the whole volume.
+_FOREIGN_LOCALITY = (
+    "a class from another framework says nothing about where its output comes from; a KonfAI stage"
+    " wrapping it can declare its locality to let its patches stream"
+)
+
+#: Why a stage that changes the tensor's rank needs the whole volume.
+_RANK_CHANGE = "it changes the tensor's rank, and regions are cut on the grid of the source"
+
 
 @dataclass(frozen=True)
 class PatchLocality:
@@ -117,7 +126,7 @@ class PatchLocality:
 
     ``halo`` is the per-spatial-axis neighbourhood radius in array order (Z, Y, X); a length-1
     tuple broadcasts to every axis. ``stat_keys`` are the ``Attribute`` keys a ``GLOBAL_STAT``
-    transform reads before running (a subset of ``Min``/``Max``/``Mean``/``Std``). ``stat_channels``
+    transform reads before running (a subset of ``Min``/``Max``/``Mean``/``Std``, or their ``PerChannel`` forms). ``stat_channels``
     restricts the statistic to those channels (``Normalize.channels``). ``reason`` is why a
     ``WHOLE_VOLUME`` declaration needs the whole volume; the plan prints it.
     """
@@ -130,8 +139,8 @@ class PatchLocality:
     # float dtype) may declare True so a later GLOBAL_STAT can still seed from the stored volume.
     preserves_statistics: bool | None = None
     #: Why this stage needs the whole volume, in the words the plan prints. A stage that is
-    #: inherently whole-volume (it changes the tensor's rank) leaves this None; one that is
-    #: whole-volume because of its configuration must say so.
+    #: inherently whole-volume may leave this None, and the plan then says only that it needs the
+    #: whole volume; one that is whole-volume because of its configuration must say so.
     reason: str | None = None
     #: The ``stat_keys`` the whole-volume call leaves in the scope under those names, ``None`` for all
     #: of them. The streamed route seeds a stage right before it runs and takes back what that route
@@ -228,13 +237,18 @@ class Transform(NeedDevice, ABC):
     def set_datasets(self, datasets: list[Dataset]):
         self.datasets = datasets
 
+    def dataset_holding(self, group: str, name: str) -> Dataset | None:
+        """The first of the run's datasets that holds the case's ``group``, ``None`` when none does."""
+        return next((dataset for dataset in self.datasets if dataset.is_dataset_exist(group, name)), None)
+
     def read_companion(self, group: str, name: str) -> np.ndarray:
         """The case's ``group`` volume, whole, from whichever dataset holds it."""
-        for dataset in self.datasets:
-            if dataset.is_dataset_exist(group, name):
-                return dataset.read_data(group, name)[0]
-        raise ValueError(
-            f"Requested group '{group}' is not present in any dataset. Check your dataset group names or configuration."
+        dataset = self.dataset_holding(group, name)
+        if dataset is not None:
+            return dataset.read_data(group, name)[0]
+        raise TransformError(
+            f"No dataset holds the group '{group}' for case '{name}'.",
+            "Check the group name against the datasets the run reads.",
         )
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
@@ -573,9 +587,18 @@ class Foreign(Transform):
     # working_multiple is not declared: a foreign callable's allocations cannot be measured here.
 
     def __init__(self, transform, classpath: str) -> None:
+        if transform is None:
+            raise TransformError(
+                "'Foreign' is named in the config, and it only wraps the class a key names.",
+                "Write the class as the key, its arguments under it:"
+                " 'monai.transforms:ScaleIntensity: {minv: 0.0, maxv: 1.0}'.",
+            )
         super().__init__()
         self.classpath = classpath
         self.transform = transform
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_FOREIGN_LOCALITY)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         result = self.transform(tensor)

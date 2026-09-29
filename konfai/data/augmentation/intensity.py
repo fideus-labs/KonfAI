@@ -73,7 +73,8 @@ class GaussianNoise(PlacedDraw):
         if std == 0:
             return tensor
         field = _hashed_normal_field(self.seeds[index][a], tuple(tensor.shape), offsets, full, tensor.device)
-        return (tensor.float() + field * std).to(tensor.dtype)
+        # The field is this draw's own buffer: the sum lands in it rather than in a second volume.
+        return field.mul_(std).add_(tensor.float()).to(tensor.dtype)
 
 
 class GaussianBlur(DataAugmentation):

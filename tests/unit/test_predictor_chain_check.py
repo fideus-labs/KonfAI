@@ -23,6 +23,7 @@ compares it, stage by stage, with the live one.
 """
 
 import shutil
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,7 @@ from typing import Any, cast
 
 import pytest
 from konfai.predictor import Predictor
+from konfai.utils.runtime.logging import MinimalLog
 from ruamel.yaml import YAML
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
@@ -68,14 +70,13 @@ def _workspace(
     return [tmp_path / "Checkpoints" / run / "model.pt" for run in runs]
 
 
-def _report(
+def _check(
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     checkpoints: list[Path],
     check_training_transforms: bool = True,
-) -> str:
-    """What the check prints for a run loading ``checkpoints``; it reads nothing else off the run."""
+) -> None:
+    """Run the check for a run loading ``checkpoints``; it reads nothing else off the run."""
     monkeypatch.setenv("KONFAI_config_file", str(tmp_path / "Prediction.yml"))
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
     predictor = SimpleNamespace(
@@ -83,6 +84,20 @@ def _report(
         check_training_transforms=check_training_transforms,
     )
     Predictor._report_chain_drift(cast(Predictor, predictor))
+
+
+def _report(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    checkpoints: list[Path],
+    check_training_transforms: bool = True,
+) -> str:
+    """What the check says in a run's log, where the console capture spells its warnings."""
+    monkeypatch.setenv("KONFAI_VERBOSE", "True")
+    with warnings.catch_warnings(), MinimalLog(rank=0):
+        warnings.simplefilter("always")
+        _check(monkeypatch, tmp_path, checkpoints, check_training_transforms)
     return capsys.readouterr().out
 
 

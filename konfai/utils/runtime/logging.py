@@ -25,6 +25,7 @@ import socket
 import subprocess  # nosec B404
 import sys
 import time
+import traceback
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -44,7 +45,7 @@ from konfai import (
     statistics_directory,
     transforms_directory,
 )
-from konfai.utils.errors import ConfigError, KonfAIWarning
+from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning
 
 if TYPE_CHECKING:
     # TRAIN and PREDICTION import the writer they open; TensorBoard stays out of the other workflows.
@@ -376,6 +377,12 @@ class Log(MinimalLog):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.outer is not None:
             return
+        if exc_val is not None:
+            # The run ends on it: the file says why, as the console does. A designed refusal is its message.
+            if isinstance(exc_val, KonfAIError):
+                self.file.write(f"{str(exc_val).strip()}\n")
+            elif not isinstance(exc_val, KeyboardInterrupt):
+                self.file.write("".join(traceback.format_exception(exc_type, exc_val, exc_tb)))
         super().__exit__(exc_type, exc_val, exc_tb)
         self.file.__exit__(exc_type, exc_val, exc_tb)
 

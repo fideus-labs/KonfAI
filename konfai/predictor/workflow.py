@@ -70,7 +70,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
     Attributes:
         model (Network): The neural network model to use for prediction.
         dataset (konfai.data.data_manager.DataPrediction): Dataset manager for prediction data.
-        combine_classpath (str): Path to the reduction strategy (e.g., "Mean").
+        combine (konfai.data.reduction.Reduction): How the ensemble members' outputs are folded (``Mean`` by default).
         autocast (bool): Whether to enable AMP inference.
         cudnn_benchmark (bool): Let cuDNN benchmark its kernels under ``manual_seed``: faster, no bit-for-bit replay.
         torch_compile (bool): Compile the model's graph walk with torch.compile; the first batches pay the compilation.
@@ -302,14 +302,15 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             differences = input_chain_differences(trained, applied)
             if not differences:
                 continue
-            print(f"[KonfAI] WARNING: this run preprocesses a model input differently from {', '.join(names)}:")
-            for difference in differences:
-                print(f"[KonfAI]   {difference}")
-            print(
+            # One warning, spelled line by line as the run's log prints it.
+            lines = [
+                f"this run preprocesses a model input differently from {', '.join(names)}:",
+                *(f"[KonfAI]   {difference}" for difference in differences),
                 "[KonfAI] The same checkpoint on differently preprocessed inputs predicts wrong values"
                 " without failing. Set 'check_training_transforms: false' under Predictor once the"
-                " difference is deliberate."
-            )
+                " difference is deliberate.",
+            ]
+            warnings.warn("\n".join(lines), KonfAIWarning, stacklevel=2)
 
     def set_models(self, path_to_models: list[Path | str]) -> None:
         self.path_to_models = path_to_models

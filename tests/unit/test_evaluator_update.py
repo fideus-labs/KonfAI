@@ -446,8 +446,8 @@ def _score_in_training_and_in_evaluation(criterion, output_group: str, target_gr
 
 
 def test_a_criterion_gets_the_same_attributes_in_training_and_in_evaluation() -> None:
-    """``attributes`` holds the targets' own, in the order of the target group, through both calls.
-    The evaluator once put the output's first, so one criterion indexed two different lists."""
+    """``attributes`` holds the targets' own, in the order of the target group, through both calls, so
+    one criterion indexes the same list in both."""
 
     class Recorder(CriterionWithAttribute):
         def __init__(self) -> None:

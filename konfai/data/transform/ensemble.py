@@ -22,7 +22,7 @@ from collections.abc import Callable
 import numpy as np
 import torch
 
-from konfai.data.transform.base import LocalityKind, Transform
+from konfai.data.transform.base import _RANK_CHANGE, LocalityKind, PatchLocality, Transform
 from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
@@ -78,14 +78,11 @@ class SegmentationDisagreement(Transform):
         disagreement = torch.zeros_like(tensors[0], dtype=torch.float32)
 
         # per-voxel disagreement = 1 - (majority label count / number of valid segmentations)
-        unique_labels = torch.unique(tensors)
-        label_counts: list[torch.Tensor] = []
-        for label in unique_labels:
-            label_counts.append(((tensors == label) & valid).sum(dim=0))
-
-        counts = torch.stack(label_counts, dim=0)  # [L, ...]
-        del label_counts  # the per-label counts live in the stack now
-        max_count = counts.max(dim=0).values
+        # A running maximum over the labels: one count is held at a time, whatever the label count.
+        labels = torch.unique(tensors)
+        max_count = torch.zeros_like(tensors[0])
+        for label in labels:
+            torch.maximum(max_count, ((tensors == label) & valid).sum(dim=0), out=max_count)
         valid_count = valid.sum(dim=0)
 
         non_empty = valid_count > 0
@@ -137,7 +134,8 @@ class Norm(Transform):
     def __init__(self) -> None:
         super().__init__()
 
-    # WHOLE_VOLUME on purpose: a rank change past the accumulator grid cannot region-stream.
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_RANK_CHANGE)
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if "Origin" in cache_attribute:

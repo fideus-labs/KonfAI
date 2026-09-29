@@ -125,6 +125,8 @@ def __getattr__(name: str):
         try:
             from konfai_apps.transforms import KonfAIInference
         except ImportError as exc:
+            if isinstance(exc, ModuleNotFoundError) and (exc.name or "").split(".")[0] != "konfai_apps":
+                raise  # konfai-apps is installed: a module it imports is not
             from konfai.utils.errors import TransformError
 
             raise TransformError(

@@ -29,8 +29,10 @@ from pathlib import Path
 import SimpleITK as sitk
 import torch
 from konfai import cuda_visible_devices
-from konfai.data.transform import Transform
+from konfai.data.transform import LocalityKind, PatchLocality, Transform
 from konfai.utils.dataset import Attribute, data_to_image, image_to_data
+
+from .cli import _exit_on_refusal
 
 # Published app used by KonfAIInference when the configuration leaves repo/model unset.
 DEFAULT_INFERENCE_REPO_ID = "VBoussot/MRSegmentator-KonfAI"
@@ -71,6 +73,11 @@ class KonfAIInference(Transform):
         # segmentation's patch_size: it degrades the result; the allocator hint below keeps memory in check).
         self.config_overrides = config_overrides
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME, reason="the app infers on the whole case, in a process of its own"
+        )
+
     def plan_note(self, group_dest: str, name: str, shape: list[int], cache_attribute: Attribute) -> str | None:
         del name, shape, cache_attribute
         return (
@@ -92,17 +99,20 @@ class KonfAIInference(Transform):
         os.environ.pop("KONFAI_TENSORBOARD_PORT", None)
 
         konfai_app = KonfAIApp(f"{self.repo_id}:{self.model_name}", False, False)
-        konfai_app.infer(
-            [[dataset_path]],
-            output_path,
-            0,
-            self.checkpoints_name,
-            self.number_of_tta,
-            mc=0,
-            config_overrides=self.config_overrides,
-            uncertainty=False,
-            gpu=gpu,
-        )
+        # This runs in a spawned child, where multiprocessing would print a refusal as a traceback: print it
+        # as the konfai CLI does, and exit 1.
+        with _exit_on_refusal():
+            konfai_app.infer(
+                [[dataset_path]],
+                output_path,
+                0,
+                self.checkpoints_name,
+                self.number_of_tta,
+                mc=0,
+                config_overrides=self.config_overrides,
+                uncertainty=False,
+                gpu=gpu,
+            )
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if current_process().daemon:

@@ -37,10 +37,13 @@ too: ``test_transform_materialize_contract`` over the storage formats, ``test_st
 the dtype, the rank, the geometry and the number of regions.
 """
 
+import inspect
+
 import numpy as np
 import pytest
 import torch
 from konfai.data import augmentation as augmentation_module
+from konfai.data import transform as transform_module
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.augmentation import Flip as FlipAugmentation
 from konfai.data.patching import DatasetManager, DatasetPatch
@@ -100,6 +103,25 @@ def test_every_builtin_transform_is_covered() -> None:
     # declaration is exactly how a wrong one would hide. Give it a _CASES entry instead.
     uncovered = [cls.__name__ for cls in builtin_transforms() if not cases_of(cls)]
     assert uncovered == []
+
+
+def test_no_builtin_stage_answers_with_the_advice_meant_for_an_undeclared_one() -> None:
+    """The base answers a stage that declares nothing with advice to its author ("set the class
+    attribute 'locality'"). Printed by the plan for a built-in, it asked the user to edit KonfAI."""
+    undeclared = [
+        name
+        for module, base, method in (
+            (transform_module, Transform, "patch_locality"),
+            (augmentation_module, augmentation_module.DataAugmentation, "_patch_locality"),
+        )
+        for name, cls in vars(module).items()
+        if isinstance(cls, type)
+        and issubclass(cls, base)
+        and not inspect.isabstract(cls)
+        and cls.locality is None
+        and getattr(cls, method) is getattr(base, method)
+    ]
+    assert undeclared == []
 
 
 def test_no_declaration_writes_to_the_case_metadata() -> None:
@@ -269,6 +291,8 @@ def _augmentation_cases() -> list[AugmentationCase]:
 def test_every_builtin_augmentation_is_covered() -> None:
     # An augmentation absent from the table is never asked anything, and an unasked declaration is
     # exactly how a wrong one would hide. Give it an entry, empty only if no draw of it can stream.
+    # An enumeration that finds nothing would pass this and skip every test below it.
+    assert builtin_augmentations()
     uncovered = [cls.__name__ for cls in builtin_augmentations() if cls.__name__ not in augmentation_cases()]
     assert uncovered == []
 

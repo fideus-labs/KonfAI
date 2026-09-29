@@ -1075,8 +1075,7 @@ class TestSSIMFromHaloPatches:
 
 
 class TestCriterionResult:
-    """The one normalizer of every shape a criterion may return (the boundary a bare numpy float
-    once slipped through, crashing the training-time consumer)."""
+    """The one normalizer of every shape a criterion may return, a bare numpy float included."""
 
     def test_a_bare_tensor_is_the_loss_and_its_detached_value(self):
         loss = torch.tensor(0.5, requires_grad=True) * 2
@@ -1279,9 +1278,8 @@ class TestFocalLossAlpha:
 
 @pytest.mark.parametrize("criterion", [MAE(), MSE(), Dice(labels=[1])], ids=["MAE", "MSE", "Dice"])
 def test_a_mask_counts_every_voxel_that_is_not_zero(criterion) -> None:
-    """A mask stored 0/255, as an 8-bit export writes it, once selected nothing: MAE nan, Dice empty,
-    exit 0. Any value but 0 is inside, so it scores as its 0/1 twin, and two masks combine as an AND
-    (their uint8 product wrapped: 16 x 16 is 0)."""
+    """A mask stored 0/255, as an 8-bit export writes it: any value but 0 is inside, so it scores as
+    its 0/1 twin, and two masks combine as an AND (a uint8 product wraps: 16 x 16 is 0)."""
     torch.manual_seed(3)
     labels = isinstance(criterion, Dice)
     output = (torch.rand(1, 1, 8, 8) > 0.5).long() if labels else torch.rand(1, 1, 8, 8)
@@ -1305,8 +1303,8 @@ def test_impact_stats_are_what_the_torchscript_models_read() -> None:
 
 
 def test_impact_scores_a_batch_one_sample_at_a_time_with_its_own_statistics() -> None:
-    # A model reads the statistics it is handed only when numel() == 4, so a whole batch at once left
-    # every sample normalized by the batch's min/max (MIND) or mean/std (the MRI TS models).
+    # A model reads the statistics it is handed only when numel() == 4: a sample at a time, each is
+    # normalized by its own min/max (MIND) or mean/std (the MRI TS models), not by the batch's.
     from konfai.metric.measure.impact import ImpactFeatureModel
 
     seen: list[list[float]] = []

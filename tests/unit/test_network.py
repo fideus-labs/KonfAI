@@ -481,8 +481,8 @@ def test_loss_add_keeps_plain_scalar_metric() -> None:
 
 def test_the_minimized_value_of_a_loss_is_what_selects_a_checkpoint() -> None:
     # A Dice loss reports the coefficient (the board's number) and minimizes one minus it. The
-    # selection score once summed the reported value with a cross entropy, so a better overlap
-    # read as a worse score and BEST kept an early epoch.
+    # selection score sums the minimized value with a cross entropy, so a better overlap reads as a
+    # better score.
     dice = Measure.Loss("Dice", "out", "tgt", 0, is_loss=True, accumulation=False)
     entropy = Measure.Loss("CE", "out", "tgt", 0, is_loss=True, accumulation=False)
     dice.add(1.0, (torch.tensor(0.1), 0.9))
@@ -727,8 +727,7 @@ def _two_dice_measure(accumulation: bool) -> Measure:
 
 
 def test_two_criteria_of_one_class_keep_a_record_each() -> None:
-    """Two criteria of one class once shared one record: the loss was their mean where two criteria
-    sum, and one value was logged for both."""
+    """Two criteria of one class keep a record each: the loss is their sum, and each is logged."""
     measure = _two_dice_measure(accumulation=False)
     torch.manual_seed(0)
     prob, seg = torch.softmax(torch.randn(1, 3, 8, 8), 1), torch.randint(0, 3, (1, 1, 8, 8))
@@ -760,8 +759,8 @@ def test_update_scheduler_past_last_window_clamps_to_last() -> None:
 
 
 def test_update_scheduler_past_the_last_window_goes_on_from_its_start() -> None:
-    """Past its window the last scheduler once restarted from step 0: a weight annealed to its floor
-    jumped back to its start value."""
+    """Past its window the last scheduler goes on from where its window starts: a weight annealed to
+    its floor stays there."""
     anneal = CosineAnnealing(start_value=1.0, eta_min=0.0, t_max=100)
     schedulers = {Constant(1.0): 100, anneal: 100}  # active windows [0,100) and [100,200)
 
@@ -1345,8 +1344,8 @@ class _NoOptimizerNet(Network):
 
 
 def test_bind_refuses_a_train_whose_networks_resolve_no_optimizer() -> None:
-    """A YAML-catalog model with `optimizer: None` once trained an epoch with the backward skipped,
-    a loss that never moved and a checkpoint written: exit 0."""
+    """A model whose networks resolve no optimizer (a YAML-catalog `optimizer: None`) would run every
+    epoch with the backward skipped: TRAIN refuses it."""
     from konfai.utils.runtime import State
 
     with pytest.raises(ConfigError, match=r"Model\._NoOptimizerNet\.optimizer"):
