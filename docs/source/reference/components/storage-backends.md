@@ -86,6 +86,17 @@ nothing.
 The extras column above is the summary; {doc}`../../getting-started/installation`
 is the canonical home for the optional-extras table.
 
+## HDF5 stores
+
+An `:h5` dataset is one `.h5` file holding every case. A new store is created
+empty before its first entry is written, so a run killed during that write
+leaves a store that opens, and the rerun writes the cases it is missing.
+
+HDF5 does not give back the space of an entry that is replaced: rewriting an
+entry of an existing store (a TRANSFORM rerun with `-y`, for example) grows the
+file by the entry's size each time. `h5repack <in> <out>`, from the HDF5
+command-line tools, writes a compacted copy.
+
 ## ITK transform files as a dataset
 
 `:itktransform` stores one ITK transform per entry (`<case>/<group>.h5`). The
@@ -109,6 +120,13 @@ extension: `.itk.txt` (SimpleITK transforms), `.fcsv` (Slicer landmarks), `.xml`
 (attribute trees), `.vtk` (VTK PolyData points), `.npy` (raw NumPy, memory-mapped
 on the slice path). It supports **true partial reads** (reading only the
 requested spatial window) for streaming.
+
+Landmarks are read in LPS, KonfAI's physical space. The `# CoordinateSystem`
+line of the `.fcsv` header decides the sign of x and y: `RAS` negates them;
+`LPS`, `1`, `0` and a file without the line keep them; any other value is
+refused. `0` is read as LPS because KonfAI up to 1.5.3 wrote it over LPS points.
+3D Slicer before 4.11 also wrote `0`, over RAS points: set the line of such a
+file to `RAS`. Landmarks are written in LPS.
 
 ## API details: DICOM series
 
@@ -147,8 +165,16 @@ Key behaviors:
 - **`apply_rescale=True`** (the default) applies `RescaleSlope` /
   `RescaleIntercept` to convert stored values to Hounsfield Units for CT. Set it
   to `False` to keep raw integers (for example for label maps).
+- **`MONOCHROME1` is not inverted.** The series reader returns
+  `RescaleSlope * value + RescaleIntercept`, the modality value the standard
+  defines; `MONOCHROME1` only tells a viewer to show low values as white. A single
+  file read through the `dcm` token (SimpleITK, GDCM) is inverted, so the two
+  routes return different values for such a file.
 - Missing geometry tags, inconsistent slice shapes, and unreadable pixel data all
-  raise `DatasetManagerError` with an actionable message.
+  raise `DatasetManagerError` with an actionable message. So does a series that is
+  not one scalar volume on one grid: colour slices (`SamplesPerPixel` other than 1),
+  slices that differ in `ImageOrientationPatient`, or slices that share one
+  position (a cine, several phases or echoes).
 
 ### Multi-series folders: `series_uid`
 
@@ -171,9 +197,19 @@ uid = next(iter(series))
 volume, origin, spacing, direction = read_dicom_series("path/to/study", series_uid=uid)
 ```
 
-`write_dicom_series` writes one uncompressed scalar DICOM series. Integer data
-round-trips exactly; floating-point data is stored as signed 16-bit pixels with
-`RescaleSlope` and `RescaleIntercept`.
+`write_dicom_series` writes one uncompressed scalar DICOM series. Integer data is
+stored exactly in 16- or 32-bit pixels, and a 64-bit volume holding a value outside
+the 32-bit range is refused; floating-point data is stored as signed 16-bit pixels with
+`RescaleSlope` and `RescaleIntercept`. The series is written beside its directory
+and renamed into place, so a writer killed mid-series leaves the previous series
+whole, or none; files in the directory that are not its own `NNNNNN.dcm` slices stay.
+
+A volume whose direction is left-handed (determinant -1, as some NIfTI or MetaImage
+grids are) written as a DICOM series reads back right-handed. DICOM records only
+the row and column directions, and the reader takes the slice axis as their cross
+product. The array comes back flipped along z and every world point keeps its
+value, so a voxel to voxel comparison with the source differs while a world-aware
+one (resampling onto the source grid) agrees.
 
 ## API details: OME-Zarr
 
@@ -188,6 +224,22 @@ OME-NGFF stores a **multiscale pyramid**: the same image at several resolutions,
 level `0` being full resolution and each higher level a downsampled copy. Each
 level carries its own physical `scale` (spacing) and `translation` (origin) in the
 `.zattrs` metadata, so geometry stays correct at every level.
+
+When KonfAI writes a pyramid (`scale_factors` on `Save`/`Write`, `write_ome_zarr`,
+`append_ome_zarr_levels`), each level is derived from the one above it over aligned
+windows of the scale factor per axis, the remainder at the far edge dropped. Without a
+`downsample_method`, the dtype decides what a window becomes:
+
+| Level 0 dtype | Coarser level |
+| --- | --- |
+| `uint8`, `int64`, `bool` (the label dtypes `Resample` takes nearest for) | the most frequent value of the window, the smallest on a tie |
+| any other dtype | the mean of the window (`DASK_BIN_SHRINK`), integers rounded half up |
+
+A label map therefore keeps its labels at every level: the mean of labels `1` and
+`3` would be a `2` no voxel holds. An `int16` label map is averaged like an
+intensity image: write it as `uint8`, or name a label method for it. A named
+`downsample_method` (an `ngff_zarr.Methods` name, such as `ITKWASM_LABEL_IMAGE` or
+`DASK_BIN_SHRINK`) always wins over the dtype.
 
 ### Units
 

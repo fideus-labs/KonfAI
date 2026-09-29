@@ -56,7 +56,7 @@ except ImportError:
     _ZARR_AVAILABLE = False
 
 try:
-    # dask is ngff-zarr's own hard dependency, and dask.array only describes a store to ngff-zarr.
+    # dask is ngff-zarr's own hard dependency: it describes a store and derives a label map's levels.
     import dask.array
     import ngff_zarr  # type: ignore[import-untyped]
 
@@ -865,7 +865,8 @@ def _downsample_method(downsample_method: str | None) -> Any:
     NOT ngff-zarr's own default, ``ITKWASM_GAUSSIAN``: a pyramid is read as "the same image,
     coarser", and a smoothed level is a change of pixels no reader can see. ``DASK_BIN_SHRINK`` is a
     plain block mean with ITK's own BinShrink semantics (aligned windows, remainder trimmed,
-    integers rounded half up), computed lazily with a bounded peak.
+    integers rounded half up), computed lazily with a bounded peak. A label map without a named
+    method takes the block majority over the same windows instead (:func:`append_ome_zarr_levels`).
     """
     _require_ngff_zarr()
     if downsample_method is None:
@@ -877,6 +878,44 @@ def _downsample_method(downsample_method: str | None) -> Any:
             f"Unknown downsample_method '{downsample_method}'.",
             f"Use one of: {', '.join(sorted(m.name for m in ngff_zarr.Methods))}.",
         ) from None
+
+
+def _is_label_dtype(dtype: np.dtype) -> bool:
+    """The dtypes :data:`konfai.data.sampling.LABEL_DTYPES` names, the ones Resample takes nearest for."""
+    import torch
+
+    from konfai.data.sampling import LABEL_DTYPES
+
+    return _native_dtype(dtype) in {torch.empty(0, dtype=label).numpy().dtype for label in LABEL_DTYPES}
+
+
+def _block_majority(block: np.ndarray, axis: tuple[int, ...] | None = None) -> np.ndarray:
+    """``dask.array.coarsen``'s reduction for a label map: the most frequent value of each window, the
+    smallest on a tie. Sorted, a window holds its equal values in runs and the first longest run is the
+    majority, so the cost follows the window size whatever the number of labels."""
+    if axis is None:  # coarsen's dtype probe
+        return block
+    kept = [index for index in range(block.ndim) if index not in axis]
+    windows = np.sort(block.transpose(*kept, *axis).reshape(*(block.shape[index] for index in kept), -1), axis=-1)
+    position = np.arange(windows.shape[-1], dtype=np.min_scalar_type(windows.shape[-1]))
+    run_starts = np.ones(windows.shape, dtype=bool)
+    np.not_equal(windows[..., 1:], windows[..., :-1], out=run_starts[..., 1:])
+    run_start = np.maximum.accumulate(np.where(run_starts, position, 0), axis=-1)
+    # The first position reaching the longest run length ends the longest run of the smallest value.
+    longest = np.argmax(position - run_start, axis=-1)
+    return np.take_along_axis(windows, longest[..., None], axis=-1)[..., 0]
+
+
+def _vote_levels(multiscales: Any, scale_factors: Sequence[int]) -> None:
+    """Replace each derived level by the block majority of the level above it: the windows, shapes and
+    chunks the block mean has, so the metadata describing them stays true."""
+    images = multiscales.images
+    spatial = [index for index, dim in enumerate(images[0].dims) if dim in _SPATIAL]
+    source = images[0].data
+    for image, factor in zip(images[1:], scale_factors, strict=True):
+        windows = dict.fromkeys(spatial, int(factor))
+        source = dask.array.coarsen(_block_majority, source, windows, trim_excess=True).rechunk(image.data.chunks)
+        image.data = source
 
 
 def _level_zero_scale_factors(scale_factors: Sequence[int]) -> list[int]:
@@ -1138,6 +1177,10 @@ def append_ome_zarr_levels(
     back whole, each coarser level is computed lazily from the one before it with a chunk-sized
     peak, and the metadata naming every level lands last, so an interrupted call leaves a store that
     still reads as its level 0. The KonfAI sidecar and a typed component axis ride along.
+
+    Without a named ``downsample_method``, a label dtype (uint8, int64, bool) takes the majority of
+    each window, the smallest value on a tie, where every other dtype takes the block mean: a mean of
+    labels 1 and 3 is a 2 no voxel holds.
     """
     if uri.is_uri(store_path):
         raise DatasetManagerError(
@@ -1160,6 +1203,8 @@ def append_ome_zarr_levels(
         chunks=tuple(int(size) for size in base.data.chunksize),
         cache=False,
     )
+    if downsample_method is None and _is_label_dtype(base.data.dtype):
+        _vote_levels(derived, scale_factors)
     derived.root_attributes = multiscales.root_attributes
     if multiscales.metadata.coordinateTransformations:
         # A conformant field keeps its ``displacements`` entry through the append: it names level 0.

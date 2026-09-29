@@ -478,6 +478,18 @@ Three semantics are worth remembering:
 - `subset` and `validation` accept the same selector spellings (slices, names,
   files, `~` exclusion): one grammar, implemented by `Subset`.
 
+A case-list file holds one case name per line, in UTF-8 (a byte-order mark is
+accepted) or in the system's code page. Under a Linux locale that is not UTF-8,
+it is read in that locale's encoding, as the case folders' names are. Two
+sources stay UTF-8 whatever the locale: the case names of a single-file `.h5`
+store, which are its keys and which h5py always decodes as UTF-8, and the case
+lists konfai-mcp's `generate_folds` writes. Under such a locale, a list does not
+find a non-ASCII case of an `.h5` store, nor a case listed by `generate_folds`:
+an inclusion list (`subset`, `validation`, `folds/fold_i.txt`) leaves that case
+out, and an exclusion (`~list`) keeps it, so a validation case, or the held-out
+fold of a `generate_folds` split (`~folds/fold_i.txt`), is trained on. Run under
+a UTF-8 locale (for example `LC_ALL=C.UTF-8`) when case names are not ASCII.
+
 The `subset` object is applied before validation splitting and can exclude or
 include items.
 

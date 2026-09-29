@@ -16,7 +16,10 @@
 
 """Tests for the app-bundle assembler."""
 
+import codecs
 import json
+import locale
+import sys
 
 import pytest
 from konfai_apps.bundle import assemble_bundle
@@ -34,6 +37,22 @@ VALID_META = {
 def _write(path, obj):
     path.write_text(json.dumps(obj))
     return path
+
+
+@pytest.fixture
+def ascii_locale():
+    """The locale's encoding set to ASCII: a file opened without an encoding takes it, as it takes the
+    ANSI code page on Windows, and any character outside it fails there the same way."""
+    if sys.flags.utf8_mode:
+        pytest.skip("UTF-8 mode ignores the locale's encoding")
+    previous = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        if codecs.lookup(locale.getencoding()).name == "utf-8":
+            pytest.skip("this platform's C locale is UTF-8")
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, previous)
 
 
 def test_assemble_bundle_layout(tmp_path):

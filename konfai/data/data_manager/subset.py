@@ -17,12 +17,25 @@
 
 """Which cases a run reads."""
 
+import codecs
+import io
+import locale
 import os
+import sys
 from collections.abc import Sequence
 
 import numpy as np
 
 from konfai.utils.dataset import Attribute
+
+
+def case_list_encoding() -> str:
+    """The encoding of a case-list file: the one case names, which are folder and file names, are
+    decoded with, so a listed name matches its case. UTF-8 on Windows, macOS and a UTF-8 locale; on
+    a Linux locale that is not UTF-8, that locale's."""
+    if codecs.lookup(sys.getfilesystemencoding()).name == "utf-8":
+        return "utf-8"
+    return locale.getpreferredencoding(False)
 
 
 class Subset:
@@ -38,8 +51,15 @@ class Subset:
 
     @staticmethod
     def _read_names_from_file(filename: str) -> list[str]:
-        with open(filename) as f:
-            return [name.strip() for name in f if name.strip()]
+        # A UTF-8 list may carry the byte-order mark Windows editors write, whatever the locale reading
+        # it; a list saved in the system's code page is read in it.
+        with open(filename, "rb") as f:
+            data = f.read().removeprefix(codecs.BOM_UTF8)
+        try:
+            text = data.decode(case_list_encoding())
+        except UnicodeDecodeError:
+            text = data.decode(locale.getpreferredencoding(False))
+        return [name.strip() for name in io.StringIO(text, newline=None) if name.strip()]
 
     def requires_infos(self) -> bool:
         """Return whether this subset implementation needs per-sample metadata."""

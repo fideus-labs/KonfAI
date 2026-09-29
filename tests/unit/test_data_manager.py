@@ -323,6 +323,37 @@ def test_a_negative_slice_end_counts_from_the_end_python_style() -> None:
     assert Subset("-2:5")(names, {}) == {"CASE_003", "CASE_004"}
 
 
+def _split_by_list(tmp_path: Path, names: list[str], content: str, encoding: str) -> tuple[list[str], list[str]]:
+    listed = tmp_path / "val.txt"
+    listed.write_text(content, encoding=encoding)
+    return DataTrain(augmentations=None, validation=str(listed))._split_train_validation_names(names)
+
+
+def test_a_case_list_with_a_byte_order_mark_keeps_its_first_name(tmp_path: Path) -> None:
+    """Windows editors and PowerShell write UTF-8 with a byte-order mark: kept on the first name, it
+    matched no case, and that validation case was trained on without a word."""
+    train, validation = _split_by_list(
+        tmp_path, ["CASE_000", "CASE_001", "CASE_002", "CASE_003"], "CASE_001\nCASE_003\n", "utf-8-sig"
+    )
+
+    assert validation == ["CASE_001", "CASE_003"]
+    assert train == ["CASE_000", "CASE_002"]
+
+
+@pytest.mark.parametrize("code_page", ["ascii_locale", "latin1_locale"])
+def test_a_utf8_case_list_keeps_its_names_whatever_the_locale(tmp_path: Path, request, code_page: str) -> None:
+    """Read in the locale's encoding, a UTF-8 list lost its non-ASCII names: a code page (cp1252 on
+    Windows, Latin-1 here) decoded 'é' as two other characters, which name no case; ASCII refused the byte."""
+    request.getfixturevalue(code_page)
+
+    train, validation = _split_by_list(
+        tmp_path, ["CASE_000", "CASE_003", "patient_é"], "patient_é\nCASE_003\n", "utf-8"
+    )
+
+    assert validation == ["CASE_003", "patient_é"]
+    assert train == ["CASE_000"]
+
+
 def test_an_unresolvable_validation_selector_is_refused_with_the_accepted_spellings() -> None:
     dataset = DataTrain(augmentations=None, validation="no_such_case_or_file")
 

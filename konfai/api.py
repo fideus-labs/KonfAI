@@ -103,12 +103,13 @@ def _workflow_scope(ranks: int) -> Iterator[None]:
     """Own build-time RNG draws, scratch files and the resident peak until execution and result
     extraction finish."""
     from konfai.utils.budget import run_peak_scope
-    from konfai.utils.runtime.distributed import preserved_rng
+    from konfai.utils.runtime.distributed import forget_memoised_inputs, preserved_rng
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, release_scratch_configs
 
     with _one_workflow_at_a_time(ranks), preserved_rng(), run_peak_scope():
         mark = len(_SCRATCH_CONFIGS)
         try:
+            forget_memoised_inputs()
             yield
         finally:
             release_scratch_configs(mark)

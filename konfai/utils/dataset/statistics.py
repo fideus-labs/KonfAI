@@ -247,6 +247,12 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> t
         low, high, inside_count = bin_low, bin_high, in_bin
 
 
+def _fold_extremum(fold: Callable[[float, float], float], current: float, candidate: float) -> float:
+    """``fold`` (``min`` or ``max``) of the running scalar and a piece's, a NaN kept as numpy keeps it:
+    Python's ``min`` and ``max`` drop a NaN candidate."""
+    return candidate if math.isnan(candidate) else fold(current, candidate)
+
+
 def _update_running_statistics(
     state: dict[str, Any] | None,
     array: np.ndarray,
@@ -296,8 +302,8 @@ def _update_running_statistics(
         state["mean"] += delta * chunk_count / total_count
         state["m2"] += chunk_m2 + delta * delta * state["count"] * chunk_count / total_count
         state["count"] = total_count
-        state["min"] = min(state["min"], float(channel_min.min()))
-        state["max"] = max(state["max"], float(channel_max.max()))
+        state["min"] = _fold_extremum(min, state["min"], float(channel_min.min()))
+        state["max"] = _fold_extremum(max, state["max"], float(channel_max.max()))
     return state
 
 
@@ -316,8 +322,8 @@ def _update_running_extrema(state: dict[str, Any] | None, array: np.ndarray) -> 
     channel_max = per_channel.max(axis=1)
     state["channel_min"] = np.minimum(state["channel_min"], channel_min)
     state["channel_max"] = np.maximum(state["channel_max"], channel_max)
-    state["min"] = min(state["min"], float(channel_min.min()))
-    state["max"] = max(state["max"], float(channel_max.max()))
+    state["min"] = _fold_extremum(min, state["min"], float(channel_min.min()))
+    state["max"] = _fold_extremum(max, state["max"], float(channel_max.max()))
     state["count"] += float(per_channel.size)
     state["channel_count"] += float(per_channel.shape[1])
     return state

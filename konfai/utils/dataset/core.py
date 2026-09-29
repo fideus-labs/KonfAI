@@ -67,10 +67,12 @@ from konfai.utils.dataset.statistics import (
 from konfai.utils.errors import DatasetManagerError, KonfAIError
 from konfai.utils.utils import (
     STORE_FORMS,
+    SUPPORTED_EXTENSIONS,
     SUPPORTED_FORMATS,
     directory_volume_form,
     is_store_name,
     split_format_level,
+    storage_form,
 )
 
 if TYPE_CHECKING:
@@ -175,6 +177,8 @@ class Dataset:
             names = Dataset._first_case_entries(root)
             return "omezarr" if any(is_store_name(name.name) for name in names) else None
         for entry in Dataset._first_case_entries(root):
+            if entry.name.startswith(".") and is_staging_entry(entry.name):
+                continue  # a writer's staging directory: another entry's files, removed once moved in
             volume = directory_volume_form(entry)
             if volume is not None:
                 return "dicom" if volume == "" else "omezarr"
@@ -605,11 +609,18 @@ class Dataset:
                 return sorted(groups_set)
             uri.refuse_remote_walk(self.filename, self.file_format)
             groups_set = set()
-            for root_dir, _, files in os.walk(self.filename):
+            for root_dir, directories, files in os.walk(self.filename):
+                # A writer's staging directory holds an entry under its final name until it is moved in.
+                directories[:] = [name for name in directories if not (name.startswith(".") and is_staging_entry(name))]
                 for file in files:
-                    if file.startswith(".") or is_staging_entry(file):
+                    # A MetaImage pixel file (.raw/.zraw, one per slice at times) is a half its header names.
+                    if file.startswith(".") or is_staging_entry(file) or file.lower().endswith((".raw", ".zraw")):
                         continue
-                    path = Path(root_dir, file.split(".")[0]).relative_to(self.filename).as_posix()
+                    # A dot in an entry's stem belongs to its name: only its storage form is cut.
+                    form = storage_form(Path(root_dir, file))
+                    cut = form.lower()[1:] in SUPPORTED_EXTENSIONS
+                    stem = file[: -len(form)] if cut else file.split(".")[0]
+                    path = Path(root_dir, stem).relative_to(self.filename).as_posix()
                     parts = path.split("/")
                     if len(parts) >= 2:
                         del parts[-2]
