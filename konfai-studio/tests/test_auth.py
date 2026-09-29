@@ -26,6 +26,7 @@ real shell, which is not something a test suite should leave behind.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -134,3 +135,53 @@ def test_a_cross_origin_page_cannot_open_the_terminal(monkeypatch: pytest.Monkey
         with client.websocket_connect("/api/terminal", headers={"origin": "http://evil.example"}) as ws:
             ws.receive_text()
     assert refused.value.code == 1008
+
+
+def _serve_with_the_cli(monkeypatch: pytest.MonkeyPatch, *argv: str) -> None:
+    """What ``konfai-studio <argv>`` sets up before uvicorn imports the app (uvicorn itself does not start)."""
+    import konfai_studio.cli as cli
+
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["konfai-studio", *argv])
+    for name in ("KONFAI_STUDIO_PROXY_HEADERS", "KONFAI_STUDIO_LOOPBACK"):
+        monkeypatch.setenv(name, "")  # so the teardown restores it, whatever the CLI writes
+    cli.main()
+
+
+def test_a_rebound_page_cannot_reach_a_local_studio_without_a_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DNS rebinding: a page re-points its own name at 127.0.0.1, so the browser sends that name as Host
+    and a matching Origin, and treats the answers as same-origin. Only the Host tells it from the
+    operator's own tab."""
+    monkeypatch.delenv("KONFAI_STUDIO_TOKEN", raising=False)
+    monkeypatch.setenv("KONFAI_STUDIO_TERMINAL", "0")  # a handshake that gets through must not spawn a shell
+    _serve_with_the_cli(monkeypatch)  # the default launch: loopback, no token
+    rebound = "attacker.example:8730"
+    with TestClient(app, base_url=f"http://{rebound}") as client:
+        assert client.get(GUARDED).status_code == 400
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(
+                "/api/terminal", headers={"host": rebound, "origin": f"http://{rebound}"}
+            ) as ws:
+                ws.receive_text()
+    assert refused.value.code == 1008
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8730", "localhost:8730", "[::1]:8730"])
+def test_a_local_studio_without_a_token_answers_its_loopback_names(monkeypatch: pytest.MonkeyPatch, host: str) -> None:
+    monkeypatch.delenv("KONFAI_STUDIO_TOKEN", raising=False)
+    _serve_with_the_cli(monkeypatch)
+    with TestClient(app) as client:
+        assert client.get(GUARDED, headers={"host": host}).status_code == 200
+
+
+def test_a_studio_bound_to_the_network_answers_its_network_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Behind a token the name is the proxy's; without one the operator chose the exposure explicitly."""
+    monkeypatch.delenv("KONFAI_STUDIO_TOKEN", raising=False)
+    _serve_with_the_cli(monkeypatch, "--host", "0.0.0.0", "--i-know-this-is-insecure")
+    with TestClient(app, base_url="http://workstation.lan:8730") as client:
+        assert client.get(GUARDED).status_code == 200
+
+    monkeypatch.setenv("KONFAI_STUDIO_TOKEN", TOKEN)
+    _serve_with_the_cli(monkeypatch)
+    with TestClient(app, base_url="https://studio.example.com") as client:
+        assert client.get(GUARDED, headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 200

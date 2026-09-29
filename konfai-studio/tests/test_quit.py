@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import signal
 import time
-from collections.abc import Iterator
 
 import pytest
 
@@ -22,15 +21,11 @@ HEADER = {"X-KonfAI-Studio": "quit"}
 
 
 @pytest.fixture
-def killed() -> Iterator[list[int]]:
-    """Capture the shutdown signal instead of killing the test runner."""
+def killed(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Capture the shutdown signal instead of stopping the test runner."""
     sent: list[int] = []
-    original = bff.os.kill
-    bff.os.kill = lambda pid, sig: sent.append(sig)  # type: ignore[assignment]
-    try:
-        yield sent
-    finally:
-        bff.os.kill = original  # type: ignore[assignment]
+    monkeypatch.setattr(signal, "raise_signal", sent.append)
+    return sent
 
 
 def _wait_for_signal(sent: list[int], timeout: float = 3.0) -> bool:

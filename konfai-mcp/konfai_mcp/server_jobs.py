@@ -132,6 +132,11 @@ def _proc_returncode(proc: object) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import psutil
+
+        # os.kill(pid, 0) sends CTRL_C_EVENT there: it succeeds or fails whatever the pid.
+        return bool(psutil.pid_exists(pid))
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -846,7 +851,7 @@ class JobRegistry:
                 return self.payload(job, isoformat)
             time.sleep(0.1)
 
-        self.signal(job, signal.SIGKILL)
+        self.signal(job, getattr(signal, "SIGKILL", signal.SIGTERM))  # Windows has no SIGKILL: SIGTERM terminates
         time.sleep(0.1)
         self.refresh(job)
         payload = self.payload(job, isoformat)

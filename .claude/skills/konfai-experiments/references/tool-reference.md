@@ -64,7 +64,7 @@ Use to DIFF the exact configs two jobs ran with, from their immutable launch-tim
 
 ### `export_app`
 
-Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters) as a local, editable app bundle: the reproducibility artifact a challenge submission wants. It copies the app's files and, when set_parameters is given, bakes those values into the copied config. Distinct from package_app_from_session, which packages a model YOU trained this session. It copies files and rewrites config only (no model-code import). Local/HuggingFace apps only. Outputs: exported_to, next_actions. Next: describe_app / run_app / import_app / register_app_source.
+Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters) as a local, editable app bundle: the reproducibility artifact a challenge submission wants. It copies the app's files and, when set_parameters is given, bakes those values into the copied config. Distinct from package_app_from_session, which packages a model YOU trained this session. It copies files and rewrites config only (no model-code import). Local/HuggingFace apps only. It refuses to replace a file already in the destination folder, naming it, unless overwrite=True. Outputs: exported_to, next_actions. Next: describe_app / run_app / import_app / register_app_source.
 
 ### `export_run_record`
 
@@ -92,7 +92,7 @@ Use to RUN a published KonfAI app as a NORMAL experiment in this session. Prefer
 
 ### `import_experiment`
 
-Use to ADOPT an existing on-disk KonfAI experiment (its Config/Prediction/Evaluation.yml, custom .py and .yml files, and optionally its Checkpoints/Predictions/Evaluations/Statistics/Dataset artifacts) into the current session workspace, so the server can read, validate, rerun, resume, and compare it. Artifacts are symlinked by default (no copy of large checkpoints); pass include_artifacts='copy' to copy or 'none' to import configs/code only. Existing session files are kept unless overwrite=True. Outputs: source, copied, linked, skipped, next_actions. Next: read_session_file / review_config_semantics, then validate_config_semantics.
+Use to ADOPT an existing on-disk KonfAI experiment (its Config/Prediction/Evaluation.yml, custom .py and .yml files, and optionally its Checkpoints/Predictions/Evaluations/Statistics/Dataset artifacts) into the current session workspace, so the server can read, validate, rerun, resume, and compare it. Artifacts are symlinked by default (no copy of large checkpoints); pass include_artifacts='copy' to copy or 'none' to import configs/code only. Where the system refuses the link (Windows without developer mode), the artifact is copied and listed in copied_instead_of_linked. Existing session files are kept unless overwrite=True. Outputs: source, copied, linked, copied_instead_of_linked, skipped, next_actions. Next: read_session_file / review_config_semantics, then validate_config_semantics.
 
 ### `initialize_session`
 

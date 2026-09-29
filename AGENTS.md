@@ -108,12 +108,14 @@ A third package exposing a **FastMCP** server. It depends on KonfAI's public API
   two `Literal` aliases beside it (and a `GUIDE`/tool description); every other map (config filename, root
   key, runner command, capabilities class, retry tool) derives from that table, and
   `tests/test_workflow_registry.py` pins the derivations to it.
-- **Safety invariants to preserve:** validation/smoke-tests never execute in the server process; only
-  `read/write_session_file` are path-jailed (dataset tools read arbitrary host paths by design, so keep it
-  that way only for the trusted-local deployment, and never widen writes). `cancel_job` now reaps the whole
-  process group: the job runs `os.setsid()` and cancel sends the signal via `os.killpg`, so `mp.spawn` DDP
-  grandchildren are killed with the middle process (regression test:
-  `test_cancel_reaps_the_whole_process_group_including_grandchildren`).
+- **Safety invariants to preserve:** validation/smoke-tests never execute in the server process;
+  `read/write_session_file` and the `output` of `run_app` and `fine_tune_app` are path-jailed to the
+  session; `export_app` (`path`) and `package_app_from_session` (`output`) write to a host folder the
+  caller names, by design, and `export_app` refuses to replace a file already there unless `overwrite=True`
+  (dataset tools read arbitrary host paths by design, so keep it that way only for the trusted-local
+  deployment, and never widen writes). `cancel_job` now reaps the whole process group: the job runs
+  `os.setsid()` and cancel sends the signal via `os.killpg`, so `mp.spawn` DDP grandchildren are killed
+  with the middle process (regression test: `test_cancel_reaps_the_whole_process_group_including_grandchildren`).
 - **Regenerate derived docs:** after changing a tool's description run
   `python konfai-mcp/scripts/generate_tool_reference.py` (the committed skill reference is generated).
 
@@ -142,7 +144,7 @@ whole matrix releases in lockstep. `konfai-studio` is the one exception to the p
 job runs `npm ci && npm run build` first (its React front is git-ignored) and then `python -m build --wheel`
 (wheel-only, because the sdist file-finder would drop the built `web/`).
 
-Before tagging: `pixi run check` green; both sibling suites green; `pixi run perf-check` within its thresholds on a quiet machine (or the regression named in the release notes; the facts of the series, voxel identity and exact differences, also gate every pull request on a GitHub runner, see `benchmarks/perf/README.md`); and, because the test job only exercises
+Before tagging: `pixi run check` green; both sibling suites green; the HF bundles tagged `vX.Y.Z` too (§7b); `pixi run perf-check` within its thresholds on a quiet machine (or the regression named in the release notes; the facts of the series, voxel identity and exact differences, also gate every pull request on a GitHub runner, see `benchmarks/perf/README.md`); and, because the test job only exercises
 the **source tree**, confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`
 by installing it **non-editable** in a clean venv (an editable install hides PEP 420 / `package-data` breakage).
 
@@ -195,6 +197,9 @@ Conventional Commits only took hold at `v1.5.9`, and rendering further back emit
   configs use **bundle-relative** classpaths (`ResidualEncoderUNet.yml`, `model:Unet_TS_CT`,
   `Model:RegistrationNet`), never KonfAI's internal module paths, which is why the models→`models.python`
   move did not break them. Validate a bundle by loading its config on a **copy** (reading mutates).
+  An unpinned reference resolves to the tag `v<konfai-apps version>` when the repository has it, else
+  `main`: **tag every bundle repository `vX.Y.Z` at each release**, once its configs are final
+  (`git tag vX.Y.Z && git push origin vX.Y.Z` in each `hf_bundles/*` clone).
 
 ## 7c. Security boundaries
 
@@ -204,9 +209,11 @@ Three, and only three, places decide trust. Keep them honest:
    default (`KONFAI_APPS_INSTALL_REQUIREMENTS=0` opts out). Protected core packages are matched by **PEP 503
    canonical name** (`konfai_apps` ≡ `konfai-apps`); transitive deps are *not* policed, so say so and don't overclaim.
 3. **`konfai-mcp`**: validation/smoke-tests run only in a spawn subprocess (never the server process);
-   `read/write_session_file` are path-jailed; dataset tools may *read* arbitrary host paths by design, but
-   **writes must never widen** (any tool that composes a write target must reject path separators);
-   `cancel_job` reaps the whole process group.
+   `read/write_session_file` and the `output` of `run_app` and `fine_tune_app` are path-jailed; dataset
+   tools may *read* arbitrary host paths by design, but **writes must never widen** (any tool that composes
+   a write target must reject path separators). Two tools take a free host destination, by design:
+   `export_app` (`path`, which refuses to replace an existing file without `overwrite=True`) and
+   `package_app_from_session` (`output`). `cancel_job` reaps the whole process group.
 
 ## 7d. Traps that have bitten before
 

@@ -366,6 +366,13 @@ Set to `0` to stop `konfai-apps` from pip-installing a resolved app's
 `requirements.txt` (installed by default; core packages are never touched).
 This is a **trust-model** switch: see the apps guide.
 
+#### `KONFAI_APPS_MAX_DATASET_BYTES`
+
+Bound, in bytes, on the `dataset` zip that `konfai-apps-server` receives for a
+fine-tune job (default 64 GiB): the archive, each member and the total extracted
+bytes. Past it the server answers **413**. See the limits of the
+[app server API](app-server-api.md).
+
 #### Streaming and write-path switches
 
 Diagnostic kill-switches for the streamed prediction writer. Defaults are the
@@ -454,7 +461,7 @@ refused unless you override it. See `konfai-studio/docs/REMOTE.md`.
 
 | Variable | Effect |
 | --- | --- |
-| `KONFAI_STUDIO_TOKEN` | Shared bearer token. **Unset means no authentication**, which is why a non-loopback bind is refused without it. |
+| `KONFAI_STUDIO_TOKEN` | Shared bearer token. **Unset means no authentication**, which is why a non-loopback bind is refused without it; a loopback bind then answers only to `127.0.0.1`, `localhost` and `::1`. |
 | `KONFAI_STUDIO_INSECURE_COOKIE` | Drops the `Secure` flag on the session cookie, for plain-HTTP testing only. |
 | `KONFAI_STUDIO_LLM` | Which backend drives the agent (for example `anthropic`, or an OpenAI-compatible server). |
 | `KONFAI_STUDIO_LLM_API_KEY` | Key for that backend. |

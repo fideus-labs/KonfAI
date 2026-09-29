@@ -1328,6 +1328,13 @@ def export_app(
     force_update: Annotated[
         bool, Field(description="Re-download the app files instead of reusing the local cache.")
     ] = False,
+    overwrite: Annotated[
+        bool,
+        Field(
+            description="Replace files of the same name already in the destination folder (default False: the "
+            "export is refused and names them)."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Save a resolved app (optionally with tuned parameters) as a local, editable bundle."""
     return APP_SERVICE.export_app(
@@ -1336,6 +1343,7 @@ def export_app(
         display_name=display_name,
         config_overrides=_config_overrides(set_parameters),
         force_update=force_update,
+        overwrite=overwrite,
     )
 
 
@@ -1929,7 +1937,7 @@ def import_experiment(
     include_artifacts: Annotated[
         Literal["link", "copy", "none"],
         Field(
-            description="How artifact dirs (Checkpoints/Predictions/...) are imported: 'link' symlinks (default), 'copy' copies, 'none' imports configs/code only."
+            description="How artifact dirs (Checkpoints/Predictions/...) are imported: 'link' symlinks (default; copies where the link is refused), 'copy' copies, 'none' imports configs/code only."
         ),
     ] = "link",
     overwrite: Annotated[
@@ -1946,6 +1954,7 @@ def import_experiment(
     artifact_dirs = {"Checkpoints", "Predictions", "Evaluations", "Statistics", "Dataset", "Cluster"}
     copied: list[str] = []
     linked: list[str] = []
+    copied_instead_of_linked: list[str] = []
     skipped: list[str] = []
     for path in sorted(source.iterdir(), key=lambda entry: entry.name):
         target = workspace / path.name
@@ -1963,16 +1972,21 @@ def import_experiment(
                 skipped.append(path.name)
                 continue
             if include_artifacts == "link":
-                os.symlink(path, target, target_is_directory=True)
-                linked.append(path.name)
-            else:
-                shutil.copytree(path, target)
-                copied.append(path.name)
+                try:
+                    os.symlink(path, target, target_is_directory=True)
+                except OSError:  # Windows without developer mode (WinError 1314), or a filesystem without links
+                    copied_instead_of_linked.append(path.name)
+                else:
+                    linked.append(path.name)
+                    continue
+            shutil.copytree(path, target)
+            copied.append(path.name)
     return {
         "session": WORKSPACE_LAYOUT.current_session,
         "source": str(source),
         "copied": copied,
         "linked": linked,
+        "copied_instead_of_linked": copied_instead_of_linked,
         "skipped": skipped,
         "next_actions": [
             "read_session_file",
@@ -3166,7 +3180,8 @@ def request_validation(
     job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job(kind)
     if job is None or job.status not in ACTIVE_JOB_STATES:
         return {"ok": False, "detail": "No running training job to validate."}
-    delivered = JOB_REGISTRY.notify(job, signal.SIGUSR1)
+    sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
+    delivered = sigusr1 is not None and JOB_REGISTRY.notify(job, sigusr1)
     return {
         "ok": delivered,
         "job_id": job.job_id,
