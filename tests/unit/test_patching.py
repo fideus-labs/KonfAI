@@ -40,7 +40,7 @@ from konfai.data.patching import (
     blend_overlap,
 )
 from konfai.utils.dataset import Dataset
-from konfai.utils.errors import PatchError
+from konfai.utils.errors import ConfigError, PatchError
 from konfai.utils.utils import best_sweep_axis, get_patch_slices_from_shape, resolve_overlap
 
 
@@ -210,6 +210,20 @@ def test_declared_free_axis_keeps_the_fraction_overlap_after_restart_concretizat
     fixed = get_patch_slices_from_shape(concrete, shape, None, None, True)
     assert _axis_overlaps(remainder, concrete) == [0, 0, 0]
     assert _axis_overlaps(fixed, concrete) == list(resolve_overlap(None, concrete, shape))
+
+
+def test_a_voxel_overlap_is_dropped_on_an_axis_one_patch_spans() -> None:
+    """The published TotalSegmentator presets write ``overlap: 32``: a case 30 voxels deep bounds the
+    96-deep patch to 30, and the plain int, alone among the spellings, kept 32 there and refused the
+    case. Every spelling now tiles the same grid."""
+    patch_size, shape = [96, 128, 160], [30, 200, 200]
+
+    slices = get_patch_slices_from_shape(patch_size, shape, 32)
+
+    assert slices == get_patch_slices_from_shape(patch_size, shape, [32, 32, 32])
+    assert _axis_overlaps(slices, [30, 128, 160]) == [0, 32, 32]
+    with pytest.raises(ConfigError, match=">= 0 voxels"):
+        get_patch_slices_from_shape(patch_size, shape, -8)
 
 
 @pytest.mark.parametrize("combine_cls", [Mean, Cosinus])

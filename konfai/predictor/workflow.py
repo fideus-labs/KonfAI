@@ -41,6 +41,7 @@ from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.chain_diff import dataset_tree, input_chain_differences, training_dataset_tree
 from konfai.utils.clock import startup_clock
 from konfai.utils.config import apply_config, config, strict_config
+from konfai.utils.dataset import refuse_shared_single_file
 from konfai.utils.errors import ConfigError, KonfAIError, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
 from konfai.utils.runtime import (
@@ -72,6 +73,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         outputs_dataset (dict[str, OutputDataset]): Mapping from layer names to output writers.
         data_log (list[str] | None): List of tensors to log during inference.
     """
+
+    # The ranks share the work list and nothing else: each writes its own cases.
+    uses_collectives = False
 
     def __init__(
         self,
@@ -188,6 +192,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         remote URLs, wrap the base model into a ``ModelComposite`` for ensemble inference and build the
         prediction dataloader, distributed over the ``world_size`` processes or GPUs.
         """
+        self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
+        refuse_shared_single_file(world_size // self.size, self.outputs_dataset.values(), PredictorError)
         for dataset_filename in self.datasets_filename:
             path = self.predict_path / dataset_filename
             if not os.path.exists(path):
@@ -227,8 +233,6 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         except (OSError, KonfAIError, ValueError, TypeError) as error:
             # A diagnostic reading someone else's config file never fails the prediction it reports on.
             print(f"[KonfAI] the training-chain check did not run: {type(error).__name__}: {error}")
-
-        self.size = len(self.gpu_checkpoints) + 1 if self.gpu_checkpoints else 1
 
         self._drop_done_cases()
         self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)

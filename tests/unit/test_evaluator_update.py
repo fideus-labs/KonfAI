@@ -20,6 +20,7 @@ An ``Evaluator`` is faked with the attributes ``__init__`` sets, no config or da
 paths run on in-memory batches.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -27,8 +28,9 @@ import torch
 from konfai.data.data_manager import BatchDataItem
 from konfai.data.patching import DatasetPatch
 from konfai.evaluator import Evaluator, Statistics
-from konfai.metric.measure import MAE, MSE, SSIM
+from konfai.metric.measure import MAE, MSE, SSIM, MAESaveMap
 from konfai.utils.clock import SweepClock
+from konfai.utils.errors import EvaluatorError
 
 
 def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], streamed: bool = False) -> Evaluator:
@@ -205,3 +207,12 @@ class TestStreamedUpdateWithAHalo:
         _, without = self._stream({"sCT": {"CT": {MAE(): None}}}, volumes, 0)
 
         assert with_halo == without
+
+
+def test_two_rank_evaluation_refuses_a_single_file_map(tmp_path: Path) -> None:
+    """Every rank writes its cases' error maps: into one h5, a map can go missing with exit 0."""
+    evaluator = _evaluator({"MOVED": {"FIXED": {MAESaveMap(dataset=f"{tmp_path / 'Maps'}:h5"): None}}})
+
+    with pytest.raises(EvaluatorError, match="single-file store"):
+        evaluator.setup(2)
+    assert not any(tmp_path.iterdir())

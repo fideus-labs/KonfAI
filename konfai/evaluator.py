@@ -35,7 +35,7 @@ from konfai.network.network.measure import CriterionResult
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config, strict_config
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import Attribute, Dataset, DataStream, refuse_shared_single_file
 from konfai.utils.errors import ConfigError, EvaluatorError
 from konfai.utils.ome_zarr import bound_chunk_cache
 from konfai.utils.runtime import (
@@ -346,6 +346,19 @@ class Evaluator(DistributedObject):
         Args:
             world_size (int): Number of processes in the distributed evaluation setup.
         """
+        # A metric's per-voxel map is the evaluation's one per-case output.
+        maps = {
+            spec
+            for targets in self.metrics.values()
+            for criterions in targets.values()
+            for metric in criterions
+            if (spec := getattr(metric, "dataset", None))
+        }
+        refuse_shared_single_file(
+            world_size,
+            (Dataset(filename, file_format) for filename, _, file_format in map(split_path_spec, maps)),
+            EvaluatorError,
+        )
         # An interrupted run (case rows on disk, no aggregate) resumes without a prompt; a completed
         # run keeps the overwrite confirmation; --overwrite clears everything, case rows included.
         resumable = os.environ.get("KONFAI_OVERWRITE") != "True" and self._is_resumable()

@@ -416,8 +416,6 @@ def evaluate(
     )
     groups_src: dict[str, object] = {}
     for group in groups:
-        # An undeclared chain is spelled None, never left out: the binder materializes its own default
-        # (Normalize) for an absent key, which erases the difference the metrics measure.
         declared = None if transforms is None else transforms.get(group)
         chain: object = "None" if declared is None else _chain_tree(declared, _STAGE_MODULES, f"transforms.{group}")
         groups_src[group] = {"groups_dest": {group: {"transforms": chain}}}

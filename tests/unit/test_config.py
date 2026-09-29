@@ -377,6 +377,35 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
 
 
+@pytest.mark.parametrize(
+    ("key", "yaml_value", "expected"),
+    [
+        ("count", "1.5", None),
+        ("count", "3.0", 3),
+        ("count", "1e3", 1000),
+        ("shape", "[0.8, 0.8, 0.8]", None),
+        ("shape", "[4.0, 8]", [4, 8]),
+        ("size", "[1, 2.5]", None),
+        ("size", "2.0", 2),
+    ],
+)
+def test_apply_config_refuses_a_fraction_under_an_int(write_config, key: str, yaml_value: str, expected) -> None:
+    # int(0.8) binds 0, and 0 is Resample's keep-this-axis sentinel: `shape: [0.8, 0.8, 0.8]` ran as a
+    # no-op, exit 0. A whole float still binds (3.0, 1e3); a fraction is refused with its key, whether
+    # the parameter is an int, a list of them or a union holding one.
+    write_config(f"Root:\n  {key}: {yaml_value}\n")
+
+    class Root:
+        def __init__(self, count: int = 1, shape: list[int] = [1], size: int | list[int] = 1) -> None:
+            self.values = {"count": count, "shape": shape, "size": size}
+
+    if expected is None:
+        with pytest.raises(ConfigError, match=key):
+            apply_config("Root")(Root)()
+    else:
+        assert apply_config("Root")(Root)().values[key] == expected
+
+
 def test_apply_config_binds_a_bare_tensor_parameter_as_a_value(write_config) -> None:
     # A bare (or Optional) ``torch.Tensor`` annotation is a value, not a nested config object:
     # without the tensor dispatch it fell through to _bind_config_object, which dropped the

@@ -144,10 +144,13 @@ sets `CUDA_VISIBLE_DEVICES` from `--gpu`, handles the overwrite and verbosity
 flags, launches TensorBoard when requested, spawns one worker process per
 device with `torch.multiprocessing.spawn` and initializes `torch.distributed`
 on a free local TCP port. Even a local multi-process run uses that bootstrap,
-for the workflows that need a process group: TRAIN, PREDICTION and EVALUATION.
-TRANSFORM ranks are independent, each writing its own shard, so they are
-spawned without one: no port, no rendezvous, and a rank that fails takes down
-nothing but its own shard. The `KONFAI_*` variables the wrappers set on the way
+for the workflows whose ranks talk to each other: TRAIN and EVALUATION.
+PREDICTION and TRANSFORM ranks are independent, each writing its own cases, so
+they are spawned without one: no port, no rendezvous, and a TRANSFORM rank that
+fails takes down nothing but its own shard. Windows gets no process group, so
+there TRAIN, RESUME and EVALUATION refuse more than one process. No workflow
+lets several processes write a single-file output (`h5`): every rank would
+write into the same file. The `KONFAI_*` variables the wrappers set on the way
 are listed under [Environment variables](#environment-variables).
 
 ## `konfai-apps`
@@ -186,7 +189,7 @@ the full signature.
 | `-i`, `--inputs` | Input paths, grouped by repeated flag occurrences. |
 | `-o`, `--output` | Output directory. |
 | `--gpu` / `--cpu` | Device selection: **mutually exclusive**, as on the `konfai` CLI. |
-| `--tmp-dir` (alias: `--tmp_dir`) | Where intermediate artifacts are written. On `infer`, `eval`, `uncertainty` and `pipeline` only. |
+| `--tmp-dir` (alias: `--tmp_dir`) | Where intermediate artifacts are written. On `infer`, `eval`, `uncertainty` and `pipeline` only. The inputs are staged in its `Dataset`, so a directory holding a `Dataset` konfai-apps did not stage is refused. |
 | `-q`, `--quiet` | Reduce console output. |
 | `--download` | Pre-download the full app locally. |
 | `--force_update` | Force an updated app download. |

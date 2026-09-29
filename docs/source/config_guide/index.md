@@ -144,7 +144,8 @@ binds to; without it, the key defaults to the object's own name.
 `inspect.signature()` and, for each parameter, reads a value from the active YAML
 subtree using the parameter's **type annotation** to decide how to convert it:
 
-- `int`, `float`, `bool`, `str`, `torch.Tensor`: cast directly from the YAML scalar
+- `int`, `float`, `bool`, `str`, `torch.Tensor`: cast directly from the YAML scalar; a
+  fraction under an `int` is refused (`3.0` binds 3, `2.5` raises `ConfigError`)
 - `Literal[...]`: validated against the allowed set (an invalid value raises `ConfigError`)
 - `pathlib.Path`: wrapped as a `Path`; a non-existent path only logs a warning
 - `list[...]` / `dict[str, ...]`: parsed element-wise
