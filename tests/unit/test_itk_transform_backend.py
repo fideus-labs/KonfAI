@@ -214,6 +214,18 @@ def test_without_h5py_the_backend_names_the_extra_to_install(tmp_path: Path, mon
         Dataset(tmp_path / "out", "itktransform").write("Transform", "P000", _field(), _attributes())
 
 
+def test_without_simpleitk_a_non_field_transform_names_the_extra_to_install(tmp_path: Path, monkeypatch) -> None:
+    """A displacement field reads through h5py; any other stored transform needs ITK's reader."""
+    euler = sitk.Euler3DTransform()
+    euler.SetParameters((0.1, 0.2, 0.3, 4.0, 5.0, 6.0))
+    (tmp_path / "out" / "P000").mkdir(parents=True)
+    sitk.WriteTransform(euler, str(tmp_path / "out" / "P000" / "Transform.tfm"))
+    monkeypatch.setattr("konfai.utils.dataset.itk_transform_file.sitk", None)
+
+    with pytest.raises(DatasetManagerError, match=r"konfai\[itk\]"):
+        Dataset(tmp_path / "out", "itktransform").read_data("Transform", "P000")
+
+
 def test_a_region_read_opens_the_file_once_for_the_process(tmp_path: Path, monkeypatch) -> None:
     """The header and the region come off one pooled handle: past the first region, no open at all."""
 

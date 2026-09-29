@@ -171,6 +171,14 @@ extension: `.itk.txt` (SimpleITK transforms), `.fcsv` (Slicer landmarks), `.xml`
 on the slice path). It supports **true partial reads** (reading only the
 requested spatial window) for streaming.
 
+An image is written in the format the dataset names. A format SimpleITK has no
+image writer for (the sidecar extensions above, `nrrd.gz`), or whose writer
+refuses the volume's pixel type or dimension (`png`, `jpg`, `bmp`, `tif` and
+`dcm` each hold only some), is refused with a `DatasetManagerError` naming the
+entry, the format and ITK's reason. SimpleITK has no boolean pixel type, so a
+`bool` volume is refused as well: cast it to `uint8`, or write it as `h5` or
+`omezarr`, which keep `bool`.
+
 Landmarks are read in LPS, KonfAI's physical space. The `# CoordinateSystem`
 line of the `.fcsv` header decides the sign of x and y: `RAS` negates them;
 `LPS`, `1`, `0` and a file without the line keep them; any other value is

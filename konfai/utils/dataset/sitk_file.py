@@ -54,7 +54,12 @@ from konfai.utils.dataset.raw_block import (
     _pixel_block_attributes,
     _pixel_block_region,
 )
-from konfai.utils.dataset.staging import _recover_orphaned_backup, _retire_dead_debris, is_staging_entry
+from konfai.utils.dataset.staging import (
+    _REPLACED_MARKER,
+    _recover_orphaned_backup,
+    _retire_dead_debris,
+    is_staging_entry,
+)
 from konfai.utils.dataset.stream import (
     _MHA_ELEMENT_TYPES,
     _NIFTI_DATATYPES,
@@ -81,6 +86,37 @@ def _require_sitk(path: str, action: str = "read") -> None:
             f"SimpleITK is required to {action} '{path}'.",
             "Install it with: pip install konfai[itk] (or konfai[imaging]).",
         )
+
+
+#: What ITK says when it has no image writer for the extension, or when its writer refuses the
+#: volume's pixel type or dimension.
+_UNWRITABLE_VOLUME = (
+    "Unable to determine ImageIO writer",
+    "supports unsigned",  # PNG, JPEG, BMP, TIFF
+    "can only write 2-dimensional",  # JPEG
+    "cannot write images with a dimension",  # BMP
+    "does not support this component type",  # DICOM
+    "stored pixel type was not specified",  # DICOM, a floating point volume
+)
+
+
+def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> None:
+    """``sitk.WriteImage`` of the entry published as ``final``: a format with no writer for this
+    volume is refused by name, not by ITK's trace naming the staging file. Any other failure (a
+    permission, a full disk) keeps ITK's error."""
+    try:
+        sitk.WriteImage(image, path)
+    except RuntimeError as error:
+        message = str(error)
+        if not any(refusal in message.replace(path, "") for refusal in _UNWRITABLE_VOLUME):
+            raise
+        # ITK's first line is its source location; the reason follows.
+        reason = " ".join(message.splitlines()[1:]).replace(path, final) or message
+        raise DatasetManagerError(
+            f"SimpleITK cannot write the {image.GetDimension()}-D {image.GetPixelIDTypeAsString()} volume"
+            f" '{final}' as '{file_format}': {reason}",
+            "Write it as mha, nrrd, h5 or omezarr, which hold any.",
+        ) from error
 
 
 def _warn_unstreamed_region_read(path: str) -> None:
@@ -201,8 +237,10 @@ class SitkFile(AbstractFile):
         # The order the map sees, which is the order the region read reorders into: MetaIO's
         # channel axis is the fastest, so an interleaved block is spatial-first with the channel
         # last. The band narrows the first axis of THAT order carrying more than one element,
-        # and every axis after it is mapped whole.
-        order = [*range(1, len(shape)), 0] if block.interleaved else list(range(len(shape)))
+        # and every axis after it is mapped whole. NIfTI keeps each component's volume whole,
+        # one after the other, so a region touches the same band in each component volume it
+        # spans: the channel axis sits above the band.
+        order = [*range(1, len(shape)), 0] if block.interleaved else list(range(1, len(shape)))
         banded = next((axis for axis in order if shape[axis] > 1), order[-1])
         whole = set(order[order.index(banded) + 1 :])
         return tuple(shape[axis] if axis in whole else 1 for axis in range(len(shape)))
@@ -263,9 +301,8 @@ class SitkFile(AbstractFile):
     def _image_region(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         block = _pixel_block(path)
         if block is not None:
-            # The region's bytes off the file, where ITK's streaming reader decodes them through
-            # its pipeline: 3.5 ms against 0.09 ms for a 64^3 region of an uncompressed 256^3
-            # .mha, the same bytes. The record ITK's route leaves is kept, key for key.
+            # The region's bytes off the file, the same bytes ITK's streaming reader decodes
+            # through its whole pipeline. The record ITK's route leaves is kept, key for key.
             normalized = self._normalize_slices(slices, list(block.shape))
             if all(item.step > 0 for item in normalized):
                 try:
@@ -424,13 +461,13 @@ class SitkFile(AbstractFile):
                         break
                     staging = DataStream.staging_path(final)
                 try:
-                    sitk.WriteImage(data, os.path.join(staging, os.path.basename(final)))
+                    _write_image(data, os.path.join(staging, os.path.basename(final)), final, self.file_format)
                     for part in sorted(os.listdir(staging), key=lambda part: part == os.path.basename(final)):
                         os.replace(os.path.join(staging, part), os.path.join(os.path.dirname(final), part))
                 finally:
                     shutil.rmtree(staging, ignore_errors=True)
             else:
-                sitk.WriteImage(data, staging)
+                _write_image(data, staging, final, self.file_format)
                 os.replace(staging, final)
             with contextlib.suppress(Exception):
                 _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write
@@ -453,7 +490,6 @@ class SitkFile(AbstractFile):
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
                     root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
-                    xml_file.close()
             else:
                 root = ET.Element(name)
             node = root
@@ -476,7 +512,6 @@ class SitkFile(AbstractFile):
                 # cleanly instead of accumulating blank lines.
                 ET.indent(root)
                 f.write(ET.tostring(root, encoding="utf-8"))
-                f.close()
         else:
             np.save(f"{self.filename}{name}.npy", data)
 
@@ -518,12 +553,20 @@ class SitkFile(AbstractFile):
         if any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS):
             return True
         # A writer killed mid-replacement left the previous entry under its backup name, which
-        # every listing hides: it is the entry, and it goes back under it. Then the question is
-        # asked of disk again, because the recovery may have declined to a publish that landed
-        # meanwhile -- and that publish is an entry too.
-        for ext in SUPPORTED_EXTENSIONS:
-            _recover_orphaned_backup(Path(f"{base}.{ext}"))
-        return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
+        # every listing hides: it is the entry, and it goes back under it. One listing of the folder
+        # finds the backups of every extension. Then the question is asked of disk again, because
+        # the recovery may have declined to a publish that landed meanwhile -- and that publish is
+        # an entry too.
+        folder, leaf = os.path.split(base)
+        try:
+            siblings = os.listdir(folder)
+        except OSError:
+            return False
+        backed_up = {sibling.split(_REPLACED_MARKER)[0] for sibling in siblings if _REPLACED_MARKER in sibling}
+        finals = [f"{base}.{ext}" for ext in SUPPORTED_EXTENSIONS if f"{leaf}.{ext}" in backed_up]
+        for final in finals:
+            _recover_orphaned_backup(Path(final))
+        return bool(finals) and any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
 
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         attributes = Attribute()

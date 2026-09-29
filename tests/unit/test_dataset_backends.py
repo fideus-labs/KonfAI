@@ -149,3 +149,31 @@ def test_an_out_of_memory_in_a_read_is_not_a_read_error(tmp_path: "Path", monkey
     monkeypatch.setattr(SitkFile, "file_to_data", no_memory)
     with pytest.raises(MemoryError):
         Dataset(str(tmp_path / "Dataset"), "mha").read_data("CT", "CASE_000")
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5", "omezarr", "itktransform"])
+def test_a_region_read_records_the_regions_own_geometry(tmp_path: "Path", file_format: str) -> None:
+    """Every backend hands a region back with the origin of its first sample, and the spacing a step
+    scales, whatever route it serves the region by."""
+    import numpy as np
+    from konfai.utils.dataset import Attribute, Dataset
+
+    if file_format == "omezarr":
+        pytest.importorskip("ngff_zarr")
+    attributes = Attribute()
+    attributes["Origin"], attributes["Spacing"] = np.array([10.0, 20.0, 30.0]), np.array([1.0, 2.0, 3.0])
+    attributes["Direction"] = np.eye(3).ravel()
+    volume = np.arange(3 * 6 * 5 * 4, dtype=np.float32).reshape(3, 6, 5, 4)  # a field for itktransform
+    Dataset(str(tmp_path / "Dataset"), file_format).write("G", "CASE_000", volume, attributes)
+    dataset = Dataset(str(tmp_path / "Dataset"), file_format)
+
+    region = (slice(None), slice(2, 4), slice(1, 3), slice(1, 3))
+    data, record = dataset.read_data_slice("G", "CASE_000", region)
+    np.testing.assert_array_equal(data, volume[region])
+    np.testing.assert_allclose(record.get_np_array("Origin"), [11.0, 22.0, 36.0])
+
+    stepped = (slice(None), slice(0, 6, 2), slice(1, 3), slice(1, 3))
+    data, record = dataset.read_data_slice("G", "CASE_000", stepped)
+    np.testing.assert_array_equal(data, volume[stepped])
+    np.testing.assert_allclose(record.get_np_array("Origin"), [11.0, 22.0, 30.0])
+    np.testing.assert_allclose(record.get_np_array("Spacing"), [1.0, 2.0, 6.0])

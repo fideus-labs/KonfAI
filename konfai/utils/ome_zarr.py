@@ -37,7 +37,7 @@ import tempfile
 import threading
 from collections import OrderedDict
 from collections.abc import Hashable, Sequence
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -150,9 +150,9 @@ _V2_VERSION = "0.4"
 CHUNK_SPATIAL_TILE = 128
 CHUNK_TARGET_BYTES = 32 << 20
 
-#: Every image store keeps byte-shuffled blosc-lz4 rather than the zarrista writer's zstd-0 default:
-#: measured on a CT-like uint16 volume, zstd-0 costs +19 % disk and ~+11 % on the streamed read. The
-#: spelling is numcodecs'; ngff-zarr builds the v3 codec chain from it on a v3 store.
+#: Every image store keeps byte-shuffled blosc-lz4 rather than the zarrista writer's zstd-0 default,
+#: which takes 19 % more disk on a CT-like uint16 volume and is slower to read back. The spelling is
+#: numcodecs'; ngff-zarr builds the v3 codec chain from it on a v3 store.
 _COMPRESSOR = {"id": "blosc", "cname": "lz4", "clevel": 5, "shuffle": 1, "blocksize": 0}
 
 
@@ -164,43 +164,43 @@ def _require_zarr() -> None:
         )
 
 
-@lru_cache(maxsize=1)
+@cache
 def _ngff_zarr_available() -> bool:
-    """Whether ngff-zarr and dask, its own hard dependency, import. They are imported where a store is
-    described or written and not with this module: some 700 modules and 50 MB that every rank of a run
-    reading no store would otherwise load."""
+    """Whether ngff-zarr and dask (its own hard dependency, which also derives a label map's levels)
+    import. Asked at first use rather than at import: the two load some 700 modules that a workflow
+    which never opens a store has no use for."""
     try:
         import dask.array  # noqa: F401
-        import ngff_zarr  # noqa: F401
+        import ngff_zarr  # type: ignore[import-untyped]  # noqa: F401
     except ImportError:
         return False
     return True
 
 
-def _require_ngff_zarr() -> None:
+def _require_ngff_zarr() -> Any:
+    """The ``ngff_zarr`` module."""
     _require_zarr()
     if not _ngff_zarr_available():
         raise DatasetManagerError(
             "ngff-zarr is required for OME-Zarr support.",
             "Install it with: pip install konfai[omezarr]",
         )
+    import ngff_zarr
+
+    return ngff_zarr
 
 
 def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
     """KonfAI's ``Attribute`` sidecar: the ``konfai`` key ngff-zarr carries beside the OME metadata.
     A copy of a memoised parse."""
-    try:
-        root = _multiscales(str(store_path)).root_attributes or {}
-    except Exception:
-        return {}
+    root = _multiscales(str(store_path)).root_attributes or {}
     return dict(root.get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
 
 
 def _from_ngff_zarr(store_path: str | Path) -> Any:
     """ngff-zarr's multiscales for ``store_path``. A remote root goes in as a key-to-bytes mapping
     over its own filesystem, and as its URL when ngff-zarr refuses the mapping."""
-    import ngff_zarr
-
+    ngff_zarr = _require_ngff_zarr()
     if not uri.is_uri(store_path):
         return ngff_zarr.from_ngff_zarr(str(store_path))
     # Through uri.filesystem, so a missing fsspec backend is a structured DatasetManagerError.
@@ -212,9 +212,12 @@ def _from_ngff_zarr(store_path: str | Path) -> Any:
         return ngff_zarr.from_ngff_zarr(str(store_path))
 
 
+#: What zarr and ngff-zarr raise on a store or a level they cannot open.
+_STORE_ERRORS = (KeyError, IndexError, OSError, TypeError, ValueError)
+
 #: Stores whose parse and level arrays stay memoised: one per case and group a run reads, 20 to 35 KiB
-#: each. An epoch shuffles its patches across cases, so a memo smaller than the cohort reparses a
-#: store at nearly every read.
+#: each. An epoch shuffles its patches across cases, and a case reduction reads every member at every
+#: region: a memo smaller than that reparses a store at nearly every read.
 _MEMOISED_STORES = 1024
 
 
@@ -223,7 +226,6 @@ def _multiscales(store_path: str) -> Any:
     """ngff-zarr's multiscales for a store, memoised per path: the images, their metadata and the
     root attributes, all from one parse. The key is the path alone, so anything that puts a
     different store at a path already read must call ``clear_ome_zarr_cache()``."""
-    _require_ngff_zarr()
     return _from_ngff_zarr(store_path)
 
 
@@ -235,7 +237,7 @@ def _load_image(store_path: str, level: int) -> Any:
     """
     try:
         multiscales = _multiscales(store_path)
-    except (KeyError, IndexError, OSError, TypeError, ValueError) as exc:
+    except _STORE_ERRORS as exc:
         raise DatasetManagerError(
             f"Cannot open OME-Zarr store '{store_path}' (level {level}).",
             "Ensure the directory is a valid OME-NGFF store.",
@@ -303,10 +305,7 @@ def _component_flip(store_path: str) -> bool:
     """
     if not _ngff_zarr_available():
         return False
-    try:
-        multiscales = _multiscales(store_path)
-    except Exception:
-        return False
+    multiscales = _multiscales(store_path)
     if any(entry.type == "displacements" for entry in multiscales.metadata.coordinateTransformations or []):
         return True
     root = (multiscales.root_attributes or {}).get(_KONFAI_ATTR_KEY) or {}
@@ -699,8 +698,9 @@ def _read_level_window(store_path: str, level: int, image: Any, index: tuple) ->
     the plain lazy read: same values either way."""
     level_path = _level_path(store_path, level)
     if level_path is not None:
-        # Any failure to open the level directly means: read through the lazy array, as before.
-        with contextlib.suppress(Exception):
+        # A level zarr cannot open directly, or a stepped selection the chunked read refuses: read
+        # through the lazy array.
+        with contextlib.suppress(DatasetManagerError, *_STORE_ERRORS):
             array = _level_array(store_path, level_path)
             if tuple(array.shape) == tuple(image.data.shape):
                 return _read_chunked(store_path, level_path, array, index)
@@ -899,9 +899,7 @@ def _downsample_method(downsample_method: str | None) -> Any:
     integers rounded half up), computed lazily with a bounded peak. A label map without a named
     method takes the block majority over the same windows instead (:func:`append_ome_zarr_levels`).
     """
-    _require_ngff_zarr()
-    import ngff_zarr
-
+    ngff_zarr = _require_ngff_zarr()
     if downsample_method is None:
         return ngff_zarr.Methods.DASK_BIN_SHRINK
     try:
@@ -1017,8 +1015,7 @@ def _write_skeleton(store_path: str | Path, multiscales: Any, version: str, **kw
     """The store's metadata and empty arrays, written in place (``to_ngff_zarr(metadata_only=True)``
     describes every level and creates its array without computing a voxel). ngff-zarr writes local
     directories only, so a remote root gets the skeleton written locally and uploaded."""
-    import ngff_zarr
-
+    ngff_zarr = _require_ngff_zarr()
     if not uri.is_uri(store_path):
         ngff_zarr.to_ngff_zarr(
             str(store_path), multiscales, overwrite=True, version=version, metadata_only=True, **kwargs
@@ -1148,9 +1145,8 @@ def create_ome_zarr_store(
     region write into a read-modify-write.
     """
     clear_ome_zarr_cache(store_path)
-    _require_ngff_zarr()
+    ngff_zarr = _require_ngff_zarr()
     import dask.array
-    import ngff_zarr
 
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
@@ -1227,10 +1223,9 @@ def append_ome_zarr_levels(
             f"Cannot append pyramid levels to the remote store '{store_path}'.",
             "Levels are derived in place through local paths; write the store locally and upload it.",
         )
-    _require_ngff_zarr()
     if not scale_factors:
         return
-    import ngff_zarr
+    ngff_zarr = _require_ngff_zarr()
 
     store = Path(store_path)
     clear_ome_zarr_cache(store)

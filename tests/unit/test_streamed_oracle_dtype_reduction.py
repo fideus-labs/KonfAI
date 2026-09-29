@@ -32,7 +32,7 @@ from konfai.data.case_reduction import CaseReduction
 from konfai.data.materialize import CaseMaterializer, Verdict
 from konfai.data.transform import Clip, Crop, Flip, Gradient, Mask, Reduce, Resample, Save
 from konfai.utils.dataset import Dataset
-from konfai.utils.errors import TransformError
+from konfai.utils.errors import DatasetManagerError, TransformError
 from oracle_support import (
     CASE_NAME,
     GEOMETRIES,
@@ -119,7 +119,7 @@ def test_a_dtype_torch_has_no_kernel_for_refuses_on_both_routes(tmp_path: Path) 
 def test_the_store_refuses_a_dtype_it_cannot_hold(tmp_path: Path) -> None:
     """``bool`` is the one dtype in the list no case can be built on: the refusal is the contract."""
     geometry = GEOMETRIES[MAIN]
-    with pytest.raises(TypeError, match="bool"):
+    with pytest.raises(DatasetManagerError, match="bool"):
         Dataset(tmp_path / "case", "mha").write(
             "Intensity",
             CASE_NAME,

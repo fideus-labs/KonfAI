@@ -23,6 +23,7 @@ import ast
 import copy
 import functools
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -75,8 +76,8 @@ def _array_text(dtype: str, shape: tuple[int, ...], data: bytes) -> str:
 
 def _vector_text(value: np.ndarray) -> str | None:
     """numpy's positional print of a short float64 vector (a region's origin, drawn anew for every
-    region a streamed read serves, and 35 us through numpy's printer), or ``None`` where numpy would
-    wrap the line or switch to exponents: past 1e8, under 1e-4, or a thousandfold spread."""
+    region a streamed read serves), or ``None`` where numpy would wrap the line or switch to
+    exponents: past 1e8, under 1e-4, or a thousandfold spread."""
     if value.dtype != np.float64 or value.ndim != 1 or not 0 < value.size <= 16 or not np.isfinite(value).all():
         return None
     magnitudes = np.abs(value[value != 0])
@@ -112,6 +113,33 @@ def region_geometry(
     start_xyz = np.asarray([item.start for item in reversed(spatial_slices)], dtype=np.float64)
     step_xyz = np.asarray([item.step for item in reversed(spatial_slices)], dtype=np.float64)
     return origin + matrix @ (start_xyz * spacing), spacing * step_xyz
+
+
+def record_region(attributes: Attribute, shape: Sequence[int], slices: tuple[slice, ...]) -> Attribute:
+    """A whole entry's record as a read of the region ``slices`` of it returns it: the region's origin
+    pushed on top, and its spacing where a step scales it, as the SimpleITK backend records one.
+
+    A record without image geometry, or a selection that is not one slice per axis of ``shape``, is
+    handed back as it is.
+    """
+    if (
+        not is_an_image(attributes)
+        or len(slices) != len(shape)
+        or not all(isinstance(item, slice) for item in slices)
+        or len(attributes.get_np_array("Spacing")) != len(shape) - 1
+    ):
+        return attributes
+    normalized = tuple(slice(*item.indices(int(extent))) for item, extent in zip(slices[1:], shape[1:], strict=True))
+    origin, spacing = region_geometry(
+        attributes.get_np_array("Origin"),
+        attributes.get_np_array("Spacing"),
+        attributes.get_np_array("Direction"),
+        normalized,
+    )
+    attributes["Origin"] = origin
+    if any(item.step != 1 for item in normalized):
+        attributes["Spacing"] = spacing
+    return attributes
 
 
 class Attribute(dict[str, Any]):
@@ -238,6 +266,11 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
     if data.dtype == np.float16:
         # ITK has no half-float pixel type; the streamed .mha writer widens the same way.
         data = data.astype(np.float32)
+    if data.dtype == np.bool_:
+        raise DatasetManagerError(
+            "SimpleITK has no bool pixel type: a boolean volume cannot become an image.",
+            "Cast it to uint8, or write it as h5 or omezarr, which keep bool.",
+        )
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
     else:

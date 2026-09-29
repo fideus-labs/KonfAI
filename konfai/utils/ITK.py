@@ -89,6 +89,19 @@ def _invert_via_displacement_field(
     return sitk.DisplacementFieldTransform(iterative_inverse.Execute(displacement_field))
 
 
+#: The kinds SimpleITK inverts exactly.
+_EXACT_INVERSES = frozenset(
+    {
+        "TranslationTransform",
+        "Euler3DTransform",
+        "VersorRigid3DTransform",
+        "Similarity3DTransform",
+        "ScaleTransform",
+        "AffineTransform",
+    }
+)
+
+
 def _copy_transform(transform_cls: type[sitk.Transform], transform: sitk.Transform, invert: bool) -> sitk.Transform:
     transform = transform_cls(transform)
     if invert:
@@ -107,21 +120,10 @@ def _open_transform(
             transform = sitk.ReadTransform(transform_file + ".itk.txt")
         else:
             transform = transform_file
-        if transform.GetName() == "TranslationTransform":
-            transform = _copy_transform(sitk.TranslationTransform, transform, invert)
-        elif transform.GetName() == "Euler3DTransform":
-            transform = _copy_transform(sitk.Euler3DTransform, transform, invert)
-        elif transform.GetName() == "VersorRigid3DTransform":
-            transform = _copy_transform(sitk.VersorRigid3DTransform, transform, invert)
-        elif transform.GetName() == "AffineTransform":
-            transform = _copy_transform(sitk.AffineTransform, transform, invert)
-        elif transform.GetName() == "DisplacementFieldTransform":
-            if invert:
-                transform = _invert_via_displacement_field(transform, image)
-        else:
-            transform = sitk.BSplineTransform(transform)
-            if invert:
-                transform = _invert_via_displacement_field(transform, image)
+        if transform.GetName() in _EXACT_INVERSES:
+            transform = _copy_transform(getattr(sitk, transform.GetName()), transform, invert)
+        elif invert:  # any other kind (a field, a B-spline, a composite) inverts through its field
+            transform = _invert_via_displacement_field(transform, image)
         transforms.append(transform)
     if len(transforms) == 0:
         transforms.append(sitk.Euler3DTransform())
