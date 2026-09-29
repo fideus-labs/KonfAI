@@ -673,6 +673,10 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
     return {
         "Brightness": [AugmentationCase(augmentation_module.Brightness(0.5), LocalityKind.POINTWISE, True)],
         "Contrast": [AugmentationCase(augmentation_module.Contrast(0.5), LocalityKind.POINTWISE, True)],
+        # Scaled about the case's own mean, which the plan seeds: a region never measures itself.
+        "ContrastAroundMean": [
+            AugmentationCase(augmentation_module.ContrastAroundMean(0.5, 0.5), LocalityKind.GLOBAL_STAT, True)
+        ],
         # The box is normalised to the volume; a region keeps its part of it. A wide box so it lands
         # in more than one patch of the fixture.
         "CutOUT": [AugmentationCase(augmentation_module.CutOUT(0.5, 0.0), LocalityKind.POINTWISE, True)],
@@ -688,9 +692,13 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
         ],
         "Flip": [
             AugmentationCase(FlipAugmentation(f_prob=[1.0, 1.0, 1.0]), LocalityKind.ORIENTATION, True),
-            # A displacement field's flipped components are negated, which is not a bijection on values.
+            # A displacement field's flipped components are negated voxel by voxel, which a region does
+            # on its own; the field group is the one whose three components are negated.
             AugmentationCase(
-                FlipAugmentation(f_prob=[1.0, 1.0, 1.0], vector_field=True), LocalityKind.WHOLE_VOLUME, False
+                FlipAugmentation(f_prob=[1.0, 1.0, 1.0], vector_field=True),
+                LocalityKind.ORIENTATION,
+                True,
+                group="Field",
             ),
         ],
         # A class from another framework says nothing about where its draw reads from, so no draw of it
@@ -700,14 +708,24 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
                 augmentation_module.Foreign(torch.nn.Sigmoid(), "torch.nn:Sigmoid"), LocalityKind.WHOLE_VOLUME, False
             )
         ],
+        # The case's own per-channel range, seeded like ContrastAroundMean's mean.
+        "Gamma": [AugmentationCase(augmentation_module.Gamma(0.5, 0.5), LocalityKind.GLOBAL_STAT, True)],
+        "GaussianBlur": [
+            # A sigma of 0.5 cuts the kernel at a radius of 2: half the patch, the widest _affords_halo allows.
+            AugmentationCase(augmentation_module.GaussianBlur(0.5, 0.5), LocalityKind.HALO, True),
+            # A sigma of 1 reaches 3 voxels: an honest halo the dispatcher will not pay for.
+            AugmentationCase(augmentation_module.GaussianBlur(1.0, 1.0), LocalityKind.HALO, False),
+        ],
+        # A function of (seed, position), as Noise's field is.
+        "GaussianNoise": [AugmentationCase(augmentation_module.GaussianNoise(1.0, 1.0), LocalityKind.POINTWISE, True)],
         "HUE": [AugmentationCase(augmentation_module.HUE(1.0), LocalityKind.POINTWISE, True)],
         "LumaFlip": [AugmentationCase(augmentation_module.LumaFlip(), LocalityKind.POINTWISE, True)],
-        "Mask": [],  # a second on-disk volume that dictates the output grid; see its note.
         # The field at a voxel is a function of (seed, position): a region computes exactly its part.
         "Noise": [AugmentationCase(augmentation_module.Noise(1.0), LocalityKind.POINTWISE, True)],
         "Permute": [
             AugmentationCase(augmentation_module.Permute(prob_permute=[1.0, 1.0]), LocalityKind.ORIENTATION, True)
         ],
+        "PlacedMask": [],  # a second on-disk volume that dictates the output grid.
         "Rotate": [
             # A free angle resamples: a REGRID pulling the source box the region's corners map to.
             AugmentationCase(
@@ -721,6 +739,10 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
         ],
         "Saturation": [AugmentationCase(augmentation_module.Saturation(0.5), LocalityKind.POINTWISE, True)],
         "Scale": [AugmentationCase(augmentation_module.Scale(), LocalityKind.REGRID, True, atol=AUGMENTATION_ATOL)],
+        # Down then up by 2 reaches ceil(2) + 2 = 4 voxels in the plane, the whole patch.
+        "SimulateLowResolution": [
+            AugmentationCase(augmentation_module.SimulateLowResolution(2.0, 2.0), LocalityKind.HALO, False)
+        ],
         "Translate": [
             # A halo of ceil(1) + 1 = 2 on a patch of 4: half the patch, the widest _affords_halo allows.
             AugmentationCase(
@@ -759,7 +781,7 @@ def builtin_augmentations() -> list[type[DataAugmentation]]:
         cls
         for _, cls in inspect.getmembers(augmentation_module, inspect.isclass)
         if issubclass(cls, DataAugmentation)
-        and cls.__module__ == augmentation_module.__name__
+        and cls.__module__.startswith(augmentation_module.__name__)
         and not inspect.isabstract(cls)
     ]
 

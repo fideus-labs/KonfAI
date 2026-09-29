@@ -311,9 +311,10 @@ def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
 
 def _link_or_copy(src: str | Path, dst: str | Path) -> None:
     """A hard link to ``src`` where the filesystem makes one (same volume, no privilege needed on
-    Windows), else a copy."""
+    Windows), else a copy. A link given as ``src`` is followed, as the copy does: a hard link to the
+    link itself would resolve a relative target from ``dst``."""
     try:
-        os.link(src, dst)
+        os.link(os.path.realpath(src), dst)
     except OSError:
         shutil.copy2(src, dst)
 

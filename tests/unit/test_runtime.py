@@ -756,6 +756,25 @@ def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatc
     assert lines == ["line one", "line two", "printed"]
 
 
+@pytest.mark.parametrize("raised", [ConfigError("'Trainer.Dataset' is empty."), ZeroDivisionError("division by zero")])
+def test_the_run_log_ends_on_why_the_run_failed(tmp_path, monkeypatch, raised: Exception) -> None:
+    """The file ended on the last progress line: the reason a run failed reached the console only."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+
+    with pytest.raises(type(raised)), rt_dist.Log("RUN", 0):
+        raise raised
+
+    text = (tmp_path / "RUN" / "log_0.txt").read_text()
+    if isinstance(raised, ConfigError):
+        assert text.rstrip().endswith("[Config] 'Trainer.Dataset' is empty.")
+        assert "Traceback" not in text
+    else:
+        assert "Traceback" in text and text.rstrip().endswith("ZeroDivisionError: division by zero")
+
+
 def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path, monkeypatch):
     """A single rank runs inside the launcher's Log on the same file: each line lands there once, and
     KonfAI's warnings and logger records carry the console's own prefix."""

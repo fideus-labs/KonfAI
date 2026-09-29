@@ -82,9 +82,9 @@ class Mask(Transform):
 
     def _mask_dataset(self, name: str) -> Dataset:
         """The dataset holding the case's mask group."""
-        for dataset in self.datasets:
-            if dataset.is_dataset_exist(self.path, name):
-                return dataset
+        dataset = self.dataset_holding(self.path, name)
+        if dataset is not None:
+            return dataset
         raise TransformError(f"'Mask' found no mask '{self.path}' for case '{name}' in any dataset.")
 
     def _mask(self, name: str, slices: tuple[slice, ...] | None) -> torch.Tensor | np.ndarray:
@@ -97,7 +97,15 @@ class Mask(Transform):
         return dataset.read_data_slice(self.path, name, slices)[0]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return self._apply(tensor, self._mask(name, None))
+        mask = self._mask(name, None)
+        if tuple(mask.shape) != tuple(tensor.shape[: len(mask.shape)]):
+            raise TransformError(
+                f"'Mask' reads '{self.path}' for case '{name}' with the shape {list(mask.shape)}, where the"
+                f" tensor it masks has {list(tensor.shape)}.",
+                "The mask must sit on the grid it is applied to: resample the mask onto it first, or apply"
+                " the Mask before the stages that change the grid.",
+            )
+        return self._apply(tensor, mask)
 
     def _check_aligned(self, name: str, context: RegionContext) -> None:
         """Refuse a mask whose extent is not the stage input's. Headers only, once per case."""
@@ -147,7 +155,7 @@ class Dilate(Transform):
     def __init__(self, dilate: int = 1) -> None:
         super().__init__()
         if dilate < 0:
-            raise ValueError(f"[Dilate] 'dilate' must be >= 0, got {dilate}")
+            raise TransformError(f"'Dilate' was given dilate={dilate}.", "The radius in voxels is 0 or more.")
         self.dilate = dilate
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
@@ -174,9 +182,8 @@ class Dilate(Transform):
             data = F.max_pool3d(data, kernel_size=(1, k, 1), stride=1, padding=(0, d, 0))
             data = F.max_pool3d(data, kernel_size=(1, 1, k), stride=1, padding=(0, 0, d))
         else:
-            raise ValueError(
-                "[Dilate] Unsupported tensor shape for "
-                f"'{name}': expected [C,H,W] or [C,D,H,W], got {list(tensor.shape)}"
+            raise TransformError(
+                f"'Dilate' takes a [C, Y, X] or [C, Z, Y, X] tensor; case '{name}' is {list(tensor.shape)}."
             )
 
         return data.to(tensor.dtype)
@@ -201,6 +208,11 @@ class Sum(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         return _axis_reduction_locality(self.dim)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        if "number_of_channels_per_model" in cache_attribute:
+            return shape
+        return _reduced_shape(shape, self.dim, keep=False)
 
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
@@ -257,6 +269,15 @@ class MergeLabels(Transform):
         return result
 
 
+def _reduced_shape(shape: list[int], dim: int, keep: bool) -> list[int]:
+    """The spatial shape a reduction over tensor axis ``dim`` of a channel-first tensor leaves, the axis
+    kept at 1 or dropped. Over the channels it is the input's: the channel axis is not spatial."""
+    axis = dim if dim >= 0 else dim + len(shape) + 1
+    if axis == 0:
+        return shape
+    return [*shape[: axis - 1], *([1] if keep else []), *shape[axis:]]
+
+
 def _axis_reduction_locality(dim: int) -> PatchLocality:
     """POINTWISE over the channel axis (dim 0); over a spatial axis the stage takes the whole volume."""
     if dim == 0:
@@ -276,6 +297,9 @@ class Argmax(Transform):
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         return _axis_reduction_locality(self.dim)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        return _reduced_shape(shape, self.dim, keep=True)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return torch.argmax(tensor, dim=self.dim).unsqueeze(self.dim)
@@ -307,7 +331,7 @@ class FlatLabel(Transform):
         self.labels = labels
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        # Filled through the mask, not through the indices of what it selects: see Clip.
+        # Filled through the mask: indexing by it would first gather the indices of every voxel it selects.
         data = torch.zeros_like(tensor)
         if self.labels:
             for label in self.labels:
@@ -355,6 +379,11 @@ class OneHot(TransformInverse):
         return self.num_classes * channels
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        if tensor.shape[0] != 1:
+            raise TransformError(
+                f"'OneHot' encodes a one-channel label map, and '{name}' has {tensor.shape[0]} channels.",
+                "Its output is [num_classes, *spatial]: store the labels as one channel.",
+            )
         # Scattered straight into the float32 answer, where ``F.one_hot`` would build int64 first.
         labels = tensor.to(torch.int64)
         # scatter_ names no label, so an out-of-range one is checked here.

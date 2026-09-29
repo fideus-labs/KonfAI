@@ -1497,6 +1497,15 @@ def test_a_chain_spelled_as_a_list_binds_under_occurrence_keys(write_config) -> 
     assert "_Engine#3:" in resolved and "- _Engine" not in resolved
 
 
+def test_a_chain_entry_written_with_nothing_under_it_binds_every_default(write_config) -> None:
+    """``Canonical:`` is how a stage without arguments reads in YAML, and the list form already bound it
+    so. In the mapping form it bound None, and the chain fell on an AttributeError naming no key."""
+    path = write_config("Root:\n  engines:\n    first:\n    second: {rate: 2.0}\n")
+    bound = apply_config("Root")(_Engines)()
+    assert [engine.rate for engine in bound.engines.values()] == [0.5, 2.0]
+    assert _load_tree(path)["Root"]["engines"]["first"] == {"rate": 0.5}
+
+
 @pytest.mark.parametrize(
     "items",
     [

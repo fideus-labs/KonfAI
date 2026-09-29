@@ -457,8 +457,9 @@ class Data(DataSources):
         #: generator of its own, and the global one, which draws the order, sees the same draws in
         #: every worker regime.
         self.manual_seed: int | None = None
-        # ``memory_budget`` may later override ``use_cache`` in ``get_data``; one builder for both.
-        self._configure_data_loading(use_cache)
+        # ``memory_budget`` may later override ``use_cache`` in ``get_data``; one builder for both. The
+        # chains are not bound yet, so nothing is said of the workers here: ``prepare`` decides them.
+        self._configure_data_loading(use_cache, bound=False)
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self._validation_managers: dict[str, list[DatasetManager]] = {}
@@ -469,7 +470,7 @@ class Data(DataSources):
         #: and the validation partition's, each set aside before its managers are built.
         self.unreadable: tuple[dict[str, str], dict[str, str]] = ({}, {})
 
-    def _configure_data_loading(self, use_cache: bool) -> None:
+    def _configure_data_loading(self, use_cache: bool, bound: bool = True) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
 
         Called from ``__init__`` with the declared ``use_cache``, from ``prepare`` once the managers
@@ -504,7 +505,7 @@ class Data(DataSources):
             # redraw, so inline augmentations freeze; an explicit persistent_workers=True cannot win.
             inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
             if inline_augmentation_active:
-                if self._persistent_workers:
+                if self._persistent_workers and bound:
                     warnings.warn(
                         "persistent_workers=True is dropped: inline augmentations redraw once per epoch and a"
                         " persistent worker keeps the copy it started with, which never sees the redraw. Set"
@@ -533,8 +534,9 @@ class Data(DataSources):
     def _patch_read_decodes_the_volume(self) -> bool:
         """Whether reading one patch costs a whole-volume decode, on any case of any group: only
         where the patches are read from the store one by one AND the store cannot serve a region (an
-        NRRD, a compressed file with no uncompressed twin). ``False`` before ``prepare``."""
-        if self._managers is None:
+        NRRD, a compressed file with no uncompressed twin). ``False`` before ``prepare``, and with no
+        patch, where the one read of a case is the volume."""
+        if self._managers is None or self.patch is None:
             return False
         return any(
             manager.can_stream_patch(0) and not manager.dataset.bounded_region_reads(manager.group_src, manager.name)

@@ -31,7 +31,7 @@ except ImportError:
 from konfai import konfai_root
 from konfai.data.geometry import AxisRemap
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
-from konfai.data.transform.base import _UNDECLARED_LOCALITY
+from konfai.data.transform.base import _FOREIGN_LOCALITY, _UNDECLARED_LOCALITY
 from konfai.utils.config import _escape_key_component, apply_config, record_given_arguments
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import AugmentationError
@@ -401,6 +401,11 @@ class DataAugmentation(NeedDevice, ABC):
         pass
 
 
+#: Voxels hashed at once. The hash holds about a dozen float32 volumes-worth of int64 and float64
+#: temporaries per voxel, so the field is built a slab at a time and only its float32 result is whole.
+_FIELD_SLAB_VOXELS = 1 << 18
+
+
 def _hashed_normal_field(
     seed: int, shape: tuple[int, ...], offsets: tuple[int, ...], full: tuple[int, ...], device: torch.device
 ) -> torch.Tensor:
@@ -411,14 +416,25 @@ def _hashed_normal_field(
         torch.arange(start, start + extent, device=device, dtype=torch.int64)
         for start, extent in zip(offsets, spatial, strict=True)
     ]
+    field = torch.empty((channels, *spatial), device=device, dtype=torch.float32)
+    rows = max(1, _FIELD_SLAB_VOXELS // max(1, channels * int(np.prod(spatial[1:], dtype=np.int64))))
+    for start in range(0, spatial[0], rows):
+        slab = [positions[0][start : start + rows], *positions[1:]]
+        field[:, start : start + rows] = _hashed_normal(seed, channels, slab, full)
+    return field
+
+
+def _hashed_normal(seed: int, channels: int, positions: list[torch.Tensor], full: tuple[int, ...]) -> torch.Tensor:
+    """The float64 normal field at ``positions`` (one index vector per spatial axis, in the full volume)."""
+    device = positions[0].device
     linear = torch.zeros((), device=device, dtype=torch.int64)
     for axis, (position, extent) in enumerate(zip(positions, full, strict=True)):
-        view = [1] * len(spatial)
+        view = [1] * len(positions)
         view[axis] = -1
         linear = linear * int(extent) + position.reshape(view)
     voxels = int(np.prod(full, dtype=np.int64))
-    channel = torch.arange(channels, device=device, dtype=torch.int64).reshape(-1, *[1] * len(spatial))
-    key = (channel * voxels + linear).expand(channels, *spatial) * 2 + torch.tensor(
+    channel = torch.arange(channels, device=device, dtype=torch.int64).reshape(-1, *[1] * len(positions))
+    key = (channel * voxels + linear).expand(channels, *linear.shape) * 2 + torch.tensor(
         seed, device=device, dtype=torch.int64
     ) * (2 * voxels * channels + 1)
 
@@ -436,8 +452,7 @@ def _hashed_normal_field(
         return shift(value, 11).to(torch.float64) * (1.0 / (1 << 53)) + (0.5 / (1 << 53))
 
     first, second = uniform(mix(key)), uniform(mix(key + 1))
-    normal = torch.sqrt(-2.0 * torch.log(first)) * torch.cos(2.0 * torch.pi * second)
-    return normal.to(torch.float32)
+    return torch.sqrt(-2.0 * torch.log(first)) * torch.cos(2.0 * torch.pi * second)
 
 
 def _reflect_interval(low: float, high: float, span: float) -> tuple[float, float]:
@@ -461,12 +476,12 @@ def _reflect_interval(low: float, high: float, span: float) -> tuple[float, floa
 class Foreign(DataAugmentation):
     """Draw an augmentation from another framework.
 
-    ``classpath`` is ``module:Class`` and ``args`` are the arguments that class takes::
+    Name the class as the key, with its arguments and the wrapper's ``groups`` under it::
 
-        augmentations:
-          Foreign:
-            classpath: monai.transforms:RandGaussianNoise
-            args: {prob: 1.0, std: 12.0}
+        data_augmentations:
+          monai.transforms:RandGaussianNoise:
+            prob: 1.0
+            std: 12.0
             groups: [CT]
 
     The class must be callable on one tensor, return the transformed tensor, and keep its shape. A
@@ -479,10 +494,19 @@ class Foreign(DataAugmentation):
     """
 
     def __init__(self, transform, classpath: str, groups: list[str] | None = None) -> None:
+        if transform is None:
+            raise AugmentationError(
+                "'Foreign' is named in the config, and it only wraps the class a key names.",
+                "Write the class as the key, its arguments under it:"
+                " 'monai.transforms:RandGaussianNoise: {prob: 1.0, std: 12.0, groups: [CT]}'.",
+            )
         super().__init__(groups)
         self.classpath = classpath
         self.transform = transform
         self.seeds: dict[int, list[int]] = {}
+
+    def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_FOREIGN_LOCALITY)
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         # One seed per copy, drawn once for the case: every group is handed these same seeds.

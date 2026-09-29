@@ -29,7 +29,8 @@ from konfai.data.augmentation import (
     Rotate,
     SimulateLowResolution,
 )
-from konfai.data.augmentation.base import DataAugmentationsList
+from konfai.data.augmentation import base as augmentation_base
+from konfai.data.augmentation.base import DataAugmentationsList, _hashed_normal_field
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import LocalityKind, Resample, TensorCast
 from konfai.utils.dataset import Attribute, Dataset
@@ -173,3 +174,18 @@ def test_a_statistic_a_draw_ahead_of_it_invalidates_is_refused(streaming_dataset
     refusal = manager.stream_refusal(1, True)
     assert refusal is not None
     assert "redrawn every epoch" in refusal
+
+
+@pytest.mark.parametrize(
+    ("shape", "offsets", "full"),
+    [((2, 9, 13, 17), (3, 5, 7), (20, 30, 40)), ((1, 11, 23), (4, 0), (15, 23))],
+    ids=["3d-two-channels", "2d"],
+)
+def test_the_noise_field_does_not_depend_on_the_slab_it_is_hashed_in(
+    monkeypatch: pytest.MonkeyPatch, shape, offsets, full
+) -> None:
+    """The field is hashed a slab of rows at a time; a voxel's value is its key's, whatever slab holds it."""
+    whole = _hashed_normal_field(7, shape, offsets, full, torch.device("cpu"))
+    for slab in (1, 50, 400):
+        monkeypatch.setattr(augmentation_base, "_FIELD_SLAB_VOXELS", slab)
+        assert torch.equal(_hashed_normal_field(7, shape, offsets, full, torch.device("cpu")), whole)

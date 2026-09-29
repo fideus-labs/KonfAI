@@ -225,3 +225,36 @@ def test_foreign_gives_the_process_back_the_random_state_it_had(cls: type) -> No
     augmentation.compute("case", 0, 0, volume.clone())
     after_label = torch.rand(3)
     assert not torch.equal(after_image, after_label)
+
+
+def _prepared(tmp_path, monkeypatch, entry: str) -> list:
+    """The draws a TRAIN config's ``data_augmentations`` entry prepares into."""
+    config = tmp_path / "Config.yml"
+    config.write_text(
+        "Trainer:\n  Dataset:\n    augmentations:\n      A:\n        nb: 2\n        data_augmentations:\n" + entry
+    )
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    from konfai.data.augmentation import DataAugmentationsList
+    from konfai.utils.config import apply_config
+
+    augmentations = apply_config("Trainer.Dataset.augmentations.A")(DataAugmentationsList)()
+    augmentations.prepare("A")
+    return augmentations.data_augmentations
+
+
+def test_the_documented_spelling_names_the_class_with_groups_beside_its_arguments(tmp_path, monkeypatch) -> None:
+    (augmentation,) = _prepared(
+        tmp_path, monkeypatch, f"          {__name__}:GlobalNoise:\n            std: 9.0\n            groups: [CT]\n"
+    )
+    assert isinstance(augmentation, Foreign)
+    assert isinstance(augmentation.transform, GlobalNoise) and augmentation.transform.std == 9.0
+    assert augmentation.groups == ["CT"]
+
+
+def test_foreign_named_by_itself_is_refused(tmp_path, monkeypatch) -> None:
+    # Bound by name, the wrapper had no class to call: the first draw raised a bare TypeError.
+    entry = "          Foreign:\n            classpath: torch.nn:Sigmoid\n            groups: [CT]\n"
+    with pytest.raises(AugmentationError, match="Write the class as the key"):
+        _prepared(tmp_path, monkeypatch, entry)

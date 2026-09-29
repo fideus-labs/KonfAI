@@ -1102,6 +1102,23 @@ def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, imag
     assert ".tmp" not in str(refusal.value)
 
 
+def test_a_dicom_write_that_fails_keeps_itks_error(tmp_path: Path, image_attributes, monkeypatch) -> None:
+    """GDCM reports every failed write, a full disk included, as a component type it does not support:
+    that phrase says nothing about the format, so it is not read as a refusal."""
+    sitk = pytest.importorskip("SimpleITK")
+
+    def full_disk(image, path, *args, **kwargs):
+        raise RuntimeError(
+            "itkGDCMImageIO.cxx:1400:\nITK ERROR: GDCMImageIO(0x1): DICOM does not support this component type"
+        )
+
+    monkeypatch.setattr(sitk, "WriteImage", full_disk)
+    dataset = Dataset(tmp_path / "store", "dcm")
+    with pytest.raises(RuntimeError, match="component type") as error:
+        dataset.write("CT", "CASE_001", np.ones((1, 1, 5, 6), np.uint8), image_attributes([0.0] * 3, [1.0] * 3))
+    assert not isinstance(error.value, DatasetManagerError)
+
+
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX directory permissions, not as root")
 @pytest.mark.parametrize("file_format", ["mha", "nii.gz"])
 def test_a_write_that_fails_on_the_disk_keeps_itks_error(tmp_path: Path, image_attributes, file_format: str) -> None:

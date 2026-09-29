@@ -352,8 +352,9 @@ extent that is 8× in 3D, against the single load streaming was avoiding. At pat
 | `REGRID` | `Resample`; `Padding` in every mode (`constant` is a translation into a filled, larger volume; `reflect` and `replicate` pull the border they mirror, which the region's own window carries; a `circular` pad fills a border from the opposite end of its axis, so a region reaching it pulls that whole axis) |
 
 Augmentations declare per **(case, draw)**, so two copies of one case can answer
-differently. `Permute`, `Flip` (with `vector_field: false`) and `Rotate` on a
-quarter turn are `ORIENTATION`; `ColorTransform` and its subclasses are
+differently. `Permute`, `Flip` and `Rotate` on a quarter turn are
+`ORIENTATION` (a `Flip` with `vector_field: true` also negates the mirrored
+components, so a statistic after it takes the whole volume); `ColorTransform` and its subclasses are
 `POINTWISE`; `Translate` is `HALO`. A free-angle `Rotate` and `Scale` are
 `REGRID`, pulling their own window through the affine; `Noise` and `CutOUT` are
 `POINTWISE`, their field and their box being functions of the voxel's position in

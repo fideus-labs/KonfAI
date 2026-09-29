@@ -48,6 +48,22 @@ def _dataset_holding(datasets: list[Dataset], group: str, name: str) -> Dataset:
     )
 
 
+def _percentile_of(bound: str, statistic: str, argument: str) -> float | None:
+    """The percentile a string bound of ``Clip`` names, ``None`` for the statistic itself."""
+    if bound == statistic:
+        return None
+    try:
+        percentile = float(bound.split(":")[1]) if bound.startswith("percentile:") else -1.0
+    except (IndexError, ValueError):
+        percentile = -1.0
+    if not 0.0 <= percentile <= 100.0:
+        raise TransformError(
+            f"'Clip' was given {argument}={bound!r}.",
+            f"A bound is a number, '{statistic}', or 'percentile:<p>' with p in [0, 100] (percentile:99.5).",
+        )
+    return percentile
+
+
 class _MaskedStatisticsSeed:
     """The masked whole-volume statistics of a stage's own group, per case, from the stores.
 
@@ -100,9 +116,13 @@ class Clip(Transform):
     ) -> None:
         super().__init__()
         if isinstance(min_value, int | float) and isinstance(max_value, int | float) and max_value <= min_value:
-            raise ValueError(
-                f"[Clip] Invalid clipping range: max_value ({max_value}) must be greater than min_value ({min_value})"
+            raise TransformError(
+                f"'Clip' was given max_value={max_value}, which is not above min_value={min_value}.",
+                "Give a max_value greater than min_value.",
             )
+        for bound, statistic, argument in ((min_value, "min", "min_value"), (max_value, "max", "max_value")):
+            if isinstance(bound, str):
+                _percentile_of(bound, statistic, argument)
         self.min_value = min_value
         self.max_value = max_value
         self.save_clip_min = save_clip_min
@@ -144,8 +164,8 @@ class Clip(Transform):
         if tuple(mask.shape) != tuple(tensor.shape):
             raise TransformError(
                 f"The mask '{self.mask}' has shape {list(mask.shape)} where the tensor in hand has"
-                f" {list(tensor.shape)}: it cannot be indexed against a region.",
-                "A masked bound needs the whole volume here; report this if the chain was planned.",
+                f" {list(tensor.shape)}.",
+                "The mask is read on the stored grid: apply this stage before the stages that change the grid.",
             )
         return tensor[mask != 0]
 
@@ -160,7 +180,8 @@ class Clip(Transform):
             return selected
 
         if isinstance(self.min_value, str):
-            if self.min_value == "min":
+            percentile = _percentile_of(self.min_value, "min", "min_value")
+            if percentile is None:
                 # Seeded first: on a streamed path a bound computed here would be one region's. A
                 # masked bound seeds from the masked disk scan, a bare seed being an unmasked stage's.
                 if seeded_masked:
@@ -169,44 +190,23 @@ class Clip(Transform):
                     min_value = _seeded_scalar(cache_attribute, "Min")
                 else:
                     min_value = torch.min(values())
-            elif self.min_value.startswith("percentile:"):
-                try:
-                    percentile = float(self.min_value.split(":")[1])
-                    # ``np.percentile`` cannot coerce a CUDA tensor; ``.cpu()`` is a no-op on a host one.
-                    min_value = np.percentile(values().detach().cpu(), percentile)
-                except (IndexError, ValueError) as exc:
-                    raise ValueError(
-                        f"Invalid format for min_value: '{self.min_value}'. Expected 'percentile:<float>'"
-                    ) from exc
             else:
-                raise TypeError(
-                    f"Unsupported string for min_value: '{self.min_value}'."
-                    "Must be a float, 'min', or 'percentile:<float>'."
-                )
+                # ``np.percentile`` cannot coerce a CUDA tensor; ``.cpu()`` is a no-op on a host one.
+                min_value = np.percentile(values().detach().cpu(), percentile)
         else:
             min_value = self.min_value
 
         if isinstance(self.max_value, str):
-            if self.max_value == "max":
+            percentile = _percentile_of(self.max_value, "max", "max_value")
+            if percentile is None:
                 if seeded_masked:
                     max_value = self._masked_seed.statistics(self.datasets, name)["max"]  # type: ignore[union-attr]
                 elif self.mask is None and "StatisticsSeeded" in cache_attribute and "Max" in cache_attribute:
                     max_value = _seeded_scalar(cache_attribute, "Max")
                 else:
                     max_value = torch.max(values())
-            elif self.max_value.startswith("percentile:"):
-                try:
-                    percentile = float(self.max_value.split(":")[1])
-                    max_value = np.percentile(values().detach().cpu(), percentile)
-                except (IndexError, ValueError) as exc:
-                    raise ValueError(
-                        f"Invalid format for max_value: '{self.max_value}'. Expected 'percentile:<float>'"
-                    ) from exc
             else:
-                raise TypeError(
-                    f"Unsupported string for max_value: '{self.max_value}'."
-                    " Must be a float, 'max', or 'percentile:<float>'."
-                )
+                max_value = np.percentile(values().detach().cpu(), percentile)
         else:
             max_value = self.max_value
 
@@ -246,8 +246,9 @@ class Normalize(TransformInverse):
     ) -> None:
         super().__init__(inverse)
         if max_value <= min_value:
-            raise ValueError(
-                f"[Normalize] Invalid range: max_value ({max_value}) must be greater than min_value ({min_value})"
+            raise TransformError(
+                f"'Normalize' was given max_value={max_value}, which is not above min_value={min_value}.",
+                "Give a max_value greater than min_value.",
             )
         self.lazy = lazy
         self.min_value = min_value
@@ -379,8 +380,8 @@ class Standardize(TransformInverse):
         if tuple(mask.shape) != tuple(tensor.shape):
             raise TransformError(
                 f"The mask '{self.mask}' has shape {list(mask.shape)} where the tensor in hand has"
-                f" {list(tensor.shape)}: it cannot be indexed against a region.",
-                "A masked statistic needs the whole volume here; report this if the chain was planned.",
+                f" {list(tensor.shape)}.",
+                "The mask is read on the stored grid: apply this stage before the stages that change the grid.",
             )
         return tensor[mask != 0]
 
@@ -457,7 +458,7 @@ class TensorCast(TransformInverse):
 
     def __init__(self, dtype: str = "float32", inverse: bool = True) -> None:
         super().__init__(inverse)
-        self.dtype: torch.dtype = getattr(torch, dtype)
+        self.dtype: torch.dtype = TensorCast.safe_dtype_cast(dtype)
 
     def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
         # The stored volume's statistics stay a later GLOBAL_STAT's input only where the cast keeps
@@ -472,10 +473,10 @@ class TensorCast(TransformInverse):
 
     @staticmethod
     def safe_dtype_cast(dtype_str: str) -> torch.dtype:
-        try:
-            return getattr(torch, dtype_str)
-        except AttributeError as exc:
-            raise ValueError(f"Unsupported dtype: {dtype_str}") from exc
+        dtype = getattr(torch, dtype_str, None)
+        if not isinstance(dtype, torch.dtype):
+            raise TransformError(f"'{dtype_str}' is not a torch dtype.", "Name one: float32, float16, int16, uint8...")
+        return dtype
 
     def inverse(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         return tensor.to(TensorCast.safe_dtype_cast(cache_attribute.pop("dtype")))
@@ -492,17 +493,20 @@ class HistogramMatching(Transform):
         super().__init__()
         self.reference_group = reference_group
 
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(
+            LocalityKind.WHOLE_VOLUME, reason="its lookup table is built from the whole volume's histogram"
+        )
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         image = data_to_image(tensor, cache_attribute)
-        image_ref = None
-        for dataset in self.datasets:
-            if dataset.is_dataset_exist(self.reference_group, name):
-                image_ref = dataset.read_image(self.reference_group, name)
-        if image_ref is None:
+        reference = self.dataset_holding(self.reference_group, name)
+        if reference is None:
             raise DatasetManagerError(
                 f"The reference '{self.reference_group}/{name}' is not in any dataset.",
                 "Add the group to a dataset the run reads, or name one that is there.",
             )
+        image_ref = reference.read_image(self.reference_group, name)
         _require_simpleitk()
         matcher = sitk.HistogramMatchingImageFilter()
         matcher.SetNumberOfHistogramLevels(256)
@@ -535,9 +539,12 @@ class Statistics(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         trusted = "StatisticsSeeded" in cache_attribute
+        values: torch.Tensor | None = None
         for seeded, recorded in self._KEYS:
             if not trusted or seeded not in cache_attribute:
-                cache_attribute[recorded] = getattr(tensors.float(), seeded.lower())()
+                if values is None:
+                    values = tensors.float()
+                cache_attribute[recorded] = getattr(values, seeded.lower())()
                 continue
             cache_attribute[recorded] = _seeded_scalar(cache_attribute, seeded)
         return tensors

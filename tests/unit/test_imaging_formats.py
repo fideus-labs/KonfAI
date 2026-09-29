@@ -271,7 +271,7 @@ class TestDicomSeriesTheReaderRefuses:
     def _assert_refused(root: Path, match: str) -> None:
         from konfai.utils import dicom
 
-        dicom.get_dicom_info.cache_clear()
+        dicom.forget_series()
         dataset = Dataset(root, "dicom")
         with pytest.raises(DatasetManagerError, match=match):
             dataset.get_infos("CT", "CASE_001")
@@ -468,7 +468,7 @@ class TestDicomRegionDecode:
         pytest.importorskip("pydicom")
         from konfai.utils import dicom
 
-        assert dicom.get_dicom_info.cache_info().maxsize is None
+        assert dicom._dicom_info.cache_info().maxsize is None
         root = tmp_path / "CT"
         dicom.write_dicom_series(root, np.zeros((1, 3, 4, 4), dtype=np.int16), origin=(0.0,) * 3, spacing=(1.0,) * 3)
         assert dicom.get_dicom_info(root)["shape"] == [1, 3, 4, 4]

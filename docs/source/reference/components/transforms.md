@@ -26,8 +26,8 @@ post-processing / reassembly when you pass `inverse: true`.
 A transform that changes the **spatial** shape must implement `transform_shape()`
 correctly: patch planning depends on an exact prediction. The **Shape** column
 below flags those. Transforms that only change the **channel** count (`OneHot`,
-`Argmax`, `Sum`, …) intentionally do *not* override it (patching strips the
-channel axis first). **Inv** flags whether a working `inverse()` exists.
+`Argmax` and `Sum` over the channels, …) leave the spatial shape as it is (patching
+strips the channel axis first). **Inv** flags whether a working `inverse()` exists.
 ```
 
 ## Patch streaming
@@ -141,14 +141,14 @@ stage that changes no grid refuses rather than pretend.
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
 | `TensorCast` | Cast dtype; caches original for inverse. | `dtype="float32", inverse=True` | no | **yes** | **yes** |
-| `OneHot` | One-hot encode a label map (changes **channels**). | `num_classes, inverse=True` | no† | **yes** | **yes** |
-| `Argmax` | `argmax(dim)` then unsqueeze. | `dim=0` | no† | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
+| `OneHot` | One-hot encode a one-channel label map (changes **channels**). | `num_classes, inverse=True` | no† | **yes** | **yes** |
+| `Argmax` | `argmax(dim)` then unsqueeze. | `dim=0` | no† at `dim=0`; **yes** over a spatial axis (kept at 1) | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
 | `Softmax` | `softmax(dim)`. | `dim=0` | no | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
 | `FlatLabel` | Binarise selected labels (else `>0`) → 1. | `labels=None` | no | no | **yes** |
 | `SelectLabel` | Remap labels; entries are `"(old,new)"` strings. | `labels` | no | no | **yes** |
 | `Mask` | Set voxels where mask==0 to `value_outside`. | `path="./default.mha", value_outside=0` | no | no | **yes**: per voxel; the dispatcher tells it where its region sits (`stream_region`) and it reads that part of the mask, a dataset group or an `.mha`; a sweep, and a case's patches, are told those reads ahead (`plan_region_reads`), so the decoded-chunk cache keeps a dataset mask's chunks by their next use |
 | `Dilate` | Binary dilation via max-pool (2D/3D). | `dilate=1` | no | no | **yes**: halo of `dilate` voxels, within half the patch |
-| `Sum` | Sum over `dim` (merges multi-model label maps). | `dim=0` | no† | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
+| `Sum` | Sum over `dim` (merges multi-model label maps). | `dim=0` | no† at `dim=0`; **yes** over a spatial axis (dropped) | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
 | `MergeLabels` | Merge the per-model `argmax` maps of a `combine: Concat` ensemble into one global label map (the correct alternative to `Sum` for disjoint-task ensembles, e.g. 5-task TotalSegmentator). |: | no | no | yes |
 | `Gradient` | Gradient-magnitude image (or components). | `per_dim=False` | no† | no | **yes**: halo of 1 voxel |
 
@@ -170,7 +170,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 
 | Name | Purpose | Stream |
 | --- | --- | --- |
-| `Statistics` | Records `Min`/`Max`/`Mean`/`Std` to the attribute cache and passes the tensor through, feeding the perceptual criteria (`SAM_Perceptual`, `IMPACTS`, `IMPACTSynth`, `IMPACTReg`). | **yes**, `GLOBAL_STAT` |
+| `Statistics` | Records the volume's min, max, mean and std to the attribute cache as `ImageMin`/`ImageMax`/`ImageMean`/`ImageStd` and passes the tensor through, feeding the perceptual criteria (`SAM_Perceptual`, `IMPACTS`, `IMPACTSynth`, `IMPACTReg`). | **yes**, `GLOBAL_STAT` |
 | `Save` | Writes the preprocessed volume to a cache dataset and passes the tensor through. Once the cache exists it becomes the source and only the stages after it are planned; an unsatisfied `Save` with a streamable prefix is materialised slab by slab. A cache written this way is
 readable by any backend, including from a loader worker (`Mask: {path: <group>}`);
 on `h5` the reader and the writer share one store, which HDF5 does not define for
@@ -184,9 +184,8 @@ case (`mha`, `nii`, …) has no such window. `dataset` takes a format token (`mh
 `†` changes the **channel** dimension, not spatial: no `transform_shape`
 override needed.
 
-`‡` declares no patch locality, so the case is loaded whole. That is the safe
-default every `Transform` inherits, not a statement that the operation could not
-be streamed.
+`‡` changes the tensor's rank, while regions are cut on the grid of the source,
+so the case is loaded whole.
 
 ## Augmentations
 
@@ -245,7 +244,7 @@ Reversible affine warps via `grid_sample` (nearest-neighbour for label tensors).
 | `Translate` | Random translation (voxels). | `t_min=-10, t_max=10, is_int=False` | no | **yes** | **yes**: a halo of the drawn shift (plus a voxel for interpolation), while that stays within half the patch |
 | `Rotate` | Random rotation (degrees) about the centre, in world units: the spacing of the grid it is handed, voxels without one. A header that does not describe the grid (a Squeeze leaves the 3D one on a 2D grid) turns the angle as drawn, in normalised coordinates. | `a_min=0, a_max=360, is_quarter=False` | **yes** with `is_quarter: true` | **yes** | **yes**: an index remap with `is_quarter: true`, and a free angle streams through the affine's own pull box |
 | `Scale` | Random log2-normal isotropic scale. | `s_std=0.2` | no | **yes** | **yes**: the region pulls its own window through the affine, so no fixed halo is needed |
-| `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes**: index remap; no with `vector_field: true` (negating a channel changes values) |
+| `Flip` | Per-axis random flip; optional vector-field channel negation. | `f_prob=[0.33,0.33,0.33], vector_field=False` | no | **yes** (self-inverse) | **yes**: index remap, and the `vector_field: true` negation is per voxel (a statistic after it takes the whole volume, since the values change) |
 | `Elastix` | Random cubic-BSpline elastic warp, drawn as a control-point lattice. | `grid_spacing=16, max_displacement=16` (world units) | no | no | **yes**: the displacement is evaluated lazily from the lattice, and no voxel moves further than `max_displacement`, which bounds the source box a region pulls |
 | `Permute` | Random spatial-axis permutation (**3-D only**). | `prob_permute=[0.5,0.5]` | **yes** | **yes** | **yes**: index remap |
 | `PlacedMask` | Randomly place a mask volume; outside → `value` (SimpleITK). | `mask` (required), `value` (required) | **yes** | no | no: the output grid is the mask's, and the mask is already resident |
@@ -265,12 +264,27 @@ them streams: a voxel comes out the same whatever region it was read in.
 | `HUE` | Random hue rotation. | `hue_max` (required) |
 | `Saturation` | Random saturation scale. | `s_std` (required) |
 
+### Intensity (acquisition)
+
+These describe an acquisition rather than a photograph: the noise a scanner adds,
+its point spread, the resolution it reconstructs at, and the transfer curves a
+protocol changes. They take any channel count, move no voxel (the inverse is the
+identity), and draw one parameter per copy in `[min, max]`.
+
+| Name | Purpose | Key args (defaults) | Stream |
+| --- | --- | --- | --- |
+| `GaussianNoise` | Additive Gaussian noise. | `std_min=0.0, std_max=0.1` | **yes**: the field is a function of the voxel's position and the copy's seed, as for `Noise` |
+| `GaussianBlur` | Separable Gaussian blur; `in_plane` blurs the two innermost axes only, for a 2.5D stack. | `sigma_min=0.5, sigma_max=1.0, in_plane=False` | **yes**: a halo of the kernel's radius (three sigmas, at least one voxel), while that stays within half the patch |
+| `SimulateLowResolution` | Resample each plane down by the drawn factor and back up. | `factor_min=1.0, factor_max=2.0` | **yes**: an in-plane halo of the factor plus two voxels; a region is degraded on the whole plane's grid |
+| `Gamma` | Gamma on the case's per-channel range, which it keeps. | `gamma_min=0.7, gamma_max=1.5, eps=1e-6` | **yes**, `GLOBAL_STAT`: the per-channel min and max are read from disk |
+| `ContrastAroundMean` | Scale each value's distance to the case's per-channel mean. | `factor_min=0.75, factor_max=1.25` | **yes**, `GLOBAL_STAT`: the per-channel mean is read from disk |
+
 ### Other
 
 | Name | Purpose | Key args (defaults) | Notes | Stream |
 | --- | --- | --- | --- | --- |
 | `Noise` | Diffusion-style forward noising (zero-terminal-SNR β schedule). | `n_std` (required), `noise_step=1000` | Its `prob` is the max noise timestep, not an apply probability; it always applies. | **yes**: the field is a function of the voxel's position and the copy's seed, so a region draws the values it would have had in the whole volume |
-| `CutOUT` | Random cutout box filled with `value`. | `cutout_size` (a fraction of the extent per axis, in `(0, 1]`), `value` (both required) | Gating uses the base probability; a `cutout_size` outside `(0, 1]` is refused. | **yes**: the box is placed in the whole volume's coordinates, so a region sees the part of it that falls inside it |
+| `CutOUT` | Random cutout box filled with `value`. | `cutout_size` (a fraction of the extent per axis, in `(0, 1]`), `value` (both required) | Gating uses the base probability; a `cutout_size` outside `(0, 1]` is refused. An integer group (a label map) keeps its dtype when it holds `value`, and is widened to float otherwise. | **yes**: the box is placed in the whole volume's coordinates, so a region sees the part of it that falls inside it |
 
 `PlacedMask` requires SimpleITK. The `vector_field` flag on `Flip` should
 only be enabled for single-channel or genuine vector-field groups.

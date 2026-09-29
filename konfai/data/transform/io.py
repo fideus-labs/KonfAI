@@ -19,7 +19,7 @@
 
 import torch
 
-from konfai.data.transform.base import Transform
+from konfai.data.transform.base import LocalityKind, PatchLocality, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
@@ -61,8 +61,10 @@ class Save(Transform):
         self.downsample_method = downsample_method
         self._destination: Dataset | None = None
 
-    # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
-    # source boundary, and an unsatisfied one with a streamable prefix is materialized slab by slab.
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
+        # source boundary, and an unsatisfied one with a streamable prefix is materialized slab by slab.
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="it cannot write its output region by region here")
 
     @property
     def spec(self) -> tuple[str, str] | None:

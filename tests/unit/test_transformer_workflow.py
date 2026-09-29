@@ -27,7 +27,7 @@ from konfai.data.reduction import Mean
 from konfai.data.transform import Reduce
 from konfai.utils.budget import BUDGET_SHARES, format_bytes, set_per_rank_budget
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import ConfigError, TransformerError
+from konfai.utils.errors import ConfigError, KonfAIWarning, TransformerError
 from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
@@ -242,7 +242,9 @@ def test_unstreamable_chain_says_why_and_still_writes(tmp_path: Path) -> None:
     assert all(entry.verdict == "WHOLE-VOLUME" for entry in plan.entries)
     assert all(entry.reason and "Standardize" in entry.reason for entry in plan.entries)
 
-    workflow.setup(1)
+    # on_fallback: warn, the default.
+    with pytest.warns(KonfAIWarning, match=r"2 case\(s\) take the whole-volume path"):
+        workflow.setup(1)
     workflow.run_process(1, 0, 0, [])
     assert Dataset(tmp_path / "out", "h5").is_dataset_exist("CT_out", "CASE_000")
 
@@ -1294,8 +1296,7 @@ def test_the_decomposition_note_is_printed_only_where_it_can_matter(tmp_path: Pa
 
 def test_a_bare_name_past_the_marker_is_the_draw(tmp_path: Path) -> None:
     """Flip exists as a transform and as a draw. Before Expand the bare name is the transform;
-    after it, the copies' draw: `Flip: {f_prob: ...}` past the marker no longer binds the transform
-    and fails on f_prob."""
+    after it, the copies' draw: `Flip: {f_prob: ...}` past the marker binds the draw, which takes f_prob."""
     from konfai.data.augmentation import Flip as FlipDraw
     from konfai.data.transform import Flip as FlipTransform
 

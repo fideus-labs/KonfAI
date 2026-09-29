@@ -95,7 +95,6 @@ _UNWRITABLE_VOLUME = (
     "supports unsigned",  # PNG, JPEG, BMP, TIFF
     "can only write 2-dimensional",  # JPEG
     "cannot write images with a dimension",  # BMP
-    "does not support this component type",  # DICOM
     "stored pixel type was not specified",  # DICOM, a floating point volume
 )
 

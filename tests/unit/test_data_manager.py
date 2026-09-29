@@ -389,7 +389,7 @@ def test_subset_and_validation_accept_the_same_selector_spellings(tmp_path: Path
 
 
 def test_a_negative_slice_end_counts_from_the_end_python_style() -> None:
-    # '0:-2' once clipped to an empty range and blamed the subset as "too restrictive".
+    # '0:-2' is every case but the last two, not an empty range.
     names = [f"CASE_{index:03d}" for index in range(5)]
     assert Subset("0:-2")(names, {}) == {"CASE_000", "CASE_001", "CASE_002"}
     assert Subset("-2:5")(names, {}) == {"CASE_003", "CASE_004"}
@@ -531,7 +531,7 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
     store = Dataset(tmp_path / "Dataset", "mha")
     for name in names:
         for group in ("CT", "SEG"):
-            store.write(group, name, np.zeros((1, 4, 4), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
+            store.write(group, name, np.zeros((1, 2, 4, 4), np.float32), geometry([0.0] * 3, [1.0] * 3))
     constructed: list[tuple[str, int]] = []
 
     class CountingManager(DatasetManager):
@@ -1463,8 +1463,11 @@ def test_data_prediction_disables_persistent_workers() -> None:
     assert dataset.dataLoader_args["persistent_workers"] is False
 
 
-def _prepared_prediction(root: Path, file_format: str, **kwargs) -> DataPrediction:
-    """A prediction over two 8x8 cases stored in ``file_format``, its managers built."""
+def _prepared_prediction(
+    root: Path, file_format: str, patch_size: tuple[int, int] | None = (4, 4), **kwargs
+) -> DataPrediction:
+    """A prediction over two 8x8 cases stored in ``file_format``, read in ``patch_size`` patches (whole
+    when ``None``), its managers built."""
     store = Dataset(root, file_format)
     for name in ("CASE_000", "CASE_001"):
         store.write("CT", name, np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
@@ -1472,7 +1475,7 @@ def _prepared_prediction(root: Path, file_format: str, **kwargs) -> DataPredicti
         augmentations=None,
         dataset_filenames=[f"{root}:{file_format}"],
         groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
-        patch=DatasetPatch(patch_size=[4, 4], overlap=None),
+        patch=None if patch_size is None else DatasetPatch(patch_size=list(patch_size), overlap=None),
         subset=PredictionSubset(),
         **kwargs,
     )

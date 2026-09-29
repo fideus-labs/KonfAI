@@ -25,6 +25,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 from konfai.data.transform import (
+    Argmax,
     Canonical,
     Clip,
     Crop,
@@ -41,11 +42,13 @@ from konfai.data.transform import (
     Reduce,
     RegionContext,
     Resample,
+    SegmentationDisagreement,
     SelectLabel,
     Squeeze,
     StandardDeviation,
     Standardize,
     Statistics,
+    Sum,
     TensorCast,
     Transform,
     Variance,
@@ -75,6 +78,22 @@ def test_onehot_inverse_argmaxes_the_class_axis_batched_and_unbatched() -> None:
     assert torch.equal(decoded_b, batched.argmax(1).unsqueeze(1))
 
 
+def test_onehot_refuses_a_label_map_of_several_channels() -> None:
+    # Its output is [num_classes, *spatial], which leaves no axis for a second label map's classes.
+    with pytest.raises(TransformError, match="2 channels"):
+        OneHot(num_classes=3)("seg", torch.zeros(2, 4, 5, 6), Attribute())
+
+
+@pytest.mark.parametrize(
+    "stage", [Argmax(0), Argmax(1), Argmax(-1), Sum(0), Sum(2), Sum(-3)], ids=lambda s: f"{type(s).__name__}({s.dim})"
+)
+def test_an_axis_reduction_predicts_the_spatial_shape_it_leaves(stage: Transform) -> None:
+    tensor = torch.rand(3, 4, 5, 6)
+    # A reduction over the channels leaves the spatial extent: the stripped channel axis is folded.
+    expected = [4, 5, 6] if stage.dim == 0 else list(stage("case", tensor, Attribute()).shape[1:])
+    assert stage.transform_shape("group", "case", [4, 5, 6], Attribute()) == expected
+
+
 @pytest.mark.parametrize("cls", [Variance, StandardDeviation])
 def test_ensemble_dispersion_keeps_member_axis_for_single_member(cls) -> None:
     # The N>1 branch does .var/.std(0).unsqueeze(0) -> [1, C, *spatial]; the single-member branch must
@@ -84,6 +103,16 @@ def test_ensemble_dispersion_keeps_member_axis_for_single_member(cls) -> None:
     single = transform("x", torch.randn(1, 2, 4, 4), Attribute())
     assert single.ndim == multi.ndim
     assert tuple(single.shape) == tuple(multi.shape)
+
+
+@pytest.mark.parametrize(
+    ("ignore_background", "want"), [(False, [0.0, 1 / 3, 2 / 3, 0.0]), (True, [0.0, 0.0, 0.5, 0.0])]
+)
+def test_segmentation_disagreement_is_one_minus_the_majority_share(ignore_background: bool, want: list[float]) -> None:
+    members = torch.tensor([[[3, 3, 1, 0]], [[3, 0, 2, 0]], [[3, 3, 0, 0]]], dtype=torch.int16)
+    got = SegmentationDisagreement(ignore_background)("case", members, Attribute())
+    assert tuple(got.shape) == (1, 1, 4)
+    torch.testing.assert_close(got[0, 0], torch.tensor(want), rtol=0, atol=1e-7)
 
 
 def test_clip_resolves_min_and_percentile_bounds() -> None:
@@ -469,6 +498,11 @@ def test_standardize_explicit_per_channel_stats():
 
 
 # --------------------------------------------------------------------------------------
+# HistogramMatching
+# --------------------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------------------
 # Padding: origin bookkeeping
 # --------------------------------------------------------------------------------------
 
@@ -660,6 +694,64 @@ def test_konfai_inference_without_konfai_apps_names_the_install(monkeypatch: pyt
 
     with pytest.raises(TransformError, match="pip install konfai-apps"):
         _ = transform_package.KonfAIInference
+
+
+def test_konfai_inference_names_the_missing_dependency_of_an_installed_konfai_apps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """konfai-apps installed with a dependency missing is not konfai-apps missing: the install hint
+    would send the user to install what they have."""
+    import konfai.data.transform as transform_package
+
+    real_import = builtins.__import__
+
+    def import_missing(name, *args, **kwargs):
+        if name == "konfai_apps.transforms":
+            raise ModuleNotFoundError("No module named 'nibabel'", name="nibabel")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_missing)
+    with pytest.raises(ModuleNotFoundError, match="nibabel"):
+        _ = transform_package.KonfAIInference
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: TensorCast("foo"),
+        lambda: TensorCast("nn"),
+        lambda: Clip(5.0, 1.0),
+        lambda: Clip("MIN", 1.0),
+        lambda: Clip(0.0, "percentile:x"),
+        lambda: Clip("percentile:150", 1.0),
+        lambda: Normalize(min_value=1, max_value=0),
+        lambda: Dilate(-1),
+        lambda: Dilate(1)("case", torch.zeros(1, 8), Attribute()),
+    ],
+    ids=[
+        "dtype",
+        "not-a-dtype",
+        "clip-range",
+        "clip-string",
+        "clip-percentile",
+        "clip-percentile-range",
+        "normalize-range",
+        "dilate",
+        "rank",
+    ],
+)
+def test_a_configuration_error_is_a_transform_error(build) -> None:
+    """The CLI reports a KonfAIError as a message and anything else as a traceback."""
+    with pytest.raises(TransformError):
+        build()
+
+
+def test_a_mask_off_the_grid_it_masks_is_refused_by_name(tmp_path: Path) -> None:
+    sitk = pytest.importorskip("SimpleITK")
+    path = tmp_path / "mask.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((3, 3), dtype=np.uint8)), str(path))
+    with pytest.raises(TransformError, match=r"shape \[1, 3, 3\], where the tensor it masks has \[1, 4, 4\]"):
+        Mask(str(path))("case", torch.zeros(1, 4, 4), Attribute())
 
 
 # --------------------------------------------------------------------------------------
@@ -1371,3 +1463,12 @@ def test_normalize_never_writes_into_the_tensor_it_is_handed() -> None:
     before = channels.clone()
     Normalize(channels=[0])("CASE", channels, Attribute())
     assert torch.equal(channels, before)
+
+
+@pytest.mark.parametrize("stage", [Flip(), Permute()], ids=["flip", "permute"])
+def test_the_three_axis_default_is_refused_by_name_on_a_2d_case(stage) -> None:
+    """``Flip()`` and ``Permute()`` name three axes by default: a 2-D case fell on torch's error."""
+    with pytest.raises(TransformError, match="axes"):
+        stage.transform_shape("CT", "P0", [5, 6], Attribute())
+    with pytest.raises(TransformError, match="axes"):
+        stage("P0", torch.zeros(1, 5, 6), Attribute())

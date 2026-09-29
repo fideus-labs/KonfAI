@@ -215,7 +215,7 @@ few percent of the budget can still exceed it.
 | Value | Effect |
 | --- | --- |
 | `allow` | Take the whole-volume path silently, but the plan still names it. |
-| `warn` (default) | Same, plus a warning line after the plan. |
+| `warn` (default) | Same, plus a warning (a `KonfAIWarning`, which a Python caller can filter) after the plan. |
 | `error` | Refuse the run. Nothing is written. A fallback only discovered mid-run (a failed sweep) stops at that case: earlier cases stay written, and the per-case resume covers the rerun. |
 
 Independently of `on_fallback`, a case that **cannot stream and does not fit
@@ -722,7 +722,8 @@ resolved config the run writes back spells it; the suffix is the stage's identit
 not part of the class it names, so `konfai.data.transform:Clip#2` resolves like `Clip`. In a list,
 name each stage without the suffix: an item written `Clip#2` next to two bare `Clip` items would take
 the key the second one binds under, and the list is refused. The mapping form keeps its two spellings
-(bare and module-qualified) as before.
+(bare and module-qualified) as before. In either form, a stage written with nothing under it
+(`Canonical:`) takes every default, as `Canonical: {}` does.
 ```
 
 `pattern` is a `str.format` template and **both** tokens are required: `{name}`
@@ -812,11 +813,12 @@ draws are not equal:
 | Draw | Reads | Regime |
 |---|---|---|
 | `Brightness`, `Contrast`, `LumaFlip`, `HUE`, `Saturation` | its own voxel | shared read pass |
-| `Noise`, `CutOUT` | its own voxel (the field and the box are functions of the voxel's position) | shared read pass |
-| `Translate` | a halo around the slab | own pass |
-| `Flip` (not a vector field), `Permute`, `Rotate` with `is_quarter: true` | a permutation of the volume | own pass |
-| `Rotate` (free angle), `Scale` | the source box each region maps to (a slab of a rotated volume pulls a wide band, which the plan prices) | own pass |
-| `Elastix`, `PlacedMask`, `Foreign`, `Flip` of a vector field | the whole volume | WHOLE-VOLUME |
+| `Noise`, `GaussianNoise`, `CutOUT` | its own voxel (the field and the box are functions of the voxel's position) | shared read pass |
+| `Translate`, `GaussianBlur`, `SimulateLowResolution` | a halo around the slab | own pass |
+| `Gamma`, `ContrastAroundMean` | its own voxel and a statistic of the whole case, read from disk | own pass |
+| `Flip`, `Permute`, `Rotate` with `is_quarter: true` | a permutation of the volume | own pass |
+| `Rotate` (free angle), `Scale`, `Elastix` | the source box each region maps to (a slab of a rotated volume pulls a wide band, which the plan prices) | own pass |
+| `PlacedMask`, `Foreign` | the whole volume | WHOLE-VOLUME |
 
 Eight copies of `Brightness` or `Noise` are one read; eight copies of a free
 `Rotate` are eight bounded passes, each re-reading the band its slabs pull.
