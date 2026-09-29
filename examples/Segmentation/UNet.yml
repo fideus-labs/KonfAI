@@ -1,4 +1,5 @@
-# Declarative KonfAI UNet used by Config.yml and Prediction.yml.
+# Declarative KonfAI UNet of the Segmentation example (examples/Segmentation: Config.yml, Prediction.yml).
+# Its defaults are that dataset's (2-D, 41 classes): set `nb_class`, `dim` and `channels` under `parameters`.
 name: UNet
 
 parameters:

@@ -271,7 +271,7 @@ update_changelog_on_bump = true
 # could be let in, but only by shipping a Commitizen plugin to widen `commit_parser` (a class
 # attribute, not a setting), and a package to maintain is a steep price for two more bullet points.
 change_type_order = [
-    "BREAKING CHANGE",
+    "💥 Breaking changes",
     "✨ Features",
     "🐛 Bug Fixes",
     "⚡ Performance",
@@ -279,6 +279,7 @@ change_type_order = [
 ]
 
 [tool.commitizen.change_type_map]
+"BREAKING CHANGE" = "💥 Breaking changes"
 feat = "✨ Features"
 fix = "🐛 Bug Fixes"
 perf = "⚡ Performance"

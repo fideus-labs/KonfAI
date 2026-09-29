@@ -28,7 +28,7 @@
 # by shape yields torch.allclose logits in 2D and 3D. KonfAI additionally appends
 # a Softmax + ArgMax inference head after the logits conv (KonfAI segmentation
 # convention); equivalence with MONAI is asserted at the logits conv, before that
-# head. See tests/unit/test_yaml_model_segresnet.py.
+# head. See tests/unit/test_models_yaml.py.
 name: SegResNet
 
 parameters:

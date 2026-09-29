@@ -40,7 +40,7 @@ from konfai import (
     cuda_visible_devices,
 )
 from konfai.utils import State
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIError
 
 
 class ClusterKwargs(TypedDict):
@@ -234,6 +234,28 @@ def get_device(device: int):
     """Return a CUDA index or CPU device depending on availability. ``device_count`` and not availability
     alone: a latched runtime keeps ``is_available()`` True after ``CUDA_VISIBLE_DEVICES`` was narrowed."""
     return device if torch.cuda.is_available() and 0 <= device < torch.cuda.device_count() else torch.device("cpu")
+
+
+def checkpoint_source(entry: str | Path, error: type[KonfAIError]) -> str | Path:
+    """A checkpoint named on the command line: an ``https://`` URL as given, else an existing file.
+
+    A missing path or a directory is refused with ``error``; a directory lists the ``.pt`` files it holds.
+    """
+    if isinstance(entry, str) and entry.startswith("https://"):
+        return entry
+    path = Path(entry)
+    if path.is_dir():
+        held = sorted(child.name for child in path.glob("*.pt"))
+        raise error(
+            f"'{entry}' is a directory, not a checkpoint.",
+            f"Name one of its checkpoints: {', '.join(held)}." if held else "It holds no '.pt' file.",
+        )
+    if not path.exists():
+        raise error(
+            f"Checkpoint '{entry}' does not exist (resolved: '{path.resolve()}').",
+            "Name a '.pt' file, or an https:// URL.",
+        )
+    return path
 
 
 def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = False) -> Any:

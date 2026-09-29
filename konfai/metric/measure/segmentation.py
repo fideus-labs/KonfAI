@@ -226,9 +226,9 @@ class Dice(Criterion):
         axis sits before the target's channels, so a reference of any channel count broadcasts against
         a gathered channel exactly as a per-label ``target == label`` did.
 
-        A slice per label cost a gradient write into the whole logits tensor each: 10.2 ms of the
-        28.2 ms of GPU time of a training step of ``examples/Segmentation``. With no gradient to build
-        it is the label count that peaks (6 to 180 MiB), and ``_soft_sums`` is the frugal route.
+        One gathered slice, because the gradient of a slice writes into the whole logits tensor, once
+        per slice. Its peak grows with the label count, so without a gradient to build ``_soft_sums``
+        is the route.
 
         The reference's own mass is the voxel count ``_reference_counts`` already holds. The per-label
         dices leave as a ``LabelledValues`` read off the device lazily (``Measure._materialize``),

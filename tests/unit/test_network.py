@@ -213,6 +213,18 @@ class _ResizableNet(Network):
         self.add_module("fc", torch.nn.Linear(4, fc_out))
 
 
+def test_a_checkpoint_of_another_network_is_refused_naming_both() -> None:
+    """A checkpoint entry is keyed by the network's name: a model under another name finds none and is
+    refused with its own name and the checkpoint's."""
+    checkpoint = {"Model": _ResizableNet(fc_out=4).network_states()}
+
+    with pytest.raises(ConfigError) as excinfo:
+        _ResizableNet(fc_out=4).set_name("MyNet").load(checkpoint, init=False)
+
+    message = str(excinfo.value)
+    assert "'MyNet'" in message and "'_ResizableNet'" in message
+
+
 def test_load_state_dict_shape_mismatch_raises_without_opt_in() -> None:
     """The overlap-copy resize is opt-in (``allow_head_resize``): by default a checkpoint whose
     out-channels disagree with the model fails the load, naming the tensor and both shapes."""

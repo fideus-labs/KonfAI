@@ -127,9 +127,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.in_branch = in_branch
             self.out_branch = out_branch
             self.in_channels: int | None = None
-            self.in_is_channel: bool = True
             self.out_channels: int | None = None
-            self.out_is_channel: bool = True
             self.requires_grad = requires_grad
             self.isCheckpoint = False
             self.isGPU_Checkpoint = False
@@ -161,26 +159,19 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
         child_lines = []
 
-        def is_simple_branch(x):
-            return len(x) > 1 or x[0] != 0
-
         for key, module in self._modules.items():
             mod_str = repr(module)
 
             mod_str = self._addindent(mod_str, 2)
             desc = ""
-            if is_simple_branch(self._modulesArgs[key].in_branch) or is_simple_branch(
-                self._modulesArgs[key].out_branch
-            ):
+            if self._modulesArgs[key].in_branch != ["0"] or self._modulesArgs[key].out_branch != ["0"]:
                 desc += f", {self._modulesArgs[key].in_branch}->{self._modulesArgs[key].out_branch}"
             if not self._modulesArgs[key].pretrained:
                 desc += ", pretrained=False"
             if self._modulesArgs[key].alias:
                 desc += f", alias={self._modulesArgs[key].alias}"
             desc += f", in_channels={self._modulesArgs[key].in_channels}"
-            desc += f", in_is_channel={self._modulesArgs[key].in_is_channel}"
             desc += f", out_channels={self._modulesArgs[key].out_channels}"
-            desc += f", out_is_channel={self._modulesArgs[key].out_is_channel}"
             desc += f", is_end={self._modulesArgs[key]._isEnd}"
             desc += f", isInCheckpoint={self._modulesArgs[key].isCheckpoint}"
             desc += f", isInGPU_Checkpoint={self._modulesArgs[key].isGPU_Checkpoint}"
@@ -738,7 +729,15 @@ class Network(ModuleArgsDict, ABC):
             value = state_dict[name]
             model_state_dict_tmp: dict[str, torch.Tensor] = {}
             if isinstance(value, dict):
-                model_state_dict_tmp = {k.split(".")[-1]: v for k, v in value.items()}[self.get_name()]
+                by_name = {k.split(".")[-1]: v for k, v in value.items()}
+                if self.get_name() not in by_name:
+                    raise ConfigError(
+                        f"The checkpoint holds no weights for the network '{self.get_name()}': "
+                        f"its networks are {sorted(value)}.",
+                        "A checkpoint entry is keyed by the network's name: the class name of a Python model, "
+                        "the 'name' (else the file name) of a YAML model. Load it into the model that wrote it.",
+                    )
+                model_state_dict_tmp = by_name[self.get_name()]
             modules_name = self.get_mapping()
             model_state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
 
@@ -848,10 +847,8 @@ class Network(ModuleArgsDict, ABC):
         gradient_checkpoints: list[str] | None,
         gpu_checkpoints: list[str] | None,
         name: str | None = None,
-        in_is_channel: bool = True,
         out_channels: int | None = None,
-        out_is_channel: bool = True,
-    ) -> tuple[int, bool, int | None, bool]:
+    ) -> tuple[int, int | None]:
 
         for k1, v1 in module.items():
             if isinstance(v1, ModuleArgsDict):
@@ -879,36 +876,20 @@ class Network(ModuleArgsDict, ABC):
                     module._modulesArgs[k].isGPU_Checkpoint = True
 
             module._modulesArgs[k].in_channels = in_channels
-            module._modulesArgs[k].in_is_channel = in_is_channel
 
             if isinstance(v, ModuleArgsDict):
-                in_channels, in_is_channel, out_channels, out_is_channel = self._compute_channels_trace(
-                    v,
-                    in_channels,
-                    gradient_checkpoints,
-                    gpu_checkpoints,
-                    key,
-                    in_is_channel,
-                    out_channels,
-                    out_is_channel,
+                in_channels, out_channels = self._compute_channels_trace(
+                    v, in_channels, gradient_checkpoints, gpu_checkpoints, key, out_channels
                 )
-
-            if v.__class__.__name__ == "ToChannels":
-                out_is_channel = True
-
-            if v.__class__.__name__ == "ToFeatures":
-                out_is_channel = False
 
             out_channels = getattr(v, "out_channels", None) or out_channels
             out_channels = getattr(v, "out_features", None) or out_channels
 
             module._modulesArgs[k].out_channels = out_channels
-            module._modulesArgs[k].out_is_channel = out_is_channel
 
             in_channels = out_channels if out_channels is not None else in_channels
-            in_is_channel = out_is_channel
 
-        return in_channels, in_is_channel, out_channels, out_is_channel
+        return in_channels, out_channels
 
     def downsampling_factor(self) -> list[int] | None:
         """Per-axis factor the input spatial size must be a multiple of, or ``None`` if the graph never
@@ -1353,29 +1334,6 @@ class Network(ModuleArgsDict, ABC):
                 submodule._channels_last = True
         return module
 
-    @staticmethod
-    def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):  # type: ignore[override]  # a placement over the routed graph, not Module.to
-        # `_counter` is a single-element box holding the next GPU index, shared by reference through the
-        # recursion so model-parallel `isGPU_Checkpoint` splits advance it, fresh at `device` per call.
-        if _counter is None:
-            _counter = [device]
-        for k, v in module.items():
-            if module._modulesArgs[k].gpu == "cpu":
-                if module._modulesArgs[k].isGPU_Checkpoint:
-                    _counter[0] += 1
-                module._modulesArgs[k].gpu = str(get_device(_counter[0]))
-                if isinstance(v, ModuleArgsDict):
-                    v = Network.to(v, _counter[0], _counter)
-                elif v is not None:
-                    v = v.to(get_device(_counter[0]))
-        if isinstance(module, Network):
-            if module.optimizer is not None:
-                for state in module.optimizer.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor):
-                            state[k] = v.to(get_device(_counter[0]))
-        return module
-
     def get_name(self) -> str:
         return self.name
 
@@ -1387,6 +1345,32 @@ class Network(ModuleArgsDict, ABC):
         for module in self.modules():
             if isinstance(module, ModuleArgsDict):
                 module._training = state
+
+
+def place_graph(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):
+    """Place each module of the routed graph on its GPU, starting at ``device``: a model-parallel
+    ``gpu_checkpoints`` split moves the rest of the graph to the next index. A function, not a ``Network``
+    method, so no child name is reserved and ``Network.to`` stays torch's."""
+    # `_counter` is a single-element box holding the next GPU index, shared by reference through the
+    # recursion so model-parallel `isGPU_Checkpoint` splits advance it, fresh at `device` per call.
+    if _counter is None:
+        _counter = [device]
+    for k, v in module.items():
+        if module._modulesArgs[k].gpu == "cpu":
+            if module._modulesArgs[k].isGPU_Checkpoint:
+                _counter[0] += 1
+            module._modulesArgs[k].gpu = str(get_device(_counter[0]))
+            if isinstance(v, ModuleArgsDict):
+                place_graph(v, _counter[0], _counter)
+            elif v is not None:
+                v.to(get_device(_counter[0]))
+    if isinstance(module, Network):
+        if module.optimizer is not None:
+            for state in module.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(get_device(_counter[0]))
+    return module
 
 
 class MinimalModel(Network):
@@ -1411,7 +1395,7 @@ class MinimalModel(Network):
         self,
         model: Network,
         optimizer: OptimizerLoader = OptimizerLoader(),
-        schedulers: dict[str, LRSchedulersLoader] = {"default|StepLR": LRSchedulersLoader(0)},
+        schedulers: dict[str, LRSchedulersLoader] | None = None,
         outputs_criterions: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()},
         patch: ModelPatch | None = None,
         dim: int = 3,

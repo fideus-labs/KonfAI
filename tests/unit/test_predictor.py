@@ -273,6 +273,32 @@ def test_a_case_s_tta_draw_does_not_depend_on_the_cases_predicted_before_it(
     assert cohort["CASE_000"] != cohort["CASE_001"], "two cases are handed two draws"
 
 
+def test_an_output_key_that_names_no_module_is_refused_under_its_own_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal named `outputs_criterions`, a training key, for a key of `outputs_dataset`."""
+    for key in ("KONFAI_config_file", "KONFAI_ROOT", "KONFAI_STATE", "KONFAI_CONFIG_MODE"):
+        monkeypatch.setenv(key, "")
+    monkeypatch.chdir(tmp_path)
+    Dataset(str(tmp_path / "Dataset"), "mha").write("CT", "CASE_000", np.ones((1, 2, 4, 4), np.float32), Attribute())
+    tree = {
+        "check_training_transforms": False,
+        "Model": {"classpath": "test_predictor:TTANet"},
+        "Dataset": {
+            "dataset_filenames": ["./Dataset:a:mha"],
+            "groups_src": {"CT": {"groups_dest": {"CT": {"is_input": True}}}},
+            "Patch": {"patch_size": [1, 4, 4], "overlap": 0},
+            "num_workers": 0,
+        },
+        "outputs_dataset": {
+            "Head": {"OutputDataset": {"same_as_group": "CT:CT", "group": "OUT", "dataset_filename": "Out:mha"}}
+        },
+    }
+    YAML().dump({"Predictor": tree}, tmp_path / "Prediction.yml")
+    with pytest.raises(PredictorError, match=r"(?s)'Head' under 'outputs_dataset'.*\['Conv'\]"):
+        build_predict([tmp_path / "fold.pt"], tmp_path / "Prediction.yml", tmp_path / "Predictions")
+
+
 _ASSETS = Path(__file__).resolve().parents[1] / "assets" / "Workflows"
 _CASES = ("CASE_000", "CASE_001")
 
@@ -505,3 +531,39 @@ def test_a_checkpoint_path_that_does_not_exist_is_refused_before_the_build(
     assert "[Predictor] Checkpoint 'nope.pt' does not exist" in message and str(tmp_path / "nope.pt") in message
     assert config.read_text(encoding="utf-8") == "Predictor:\n  train_name: MISSING_CHECKPOINT\n"
     assert not (tmp_path / "Predictions").exists()
+
+
+def test_a_models_path_that_is_no_checkpoint_is_refused_by_name(tmp_path: Path) -> None:
+    """A missing path and a directory each read as one [Predictor] line naming the path; a directory
+    lists the checkpoints it holds."""
+    run = tmp_path / "Checkpoints" / "RUN"
+    run.mkdir(parents=True)
+    (run / "2026_01_01.pt").touch()
+    (run / "resume_latest.pt").touch()
+    predictor = Predictor.__new__(Predictor)
+
+    predictor.set_models([str(tmp_path / "Checkpoints" / "NOPE.pt")])
+    with pytest.raises(PredictorError, match=r"NOPE\.pt' does not exist"):
+        predictor._load()
+
+    predictor.set_models([str(run)])
+    with pytest.raises(PredictorError, match="is a directory") as refused:
+        predictor._load()
+    assert "2026_01_01.pt, resume_latest.pt" in str(refused.value)
+
+
+class _WidthNet(Network):
+    """The same class at two widths: a checkpoint of one does not fit the other."""
+
+    def __init__(self, width: int) -> None:
+        super().__init__(in_channels=1, dim=2)
+        self.add_module("Conv", torch.nn.Conv2d(1, width, 1))
+
+
+def test_a_checkpoint_of_another_architecture_is_refused_by_name() -> None:
+    from konfai.predictor import Mean, ModelComposite
+
+    composite = ModelComposite(_WidthNet(2), Mean())
+    with pytest.raises(PredictorError, match="size mismatch") as refused:
+        composite.load([{"Model": _WidthNet(1).network_states()}])
+    assert "Predictor.Model._WidthNet" in str(refused.value)

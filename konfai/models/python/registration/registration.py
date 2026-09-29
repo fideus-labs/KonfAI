@@ -185,8 +185,8 @@ class MaskFlow(torch.nn.Module):
 class SpatialTransformer(torch.nn.Module):
     """Warp ``src`` by ``flow``, in 2-D or 3-D.
 
-    Rigid takes a flat per-sample translation ``[B, dim]``; otherwise ``flow`` is a dense
-    displacement field ``[B, dim, *size]`` added to the identity grid.
+    Rigid takes the per-sample rigid parameters ``[B, dim * (dim + 1) / 2]`` of :func:`rigid_affine`;
+    otherwise ``flow`` is a dense displacement field ``[B, dim, *size]`` added to the identity grid.
     """
 
     grid: torch.Tensor

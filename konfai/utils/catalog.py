@@ -170,7 +170,7 @@ def _list_python_models() -> list[Component]:
 
 def _list_yaml_catalog_models() -> list[Component]:
     # The declarative catalog (konfai/models/yaml): each file is referenced as 'default|<Name>.yml',
-    # and its leading comment lines are its documentation.
+    # and the first paragraph of its leading comment is its summary.
     import konfai.models.yaml as yaml_catalog
 
     catalog_dir = os.path.dirname(str(yaml_catalog.__file__))
@@ -182,10 +182,13 @@ def _list_yaml_catalog_models() -> list[Component]:
         with open(os.path.join(catalog_dir, filename), encoding="utf-8") as handle:
             for line in handle:
                 stripped = line.strip()
-                if stripped.startswith("#"):
-                    doc_lines.append(stripped.lstrip("# ").rstrip())
-                elif stripped:
+                if stripped and not stripped.startswith("#"):
                     break
+                text = stripped.lstrip("# ")
+                if text:
+                    doc_lines.append(text)
+                elif doc_lines:
+                    break  # a blank line closes the first paragraph
         components.append(
             Component(
                 name=filename.rsplit(".", 1)[0],

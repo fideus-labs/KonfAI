@@ -332,6 +332,31 @@ def test_documented_model_constructs_and_forwards(model_name: str) -> None:
     assert output is not None
 
 
+@pytest.mark.parametrize(
+    "model_name",
+    [name for name, (_, shapes) in DOCUMENTED_MODEL_SPECS.items() if shapes is not None],
+)
+def test_documented_model_takes_a_training_step(model_name: str) -> None:
+    """Train mode with autograd, on a batch of two so a batch norm has statistics to take: every
+    parameter still trainable after the walk gets a finite gradient."""
+    builder, input_shapes = DOCUMENTED_MODEL_SPECS[model_name]
+    torch.manual_seed(0)
+    model = builder()
+    model.train()
+
+    outputs = [
+        tensor
+        for _, tensor in model.named_forward(*[torch.randn(2, *shape[1:]) for shape in input_shapes])
+        if tensor.requires_grad
+    ]
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not parameters:
+        pytest.skip("a weightless model has no step to take")
+    torch.stack([output.float().mean() for output in outputs]).sum().backward()
+
+    assert all(p.grad is not None and bool(torch.isfinite(p.grad).all()) for p in parameters)
+
+
 def test_gan_default_builds_fresh_unshared_subnetworks() -> None:
     # The generator/discriminator defaults were class-level instances evaluated at import, so two
     # Gan() shared (and co-trained) the same sub-networks. Defaults must build per instance,

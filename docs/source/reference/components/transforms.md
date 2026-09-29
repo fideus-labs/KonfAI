@@ -83,10 +83,10 @@ until it declares otherwise.
 
 | Name | Purpose | Key args (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
-| `Clip` | Clamp intensities to a fixed or data-dependent range. | `min_value=-1024, max_value=1024, save_clip_min=False, save_clip_max=False, mask=None` | no | no | **yes**: fixed bounds clamp each voxel on its own, and a `"min"`/`"max"` bound is read from disk; no with `mask=` (a second volume) or a `"percentile:<float>"` bound (the whole histogram) |
+| `Clip` | Clamp intensities to a fixed or data-dependent range. | `min_value=-1024, max_value=1024, save_clip_min=False, save_clip_max=False, mask=None` | no | no | **yes**: fixed bounds clamp each voxel on its own, and a `"min"`/`"max"` bound is read from disk, under `mask=` from one streamed scan of the volume and its mask per case; no with a `"percentile:<float>"` bound (the whole histogram) |
 | `Normalize` | Linear map to `[min,max]`; caches Min/Max. | `min_value=-1, max_value=1, channels=None, lazy=False, inverse=True` | no | **yes** | **yes**: Min/Max read from disk |
 | `UnNormalize` | Map `[-1,1] → [min,max]` (fixed). | `min_value=-1024, max_value=3071` | no | no | **yes** |
-| `Standardize` | Zero-mean / unit-std from cached, given, or mask-derived stats. | `mean=None, std=None, mask=None, lazy=False, inverse=True` | no | **yes** | **yes**: Mean/Std read from disk, or neither when both are given; no with `mask=` (a second volume) |
+| `Standardize` | Zero-mean / unit-std from cached, given, or mask-derived stats. | `mean=None, std=None, mask=None, lazy=False, inverse=True` | no | **yes** | **yes**: Mean/Std read from disk, under `mask=` from one streamed scan of the volume and its mask per case, or neither when both are given |
 | `HistogramMatching` | SimpleITK histogram match to a reference group. | `reference_group` | no | no | no: the LUT needs the volume's whole histogram |
 
 ## Geometry & resampling

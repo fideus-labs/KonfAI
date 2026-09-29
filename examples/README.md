@@ -1,6 +1,6 @@
 # Examples
 
-Every example here is a notebook you can **open and run top to bottom**. Each one downloads (or
+Every example here but the Quickstart is a notebook you can **open and run top to bottom**. Each one downloads (or
 generates) its own data, runs the real KonfAI commands, and ends by showing you the result. Nothing
 is hidden behind a flag you have to flip.
 
@@ -8,6 +8,13 @@ They all work from a fresh environment, including **Google Colab**: click the ba
 README, then *Runtime > Run all*.
 
 ## Start here
+
+Start with [`Segmentation/TwoClasses`](Segmentation/TwoClasses/), the
+[Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html): a two-class segmentation
+trained, predicted and evaluated on four synthetic cases, on one CPU, with a check of every file it
+writes. It is the one example run from a shell rather than a notebook.
+
+## The framework examples
 
 These four are the framework itself: a YAML config, the `konfai` CLI, and nothing else.
 
@@ -18,7 +25,7 @@ These four are the framework itself: a YAML config, the `konfai` CLI, and nothin
 | [`Synthesis`](Synthesis/) | Turn an MR volume into a synthetic CT, scored with MAE / PSNR / SSIM inside the body mask. | ~7 min |
 | [`Transform`](Transform/) | Fold a cohort into one template, and expand each case into drawn copies: dataset preparation. | ~1 min, CPU |
 
-`Registration` is the shortest way to see the whole `TRAIN -> PREDICTION -> EVALUATION` loop.
+Of these four, `Registration` is the shortest way to see the whole `TRAIN -> PREDICTION -> EVALUATION` loop.
 `Segmentation` is the best template to copy for your own data. `Synthesis` shows the richer patterns:
 a custom Python model, a perceptual loss, test-time augmentation, and an optional GAN variant.
 `Transform` is the odd one out and the quickest: dataset preparation, nothing to train first, nothing to download. It is the

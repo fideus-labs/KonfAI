@@ -953,6 +953,21 @@ def test_the_workflow_wrapper_lets_an_interrupt_and_a_refusal_reach_its_caller(m
             workflow()
 
 
+def test_a_warning_the_build_raises_reaches_an_api_caller(monkeypatch) -> None:
+    """Only the CLI spells a build warning as KonfAI's console does: a Python caller still records it."""
+    import warnings
+
+    monkeypatch.setattr(rt_dist, "execute_distributed_object", lambda *args, **kwargs: None)
+
+    @rt_dist.run_distributed_app
+    def workflow(gpu: list[int] = [], cpu: int = 1):
+        warnings.warn("[Config] Unknown key(s) in the Trainer configuration.", KonfAIWarning, stacklevel=2)
+        return object()
+
+    with pytest.warns(KonfAIWarning, match="Unknown key"):
+        workflow()
+
+
 def _budget_applied(
     monkeypatch,
     cores: int,

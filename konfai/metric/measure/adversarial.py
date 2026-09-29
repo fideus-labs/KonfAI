@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from konfai.metric.measure.base import Criterion
-from konfai.network.network import ModelLoader, Network
+from konfai.network.network import ModelLoader, Network, place_graph
 from konfai.utils.config import apply_config
 from konfai.utils.runtime.environment import safe_torch_load
 from konfai.utils.utils import get_module, module_attribute
@@ -166,9 +166,9 @@ class PerceptualLoss(Criterion):
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         if output.device.index not in self.models:
-            # `Network.to` resets its GPU-index counter per call, so the perceptual model is
+            # `place_graph` resets its GPU-index counter per call, so the perceptual model is
             # placed starting at this device.
-            self.models[output.device.index] = Network.to(copy.deepcopy(self.model).eval(), output.device.index).eval()
+            self.models[output.device.index] = place_graph(copy.deepcopy(self.model).eval(), output.device.index).eval()
         loss = torch.zeros((1), requires_grad=True).to(output.device, non_blocking=False).type(torch.float32)
         if len(output.shape) == 5 and len(self.shape) == 2:
             for i in range(output.shape[2]):

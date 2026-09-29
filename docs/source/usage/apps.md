@@ -19,17 +19,18 @@ trust.
 
 ## What ships today
 
-These are full medical models, not demonstrations. Every figure is measured on an
-NVIDIA RTX PRO 5000 24 GB and quoted from the bundle's own README; the rows are
-not comparable to each other, since the tasks, inputs and ensemble sizes differ.
+These are full medical models, not demonstrations. Every figure is the medium case
+(249 × 246 × 246) of the bundle's own README table, measured with
+`benchmarks/perf/bench_apps.py` on an NVIDIA RTX PRO 5000 24 GB on 2026-09-09; the
+rows are not comparable to each other, since the tasks and ensemble sizes differ.
 
 | App | Workload | Measured |
 | --- | --- | --- |
-| `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models, `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2, `total_mr-3mm`: 1) | 42 s, 20 GB VRAM, 19 GB RAM on a 295 × 259 × 219 case. Head to head on 533 × 390 × 177: **17 s / 6.5 GB RAM** against the original's 61 s / 26.5 GB |
-| `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | 27 s and 22 GB VRAM. Head to head on 533 × 390 × 177: **25 s / 7.5 GB RAM** against 65 s / 14.6 GB |
-| `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | 7 s, 10 GB VRAM, 1.6 GB RAM |
-| `ImpactSynth` | three MR/CBCT→sCT variants, five models each | 24 s and 16 GB VRAM for one inference, 82 s for the full ensemble, 2 GB RAM |
-| `ImpactReg:ConvexAdam_Composite` | fixed + moving → moved image and displacement field on the fixed grid | 5.1 s and 2.1 GB VRAM on a real abdominal MR→CT pair |
+| `TotalSegmentator-KonfAI` | CT → 117 labels (`total`: 5 models, `total-3mm`: 1), MRI → 50 labels (`total_mr`: 2, `total_mr-3mm`: 1) | **17.7 s / 5.2 GB RAM**, 15.4 GB VRAM, against the original's 58.3 s / 25.2 GB RAM |
+| `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | **21 s / 5.3 GB RAM**, 16.3 GB VRAM, against the original's 24 s / 8.5 GB RAM |
+| `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | 3.3 s, 1.7 GB RAM, 3.9 GB VRAM |
+| `ImpactSynth` | three MR/CBCT→sCT variants, five models each | `MR`: 24.6 s, 2.7 GB RAM, 12.8 GB VRAM |
+| `ImpactReg:FireANTs_SyN` | fixed + moving → moved image and displacement field on the fixed grid | 108 s, 6.3 GB RAM, 16.0 GB VRAM |
 
 Between them: four TotalSegmentator tasks, a five-fold MRSegmentator, one
 modality-agnostic ImpactSeg model, three ImpactSynth variants and thirteen

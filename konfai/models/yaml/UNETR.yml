@@ -22,7 +22,7 @@
 # KonfAI ``Network`` and a forward on a fixed 3D (and 2D) input returns a segmentation map at the input
 # resolution with ``out_channels`` channels, and the encoder/skip topology matches MONAI's UNETR
 # (skips taken after transformer layers 3/6/9 and the final norm; four upsampling decoder stages). Its OUTPUT
-# SHAPE is checked equal to MONAI 1.4.0 ``UNETR`` at matching hyperparameters (tests/unit/test_yaml_model_unetr.py).
+# SHAPE is checked equal to MONAI 1.4.0 ``UNETR`` at matching hyperparameters (tests/unit/test_models_yaml.py).
 # Documented divergences from MONAI's UNETR:
 #   * the residual convolution blocks are KonfAI ``ResBlock`` (Conv-Norm-Act x2 + projected residual + ReLU),
 #     which differ from MONAI's ``UnetResBlock`` in the position of the second activation and in using ReLU

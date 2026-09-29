@@ -17,6 +17,7 @@
 
 """Pointwise, structural and information criteria over intensities."""
 
+import math
 from collections.abc import Iterator
 from functools import partial
 from typing import Any
@@ -198,9 +199,8 @@ class PSNR(MaskedLoss):
 class SSIM(MaskedLoss):
     """Structural similarity as ``skimage.metrics.structural_similarity`` computes it with its
     defaults: a 7-wide uniform window, K1 0.01, K2 0.03, the sample covariance, the mean over the
-    map cropped by the window's radius, one map per channel (``channel_axis=0``) all averaged. In
-    torch on the tensors' device, where skimage's numpy route was single-threaded and pulled the
-    volumes back to the host. The map is built slab by slab along the first spatial axis, so the
+    map cropped by the window's radius, one map per channel (``channel_axis=0``) all averaged, in
+    torch on the tensors' device. The map is built slab by slab along the first spatial axis, so the
     five window statistics it needs hold a few MiB at a time whatever the case.
 
     A voxel's window reaches the window's radius past a patch's faces: reducible from patches read
@@ -528,12 +528,14 @@ class KLDivergence(CriterionWithInit):
     any_target_grid = True  # scores the output's latent distribution, never a target
 
     def __init__(self, shape: list[int], dim: int = 100, mu: float = 0, std: float = 1) -> None:
+        """``mu`` and ``std`` are the mean and standard deviation of the Gaussian prior."""
         super().__init__()
+        if std <= 0:
+            raise MeasureError(f"KLDivergence: the prior's std must be positive, got {std}.")
         self.latent_dim = dim
-        self.mu = torch.Tensor([mu])
-        self.std = torch.Tensor([std])
+        self.prior_mu = float(mu)
+        self.prior_var = float(std) ** 2
         self.shape = shape
-        self.loss = torch.nn.KLDivLoss()
 
     def init(self, model: torch.nn.Module, output_group: str, target_group: str) -> str:
         if not isinstance(model, Network):
@@ -555,9 +557,17 @@ class KLDivergence(CriterionWithInit):
         return ".".join(output_group.split(".")[:-1]) + ".LatentDistribution.Concat"
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        # The LatentDistribution channels: mu, then the log-variance (its module is named log_std).
         mu = output[:, 0, :]
-        log_std = output[:, 1, :]
-        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim=1), dim=0)
+        log_var = output[:, 1, :]
+        kl = (
+            1
+            + log_var
+            - math.log(self.prior_var)
+            - (mu - self.prior_mu) ** 2 / self.prior_var
+            - torch.exp(log_var) / self.prior_var
+        )
+        return torch.mean(-0.5 * torch.sum(kl, dim=1), dim=0)
 
 
 class Accuracy(Criterion):

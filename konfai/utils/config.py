@@ -267,6 +267,21 @@ class _KeyLedger:
                 lines.append(f"'{'.'.join(level)}.{key}' (keys read at that level: {read}).{hint}")
         return lines
 
+    def misspellings(self, root: str) -> list[str]:
+        """One line per key under ROOT nothing read that is close to a key read in its place, one the file
+        did not hold, so its default was taken. Unlike ``unknown`` this holds while the binding is
+        incomplete: a key the binder has not reached yet sits beside keys the file holds."""
+        lines = []
+        for level in sorted(self.present):
+            if level[0] != root:
+                continue
+            defaulted = sorted(self.consumed[level] - self.present[level])
+            for key in sorted(self.present[level] - self.consumed[level]):
+                close = difflib.get_close_matches(key, defaulted, n=1)
+                if close:
+                    lines.append(f"'{'.'.join(level)}.{key}': did you mean '{close[0]}'?")
+        return lines
+
 
 # The ledgers of the open strict_config() blocks; empty outside them, where the binder records nothing.
 _ledgers: list[_KeyLedger] = []
@@ -319,6 +334,14 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     unknown: list[str] = []
     try:
         yield
+    except Exception as error:
+        misspellings = ledger.misspellings(root)
+        if misspellings:
+            note = ConfigError(
+                f"Unread when the {root} configuration failed, beside a key that took its default:", *misspellings
+            )
+            error.add_note(str(note).strip())
+        raise
     finally:
         _ledgers.remove(ledger)
         unknown = ledger.unknown(root)
@@ -339,7 +362,7 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
 def _report(refuse: bool, *messages: str) -> None:
     if refuse:
         raise ConfigError(*messages)
-    warnings.warn(str(ConfigError(*messages)), KonfAIWarning, stacklevel=4)
+    warnings.warn(str(ConfigError(*messages)).strip(), KonfAIWarning, stacklevel=4)
 
 
 class Config:

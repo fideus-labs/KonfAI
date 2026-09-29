@@ -29,6 +29,7 @@ import konfai.main as main_module
 import konfai.predictor as predictor_module
 import konfai.trainer as trainer_module
 import konfai.transformer as transformer_module
+import konfai.utils.runtime.distributed as rt_dist
 import pytest
 
 
@@ -69,6 +70,7 @@ def test_the_version_is_looked_up_only_when_asked_for(monkeypatch: pytest.Monkey
         (["TRANSFORM", "--help"], 0),
         (["TRAIN", "--no-such-flag"], 2),
         (["TRANSFORM", "--gpu", "0", "--cpu", "1"], 2),
+        (["PREDICTION"], 2),
     ],
 )
 def test_konfai_help_and_usage_errors_do_not_import_torch(argv: list[str], exit_code: int) -> None:
@@ -149,6 +151,28 @@ def test_init_reports_a_refusal_by_its_message_and_a_bug_by_its_traceback(
     assert exited.value.code == 1
     out = capsys.readouterr().out
     assert "Wrote what resolved before the error" in out and "[Config] 'Trainer.Dataset' is empty." in out
+
+
+def test_a_refusal_prints_its_notes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """A refusal prints as its message alone; the notes strict_config adds (a misspelt key) come with it."""
+    from konfai.utils.errors import ConfigError
+
+    def refused(**kwargs) -> None:
+        error = ConfigError("Group source 'PRED' not found.")
+        error.add_note("[Config] 'Root.dataset_filename': did you mean 'dataset_filenames'?")
+        raise error
+
+    monkeypatch.setattr(trainer_module, "train", refused)
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "-c", "Config.yml"])
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+    assert exited.value.code == 1
+    assert capsys.readouterr().err.splitlines() == [
+        "[Config] Group source 'PRED' not found.",
+        "[Config] 'Root.dataset_filename': did you mean 'dataset_filenames'?",
+    ]
 
 
 def test_konfai_train_dispatches_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -469,3 +493,53 @@ def test_every_documented_konfai_command_parses(monkeypatch: pytest.MonkeyPatch,
         entry()
     except SystemExit as exit:
         assert exit.code == 0, f"{where}: {command}"
+
+
+@pytest.mark.parametrize(("command", "flag"), [("PREDICTION", "--models"), ("RESUME", "--model")])
+def test_a_run_requires_its_checkpoint(monkeypatch: pytest.MonkeyPatch, capsys, command: str, flag: str) -> None:
+    monkeypatch.setattr(sys, "argv", ["konfai", command])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main()
+
+    assert exc_info.value.code == 2
+    assert flag in capsys.readouterr().err
+
+
+class _RunWithOutputs(rt_dist.DistributedObject):
+    """What a finished PREDICTION hands back to the CLI: a workflow naming where it wrote."""
+
+    def __init__(self) -> None:
+        super().__init__("RUN")
+
+    def setup(self, world_size: int) -> None:  # pragma: no cover - never launched here
+        pass
+
+    def run_process(self, *args, **kwargs) -> None:  # pragma: no cover - never launched here
+        pass
+
+    def outputs(self) -> list[Path]:
+        return [Path("Predictions/RUN/Dataset")]
+
+
+@pytest.mark.parametrize(
+    ("entry", "argv", "printed"),
+    [
+        ("main", ["PREDICTION", "--models", "m.pt"], True),
+        ("main", ["PREDICTION", "-q", "--models", "m.pt"], False),
+        ("cluster", ["--name", "job", "PREDICTION", "--models", "m.pt"], False),
+    ],
+)
+def test_a_finished_run_names_where_its_outputs_are(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path, entry: str, argv: list[str], printed: bool
+) -> None:
+    """A train_name that differs between two configs sends a run's outputs elsewhere: the CLI closes a
+    finished run on their absolute path, unless -q, and says nothing for a job it only submitted."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(predictor_module, "predict", lambda **kwargs: _RunWithOutputs())
+    monkeypatch.setattr(sys, "argv", ["konfai", *argv])
+
+    getattr(main_module, entry)()
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if "outputs in" in line]
+    assert lines == ([f"[KonfAI] outputs in {tmp_path / 'Predictions/RUN/Dataset'}"] if printed else [])

@@ -5,7 +5,7 @@ fetches its own data, runs the real `konfai` commands, and ends by showing the
 result, from a fresh environment, Google Colab included.
 
 **Five run a published model**: no training, no YAML, a real result in about a
-minute. Start there to see what KonfAI produces before learning how it is
+minute. They show what KonfAI produces before you learn how it is
 configured. They are KonfAI {doc}`Apps <../usage/apps>`.
 
 | Run a published model | Task | |
@@ -76,7 +76,7 @@ that produce these transforms are in {doc}`registration`.
 
 ## Choosing an example
 
-Start with **Segmentation** when you want the smallest conservative baseline:
+Pick **Segmentation** when you want the smallest conservative baseline:
 
 - one input group (`CT`)
 - one label-map target (`SEG`)
@@ -84,7 +84,7 @@ Start with **Segmentation** when you want the smallest conservative baseline:
 - training with `CrossEntropyLoss` and `Dice`
 - final evaluation with Dice
 
-Start with **Synthesis** when you want to understand more of KonfAI's
+Pick **Synthesis** when you want to understand more of KonfAI's
 configuration model:
 
 - custom local Python modules loaded through `classpath` (needs `pip install "konfai[smp]"`)
@@ -95,10 +95,13 @@ configuration model:
 
 ```{warning}
 The preprocessing in `Prediction.yml` must mirror `Config.yml` exactly. Standardizing a group
-differently in the two files feeds the network a scale it never trained on, and nothing warns you, on this example that single mismatch cost 4x on MAE.
+differently in the two files feeds the network a scale it never trained on, and the run still
+succeeds: on this example that single mismatch cost 4x on MAE. PREDICTION warns about it only for
+a checkpoint whose training run's resolved config is still in `Statistics/<train_name>/` (see
+[the training-chain check](../config_guide/prediction.md#the-training-chain-check)).
 ```
 
-Start with **Registration** when you want to learn the two-input spatial
+Pick **Registration** when you want to learn the two-input spatial
 workflow:
 
 - `FIXED` / `MOVING` pairs built from real CT slices with a known displacement field
@@ -172,7 +175,8 @@ backend, its selectors and its URI support.
 
 ## Next steps
 
-- {doc}`segmentation`: the smallest end-to-end run; start here
+- {doc}`../quickstart`: the smallest end-to-end run, on one CPU; start here
+- {doc}`segmentation`: 41 classes on real pelvis CT, and its notebook
 - {doc}`registration`: train, materialise, and evaluate a fixed/moving image workflow
 - {ref}`gallery-registration`: inspect a separate real IMPACT-Reg App execution
 - {doc}`../config_guide/index`: understand the YAML the examples are built from

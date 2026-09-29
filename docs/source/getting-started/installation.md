@@ -30,7 +30,7 @@ python -m pip install ".[imaging]"
 ## The extras
 
 Take one when you need a specific reader, metric or tool. `[all]` takes
-everything, `[dev]` adds the test, lint and docs tooling.
+every extra but `monai`, `[dev]` adds the test, lint and docs tooling.
 
 | Extra | Pulls in | Use it for |
 | --- | --- | --- |
@@ -43,12 +43,13 @@ everything, `[dev]` adds the test, lint and docs tooling.
 | `tensorboard` | `tensorboard` | TensorBoard logging |
 | `monitoring` | `nvidia-ml-py` | GPU monitoring |
 | `smp` | `segmentation-models-pytorch` | the SMP model bridge, **required by `examples/Synthesis`** |
+| `monai` | `monai` | MONAI networks and losses named by classpath (`monai.networks.nets:UNet`) and MONAI Bundles, see {doc}`../usage/adopting-konfai` |
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `ssim` | `scikit-image` | the `SSIM` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
-| `all` | everything above, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |
+| `all` | everything above but `monai`, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |
 | `dev` | pytest, ruff, mypy, sphinx, … | working on KonfAI itself |
 
 ## Running packaged apps

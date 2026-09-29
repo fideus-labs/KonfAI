@@ -980,6 +980,32 @@ def test_accepts_init_flag_lives_on_the_criterion_not_the_attr() -> None:
     assert getattr(CriterionsAttr(), "accepts_init", False) is False
 
 
+def _latent(batch: int = 4, latent_dim: int = 5) -> torch.Tensor:
+    """A ``LatentDistribution.Concat`` output: ``[B, 3, L]`` holding mu, the log-variance and z."""
+    generator = torch.Generator().manual_seed(0)
+    return torch.randn(batch, 3, latent_dim, generator=generator)
+
+
+def test_kl_divergence_is_taken_against_the_configured_prior() -> None:
+    output = _latent()
+    posterior = torch.distributions.Normal(output[:, 0], torch.exp(output[:, 1] / 2))
+    prior = torch.distributions.Normal(torch.tensor(1.0), torch.tensor(2.0))
+    expected = torch.distributions.kl_divergence(posterior, prior).sum(dim=1).mean()
+    assert torch.allclose(KLDivergence(shape=[4], dim=5, mu=1.0, std=2.0)(output), expected, atol=1e-6)
+
+
+def test_kl_divergence_against_the_standard_normal_is_the_closed_form() -> None:
+    output = _latent()
+    mu, log_var = output[:, 0, :], output[:, 1, :]
+    closed_form = torch.mean(-0.5 * torch.sum(1 + log_var - mu**2 - torch.exp(log_var), dim=1), dim=0)
+    assert torch.equal(KLDivergence(shape=[4], dim=5)(output), closed_form)
+
+
+def test_kl_divergence_refuses_a_prior_without_spread() -> None:
+    with pytest.raises(MeasureError, match="std must be positive"):
+        KLDivergence(shape=[4], std=0)
+
+
 class TestSSIMFromHaloPatches:
     """SSIM is reducible from patches read with the window's radius of halo, each scoring the map
     voxels centred in its own grid slot: the streamed sum equals the whole-volume sum to float64
