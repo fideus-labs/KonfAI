@@ -37,6 +37,7 @@ from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
 from konfai.trainer import build_train
 from konfai.transformer import build_transform
+from konfai.utils.errors import KonfAIError
 from konfai.utils.runtime import State, execute_distributed_object
 
 
@@ -938,7 +939,17 @@ def validate_workflow_api(
             if level == "train_step" and workflow == "train":
                 payload["train_step"] = _run_one_train_step(workflow_object)
             return payload
-        except Exception as exc:  # pragma: no cover - error shape tested through caller
+        except KonfAIError as exc:
+            # A designed refusal names what to change; the traceback would only bury it. The binder
+            # also wraps any exception raised while building an object: that crash keeps its trace.
+            refusal: dict[str, Any] = {"ok": False, "error_type": type(exc).__name__, "error": str(exc).strip()}
+            cause = exc.__cause__
+            while isinstance(cause, KonfAIError):
+                cause = cause.__cause__
+            if cause is not None:
+                refusal["traceback"] = traceback.format_exc()
+            return refusal
+        except Exception as exc:
             return {
                 "ok": False,
                 "error_type": type(exc).__name__,

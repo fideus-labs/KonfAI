@@ -160,6 +160,13 @@ class MaskedLoss(Criterion):
         self.loss = loss
         self.mode_image_masked = mode_image_masked
 
+    def _require_target(self, targets: tuple[torch.Tensor, ...]) -> None:
+        if not targets:
+            raise MeasureError(
+                f"{self.get_name()} compares the output with a target and was handed none.",
+                "Name the target group under its targets_criterions.",
+            )
+
     @staticmethod
     def get_mask(targets: list[torch.Tensor]) -> torch.Tensor | None:
         """The voxels inside every mask, as bool: a mask counts a voxel in when it is not 0."""
@@ -201,9 +208,7 @@ class MaskedLoss(Criterion):
         *targets: torch.Tensor,
     ) -> CriterionOutput:
 
-        if len(targets) == 0:
-            raise ValueError("MaskedLoss expects at least one target tensor.")
-
+        self._require_target(targets)
         target = targets[0]
         mask = self.get_mask(list(targets[1:]))
 
@@ -257,7 +262,7 @@ class MaskedLoss(Criterion):
     # . Streamed-evaluation hooks -------------------------------------------------------------------
     # A subclass whose ``loss`` reduces to a running sum provides its sufficient statistic and its
     # finisher, and declares itself ``reducible``; the generic partial/combine below then reproduces
-    # ``forward`` exactly from disjoint patches (masked and unmasked paths alike).
+    # ``forward`` from disjoint patches, to float32 rounding (masked and unmasked paths alike).
 
     def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
         """Sum-contribution of one (output, target) pair to this loss's running total."""
@@ -271,8 +276,7 @@ class MaskedLoss(Criterion):
         raise NotImplementedError()
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
-        if len(targets) == 0:
-            raise ValueError("MaskedLoss expects at least one target tensor.")
+        self._require_target(targets)
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
         if mask is None:

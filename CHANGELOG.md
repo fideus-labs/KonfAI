@@ -18,6 +18,11 @@ written replaces it.
 
 ## v1.8.6 (2026-09-23)
 
+### Breaking Changes
+
+- The draw that crops a case to a stored mask at a random position is `PlacedMask`, no longer
+  `konfai.data.augmentation.Mask`: a bare `Mask` names the transform alone.
+
 ### Features
 
 - impact-reg: the FireANTs engine reads IMPACT features the way the elastix engine does, in one of two
@@ -305,8 +310,13 @@ written replaces it.
   an out-of-tree caller reading `[1]` as a dict must materialize it.
 - **Config generation modes removed**: `KONFAI_CONFIG_MODE=default|interactive|remove` no
   longer exist; use `konfai <COMMAND> --init`.
-- **`validation: <int>`** now selects that position (matching `subset:`) instead of refusing.
+- **`validation` given a Python `int`** (`DataTrain(validation=1)`) now selects that position
+  instead of refusing. A config binds a bare number as a share in TRAIN (`validation: 1` is
+  refused) and as a case name in EVALUATION; positions are written as a list, `validation: [1]`.
 - **`TrainSubset` deleted**: it was an identity subclass; spell `Subset`.
+- **Python 3.11 or later** is required (`requires-python` was `>=3.10`).
+- **OME-Zarr displacement fields written by KonfAI 1.8.2 or earlier are refused**: their component
+  axis is typed but declares no component order. Rewrite them from their source transform.
 - **`konfai` package private re-exports removed**: the nine package `__init__`s no longer
   re-export single-underscore names; import from the defining submodule.
 
@@ -362,8 +372,9 @@ no value.
 
 ### ♻️ Refactoring
 
-- the nine monolithic modules split into packages; `konfai.predictor.Median`, the
-  `Dataset.<Backend>` aliases and `OutSameAsGroupDataset` keep resolving for published configs
+- the nine monolithic modules split into packages; a bare reduction name (`Median`) and
+  `OutSameAsGroupDataset` keep resolving for published configs, and the backends stay
+  addressable as `Dataset.<Backend>`
 
 ## v1.8.1 (2026-08-19)
 

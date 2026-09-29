@@ -1114,11 +1114,11 @@ class Resample(TransformInverse):
                 # Both halves of the refusal: the first says what is wrong, the second what to
                 # change. A plan line carrying only the first tells the reader nothing to do.
                 return " ".join(str(part).strip() for part in error.args if part)
-            except Exception:  # an unreadable transform is a whole-volume answer, not a crash
+            except Exception as error:  # an unreadable transform is a whole-volume answer, not a crash
                 return (
-                    f"the map for case '{name}' could not be read, so what it does to a region is"
-                    " unknown. Check the group names under 'transforms:'/'field:' and that every"
-                    " case has an entry in each"
+                    f"the map for case '{name}' could not be read ({type(error).__name__}: {error}), so"
+                    " what it does to a region is unknown. Check the group names under"
+                    " 'transforms:'/'field:' and that every case has an entry in each"
                 )
         return None
 

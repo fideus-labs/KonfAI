@@ -32,7 +32,8 @@ from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
 from konfai.utils.errors import MeasureError
 
-#: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share.
+#: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share, written
+#: into a resolved config as a number, and what a ``dynamic_range: None`` in a published config names.
 CT_DYNAMIC_RANGE = 4095.0
 
 
@@ -178,7 +179,7 @@ class PSNR(MaskedLoss):
         psnr = 10 * torch.log10(dynamic_range**2 / mse)
         return psnr
 
-    def __init__(self, dynamic_range: float | None = None) -> None:
+    def __init__(self, dynamic_range: float | None = CT_DYNAMIC_RANGE) -> None:
         dynamic_range = CT_DYNAMIC_RANGE if dynamic_range is None else dynamic_range
         super().__init__(partial(PSNR._loss, dynamic_range), False)
         self._dynamic_range = float(dynamic_range)
@@ -223,7 +224,7 @@ class SSIM(MaskedLoss):
     #: against 0.15 s at 2 MiB.
     slab_bytes = 8 << 20
 
-    def __init__(self, dynamic_range: float | None = None) -> None:
+    def __init__(self, dynamic_range: float | None = CT_DYNAMIC_RANGE) -> None:
         dynamic_range = CT_DYNAMIC_RANGE if dynamic_range is None else dynamic_range
         super().__init__(partial(SSIM._loss, dynamic_range), True)
         self._dynamic_range = float(dynamic_range)
@@ -354,8 +355,7 @@ class SSIM(MaskedLoss):
         self, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None]:
         """Per batch item, the float pair and its bool mask; ``None`` for an item its mask empties."""
-        if len(targets) == 0:
-            raise ValueError("SSIM expects at least one target tensor.")
+        self._require_target(targets)
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
         mask = None if mask is None else mask.to(device=output.device)

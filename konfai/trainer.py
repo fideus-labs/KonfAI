@@ -63,6 +63,7 @@ from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
     NullSummaryWriter,
+    ProgressBar,
     State,
     clear_directory_except_logs,
     configure_workflow_environment,
@@ -349,8 +350,6 @@ class _Trainer:
             "reason": "The epoch has not completed; its sample cursor and pending gradients were not saved.",
         }
         if resume_state is not None:
-            if resume_state["world_size"] != world_size:
-                raise TrainerError("RESUME requires the same number of training ranks as its epoch checkpoint.")
             if resume_state["batches_per_epoch"] != len(dataloader_training):
                 raise TrainerError("RESUME requires the same number of training batches per epoch.")
             if isinstance(self.early_stopping, EarlyStopping) and resume_state.get("early_stopping"):
@@ -519,7 +518,7 @@ class _Trainer:
         if self.early_stopping.is_stopped():
             return
 
-        with tqdm.tqdm(
+        with ProgressBar(
             iterable=range(self.epoch, self.epochs),
             leave=False,
             total=self.epochs,
@@ -639,7 +638,7 @@ class _Trainer:
         clock = SweepClock()
         with (
             clock.phase("epoch"),
-            tqdm.tqdm(
+            ProgressBar(
                 iterable=clock.waiting("wait(data)", enumerate(self.dataloader_training)),
                 desc=f"Training : {description(self.model, self.model_ema)}",
                 total=len(self.dataloader_training),
@@ -772,7 +771,7 @@ class _Trainer:
         )
         measures = self._measures()
         try:
-            with tqdm.tqdm(
+            with ProgressBar(
                 iterable=enumerate(self.dataloader_validation),
                 desc=f"Validation : {description(self.model, self.model_ema)}",
                 total=len(self.dataloader_validation),
@@ -1250,6 +1249,13 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         with startup_clock().phase("checkpoint"):
             if state != State.TRAIN:
                 state_dict = self._load()
+                # Refused here, on the launcher, before the run writes into its statistics directory.
+                if self._resume_state is not None and self._resume_state["world_size"] != world_size // self.size:
+                    raise TrainerError(
+                        "RESUME requires the same number of training ranks as its epoch checkpoint: it was"
+                        f" written by {self._resume_state['world_size']}, this run has {world_size // self.size}.",
+                        f"Relaunch RESUME on {self._resume_state['world_size']} training rank(s).",
+                    )
             self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
             if self.ema_decay > 0:
                 self.model_ema = AveragedModel(self.model, **self._ema_update())

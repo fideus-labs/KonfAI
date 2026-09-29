@@ -65,7 +65,7 @@ metrics:
           MAE:
             reduction: mean
           PSNR:
-            dynamic_range: None
+            dynamic_range: 4095
 ```
 
 Structure:
@@ -120,7 +120,9 @@ Evaluation bounds itself by default: an absent `memory_budget` means `auto`
 `"24GB"`) narrow it. Each run sizes itself from image headers alone: a case that
 fits the budget is evaluated whole, and a case that does not is cut into the largest
 DISJOINT patches that fit. Metrics accumulate running partial sums per patch and
-combine them into the exact whole-case value (never a mean of per-patch values).
+combine them into the whole-case value (never a mean of per-patch values). MAE, MSE,
+ME and PSNR sum in float32, so they agree with the whole-volume value to float32
+rounding (a relative difference near 1e-7), not bit for bit.
 MAE, MSE, ME, PSNR, SSIM and Dice (masked or not) support this, and the SaveMap
 error maps stream region by region into their `dataset` (mha, h5 or omezarr). One
 caveat on the first two: `MAE` and `MSE` are reducible only for `reduction: mean` or

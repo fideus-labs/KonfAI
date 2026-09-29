@@ -1588,3 +1588,27 @@ def test_a_window_learns_while_any_step_of_its_losses_is_finite() -> None:
     assert not measure_of([0.4, nan, nan]).learns(2)  # the window is the last two steps
     assert measure_of([nan]).learns(3)  # a window not yet full is not judged
     assert not measure_of([nan, nan], metrics=[0.9, 0.9]).learns(2)  # a finite metric is no loss
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        lambda output: MAE()(output),
+        lambda output: MAE().partial_metric(output),
+        lambda output: SSIM(dynamic_range=1.0)(output),
+    ],
+    ids=["MAE", "MAE-partial", "SSIM"],
+)
+def test_a_criterion_given_no_target_is_a_designed_refusal(score) -> None:
+    """A target group missing from the configuration is reported, not raised as a bare ValueError."""
+    with pytest.raises(MeasureError, match="target"):
+        score(torch.rand(1, 1, 4, 4))
+
+
+def test_impact_synth_given_one_target_is_a_designed_refusal() -> None:
+    from konfai.metric.measure.impact import IMPACTSynth
+
+    with pytest.raises(MeasureError, match="content and the style"):
+        IMPACTSynth.forward(
+            IMPACTSynth.__new__(IMPACTSynth), torch.rand(1, 1, 4, 4), torch.rand(1, 1, 4, 4), attributes=[[]]
+        )

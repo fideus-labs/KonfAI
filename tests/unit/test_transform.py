@@ -1312,6 +1312,29 @@ def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
     assert clip.plan_note("G", "case", [4, 4, 4], Attribute()) is None
 
 
+def test_a_slash_occurrence_suffix_binds_the_stage_it_names(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The published ImpactSynth configs key a repeated stage ``Name/N`` (``TensorCast/0``, ``Clip/1``,
+    ``Save/2``): each key binds its own block and resolves to the class before the slash."""
+    from konfai.data.transform import Clip, TensorCast, TransformLoader
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text(
+        "T:\n  transforms:\n"
+        "    TensorCast/0: {dtype: float16}\n"
+        "    Clip/0: {min_value: -1024, max_value: 5000}\n"
+        "    TensorCast/1: {dtype: int16}\n"
+        "    Clip/1: {min_value: 0, max_value: 10}\n"
+    )
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+
+    keys = ("TensorCast/0", "Clip/0", "TensorCast/1", "Clip/1")
+    stages = {key: TransformLoader().get_transform(key, "T.transforms") for key in keys}
+    assert [type(stage) for stage in stages.values()] == [TensorCast, Clip, TensorCast, Clip]
+    assert [stages[key].dtype for key in ("TensorCast/0", "TensorCast/1")] == [torch.float16, torch.int16]
+    assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip/0", "Clip/1")] == [(-1024, 5000), (0, 10)]
+
+
 def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The mask draw is PlacedMask: `Mask` names one class, so its bare name resolves without an
     ambiguity warning, before an Expand marker and past it."""

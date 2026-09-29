@@ -31,6 +31,7 @@ from konfai.metric.measure.adversarial import Gram
 from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import MeasureError
 from konfai.utils.utils import get_module, module_attribute
 
 
@@ -229,6 +230,10 @@ class ImpactFeatureModel:
         """
         if self.model is None:
             self.model = torch.jit.load(self.model_path, map_location="cpu").eval()  # nosec B614
+            # A fixed feature space: no optimizer holds its weights, so a gradient for them is never used.
+            # A ScriptModule refuses requires_grad_, its parameters do not.
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
         self.model.to(output.device)
         slices = range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),)
         for sample in range(output.shape[0]):
@@ -358,7 +363,10 @@ class IMPACTSynth(CriterionWithAttribute):
         output_attributes: list[Attribute] | None = None,
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
         if len(targets) < 2:
-            raise ValueError("At least two target tensors are required.")
+            raise MeasureError(
+                "IMPACTSynth compares the output with two targets, the content and the style image.",
+                "Name both groups in its targets_criterions key, content first: 'CT;MR' (a mask may follow).",
+            )
         mask = targets[2] if len(targets) > 2 else None  # after the content and style images
         content, style = attributes[0], attributes[1]
         # An output without statistics of its own (a model output) is read with the content image's.

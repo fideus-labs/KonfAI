@@ -21,6 +21,7 @@ Covers ``Config`` file handling and error messages, ``apply_config`` type bindin
 keys), and the config env-var bookkeeping.
 """
 
+import _pyio
 import functools
 import os
 import sys
@@ -592,7 +593,7 @@ def test_config_write_back_is_atomic_when_the_rename_fails(write_config, monkeyp
         replace_calls.append((str(src), str(dst)))
         raise RuntimeError("crash at rename")
 
-    # A non-OSError: OSError is the Windows in-place fallback, pinned separately below.
+    # A non-OSError: an OSError is retried, then refused, pinned separately below.
     monkeypatch.setattr("konfai.utils.config.os.replace", failing_replace)
 
     with pytest.raises(RuntimeError, match="crash at rename"):
@@ -601,6 +602,27 @@ def test_config_write_back_is_atomic_when_the_rename_fails(write_config, monkeyp
     assert replace_calls, "the write-back must land through os.replace, never a bare open(target, 'w')"
     assert config_path.read_bytes() == original  # a concurrent reader never sees a truncated config
     assert list(config_path.parent.glob("*.tmp")) == []  # the temp file is removed on failure
+
+
+@pytest.mark.parametrize(("ending", "platform_ending"), [(b"\n", "\r\n"), (b"\r\n", "\n")])
+def test_config_write_back_keeps_the_files_line_ending(write_config, monkeypatch, ending, platform_ending) -> None:
+    """A config keeps its line ending on a platform whose text files use the other one: an LF file
+    checked out on Windows is not rewritten CRLF by its first run."""
+    config_path = write_config("")
+    config_path.write_bytes(b"Root:\n  count: 3\n".replace(b"\n", ending))
+    # The pure-Python text layer reads os.linesep, the translation the C one does on Windows.
+    monkeypatch.setattr(os, "linesep", platform_ending)
+    monkeypatch.setattr("konfai.utils.config.open", _pyio.open, raising=False)
+
+    class Root:
+        def __init__(self, count: int = 0, added: int = 5) -> None:
+            self.count = count
+
+    apply_config("Root")(Root)()
+
+    written = config_path.read_bytes()
+    assert b"added: 5" in written
+    assert written == written.replace(b"\r\n", b"\n").replace(b"\n", ending)
 
 
 def test_config_write_back_retries_a_denied_rename_and_never_writes_in_place(write_config, monkeypatch) -> None:
@@ -1286,25 +1308,51 @@ _WORKFLOWS = {
 }
 
 
-def _shipped_workflow_configs() -> list[str]:
-    """Every shipped config whose first key names a workflow.
+#: The directories a run of an example writes beside it (git-ignored): the config snapshots they
+#: hold name files that exist only in that run.
+_RUN_OUTPUTS = frozenset({"Dataset", "Checkpoints", "Statistics", "Predictions", "Evaluations", "Transforms", "Output"})
+
+
+def _shipped_workflow_configs(examples: Path = _EXAMPLES) -> list[str]:
+    """Every shipped config whose first key names a workflow, at any depth (Segmentation/TwoClasses),
+    outside the run outputs a run of an example leaves beside it.
 
     This feeds a parametrize, so it runs at collection: an example that is empty (no mapping at
     all) or opens on a sequence is not one of these files, and must not take the module's
     collection down with it."""
     relatives = []
-    for path in _EXAMPLES.glob("*/*.yml"):
+    for path in examples.glob("**/*.yml"):
+        relative = path.relative_to(examples)
+        if _RUN_OUTPUTS.intersection(relative.parts[:-1]):
+            continue
         tree = ruamel.yaml.YAML().load(path.read_text(encoding="utf-8"))
         if isinstance(tree, Mapping) and next(iter(tree), None) in _WORKFLOWS:
-            relatives.append(str(path.relative_to(_EXAMPLES)))
+            relatives.append(relative.as_posix())
     return sorted(relatives)
+
+
+def test_the_shipped_configs_leave_out_what_a_run_of_an_example_wrote(tmp_path: Path) -> None:
+    """A checkout where an example was run holds the config snapshots of that run; they are not
+    shipped configs, and binding one fails on files only that run had."""
+    shipped = ["Seg/Config.yml", "Seg/TwoClasses/Prediction.yml"]
+    written = [
+        "Seg/Statistics/RUN/Config_0_0.yml",
+        "Seg/Predictions/RUN/Prediction.yml",
+        "Seg/TwoClasses/Evaluations/RUN/Evaluation.yml",
+        "App/Output/App/Prediction.yml",
+    ]
+    for relative in shipped + written:
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("Predictor:\n  a: 1\n", encoding="utf-8")
+    assert _shipped_workflow_configs(tmp_path) == shipped
 
 
 def _bind_shipped_config(
     relative: str, workdir: Path, strict: bool, monkeypatch: pytest.MonkeyPatch, classpath: str | None = None
 ) -> bytes:
     """Bind a shipped example config on a copy under WORKDIR, over a synthetic cohort holding every
-    group the config names, the way its workflow builder does (STRICT) or one context at a time.
+    group the config names, the way its workflow builder does (STRICT, a key nothing reads refused)
+    or one context at a time.
     CLASSPATH, when given, replaces the config's model classpath (the alternative a comment offers)."""
     import importlib
 
@@ -1344,7 +1392,7 @@ def _bind_shipped_config(
         monkeypatch.delitem(sys.modules, local, raising=False)
     workflow = getattr(importlib.import_module(module_name), class_name)
     if strict:
-        with strict_config(root, refuse=False):
+        with strict_config(root):
             apply_config()(workflow)()
     else:
         apply_config()(workflow)()
@@ -1357,8 +1405,9 @@ def test_a_shipped_config_resolves_to_the_same_bytes_under_the_block_as_per_cont
     relative: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every shipped workflow config, built as its workflow builds it (one strict block) and one
-    context at a time: the resolved file is byte-identical. Two of them gain keys the write-back
-    appends (Config_GAN.yml, Transform.yml), which is where the order of the appends shows."""
+    context at a time: every key of it is read, and the resolved file is byte-identical. Some gain
+    keys the write-back appends (Config_GAN.yml, Transform.yml), which is where the order of the
+    appends shows."""
     pytest.importorskip("SimpleITK")
     if Path(relative).parent.name == "Synthesis":
         # Its Model.py imports segmentation_models_pytorch, an extra the example declares and the

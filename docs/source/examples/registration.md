@@ -85,9 +85,10 @@ module output `MovingImageResample`. Training attaches an MSE loss to that
 output against `FIXED`.
 
 ```{important}
-The current VoxelMorph warping components support `dim: 2`. Three values must
-agree when adapting this example: VoxelMorph's `shape: [256, 256]`, the spatial
-part of the patch `patch_size: [1, 256, 256]` in **both** `Config.yml` and
+This example runs VoxelMorph slice-wise, `dim: 2` (it also takes `dim: 3`).
+Three values must agree when adapting this example: VoxelMorph's
+`shape: [256, 256]`, the spatial part of the patch `patch_size: [1, 256, 256]`
+in **both** `Config.yml` and
 `Prediction.yml`, and `CROP` in `make_dataset.py`. A mismatch surfaces as a
 `state_dict` load error at PREDICTION, not as a configuration error.
 ```

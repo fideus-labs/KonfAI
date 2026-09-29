@@ -35,7 +35,9 @@ def _sessions_file() -> Path:
 
 
 def _credentials_file() -> Path:
-    """Where the LLM credentials set from the UI live: outside sessions.json, and readable by nobody else."""
+    """Where the LLM credentials set from the UI live: outside sessions.json, readable by their owner
+    alone. On Windows the file inherits the folder's permissions, which Python restricts to the owner from
+    3.11.10; an earlier Python leaves the workspace root's."""
     return _workspace_root() / ".konfai_studio" / "credentials.json"
 
 

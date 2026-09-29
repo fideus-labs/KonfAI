@@ -209,7 +209,7 @@ Common fields:
 | `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A stage that declares `single_process = True` (`KonfAIInference` does) in any group forces `0` whatever the value. |
 | `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
-| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |
+| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. Each epoch then starts its workers anew: on macOS and Windows every worker is a fresh interpreter that imports KonfAI and receives the dataset again. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. A float holds out the last cases of the run order at the case boundary closest to that share of the entries (a tie goes to validation, which keeps at least one case). |
 | `validation_augmentations` | bool | `false` | Whether validation also iterates over augmented variants. Set `true` to validate on every augmented copy as well as the base samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
@@ -275,16 +275,18 @@ memory"; across nodes the numerator still uses `world_size`, so they do not canc
 takes whichever is tighter of the **cgroup limit** (set under a container or
 SLURM), and the host's available RAM; the log names which one won.
 
-The dataset size is an estimate, not a guarantee. It sums `prod(header_shape) x 4`
-bytes over the source groups: it models a float32 cached tensor, so a `uint8`
-source is over-counted and a `float64` one under-counted. It reads the raw header
-shape and ignores transforms that shrink (resample-down, crop) or grow (pad,
-one-hot) the tensor. It also counts one copy per case, while the cache holds every
-augmented copy of every case, with augmentations declared, the real footprint is a
-multiple of the estimate. `inline_augmentations: true` defers those copies rather
-than dropping them: they are built on demand and released once per epoch, so the
-peak is the same. Caching also peaks above its steady state while it runs. Leave
-headroom.
+The dataset size is an estimate, not a guarantee. It reads no voxel: for every
+case of every source group it takes the shape the transform chain lands the case
+on, computed from the header (a resample-down or a crop shrinks it, a pad or a
+one-hot grows it), times 4 bytes. It models a float32 cached tensor, so a `uint8`
+source is over-counted and a `float64` one under-counted. Each case counts once
+per copy the cache holds: the base tensor plus one per augmentation draw, and for
+the validation cases the draws count only under `validation_augmentations: true`.
+When the chain changes the size by more than a tenth, the printed line also gives
+the size as stored. `inline_augmentations: true` defers the augmented copies
+rather than dropping them: they are built on demand and released once per epoch,
+so the peak is the same. Caching also peaks above its steady state while it
+runs. Leave headroom.
 
 ### `shuffle_window`
 

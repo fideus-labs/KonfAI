@@ -18,7 +18,8 @@ literal string `"None"`: it is written back as `"None"` and reparsed to
 binds `None`: null is the disabled spelling and is never replaced by the
 default.
 
-The rewrite replaces the file through a temporary file in its directory. On
+The rewrite replaces the file through a temporary file in its directory, with
+the line ending the file had (LF or CRLF), whatever the system. On
 Linux and macOS, a config you own keeps its group and its mode: a read-only
 config (`0444`) is still resolved in place and stays read-only after the run,
 so a tool that must edit it afterwards has to make it writable first. A config

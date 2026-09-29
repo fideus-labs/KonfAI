@@ -83,7 +83,8 @@ def _slice_indices(volume: np.ndarray) -> list[int]:
 
 
 def _crop(image: np.ndarray) -> np.ndarray:
-    """Crop to ``CROP`` around the centre of mass of the body, padding if the slice is smaller."""
+    """Crop to ``CROP`` around the mean index of the rows and of the columns the body (above 0.05)
+    occupies, kept inside the slice, padding if the slice is smaller."""
     padded = np.pad(image, [(max(0, c - s), max(0, c - s)) for s, c in zip(image.shape, CROP, strict=True)])
     weights = padded > 0.05
     centre = [

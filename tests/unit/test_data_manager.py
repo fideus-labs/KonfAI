@@ -1435,7 +1435,7 @@ def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
 
 
 def test_inline_augmentations_disable_persistent_workers() -> None:
-    # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+    # Persistent workers keep the copy of the dataset they started with and never see the main process's
     # per-epoch reset_augmentation redraw, so inline augmentations would freeze at their first draw.
     # The guard is inline_augmentations AND a non-empty augmentations config, and it overrides an
     # explicit persistent_workers=True.

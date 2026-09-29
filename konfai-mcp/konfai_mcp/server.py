@@ -3401,6 +3401,10 @@ def main(
     if transport == "stdio":
         if log_level is not None:
             transport_kwargs["log_level"] = log_level
+        if threading.current_thread() is threading.main_thread():
+            # stdin is read by a worker thread no cancellation interrupts, and the loop waits for it before it
+            # can stop: a Ctrl+C would wait for the client's next line. Exit at once, with the interrupted status.
+            signal.signal(signal.SIGINT, lambda _signum, _frame: os._exit(130))
     else:
         if host is not None:
             transport_kwargs["host"] = host

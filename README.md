@@ -175,7 +175,9 @@ KonfAI is command-driven; each CLI state maps to one YAML file:
 | `konfai TRANSFORM` | `Transform.yml` (`Transformer:`) | dataset preparation: a transform chain → datasets (1→1, N→1, 1→N) |
 
 Full CLI reference (flags, `konfai-cluster`, `konfai-apps`):
-[docs/reference/cli](https://konfai.readthedocs.io/en/latest/reference/cli.html).
+[docs/reference/cli](https://konfai.readthedocs.io/en/latest/reference/cli.html). The words with
+two meanings (group, fold, worker, workspace, bundle):
+[docs/reference/glossary](https://konfai.readthedocs.io/en/latest/reference/glossary.html).
 
 The same four workflows are Python callables, with structured results and the
 config tree as a dict, which is the idiom for a sweep or a notebook:
@@ -236,11 +238,13 @@ from monai.networks.nets import UNet
 from konfai.data.transform import TensorCast
 from konfai.metric.measure import CrossEntropyLoss
 
-model = UNet(spatial_dims=2, in_channels=1, out_channels=41, channels=(32, 64, 128, 256), strides=(2, 2, 2))
-checkpoints = konfai.train_model(model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
-                                 patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]})
-konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
-                     checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
+if __name__ == "__main__":
+    model = UNet(spatial_dims=2, in_channels=1, out_channels=41, channels=(32, 64, 128, 256), strides=(2, 2, 2))
+    checkpoints = konfai.train_model(model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
+                                     patch=[1, 256, 256], epochs=20, batch_size=8,
+                                     transforms={"SEG": [TensorCast(dtype="int64")]})
+    konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
+                         checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
 ```
 
 [`examples/BringYourModel/BringYourModel_demo.ipynb`](https://github.com/fideus-labs/KonfAI/blob/main/examples/BringYourModel/BringYourModel_demo.ipynb)

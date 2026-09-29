@@ -23,7 +23,7 @@ pinned by tests: the job now is to not reintroduce them.
 | `utils/dataset/` | Streaming paths **never materialize a full volume**; `Attribute` round-trips only flat scalars/1-D arrays; streamed entries appear only once finalized (temp+rename) | Confirm no hidden full read on the streaming path; a replaced entry stays readable until its replacement is ready. |
 | `utils/model_builder.py` | The trusted/untrusted **boundary**: only registry types; module names contain no `.`; `default\|` = bare filename | No `eval`/import injection; a path separator in a `default\|` name is refused. |
 | `konfai-mcp` job/path code | Validation/smoke-tests run **only in a spawn subprocess** (never the server process); `read/write_session_file` are **path-jailed**; `cancel_job` reaps the whole process group | Any write target that composes a path rejects separators; dataset *reads* may be arbitrary host paths by design: writes must never widen. |
-| a workflow kind | Adding one touches ~12 registries + ~8 `Literal`s | Prefer one descriptor table; a drift-guard test asserts each registry is derived from it. |
+| a workflow kind | In konfai-mcp one `WorkflowSpec` entry + the two `Literal` aliases beside it; in core several maps (`main.py` `_COMMANDS`/`_INIT_TARGETS`, `State`, `api.py`) | `konfai-mcp/tests/test_workflow_registry.py` pins every konfai-mcp map to the table; extend the core tables rather than add a registry. |
 
 ## Confirmed-trap watchlist (2026-07-19 audit, since fixed and pinned by tests; do not reintroduce)
 
@@ -48,8 +48,8 @@ pinned by tests: the job now is to not reintroduce them.
 - **Metrics that can't run**: `FID` used `torch.nn.functional.resize` (nonexistent); `Accuracy` accumulates
   for the process lifetime; `PerceptualLoss` zips `strict=False` and drops extra losses. A metric smoke test
   catches all three.
-- **CI/wheel**: no CI installs the built wheel: a PEP 420 / package-data regression ships green. Use the
-  release script.
+- **CI/wheel**: an editable install hides a PEP 420 / package-data regression. The slow tests of
+  `tests/unit/test_packaging.py` install the built wheel non-editable; CI's build job runs them on its wheel.
 
 Full evidence for each trap lives in the maintainer's local audit notes under `.audit-local/` (git-ignored);
 this watchlist is the portable summary.

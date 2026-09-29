@@ -46,8 +46,10 @@ def main() -> int:
         print("at the entrypoint above (see the skill's references/resources-and-clients.md).")
         return 0
 
-    print("Not ready. Install the packages on the konfai-mcp branch:")
-    print("    pip install -e '.[dev]' && pip install -e ./konfai-mcp")
+    print("Not ready. Install the MCP server:")
+    print('    pip install "konfai[imaging]" konfai-apps konfai-mcp')
+    print("or, from a KonfAI checkout:")
+    print('    pip install -e ".[dev,imaging]" -e ./konfai-apps -e ./konfai-mcp')
     return 1
 
 

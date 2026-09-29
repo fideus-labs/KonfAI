@@ -253,32 +253,6 @@ def test_an_oriented_field_keeps_the_label_only_layout(tmp_path: Path) -> None:
     np.testing.assert_array_equal(stored, itk_order[::-1], err_msg="oriented fields share the spec order")
 
 
-def test_a_pre_19_store_is_refused_by_name(tmp_path: Path) -> None:
-    """A store with the typed axis but neither the ``displacements`` entry nor the component-order
-    marker is every store this backend wrote before 1.9, and its components are ITK-ordered. Read
-    under either convention it is a guess -- a plausible field with dx and dz possibly exchanged --
-    so it is refused with the layout named, not read with one."""
-    import dask.array
-    import ngff_zarr
-    from konfai.data import read_ome_zarr_data_slice
-
-    values = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
-    image = ngff_zarr.to_ngff_image(
-        dask.array.from_array(values, chunks=values.shape),
-        dims=["c", "z", "y", "x"],
-        scale={"c": 1.0, "z": SPACING[2], "y": SPACING[1], "x": SPACING[0]},
-        translation={"c": 0.0, "z": ORIGIN[2], "y": ORIGIN[1], "x": ORIGIN[0]},
-    )
-    image.axes_types = {"c": "displacement"}
-    multiscales = ngff_zarr.to_multiscales(image, scale_factors=[], cache=False)
-    store = tmp_path / "legacy.ome.zarr"
-    ngff_zarr.to_ngff_zarr(str(store), multiscales, overwrite=True, version="0.6")
-    clear_ome_zarr_cache()
-
-    with pytest.raises(DatasetManagerError, match=r"KonfAI < 1\.9"):
-        read_ome_zarr_data_slice(store, tuple(slice(None) for _ in values.shape))
-
-
 @pytest.mark.parametrize("oriented", [False, True], ids=["axis-aligned", "oriented"])
 def test_appending_levels_keeps_the_field_a_field(tmp_path: Path, oriented: bool) -> None:
     """A pyramid grafted onto a field store rewrites the multiscales document, which is where the

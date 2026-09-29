@@ -121,6 +121,26 @@ def test_main_apps_server_rejects_a_config_without_an_apps_list(
     assert "Invalid config file" in _run_apps_server(monkeypatch, apps_config)
 
 
+def test_main_apps_server_check_validates_and_exits_without_serving(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # --check is a validation command: a CI job running it must get its answer back, not a server.
+    uvicorn = pytest.importorskip("uvicorn")
+    served: list[object] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: served.append(kwargs))
+    monkeypatch.setattr(apps_cli_module, "get_app_repository_info", lambda app_id, force_update: app_id)
+    monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
+    monkeypatch.setenv("KONFAI_APPS_CONFIG", "{}")  # the CLI publishes the config; restored at teardown
+    apps_config = tmp_path / "apps.json"
+    apps_config.write_text(json.dumps({"apps": ["demo/app"]}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["konfai-apps-server", "--auth", "off", "--apps", str(apps_config), "--check"])
+
+    apps_cli_module.main_apps_server()
+
+    assert "All apps validated successfully." in capsys.readouterr().out
+    assert served == []
+
+
 @pytest.mark.parametrize(
     "command",
     [

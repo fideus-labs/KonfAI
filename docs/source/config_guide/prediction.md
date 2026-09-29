@@ -210,10 +210,9 @@ stage, naming the group, the position, the class and the arguments that differ:
 
 It warns and never refuses, because a difference can be deliberate. What is
 compared is what reaches the model, so none of these is a finding: a stage that
-alters no value (`Statistics`, `Save`), everything from an `Expand` marker on
-(the copies' draws), the `inverse` argument (an output-path setting), a group
-the live config does not declare as a model input, and anything an
-`outputs_dataset` applies afterwards. An argument one config does not spell,
+alters no value (`Statistics`, `Save`), the `inverse` argument (an output-path
+setting), a group the live config does not declare as a model input, and
+anything an `outputs_dataset` applies afterwards. An argument one config does not spell,
 because the stage gained it after the training run, is compared at the default
 KonfAI binds for it (for KonfAI's own stages). A checkpoint that keeps no resolved config
 within reach (an app bundle, a hand-copied `.pt`, a run whose `--statistics-dir`
