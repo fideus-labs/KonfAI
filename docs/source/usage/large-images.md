@@ -44,9 +44,11 @@ the dataset exceeds `memory_budget`, so setting a budget below your dataset's
 size is how you force the streaming path there.
 
 The format decides how cheap it is. HDF5 and OME-Zarr serve regions natively,
-DICOM reads per slice, and SimpleITK serves them for uncompressed MetaImage and
-non-gzipped NIfTI. Anything compressed still returns correct patches, but decodes
-the whole volume for each one. The token for a DICOM series is `./Dataset:dicom`;
+DICOM reads per slice, and SimpleITK serves them for MetaImage and NIfTI. A
+compressed one (`.nii.gz`, a compressed `.mha`) is decompressed once per run into
+an uncompressed copy on disk, which its patches are then read from (see
+[compressed files](../reference/components/storage-backends.md#compressed-files)).
+NRRD still returns correct patches, but decodes the whole volume for each one. The token for a DICOM series is `./Dataset:dicom`;
 `dcm` means a single file through SimpleITK, which is a different backend.
 
 ## OME-Zarr layout
@@ -383,12 +385,16 @@ Streaming is only as cheap as the format underneath.
 | HDF5 | yes, natively |
 | OME-Zarr | yes, chunked, `level` selects the pyramid resolution |
 | DICOM | yes, per slice |
-| SimpleITK | uncompressed MetaImage and non-gzipped NIfTI only |
+| SimpleITK | MetaImage and NIfTI; a compressed one through an uncompressed copy decompressed once per run |
 
-A format that cannot serve a region still returns the right voxels: it decodes
-the whole volume for every patch. That costs speed, never correctness, and KonfAI
-warns once per format. Convert those datasets to OME-Zarr, HDF5, or uncompressed
-`.mha`/`.nii`.
+A format that cannot serve a region (NRRD) still returns the right voxels: it
+decodes the whole volume for every patch. That costs speed, never correctness,
+and KonfAI warns once per format. Convert those datasets to OME-Zarr, HDF5, or
+`.mha`/`.nii`. A compressed `.nii.gz` or `.mha` needs no conversion: its
+uncompressed copy goes to `~/.cache/konfai/decompressed` for the length of the
+run and takes the volume's uncompressed size there; `KONFAI_DECOMPRESSED_DIRECTORY`
+moves it (see
+[compressed files](../reference/components/storage-backends.md#compressed-files)).
 
 The same table governs the `GLOBAL_STAT` seed: on a backend that serves regions
 the statistic is a chunked running pass in float64, never the whole volume in

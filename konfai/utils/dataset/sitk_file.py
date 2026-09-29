@@ -27,6 +27,7 @@ import re
 import shutil
 import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -36,6 +37,7 @@ try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
+from konfai.utils.dataset import decompressed
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
     Attribute,
@@ -93,9 +95,9 @@ def _warn_unstreamed_region_read(path: str) -> None:
     _unstreamed_formats_warned.add(suffix)
     warnings.warn(
         f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
-        "(NRRD, or any compressed file), so every patch decodes the whole volume again: many times "
-        "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
-        "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
+        "(NRRD, or a compressed file that has no uncompressed twin), so every patch decodes the whole "
+        "volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr "
+        "or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
         KonfAIWarning,
         stacklevel=2,
     )
@@ -184,13 +186,15 @@ class SitkFile(AbstractFile):
         [200, 64, 64] one held 79 against 78.1, and a full-plane [8, 320, 320] held its own 3.
         One step along the banded axis, everything below it whole: that is what this says.
 
-        ``None`` where ITK decodes instead of mapping (a compressed stream), where the whole
-        volume is the cost and the streaming refusal already says so.
+        A compressed file answers for the twin its regions are read from (:mod:`.decompressed`),
+        before that twin exists. ``None`` where ITK decodes instead of mapping (an NRRD, a compressed
+        file whose twin cannot be written), where the whole volume is the cost and the streaming
+        refusal already says so.
         """
         path = self._resolve_data_path(name)
         if path is not None:
             _require_sitk(path)
-        block = _pixel_block(path) if path is not None else None
+        block = (_pixel_block(path) or decompressed.servable(path)) if path is not None else None
         if block is None:
             return None
         shape = [int(extent) for extent in block.shape]
@@ -225,8 +229,29 @@ class SitkFile(AbstractFile):
         )
         return matches[0] if matches else None
 
+    @staticmethod
+    def _spans(normalized: tuple[slice, ...], shape: Sequence[int]) -> bool:
+        """Whether a region is the whole volume at unit step, whatever its channels."""
+        return normalized[1:] == tuple(slice(0, extent, 1) for extent in shape[1:])
+
     def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         _require_sitk(path)
+        found = decompressed.layout(path)
+        if found is not None:
+            # A region that is the whole volume decodes it once either way: it takes a twin already there
+            # and makes none, which would only add a write and a read of the volume.
+            whole = self._spans(self._normalize_slices(slices, list(found.shape)), found.shape)
+            # Filed under the entry it is read for: a one-pass reader leaving the case removes it,
+            # whichever root holds it.
+            twin = decompressed.twin(path, self.case, make=not whole)
+            if twin is not None:
+                # A one-pass reader removes the twin as it leaves the case: a read losing that race to
+                # another reader of the entry takes the compressed file, as it would without a twin.
+                with contextlib.suppress(OSError, RuntimeError):
+                    return self._image_region(name, twin, slices)
+        return self._image_region(name, path, slices)
+
+    def _image_region(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         block = _pixel_block(path)
         if block is not None:
             # The region's bytes off the file, where ITK's streaming reader decodes them through
@@ -265,7 +290,7 @@ class SitkFile(AbstractFile):
                 attributes["Spacing"] = spacing
             return data[normalized], attributes
 
-        if not self._supports_region_read(path):
+        if not self._supports_region_read(path) and not self._spans(normalized, data_shape):
             _warn_unstreamed_region_read(path)
 
         extract_index_xyz = [item.start for item in reversed(normalized[1:])]
@@ -345,7 +370,10 @@ class SitkFile(AbstractFile):
             return False
         if path.endswith(".npy"):
             return True  # np.load(mmap) reads the slice off the map
-        return not path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")) and self._supports_region_read(path)
+        if path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")):
+            return False
+        # A compressed file is read by region from its uncompressed twin, decompressed once.
+        return self._supports_region_read(path) or decompressed.servable(path) is not None
 
     def is_vtk_polydata(self, obj) -> bool:
         try:

@@ -323,6 +323,8 @@ class DatasetIter(data.Dataset):
             except Exception as error:
                 if not self._set_aside(case, error):
                     raise
+            if self.single_pass:
+                manager.release_case()  # the cohort's twins are never on disk at once
 
         self._on_fill_threads(f"scanning {label}", work, scan, lambda _done: f"Scanning {label}: {get_cpu_info()}")
 
@@ -492,7 +494,7 @@ class DatasetIter(data.Dataset):
         if self.single_pass and x != self._slab_case:
             if self._slab_case is not None:
                 for _group_src, group_dest, _chain in _chains(self.groups_src):
-                    self.data[group_dest][self._slab_case].release_slabs()
+                    self.data[group_dest][self._slab_case].release_case()
             self._slab_case = x
         if x not in self._unreadable:
             try:

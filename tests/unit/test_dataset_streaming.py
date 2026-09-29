@@ -185,7 +185,7 @@ def test_sitk_supports_region_read_matches_itk_streaming_capability(
 
 @pytest.mark.parametrize(
     ("file_format", "compress", "warns"),
-    [("nrrd", False, True), ("mha", True, True), ("mha", False, False)],
+    [("nrrd", False, True), ("mha", True, False), ("nii.gz", True, False), ("mha", False, False)],
 )
 def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_format: str, compress: bool, warns: bool
@@ -193,7 +193,8 @@ def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     """A format serving no region re-decodes the whole volume per patch: say so, once for the dataset.
 
     Two cases x three patches: the warning is about the format, so it must survive neither the patch
-    loop nor the second case. Streaming an uncompressed .mha is a win and must stay silent.
+    loop nor the second case. Streaming an uncompressed .mha is a win and must stay silent, and so is
+    a compressed file, whose regions are read from its uncompressed twin.
     """
     monkeypatch.setattr("konfai.utils.dataset.sitk_file._unstreamed_formats_warned", set())
     dataset = Dataset(tmp_path / "Dataset", file_format)

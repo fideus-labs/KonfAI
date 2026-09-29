@@ -224,7 +224,10 @@ class DistributedObject(ABC):
         apply_cpu_thread_budget(world_size)
         self._bound_chunk_cache(world_size)
         self._bound_allocator()
-        with Log(self.name, global_rank):
+        from konfai.utils.dataset.decompressed import run_scope
+
+        # The launcher's scope when it has one; a cluster task has none, and scopes its loader workers here.
+        with run_scope(), Log(self.name, global_rank):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
             if self.manual_seed is not None:
@@ -439,15 +442,20 @@ def execute_distributed_object(
                             else f"CPU ({cpu_workers} worker{'s' if cpu_workers > 1 else ''})"
                         )
                         print(f"[KonfAI] Running on {device_line}")
-                    with clock.phase("setup"):
-                        configured_object.setup(world_size)
-                    # Share tensors through /dev/shm files instead of one file descriptor per tensor, or a
-                    # worker pickling a loaded model can exhaust the open-file limit.
-                    mp.set_sharing_strategy("file_system")
-                    clock.launch()
-                    configured_object.startup_clock = clock
-                    with TensorBoard(configured_object.name):
-                        configured_object.launch_ranks(world_size)
+                    from konfai.utils.dataset.decompressed import run_scope
+
+                    # The uncompressed twins of compressed entries: shared by the ranks and their loader
+                    # workers, removed when the run ends, however it ends.
+                    with run_scope():
+                        with clock.phase("setup"):
+                            configured_object.setup(world_size)
+                        # Share tensors through /dev/shm files instead of one file descriptor per tensor, or
+                        # a worker pickling a loaded model can exhaust the open-file limit.
+                        mp.set_sharing_strategy("file_system")
+                        clock.launch()
+                        configured_object.startup_clock = clock
+                        with TensorBoard(configured_object.name):
+                            configured_object.launch_ranks(world_size)
         finally:
             for key, value in previous_env.items():
                 if value is None:
