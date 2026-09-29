@@ -27,17 +27,19 @@ Reading one requires:
    columns plus their cross product for the z-axis).
 4. **CT intensity rescale**: RescaleSlope and RescaleIntercept convert stored pixel values to
    Hounsfield Units, mandatory for CT and absent or identity for MR.
-5. **Error handling**: missing tags, inconsistent slice spacing and unsupported transfer syntaxes
-   are reported. A single-slice series takes ``SliceThickness``, or 1.0 mm when it carries none,
-   and non-square pixels are read as they are.
+5. **Error handling**: missing tags, inconsistent slice spacing, colour slices, mixed orientations,
+   repeated positions and unsupported transfer syntaxes are reported. A single-slice series takes
+   ``SliceThickness``, or 1.0 mm when it carries none, and non-square pixels are read as they are.
 
 Optional dependency: ``pydicom`` (``pip install konfai[dicom]``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shutil
 import threading
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -53,6 +55,12 @@ from konfai.utils.errors import DatasetManagerError
 
 # Zero-padded slice filenames produced by :func:`write_dicom_series` (e.g. ``000001.dcm``).
 _SLICE_FILENAME_RE = re.compile(r"^\d{6}\.dcm$")
+
+#: How far the direction cosines of two slices of one series may differ (rounding in the header).
+_ORIENTATION_TOLERANCE = 1e-4
+
+#: Two slices closer than this along the normal sit at one position (float noise, not a spacing).
+_COINCIDENT_POSITION_MM = 1e-6
 
 if TYPE_CHECKING:
     pass
@@ -193,6 +201,12 @@ def extract_geometry(
             f"The series declares NumberOfFrames={number_of_frames}.",
             "KonfAI expects one frame per file (classic single-frame DICOM).",
         )
+    samples = sorted({int(getattr(ds, "SamplesPerPixel", 1) or 1) for ds in datasets})
+    if samples != [1]:
+        raise DatasetManagerError(
+            f"DICOM series with SamplesPerPixel={samples} (colour) is not supported.",
+            "KonfAI reads a series as one scalar volume: one sample per pixel.",
+        )
 
     # Origin = ImagePositionPatient of first slice
     try:
@@ -217,7 +231,25 @@ def extract_geometry(
     # Slice spacing: the first computed inter-slice gap (matching SimpleITK's geometry), with the
     # whole series checked for uniform spacing so an irregular one fails instead of skewing z.
     if len(datasets) > 1:
+        try:
+            cosines = np.asarray([[float(x) for x in ds.ImageOrientationPatient] for ds in datasets])
+        except AttributeError as exc:
+            raise DatasetManagerError(
+                "DICOM tag 'ImageOrientationPatient' is missing on a slice.",
+                "This tag is required on every slice to place it along the series.",
+            ) from exc
+        if not np.allclose(cosines, cosines[0], rtol=0.0, atol=_ORIENTATION_TOLERANCE):
+            raise DatasetManagerError(
+                "DICOM slices of one series have different orientations (ImageOrientationPatient).",
+                "KonfAI reads a series as one volume on one grid: every slice must lie in the same plane.",
+            )
         gaps = np.abs(np.diff([_slice_position(ds) for ds in datasets]))
+        if float(gaps.min()) <= _COINCIDENT_POSITION_MM:
+            raise DatasetManagerError(
+                "DICOM slices of one series share one position.",
+                "KonfAI reads a series as one volume: a series that repeats a location (a cine, several "
+                "phases or echoes) is not supported.",
+            )
         slice_spacing_mm = float(gaps[0])
         tolerance = max(1e-2, 1e-2 * slice_spacing_mm)
         if float(np.ptp(gaps)) > tolerance:
@@ -427,8 +459,8 @@ def get_dicom_info(
     """Read DICOM series shape and geometry without decoding pixel data.
 
     Memoised per directory and unbounded: input DICOM is read-only for a run, and a cohort read case
-    by case would miss on every patch past a bound. ``write_dicom_series`` clears it. Callers that
-    mutate the result must copy it first.
+    by case would miss on every patch past a bound. ``write_dicom_series`` and :func:`forget_series`
+    clear it. Callers that mutate the result must copy it first.
     """
     selected_uid, files = _select_series_files(directory, series_uid)
     datasets = sort_series(files, stop_before_pixels=True)
@@ -449,6 +481,12 @@ def get_dicom_info(
         "spacing": spacing,
         "direction": direction,
     }
+
+
+def forget_series() -> None:
+    """Drop every memoised series header and decoded plane: the next read sees the disk as it is."""
+    get_dicom_info.cache_clear()
+    _plane_cache.clear()
 
 
 def read_dicom_series_slice(
@@ -501,10 +539,23 @@ def _encode_pixels(data: np.ndarray) -> tuple[np.ndarray, float, float]:
         stored = np.rint((np.nan_to_num(data, nan=minimum) - intercept) / slope).clip(-32768, 32767).astype(np.int16)
         return stored, slope, intercept
     if np.issubdtype(data.dtype, np.signedinteger):
-        return data.astype(np.int32 if data.dtype.itemsize > 2 else np.int16), 1.0, 0.0
+        return _narrowed(data, np.dtype(np.int32 if data.dtype.itemsize > 2 else np.int16)), 1.0, 0.0
     if np.issubdtype(data.dtype, np.unsignedinteger):
-        return data.astype(np.uint32 if data.dtype.itemsize > 2 else np.uint16), 1.0, 0.0
+        return _narrowed(data, np.dtype(np.uint32 if data.dtype.itemsize > 2 else np.uint16)), 1.0, 0.0
     raise DatasetManagerError(f"Unsupported DICOM pixel dtype '{data.dtype}'.")
+
+
+def _narrowed(data: np.ndarray, stored: np.dtype) -> np.ndarray:
+    """``data`` as the integer pixels a slice stores; values the cast would wrap are refused."""
+    if not np.can_cast(data.dtype, stored) and data.size:
+        low, high = int(data.min()), int(data.max())
+        bounds = np.iinfo(stored)
+        if low < bounds.min or high > bounds.max:
+            raise DatasetManagerError(
+                f"Integer values from {low} to {high} do not fit the {stored} pixels a DICOM slice stores.",
+                "Write a floating-point volume (stored with a rescale) or bring the values into that range.",
+            )
+    return data.astype(stored)
 
 
 def write_dicom_series(
@@ -521,6 +572,8 @@ def write_dicom_series(
     from pydicom.dataset import FileDataset, FileMetaDataset
     from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
+    from konfai.utils.dataset.staging import _recover_orphaned_backup, _replaced_name, _retire_dead_debris
+
     data = np.asarray(volume)
     if data.ndim == 3:
         data = data[np.newaxis]
@@ -536,14 +589,21 @@ def write_dicom_series(
     if origin_array.shape != (3,) or spacing_array.shape != (3,):
         raise DatasetManagerError("DICOM origin and spacing must each contain exactly three values.")
 
-    root = Path(directory)
+    # Written beside the series and renamed over it: a writer killed mid-series leaves the previous
+    # series whole, or no series, never a shorter one.
+    root = Path(directory).resolve()
+    _recover_orphaned_backup(root)  # a killed writer's backup is the series to start from
     root.mkdir(parents=True, exist_ok=True)
-    get_dicom_info.cache_clear()  # what this directory holds is about to change
-    _plane_cache.clear()
-    # Remove only slices this function wrote (its zero-padded NNNNNN.dcm naming).
-    for existing in root.glob("*.dcm"):
-        if _SLICE_FILENAME_RE.match(existing.name):
-            existing.unlink()
+    staging = root.with_name(f"{root.name}.{os.getpid()}.tmp")
+    shutil.rmtree(staging, ignore_errors=True)
+    # Everything but the slices this function wrote (its NNNNNN.dcm naming) stays with the series.
+    shutil.copytree(
+        root,
+        staging,
+        symlinks=True,
+        ignore=lambda folder, names: [name for name in names if folder == str(root) and _SLICE_FILENAME_RE.match(name)],
+        copy_function=_link_or_copy,
+    )
 
     metadata = dict(metadata or {})
     study_uid = str(metadata.get("StudyInstanceUID", generate_uid()))
@@ -563,7 +623,7 @@ def write_dicom_series(
         file_meta.MediaStorageSOPInstanceUID = sop_uid
         file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
         file_meta.ImplementationClassUID = generate_uid()
-        path = root / f"{index + 1:06d}.dcm"
+        path = staging / f"{index + 1:06d}.dcm"
         dataset = FileDataset(str(path), {}, file_meta=file_meta, preamble=b"\0" * 128)
         dataset.SOPClassUID = CTImageStorage
         dataset.SOPInstanceUID = sop_uid
@@ -596,7 +656,31 @@ def write_dicom_series(
         dataset.RescaleIntercept = float(intercept)
         dataset.PixelData = pixels.tobytes()
         dataset.save_as(str(path), enforce_file_format=True)
+
+    # A directory is renamed over an empty one only: the previous series steps aside for the rename.
+    backup = root.with_name(_replaced_name(root.name))
+    shutil.rmtree(backup, ignore_errors=True)
+    root.rename(backup)
+    try:
+        staging.rename(root)
+    except BaseException:
+        if not root.exists():
+            backup.rename(root)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+    forget_series()  # this directory holds another series now
+    with contextlib.suppress(Exception):
+        _retire_dead_debris(root)  # housekeeping: it cannot fail the write
     return series_uid
+
+
+def _link_or_copy(source: str, target: str) -> None:
+    """Carry a file into the staged series under a second name, or as a copy where links are refused."""
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
 
 
 # High-level convenience function

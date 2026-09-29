@@ -173,8 +173,11 @@ class Attribute(dict[str, Any]):
 
     @staticmethod
     def _parse_array(text: str) -> np.ndarray:
-        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``."""
-        return np.fromstring(text[1:-1].replace(",", " "), sep=" ", dtype=np.double)
+        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``,
+        and a scalar, printed bare (``12.5``)."""
+        if text[:1] in ("[", "("):
+            text = text[1:-1]
+        return np.fromstring(text.replace(",", " "), sep=" ", dtype=np.double)
 
     @staticmethod
     def _parsed_array(key: str, text: str) -> np.ndarray:
@@ -287,13 +290,19 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     return np.array(np.moveaxis(sitk.GetArrayViewFromImage(image), -1, 0), order="C"), attributes
 
 
+def _same_values(recorded: np.ndarray, level: np.ndarray) -> bool:
+    """Whether a sidecar value is the level's own, up to the rounding of a unit conversion."""
+    return recorded.shape == level.shape and bool(np.allclose(recorded, level, rtol=1e-6, atol=0.0))
+
+
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
 
     The store's konfai sidecar carries the Direction matrix, which NGFF cannot express, and every
     other key it recorded; Direction defaults to identity without it. The sidecar describes one
-    level, the finest: its Spacing and Origin are trusted only where its Spacing is this level's
-    scale, and any other level takes both from its own transforms.
+    level, the finest, as KonfAI wrote it: its Spacing and Origin are trusted only where they are
+    this level's scale and translation. Any other level, or a store another tool has moved, takes
+    both from its own transforms.
 
     Spacing and Origin come out in MILLIMETRES, whatever the store declares: they are handed to
     SimpleITK, written into NIfTI headers and composed with other volumes' frames, none of which
@@ -312,9 +321,10 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     level_spacing = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes]) * factors
     level_origin = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes]) * factors
     if "Spacing" in attributes:
-        recorded = attributes.get_np_array("Spacing")
-        if recorded.shape != level_spacing.shape or not np.allclose(recorded, level_spacing, rtol=1e-6, atol=0.0):
-            # Another level than the sidecar's. Popped then set, so the key keeps its place in the stack.
+        recorded_spacing = attributes.get_np_array("Spacing")
+        recorded_origin = attributes.get_np_array("Origin") if "Origin" in attributes else level_origin
+        if not (_same_values(recorded_spacing, level_spacing) and _same_values(recorded_origin, level_origin)):
+            # Not the grid the sidecar recorded. Popped then set, so the key keeps its place in the stack.
             attributes.pop("Spacing")
             attributes["Spacing"] = level_spacing
             if "Origin" in attributes:
@@ -355,10 +365,10 @@ def _transform_codec() -> list[tuple[type, str, Any]]:
     ]
 
 
-def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> list[np.ndarray]:
+def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> np.ndarray:
     """Serialize a (possibly composite) transform: record each leaf's type tag and fixed parameters
-    into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the per-leaf
-    parameter arrays, in application order."""
+    into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the leaves'
+    parameters, one row per leaf in application order, the shorter rows padded with NaN."""
     datas: list[np.ndarray] = []
     for i, leaf in enumerate(_flatten_transforms(transform)):
         type_tag = next((tag for sitk_class, tag, _ in _transform_codec() if isinstance(leaf, sitk_class)), None)
@@ -368,7 +378,8 @@ def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: A
         attributes[f"{i}:FixedParameters"] = leaf.GetFixedParameters()
 
         datas.append(np.asarray(leaf.GetParameters()))
-    return datas
+    longest = max((len(row) for row in datas), default=0)
+    return np.asarray([np.pad(row, (0, longest - len(row)), constant_values=np.nan) for row in datas])
 
 
 def _decode_transform(transform_type: str, name: str) -> sitk.Transform:

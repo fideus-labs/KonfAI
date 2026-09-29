@@ -30,6 +30,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import Attribute, image_to_data
+from konfai.utils.dataset.staging import is_staging_entry
 from konfai.utils.errors import DatasetManagerError
 
 
@@ -131,7 +132,11 @@ class DicomFile(AbstractFile):
         root = Path(self.filename)
         if not root.is_dir():
             return []
-        return sorted(path.name for path in root.iterdir() if path.is_dir() and self.is_exist(path.name))
+        return sorted(
+            path.name
+            for path in root.iterdir()
+            if path.is_dir() and not is_staging_entry(path.name) and self.is_exist(path.name)
+        )
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
         from konfai.utils.dicom import get_dicom_info

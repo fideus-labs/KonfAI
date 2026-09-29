@@ -36,7 +36,8 @@ in place. Two stages of the same class in one chain spell the second one module-
 - **The process is left as found**: the `KONFAI_*` environment and the per-rank memory budget a
   run publishes are restored around every call, so one call's `memory_budget` never sizes the
   next, and one workflow runs at a time per process: a second concurrent call is refused with the
-  remedy (subprocesses), never allowed to corrupt the first.
+  remedy (subprocesses), never allowed to corrupt the first. Each call reads a DICOM series as it is
+  when the call starts: a series another tool rewrote in place since the previous call is read afresh.
 - **The record remains.** Every call materializes the resolved YAML in the run's workspace:
   promoting a notebook run to a versioned experiment is copying `result.config`: nothing to
   rewrite, and the run stays resumable like any other.

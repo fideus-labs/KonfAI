@@ -16,6 +16,10 @@
 
 """Shared fixtures for the KonfAI test suite."""
 
+import codecs
+import contextlib
+import locale
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -62,3 +66,36 @@ def image_attributes():
         return attributes
 
     return make
+
+
+def _ctype_locale(*names: str):
+    """Set the locale's character type to the first of ``names`` installed, for one test: a file opened
+    without an encoding takes that locale's encoding, as it takes the ANSI code page on Windows."""
+    if sys.flags.utf8_mode:
+        pytest.skip("UTF-8 mode ignores the locale's encoding")
+    previous = locale.setlocale(locale.LC_CTYPE)
+    try:
+        for name in names:
+            with contextlib.suppress(locale.Error):
+                locale.setlocale(locale.LC_CTYPE, name)
+                break
+        else:
+            pytest.skip(f"none of the locales {names} is installed")
+        if codecs.lookup(locale.getencoding()).name == "utf-8":
+            pytest.skip(f"the locale {name} is UTF-8 on this platform")
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, previous)
+
+
+@pytest.fixture
+def ascii_locale():
+    """The locale's encoding set to ASCII: any character outside it fails there as it fails outside a
+    Windows code page."""
+    yield from _ctype_locale("C")
+
+
+@pytest.fixture
+def latin1_locale():
+    """The locale's encoding set to Latin-1, a code page that, like cp1252, decodes any byte."""
+    yield from _ctype_locale("en_US.ISO-8859-1", "en_US.ISO8859-1")

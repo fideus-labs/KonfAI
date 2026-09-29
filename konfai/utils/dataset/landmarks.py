@@ -22,17 +22,34 @@ from pathlib import Path
 
 import numpy as np
 
+from konfai.utils.errors import DatasetManagerError
+
+# "0" stays LPS: KonfAI up to 1.5.3 wrote it over LPS points, 3D Slicer before 4.11 over RAS points.
+_RAS = {"RAS"}
+_LPS = {"0", "1", "LPS"}
+
 
 def read_landmarks(filename: Path) -> np.ndarray | None:
-    """Read Slicer-style fiducial landmarks from disk."""
-    data = None
+    """Read Slicer-style fiducial landmarks from disk, in LPS. A file without a
+    ``# CoordinateSystem`` line is LPS, as 3D Slicer reads it."""
+    coordinate_system = "LPS"
     with open(filename, newline="") as csvfile:
-        reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
-        lines = list(reader)
-        data = np.zeros((len(list(lines)), 3), dtype=np.double)
-        for i, row in enumerate(lines):
-            data[i] = np.array(row[1:4], dtype=np.double)
-        csvfile.close()
+        lines = csvfile.readlines()
+    for line in filter(lambda row: row[0] == "#", lines):
+        key, _, value = line[1:].partition("=")
+        if key.strip() == "CoordinateSystem":
+            coordinate_system = value.strip()
+    if coordinate_system.upper() not in _RAS | _LPS:
+        raise DatasetManagerError(
+            f"'{filename}' declares '# CoordinateSystem = {coordinate_system}'.",
+            "KonfAI reads landmarks given in RAS (RAS) or LPS (LPS, 1 or 0).",
+        )
+    rows = list(csv.reader(filter(lambda row: row[0] != "#", lines)))
+    data = np.zeros((len(rows), 3), dtype=np.double)
+    for i, row in enumerate(rows):
+        data[i] = np.array(row[1:4], dtype=np.double)
+    if coordinate_system.upper() in _RAS:
+        data[:, :2] *= -1
     return data
 
 

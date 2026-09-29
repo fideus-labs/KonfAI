@@ -41,7 +41,13 @@ from konfai import current_date
 from konfai.utils.budget import budget_share
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import Attribute, _encode_transform_leaves, image_to_data
-from konfai.utils.dataset.staging import _REPLACED_MARKER, _orphaned_backup_names, _replaced_name, is_staging_entry
+from konfai.utils.dataset.staging import (
+    _REPLACED_MARKER,
+    _orphaned_backup_names,
+    _replaced_name,
+    _retire_dead_debris,
+    is_staging_entry,
+)
 from konfai.utils.dataset.stream import DataStream
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning
 
@@ -263,16 +269,25 @@ class H5File(AbstractFile):
             else:
                 _h5_read_pool.drop(self.filename)
                 if not os.path.exists(self.filename):
-                    Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
-                    self.h5 = _open_h5(self.filename, "w")
-                else:
-                    self.h5 = _open_h5(self.filename, "r+")
+                    self._create_empty_store()
+                self.h5 = _open_h5(self.filename, "r+")
                 self.h5.attrs["Date"] = current_date()
         except BaseException:
             self._lock.release()
             self._lock = None
             raise
         return self.h5
+
+    def _create_empty_store(self) -> None:
+        """Put an empty, closed store under the final name. HDF5 writes a new file's root group out
+        only when the file closes, so a store created by the write itself does not open again if
+        that write is killed."""
+        Path(self.filename).parent.mkdir(parents=True, exist_ok=True)
+        staging = DataStream.staging_path(self.filename)
+        _open_h5(staging, "w").close()
+        os.replace(staging, self.filename)
+        with contextlib.suppress(Exception):
+            _retire_dead_debris(Path(self.filename))  # housekeeping: it cannot fail the write
 
     def __exit__(self, exc_type, value, traceback):
         try:
@@ -332,7 +347,7 @@ class H5File(AbstractFile):
             data, attributes_tmp = image_to_data(data)
             attributes.update(attributes_tmp)
         elif isinstance(data, sitk.Transform):
-            data = np.asarray(_encode_transform_leaves(data, name, attributes))
+            data = _encode_transform_leaves(data, name, attributes)
 
         h5_group, name = self._resolve_group(name)
         # Staged under a temp name and moved, never created under the final one; the old entry is

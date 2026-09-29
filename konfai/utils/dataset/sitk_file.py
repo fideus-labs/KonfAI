@@ -24,6 +24,7 @@ import functools
 import glob
 import os
 import re
+import shutil
 import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
 from pathlib import Path
@@ -287,9 +288,7 @@ class SitkFile(AbstractFile):
         attributes = Attribute()
         if path.endswith(".itk.txt"):
             _require_sitk(path)
-            datas = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
-            max_len = max(len(v) for v in datas)
-            data = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
+            data = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
         elif path.endswith(".fcsv"):
             data = cast(np.ndarray, read_landmarks(Path(path)))
         elif path.endswith(".xml"):
@@ -376,8 +375,23 @@ class SitkFile(AbstractFile):
             # so a reader must never meet the entry while it is being written.
             final = f"{self.filename}{name}.{self.file_format}"
             staging = DataStream.staging_path(final)
-            sitk.WriteImage(data, staging)
-            os.replace(staging, final)
+            if self.file_format in ("mhd", "hdr", "img"):
+                # Header and pixels are two files, the header naming the pixels: both are written under
+                # their final names in a staging directory, then moved in, the entry's own file last.
+                while True:  # a writer killed under a reused pid may have left this very name
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(staging)
+                        break
+                    staging = DataStream.staging_path(final)
+                try:
+                    sitk.WriteImage(data, os.path.join(staging, os.path.basename(final)))
+                    for part in sorted(os.listdir(staging), key=lambda part: part == os.path.basename(final)):
+                        os.replace(os.path.join(staging, part), os.path.join(os.path.dirname(final), part))
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
+            else:
+                sitk.WriteImage(data, staging)
+                os.replace(staging, final)
             with contextlib.suppress(Exception):
                 _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write
         elif sitk is not None and isinstance(data, sitk.Transform):

@@ -232,6 +232,36 @@ def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkey
     )
 
 
+def test_a_dicom_series_rewritten_between_two_calls_is_read_as_it_now_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another tool re-saves the series in place between two calls: the second call reads the header
+    a fresh process reads, not the one the first call memoised."""
+    pydicom = pytest.importorskip("pydicom")
+    from konfai.utils.dataset import Attribute, Dataset
+
+    monkeypatch.chdir(tmp_path)
+    attributes = Attribute()
+    attributes["Origin"], attributes["Spacing"], attributes["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+    volume = np.arange(4 * 8 * 8, dtype=np.int16).reshape(1, 4, 8, 8)
+    Dataset(tmp_path / "Raw", "dicom").write("CT", "P000", volume, attributes)
+
+    def run(name: str) -> tuple[float, ...]:
+        chains = {"CT": {"CT": [Write(dataset=f"./{name}:mha")]}}
+        api.transform(name, "./Raw:dicom", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+        return sitk.ReadImage(str(tmp_path / name / "P000" / "CT.mha")).GetSpacing()
+
+    assert run("First") == (1.0, 1.0, 1.0)
+    for path in sorted((tmp_path / "Raw" / "P000" / "CT").glob("*.dcm")):
+        dataset = pydicom.dcmread(path)
+        dataset.PixelSpacing = [2.0, 2.0]
+        dataset.save_as(path)
+    from konfai.utils.dicom import read_dicom_series  # the unmemoised read, as a fresh process sees it
+
+    assert tuple(read_dicom_series(tmp_path / "Raw" / "P000" / "CT")[2]) == (2.0, 2.0, 1.0)
+    assert run("Second") == (2.0, 2.0, 1.0)
+
+
 def test_one_workflow_at_a_time_per_process(cohort: Path) -> None:
     assert api._ACTIVE.acquire(blocking=False)
     try:
