@@ -127,6 +127,17 @@ of reading was hidden behind the chain. The longest of the three stages is the
 floor the run cannot go below; when one of them is close to the wall clock, that
 is the one to work on.
 
+A run that read an OME-Zarr store also says what its decoded-chunk cache did:
+
+```text
+[KonfAI] decoded-chunk cache: 1840 hit(s), 460 miss(es), 0 eviction(s)
+```
+
+Every chunk a read touches is a hit (served from the cache) or a miss (decoded).
+Evictions are chunks dropped under the cache's share of `memory_budget`: many of
+them beside a high miss count mean the regions touch more chunks than the cache
+holds, and a larger budget reads each chunk fewer times.
+
 ## Read the plan before you read anything else
 
 Every run plans first, and a run that proceeds opens its log with that plan,

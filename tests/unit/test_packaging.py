@@ -104,8 +104,17 @@ def test_errors_module_importable() -> None:
 def test_local_vram_query_requires_monitoring_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "pynvml", None)  # an import of it now raises ImportError
 
+    monkeypatch.setitem(sys.modules, "pynvml", None)  # what an install without nvidia-ml-py imports
+
     with pytest.raises(KonfAIError, match="nvidia-ml-py"):
         konfai.get_vram([0])
+
+
+def test_import_konfai_leaves_the_monitoring_libraries_to_their_use() -> None:
+    """``konfai --help`` imports the package: psutil and pynvml load only when get_ram/get_vram run."""
+    script = "import sys, konfai.main; print(sorted({'psutil', 'pynvml'} & set(sys.modules)))"
+    completed = subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+    assert completed.stdout.strip() == "[]"
 
 
 def test_itk_helper_requires_simpleitk(monkeypatch: pytest.MonkeyPatch) -> None:

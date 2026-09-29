@@ -1465,3 +1465,11 @@ def test_a_resume_model_that_is_no_checkpoint_is_refused_by_name(tmp_path: Path)
     with pytest.raises(TrainerError, match="is a directory") as refused:
         trainer._load()
     assert "resume_latest.pt" in str(refused.value)
+
+
+def test_the_trainer_docstring_names_every_config_key() -> None:
+    import inspect
+
+    documented = inspect.getdoc(Trainer) or ""
+    keys = [name for name in inspect.signature(Trainer.__init__).parameters if name != "self"]
+    assert [key for key in keys if f"{key} (" not in documented] == []

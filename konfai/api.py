@@ -105,8 +105,11 @@ def _working_directory_importable() -> Iterator[None]:
     (``konfai.main`` puts it on ``sys.path``). Held for the whole call: spawned ranks import the
     workflow's classes through the ``sys.path`` they copy from this process. Searched last, so a module
     that already resolves keeps resolving to the same file."""
-    cwd = os.getcwd()
-    if cwd in sys.path:
+    try:
+        cwd: str | None = os.getcwd()
+    except OSError:  # a deleted working directory holds no module to import
+        cwd = None
+    if cwd is None or cwd in sys.path:
         yield
         return
     sys.path.append(cwd)
@@ -903,11 +906,12 @@ def predict(
     # A bare str is a Sequence[str]: "best.pt" would expand per character.
     if isinstance(models, (str, Path)):
         models = [models]
-    checkpoint_sources([Path(model) for model in models])
+    checkpoints = [Path(model) for model in models]  # one pass: a generator (Path.glob) is read once
+    checkpoint_sources(checkpoints)
     return _launch(
         len(gpu or []) or cpu,
         lambda: build_predict(
-            models=[Path(model) for model in models],
+            models=checkpoints,
             prediction_file=_config_copy(config),
             predictions_dir=predictions_dir,
         ),

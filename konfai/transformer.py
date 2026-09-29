@@ -65,7 +65,7 @@ from konfai.utils.budget import (
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, refuse_shared_single_file
 from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
-from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache
+from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache, chunk_cache_counts
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -959,6 +959,7 @@ class Transformer(DistributedObject):
         chain_device = torch.device(f"cuda:{device}") if isinstance(device, int) else device
         started = time.monotonic()
         SWEEP_CLOCK.reset()
+        cache_counts = chunk_cache_counts()  # the cache outlives the run: its counts are read as a difference
         # What a region is measured above: the process as it stands before its first case. Released
         # with the run; the closing line below reads the peak first.
         record_resident_floor()
@@ -1007,6 +1008,11 @@ class Transformer(DistributedObject):
             held = self._held_line()
             if held is not None:
                 print(f"[KonfAI] {who}{held}")
+            hits, misses, evictions = (
+                now - before for now, before in zip(chunk_cache_counts(), cache_counts, strict=True)
+            )
+            if hits + misses:
+                print(f"[KonfAI] {who}decoded-chunk cache: {hits} hit(s), {misses} miss(es), {evictions} eviction(s)")
             if failed and world_size > 1 and self._report_to_launcher:
                 self._failures_file(global_rank).write_text(json.dumps(failed), encoding="utf-8")
             elif failed:
