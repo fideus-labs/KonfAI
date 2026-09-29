@@ -92,7 +92,7 @@ From a checkout:
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 pixi install           # every environment, locked
-pixi run test-fast     # the iteration loop, about 1 min 40
+pixi run test-fast     # the iteration loop, about 25 s
 pixi run lint          # ruff over the source tree
 pixi run check         # lint + format + tests, before pushing
 ```
@@ -108,7 +108,7 @@ environment:
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 python -m pip install -e ".[imaging,dev]"
-pytest -q tests/
+pytest tests/
 ```
 
 ## GPU

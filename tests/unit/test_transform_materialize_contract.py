@@ -135,11 +135,10 @@ def _check(
     assert np.asarray(expected).ndim == len(header_expected.get_np_array("Spacing")) + 1
 
     streamed = _manager(dataset, case, tmp_path / "Streamed", fmt)
-    # A stage the sweep cannot serve (it changes the rank, it needs the volume) says so -- up front
-    # or on the first slab -- and the whole-volume path writes the case: the contract then is the
-    # shape asserted above, and there is no streamed store to compare.
-    if CaseMaterializer(streamed).materialize(fallback_budget_bytes=1 << 30, device=dev) is not Verdict.STREAM:
-        pytest.skip(f"took the whole-volume path: {streamed.stream_refusal() or streamed._sweep_failure}")
+    # Every case here declares that a region of it can be served, so it must stream: the sweep turns
+    # a failed region into a whole-volume write with only a warning, which would pass for a result.
+    verdict = CaseMaterializer(streamed).materialize(fallback_budget_bytes=1 << 30, device=dev)
+    assert verdict is Verdict.STREAM, streamed.stream_refusal() or streamed._sweep_failure
     got, header_got = Dataset(tmp_path / "Streamed", fmt).read_data(case.group, CASE_NAME)
     assert got.shape == expected.shape
     assert got.dtype == expected.dtype

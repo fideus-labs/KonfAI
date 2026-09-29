@@ -389,12 +389,12 @@ def test_it_is_refused_as_a_patch_transform(dataset: Dataset, monkeypatch: pytes
 
 
 def test_a_differing_direction_is_resampled_and_not_refused(tmp_path: Path) -> None:
-    """Axes that do not line up used to be refused. They are a rotation, and a rotation is ordinary.
+    """Axes that do not line up are a rotation, and a rotation is resampled, not refused.
 
-    The old map was a scale and a shift per axis, which no rotation is, so the stage refused and told
-    the reader to run ``Canonical`` first: a second resample, and a second interpolation of the
-    same voxels. The source region of a target region is now that region's world box mapped through
-    the map and read back as an index window, which a rotation answers as readily as a translation.
+    The source region of a target region is that region's world box mapped through the map and read
+    back as an index window, which a rotation answers as readily as a translation. A per-axis scale
+    and shift, which no rotation is, would send the reader to run ``Canonical`` first: a second
+    resample, and a second interpolation of the same voxels.
     """
     dataset = Dataset(tmp_path / "Rotated", "mha")
     turned = np.asarray([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
@@ -904,9 +904,8 @@ def test_a_field_on_another_direction_is_read_where_it_is_asked(
 ) -> None:
     """A field stored on rotated axes is still a displacement in world units, and is read as one.
 
-    It used to be refused for the same reason a rotated reference was: the map onto the field's grid
-    was a per-axis scale and shift. It is now the field's own ``world -> index``, so where the field
-    was stored stops being a constraint on where it can be applied.
+    The map onto the field's grid is the field's own ``world -> index``, not a per-axis scale and
+    shift, so where the field was stored is no constraint on where it can be applied.
     """
     images, _fields, volume = warped
     turned = Dataset(tmp_path / "Turned", "h5")

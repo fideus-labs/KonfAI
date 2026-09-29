@@ -270,7 +270,7 @@ python -m pip install -e "./konfai-apps[server]"
 Run the package test suite:
 
 ```bash
-pytest -q konfai-apps/tests
+pytest konfai-apps/tests
 ```
 
 The tests are split into:

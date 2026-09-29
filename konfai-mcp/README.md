@@ -340,16 +340,16 @@ entrypoint is the package command, not an ad hoc wrapper script.
 Run the full MCP test suite:
 
 ```bash
-pytest -q konfai-mcp/tests
+pytest konfai-mcp/tests
 ```
 
 Useful subsets:
 
 ```bash
-pytest -q konfai-mcp/tests/test_mcp_server.py
-pytest -q konfai-mcp/tests/test_mcp_server_pipeline.py
-pytest -q konfai-mcp/tests/test_mcp_server_segmentation_pipeline.py
-pytest -q konfai-mcp/tests/test_mcp_server_reliability.py
+pytest konfai-mcp/tests/test_mcp_server.py
+pytest konfai-mcp/tests/test_mcp_server_pipeline.py
+pytest konfai-mcp/tests/test_mcp_server_segmentation_pipeline.py
+pytest konfai-mcp/tests/test_mcp_server_reliability.py
 ```
 
 The `test_mcp_server_segmentation_pipeline.py` end-to-end test drives a full
@@ -365,7 +365,7 @@ which:
 - lints and format-checks `konfai_mcp`
 - builds the standalone MCP package
 - smoke-imports `konfai_mcp`
-- runs `pytest -q konfai-mcp/tests`
+- runs `pytest konfai-mcp/tests`
 
 ## Current Scope and Limitations
 

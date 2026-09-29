@@ -784,12 +784,9 @@ def test_a_budget_with_room_folds_the_whole_volume(tmp_path: Path) -> None:
 
 
 def test_a_reduction_accounts_for_every_second_of_its_own_wall_clock(tmp_path: Path) -> None:
-    """A work item that reads N volumes must appear in the run's one accounting line.
-
-    Measured on a 5 x 384 MiB cohort (.audit-local/bench/bench_reduce_expand.py): the member reads
-    are 13-40 % of the work item, the operator 13-37 %, the write 4-9 %. None of it was attributed:
-    the fold reads through ``read_region``, which no phase of the sweep clock covers.
-    """
+    """A work item that reads N volumes must appear in the run's one accounting line: its member
+    reads (through ``read_region``), its operator and its write each fall under a phase of the
+    sweep clock."""
     SWEEP_CLOCK.reset()
     engine, _destination, _volumes = _run(tmp_path, [], Reduce(operator="Mean", output="clocked"), [])
     assert engine.materialize() is True
@@ -808,9 +805,9 @@ def test_a_reduction_accounts_for_every_second_of_its_own_wall_clock(tmp_path: P
 def test_the_fold_charges_the_operator_s_own_work_to_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An incremental operator does the reduction in ``accumulate``, not in ``finalize``.
 
-    Timed around ``finalize`` alone, the line credited a ``Mean`` or a ``Std`` with the last
-    division and left every addition it made in ``other``: the phase that is supposed to say what
-    the reduction costs under-reported it by the whole of the fold.
+    Timed around ``finalize`` alone, the line would credit a ``Mean`` or a ``Std`` with the last
+    division and leave every addition it made in ``other``: the phase that is supposed to say what
+    the reduction costs would under-report it by the whole of the fold.
     """
     delay = 0.02
     accumulate = Mean.accumulate
@@ -900,8 +897,7 @@ def test_the_plan_prices_the_source_window_a_member_pulls(tmp_path: Path) -> Non
 def test_a_budget_no_region_fits_is_refused_rather_than_cut_to_one_row(tmp_path: Path) -> None:
     """Below one row there is nothing to cut, and no whole-volume path to fall back to: the sizing
     stops at one row and the plan reports a peak above the budget, which is what the workflow
-    refuses on. Sizing it to something that does not fit and running anyway is what a linear
-    extrapolation through one height used to do."""
+    refuses on. A size extrapolated linearly through one height would not fit and would run anyway."""
     resampled = _run(tmp_path / "tight", [Resample(spacing=[1.0, 1.0, 2.0])], Reduce(operator="Mean", output="t"), [])[
         0
     ]

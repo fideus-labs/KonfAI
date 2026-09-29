@@ -1,7 +1,7 @@
 # Test suite conventions
 
 - **One test file per module under test.** `tests/unit/test_<module>.py` is named after the `konfai`
-  module it covers (`test_patching.py` → `data/patching.py`). Feature files (`test_streamed_tta.py`,
+  module it covers (`test_geometry.py` → `data/geometry.py`). Feature files (`test_streamed_tta.py`,
   `test_auto_patching.py`) exist only when a feature spans modules.
 - **Regression pins live in the module's file**, with a docstring/comment stating the *property* being
   pinned (see `test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`): never in batch "fixes" files.

@@ -74,7 +74,7 @@ def synthesize(root: Path, gib: float) -> tuple[Path, list[int]]:
     import h5py
 
     voxels = int(gib * 2**30 / 4)  # float32
-    side = max(64, int(round((voxels / 4) ** (1 / 3))))  # anisotropic: 4x taller than wide
+    side = max(64, round((voxels / 4) ** (1 / 3)))  # anisotropic: 4x taller than wide
     shape = [4 * side, side, side]
     store = root / "Dataset.h5"
     rng = np.random.default_rng(0)

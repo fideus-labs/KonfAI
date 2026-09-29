@@ -14,6 +14,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -45,12 +46,17 @@ jobs:
           pip install -e ./konfai-mcp
 
       - name: Run konfai tests
+        # The environment of konfai_ci's pytest step, which this gate repeats: one torch thread per
+        # xdist worker, and every thread's Python stack on a native crash.
+        env:
+          OMP_NUM_THREADS: "1"
+          PYTHONFAULTHANDLER: "1"
         run: |
-          pytest -q -n auto --dist loadfile tests
+          pytest -n auto --dist loadfile tests
 
       - name: Run konfai-apps tests
         run: |
-          python -m pytest -q konfai-apps/tests
+          python -m pytest konfai-apps/tests
 
       - name: Install app bundles
         run: |
@@ -64,7 +70,7 @@ jobs:
 
       - name: Run konfai-mcp tests
         run: |
-          python -m pytest -q konfai-mcp/tests
+          python -m pytest konfai-mcp/tests
 
       - name: Install standalone Studio package
         run: |
@@ -91,6 +97,7 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -175,6 +182,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write
@@ -201,6 +209,7 @@ jobs:
   github_release:
     needs: publish
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write  # to create the release
 
@@ -252,6 +261,7 @@ jobs:
   publish_docker:
     needs: publish
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
 

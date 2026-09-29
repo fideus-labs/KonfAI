@@ -1,7 +1,8 @@
 name: konfai_ci
 
-# config_guide and examples/Transform are sources here: the integration tests extract the YAML blocks
-# from those pages and run the example's configs as shipped, so editing either is editing a fixture.
+# docs, examples, benchmarks/perf, .github/scripts and CHANGELOG.md are sources here: the tests extract
+# the YAML blocks of the config guide, bind every example's configs as shipped, and check the perf gate,
+# the release-notes script and the changelog it reads, so editing any of them is editing a fixture.
 on:
   push:
     branches: [main]
@@ -11,7 +12,10 @@ on:
       - "konfai-apps/**"
       - "tests/**"
       - "docs/**"
-      - "examples/Transform/**"
+      - "examples/**"
+      - "benchmarks/**"
+      - ".github/scripts/**"
+      - "CHANGELOG.md"
       - "pyproject.toml"
       - "README.md"
   pull_request:
@@ -21,7 +25,10 @@ on:
       - "konfai-apps/**"
       - "tests/**"
       - "docs/**"
-      - "examples/Transform/**"
+      - "examples/**"
+      - "benchmarks/**"
+      - ".github/scripts/**"
+      - "CHANGELOG.md"
       - "pyproject.toml"
       - "README.md"
   schedule:
@@ -31,9 +38,15 @@ on:
 permissions:
   contents: read
 
+# Only a pull request's runs share a group: a newer push cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   konfai_ci:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       # A pull request runs the representative lanes: every Python on Linux, and the OS-sensitive
@@ -76,7 +89,7 @@ jobs:
           # A native crash (the macOS workflow SIGSEGV) prints every thread's Python stack.
           PYTHONFAULTHANDLER: "1"
         run: |
-          pytest -q -n auto --dist loadfile tests
+          pytest -n auto --dist loadfile tests
 
       - name: Upload macOS crash reports
         # The native backtrace of a crashed Python lives only in the runner's DiagnosticReports.
@@ -89,6 +102,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -107,10 +121,11 @@ jobs:
         run: pip install ruff==0.15.2
 
       - name: Run ruff lint
-        run: ruff check konfai konfai-apps/konfai_apps apps tests
+        run: ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -135,6 +150,7 @@ jobs:
 
   format:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -153,10 +169,11 @@ jobs:
         run: pip install ruff==0.15.2
 
       - name: Check formatting
-        run: ruff format --check konfai konfai-apps/konfai_apps apps tests
+        run: ruff format --check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs
 
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -189,6 +206,7 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -218,8 +236,9 @@ jobs:
         # The wheel contract lives in one place: the slow tests check the wheel built above against
         # the source tree and install it NON-editable in a fresh venv (the test job's editable
         # install hides PEP 420/package-data breakage). KONFAI_WHEEL points them at that wheel
-        # instead of building a second one.
-        run: pytest tests/unit/test_packaging.py -m slow
+        # instead of building a second one. The whole file runs, not only its slow tests: the sibling
+        # pin test needs setuptools-scm, which this job installs and the test job does not.
+        run: pytest tests/unit/test_packaging.py
         env:
           KONFAI_WHEEL: dist
 

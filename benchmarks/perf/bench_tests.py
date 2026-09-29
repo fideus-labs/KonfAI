@@ -18,7 +18,7 @@
 
     python benchmarks/perf/bench_tests.py [--force] [--quick] [--with-full] [--skip-unpinned]
 
-Runs ``pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/`` twice from the
+Runs ``pytest -n auto --dist loadfile -m "not slow and not integration" tests/`` twice from the
 repository root: pinned (``OMP_NUM_THREADS=1``, ``MKL_NUM_THREADS=1``, what the pixi test tasks set)
 and unpinned (both unset, a bare ``pytest``), and records the wall, the CPU-seconds of the whole worker
 tree (``RUSAGE_CHILDREN``, which counts the waited-for descendants pytest-xdist leaves behind) and the

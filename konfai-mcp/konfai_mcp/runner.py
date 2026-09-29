@@ -551,7 +551,7 @@ def _collect_model_outputs(workflow_object: Any, workflow: str) -> dict[str, lis
         if not hasattr(value, "named_module_args_dict") and hasattr(value, "get_model"):
             try:
                 probe(attr, value.get_model(train=workflow == "train"))
-            except Exception:  # a loader that cannot build outside setup is simply skipped
+            except Exception:  # nosec B112 - a loader that cannot build outside setup is simply skipped
                 continue
     return {
         label: [
@@ -696,7 +696,7 @@ def _check_worker_spawn_picklability(workflow_object: Any, requested_num_workers
     result: dict[str, Any] = {"requested_num_workers": requested_num_workers, "checked": False}
     if requested_num_workers <= 0:
         return result
-    import pickle
+    import pickle  # nosec B403 - dumps only: it probes what a DataLoader worker would receive
 
     datasets: list[Any] = []
     for group in getattr(workflow_object, "dataloader", []) or []:

@@ -472,8 +472,8 @@ def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(t
     dataset_path = tmp_path / "Dataset"
     dataset_storage = Dataset(dataset_path, "mha")
     volume = np.arange(1 * 4 * 4, dtype=np.float32).reshape(1, 4, 4)
-    dataset_storage.write("CT", "CASE_000", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
-    dataset_storage.write("CT", "CASE_001", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset_storage.write("CT", "CASE_000", volume, geometry([0.0, 0.0], [1.0, 1.0]))
+    dataset_storage.write("CT", "CASE_001", volume, geometry([0.0, 0.0], [1.0, 1.0]))
 
     augmentations = DataAugmentationsList(nb=1, data_augmentations={})
     dataset = DataTrain(
@@ -531,7 +531,7 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
     store = Dataset(tmp_path / "Dataset", "mha")
     for name in names:
         for group in ("CT", "SEG"):
-            store.write(group, name, np.zeros((1, 4, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+            store.write(group, name, np.zeros((1, 4, 4), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     constructed: list[tuple[str, int]] = []
 
     class CountingManager(DatasetManager):
@@ -589,10 +589,6 @@ def test_cache_worker_count_never_drops_below_one() -> None:
 # --------------------------------------------------------------------------------------
 # B3 - patch streaming must persist TensorCast dtype for the inverse
 # --------------------------------------------------------------------------------------
-
-
-def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    return geometry(origin, spacing)
 
 
 def test_a_statistic_only_a_pass_can_give_is_measured_once_for_the_run(streaming_dataset_stub) -> None:
@@ -995,13 +991,13 @@ def test_cross_group_patch_count_check_names_the_case_the_groups_and_their_shape
 
 
 def test_destination_groups_with_disagreeing_grids_are_refused_at_prepare(tmp_path: Path) -> None:
-    """Two chains folding a case to different grids used to surface as an IndexError deep in a
-    loader worker (last group counted larger) or as silently unenumerated patches (smaller): the
-    disagreement is a config error and must be refused before a single patch is read."""
+    """Two chains folding a case to different grids are a config error, refused before a single patch
+    is read: let through, they surface as an IndexError deep in a loader worker (last group counted
+    larger) or as silently unenumerated patches (smaller)."""
     pytest.importorskip("SimpleITK")
     store = Dataset(tmp_path / "Dataset", "mha")
-    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
-    store.write("SEG", "CASE_000", np.zeros((1, 8, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
+    store.write("SEG", "CASE_000", np.zeros((1, 8, 4), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     dataset = DataPrediction(
         augmentations=None,
         dataset_filenames=[f"{tmp_path / 'Dataset'}:mha"],
@@ -1022,7 +1018,7 @@ def test_a_one_pass_source_holds_two_cases_whatever_its_batch_size(tmp_path: Pat
     batch kept batch_size + 1 whole cases loaded, and a cohort's RAM grew by a case per case."""
     pytest.importorskip("SimpleITK")
     store = Dataset(tmp_path / "Dataset", "mha")
-    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     groups = {"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})}
 
     prediction = DataPrediction(
@@ -1471,7 +1467,7 @@ def _prepared_prediction(root: Path, file_format: str, **kwargs) -> DataPredicti
     """A prediction over two 8x8 cases stored in ``file_format``, its managers built."""
     store = Dataset(root, file_format)
     for name in ("CASE_000", "CASE_001"):
-        store.write("CT", name, np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+        store.write("CT", name, np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     dataset = DataPrediction(
         augmentations=None,
         dataset_filenames=[f"{root}:{file_format}"],
@@ -1869,7 +1865,7 @@ class InfoCountingDataset:
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         assert group == "CT"
         self.info_calls += 1
-        return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+        return [1, 2, 2], geometry([0.0, 0.0], [1.0, 1.0])
 
 
 def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1882,9 +1878,7 @@ def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, m
     store = Dataset(tmp_path / "Dataset", "mha")
     for index in range(4):
         for group in ("CT", "SEG"):
-            store.write(
-                group, f"CASE_{index:03d}", np.zeros((1, 4, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0])
-            )
+            store.write(group, f"CASE_{index:03d}", np.zeros((1, 4, 4), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     counts = {"datasets": 0, "parsed": 0, "cached": 0}
     dataset_init, dataset_get_infos = Dataset.__init__, Dataset.get_infos
 

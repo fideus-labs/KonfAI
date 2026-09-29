@@ -97,7 +97,7 @@ def _run_job(
                 try:
                     handle.write(f"\n[konfai-mcp] job process terminated by signal {signum}.\n")
                     handle.flush()
-                except Exception:
+                except Exception:  # nosec B110 - the log may be closed already; the signal is re-raised below
                     pass
                 signal.signal(signum, signal.SIG_DFL)
                 os.kill(os.getpid(), signum)

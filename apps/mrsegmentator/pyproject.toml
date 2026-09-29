@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
+requires = ["setuptools>=77", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "mrsegmentator-konfai"
 dynamic = ["version", "dependencies"]
 description = "Fast and lightweight MRSegmentator CLI powered by the KonfAI framework."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 
 authors = [

@@ -370,9 +370,9 @@ def test_a_crop_writes_the_region_of_interest_header_on_every_route(
 def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No chain declared scores the values as stored: two groups each rescaled to [-1, 1] by their own
-    extrema no longer differ where they did. On a pair related by ``0.9 x + 0.05`` that reported MAE
-    1.9e-8 for 0.025."""
+    """No chain declared scores the values as stored. Two groups each rescaled to [-1, 1] by their own
+    extrema would lose the difference between them: on a pair related by ``0.9 x + 0.05`` the MAE
+    would read 1.9e-8 for 0.025."""
     monkeypatch.chdir(tmp_path)
     truth = np.linspace(0.0, 1.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)
     prediction = (0.9 * truth + 0.05).astype(np.float32)
@@ -441,8 +441,8 @@ def test_a_gpu_the_process_does_not_see_is_refused_before_the_run(
 
 
 def test_an_evaluation_yml_without_transforms_scores_the_stored_values(tmp_path: Path) -> None:
-    """The key a hand-written Evaluation.yml leaves out once bound a min-max Normalize per group: a
-    prediction 10 HU off its reference scored a MAE of 1e-10, exit 0."""
+    """A hand-written Evaluation.yml that leaves out the groups' transforms scores the stored values:
+    a min-max Normalize per group would score a prediction 10 HU off its reference at an MAE of 1e-10."""
     from konfai.evaluator import evaluate
 
     truth = np.linspace(-100.0, 100.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)

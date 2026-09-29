@@ -175,7 +175,7 @@ def test_init_func_centres_batchnorm_gamma_on_one() -> None:
 
 
 def test_load_state_dict_warm_starts_resized_layer_and_keeps_siblings() -> None:
-    """#2 A resized layer must warm-start, and sibling layers must still load.
+    """A resized layer must warm-start, and sibling layers must still load.
 
     Checking ``isinstance(module, Linear)`` on the parent instead of the child,
     or an early ``return``, aborts loading the remaining siblings of a resized
@@ -657,7 +657,7 @@ def _make_accumulating_measure(scaler) -> tuple[Measure, torch.Tensor]:
 
 
 def test_accumulation_backward_uses_scaler_scale() -> None:
-    """#AMP: accumulation losses must be scaled before backward when a GradScaler is set."""
+    """Accumulation losses must be scaled before backward when a GradScaler is set."""
     scaler = MagicMock()
     scaled = MagicMock()
     scaler.scale.return_value = scaled
@@ -1096,7 +1096,7 @@ class TestUnknownStringBranch:
 # Learning-rate schedulers in ``konfai.metric.schedulers`` (Network.load resync)
 # ---------------------------------------------------------------------------
 def test_polylr_resync_resumes_from_last_epoch() -> None:
-    """#scheduler: PolyLR must honour a resync that sets last_epoch (RESUME fast-forward)."""
+    """PolyLR must honour a resync that sets last_epoch (RESUME fast-forward)."""
     param = torch.nn.Parameter(torch.zeros(1))
     opt = torch.optim.SGD([param], lr=0.1)
     scheduler = PolyLRScheduler(opt, initial_lr=0.1, max_steps=100)

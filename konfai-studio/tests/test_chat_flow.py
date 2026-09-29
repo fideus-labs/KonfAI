@@ -348,6 +348,11 @@ def test_the_index_is_never_cached_and_the_assets_always_are(studio: tuple[TestC
     client, _agent, _ = studio
     from konfai_studio.server import WEB_DIR
 
+    if not (WEB_DIR / "index.html").is_file():
+        pytest.skip("front not built in this tree")
+    index = client.get("/")
+    assert "no-cache" in index.headers.get("cache-control", ""), "a cached index pins the old front"
+
     built = sorted((WEB_DIR / "assets").glob("*.js")) if (WEB_DIR / "assets").is_dir() else []
     if not built:
         pytest.skip("front not built in this tree")

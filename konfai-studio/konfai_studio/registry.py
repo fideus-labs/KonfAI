@@ -218,7 +218,7 @@ class _Registry:
                 if old is not None:
                     try:
                         await old.__aexit__(None, None, None)
-                    except Exception:
+                    except Exception:  # nosec B110 - a failing close must not keep the agent from being replaced
                         pass
             if state.agent is None:
                 state.agent = await make_agent(
@@ -242,7 +242,7 @@ class _Registry:
             if agent is not None:
                 try:
                     await agent.__aexit__(None, None, None)
-                except Exception:
+                except Exception:  # nosec B110 - a failing close must not keep the session from being deleted
                     pass
         if not _delete_workspace(name):
             return False  # still on disk: the next listing would adopt it straight back
