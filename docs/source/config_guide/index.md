@@ -344,7 +344,8 @@ constructor trees that the framework accepts.
 
 When a config does not behave as expected, check these rules first:
 
-- the YAML root must match the workflow you are launching
+- the YAML root must match the workflow you are launching: a file that declares
+  another root is refused and left as it was
 - nested section names must match constructor parameters or any explicit
   `@config("...")` keys you chose
 - local `classpath` modules must be importable from the current working directory

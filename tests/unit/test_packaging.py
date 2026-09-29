@@ -102,7 +102,7 @@ def test_errors_module_importable() -> None:
 
 
 def test_local_vram_query_requires_monitoring_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(konfai, "_PYNVML_AVAILABLE", False)
+    monkeypatch.setitem(sys.modules, "pynvml", None)  # an import of it now raises ImportError
 
     with pytest.raises(KonfAIError, match="nvidia-ml-py"):
         konfai.get_vram([0])

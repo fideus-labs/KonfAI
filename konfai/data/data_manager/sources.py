@@ -49,6 +49,7 @@ from konfai.data.transform import (
     Save,
     Write,
 )
+from konfai.utils import uri
 from konfai.utils.budget import (
     MemoryBudget,
     format_bytes,
@@ -222,8 +223,16 @@ class DataSources(ABC):
 
         for group_src in self.groups_src:
             if group_src not in datasets:
+                # A local root that is not there lists as empty: named, it is not taken for an empty cohort.
+                missing = [
+                    f"Dataset root '{filename}' does not exist (resolved: '{Path(dataset.store_root).resolve()}',"
+                    f" working directory: '{Path.cwd()}')."
+                    for filename, dataset in self.datasets.items()
+                    if not uri.is_uri(dataset.store_root) and not dataset.exists_on_disk()
+                ]
                 raise DatasetManagerError(
                     f"Group source '{group_src}' not found in any dataset.",
+                    *missing,
                     f"Dataset filenames provided: {self.dataset_filenames}",
                     f"Available groups across all datasets: "
                     f"{[f'{f} {d.get_group()}' for f, d in self.datasets.items()]}\n"

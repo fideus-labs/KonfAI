@@ -22,6 +22,7 @@ import functools
 import inspect
 import logging
 import os
+import re
 import stat
 import sys
 import time
@@ -41,6 +42,7 @@ import ruamel.yaml
 from konfai.utils.errors import ConfigError, KonfAIWarning
 
 yaml = ruamel.yaml.YAML()
+yaml.width = 4096  # the write-back keeps a long line (a label list, a path) on its line
 _log = logging.getLogger(__name__)
 
 
@@ -266,7 +268,8 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     on a clean exit the difference is reported by path, with the keys read at that level and the closest
     of them: a :class:`ConfigError` when ``refuse``, a warning otherwise. The block must contain
     everything the workflow binds from the file: a key a later, lazily bound callable would read is
-    unknown to it. On entry the file must hold ROOT.
+    unknown to it. On entry a non-empty file must hold ROOT; an empty one receives the default block,
+    with a warning, unless ``refuse``.
 
     The file is read once here and written once when the block ends, whatever the number of contexts
     and nested blocks opened over it: they all resolve against the one tree held in memory, read and
@@ -279,12 +282,17 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     if filename and Path(filename).exists():
         tree = outer.tree if outer is not None else _load_tree(filename)
         if root not in tree:
-            _report(
-                refuse,
-                f"'{filename}' declares no '{root}' root (found: {sorted(str(key) for key in tree)}).",
-                f"This workflow reads the '{root}:' block; anything else is ignored and a full default"
-                " block appended to the file in its place.",
-            )
+            found = f"'{filename}' declares no '{root}' root (found: {sorted(str(key) for key in tree)})."
+            if refuse or tree:
+                # Refused before anything is written: a default block appended beside a misspelled root
+                # would become a duplicate key once the spelling is fixed.
+                raise ConfigError(
+                    found,
+                    f"This workflow reads the '{root}:' block: fix the root's spelling, or pass this"
+                    " workflow's own config file.",
+                )
+            # An empty file is the one a default block is written into.
+            _report(False, found, f"This workflow reads the '{root}:' block: a full default block is written to it.")
         elif tree[root] in (None, "None"):
             # An empty root binds the workflow itself to None: refused whatever `refuse` says.
             raise ConfigError(
@@ -488,13 +496,6 @@ def _tensor_type() -> type | None:
     return getattr(sys.modules.get("torch"), "Tensor", None)
 
 
-_CONFIG_SUPPORTED_TYPES_MESSAGE = (
-    "Config: The config only supports types : config(Object), int, str, "
-    "bool, float, list[int], list[str], list[bool], list[float], "
-    "dict[str, Object]"
-)
-
-
 def _recordable(value):
     """Normalize a default to the form the config file stores and the callable accepts back: an ``Enum``
     as its ``.value``, any other ``type`` as its ``.__name__``."""
@@ -507,14 +508,14 @@ def _recordable(value):
 
 def _annotation_namespace(function) -> dict[str, Any]:
     """The globals an annotation's names resolve against: the function's ``__globals__``, or its
-    ``__init__``'s for a class."""
-    namespace = getattr(function, "__globals__", None)
-    if namespace is None:
-        namespace = getattr(getattr(function, "__init__", None), "__globals__", None)
+    ``__init__``'s for a class. A wrapper (``record_given_arguments``) is followed to the function that
+    wrote the annotations, as ``inspect.signature`` follows it to read them."""
+    target = function if hasattr(function, "__globals__") else getattr(function, "__init__", None)
+    namespace = getattr(inspect.unwrap(target), "__globals__", None) if target is not None else None
     return dict(namespace) if namespace else {}
 
 
-def _resolve_annotation(function, annotation):
+def _resolve_annotation(function, annotation, section_key: str, name: str):
     if annotation in {"int", "float", "bool", "str"}:
         return {"int": int, "float": float, "bool": bool, "str": str}[annotation]
 
@@ -541,8 +542,12 @@ def _resolve_annotation(function, annotation):
                 **({"torch": sys.modules["torch"]} if "torch" in sys.modules else {}),
             },
         )
-    except Exception:
-        return annotation
+    except Exception as exc:
+        raise ConfigError(
+            f"Parameter '{section_key}.{name}' is annotated '{annotation}', which does not resolve: {exc}.",
+            "Import every name the annotation uses at module level (an import under 'if TYPE_CHECKING:' does"
+            " not exist when the config binds).",
+        ) from exc
 
 
 def _unwrap_optional(annotation) -> tuple[Any, bool]:
@@ -591,7 +596,7 @@ def _value_matches_annotation(value: object, annotation: object) -> bool:
 def _convert_union_sequence_value(
     value: object,
     valid_types: tuple[type | object, ...],
-    param_name: str,
+    where: str,
 ) -> object:
     # A value whose runtime type already satisfies a union member is kept as is; coercion in declaration
     # order is lossy (int(0.25) == 0, str([1, 2])) and applies only when no member matches.
@@ -603,9 +608,9 @@ def _convert_union_sequence_value(
     if isinstance(value, Mapping) and not any(get_origin(member) is dict for member in valid_types):
         # No member holds a mapping and `str(mapping)` never fails: refused here, not bound as a repr.
         raise ConfigError(
-            f"Parameter '{param_name}' was given a nested block, but it takes a value.",
+            f"Parameter '{where}' was given a nested block, but it takes a value.",
             f"Expected one of: {valid_types}.",
-            f"Write it on one line ('{param_name}: <value>'); keys nested under it select nothing.",
+            "Write it as a single value on one line; keys nested under it select nothing.",
         )
 
     converted = None
@@ -619,7 +624,7 @@ def _convert_union_sequence_value(
                     return None
                 continue
             if get_origin(candidate_type) in {list, tuple, Sequence, dict}:
-                return _coerce_config_value(value, candidate_type, param_name)
+                return _coerce_config_value(value, candidate_type, where)
             if not isinstance(candidate_type, type):
                 continue
             if candidate_type is _tensor_type():
@@ -627,7 +632,7 @@ def _convert_union_sequence_value(
             elif candidate_type in {int, float, bool, str}:
                 if isinstance(value, Mapping | list | tuple):
                     continue
-                converted = _coerce_config_value(value, candidate_type, param_name)
+                converted = _coerce_config_value(value, candidate_type, where)
             else:
                 converted = candidate_type(value)
             break
@@ -636,7 +641,7 @@ def _convert_union_sequence_value(
 
     if converted is None and value not in (None, "None"):
         raise ConfigError(
-            f"Invalid value '{value}' for parameter '{param_name}'.",
+            f"Invalid value '{value}' for parameter '{where}'.",
             f"Expected one of: {valid_types}.",
             f"Last conversion error: {last_error}" if last_error else "",
         )
@@ -647,7 +652,7 @@ def _convert_union_sequence_value(
 _SKIP = object()
 
 
-def _bind_literal(config: Config, param: inspect.Parameter, annotation, is_optional: bool = False) -> object:
+def _bind_literal(config: Config, param: inspect.Parameter, annotation, is_optional: bool, section_key: str) -> object:
     allowed_values = get_args(annotation)
     default_value = param.default if param.default != inspect._empty else allowed_values[0]
     value = config.get_value(param.name, f"default|{default_value}")
@@ -662,7 +667,9 @@ def _bind_literal(config: Config, param: inspect.Parameter, annotation, is_optio
         if matched:
             value = matched[0]
     if value not in allowed_values:
-        raise ConfigError(f"Invalid value '{value}' for parameter '{param.name}' expected one of: {allowed_values}.")
+        raise ConfigError(
+            f"Invalid value '{value}' for parameter '{section_key}.{param.name}' expected one of: {allowed_values}."
+        )
     return value
 
 
@@ -780,7 +787,7 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
         raise ConfigError(
             f"Parameter '{section_key}.{param.name}' is annotated {annotation}, which the config cannot bind"
             " (dict keys must be str).",
-            _CONFIG_SUPPORTED_TYPES_MESSAGE,
+            "Annotate it dict[str, ...]: a YAML mapping key reaches the binder as a string.",
         )
     values: Any = config.get_value(param.name, param.default)
     if values is None or value_type is Any:
@@ -798,13 +805,26 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
         # The list spelling of a chain: bound under occurrence keys, the level's copy holds the mapping.
         values = _occurrence_mapping(values, f"{section_key}.{param.name}")
         config.config[param.name] = values
-    try:
+    with _locating(f"{section_key}.{param.name}", "Failed to build an entry of"):
         return {
             value: apply_config(f"{section_key}.{param.name}.{_escape_key_component(value)}")(value_type)()
             for value in values
         }
+
+
+@contextmanager
+def _locating(block: str, action: str) -> Iterator[None]:
+    """A failure inside BLOCK surfaces as a ConfigError naming it. A ConfigError that already names BLOCK (or
+    a key under it) passes as is, so a refusal nested N blocks deep reads once, not N times."""
+    try:
+        yield
+    except ConfigError as exc:
+        if re.search(rf"(?<![\w.]){re.escape(block)}(?!\w)", str(exc)):
+            raise
+        head, *hints = exc.args or ("",)
+        raise ConfigError(f"{action} '{block}': {head}", *hints) from exc
     except Exception as exc:
-        raise ConfigError(f"Failed to build an entry of '{section_key}.{param.name}': {exc}") from exc
+        raise ConfigError(f"{action} '{block}': {exc}") from exc
 
 
 def _bind_config_object(config: Config, param: inspect.Parameter, annotation, is_optional: bool, section_key: str):
@@ -821,21 +841,20 @@ def _bind_config_object(config: Config, param: inspect.Parameter, annotation, is
             f"'{section_key}.{annotation_key}' is empty: the workflow cannot run without it.",
             f"Write its settings under '{annotation_key}:', or '{annotation_key}: {{}}' to bind every default.",
         )
-    try:
+    block = f"{section_key}.{annotation_key}" if annotation_key is not None else section_key
+    with _locating(block, f"Failed to instantiate {param.name} with type {annotation} at"):
         return apply_config(section_key)(annotation)()
-    except Exception as exc:
-        raise ConfigError(f"Failed to instantiate {param.name} with type {annotation}, error {exc}") from exc
 
 
 def _bind_parameter(function, config: Config, param: inspect.Parameter, section_key: str) -> object:
     """The config-bound value for one signature parameter, or ``_SKIP`` (dispatch by annotation kind)."""
-    annotation = _resolve_annotation(function, param.annotation)
+    annotation = _resolve_annotation(function, param.annotation, section_key, param.name)
     if hasattr(annotation, "__metadata__"):  # Annotated[T, meta]: bind on T, meta is a UI hint
         annotation = get_args(annotation)[0]
     annotation, is_optional = _unwrap_optional(annotation)
     # After unwrapping, so ``Literal[X] | None`` binds as a literal (or None).
     if get_origin(annotation) is Literal:
-        return _bind_literal(config, param, annotation, is_optional)
+        return _bind_literal(config, param, annotation, is_optional, section_key)
 
     if annotation == inspect._empty:
         return _SKIP if param.name == "self" else config.get_value(param.name, param.default)
@@ -867,12 +886,16 @@ def _bind_parameter(function, config: Config, param: inspect.Parameter, section_
 
     if origin in {Union, types.UnionType}:
         value = config.get_value(param.name, param.default)
-        return None if value is None else _convert_union_sequence_value(value, get_args(annotation), param.name)
+        return (
+            None
+            if value is None
+            else _convert_union_sequence_value(value, get_args(annotation), f"{section_key}.{param.name}")
+        )
 
     if is_tensor:
         # A bare (or Optional) Tensor parameter is a value: the YAML scalar/list binds through torch.tensor.
         value = config.get_value(param.name, param.default)
-        return None if value is None else _convert_union_sequence_value(value, (tensor,), param.name)
+        return None if value is None else _convert_union_sequence_value(value, (tensor,), f"{section_key}.{param.name}")
 
     if annotation in _CONFIG_PRIMITIVE_TYPES or annotation is Any:
         return _bind_primitive(config, param, annotation, section_key)

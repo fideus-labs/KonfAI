@@ -815,6 +815,50 @@ def test_a_scalar_where_an_object_block_is_expected_refuses(write_config) -> Non
         apply_config("Root.Engine")(_Engine)()
 
 
+@config("Optimizer")
+class _NestedOptimizer:
+    def __init__(self, mode: Literal["a", "b"] = "a", overlap: float | str | None = None, lr: float = 0.1) -> None:
+        if lr < 0:
+            raise ConfigError("A negative learning rate descends nothing.", "Write a positive lr.")
+        if lr > 1:
+            raise ValueError("lr above 1 diverges")
+
+
+@config("Child")
+class _NestedChild:
+    def __init__(self, optimizer: _NestedOptimizer = _NestedOptimizer()) -> None:
+        self.optimizer = optimizer
+
+
+class _NestedRoot:
+    def __init__(self, child: _NestedChild = _NestedChild(), mode: Literal["a", "b"] = "a") -> None:
+        self.child, self.mode = child, mode
+
+
+@pytest.mark.parametrize(
+    ("block", "located"),
+    [
+        ("mode: null", "for parameter 'Root.mode' expected one of"),
+        ("Child:\n    Optimizer:\n      mode: c", "for parameter 'Root.Child.Optimizer.mode' expected one of"),
+        ("Child:\n    Optimizer:\n      overlap:\n        x: 1", "Parameter 'Root.Child.Optimizer.overlap' was given"),
+        ("Child:\n    Optimizer: AdamW", "'Root.Child.Optimizer' holds the value 'AdamW'"),
+        ("Child:\n    Optimizer:\n      lr: -1", "at 'Root.Child.Optimizer': A negative learning rate"),
+        ("Child:\n    Optimizer:\n      lr: 2", "at 'Root.Child.Optimizer': lr above 1 diverges"),
+    ],
+)
+def test_a_nested_refusal_names_its_full_key_path_once(write_config, block: str, located: str) -> None:
+    """A Literal or union refusal names the key with its section; a refusal nested two blocks deep reads
+    once, located at the innermost block (a constructor's own refusal keeps its hint)."""
+    write_config(f"Root:\n  {block}\n")
+    with pytest.raises(ConfigError) as refusal:
+        apply_config("Root")(_NestedRoot)()
+    message = str(refusal.value)
+    assert located in message
+    assert message.count("[Config]") == 1
+    if "negative" in located:
+        assert "→\tWrite a positive lr." in message
+
+
 def test_an_explicit_none_at_an_object_key_still_binds_none(write_config) -> None:
     write_config("Root:\n  Engine: None\n")
     assert apply_config("Root.Engine")(_Engine)() is None
@@ -962,6 +1006,20 @@ def test_strict_config_refuses_a_missing_root_before_anything_binds(write_config
     write_config("Rot:\n  kept: 2\n")
     with pytest.raises(ConfigError, match="declares no 'Root' root"), strict_config("Root"):
         raise AssertionError("refused before anything binds")
+
+
+@pytest.mark.parametrize("refuse", [True, False])
+def test_strict_config_refuses_a_misspelled_root_without_writing_whatever_refuse_says(
+    write_config, refuse: bool
+) -> None:
+    """``Trainee:`` under TRAIN was only warned: a full default ``Trainer:`` block was appended beside it
+    (137 -> 254 lines), the run failed on an unrelated dataset error, and fixing the spelling then left
+    a duplicate ``Trainer`` key in the file."""
+    content = "Rot:\n  kept: 2\n"
+    path = write_config(content)
+    with pytest.raises(ConfigError, match="declares no 'Root' root"), strict_config("Root", refuse=refuse):
+        apply_config("Root")(_StrictRoot)()
+    assert path.read_text(encoding="utf-8") == content
 
 
 @pytest.mark.parametrize("refuse", [True, False])
@@ -1406,6 +1464,48 @@ def test_an_occurrence_suffix_is_dropped_when_the_class_is_resolved() -> None:
     assert name == "Clip" and hasattr(module, "Clip")
     module, name = get_module("konfai.data.transform:Clip#12", "konfai.data.augmentation")
     assert name == "Clip" and module.__name__ == "konfai.data.transform"
+
+
+@pytest.mark.parametrize(
+    ("classpath", "refusal"),
+    [
+        (
+            "segmentation.UNett.UNet",
+            "names module 'konfai.models.python.segmentation.UNett', which does not exist (closest: 'UNet')",
+        ),
+        ("no_such_package_xyz.losses:Dice", "and there is no package 'no_such_package_xyz'"),
+    ],
+)
+def test_a_classpath_whose_module_does_not_exist_is_refused_by_name(classpath: str, refusal: str) -> None:
+    from konfai.utils.utils import get_module
+
+    with pytest.raises(ConfigError) as refused:
+        get_module(classpath, "konfai.models.python")
+    assert refusal in str(refused.value)
+    assert f"Classpath '{classpath}'" in str(refused.value)
+
+
+def test_a_dependency_the_classpaths_module_lacks_keeps_its_own_error(tmp_path: Path, monkeypatch) -> None:
+    """The module a classpath names exists and imports one that does not: the error names that
+    dependency, not the classpath."""
+    from konfai.utils.utils import get_module
+
+    (tmp_path / "needs_a_dependency.py").write_text("import no_such_dependency_xyz\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ModuleNotFoundError) as missing:
+        get_module("needs_a_dependency:Net", "konfai.models.python")
+    assert missing.value.name == "no_such_dependency_xyz"
+
+
+def test_a_classpath_whose_class_does_not_exist_is_refused_with_the_closest_names(monkeypatch) -> None:
+    from konfai.network.network import ModelLoader
+
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    with pytest.raises(
+        ConfigError, match=r"Module 'konfai\.models\.python\.segmentation\.UNet' has no 'UNett'"
+    ) as refused:
+        ModelLoader(classpath="segmentation.UNet.UNett").get_model()
+    assert "(closest: 'UNet'" in str(refused.value)
 
 
 @pytest.mark.parametrize(

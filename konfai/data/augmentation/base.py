@@ -36,7 +36,7 @@ from konfai.utils.config import _escape_key_component, apply_config, record_give
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import AugmentationError
 from konfai.utils.runtime import NeedDevice, preserved_rng, seed_all
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 
 
 def _require_simpleitk() -> None:
@@ -165,7 +165,7 @@ class DataAugmentationsList:
             # A key is read as a dotted path, and a classpath carries dots of its own.
             drawn = apply_config(
                 f"{konfai_root()}.Dataset.augmentations.{key}.data_augmentations.{_escape_key_component(augmentation)}"
-            )(getattr(module, name))()
+            )(module_attribute(module, name))()
             # A foreign class is handed over wrapped, the wrapper reading its own parameters from
             # the subtree the class read its arguments from.
             data_augmentation: DataAugmentation = (

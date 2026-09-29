@@ -22,17 +22,34 @@ import argparse
 import importlib.metadata
 import json
 import os
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from konfai import RemoteServer
+from konfai.utils.errors import KonfAIError
+from konfai.utils.utils import env_flag
 
 from . import app as app_module
 from .app_repository import LocalAppRepository, get_app_repository_info
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
+
+
+@contextmanager
+def _exit_on_refusal() -> Iterator[None]:
+    """A designed refusal (the app layer's or a workflow's it runs) prints its message and exits 1, as the
+    konfai CLI does; the traceback only under KONFAI_DEBUG=1."""
+    try:
+        yield
+    except KonfAIError as error:
+        if env_flag("KONFAI_DEBUG", False):
+            raise
+        print(str(error).strip(), file=sys.stderr)
+        sys.exit(1)
 
 
 def _package_version() -> str:
@@ -248,6 +265,7 @@ def build_app_cli(
     knobs = add_infer_knobs or (lambda parser: None)
     infer_kwargs = resolve_infer or (lambda args: {})
 
+    @_exit_on_refusal()
     def main() -> None:
         parser = argparse.ArgumentParser(
             prog=prog,
@@ -414,6 +432,7 @@ def run_download_cli(kwargs: dict[str, Any]) -> None:
             print(f"[KonfAI-Apps] {filename} is ready.")
 
 
+@_exit_on_refusal()
 def main_apps() -> None:
     """Entry point for the `konfai-apps` command-line interface."""
     parser = argparse.ArgumentParser(

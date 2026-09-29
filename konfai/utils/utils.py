@@ -17,13 +17,16 @@
 """The patch/overlap and storage-format grammar shared by every workflow: patch sizing and overlap
 resolution, the supported-extension and ``path:spec`` vocabulary, and the classpath importer."""
 
+import difflib
 import importlib
 import itertools
 import os
+import pkgutil
 import re
 from math import prod
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import numpy as np
 
@@ -61,12 +64,47 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     os.environ["KONFAI_CONFIG_MODE"] = "Import"
     try:
         module = importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        # Only the classpath's own module or a package above it: a dependency it imports keeps its own error.
+        if error.name is None or not f"{module_name}.".startswith(f"{error.name}."):
+            raise
+        missing = "which does not exist" if error.name == module_name else f"and there is no package '{error.name}'"
+        raise ConfigError(
+            f"Classpath '{classpath}' names module '{module_name}', {missing}{_closest_submodules(error.name)}.",
+            f"A bare name resolves in '{default_classpath}'; 'module:Class' imports any module on the path.",
+        ) from error
     finally:
         if previous_mode is None:
             os.environ.pop("KONFAI_CONFIG_MODE", None)
         else:
             os.environ["KONFAI_CONFIG_MODE"] = previous_mode
     return module, name.split("/")[0]
+
+
+def _closest(name: str, candidates: list[str]) -> str:
+    close = difflib.get_close_matches(name, candidates, n=3)
+    return f" (closest: {', '.join(repr(match) for match in close)})" if close else ""
+
+
+def _closest_submodules(missing: str) -> str:
+    """The modules beside ``missing`` in its package closest to its last component; empty at the top level."""
+    package_name, _, leaf = missing.rpartition(".")
+    package = importlib.import_module(package_name) if package_name else None
+    paths = getattr(package, "__path__", None)
+    return _closest(leaf, [module.name for module in pkgutil.iter_modules(paths)]) if paths else ""
+
+
+def module_attribute(module: ModuleType, name: str) -> Any:
+    """``getattr(module, name)`` for the name a classpath gave: one the module does not hold is a
+    ConfigError naming the closest ones."""
+    try:
+        return getattr(module, name)
+    except AttributeError:
+        public = [attribute for attribute in dir(module) if not attribute.startswith("_")]
+        raise ConfigError(
+            f"Module '{module.__name__}' has no '{name}'{_closest(name, public)}.",
+            "Check the class name the classpath ends with.",
+        ) from None
 
 
 def best_sweep_axis(patch_size: list[int], shape: list[int]) -> int:
