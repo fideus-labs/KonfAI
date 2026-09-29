@@ -254,8 +254,8 @@ def test_a_requested_case_one_group_lacks_is_refused_as_a_subset_whatever_the_or
 ) -> None:
     """CT holds every case and SEG the first four: asked for CASE_005 alone, the walk finds it in one
     group and not the other, and the refusal names the subset and what each group holds. The same
-    refusal in both declaration orders: an empty first group used to read as a walk not started, so
-    the second group's find stood in for the intersection and the managers failed on a KeyError."""
+    refusal in both declaration orders: an empty first group is a walk that found nothing, not one
+    not started, so the second group's find cannot stand in for the intersection."""
     dataset = Dataset(tmp_path / "cases", "mha")
     for name in CASES:
         dataset.write("CT", name, np.zeros((1, 2, 2, 2), np.float32), _attributes())

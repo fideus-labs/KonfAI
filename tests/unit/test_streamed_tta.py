@@ -36,18 +36,11 @@ from konfai.data.transform import Flip as FlipTransform
 from konfai.data.transform import InferenceStack, LocalityKind, Sum
 from konfai.predictor import Concat, Mean, Median, OutputDataset
 from konfai.utils.dataset import Attribute, Dataset
+from oracle_support import geometry
 
 SHAPE = [6, 4, 3]
 PATCH_SIZE = [2, 4, 3]
 OVERLAP = 1
-
-
-def _geometry_attribute() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.zeros(3)
-    attribute["Spacing"] = np.ones(3)
-    attribute["Direction"] = np.eye(3).flatten()
-    return attribute
 
 
 def _augmentations(
@@ -168,7 +161,7 @@ def _gate(augmentation, nb: int = 1) -> bool:
     output_dataset = OutputDataset.__new__(OutputDataset)
     output_dataset.nb_data_augmentation = nb + 1
     output_dataset.group_dest = "dest"
-    return output_dataset._tta_streamable(cast(DatasetIter, DummyDatasetIter()), 0, _geometry_attribute())
+    return output_dataset._tta_streamable(cast(DatasetIter, DummyDatasetIter()), 0, geometry())
 
 
 def test_gate_reads_the_draw_declarations() -> None:

@@ -522,7 +522,7 @@ def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels
 
 def test_replacing_an_h5_entry_keeps_the_old_one_until_the_new_is_in_place(tmp_path, monkeypatch):
     """A rewrite moves the old entry aside, publishes, then drops it: at no instant is the entry
-    absent from the file, which is what a crash between the two steps used to leave."""
+    absent from the file, not even for a crash between the two steps."""
     h5py = pytest.importorskip("h5py")
 
     dataset = Dataset(tmp_path / "store", "h5")

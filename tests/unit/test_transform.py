@@ -451,7 +451,7 @@ def test_permute_and_flip_keep_every_voxel_where_it_sits_in_the_world(stage, ora
 
 
 def test_standardize_explicit_scalar_stats():
-    """#5 Standardize with explicit scalar mean/std must not crash."""
+    """Standardize with explicit scalar mean/std must not crash."""
     t = Standardize(lazy=False, mean=[10.0], std=[2.0])
     x = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
     out = t("c", x.clone(), Attribute())
@@ -459,7 +459,7 @@ def test_standardize_explicit_scalar_stats():
 
 
 def test_standardize_explicit_per_channel_stats():
-    """#5 Per-channel mean/std broadcast over the channel axis."""
+    """Per-channel mean/std broadcast over the channel axis."""
     t = Standardize(lazy=False, mean=[10.0, 20.0], std=[2.0, 4.0])
     x = torch.zeros(2, 3, 4)
     x[0] = 10.0
@@ -559,7 +559,7 @@ def test_resample_to_shape_transform_shape_dimension_mismatch_message():
 
 
 def test_resample_to_shape_does_not_mutate_config():
-    """#9 transform_shape must not write resolved dims back into the shared instance config."""
+    """transform_shape must not write resolved dims back into the shared instance config."""
     resampler = Resample(shape=[0, 16, 16])
     attributes = Attribute()
     attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
@@ -1245,11 +1245,11 @@ def test_inference_stack_refuses_a_mode_it_does_not_know(mode: str) -> None:
 def test_gradient_keeps_the_axis_dimension_apart_from_the_channels() -> None:
     """The differences are ``(C, rank, *spatial)`` and the axis dimension is its own.
 
-    It used to be dropped with ``squeeze(0)``, which only fires when the case has ONE channel: a
-    multi-channel case then took its norm across the CHANNELS instead of across the axes and handed
-    the writer a rank-5 array (measured on a 3-channel case: [1, 3, 128, 256, 256], refused by
-    OME-Zarr). Every case here is four-dimensional, and the channel count is the one the stage
-    declares -- a plan sizes its regions from that declaration.
+    Dropped with ``squeeze(0)``, which only fires when the case has ONE channel, a multi-channel
+    case would take its norm across the CHANNELS instead of across the axes and hand the writer a
+    rank-5 array (on a 3-channel case: [1, 3, 128, 256, 256], refused by OME-Zarr). Every case here
+    is four-dimensional, and the channel count is the one the stage declares -- a plan sizes its
+    regions from that declaration.
     """
     from konfai.data.transform import Gradient
 

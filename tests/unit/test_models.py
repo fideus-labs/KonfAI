@@ -82,7 +82,7 @@ def test_unet_attention_forwards_without_branch_collision() -> None:
 
 
 def test_linear_vae_is_parameterized_and_variational():
-    """#17 LinearVAE must be parameterized (no hardcoded dims) and sample a latent."""
+    """LinearVAE must be parameterized (no hardcoded dims) and sample a latent."""
     model = LinearVAE(in_features=32, hidden_features=16, latent_dim=4)
     x = torch.randn(2, 32)
     outputs = dict(model.named_forward(x))
@@ -97,7 +97,7 @@ def test_linear_vae_is_parameterized_and_variational():
 
 
 def test_cyclegan_discriminator_initialized_no_keyerror():
-    """#CycleGan: initialized() must not index a missing 'Sample' submodule on load."""
+    """CycleGanDiscriminator.initialized() must not index a missing 'Sample' submodule on load."""
     model = CycleGanDiscriminator()
     # Must not raise KeyError('Sample').
     model.initialized()
@@ -109,7 +109,7 @@ def test_cyclegan_discriminator_initialized_no_keyerror():
 
 
 def test_adaptation_sets_requires_grad_at_construction():
-    """#18 Adaptation must configure requires_grad in __init__, not on every forward."""
+    """Adaptation must configure requires_grad in __init__, not on every forward."""
     adaptation = Adaptation()
     # State is correct immediately after construction, before any forward pass.
     assert all(not p.requires_grad for p in adaptation.Encoder_1.parameters())

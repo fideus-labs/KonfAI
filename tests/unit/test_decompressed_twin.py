@@ -223,10 +223,10 @@ def test_a_patch_read_off_the_twin_is_the_volume(tmp_path: Path, cache: Path) ->
 def test_transform_plans_a_compressed_case_streamed_and_decodes_it_once(
     tmp_path: Path, cache: Path, counted: dict[str, list[str]], monkeypatch: pytest.MonkeyPatch, slabs: bool
 ) -> None:
-    """The plan asks the store before any twin exists: STREAM, where it used to LOAD the case whole.
+    """The plan asks the store before any twin exists and answers STREAM, not a whole-case LOAD.
     Cut into slabs, each case is decompressed once, its slabs swept off the twin, the twin released with
     the case, and nothing is left in the cache. A case that fits the budget is one region, the whole
-    volume: one decode of the compressed file, as its LOAD was, and no twin."""
+    volume: one decode of the compressed file, as a LOAD would be, and no twin."""
     monkeypatch.chdir(tmp_path)
     volumes = _cohort(tmp_path / "Raw")
     chains = {"CT": {"CT": [Clip(min_value=0.0, max_value=30.0), Write(dataset="./Out:mha")]}}

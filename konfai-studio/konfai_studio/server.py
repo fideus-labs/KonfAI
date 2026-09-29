@@ -260,7 +260,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 title = await suggest_title(req.message, _reg.brain())
                 _reg.set_title(name, title)
                 yield _sse({"type": "title", "session": name, "title": title})
-            except Exception:
+            except Exception:  # nosec B110 - the title is cosmetic: the session keeps its default one
                 pass
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -1262,7 +1262,7 @@ def _slicer_exec(code: str) -> bool:
         f"http://127.0.0.1:{_SLICER_WEBSERVER_PORT}/slicer/exec", data=code.encode(), method="POST"
     )
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with urllib.request.urlopen(request, timeout=3) as response:  # nosec B310 - a fixed http://127.0.0.1 URL
             response.read()
         return True
     except (OSError, urllib.error.URLError):
@@ -1296,9 +1296,9 @@ async def slicer_open(req: SlicerOpen) -> dict[str, Any]:
             "ok": False,
             "detail": "3D Slicer not found: put `Slicer` on PATH or set KONFAI_STUDIO_SLICER to the executable.",
         }
-    import subprocess
+    import subprocess  # nosec B404
 
-    subprocess.Popen(
+    subprocess.Popen(  # nosec B603 - an argv list, no shell: the user's Slicer on the paths they chose
         [executable, *map(str, volumes)],
         start_new_session=True,
         stdout=subprocess.DEVNULL,

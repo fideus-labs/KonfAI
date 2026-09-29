@@ -16,12 +16,12 @@
 
 """Unit tests for ``create_ome_zarr_store``: the properties a region-by-region write depends on.
 
-``write_ome_zarr`` and ``create_ome_zarr_store`` now share ngff-zarr as their single source of
+``write_ome_zarr`` and ``create_ome_zarr_store`` share ngff-zarr as their single source of
 OME-NGFF metadata, which is what these tests are really protecting: the alternative, a hand-built
 ``multiscales`` entry, drifts from the spec silently and can only ever describe what its author knew.
-What that sharing must not cost is any of the guarantees the streaming path relies on, and most of
-them were previously covered only end to end, where a regression shows up as a wrong volume rather
-than as a wrong store.
+What that sharing must not cost is any of the guarantees the streaming path relies on, pinned here
+on the store itself: end to end, a regression shows up as a wrong volume rather than as a wrong
+store.
 """
 
 from pathlib import Path

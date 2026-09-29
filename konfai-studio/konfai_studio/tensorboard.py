@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from contextlib import suppress
@@ -160,7 +160,7 @@ async def tensorboard_link(session: str = Query("default")) -> dict[str, Any]:
     if not binary:
         return {"ok": False, "detail": "tensorboard is not installed (pip install konfai[tensorboard])"}
     port = _free_port()
-    proc = subprocess.Popen(
+    proc = subprocess.Popen(  # nosec B603 - an argv list, no shell: the installed tensorboard
         [binary, "--logdir", str(session_root), "--host", "127.0.0.1", "--port", str(port)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

@@ -113,8 +113,8 @@ def test_async_gate_stays_inline_for_single_stores_and_cpu_outputs(tmp_path, mon
 
 
 def test_a_built_in_reduction_binds_from_its_own_block_like_a_custom_one(write_config, monkeypatch) -> None:
-    """``reduction: Mean`` used to build ``Mean()`` directly, so the ``Mean:`` block a resolved config
-    carries was read by nothing; every operator now binds from its block, and the write-back says so."""
+    """``reduction: Mean`` binds from the ``Mean:`` block a resolved config carries, as a custom
+    operator does, and the write-back records that block."""
     import ruamel.yaml
     from konfai.data.reduction import Mean
 

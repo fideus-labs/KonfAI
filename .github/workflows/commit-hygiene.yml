@@ -6,9 +6,15 @@ on:
 permissions:
   contents: read
 
+# Only a pull request's runs share a group: a newer push cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   validate-commits:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out full history
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

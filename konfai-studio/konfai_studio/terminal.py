@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 import signal
-import subprocess
+import subprocess  # nosec B404
 from contextlib import suppress
 from urllib.parse import urlparse
 
@@ -36,7 +36,7 @@ class _PtySession:
 
             self._master, slave = pty.openpty()
             shell = os.environ.get("SHELL") or "/bin/bash"
-            self._proc = subprocess.Popen(
+            self._proc = subprocess.Popen(  # nosec B603 - the user's own shell: the terminal is the feature
                 [shell, "-i"],
                 stdin=slave,
                 stdout=slave,

@@ -17,8 +17,7 @@
 """The rules the one gather obeys, pinned apart from any stage that uses it.
 
 There is a single sampler in KonfAI (``konfai.data.sampling.gather``), and every resample, warp and
-regrid reaches its voxels through it. That is recent: the rules used to be restated by a separable
-sampler and a non-separable one, which is how two of them came to disagree about a half-voxel rim.
+regrid reaches its voxels through it.
 
 One implementation does not make the rules self-evident, it only makes them checkable in one place.
 These tests are that place: the inside interval, the tap clamp, round-half-up, the working dtype and

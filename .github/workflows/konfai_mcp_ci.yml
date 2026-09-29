@@ -19,9 +19,18 @@ on:
       - "examples/**"
       - "pyproject.toml"
 
+permissions:
+  contents: read
+
+# Only a pull request's runs share a group: a newer push cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   konfai_mcp_ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +73,13 @@ jobs:
           ruff check konfai-mcp/konfai_mcp
           ruff format --check konfai-mcp/konfai_mcp
 
+      - name: Type-check with the MCP stack installed
+        # The same command as the pixi `typecheck` task. konfai_ci's typecheck job installs neither
+        # fastmcp nor fastapi, so their APIs are Any there. One lane, the typecheck job's 3.12: mypy
+        # analyses as the interpreter it runs on.
+        if: matrix.python-version == '3.12'
+        run: python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio
+
       - name: Build standalone MCP package
         run: |
           python -m build konfai-mcp
@@ -74,4 +90,4 @@ jobs:
 
       - name: Run MCP tests
         run: |
-          python -m pytest -q konfai-mcp/tests
+          python -m pytest konfai-mcp/tests

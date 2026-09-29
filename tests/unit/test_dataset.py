@@ -160,8 +160,8 @@ def test_attribute_prints_random_float_vectors_as_numpy_prints_them() -> None:
 
 def test_attribute_names_the_key_whose_value_does_not_parse_back_flat() -> None:
     """A >= 2-D value is stored as a nested print (Crop's ``box`` is read back through its own
-    parser, so the write door cannot refuse the rank), and reading it back as an array used to be
-    an anonymous ``ValueError`` deep in numpy: the refusal now names the key and the remedy."""
+    parser, so the write door cannot refuse the rank), and reading it back as an array is refused
+    with the key and the remedy named, not an anonymous ``ValueError`` deep in numpy."""
     attribute = Attribute()
     attribute["MyMatrix"] = np.eye(3)
     with pytest.raises(DatasetManagerError, match=r"'MyMatrix'.*flat"):
@@ -413,6 +413,46 @@ def test_read_landmarks_refuses_a_coordinate_system_other_than_ras_or_lps(
 ) -> None:
     with pytest.raises(DatasetManagerError, match="CoordinateSystem"):
         read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
+
+
+_POINTS = np.array([[1.5, -2.25, 3.0], [4.0, 5.0, -6.125]])
+
+
+def test_landmarks_round_trip_through_a_dataset(tmp_path: Path) -> None:
+    """An (N, 3) array is written as a Slicer fiducial file and read back as the same LPS points."""
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+
+    dataset.write("Points", "CASE_000", _POINTS, Attribute())
+
+    assert (tmp_path / "Dataset" / "CASE_000" / "Points.fcsv").is_file()
+    data, _ = dataset.read_data("Points", "CASE_000")
+    np.testing.assert_array_equal(data, _POINTS)
+
+
+def test_a_polydata_round_trips_through_a_dataset(tmp_path: Path) -> None:
+    vtk = pytest.importorskip("vtk")
+    points = vtk.vtkPoints()
+    for point in _POINTS:
+        points.InsertNextPoint(*point)
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(points)
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+
+    dataset.write("Mesh", "CASE_000", polydata, Attribute())
+
+    assert (tmp_path / "Dataset" / "CASE_000" / "Mesh.vtk").is_file()
+    data, _ = dataset.read_data("Mesh", "CASE_000")
+    np.testing.assert_array_equal(data, _POINTS)
+
+
+def test_a_vtk_entry_without_vtk_names_the_extra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    case = tmp_path / "Dataset" / "CASE_000"
+    case.mkdir(parents=True)
+    (case / "Mesh.vtk").write_text("# vtk DataFile Version 5.1\n")
+    monkeypatch.setitem(sys.modules, "vtk", None)  # an import of vtk now fails as on a bare install
+
+    with pytest.raises(DatasetManagerError, match=r"pip install konfai\[vtk\]"):
+        Dataset(tmp_path / "Dataset", "mha").read_data("Mesh", "CASE_000")
 
 
 # --------------------------------------------------------------------------------------
@@ -991,10 +1031,9 @@ def _write_mask_in_child_h5(root: str, case: str) -> None:
 
 
 def test_membership_sees_an_h5_entry_written_by_another_process(tmp_path: Path) -> None:
-    """A single store answers the same way a directory does. The pooled read handle used to keep serving
-    the view it opened on, and reopening alone would not have helped: HDF5 shares a file's metadata state
-    across the handles one process holds, so a second handle inherits the first's. The pool now closes a
-    handle whose store changed underneath it."""
+    """A single store answers the same way a directory does: the pool closes a handle whose store
+    changed underneath it. Opening a second handle beside it is not enough: HDF5 shares a file's metadata
+    state across the handles one process holds, so a second handle inherits the first's view."""
     pytest.importorskip("h5py")
     root = str(tmp_path / "ds") + "/"
     Path(root).mkdir()
@@ -1422,11 +1461,9 @@ def test_a_stepped_region_off_the_raw_block_reads_as_itk_reads_it_whole(tmp_path
 
 
 def test_a_stepped_region_carries_the_same_geometry_record_whatever_the_backend(tmp_path: Path) -> None:
-    """The same stepped read of the same logical volume used to answer three different geometry
-    records depending on the file format it was stored in: SitkFile kept the volume's origin and
-    un-scaled spacing where OME-Zarr and DICOM returned the region's. One shared helper now
-    computes the record everywhere: the first kept sample's world position, the step-scaled
-    spacing."""
+    """The same stepped read of the same logical volume answers one geometry record whatever the
+    file format it was stored in: the region's, the first kept sample's world position and the
+    step-scaled spacing, not the volume's origin and un-scaled spacing."""
     pytest.importorskip("zarr")
     pytest.importorskip("pydicom")
     volume = np.arange(1 * 6 * 8 * 10, dtype=np.int16).reshape(1, 6, 8, 10)

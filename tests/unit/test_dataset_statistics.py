@@ -16,10 +16,10 @@
 
 """``Dataset.read_data_statistics`` is one fold over ``iter_data_blocks``, whatever the backend.
 
-Each backend used to own its walk (slabs, slices, or the whole volume); those walks are recopied
-here as oracles, and the fold is held against them key by key, next to numpy in float64 on the
-whole volume. Welford in floating point is not associative, and the fold merges in cache-sized
-pieces of its own, so the bound is a few ulp, whatever the backend walked before."""
+The per-backend walks (slabs, slices, or the whole volume) are written out here as oracles, and
+the fold is held against them key by key, next to numpy in float64 on the whole volume. Welford in
+floating point is not associative, and the fold merges in cache-sized pieces of its own, so the
+bound is a few ulp, whatever the oracle walks."""
 
 from collections.abc import Callable, Iterator
 from pathlib import Path

@@ -376,7 +376,12 @@ class SitkFile(AbstractFile):
             text = (node.text or "").strip()
             data = np.fromstring(text, sep=",", dtype=np.float64) if text else np.asarray([], dtype=np.float64)
         elif path.endswith(".vtk"):
-            import vtk
+            try:
+                import vtk
+            except ImportError as error:
+                raise DatasetManagerError(
+                    f"vtk is required to read '{path}'.", "Install it with: pip install konfai[vtk]."
+                ) from error
 
             vtk_reader = vtk.vtkPolyDataReader()
             vtk_reader.SetFileName(path)

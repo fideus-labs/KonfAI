@@ -952,7 +952,7 @@ def summarize_classpath_signature(classpath: str, workspace_dir: Path | None = N
     )
 
     if local_candidate:
-        assert workspace_dir is not None
+        assert workspace_dir is not None  # nosec B101 - local_candidate requires it
         source_path = workspace_dir / f"{module_name}.py"
         summary = summarize_local_python_object(source_path, object_name)
         return {
@@ -1318,7 +1318,7 @@ def copy_template_subset(
             continue
         try:
             parsed = YAML_SAFE.load(config_path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:  # nosec B112 - an unreadable template names no local file
             continue
         for classpath in _referenced_classpaths(parsed):
             candidate = _classpath_local_file(classpath)

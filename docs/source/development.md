@@ -62,15 +62,15 @@ Run tasks with `pixi run <task>`:
 
 | Task | Command | Description |
 | --- | --- | --- |
-| `test` | `pytest -q -n auto --dist loadfile tests/` with `OMP_NUM_THREADS=1` | Run the full test suite (about 3 min on 24 cores; one torch thread per worker) |
-| `test-fast` | `pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/` with `OMP_NUM_THREADS=1` | The iteration loop: skips the slow oracle and integration tests (about 25 s on 24 cores) |
+| `test` | `pytest -n auto --dist loadfile tests/` with `OMP_NUM_THREADS=1` | Run the full test suite (about 3 min on 24 cores; one torch thread per worker) |
+| `test-fast` | `pytest -n auto --dist loadfile -m "not slow and not integration" tests/` with `OMP_NUM_THREADS=1` | The iteration loop: skips the slow oracle and integration tests (about 25 s on 24 cores) |
 | `test-cov` | `pytest --cov=konfai tests/` | Run tests with coverage report |
-| `lint` | `ruff check konfai konfai-apps/konfai_apps` | Lint the source tree |
-| `format` | `ruff format konfai konfai-apps/konfai_apps` | Auto-format source files |
+| `lint` | `ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs` | Lint the source tree; the pre-commit hook and the CI `lint` job cover the same paths |
+| `format` | `ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs` | Auto-format source files |
 | `format-check` | `ruff format --check ...` | Check formatting without modifying files |
 | `typecheck` | `python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio` | Static type checking of the four packages; the pre-commit hook and the CI `typecheck` job run the same command |
 | `build` | `python -m build` | Build sdist and wheel |
-| `test-apps` | `pytest -q konfai-apps/tests` | Run the konfai-apps test suite |
+| `test-apps` | `pytest konfai-apps/tests` | Run the konfai-apps test suite |
 | `check` | lint + format-check + test + test-apps | Full pre-push gate; run it once before finishing any change (needs konfai-apps installed) |
 
 Always run `pixi run check` before pushing or opening a PR.
@@ -81,9 +81,9 @@ If Pixi is unavailable, use an editable pip install:
 
 ```bash
 pip install -e ".[dev]"
-pytest -q tests/
-ruff check konfai
-ruff format konfai
+pytest tests/
+ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs
+ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs
 ```
 
 ## Pre-commit hooks
@@ -100,8 +100,8 @@ python -m pip install pre-commit
 pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
-After installation, `git commit` runs file checks plus Conventional Commit and forbidden-branding validation. Run all
-file checks manually with:
+After installation, `git commit` runs file checks plus Conventional Commit validation. Run all file checks manually
+with:
 
 ```bash
 pre-commit run --all-files
@@ -116,8 +116,8 @@ git switch -c fix/short-description
 ```
 
 Use a Conventional Commit message such as `fix(config): improve YAML validation errors`. Commit messages must not
-contain agent names, generated-by/generated-with branding, or AI co-author trailers. The `commit-msg` hooks validate
-both the Conventional Commit structure and forbidden branding.
+contain agent names, generated-by/generated-with branding, or AI co-author trailers. The `commit-msg` hook validates
+the Conventional Commit structure.
 
 Before pushing, run `pixi run format`, `pixi run check`, and `pre-commit run --all-files`. Push the feature branch,
 open a pull request, and leave it open for a maintainer to review and merge; do not merge your own PR.

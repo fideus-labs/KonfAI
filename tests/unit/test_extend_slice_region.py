@@ -15,10 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """A 2.5D model reads ``extend_slice`` neighbouring slices around each one-slice patch. The region
-route once replayed the chain on the grid slot alone and then applied the plan's reflection and
-concatenation to that single slice: the first boundary patch failed in ``F.pad`` and an interior
-one came back ``[8, 8]`` where the model expects ``[extend_slice + 1, 8, 8]``. The region target
-now comes from the same read plan the whole-volume path cuts with."""
+route cuts its target from the same read plan as the whole-volume path, so a boundary patch and an
+interior one both come back ``[extend_slice + 1, Y, X]``, reflected where the volume ends."""
 
 from pathlib import Path
 

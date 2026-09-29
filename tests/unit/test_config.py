@@ -830,8 +830,8 @@ class _ShapeRoot:
 
 
 def test_a_scalar_where_an_object_block_is_expected_refuses(write_config) -> None:
-    # `Engine: AdamW` instead of a block once bound the object to None: the run then proceeded
-    # without it (an optimizer that never steps), silently.
+    # `Engine: AdamW` instead of a block is refused: bound to None, the run would proceed without
+    # the object (an optimizer that never steps), silently.
     write_config("Root:\n  Engine: AdamW\n")
     with pytest.raises(ConfigError, match="where a block is expected"):
         apply_config("Root.Engine")(_Engine)()
@@ -1457,7 +1457,7 @@ class _Coerced:
 @pytest.mark.parametrize(
     ("yaml", "expected"),
     [
-        ("flag: 'false'", {"flag": False}),  # bool("false") once bound True through the union path
+        ("flag: 'false'", {"flag": False}),  # parsed as text: bool("false") would be True
         ("flag: 'true'", {"flag": True}),
         ("flag: 3", {"flag": 3}),
         ("flag: '3'", {"flag": 3}),
