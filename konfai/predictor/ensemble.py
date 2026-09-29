@@ -49,16 +49,20 @@ def _colocate_loaded_modules(model: torch.nn.Module) -> None:
             sub.to(target)
 
 
+def _stock_loader(model: Network) -> bool:
+    """Whether ``model`` loads through ``Network.load``: a class that overrides ``load`` owns its format."""
+    from konfai.network.network.network import MinimalModel
+
+    return getattr(type(model), "load", None) in (Network.load, MinimalModel.load)
+
+
 def _require_weights_entry(model: Network, state: dict[str, Any], source: dict[str, Any] | Path | str) -> None:
     """Refuse a checkpoint the stock loader would take no weights from.
 
     ``Network.load`` reads weights from a KonfAI checkpoint's ``Model`` entry and is silent without
     one. A model whose class overrides ``load`` owns its format, and a weightless model loads nothing.
     """
-    from konfai.network.network.network import MinimalModel
-
-    stock_loader = getattr(type(model), "load", None) in (Network.load, MinimalModel.load)
-    if not stock_loader or not any(True for _ in model.parameters()):
+    if not _stock_loader(model) or not any(True for _ in model.parameters()):
         return
     if "Model" in state:
         return
@@ -75,9 +79,7 @@ def _inference_entries(model: Network, state: dict[str, Any]) -> dict[str, Any]:
     """What the host cache keeps of a checkpoint: the weights inference reads, dropping the optimizer
     state a training checkpoint carries beside them. A model whose class owns its ``load`` keeps the
     file whole."""
-    from konfai.network.network.network import MinimalModel
-
-    if getattr(type(model), "load", None) not in (Network.load, MinimalModel.load):
+    if not _stock_loader(model):
         return state
     # The composite calls load(..., ema=False): even when present, Model_EMA is never read.
     return {key: value for key, value in state.items() if key == "Model"}
@@ -257,7 +259,19 @@ class ModelComposite(Network):
                 self._cache_state(index, state, replace=replace)
             self._state_stamps[index] = stamp
             model.set_name(self._base_model_name)
-            model.load(state, init=False)
+            try:
+                model.load(state, init=False)
+            except RuntimeError as error:
+                # The stock loader's strict load: a checkpoint of another architecture.
+                if not _stock_loader(model) or isinstance(error, torch.cuda.OutOfMemoryError):
+                    raise
+                named = "The in-memory checkpoint" if isinstance(source, dict) else f"Checkpoint '{source}'"
+                raise PredictorError(
+                    f"{named} does not fit the model this configuration builds.",
+                    str(error).strip(),
+                    f"Predictor.Model.{self._base_model_name} must declare the architecture the checkpoint"
+                    " was trained with: the same parameters as in the training Config.yml.",
+                ) from error
             # A custom load() may append modules on CPU: co-locate them with the placed model.
             _colocate_loaded_modules(model)
             model.set_name(f"{self._base_model_name}_{index}")

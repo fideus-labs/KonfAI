@@ -1969,6 +1969,19 @@ def test_split_path_spec_supports_unix_style_dataset_specs() -> None:
     )
 
 
+def test_every_workflow_writes_the_default_dataset_root_with_its_format() -> None:
+    """The default a config without dataset_filenames resolves to, and --init writes, is spelled the
+    same by the four workflows, the format named."""
+    import inspect
+
+    from konfai.data.data_manager import DataMetric, DataTransform
+
+    for workflow in (DataTrain, DataPrediction, DataMetric, DataTransform):
+        assert inspect.signature(workflow).parameters["dataset_filenames"].default == ["default|./Dataset:mha"], (
+            workflow.__name__
+        )
+
+
 def test_split_path_spec_supports_windows_paths_without_breaking_drive_letters() -> None:
     assert split_path_spec(r"C:\Dataset") == (r"C:\Dataset", None, "mha")
     assert split_path_spec(r"C:\Dataset:mha") == (r"C:\Dataset", None, "mha")

@@ -34,6 +34,7 @@ from konfai.network.network.network import MinimalModel as MinimalModel
 from konfai.network.network.network import ModuleArgsDict as ModuleArgsDict
 from konfai.network.network.network import Network as Network
 from konfai.network.network.network import OutputsGroup as OutputsGroup
+from konfai.network.network.network import place_graph as place_graph
 
 __all__ = [
     "CriterionsAttr",
@@ -53,4 +54,5 @@ __all__ = [
     "TargetCriterionsLoader",
     "batched_step",
     "build_configured_criterions",
+    "place_graph",
 ]

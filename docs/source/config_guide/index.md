@@ -186,7 +186,10 @@ the difference by path with the keys read at that level: `TRANSFORM` refuses
 (its config is the deliverable), `TRAIN`/`PREDICTION`/`EVALUATION` warn, since
 files written back by earlier versions carry such keys. The check closes when
 the builder returns, so everything a workflow reads from its file is bound at
-construction.
+construction. When the build fails first, a key it had not read yet is not
+reported as unknown; the error only names an unread key that sits beside a key
+which took its default, the misspelling that likely caused the failure
+(`'Evaluator.Dataset.dataset_filename': did you mean 'dataset_filenames'?`).
 
 ## Config modes
 
@@ -310,12 +313,9 @@ ways to get the exhaustive list for any component:
 
 ## `default|...` values
 
-The `default|...` prefix is an important KonfAI convention. Its behavior is
-inferred directly from `konfai.utils.config.Config._get_input_default()`.
-
-It is used to express a fallback value that can still be overridden by the
-config, and it is what `--init` materialises into a generated file. Examples
-from the codebase include:
+The `default|...` prefix is an important KonfAI convention. It marks a
+fallback value that the config can still override, and it is what `--init`
+materialises into a generated file. Examples from the codebase include:
 
 - `train_name: str = "default|TRAIN_01"`
 - `classpath: str = "default|segmentation.UNet.UNet"`

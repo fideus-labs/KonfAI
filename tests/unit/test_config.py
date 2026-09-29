@@ -1094,6 +1094,30 @@ def test_strict_config_can_warn_instead_of_refusing(write_config) -> None:
     assert root.kept == 0
 
 
+class _Pair:
+    def __init__(self, pair: str = "default") -> None:
+        self.source, self.dest = pair.split(":")
+
+
+@pytest.mark.parametrize("refuse", [True, False])
+def test_a_misspelling_that_fails_the_build_is_named_on_the_error(write_config, refuse: bool) -> None:
+    """A misspelt key leaves its parameter to a default the build may fail on: the error that goes up
+    names the key, and only a key beside one that took its default in its place."""
+    write_config("Root:\n  pare: CT:CT\n  other: 1\n")
+    with pytest.raises(ValueError) as raised, strict_config("Root", refuse=refuse):
+        apply_config("Root")(_Pair)()
+    notes = "\n".join(getattr(raised.value, "__notes__", []))
+    assert "'Root.pare'" in notes and "did you mean 'pair'?" in notes
+    assert "other" not in notes
+
+
+@config("Stage")
+class _Stage:
+    def __init__(self, width: int = 1) -> None:
+        if width > 1:
+            raise ValueError("the first stage fails")
+
+
 def test_outside_strict_config_the_binder_records_nothing_and_refuses_nothing(write_config) -> None:
     from konfai.utils import config as config_module
 

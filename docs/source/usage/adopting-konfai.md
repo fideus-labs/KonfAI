@@ -20,12 +20,34 @@ network or loss.
 
 ## Lowest-friction adoption: import the component
 
-Use `module:Class` in YAML for any importable class. Examples include:
+Use `module:Class` in YAML for any importable class. A model class that is not
+a KonfAI `Network` is wrapped: its constructor arguments sit directly under the
+class name, beside `optimizer` and `outputs_criterions`, and its output is the
+module `Model`, the key a loss attaches to (and the `outputs_dataset` key at
+prediction). A MONAI UNet (`pip install "konfai[monai]"`):
 
 ```yaml
 Model:
-  classpath: monai.networks.nets:SegResNet
+  classpath: monai.networks.nets:UNet
+  UNet:
+    spatial_dims: 2
+    in_channels: 1
+    out_channels: 2
+    channels: [8, 16, 32]
+    strides: [2, 2]
+    optimizer:
+      name: AdamW
+      lr: 0.01
+    outputs_criterions:
+      Model:
+        targets_criterions:
+          SEG:
+            criterions_loader:
+              CrossEntropyLoss:
+                is_loss: true
 ```
+
+Losses and metrics import the same way:
 
 ```yaml
 criterions_loader:
@@ -41,8 +63,8 @@ criterions_loader:
     reduction: mean
 ```
 
-An ordinary `torch.nn.Module` is wrapped for execution and exposes its final
-output. Choose this route first when the existing forward is all you need.
+A wrapped model exposes its final output only. Choose this route first when the
+existing forward is all you need.
 
 ## Bring your model: ten lines, no YAML
 
@@ -53,7 +75,7 @@ writes and the run record of every other run:
 ```python
 import konfai, torch
 from konfai.metric.measure import CrossEntropyLoss
-from konfai.data.transform import TensorCast
+from konfai.data.transform import Argmax, TensorCast
 
 if __name__ == "__main__":
     model = torch.nn.Sequential(torch.nn.Conv2d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(16, 2, 1))
@@ -62,12 +84,18 @@ if __name__ == "__main__":
         patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]},
     )
     konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
-                         checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
+                         checkpoints=sorted(checkpoints.glob("[0-9]*.pt"))[-1],
+                         final_transforms=[Argmax(), TensorCast(dtype="uint8")])
 ```
 
 `inputs` and `targets` are the dataset's groups; `patch` is what the model is
 fed, its non-unit axes deciding whether the model is 2D or 3D; `transforms`
-and `augmentations` take the same objects the YAML would name. The workspace
+and `augmentations` take the same objects the YAML would name. The model's
+output is written as it comes out, one channel per logit, unless
+`final_transforms` turns it into something else: here a `uint8` label map.
+`train_model` returns the run's checkpoint directory; `[0-9]*.pt` matches the
+one dated checkpoint the run keeps, its best, where `resume_latest.pt` beside
+it is the last epoch, kept to resume. The workspace
 keeps the resolved config as every run does, with the model named by a token
 (`konfai.api:live_model`): the object lives in this process, so such a run
 stays on one rank and cannot be resumed from another process. A relative

@@ -607,6 +607,22 @@ def test_list_components_names_the_config_vocabulary() -> None:
     assert "segmentation.UNet.UNet" in models  # the Python catalog, in Model.classpath spelling
 
 
+def test_a_declarative_model_is_listed_with_the_summary_of_its_header() -> None:
+    """``konfai list models`` prints one line per model: a declarative file's summary is its header's
+    first paragraph, not the whole header (up to 67 comment lines)."""
+    docs = {
+        component.config_reference: component.doc
+        for component in api.list_components("models")
+        if component.config_reference.startswith("default|")
+    }
+    assert docs["default|DynUNet.yml"] == "Declarative KonfAI DynUNet (nnU-Net-style dynamic U-Net)."
+    assert docs["default|AttentionUNet.yml"] == (
+        "Declarative KonfAI Attention U-Net (Oktay et al., 2018,"
+        ' "Attention U-Net: Learning Where to Look for the Pancreas", arXiv:1804.03999).'
+    )
+    assert all(doc and len(doc) < 400 for doc in docs.values()), docs
+
+
 def test_list_components_refuses_an_unknown_kind() -> None:
     with pytest.raises(ConfigError, match="component kind"):
         api.list_components("optimizers")
@@ -659,7 +675,10 @@ def test_a_call_releases_its_scratch_config_and_restores_the_callers_rng(
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS
 
     monkeypatch.chdir(cohort)
-    scratch_root = Path(tempfile.gettempdir())
+    # A directory of its own: the system one is shared with the other test workers' scratch configs.
+    scratch_root = cohort / "tmp"
+    scratch_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_root))
     before = {p.name for p in scratch_root.glob("konfai_transformer_*")}
     random.seed(3)
     torch.manual_seed(5)
@@ -843,9 +862,10 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ten-line path: an ``nn.Module`` with one tensor in and one out, a dataset root, the
-    groups it reads and scores, a loss, a patch. Trained one epoch on the CPU, then predicted twice:
-    from the checkpoint the training wrote, and from the weights the module holds in memory."""
-    from konfai.data.transform import TensorCast
+    groups it reads and scores, a loss, a patch. Trained one epoch on the CPU, then predicted three
+    times: from the checkpoint the training wrote, as logits and as a label map, and from the weights
+    the module holds in memory."""
+    from konfai.data.transform import Argmax, TensorCast
     from konfai.metric.measure import CrossEntropyLoss
 
     monkeypatch.chdir(tmp_path)
@@ -872,8 +892,9 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
         statistics_dir=tmp_path / "Statistics",
         quiet=True,
     )
-    saved = sorted(checkpoints.glob("*.pt"))
-    assert checkpoints == tmp_path / "Checkpoints" / "TEN_LINES" and saved, "one epoch wrote a checkpoint"
+    saved = sorted(checkpoints.glob("[0-9]*.pt"))
+    assert checkpoints == tmp_path / "Checkpoints" / "TEN_LINES"
+    assert len(saved) == 1, "the documented glob matches the one dated checkpoint BEST keeps, not resume_latest.pt"
     record = (tmp_path / "Statistics" / "TEN_LINES" / "Trainer.yml").read_text(encoding="utf-8")
     assert "konfai.api:live_model" in record, (
         "the run record names the live model, as every run keeps its resolved config"
@@ -894,6 +915,23 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
     # A relative output root lands under the run's workspace, as it does for every prediction.
     predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Pred" / "P000" / "PRED.mha")))
     assert predicted.shape == (4, 8, 8, 2), "the two logit channels, as a vector image on the case's grid"
+
+    # The documented snippet writes a label map: the logits reduced before the write.
+    labels_workspace = api.predict_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        patch=[1, 8, 8],
+        output="./Labels:mha",
+        checkpoints=saved[-1],
+        final_transforms=[Argmax(), TensorCast(dtype="uint8")],
+        name="TEN_LINES_LABELS",
+        predictions_dir=tmp_path / "Predictions",
+        quiet=True,
+    )
+    labels = sitk.ReadImage(str(labels_workspace / "Labels" / "P000" / "PRED.mha"))
+    assert labels.GetNumberOfComponentsPerPixel() == 1 and labels.GetPixelID() == sitk.sitkUInt8
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(labels), predicted.argmax(-1))
 
     # No checkpoint named: the weights the module holds are what predicts, written as one for the run.
     live_workspace = api.predict_model(
@@ -970,10 +1008,59 @@ def test_a_monai_unet_trains_and_predicts_through_the_same_ten_lines(
         inputs="CT",
         patch=[1, 16, 16],
         output="./Pred:mha",
-        checkpoints=sorted(checkpoints.glob("*.pt"))[-1],
+        checkpoints=sorted(checkpoints.glob("[0-9]*.pt"))[-1],
         name="MONAI",
         predictions_dir=tmp_path / "Predictions",
         quiet=True,
     )
     predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Pred" / "P001" / "PRED.mha")))
     assert predicted.shape == (4, 16, 16, 3)
+
+
+def _wrapped_model_training(tmp_path: Path, model: dict) -> dict:
+    rng = np.random.default_rng(5)
+    for case in ("P000", "P001"):
+        _write_case(tmp_path / "Raw" / case / "CT.mha", rng.normal(0.0, 1.0, (4, 16, 16)).astype(np.float32))
+        _write_case(tmp_path / "Raw" / case / "SEG.mha", rng.integers(0, 2, (4, 16, 16)).astype(np.uint8))
+    groups = {
+        "CT": {"groups_dest": {"CT": {"transforms": None, "patch_transforms": None, "is_input": True}}},
+        "SEG": {
+            "groups_dest": {
+                "SEG": {"transforms": {"TensorCast": {"dtype": "int64"}}, "patch_transforms": None, "is_input": False}
+            }
+        },
+    }
+    dataset = {
+        "dataset_filenames": ["./Raw:mha"],
+        "groups_src": groups,
+        "augmentations": None,
+        "Patch": {"patch_size": [1, 16, 16]},
+        "batch_size": 2,
+        "validation": 0.5,
+    }
+    return {"Trainer": {"train_name": "WRAPPED", "manual_seed": 1, "epochs": 1, "Model": model, "Dataset": dataset}}
+
+
+def test_the_adoption_page_s_monai_model_block_trains_one_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """docs/source/usage/adopting-konfai.md shows a MONAI network named by classpath, with its loss on
+    the wrapped module's output. The block, as printed, trains."""
+    import re
+
+    from ruamel.yaml import YAML
+
+    pytest.importorskip("monai.networks.nets")
+    page = Path(__file__).resolve().parents[2] / "docs" / "source" / "usage" / "adopting-konfai.md"
+    blocks = re.findall(r"```yaml\n(.*?)```", page.read_text(encoding="utf-8"), re.S)
+    block = next(body for body in blocks if "classpath: monai.networks.nets:" in body)
+    monkeypatch.chdir(tmp_path)
+
+    checkpoints = api.train(
+        _wrapped_model_training(tmp_path, YAML(typ="safe").load(block)["Model"]),
+        checkpoints_dir=tmp_path / "Checkpoints",
+        statistics_dir=tmp_path / "Statistics",
+        quiet=True,
+    )
+
+    assert sorted(checkpoints.glob("[0-9]*.pt")), "one epoch wrote a checkpoint"

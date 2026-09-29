@@ -108,11 +108,12 @@ and `Standardize` given **both** `mean` and `std`; `Normalize` and an automatic
 the region kinds are `Flip`, `Permute`, **axis-aligned** `Canonical`,
 `Resample` (to a grid, or through a stored transform or field), `Padding`,
 `Dilate` and `Gradient`; and `Mask` streams as a pointwise stage, reading its
-companion mask by region. A `Clip` with a percentile bound needs the whole histogram.
+companion mask by region. A masked `Clip` with `min`/`max` bounds or a masked automatic `Standardize`
+is global-statistic too: the stage measures its statistic under the mask once,
+then streams. A `Clip` with a percentile bound needs the whole histogram.
 See the transform reference for the per-transform answer.
-A transform that reads a second volume it cannot place (a masked `Clip` or
-`Standardize`), a global histogram (`HistogramMatching`), or an undeclared custom
-transform uses the bounded full-volume path.
+A global histogram (`HistogramMatching`) or an undeclared custom transform uses
+the bounded full-volume path.
 
 Reduce the transform chain to identify the boundary, or materialise expensive
 preprocessing once with `Save` and stream from that prepared dataset. See
@@ -151,10 +152,10 @@ konfai TRAIN -y --config Config.yml
 
 This can happen in sandboxes, some notebooks, or hardened servers.
 
-This behavior is inferred from the runtime code: KonfAI's distributed launcher
-allocates a free TCP port and initializes PyTorch distributed communication even
-for local execution paths. If the environment forbids socket binding, startup
-can fail before training begins.
+KonfAI's launcher reserves a free TCP port before it starts the ranks, by
+binding a socket to find one; several ranks then open a PyTorch distributed
+group over it, a single rank opens none. An environment that forbids binding a
+socket stops the run at that reservation, before training begins.
 
 In practice, test the workflow on a normal local machine or GPU server first.
 
@@ -166,13 +167,19 @@ description, while validation summaries are written on their own schedule.
 If you are debugging live behavior, inspect the log stream first. If you are
 ranking completed runs, inspect the saved evaluation JSON files.
 
-### Evaluation runs but the metric file is empty or missing
+### Evaluation refuses: a group not found, or no case in common
 
-Check:
+EVALUATION stops before it writes a metric file when its groups do not meet:
+
+```text
+[DatasetManager] Group source 'PRED' not found in any dataset.
+[DatasetManager] No data was found for groups ['PRED', 'SEG']: although each group contains data from a dataset, there are no common dataset names shared across all groups, the intersection is empty.
+```
+
+The first lists the groups each dataset holds. Check:
 
 - that `Prediction.yml` wrote outputs into the expected `Predictions/<train_name>/`
-  folder
-- that `Evaluation.yml` points to the same `train_name`
+  folder, and that `Evaluation.yml` points to the same `train_name`
 - that masks, predictions, and references use compatible group names
 - that the evaluation dataset uses the same case names as the prediction folder
 

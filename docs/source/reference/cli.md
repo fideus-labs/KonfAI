@@ -95,13 +95,13 @@ catalog (`segmentation.UNet.UNet`) and the declarative catalog
 
 `RESUME`
 
-- `--model`: checkpoint path to resume from (**required**)
+- `--model`: checkpoint path to resume from (**required**, except with `--init`)
 - `--lr`: override the learning rate on resume (omit to keep the checkpoint LR)
 - `--checkpoints-dir` / `--statistics-dir`: as for TRAIN
 
 `PREDICTION`
 
-- `--models`: one or more checkpoint paths (**required**); multiple = ensemble
+- `--models`: one or more checkpoint paths (**required**, except with `--init`); multiple = ensemble
 - `--predictions-dir` / `--predictions_dir` (default `./Predictions/`)
 
 `EVALUATION`
@@ -137,7 +137,10 @@ use a card. An id that is not among the visible CUDA devices is a usage error
 loads torch. `--cpu` must be greater than 0. Unless `-q` is passed, every run
 prints one startup line naming the resolved devices (`[KonfAI] Running on
 cuda:0`, or `[KonfAI] Running on CPU (4 workers)`), so a silent CPU fallback on
-a GPU machine is visible.
+a GPU machine is visible, and a finished `TRAIN`, `RESUME`, `PREDICTION` or
+`EVALUATION` closes on the absolute path of what it wrote (`[KonfAI] outputs in
+.../Predictions/<train_name>/Dataset`), so a `train_name` that differs between two
+configs is visible too.
 `--version` works on the root parser, `konfai --version`, not on a subcommand.
 
 ### How a run is launched

@@ -35,7 +35,7 @@ from konfai.data.data_manager import (
     DataPrediction,
 )
 from konfai.data.reduction import Concat
-from konfai.network.network import Model, ModelLoader, Network
+from konfai.network.network import Model, ModelLoader, Network, place_graph
 from konfai.predictor.ensemble import ModelComposite
 from konfai.predictor.loop import _Predictor
 from konfai.predictor.output import OutputDatasetLoader
@@ -51,6 +51,7 @@ from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
     State,
+    checkpoint_source,
     configure_workflow_environment,
     run_distributed_app,
 )
@@ -172,7 +173,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         for output_group in self.outputs_dataset.keys():
             if output_group.replace(";accu;", "") not in self.output_modules:
                 raise PredictorError(
-                    f"The output group '{output_group}' defined in 'outputs_criterions' "
+                    f"The output group '{output_group}' under 'outputs_dataset' "
                     "does not correspond to any module in the model.",
                     f"Available modules: {self.output_modules}",
                     "Please check that the name matches exactly a submodule or output of your model architecture.",
@@ -196,6 +197,11 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 "No prediction outputs or runtime measures are configured.",
                 "Define at least one outputs_dataset entry or enable a network measure.",
             )
+
+    def outputs(self) -> list[Path]:
+        # A dataset_filename may be absolute, so each output dataset is named, not only the run directory.
+        roots = [Path(output_dataset.filename) for output_dataset in self.outputs_dataset.values()]
+        return list(dict.fromkeys(roots)) or [self.predict_path]
 
     def setup(self, world_size: int):
         """Set up the predictor for inference: create the output directories, copy the configuration
@@ -326,7 +332,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         """
 
         model_composite = (
-            Network.to(self.model_composite, local_rank * self.size)
+            place_graph(self.model_composite, local_rank * self.size)
             if len(cuda_visible_devices())
             else self.model_composite
         )
@@ -506,19 +512,9 @@ def checkpoint_sources(path_to_models: Sequence[Path | str]) -> list[Path | str]
     """Each checkpoint as ``ModelComposite`` loads it. A URL remains a reloadable source: torch.hub keeps
     its download on disk, while the composite's bounded host cache decides which deserialized weights
     stay resident. A local path is kept as a path, its weights streamed into a single model instance
-    during prediction. A path that neither exists nor is a URL is refused by name."""
-    sources: list[Path | str] = []
-    for path_to_model in path_to_models:
-        if isinstance(path_to_model, str) and path_to_model.startswith("https://"):
-            sources.append(path_to_model)
-        elif Path(path_to_model).exists():
-            sources.append(Path(path_to_model))
-        else:
-            raise PredictorError(
-                f"Checkpoint '{path_to_model}' does not exist (resolved: '{Path(path_to_model).resolve()}').",
-                "Pass the path of a checkpoint file (--models), or an https:// URL.",
-            )
-    return sources
+    during prediction. A path that does not exist or is a directory is refused by name
+    (:func:`~konfai.utils.runtime.checkpoint_source`)."""
+    return [checkpoint_source(path_to_model, PredictorError) for path_to_model in path_to_models]
 
 
 def build_predict(

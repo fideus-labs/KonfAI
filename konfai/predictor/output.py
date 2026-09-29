@@ -515,8 +515,19 @@ class OutputDataset(Dataset, NeedDevice):
                 else None
             )
             self._stream_plans[index_dataset] = plan
-            if self._streaming_enabled and (plan is None or not plan.to_sink):
-                path = "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
+            if self._streaming_enabled and plan is None:
+                reason = (
+                    self._stream_refusal(dataset, index_dataset, source_attribute, layer)
+                    if sweeps_first_axis
+                    else "its patch grid is swept along another axis than the first, the one slabs are written along"
+                )
+                self._report_once(
+                    f"whole-volume: {reason}",
+                    f"streaming: case '{input_dataset.name}' takes the whole-volume path: {reason}."
+                    " Reported once per reason.",
+                )
+            elif plan is not None and not plan.to_sink:
+                path = "buffered (the prefix streams, the tail runs whole-volume)"
                 self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
         # Everything past this point reads the header at index 0; a patch-level inverse reads one copy
         # per patch, taken before any inverse ran.
@@ -646,6 +657,29 @@ class OutputDataset(Dataset, NeedDevice):
             budget = resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
         return assembled >= fraction * budget
 
+    def _stream_refusal(
+        self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None
+    ) -> str | None:
+        """Why this case cannot stream at all, or ``None`` when a plan can be drawn for it."""
+        if self.nb_data_augmentation < 1:
+            return "no copy of the case is planned"
+        if not self.reduction.voxel_local:
+            return f"the reduction {type(self.reduction).__name__} is not voxel-local"
+        if layer is not None and not self._worth_streaming(dataset, index, layer):
+            return (
+                "the case is too light for slab streaming to pay, its output being under"
+                f" KONFAI_STREAM_WORTH_THRESHOLD (default {_STREAM_WORTH_MIN_FRACTION}) of the per-rank memory budget"
+            )
+        if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
+            return "a TTA copy's un-augment does not act slab by slab (it moves the slab axis)"
+        for transform in self.before_reduction_transforms:
+            locality = transform.patch_locality(Attribute(attribute))
+            # A SLAB before-reduction transform streams through ``stream_slab``; any other
+            # non-voxel-local one refuses outright.
+            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
+                return f"the before-reduction transform {type(transform).__name__} is not voxel-local"
+        return None
+
     def _plan_stream(
         self,
         dataset: DatasetIter,
@@ -660,22 +694,11 @@ class OutputDataset(Dataset, NeedDevice):
         streaming cannot honour becomes a whole-volume TAIL run once on a post-reduction buffer, as does
         a destination that cannot serve region writes. Refused outright: a reduction that is not
         voxel-local, a non-voxel-local before-reduction transform, a TTA copy whose un-augment does not
-        act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``).
+        act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``): see
+        ``_stream_refusal``.
         """
-        if self.nb_data_augmentation < 1:
+        if self._stream_refusal(dataset, index, attribute, layer) is not None:
             return None
-        if not self.reduction.voxel_local:
-            return None
-        if layer is not None and not self._worth_streaming(dataset, index, layer):
-            return None
-        if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
-            return None
-        for transform in self.before_reduction_transforms:
-            locality = transform.patch_locality(Attribute(attribute))
-            # A SLAB before-reduction transform streams through ``stream_slab``; any other
-            # non-voxel-local one refuses outright.
-            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
-                return None
         stages = [
             *(_FinalizeStage(transform, False) for transform in self.after_reduction_transforms),
             *(

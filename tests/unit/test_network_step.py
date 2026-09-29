@@ -26,7 +26,7 @@ from konfai.network.network import OptimizerLoader, batched_step
 @pytest.fixture
 def on_gpu(monkeypatch: pytest.MonkeyPatch):
     """The run places the graph on a GPU. The parameters stay on the host: an optimizer is built on
-    the launcher, before ``Network.to`` moves them, which is why the choice reads the run, not them."""
+    the launcher, before ``place_graph`` moves them, which is why the choice reads the run, not them."""
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
 
 

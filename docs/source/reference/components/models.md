@@ -1,6 +1,6 @@
 # Models
 
-A KonfAI model is a **named module graph**: a subclass of `konfai.network.Network`
+A KonfAI model is a **named module graph**: a subclass of `konfai.network.network.Network`
 whose modules are wired by `add_module`, or the same graph written as a `.yml`.
 Every module has a dotted path, and that path is what a config writes to attach
 a loss, a metric or an exported prediction to it. This page is the whole model
@@ -158,11 +158,10 @@ The `examples/Synthesis` GAN variant is the clearest example:
 
 ### `;accu;` outputs
 
-The `;accu;` marker appears in some advanced workflows, especially when model
-patching is enabled. Its semantics are **inferred from the shipped examples and
-the network patch/accumulation logic**.
-
-In practice it refers to patch-wise outputs **before final re-assembly**.
+A network with a `ModelPatch` runs its forward once per patch. Each layer's
+output for one patch is named with the `;accu;` marker before the layer's name;
+the outputs of its terminal modules are then re-assembled and named without it.
+`;accu;` therefore names the patch-wise outputs **before final re-assembly**.
 
 This matters in the synthesis GAN example:
 
@@ -240,7 +239,7 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 | `LinearVAE` | `generation.vae.LinearVAE` | Fully-connected variational AE (`LatentDistribution` reparam bottleneck). Pairs with the `KLDivergence` loss. | 1D (flat vectors) | No (`LatentDistribution`) |
 | `Generator` / `Discriminator` / `Gan` | `generation.gan.*` | PatchGAN discriminator + ResNet-autoencoder generator + composite adversarial graph. | 2D / 3D | No |
 | `DiffusionGan`, `DiffusionGanV2`, `DiffusionCycleGan`, `CycleGan*` | `generation.diffusionGan.*` | Adversarial + diffusion + CycleGAN family. | 2D / 3D | No |
-| `cStyleGan.Generator` | `generation.cStyleGan.Generator` | Conditional StyleGAN-style generator with weight-modulated convs. | 2D / 3D | No |
+| `cStyleGan.Generator` | `generation.cStyleGan.Generator` | Conditional StyleGAN-style generator with weight-modulated convs. **Construction only: its forward raises a `RuntimeError`**, so it cannot be trained or run as shipped. | 2D / 3D | No |
 
 ### Registration: `konfai.models.python.registration`
 
@@ -491,7 +490,8 @@ reusable pieces are the vocabulary:
 
 - **Conv graphs:** `ConvBlock` (`[Conv → Norm → Activation]×N`), `ResBlock`
   (residual with projected skip), `Attention` (Attention-U-Net gate),
-  `LatentDistribution` (VAE reparameterisation, exposes `mu`/`log_std`/`z`).
+  `LatentDistribution` (VAE reparameterisation, exposes `mu`/`log_std`/`z`;
+  `log_std` holds the log-variance).
 - **`BlockConfig`**: one conv stage: `kernel_size=3, stride=1, padding=1,
   bias=True, activation="ReLU", norm_mode="NONE"`. `activation` accepts a name,
   a `";"`-separated spec (`"LeakyReLU;0.2;True"`), a callable, or `None`.

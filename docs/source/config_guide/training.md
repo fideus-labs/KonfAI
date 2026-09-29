@@ -114,8 +114,17 @@ konfai TRAIN -y --config Config.yml \
 | `gpu_checkpoints` | list or null | `None` | No | Pins selected modules to dedicated GPUs. |
 | `ema_decay` | float | `0` | No | Enables exponential moving average tracking when greater than zero. |
 | `data_log` | list or null | `None` | No | TensorBoard logging directives for dataset groups or model outputs. |
-| `EarlyStopping` | mapping or null | `None` | No | Configures early stopping. |
+| `EarlyStopping` | mapping or null | `None` | No | Configures early stopping: see [`EarlyStopping`](#earlystopping). |
 | `save_checkpoint_mode` | string | `BEST` | No | `BEST` keeps the checkpoint whose validation losses sum lowest (a Dice loss counts one minus its coefficient; a `ReduceLROnPlateau` schedule steps on the same sum), `ALL` keeps every save. |
+
+### `EarlyStopping`
+
+| Field | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `monitor` | list[str] or null | `null` | The logged losses or metrics summed into the score; a name the run does not log is refused with the names it does. `null` sums the losses. |
+| `patience` | int | `10` | Checks without improvement before the run stops. |
+| `min_delta` | float | `0.0` | The smallest change that counts as an improvement. |
+| `mode` | string | `min` | `min` or `max`: the direction the score improves in. `BEST` checkpoint retention reads it too. |
 
 ## `Trainer.Model`
 
@@ -142,6 +151,8 @@ Common nested fields used by built-in and local models:
 | `outputs_criterions` | mapping | Usually | Declares losses and metrics attached to specific model outputs. |
 | `ModelPatch` | mapping or null | Optional | Enables a second, model-level patch inside the network (a config key named `ModelPatch`, distinct from `Dataset.Patch`). |
 | `dim` | int | Model-dependent | Declares whether the network operates in 2D or 3D. |
+| `allow_head_resize` | bool | Optional | `true` lets a checkpoint whose tensor shapes differ warm-start the overlapping slice of each one (a new label count); the default refuses the mismatch. See {doc}`../reference/components/models`. |
+| `pretrained_from` | mapping or null | Optional | Seeds a fresh TRAIN from another framework's weights (`checkpoint`, `builder`, `args`, `input_shape`). See {doc}`../reference/components/models`. |
 
 ### `optimizer`
 
@@ -215,6 +226,15 @@ Common fields:
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
 | `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Safe under DDP. |
 
+### `Patch`
+
+| Field | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `patch_size` | list[int] | `[128, 128, 128]` | The patch the model is fed; a `0` is a free axis the framework sizes (below). |
+| `overlap` | int / float / string / list / null | `null` | Overlap between neighbouring patches: a voxel count, a fraction in `[0, 1[`, a percent string (`"20%"`) or a per-axis list of those. `null` takes 20 % of the patch. |
+| `pad_value` | float or null | `null` | Value that pads a patch reaching past the volume. `null` pads with the data's minimum; a `uint8` volume always pads with `0`. |
+| `extend_slice` | int | `0` | 2.5D context: the number of neighbouring slices read around a slice patch of an input group and stacked as channels. Only with `patch_size[0] == 1`. |
+
 ### Cache, stream, and buffer
 
 The loading regime picks how a loader turns a case into patches. It applies to
@@ -239,8 +259,9 @@ A cached case is resident, so its patches are cut from RAM even when its chain
 would stream.
 
 A 16 GiB uncompressed `.mha` at patch 64³, batch 2, 2 workers on the streaming
-regime, run under an 8 GiB memory cap, streams at a peak anonymous
-RSS of 0.46 GiB, flat across epochs, with one batch (2 MiB) resident on the GPU.
+regime, run under an 8 GiB memory cap, streamed at a peak anonymous
+RSS of 0.46 GiB, flat across epochs, with one batch (2 MiB) resident on the GPU
+(measured for aa69df3a, 2026-07-15).
 
 ### `memory_budget`
 

@@ -140,7 +140,7 @@ every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
 | `TRE` | `(Tensor, dict)` metric | Target Registration Error between predicted/target landmark coordinates. |: |
 | `GradientImages` | `Tensor` loss | Image-gradient smoothness loss (2D/3D auto); regulariser, or gradient-difference if a target is given. |: |
 | `monai.losses:GlobalMutualInformationLoss` | `Tensor` loss | Parzen-window mutual information, by classpath (needs MONAI installed). | see MONAI |
-| `KLDivergence` | `Tensor` loss | VAE KL term. **Rewires the graph** on init, inserting a `LatentDistribution` block; computes closed-form KL from `mu`/`log_std`. | `shape` (**required**), `dim=100, mu=0, std=1` |
+| `KLDivergence` | `Tensor` loss | VAE KL term. **Rewires the graph** on init, inserting a `LatentDistribution` block; computes the closed-form KL between the latent Gaussian (the block's `mu` output and its `log_std` output, which holds the log-variance) and the prior N(`mu`, `std`²) its arguments set. | `shape` (**required**), `dim=100, mu=0, std=1` |
 
 ## Uncertainty / bookkeeping
 

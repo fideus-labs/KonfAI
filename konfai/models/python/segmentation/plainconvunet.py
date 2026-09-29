@@ -59,38 +59,11 @@ from konfai.models.python.segmentation._nnunet_common import (
     as_kernel_list,
     as_stage_list,
     build_unet_decoder,
+    conv_block_config,
     validate_topology,
 )
 from konfai.network import blocks, network
 from konfai.utils.config import config
-
-
-def _kernel_padding(kernel_size: int | list[int]) -> int | list[int]:
-    """Same-padding for an odd kernel: ``k // 2`` per axis (nnU-Net's ``(k - 1) // 2`` for odd k)."""
-    if isinstance(kernel_size, int):
-        return kernel_size // 2
-    return [k // 2 for k in kernel_size]
-
-
-def _conv_block_config(stride: int | list[int], kernel_size: int | list[int]) -> blocks.BlockConfig:
-    """One nnU-Net conv block: Conv(bias) -> InstanceNorm(affine) -> LeakyReLU(0.01).
-
-    ``stride`` and ``kernel_size`` are each an int (isotropic) or a per-axis list (anisotropic);
-    nnU-Net picks them INDEPENDENTLY, so both pass straight through to the convolution. Padding is
-    same-padding derived from the kernel, so a checkpoint with kernel != 3 (or an anisotropic
-    ``[1, 3, 3]``) loads without a shape mismatch.
-    """
-    stride_value: Any = stride
-    kernel_value: Any = kernel_size
-    padding_value: Any = _kernel_padding(kernel_size)
-    return blocks.BlockConfig(
-        kernel_size=kernel_value,
-        stride=stride_value,
-        padding=padding_value,
-        bias=True,
-        activation="LeakyReLU",
-        norm_mode="INSTANCE_AFFINE",
-    )
 
 
 @config()
@@ -143,8 +116,8 @@ class PlainConvUNet(network.Network):
         # (stage 0 = full resolution), the rest are stride 1. Output written to branch ``enc{k}``.
         stage_in = in_channels
         for k in range(n_stages):
-            block_configs = [_conv_block_config(strides[k], kernel_list[k])] + [
-                _conv_block_config(1, kernel_list[k]) for _ in range(n_conv_encoder[k] - 1)
+            block_configs = [conv_block_config(strides[k], kernel_list[k])] + [
+                conv_block_config(1, kernel_list[k]) for _ in range(n_conv_encoder[k] - 1)
             ]
             self.add_module(
                 f"Encoder_{k}",
@@ -172,7 +145,7 @@ class PlainConvUNet(network.Network):
             num_classes=num_classes,
             dim=dim,
             conv_bias=True,
-            block_config=_conv_block_config,
+            block_config=conv_block_config,
             build_head=lambda j: True,
         )
 

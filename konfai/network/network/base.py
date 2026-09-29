@@ -31,7 +31,7 @@ from konfai.data.patching import ModelPatch
 class NetState(Enum):
     """Execution state of a network inside KonfAI workflows."""
 
-    TRAIN = (0,)
+    TRAIN = 0
     PREDICTION = 1
 
 
@@ -87,7 +87,7 @@ def batched_step(
 
     ``fused`` and ``foreach`` both unset ask for the widest batched step the optimizer implements: fused
     when it has one, foreach when it only has that. The device is the one the run will place the graph on,
-    not the one the parameters sit on here, because an optimizer is built on the launcher and ``Network.to``
+    not the one the parameters sit on here, because an optimizer is built on the launcher and ``place_graph``
     moves the graph afterwards. Off CUDA torch's own default stands (forcing foreach there costs 526 ms a
     step against 2.0 ms, over the 40 tensors of the Segmentation example); an explicit value in the config
     is passed through either way.

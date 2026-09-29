@@ -112,6 +112,10 @@ Common fields:
 | `groups_src` | mapping | Defines how the compared tensors are loaded. A group without `transforms` is compared as stored. |
 | `subset` | string / list / null | Restricts evaluated cases: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |
+| `num_workers` | int or null | DataLoader workers. `None` resolves to `0`, or to `max(1, min(cpu_count, 4))` when reading one patch decodes a whole volume (a store that cannot serve a region). |
+| `pin_memory` | bool | Pinned host memory for the batches (`false` when absent). |
+| `prefetch_factor` | int or null | Prefetched batches per worker, only with workers; `None` resolves to `2`. |
+| `persistent_workers` | bool or null | Keep the workers alive, only with workers; `None` resolves to `false`. |
 
 ### `memory_budget`: memory-bounded evaluation
 

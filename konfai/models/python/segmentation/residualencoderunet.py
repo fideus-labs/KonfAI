@@ -57,38 +57,11 @@ from konfai.models.python.segmentation._nnunet_common import (
     as_kernel_list,
     as_stage_list,
     build_unet_decoder,
+    conv_block_config,
     validate_topology,
 )
 from konfai.network import blocks, network
 from konfai.utils.config import config
-
-
-def _kernel_padding(kernel_size: int | list[int]) -> int | list[int]:
-    """Same-padding for the decoder convs: ``(k - 1) // 2`` per axis (nnU-Net's ConvDropoutNormReLU)."""
-    if isinstance(kernel_size, int):
-        return (kernel_size - 1) // 2
-    return [(k - 1) // 2 for k in kernel_size]
-
-
-def _conv_block_config(
-    stride: int | list[int], kernel_size: int | list[int], bias: bool, negative_slope: float
-) -> blocks.BlockConfig:
-    """One nnU-Net decoder/stem conv block: Conv(bias) -> InstanceNorm(affine) -> LeakyReLU.
-
-    ``stride``/``kernel_size`` are each an int (isotropic) or a per-axis list (anisotropic); both
-    pass straight through the convolution with same-padding derived from the kernel.
-    """
-    stride_value: Any = stride
-    kernel_value: Any = kernel_size
-    padding_value: Any = _kernel_padding(kernel_size)
-    return blocks.BlockConfig(
-        kernel_size=kernel_value,
-        stride=stride_value,
-        padding=padding_value,
-        bias=bias,
-        activation=f"LeakyReLU;{negative_slope}",
-        norm_mode="INSTANCE_AFFINE",
-    )
 
 
 @config()
@@ -146,7 +119,7 @@ class ResidualEncoderUNet(network.Network):
             blocks.ConvBlock(
                 in_channels=in_channels,
                 out_channels=features_per_stage[0],
-                block_configs=[_conv_block_config(1, kernel_list[0], conv_bias, negative_slope)],
+                block_configs=[conv_block_config(1, kernel_list[0], conv_bias, negative_slope)],
                 dim=dim,
             ),
             in_branch=[0],
@@ -195,7 +168,7 @@ class ResidualEncoderUNet(network.Network):
             num_classes=num_classes,
             dim=dim,
             conv_bias=conv_bias,
-            block_config=lambda stride, kernel: _conv_block_config(stride, kernel, conv_bias, negative_slope),
+            block_config=lambda stride, kernel: conv_block_config(stride, kernel, conv_bias, negative_slope),
             build_head=lambda j: deep_supervision or j == n_stages - 2,
         )
 

@@ -115,21 +115,21 @@ interface, not the value proposition by itself.
 The same App interface already ships full segmentation, synthesis and
 registration systems, not reduced demonstration networks:
 
-| App | Workload | Published RTX PRO 5000 benchmark |
+| App | Workload | Medium case (249 × 246 × 246), RTX PRO 5000 |
 | --- | --- | --- |
-| **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: ≈42 s / ≈20 GB VRAM / ≈19 GB RAM**: 1.5–3.6× faster, 2.7–4.1× less host RAM than the original |
-| **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **≈27 s / ≈22 GB VRAM**: 1.6–2.6× faster, up to ~6× less host RAM than the original |
-| **ImpactSynth** | three MR/CBCT→sCT variants, 2.5D UNet++, 5 models each | ≈24 s / ≈16 GB VRAM for the benchmark inference; ≈82 s full ensemble; ≈2 GB RAM |
-| **ImpactSeg** | one model segments 11 structures from CT, MRI, or CBCT | ≈7 s / ≈10 GB VRAM / ≈1.6 GB RAM |
-| **IMPACT-Reg** | 13 multimodal presets across elastix+IMPACT, ConvexAdam, and FireANTs | `ConvexAdam_Composite`: ≈5.1 s / ≈2.1 GB VRAM |
+| **TotalSegmentator-KonfAI** | CT: 117 labels / 5 models · MRI: 50 labels / 2 models | **CT `total`: 17.7 s / 5.2 GB RAM / 15.4 GB VRAM**: 1.8–3.9× faster, 2.7–4.8× less host RAM than the original |
+| **MRSegmentator-KonfAI** | MRI: 40 labels, 5-fold ensemble | **21 s / 5.3 GB RAM / 16.3 GB VRAM**: 1.1–1.7× faster, 1.4–5.4× less host RAM than the original |
+| **ImpactSynth** | three MR/CBCT→sCT variants, 2.5D UNet++, 5 models each | `MR`: 24.6 s / 2.7 GB RAM / 12.8 GB VRAM |
+| **ImpactSeg** | one model segments 11 structures from CT, MRI, or CBCT | 3.3 s / 1.7 GB RAM / 3.9 GB VRAM |
+| **IMPACT-Reg** | 13 multimodal presets across elastix+IMPACT, ConvexAdam, and FireANTs | `FireANTs_SyN`: 108 s / 6.3 GB RAM / 16.0 GB VRAM |
 
-These figures retain each bundle's stated case, ensemble and hardware
-conditions; they are evidence of executable scale, not a cross-task
-leaderboard. The per-app time and RAM ratios come from each bundle's own
-small/medium/large benchmark table (see the bundle READMEs under
-[`apps/`](https://github.com/fideus-labs/KonfAI/tree/main/apps)); the shared
-measurement protocol and the runnable harness are in
-[`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks).
+Every figure is the medium case of the bundle's own small/medium/large table
+(see the bundle READMEs under
+[`apps/`](https://github.com/fideus-labs/KonfAI/tree/main/apps)), measured with
+`benchmarks/perf/bench_apps.py` on 2026-09-09; the ratios against the original
+tools span the three cases. They are evidence of executable scale, not a
+cross-task leaderboard. The shared measurement protocol and the runnable harness
+are in [`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks).
 The bundles share the same App contract across local directories,
 Hugging Face and HTTP, with SlicerKonfAI for general Apps and SlicerImpactReg
 for dedicated registration.
@@ -201,41 +201,53 @@ dict. → [**Python workflows**](https://konfai.readthedocs.io/en/latest/usage/p
 
 ## Quickstart (first smoke run)
 
+Train, predict and evaluate a two-class segmentation on four tiny synthetic CT
+volumes: one CPU, no dataset to download, and a final check of the files the run
+writes.
+
 ```bash
-git clone https://github.com/fideus-labs/KonfAI.git && cd KonfAI
-pip install -e ".[imaging]"
-cd examples/Segmentation
+git clone https://github.com/fideus-labs/KonfAI.git
+python -m venv .venv && . .venv/bin/activate
+python -m pip install "./KonfAI[itk]"
+cp -r KonfAI/examples/Segmentation/TwoClasses konfai-first-run && cd konfai-first-run
 
-# download the small public demo dataset
-pip install -U "huggingface_hub[cli]"
-hf download VBoussot/konfai-demo --repo-type dataset --include "Segmentation/**" --local-dir Dataset
-mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Dataset/.cache
-
-konfai TRAIN -y --gpu 0 --config Config.yml     # use --cpu 1 if you have no GPU
+export OMP_NUM_THREADS=1
+python quickstart.py prepare
+konfai TRAIN -y --cpu 1 --config Config.yml
+python quickstart.py checkpoint
+konfai PREDICTION -y --cpu 1 --config Prediction.yml --models "$(python quickstart.py checkpoint)"
+konfai EVALUATION -y --cpu 1 --config Evaluation.yml
+python quickstart.py verify
 ```
 
 > 💡 After a run, `Config.yml` will contain the resolved defaults KonfAI
 > materialised. That's expected, and it's what makes runs reproducible.
 
-The shipped `epochs: 5` is demo-sized: it walks the complete path in a few
-minutes and is not meant to produce a useful checkpoint; raise it to 100+ for a
-real run. To do all of the above in one go, including predict, evaluate and a
-plot of the result, run every cell of
-[`examples/Segmentation/Segmentation_demo.ipynb`](https://github.com/fideus-labs/KonfAI/blob/main/examples/Segmentation/Segmentation_demo.ipynb).
+`verify` fails unless the four predictions carry the geometry of their CT and
+the Dice values in `Metric_TRAIN.json` match the written files. The
+[**Quickstart**](https://konfai.readthedocs.io/en/latest/quickstart.html) says
+what each file is and how to adapt the three configs to your own CT.
 
-The full walkthrough (predict, evaluate, what to inspect, common first issues,
-notebook entry points) lives in the
-[**Quickstart**](https://konfai.readthedocs.io/en/latest/quickstart.html).
+The next step trains 41 classes on real pelvis CT, a GPU recommended: run every
+cell of
+[`examples/Segmentation/Segmentation_demo.ipynb`](https://github.com/fideus-labs/KonfAI/blob/main/examples/Segmentation/Segmentation_demo.ipynb),
+which downloads the demo data, trains, predicts, evaluates and plots the result.
+Its `epochs: 5` walks the whole path without producing a useful model; raise it
+to 100+ for a real run.
 
 ### Bring your model (no YAML)
 
 A model you already have goes through the same engine in two calls, the
 patching, the overlap blending, the streamed writes and the run record included:
 
+```bash
+pip install "konfai[itk,monai]"   # .mha through SimpleITK, and the MONAI UNet below
+```
+
 ```python
 import konfai
 from monai.networks.nets import UNet
-from konfai.data.transform import TensorCast
+from konfai.data.transform import Argmax, TensorCast
 from konfai.metric.measure import CrossEntropyLoss
 
 if __name__ == "__main__":
@@ -244,7 +256,8 @@ if __name__ == "__main__":
                                      patch=[1, 256, 256], epochs=20, batch_size=8,
                                      transforms={"SEG": [TensorCast(dtype="int64")]})
     konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
-                         checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
+                         checkpoints=sorted(checkpoints.glob("[0-9]*.pt"))[-1],
+                         final_transforms=[Argmax(), TensorCast(dtype="uint8")])
 ```
 
 [`examples/BringYourModel/BringYourModel_demo.ipynb`](https://github.com/fideus-labs/KonfAI/blob/main/examples/BringYourModel/BringYourModel_demo.ipynb)
@@ -265,15 +278,17 @@ streamability from the transforms you declared:
 | --- | --- | --- |
 | **Cache** | training default | every case, resident for the whole run |
 | **Stream** | predict/eval default or budget exceeded; transform default; chain streamable | one patch, or a budget-sized slab under `TRANSFORM` |
-| **Buffer** | predict/eval, chain not streamable | a FIFO of `max(batch_size + 1, shuffle_window)` cases |
+| **Buffer** | predict/eval, or training over its budget; chain not streamable | predict/eval: two cases, the one being finished and the next; training: a FIFO of `max(batch_size + 1, shuffle_window)` cases |
 | **Whole-volume** | transform, chain not streamable | one case plus one in-flight copy |
 
 A chain streams when every step declares the region it needs: the exact patch
 (`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`Resample`),
 or a whole-volume statistic read once from disk (`Normalize`). On the stream
-path, a 16 GiB uncompressed `.mha` trains at patch 64³ under an 8 GiB memory cap
-with a peak resident set of 0.46 GiB. Reproduce the bounded-memory claim with
-`python benchmarks/bench_streaming.py --gib 16 --budget 1` (the tracked
+path, a 16 GiB uncompressed `.mha` trained at patch 64³ under an 8 GiB memory cap
+with a peak resident set of 0.46 GiB (measured for aa69df3a, 2026-07-15).
+`python benchmarks/bench_streaming.py --gib 16 --budget 1` reproduces the bound
+for `TRANSFORM`: it transforms a 16 GiB volume under a 1 GiB `memory_budget` and
+prints the peak resident set beside both (the tracked
 [`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks)
 harness pins the protocol).
 

@@ -34,7 +34,7 @@
 # The backbone parameter list matches MONAI's DynUNet position-by-position
 # (same conv shapes, same order), so MONAI's trained weights transfer into this
 # graph and every segmentation head's logits are `torch.allclose` with MONAI's
-# (see tests/unit/test_yaml_model_dynunet.py). Two deliberate, documented
+# (see tests/unit/test_models_yaml.py). Two deliberate, documented
 # convention differences do NOT affect the logits:
 #   * KonfAI heads append Softmax + ArgMax after the 1x1 logit conv (the catalog
 #     convention, see UNet.yml / NestedUNet.yml); the weight-exact comparison is
