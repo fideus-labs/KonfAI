@@ -22,6 +22,7 @@ import copy
 import queue
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
+from itertools import pairwise
 from typing import Any, cast
 
 import numpy as np
@@ -1864,6 +1865,30 @@ class DatasetManager:
             spans = self._patch_read_spans(source, index, a, is_input)[0]
             read += float(np.prod([span.stop - span.start for span in spans], dtype=np.float64))
         return read / stored
+
+    def streamed_read_widenings(self, a: int, is_input: bool, apply_augmentations: bool) -> list[str]:
+        """What makes the patches of copy ``a`` read more than their slots, named from the grid and
+        the plans: overlapping slots, the halo and the 2.5D stack a patch is read with, and each stage
+        that pulls a window wider than the region it serves."""
+        widenings = []
+        slots = self.patch.get_patch_slices(a)
+        for axis in range(len(slots[0]) if slots else 0):
+            spans = sorted({(slot[axis].start, slot[axis].stop) for slot in slots})
+            if any(start < stop for (_, stop), (start, _) in pairwise(spans)):
+                widenings.append("overlapping patches")
+                break
+        if self.patch.halo:
+            widenings.append(f"a {self.patch.halo}-voxel halo")
+        if is_input and self.patch.extend_slice:
+            widenings.append(f"a 2.5D stack (extend_slice: {self.patch.extend_slice})")
+        source = self._resolve_patch_stream_source(a, apply_augmentations)
+        if source is not None:
+            widenings += [
+                f"'{_stage_name(stage)}'"
+                for stage, plan in zip(source.stages, source.stage_plans, strict=True)
+                if plan.kind in (LocalityKind.HALO, LocalityKind.REGRID)
+            ]
+        return widenings
 
     def _patch_read_spans(
         self, stream_source: _PatchStreamSource, index: int, a: int, is_input: bool

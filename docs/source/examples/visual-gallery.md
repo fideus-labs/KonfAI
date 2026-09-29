@@ -187,13 +187,18 @@ hf download VBoussot/konfai-demo Segmentation/1PC006/CT.mha \
   --repo-type dataset --local-dir /tmp/konfai-doc-gallery
 pixi run --environment dev python docs/scripts/generate_visual_gallery.py \
   --input /tmp/konfai-doc-gallery/Segmentation/1PC006/CT.mha \
-  --slice-index 49
+  --slice-index 49 \
+  --transforms-dir /tmp/konfai-doc-gallery/transforms \
+  --augmentations-dir /tmp/konfai-doc-gallery/augmentations
 ```
 
 The public command deliberately substitutes a different case, so it validates
-the transform logic rather than reproducing the committed pixel values. The
-dimensions and numerical captions above describe the committed 1ABB124 slice;
-update them if you replace those assets with another case.
+the transform logic rather than reproducing the committed pixel values. Its two
+output folders keep the committed panels intact: without them the script writes
+into `docs/source/_static/gallery/`. The dimensions and numerical captions above
+describe the committed 1ABB124 slice; update them if you replace those assets
+with another case. The provenance manifest records the slice, the KonfAI
+version and the SHA-256 that reproduce the committed panels.
 
 The generator imports `Clip`, `Normalize`, `Standardize`, both resampling
 variants, `Padding`, `Crop`, `Permute`, `Gradient`, and every named augmentation

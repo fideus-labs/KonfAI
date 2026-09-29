@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
 
+from konfai.utils.uri import is_uri
 from ruamel.yaml.error import YAMLError
 
 from .config_io import YAML_SAFE
@@ -415,9 +416,11 @@ def _dataset_from_config(path: Path, workflow: str = "train") -> tuple[str, list
     dataset = root.get("Dataset") if isinstance(root, dict) else None
     if not isinstance(dataset, dict):
         return "", []
+    from konfai.utils.utils import split_path_spec  # local: keeps this module free of numpy
+
     entries = [e for e in dataset.get("dataset_filenames") or [] if isinstance(e, str) and e not in {"", "None"}]
-    # A dataset entry is "<path>:<flags>:<extension>": the path is the part before those two fields.
-    first = entries[0].rsplit(":", 2)[0] if entries else ""
+    # A drive letter and a URI scheme carry colons of their own: the spec grammar tells them apart.
+    first = split_path_spec(entries[0], allowed_flags={"a", "i"})[0] if entries else ""
     groups = dataset.get("groups_src")
     return first, sorted(groups)[:12] if isinstance(groups, dict) else []
 
@@ -454,7 +457,7 @@ def collect_facts(
         # A config writes the dataset for the cwd the job runs in, which is the workspace ("./Dataset").
         # Kept relative it resolves against whoever is asking instead: the scan below found nothing, so
         # the state reported 0 cases, and the path it handed on opened for no tool that received it.
-        if dataset and not Path(dataset).expanduser().is_absolute():
+        if dataset and not is_uri(dataset) and not Path(dataset).expanduser().is_absolute():
             dataset = str((workspace / dataset).resolve())
         groups = groups or config_groups
     if dataset and not groups:  # a path is not knowledge of the data: read its structure

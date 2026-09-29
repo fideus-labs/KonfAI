@@ -30,8 +30,9 @@ import torch
 sitk = pytest.importorskip("SimpleITK")
 
 from konfai import api  # noqa: E402
+from konfai.data.augmentation import Flip  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
-from konfai.data.transform import Clip, Crop, Magnitude, Resample, Save, Write  # noqa: E402
+from konfai.data.transform import Clip, Crop, Expand, Magnitude, Resample, Save, Write  # noqa: E402
 from konfai.metric.measure import MAE, Dice  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
@@ -447,6 +448,103 @@ def test_an_evaluation_yml_without_transforms_scores_the_stored_values(tmp_path:
     assert "Normalize" not in config.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("workflow", ["evaluate", "predict"])
+def test_an_expand_in_a_prediction_or_evaluation_chain_is_refused_before_the_run_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workflow: str
+) -> None:
+    """Only TRANSFORM writes an Expand's copies. Here the run once read the case alone, never ran the
+    draw past the marker and exited 0 on the untransformed input."""
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(3)
+    for case in ("P000", "P001"):
+        for group in ("CT", "sCT"):
+            _write_case(tmp_path / "Raw" / case / f"{group}.mha", rng.normal(0.0, 100.0, (4, 8, 8)).astype(np.float32))
+    transforms = {"CT": [Expand(nb=2), Flip()]}
+
+    with pytest.raises(ConfigError, match="'Expand' changes how many cases"):
+        if workflow == "evaluate":
+            api.evaluate(
+                "EXPAND",
+                "./Raw:mha",
+                {"CT": {"sCT": [MAE()]}},
+                transforms=transforms,
+                evaluations_dir=tmp_path / "Evaluations",
+                quiet=True,
+            )
+        else:
+            api.predict_model(
+                torch.nn.Conv2d(1, 1, 3, padding=1),
+                "./Raw:mha",
+                inputs="CT",
+                patch=[1, 8, 8],
+                output="./Pred:mha",
+                transforms=transforms,
+                name="EXPAND",
+                predictions_dir=tmp_path / "Predictions",
+                quiet=True,
+            )
+    assert not (tmp_path / "Evaluations").exists() and not (tmp_path / "Predictions").exists()
+
+
+_READ_PROBE = """
+import os
+
+from konfai.data.transform import Transform
+
+
+class ReadProbe(Transform):
+    def __call__(self, name, tensor, cache_attribute):
+        with open(os.environ["READ_PROBE_LOG"], "a") as log:
+            log.write(name + "\\n")
+        return tensor
+"""
+
+
+@pytest.mark.parametrize(
+    ("lost_train", "lost_validation"), [(["P001"], []), ([], ["P003"])], ids=["train-row-lost", "validation-row-lost"]
+)
+def test_a_resumed_evaluation_reads_only_the_cases_it_has_not_scored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost_train: list[str], lost_validation: list[str]
+) -> None:
+    """An interrupted run's scored cases are neither read nor transformed again, and each split, a
+    split every case of which was scored included, still writes its report from the rows on disk."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "read_probe.py").write_text(_READ_PROBE, encoding="utf-8")
+    monkeypatch.setenv("READ_PROBE_LOG", str(tmp_path / "reads.txt"))
+    rng = np.random.default_rng(5)
+    for case in ("P000", "P001", "P002", "P003"):
+        truth = rng.normal(0.0, 100.0, (4, 5, 6)).astype(np.float32)
+        _write_case(tmp_path / "Raw" / case / "CT.mha", truth)
+        _write_case(tmp_path / "Raw" / case / "sCT.mha", truth + rng.normal(0.0, 10.0, truth.shape).astype(np.float32))
+
+    def run() -> dict[str, dict[str, object]]:
+        return api.evaluate(
+            "RESUMED",
+            "./Raw:mha",
+            {"sCT": {"CT": [MAE()]}},
+            transforms={"CT": {"read_probe:ReadProbe": {}}},
+            dataset_options={"validation": ["P002", "P003"]},
+            evaluations_dir=tmp_path / "Evaluations",
+            quiet=True,
+        ).metrics
+
+    first = run()
+    workspace = tmp_path / "Evaluations" / "RESUMED"
+    for split, lost in (("TRAIN", lost_train), ("VALIDATION", lost_validation)):
+        (workspace / f"Metric_{split}.json").unlink()
+        rows = workspace / f"Metric_{split}.cases.rank0.jsonl"
+        kept = [line for line in rows.read_text().splitlines() if json.loads(line)["name"] not in lost]
+        rows.write_text("".join(f"{line}\n" for line in kept))
+    (tmp_path / "reads.txt").unlink()
+
+    resumed = run()
+
+    assert sorted((tmp_path / "reads.txt").read_text().split()) == lost_train + lost_validation
+    for split in ("TRAIN", "VALIDATION"):
+        assert resumed[split]["case"] == first[split]["case"]
+
+
 # --------------------------------------------------------------------------- uncertainty vocabulary
 
 
@@ -713,6 +811,13 @@ def test_plans_and_live_predictions_release_scratch_on_success_and_failure(
     assert random.getstate() == states[0]
     assert np.array_equal(np.random.get_state()[1], states[1][1])
     assert torch.equal(torch.get_rng_state(), states[2])
+
+
+@pytest.mark.parametrize("output", ["./Pred", "C:\\out\\Pred", "s3://bucket/pred"])
+def test_predict_model_refuses_an_output_without_its_format(output: str) -> None:
+    """A drive letter and a URI scheme carry a colon that does not name the format."""
+    with pytest.raises(ConfigError, match="must name a dataset root and its format"):
+        api.predict_model(torch.nn.Conv3d(1, 1, 1), "./Dataset:mha", inputs="CT", patch=[4, 4, 4], output=output)
 
 
 def test_released_scratch_does_not_accumulate_exit_callbacks(tmp_path: Path) -> None:

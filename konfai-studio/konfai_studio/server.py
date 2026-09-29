@@ -505,7 +505,8 @@ def _load_credentials() -> None:
 
 def _save_credentials(values: dict[str, str]) -> None:
     """Persist what the user typed and apply it now. Created 0600: it holds API keys, and a write
-    followed by chmod would leave them readable under the umask in between."""
+    followed by chmod would leave them readable under the umask in between. On Windows a mode sets
+    only the read-only flag: the file takes the permissions of the folder it is in."""
     path = _credentials_file()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:

@@ -338,6 +338,10 @@ One chain changes its cardinality at most once. Composing the two (augment a
 cohort, then fold it) is two invocations, the second reading the first one's
 output back.
 
+Both markers belong to TRANSFORM. A TRAIN, PREDICTION or EVALUATION chain that
+declares one is refused when its config is read: write the copies or the folded
+case as a dataset with TRANSFORM, then read that dataset.
+
 ### `Reduce`: N cases, one volume
 
 Everything before the marker runs once per case, `Reduce` folds the cohort at

@@ -10,7 +10,7 @@ answers *what exists*, `inspect_object_signature` and `describe_config_schema` a
 *how to configure it*, and `describe_extension_points` / `check_external_dependency`
 answer *what you can add* and *what is installed*.
 
-## The three files and their root keys
+## The four files and their root keys
 
 Each CLI state maps to one file with one mandatory root key. Author the file that
 matches the workflow you are running.
@@ -20,14 +20,15 @@ matches the workflow you are running.
 | `TRAIN` / `RESUME` | `Config.yml` | `Trainer:` | model + dataset + losses + augmentations + optimizer/schedulers + training params |
 | `PREDICTION` | `Prediction.yml` | `Predictor:` | model load(s), patch/TTA/ensemble inference, output post-processing |
 | `EVALUATION` | `Evaluation.yml` | `Evaluator:` | predictions vs ground truth → per-case + aggregate metric JSON |
+| `TRANSFORM` | `Transform.yml` | `Transformer:` | dataset preparation: read a dataset, run a chain per case, `Write` the result |
 
 `write_workflow_config` validates that the top-level root key matches the workflow
 before writing, so a `Prediction.yml` whose root is `Trainer:` is rejected early.
 
 > **Reading a config mutates it.** `apply_config` writes resolved defaults *back* to the
-> file. After a validate or run, the on-disk YAML is the fully-resolved snapshot, not
+> file. After a run, the on-disk YAML is the fully-resolved snapshot, not
 > what you originally wrote. `validate_config_semantics` is the exception, it validates
-> on a snapshot and restores your authored file, so validating never rewrites your work.
+> a scratch copy placed beside your config, so validating never rewrites your work.
 
 ## Non-negotiable conventions
 
@@ -82,8 +83,8 @@ YAML you write with `write_workflow_config`.
    every object name and its parameters *before* writing them.
 4. `write_workflow_config`: write one workflow YAML (root key checked).
 5. `review_config_semantics`: cheap, no runtime instantiation; fix any `blocking_issues`.
-6. `validate_config_semantics`: instantiates KonfAI objects on a snapshot to catch
-   runtime-facing errors; side-effect-free.
+6. `validate_config_semantics`: instantiates KonfAI objects on a scratch copy of the config to
+   catch runtime-facing errors; side-effect-free.
 
 Only after step 6 is clean do you launch a run. See `troubleshooting.md` for what to do
 when a step fails.

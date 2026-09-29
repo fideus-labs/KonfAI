@@ -543,6 +543,54 @@ def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: 
     assert clock.spent("checkpoint") >= 0.04
 
 
+@pytest.mark.parametrize(
+    ("checkpoint_ranks", "processes", "size", "refused"),
+    [(1, 2, 1, True), (2, 2, 1, False), (1, 2, 2, False)],
+    ids=["other-rank-count", "same-rank-count", "two-gpus-per-replica"],
+)
+def test_resume_refuses_another_rank_count_before_writing_its_statistics(
+    tmp_path: Path, monkeypatch, checkpoint_ranks: int, processes: int, size: int, refused: bool
+) -> None:
+    """A checkpoint's rank generators and batches belong to the ranks that wrote it: RESUME on another
+    count is refused on the launcher, the statistics directory as the last run left it."""
+    monkeypatch.setattr(trainer_module, "checkpoints_directory", lambda: tmp_path / "Checkpoints")
+    monkeypatch.setattr(trainer_module, "statistics_directory", lambda: tmp_path / "Statistics")
+    monkeypatch.setattr(trainer_module, "konfai_state", lambda: "RESUME")
+    statistics = tmp_path / "Statistics" / "RUN"
+    statistics.mkdir(parents=True)
+    (statistics / "Config.yml").write_text("Trainer: {epochs: 1}\n", encoding="utf-8")
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Trainer: {epochs: 2}\n", encoding="utf-8")
+
+    trainer = cast(Any, Trainer.__new__(Trainer))
+    trainer.name = "RUN"
+    trainer.size = size
+    trainer.it = 4
+    trainer._split_seed = 0
+    trainer.ema_decay = 0
+    trainer.model_ema = None
+    trainer.override_lr = None
+    trainer.model = cast(Any, SimpleNamespace(load=lambda *args, **kwargs: None))
+    trainer.dataset = cast(Any, SimpleNamespace(get_data=lambda world_size: ([], [], [])))
+    trainer.config_path_src = config_path
+    trainer.config_namefile = statistics / "Config.yml"
+
+    def load() -> dict:
+        trainer._resume_state = {"world_size": checkpoint_ranks}
+        return {}
+
+    trainer._load = load
+
+    if refused:
+        with pytest.raises(TrainerError, match="written by 1, this run has 2"):
+            trainer.setup(processes)
+        assert [path.name for path in statistics.iterdir()] == ["Config.yml"]
+        assert (statistics / "Config.yml").read_text(encoding="utf-8") == "Trainer: {epochs: 1}\n"
+    else:
+        trainer.setup(processes)
+        assert (statistics / "Train_4.txt").is_file()
+
+
 # ---- RESUME LR override ----
 
 # Resume/fine-tune learning-rate override semantics for ``Network.load``.

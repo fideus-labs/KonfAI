@@ -17,8 +17,8 @@
 
 """Prediction workflow entrypoints and orchestration for KonfAI.
 
-Every reduction of :mod:`konfai.data.reduction` is re-exported: a bare ``combine`` or ``reduction`` name
-resolves here, and published configs name them as ``konfai.predictor.<Reduction>``."""
+Every reduction of :mod:`konfai.data.reduction` is re-exported: a bare ``combine`` or ``reduction`` name,
+the spelling published configs use (``combine: Mean``), resolves here."""
 
 from konfai.data.reduction import Concat as Concat
 from konfai.data.reduction import Mean as Mean

@@ -117,6 +117,18 @@ drivers and CUDA version. If your PyTorch already matches your machine, there is
 nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
 first, then KonfAI. For containers, see [Docker](#docker) below.
 
+## Platforms
+
+KonfAI runs on Linux, macOS and Windows. Two things differ outside Linux:
+
+- **GPUs are CUDA devices.** KonfAI does not use Apple's Metal (MPS) backend, so
+  on macOS every workflow runs on the CPU: leave `--gpu` out and choose the
+  number of processes with `--cpu N`.
+- **Windows opens no process group.** TRAIN, RESUME and EVALUATION run there on
+  one process (`--cpu 1` or a single `--gpu`) and refuse more. PREDICTION and
+  TRANSFORM, whose processes never talk to each other, can use several. See
+  [How a run is launched](../reference/cli.md#how-a-run-is-launched).
+
 ## If something is missing
 
 - **`ModuleNotFoundError` after installing**: the install landed in a different

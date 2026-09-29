@@ -309,6 +309,15 @@ def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
     return MultipartEncoder(fields=fields)
 
 
+def _link_or_copy(src: str | Path, dst: str | Path) -> None:
+    """A hard link to ``src`` where the filesystem makes one (same volume, no privilege needed on
+    Windows), else a copy."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 class AbstractKonfAIApp:
     """Common base class for local and remote KonfAI App runners."""
 
@@ -1035,9 +1044,9 @@ class KonfAIApp(AbstractKonfAIApp):
         - files are unlinked
 
         On platforms or filesystems that do not support symlinks (Windows without
-        Developer Mode raises OSError WinError 1314), this falls back to copying:
-        - directories via copytree
-        - files via copy2
+        Developer Mode raises OSError WinError 1314), each file is hard-linked where
+        the filesystem allows it (same volume) and copied otherwise; a directory is
+        rebuilt around its files.
 
         Parameters
         ----------
@@ -1060,9 +1069,9 @@ class KonfAIApp(AbstractKonfAIApp):
         except OSError:
             # Windows without Developer Mode (WinError 1314), or a filesystem without symlink support.
             if src.is_dir():
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, copy_function=_link_or_copy)
             else:
-                shutil.copy2(src, dst)
+                _link_or_copy(src, dst)
 
     def _write_inputs_to_dataset(self, inputs: list[list[Path]]) -> None:
         """

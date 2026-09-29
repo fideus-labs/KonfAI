@@ -14,10 +14,11 @@ This file is the map from a symptom to the tool that diagnoses or fixes it.
   raises `Session '<name>' already has active job(s)`. Either `wait_for_job` on the
   active one or `cancel_job`, or work in a different session.
 - **A server restart orphans running jobs.** The server does **not** kill the child on
-  restart, it loses the in-memory process handle and relabels any previously-active job
-  `status=error`, `recovered=true` ("original subprocess handle is unavailable"). Because
-  jobs run as non-daemon processes, an orphaned training child may **keep running and holding
-  the GPU**. Verify/kill it at the OS level if needed, then relaunch.
+  restart; it loses the in-memory process handle and marks every previously-active job
+  `recovered=true`. A job whose process is still alive stays `status=running`: the server
+  watches it by pid, reports how it ends, and `cancel_job` still stops it (it may be holding
+  the GPU). A job whose process is gone becomes `status=error` ("the original process is
+  gone"): relaunch it.
 
 ## Symptom → action
 
@@ -25,7 +26,7 @@ This file is the map from a symptom to the tool that diagnoses or fixes it.
 |---|---|
 | Config written but unsure it's valid | `review_config_semantics` → `validate_config_semantics` |
 | `review_config_semantics` returns `blocking_issues` | Fix the YAML, re-write with `write_workflow_config`, review again. Do **not** proceed to validate. |
-| `validate_config_semantics` returns `ok=false` | Read `error_type` / `error` / `traceback`; fix the offending object. Use `inspect_object_signature` on the classpath in the traceback to get its real parameters. |
+| `validate_config_semantics` returns `ok=false` | Read `error_type` / `error`; a KonfAI refusal says what to change in its message. A `traceback` comes only with a crash (also one a refusal wraps): fix the offending object, using `inspect_object_signature` on the classpath it names to get its real parameters. |
 | Unknown/ambiguous object name in YAML | `list_components` for that kind, then `inspect_object_signature` on the chosen classpath. |
 | "How is X even configured?" | `describe_config_schema` for the workflow; `inspect_object_signature` for one object. |
 | Optional dependency error (`itk`, `h5py`, `lpips`, …) | `check_external_dependency` to confirm what's installed and get the install hint. |
@@ -34,7 +35,7 @@ This file is the map from a symptom to the tool that diagnoses or fixes it.
 | Dataset mapping looks wrong (`IMG` vs `CT`) | `inspect_dataset` → `prepare_dataset_aliases`, then re-`design_config_strategy`. |
 | Job stuck / need to stop it | `cancel_job` (SIGTERM, waits ~5s, then SIGKILL). |
 | Job failed: what next? | The job payload's `next_actions` say `validate_config_semantics` then `retry:<kind>`. Validate first to catch the cause, fix, relaunch. |
-| Long training seems to "hang" | It probably isn't: `wait_for_job` **with no `timeout_s`** waits until the job truly finishes. Use `read_live_metrics` / the `job://<id>/log` resource to watch progress. Only pass `timeout_s` when you deliberately want to bound the wait (it raises on expiry). |
+| Long training seems to "hang" | It probably isn't: `wait_for_job` **with no `timeout_s`** waits until the job truly finishes. Use `read_live_metrics` / the `job://<id>/log` resource to watch progress. Only pass `timeout_s` when you deliberately want to bound the wait (on expiry it returns the current status with `timed_out=true`). |
 
 ## Job status lifecycle
 
@@ -62,5 +63,5 @@ job payload:
 - Validating a **prediction** config without supplying `models` writes a tiny placeholder
   weight file into the scratch workspace so the build can complete: this is expected and
   is not a real checkpoint.
-- `KONFAI_MCP_VALIDATE_ROOT` sets the scratch validation workspace. If validation errors
-  with a missing-root/KeyError, that env var (or the server's default) is not set.
+- Each validation builds in a fresh temporary directory (under `TMPDIR`), removed when it
+  returns.

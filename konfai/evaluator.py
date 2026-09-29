@@ -388,11 +388,30 @@ class Evaluator(DistributedObject):
             self.metric_path / config_file().name,
         )
 
+        # A case an interrupted run scored is never read again: its row reaches the aggregate from disk.
+        self.dataset.leave_out(
+            self._scored_cases(self.statistics_train), self._scored_cases(self.statistics_validation)
+        )
         self.dataloader, _, _ = self.dataset.get_data(world_size)
 
     def _incremental_case_files(self, statistics: Statistics) -> list[Path]:
         """Every rank's case file for this split, this run's and an interrupted predecessor's alike."""
         return sorted(self.metric_path.glob(f"{statistics.filename.stem}.cases.*.jsonl"))
+
+    def _scored_cases(self, statistics: Statistics) -> dict[str, dict[str, float]]:
+        """The rows an interrupted run left for this split, by case. A row scored with other metrics
+        than the config names now is not one: its case is scored again."""
+        keys = {
+            f"{output_group}:{target_group}:{metric.get_name()}"
+            for output_group, targets in self.metrics.items()
+            for target_group, metrics in targets.items()
+            for metric in metrics
+        }
+        return {
+            name: values
+            for name, values in Statistics.load_incremental(self._incremental_case_files(statistics)).items()
+            if keys <= values.keys() and all(any(key == k or key.startswith(f"{k}:") for k in keys) for key in values)
+        }
 
     def _is_resumable(self) -> bool:
         """Whether an interrupted run left case rows without their aggregate for some split."""
@@ -763,19 +782,8 @@ class Evaluator(DistributedObject):
         self._iter_dataset.load(label)
         self._clock = SweepClock()
         # Cases an interrupted run scored are read back and skipped; each case scored from here on is
-        # appended to this rank's own case file. The aggregate is built from the union. A row scored with
-        # other metrics than the config names now is scored again.
-        keys = {
-            f"{output_group}:{target_group}:{metric.get_name()}"
-            for output_group, targets in self.metrics.items()
-            for target_group, metrics in targets.items()
-            for metric in metrics
-        }
-        scored = {
-            name: values
-            for name, values in Statistics.load_incremental(self._incremental_case_files(statistics)).items()
-            if keys <= values.keys() and all(any(key == k or key.startswith(f"{k}:") for k in keys) for key in values)
-        }
+        # appended to this rank's own case file. The aggregate is built from the union.
+        scored = self._scored_cases(statistics)
         self._scored_names = set(scored)
         if scored:
             statistics.measures.update(scored)

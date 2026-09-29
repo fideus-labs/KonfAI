@@ -97,27 +97,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     if with_uncertainty:
         parser.add_argument("-uncertainty", action="store_true", help="Run uncertainty workflow.")
 
-    device_group = parser.add_mutually_exclusive_group()
-    device_group.add_argument(
-        "--gpu",
-        type=int,
-        nargs="+",
-        default=[],
-        help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
-    )
-
-    def non_negative_int(value: str) -> int:
-        ivalue = int(value)
-        if ivalue <= 0:
-            raise argparse.ArgumentTypeError("CPU value must be > 0")
-        return ivalue
-
-    device_group.add_argument(
-        "--cpu",
-        type=non_negative_int,
-        default=None,
-        help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
-    )
+    _add_device(parser)
 
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
     parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront")
@@ -146,6 +126,14 @@ def _positive_int(value: str) -> int:
     return ivalue
 
 
+def _add_device(parser: argparse.ArgumentParser) -> None:
+    device = parser.add_mutually_exclusive_group()
+    device.add_argument(
+        "--gpu", type=int, nargs="+", default=[], help="GPU device ids, e.g. '0' or '0 1'. CPU if omitted."
+    )
+    device.add_argument("--cpu", type=_positive_int, default=None, help="Run on CPU using N worker processes.")
+
+
 def _add_app_io(parser: argparse.ArgumentParser) -> None:
     """Add the input/output/device options shared by every app operation."""
     parser.add_argument(
@@ -168,11 +156,7 @@ def _add_app_io(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Temporary directory (optional).",
     )
-    device = parser.add_mutually_exclusive_group()
-    device.add_argument(
-        "--gpu", type=int, nargs="+", default=[], help="GPU device ids, e.g. '0' or '0 1'. CPU if omitted."
-    )
-    device.add_argument("--cpu", type=_positive_int, default=None, help="Run on CPU using N worker processes.")
+    _add_device(parser)
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output.")
     parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront.")
     parser.add_argument("--force_update", action="store_true", help="Refresh required app files before running.")
@@ -486,27 +470,7 @@ def main_apps() -> None:
                 default=None,
                 help="Temporary directory (optional).",
             )
-        device_group = parser.add_mutually_exclusive_group()
-        device_group.add_argument(
-            "--gpu",
-            type=int,
-            nargs="+",
-            default=[],
-            help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
-        )
-
-        def non_negative_int(value: str) -> int:
-            ivalue = int(value)
-            if ivalue <= 0:
-                raise argparse.ArgumentTypeError("CPU value must be > 0")
-            return ivalue
-
-        device_group.add_argument(
-            "--cpu",
-            type=non_negative_int,
-            default=None,
-            help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
-        )
+        _add_device(parser)
 
         parser.add_argument(
             "-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution"
@@ -809,7 +773,11 @@ def main_apps_server() -> None:
         action="store_true",
         help="Pre-download all apps listed in --apps into the local cache before starting the server.",
     )
-    parser.add_argument("--check", action="store_true", help="Validate all apps listed in --apps (no download).")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate all apps listed in --apps (no download) and exit; with --download, download and serve.",
+    )
 
     args = parser.parse_args()
 
@@ -838,6 +806,8 @@ def main_apps_server() -> None:
             raise SystemExit("One or more apps are invalid:\n" + "\n".join(f"  - {a}: {err}" for a, err in errors))
 
         print("[KonfAI-Apps] All apps validated successfully.")
+        if not args.download:
+            return
 
     if args.download:
         for app in apps:

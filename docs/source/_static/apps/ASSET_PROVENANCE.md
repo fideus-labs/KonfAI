@@ -75,9 +75,31 @@ and displays the coronal anatomy with superior at the top.
 | `gallery/scale-omezarr.webp` | `2e0e44c6e443af4117373aac971756b341ec6bd0a0af5ea159858b64f6f3e579` |
 | `gallery/scale-omezarr-mobile.webp` | `02b602195ad5f42e6b8184816b66e678c0fe881bc580b32c81855cce26e9713b` |
 
-Transform and augmentation PNG hashes are reproducible from case `1ABB124`
-with `docs/scripts/generate_visual_gallery.py`; the source-volume SHA-256 above
-anchors the input and the committed script plus captions record every parameter.
+The transform and augmentation panels come from axial index `84` of case
+`1ABB124` (the `CT.mha` above). `docs/scripts/generate_visual_gallery.py
+--input CT.mha --slice-index 84`, run with KonfAI `4d452cf` (v1.6.0), writes
+these 17 files byte for byte; the stages have changed since, so another version
+can draw them differently.
+
+| Panel | SHA-256 |
+| --- | --- |
+| `gallery/transforms/source.png` | `d435a7cb2e29070a70b48ac0780c8366b3e078c1999d2d10b20be08677078fa7` |
+| `gallery/transforms/clip.png` | `c35559d53d50cff3004e7ccc0648b26a8d77e6a9947d8f389d870be654b1f921` |
+| `gallery/transforms/normalize.png` | `b9730a73f378584bf7e43e3f898a42c91b36dee59c158cdaa7e31d4dbfffe2d9` |
+| `gallery/transforms/standardize.png` | `0ada4e44596316e673a1ab5be89ecbaf5258bd3126971bec9d1ea8e4850fb853` |
+| `gallery/transforms/resample-shape.png` | `7427df0122b9a7eaec0807e010f195168ff9dbbc434cc64b0c8bc4b6a3d02f35` |
+| `gallery/transforms/resample-spacing.png` | `1b59aca2ae926efcdf8de354b5c03599f34d87e7e5149477bbdd11bcd5b6ef86` |
+| `gallery/transforms/padding.png` | `7ce0f833ba91cb2e93253afac7f74cc3091bcfda66b6d1aa813914a14990ebb2` |
+| `gallery/transforms/crop.png` | `81e2cb0ac8400d4eeaa546633c1548692757e803d4a4e1307c505eb769785c0d` |
+| `gallery/transforms/permute.png` | `8596ad620e2081da4cd4e8f975a769f719e948306d7b36af059ac84563c5c61a` |
+| `gallery/transforms/gradient.png` | `ca8039d1420e7bfc236a3e4b67231fd40bbdf9dc4eb3e7885da6920606b9ebf4` |
+| `gallery/augmentations/source.png` | `b9730a73f378584bf7e43e3f898a42c91b36dee59c158cdaa7e31d4dbfffe2d9` |
+| `gallery/augmentations/flip.png` | `73b67999f4ef87258abf61ed4ec93aed4e6a316bf5dd5f01e0a1d50e547c9d71` |
+| `gallery/augmentations/rotate.png` | `f932fcaf5efdd08f6902c0a1d81ed95238ba60ab33c4b2e857e4272f4ae6ba93` |
+| `gallery/augmentations/brightness.png` | `99c4832055269a7a28ab01928a2aa43e36aa2d18eb81ceed1c88155d93e6986d` |
+| `gallery/augmentations/contrast.png` | `29efc71f5b814e1017b622245a9fa6cf672eddd4060220e6cdfa1d4b113bae9c` |
+| `gallery/augmentations/noise.png` | `994cbe14b83e46ddf947d3525c9220ab3ff1768eb49152df5c2e0ff53f0fec26` |
+| `gallery/augmentations/cutout.png` | `62c7ec9333a1ca79de392e4904c507d02b89a17da0e989094b56981e293a6d49` |
 
 The generators request plane-sized images through SimpleITK's extraction API.
 Because the source MHA files are compressed, the backend may still decompress

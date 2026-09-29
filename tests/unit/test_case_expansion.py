@@ -39,22 +39,25 @@ from konfai.data.augmentation import (
     Rotate,
     Scale,
 )
+from konfai.data.data_manager import GroupTransform, GroupTransformMetric, GroupTransformOut
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
 from konfai.data.transform import (
     Clip,
     Expand,
     Mask,
+    Reduce,
     Resample,
     Save,
     TensorCast,
     Transform,
+    TransformLoader,
     Write,
     split_expand,
 )
 from konfai.data.transform import Permute as PermuteAxes
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import PatchError, TransformError
+from konfai.utils.errors import ConfigError, PatchError, TransformError
 from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
@@ -107,6 +110,26 @@ def test_expand_refuses_a_cardinality_below_one() -> None:
 def test_expand_is_never_applied_as_an_ordinary_transform() -> None:
     with pytest.raises(TransformError, match="expands nothing"):
         Expand()("CASE_000", torch.zeros(1, 2, 2, 2), Attribute())
+
+
+@pytest.mark.parametrize("marker", [Expand(nb=2), Reduce(operator="Mean", output="MEAN")], ids=["expand", "reduce"])
+def test_a_cardinality_marker_outside_transform_is_refused_when_the_chain_is_bound(
+    marker: Transform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the TRANSFORM engine runs a marker; another workflow refuses it from the config, not
+    at the first case its loader reads."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    monkeypatch.setattr(TransformLoader, "get_transform", lambda *_, **__: marker)
+    for chain in (
+        GroupTransform(transforms={"Marker": TransformLoader()}),
+        GroupTransformMetric({"Marker": TransformLoader()}),
+    ):
+        with pytest.raises(ConfigError, match=f"'{type(marker).__name__}' changes how many cases"):
+            chain.prepare("CT", "CT")
+
+    transform_chain = GroupTransformOut({"Marker": TransformLoader()})
+    transform_chain.prepare("CT", "CT")
+    assert transform_chain.transforms == [marker]
 
 
 def test_split_expand_is_the_chain_around_its_marker() -> None:

@@ -4,6 +4,7 @@ next_actions token emitted by payload builders is a callable registered tool."""
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -163,3 +164,24 @@ def test_validated_config_names_only_registered_tools(
     assert not [action for action in actions if action not in tool_names], actions
     if workflow.lower() == "transform":
         assert actions.index("plan_transform") < actions.index("run_transform")
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_the_resources_the_skill_names_are_listed_by_the_client(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """The experiments skill sends its reader to resources/list and resources/templates/list for the live list."""
+    skill = (
+        Path(__file__).resolve().parents[2] / ".claude/skills/konfai-experiments/references/resources-and-clients.md"
+    )
+    named = set(re.findall(r"`(\w+://[^`\s]+)`", skill.read_text(encoding="utf-8")))
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> set[str]:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            resources = {str(resource.uri) for resource in await client.list_resources()}
+            return resources | {template.uriTemplate for template in await client.list_resource_templates()}
+
+    listed = asyncio.run(scenario())
+    assert named, skill
+    assert named <= listed, sorted(named - listed)

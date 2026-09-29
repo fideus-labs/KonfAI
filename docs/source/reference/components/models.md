@@ -246,7 +246,7 @@ The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
 
 | Model | Classpath | Purpose | Dims | YAML-buildable |
 | --- | --- | --- | --- | --- |
-| `VoxelMorph` | `registration.registration.VoxelMorph` | Learning-based deformable/rigid registration (U-Net flow field + spatial-transformer warp + scaling-and-squaring integration). Pass `dim: 2`. | 2D | No |
+| `VoxelMorph` | `registration.registration.VoxelMorph` | Learning-based deformable/rigid registration (U-Net flow field + spatial-transformer warp + scaling-and-squaring integration). `dim` 2 or 3 (default 3), with a `shape` of that many axes. | 2D / 3D | No |
 
 ### Representation: `konfai.models.python.representation`
 

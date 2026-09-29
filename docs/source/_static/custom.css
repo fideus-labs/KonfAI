@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
 /* The logo is the full KonfAI wordmark (mark + "KonfAI"), so hide the theme's
  * duplicate text label and size the transparent lockup for the header. */
 .sy-head-brand img {

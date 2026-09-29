@@ -915,7 +915,8 @@ class LocalAppRepository(AppRepositoryInfo):
             for name in declared[:number_of_model]:
                 models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
         else:
-            # Legacy metadata that declares no models: every .pt the repository holds, in listing order.
+            # app.json declares no models: every .pt the repository holds, in listing order, up to the
+            # count asked; a weightless app ("models": []) asks for none.
             models_to_download = available_models
             remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
             if remote_filenames is not None:

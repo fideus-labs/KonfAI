@@ -134,7 +134,7 @@ Admission control: at most one stream per job (else 429), and a global cap of 20
 | Total upload | 6 GB | **413** on overflow |
 | Fine-tune `dataset` zip | 64 GiB, set `KONFAI_APPS_MAX_DATASET_BYTES` (bytes) to change it | the archive, each member and the total extracted bytes are counted while written: **413** naming the variable on overflow |
 | GPU scheduling | one semaphore per visible GPU | auto mode waits for any free GPU; explicit mode acquires all requested (400 unknown id, 503 if none) |
-| Result grace period | 120 s after completion | workspace and job are then removed: **download promptly** |
+| Result retention | 600 s after completion, renewed by every download that starts; set `KONFAI_APPS_RESULT_RETENTION` (seconds) to change it | workspace and job are then removed: **download promptly** |
 
 Jobs run in an isolated temp workspace; the command is built as an argv list and
 launched with `subprocess.Popen` (no shell), so there is no shell injection.

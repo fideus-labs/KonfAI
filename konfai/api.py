@@ -23,7 +23,7 @@ see ``record_given_arguments``), the equivalent mapping, or a tree loaded from a
 
 The contract:
 
-- A designed refusal raises ``KonfAIError``; only the decorated entrypoints the CLIs call catch it and exit.
+- A designed refusal raises ``KonfAIError``; only the ``konfai`` and ``konfai-apps`` CLIs catch it and exit.
 - Results come back structured, read from the run's own record (``outputs.json``, ``Metric_*.json``).
 - The ``KONFAI_*`` environment and the published per-rank memory budget are restored around every
   call; one workflow runs at a time per process, a second concurrent call is refused.
@@ -122,13 +122,13 @@ def _workflow_scope(ranks: int) -> Iterator[None]:
     """Own build-time RNG draws, scratch files and the resident peak until execution and result
     extraction finish."""
     from konfai.utils.budget import run_peak_scope
-    from konfai.utils.runtime.distributed import forget_memoised_inputs, preserved_rng
+    from konfai.utils.runtime.distributed import forget_earlier_workflows, preserved_rng
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, release_scratch_configs
 
     with _one_workflow_at_a_time(ranks), preserved_rng(), run_peak_scope(), _working_directory_importable():
         mark = len(_SCRATCH_CONFIGS)
         try:
-            forget_memoised_inputs()
+            forget_earlier_workflows()
             yield
         finally:
             release_scratch_configs(mark)
@@ -785,10 +785,11 @@ def predict_model(
     """
     from konfai.predictor import build_predict
     from konfai.utils.runtime.environment import register_scratch_config
+    from konfai.utils.utils import split_path_spec
 
     _one_rank_inline(gpu)
     with _registered_live_model(model) as token:
-        root, _, file_format = str(output).rpartition(":")
+        root, _, file_format = split_path_spec(str(output), default_format="")
         if not root or not file_format:
             raise ConfigError(
                 f"'output' must name a dataset root and its format, as the YAML does: './Pred:mha' (got {output!r}).",
@@ -824,7 +825,7 @@ def predict_model(
                                 if final_transforms is None
                                 else _chain_tree(final_transforms, _STAGE_MODULES, "final_transforms")
                             ),
-                            "dataset_filename": f"{root}:{file_format}",
+                            "dataset_filename": str(output),
                             "group": group,
                             "same_as_group": f"{inputs}:{inputs}",
                             "reduction": "Mean",

@@ -14,7 +14,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import errno
 import os
+import shutil
 import types
 from contextlib import nullcontext
 from pathlib import Path
@@ -263,6 +265,63 @@ def test_dataset_staging_replaces_its_own_and_is_invisible_to_the_reader(
     assert Dataset("Dataset", "mha").get_names("Volume_0") == ["P000"]
     app._clear_dataset()
     assert not (tmp_path / "Dataset").exists()
+
+
+def _refuse_symlinks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What Windows without developer mode answers to ``os.symlink``."""
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(app_module.os, "symlink", refused)
+
+
+def test_a_refused_symlink_shares_the_inputs_data_instead_of_copying_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Where symbolic links are refused, an input file and a fine-tune dataset directory are staged
+    through hard links: nothing is written twice, and removing the staging leaves the inputs."""
+    _refuse_symlinks(monkeypatch)
+    volume = tmp_path / "case.mha"
+    _write_volume(volume)
+    cohort = tmp_path / "cohort"
+    (cohort / "P0").mkdir(parents=True)
+    _write_volume(cohort / "P0" / "CT.mha")
+    monkeypatch.chdir(tmp_path)
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+
+    app._write_inputs_to_dataset([[volume]])
+    app_module.KonfAIApp.symlink(cohort, tmp_path / "staged")
+
+    assert (tmp_path / "Dataset" / "P000" / "Volume_0.mha").samefile(volume)
+    assert not (tmp_path / "staged").is_symlink()
+    assert (tmp_path / "staged" / "P0" / "CT.mha").samefile(cohort / "P0" / "CT.mha")
+    app._clear_dataset()
+    shutil.rmtree(tmp_path / "staged")
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(volume))).max() == 7
+    assert (cohort / "P0" / "CT.mha").is_file()
+
+
+def test_an_input_that_cannot_be_linked_either_is_copied(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Across volumes, or on a filesystem without hard links, the input is copied."""
+    _refuse_symlinks(monkeypatch)
+
+    def cross_device(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(app_module.os, "link", cross_device)
+    volume = tmp_path / "case.mha"
+    volume.write_bytes(b"volume")
+    staged = tmp_path / "Dataset" / "P000" / "Volume_0.mha"
+
+    app_module.KonfAIApp.symlink(volume, staged)
+
+    assert staged.read_bytes() == b"volume"
+    assert not staged.samefile(volume)
 
 
 def _write_volume(path: Path, shape: tuple[int, int, int] = (4, 5, 6), value: int = 7) -> None:

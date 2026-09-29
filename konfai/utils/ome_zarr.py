@@ -305,8 +305,8 @@ def _component_flip(store_path: str) -> bool:
     if _has_displacement_axis(multiscales.images[0]):
         raise DatasetManagerError(
             f"'{store_path}' types its component axis but declares no component order: a"
-            " displacement field written by KonfAI < 1.9, whose components are ITK-ordered.",
-            "Rewrite it from its source transform with KonfAI >= 1.9, or read it with the release that wrote it.",
+            " displacement field written by KonfAI < 1.8.3, whose components are ITK-ordered.",
+            "Rewrite it from its source transform with KonfAI >= 1.8.3, or read it with the release that wrote it.",
         )
     return False
 

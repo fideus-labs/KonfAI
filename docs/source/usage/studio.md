@@ -112,6 +112,13 @@ export KONFAI_STUDIO_MODEL=qwen2.5:14b
 konfai-studio
 ```
 
+A key or an endpoint typed in Studio's LLM panel instead is saved in
+`.konfai_studio/credentials.json` under the workspace root
+(`KONFAI_MCP_WORKSPACES_ROOT`, `~/KonfAI_Workspaces` by default) and read back at
+the next start, where a variable set in the environment wins over it. On Linux
+and macOS only you can read that file. On Windows it takes the permissions of
+the workspace root, so keep that root in your own profile.
+
 ## What a session looks like
 
 In practice you keep one conversation going. You point Studio at a dataset and

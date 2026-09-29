@@ -7,9 +7,9 @@ Evaluator:
             MAE: # Mean Absolute Error between sCT and CT
               reduction: mean
             PSNR: # Peak Signal-to-Noise Ratio metric
-              dynamic_range: None
+              dynamic_range: 4095
             SSIM: # Structural Similarity Index
-              dynamic_range: None
+              dynamic_range: 4095
   Dataset: # Mapping between dataset modalities and evaluation inputs
     groups_src:
       CT:

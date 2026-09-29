@@ -52,8 +52,8 @@ _STAGING_PID = re.compile(r"\.(?:(?P<pid>\d+)(?:-\d+)?\.(?:tmp|replaced)|replace
 
 
 def _writer_is_dead(pid: int) -> bool:
-    """Whether the writer that staged under ``pid`` no longer runs. ``psutil``, not ``os.kill(pid, 0)``,
-    which on Windows raises a generic OSError for a missing pid."""
+    """Whether the writer that staged under ``pid`` no longer runs. ``psutil``, not ``os.kill(pid, 0)``:
+    on Windows signal 0 is CTRL_C_EVENT, sent to the process rather than probing it."""
     if pid == os.getpid():
         return False
     import psutil

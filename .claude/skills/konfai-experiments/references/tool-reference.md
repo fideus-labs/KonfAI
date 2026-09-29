@@ -68,7 +68,7 @@ Use to SAVE a HuggingFace / remote-cached app (optionally with tuned parameters)
 
 ### `export_run_record`
 
-Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in one payload. It does not rerun anything. Caveat: resolved_config is read from the LIVE session config, which may have been rewritten since the run: the launch-time truth is config_snapshots. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
+Use to EXPORT the full reproducibility record of one run: the job manifest (command, devices, environment snapshot with package versions and GPUs), the launch-time config snapshots' CONTENT, the post-run resolved config, every split's metrics, and a log tail: a Methods-section-grade record in one payload. It does not rerun anything. resolved_config is the snapshot the job took when it completed, not the live session config, which may have been rewritten since; config_snapshots are the launch-time ones. Outputs: job, manifest, config_snapshots (text), resolved_config, metrics per split, log_tail. Next: compare_runs or read_training_curves.
 
 ### `fine_tune_app`
 

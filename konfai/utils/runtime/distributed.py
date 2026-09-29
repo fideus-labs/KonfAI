@@ -87,12 +87,16 @@ def preserved_rng() -> Iterator[None]:
             torch.cuda.set_rng_state_all(cuda_states)
 
 
-def forget_memoised_inputs() -> None:
-    """Forget the DICOM series an earlier workflow of this process memoised: a workflow reads a DICOM
-    series as it is when it starts, and another tool may have rewritten it in place since."""
+def forget_earlier_workflows() -> None:
+    """Forget what an earlier workflow of this process left behind: the DICOM series it memoised (a
+    workflow reads a series as it is when it starts, and another tool may have rewritten it in place
+    since) and the streaming explanations it gave, which every run gives once."""
     dicom = sys.modules.get("konfai.utils.dicom")  # a process that never read DICOM memoised none
     if dicom is not None:
         dicom.forget_series()
+    samples = sys.modules.get("konfai.data.data_manager.samples")  # nor explained a case
+    if samples is not None:
+        samples.forget_explanations()
 
 
 def seed_all(seed: int) -> None:
@@ -323,7 +327,7 @@ def run_distributed_app(
         previous_local_ranks = os.environ.get("KONFAI_LOCAL_RANKS")
         os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, local_ranks))
         try:
-            forget_memoised_inputs()
+            forget_earlier_workflows()
             with restart_startup_clock().phase("build"):
                 workflow = func(*args, **kwargs_fun)
             execute_distributed_object(
@@ -487,8 +491,8 @@ def execute_distributed_object(
                     with run_scope():
                         with clock.phase("setup"):
                             configured_object.setup(world_size)
-                        # Share tensors through /dev/shm files instead of one file descriptor per tensor, or
-                        # a worker pickling a loaded model can exhaust the open-file limit.
+                        # Share tensors through shared-memory files, not one file descriptor per tensor (Linux's
+                        # default), or a worker pickling a loaded model can exhaust the open-file limit.
                         mp.set_sharing_strategy("file_system")
                         clock.launch()
                         configured_object.startup_clock = clock
@@ -605,18 +609,18 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     12; ITK's takes the share whole; zarr's async concurrency takes a third of it (at least min(cores, 4)).
     An explicit ``OMP_NUM_THREADS`` keeps authority over all of them.
 
-    Applied once per process, and never on macOS, where ``torch.set_num_threads`` after a parallel region
-    can crash libomp with SIGSEGV.
+    Applied once per process. On macOS torch's pool keeps its default: ``torch.set_num_threads`` after a
+    parallel region can crash libomp with SIGSEGV there.
     """
     global _cpu_budget_applied
-    if sys.platform == "darwin" or _cpu_budget_applied:
+    if _cpu_budget_applied:
         return
     explicit = os.environ.get("OMP_NUM_THREADS")
     cores = rank_cpu_share(world_size)
     # The cap is torch's alone: ITK's resampler keeps scaling to the whole share.
     share = int(explicit) if explicit else min(cores, 12)
     itk_share = cores
-    if not explicit:
+    if not explicit and sys.platform != "darwin":
         torch.set_num_threads(share)
     try:
         import SimpleITK as sitk

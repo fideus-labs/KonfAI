@@ -1,8 +1,8 @@
 Trainer:
   Model:
-    classpath: registration.registration.VoxelMorph  # Built-in diffeomorphic VoxelMorph (2D)
+    classpath: registration.registration.VoxelMorph  # Built-in diffeomorphic VoxelMorph
     VoxelMorph:
-      dim: 2  # VoxelMorph's warping components are 2D-only; keep dim=2
+      dim: 2  # This example registers axial slices; dim: 3 with a three-axis shape registers volumes
       channels:  # UNet feature channels; channels[0] = 2 = FIXED + MOVING concatenated as input
       - 2
       - 8

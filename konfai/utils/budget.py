@@ -192,8 +192,13 @@ def run_peak_scope() -> Iterator[None]:
 
 
 def resident_bytes() -> int | None:
-    """What this process holds resident right now (``VmRSS``), or ``None`` where the kernel does not say."""
-    return _status_bytes("VmRSS")
+    """What this process holds resident right now: ``VmRSS``, or psutil's reading where there is no
+    ``/proc`` (macOS, Windows). ``None`` where neither says."""
+    resident = _status_bytes("VmRSS")
+    if resident is None:
+        with suppress(psutil.Error):
+            resident = int(psutil.Process().memory_info().rss)
+    return resident
 
 
 #: The resident set a workflow recorded before its first case: what its regions are measured above.

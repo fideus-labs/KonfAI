@@ -51,8 +51,9 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     A ``:`` separates the module from the name: everything before the last one is the module, so
     ``torch:nn:L1Loss`` and ``torch.nn:L1Loss`` name the same class. Without one the name comes from the
     kind's own package, dots leading into its subpackages (``segmentation.UNet.UNet``)."""
-    # A chain spelled as a list binds its stages under occurrence keys (`Clip#2`): the suffix is the
-    # stage's identity in the config, not part of the class it names.
+    # A chain spelled as a list binds its stages under occurrence keys (`Clip#2`), and published configs
+    # key a repeated stage `Clip/1`: either suffix is the stage's identity in the config, not part of the
+    # class it names.
     classpath = classpath.rsplit("#", 1)[0] if _OCCURRENCE.search(classpath) else classpath
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])

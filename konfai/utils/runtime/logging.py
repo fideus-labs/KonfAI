@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TextIO, cast
 
 import numpy as np
+import tqdm
 
 try:
     from torch.utils.tensorboard.writer import SummaryWriter
@@ -184,6 +185,19 @@ class _ConsoleHandler(logging.Handler):
 
 
 _CONSOLE_HANDLER = _ConsoleHandler(logging.WARNING)
+
+
+class ProgressBar(tqdm.tqdm):
+    """A tqdm bar that draws its final state before it clears itself (``leave=False``).
+
+    tqdm skips the frames inside its refresh interval and clears such a bar without drawing the last
+    one, so the run's log, which records what is drawn, would end on a stale frame.
+    """
+
+    def close(self) -> None:
+        if not self.disable and not self.leave:
+            self.refresh()
+        super().close()
 
 
 class MinimalLog:
