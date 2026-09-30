@@ -1139,6 +1139,7 @@ def test_a_seed_makes_cudnn_deterministic_unless_the_run_benchmarks() -> None:
     assert rt_dist.cudnn_flags(None, True) == (True, False)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="AF_UNIX socket paths are a POSIX limit")
 def test_a_temporary_directory_too_long_for_a_socket_is_reached_through_a_short_link(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

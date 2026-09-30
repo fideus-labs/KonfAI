@@ -338,7 +338,7 @@ def test_the_generated_map_names_each_model_by_its_downloaded_file(
 
     (staged,) = _staged(engine, tmp_path)
 
-    assert f'(ImpactModelsPath0 "{downloaded.as_posix()}")' in staged
+    assert f'(ImpactModelsPath0 "{downloaded}")' in staged
 
 
 def test_a_map_of_one_s_own_reaches_elastix_whole(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

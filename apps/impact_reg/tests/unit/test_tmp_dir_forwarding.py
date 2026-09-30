@@ -24,6 +24,7 @@ a new one cannot be added without it.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,7 @@ def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_pre
     assert [path.name for path in spread] == ["Uncertainty.mha"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot make a Windows directory read-only")
 def test_the_work_dir_falls_back_inside_an_output_whose_parent_is_read_only(tmp_path: Path) -> None:
     """``-o .`` in a home directory under a root-owned ``/home``: the parent refuses, the output itself does not."""
     from impact_reg_konfai.impact_reg import _work_dir

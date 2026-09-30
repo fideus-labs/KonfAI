@@ -160,9 +160,10 @@ def test_show_says_what_a_preset_will_do(
     assert re.search(r"\n  cc_kernel = 5  \([^)]+\)\n      \w", out)
     assert f"  Predictor.Model.RegistrationNet.models.0.ref = {model}" in out
 
-    assert _run(monkeypatch, ["show", "FireANTs_Syn"]) == 1
+    # Not a case slip: a local folder is a path, which macOS and Windows resolve whatever the case.
+    assert _run(monkeypatch, ["show", "FireANTs_SyM"]) == 1
     err = capsys.readouterr().err
-    assert "No app 'FireANTs_Syn'" in err and "Did you mean 'FireANTs_SyN'" in err
+    assert "No app 'FireANTs_SyM'" in err and "Did you mean 'FireANTs_SyN'" in err
 
 
 @pytest.mark.parametrize(
