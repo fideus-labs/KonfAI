@@ -502,8 +502,7 @@ class Flip(DataAugmentation):
             self.flip[index] = [mirrors[copy % len(mirrors)] if mirrors else [] for copy in range(len(shapes))]
             return shapes
         prob = torch.rand((len(shapes), len(self.f_prob))) < torch.tensor(self.f_prob)
-        dims = torch.tensor([1, 2, 3][: len(self.f_prob)])
-        self.flip[index] = [dims[mask].tolist() for mask in prob]
+        self.flip[index] = [torch.tensor(dims)[mask].tolist() for mask in prob]
         self.directions[index] = [
             Flip._direction(attribute, len(shape)) for attribute, shape in zip(caches_attribute, shapes, strict=True)
         ]

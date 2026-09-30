@@ -1301,7 +1301,8 @@ def append_ome_zarr_levels(
         )
         if not scale_factors:
             return
-    factors = _level_zero_scale_factors(cast("Sequence[int]", scale_factors))
+    levels = cast("Sequence[int]", scale_factors)  # "auto" is resolved above
+    factors = _level_zero_scale_factors(levels)
     _refuse_factors_outgrowing_an_axis(base, factors)
     derived = ngff_zarr.to_multiscales(
         base,
@@ -1311,7 +1312,7 @@ def append_ome_zarr_levels(
         cache=False,
     )
     if downsample_method is None and _is_label_dtype(base.data.dtype):
-        _vote_levels(derived, scale_factors)
+        _vote_levels(derived, levels)
     derived.root_attributes = multiscales.root_attributes
     if multiscales.metadata.coordinateTransformations:
         # A conformant field keeps its ``displacements`` entry through the append: it names level 0.
