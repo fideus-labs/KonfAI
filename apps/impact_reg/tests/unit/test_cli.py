@@ -119,14 +119,13 @@ def test_list_shows_each_preset_with_its_display_name(
 def test_show_says_what_a_preset_will_do(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    # 'show NAME' answers before a run, through konfai-apps: the manifest's own fields (tiling, memory), the feature
-    # models (with their size once on disk), the installs, and the --set parameters with the range and meaning the
+    # 'show NAME' answers before a run, through konfai-apps: the manifest's own fields (tiling, memory), the model
+    # files it declares (with their size once cached), the installs, and the --set parameters with the range and meaning the
     # model's types declare. A real preset folder; the model class is imported for its signature only.
     import json
     import re
 
     model = tmp_path / "Feature.pt"
-    model.write_bytes(b"0" * 2_500_000)
     preset = tmp_path / "presets" / "FireANTs_SyN"
     preset.mkdir(parents=True)
     manifest = {
@@ -138,6 +137,7 @@ def test_show_says_what_a_preset_will_do(
         "mc_dropout": 0,
         "vram_bytes_per_voxel": 1000,
         "tiling": {"global": "Prediction.yml", "tile": "Prediction_tile.yml", "tile_vram_bytes_per_voxel": 600},
+        "model_files": [{"repo_id": "org/models", "revision": "0" * 40, "filename": "Feature.pt"}],
     }
     (preset / "app.json").write_text(json.dumps(manifest))
     (preset / "requirements.txt").write_text("# comment\nnibabel\n")
@@ -154,7 +154,7 @@ def test_show_says_what_a_preset_will_do(
     out = capsys.readouterr().out
     assert "impact_reg_konfai.models.fireants:RegistrationNet\n" in out
     assert '"tile_vram_bytes_per_voxel": 600' in out and "vram_bytes_per_voxel 1000\n" in out
-    assert f"{model} (2.5 MB)" in out
+    assert "org/models:Feature.pt (not cached yet" in out
     assert "nibabel, on first use" in out
     # The shape, not FireANTs' own wording: the preset's value, its range or choices, a description under it.
     assert re.search(r"\n  cc_kernel = 5  \([^)]+\)\n      \w", out)
