@@ -543,10 +543,15 @@ PATCH_BUDGET = 1 << 22
 
 def normalized_features(features: torch.Tensor, mode: str) -> torch.Tensor:
     """Each voxel's feature vector scaled as itk-impact's NormalizeFeatureChannels: 'l2' to unit length,
-    'standardized' to zero mean and unit (unbiased) deviation over its channels, anything else as it is."""
+    'standardized' to zero mean and unit (unbiased) deviation over its channels, anything else as it is. A one-channel
+    feature has no deviation to standardize by, and is refused."""
     if mode == "l2":
         return F.normalize(features, dim=1)
     if mode == "standardized":
+        if features.shape[1] == 1:
+            raise MeasureError(
+                "A one-channel feature cannot be standardized over its channels.", "Use 'none' or 'l2' for this layer."
+            )
         return (features - features.mean(1, keepdim=True)) / features.std(1, keepdim=True).clamp_min(1e-6)
     return features
 
