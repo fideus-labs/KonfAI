@@ -31,7 +31,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Sampler
 
-from konfai import konfai_state
+from konfai import cuda_visible_devices, konfai_state
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chains
 from konfai.data.data_manager.order import (
@@ -62,7 +62,7 @@ from konfai.utils.config import config, is_initializing
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
-from konfai.utils.utils import SUPPORTED_FORMATS, resolve_patch, split_path_spec
+from konfai.utils.utils import SUPPORTED_FORMATS, concretize_patch_size, resolve_patch, split_path_spec
 
 #: The workflows that read each case once, sharded by case across ranks.
 _ONE_PASS_STATES = (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM))
@@ -1170,7 +1170,7 @@ class DataPrediction(Data):
         patch: DatasetPatch | None = DatasetPatch(),
         memory_budget: str | float | None = None,
         subset: PredictionSubset = PredictionSubset(),
-        batch_size: int = 1,
+        batch_size: int = 0,
         num_workers: int | None = None,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
@@ -1200,10 +1200,31 @@ class DataPrediction(Data):
         self.measures_batch = batch_size == 0
 
     def _batching(self, sampler: Sampler[int]) -> dict[str, Any]:
-        if not self.measures_batch:
+        # Off a GPU nothing measures, nor where two patches may not stack: one patch per batch, as
+        # batch_size: 1 has it.
+        if not self.measures_batch or not cuda_visible_devices() or not self._patches_stack():
             return super()._batching(sampler)
         # One patch, then two, then the measured batch: the predictor sets the size as it measures.
         return {"batch_sampler": GrowingBatchSampler(sampler, 1)}
+
+    def _patches_stack(self) -> bool:
+        """Whether the patches of each group share one shape, as a batch of several stacks them: a declared
+        patch axis pads every patch to its size, a free one (``0``, or no patch) keeps each case's extent.
+        Without a patch, every copy is cut into patches of the case's shape, so only that shape counts."""
+        patch_size = self.patch.patch_size if self.patch is not None else None
+        multiple = self.patch.free_axis_multiple if self.patch is not None else None
+        copies = slice(None) if self.patch is not None else slice(1)
+
+        def extents(shape: list[int]) -> tuple[int, ...]:
+            if patch_size is None or len(shape) != len(patch_size):
+                return tuple(shape)
+            sizes = concretize_patch_size(patch_size, shape, multiple)
+            return tuple(size if declared == 0 else declared for size, declared in zip(sizes, patch_size, strict=True))
+
+        return all(
+            len({extents(shape) for manager in managers for shape in manager.shapes[copies]}) <= 1
+            for managers in (self._managers or {}).values()
+        )
 
 
 @config("Dataset")

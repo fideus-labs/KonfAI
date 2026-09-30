@@ -28,6 +28,7 @@ import torch
 
 from konfai.data.reduction import Mean, Reduction
 from konfai.network.network import Network
+from konfai.utils import vram
 from konfai.utils.errors import PredictorError
 from konfai.utils.runtime import (
     safe_torch_load,
@@ -54,6 +55,16 @@ def _stock_loader(model: Network) -> bool:
     from konfai.network.network.network import MinimalModel
 
     return getattr(type(model), "load", None) in (Network.load, MinimalModel.load)
+
+
+def _member_weights(model: Network) -> list[torch.Tensor]:
+    """The tensors a stock load writes: every parameter and persistent buffer of the graph."""
+    return [
+        tensor
+        for module in model.modules()
+        for name, tensor in (*module._parameters.items(), *module._buffers.items())
+        if tensor is not None and name not in module._non_persistent_buffers_set
+    ]
 
 
 def _require_weights_entry(model: Network, state: dict[str, Any], source: dict[str, Any] | Path | str) -> None:
@@ -151,6 +162,9 @@ class ModelComposite(Network):
     """
     One reusable model streams ensemble checkpoints and combines their outputs.
 
+    Once :meth:`keep_resident` has run, each member keeps weights of its own on the model's devices and a
+    forward points the model at them, instead of loading the member's checkpoint into it.
+
     Args:
         model (Network): The base network to replicate.
         combine (konfai.data.reduction.Reduction): The reduction combining the replicas' outputs.
@@ -183,6 +197,12 @@ class ModelComposite(Network):
         self._state_cache_bytes = 0
         self._cache_entry_bytes: dict[int, int] = {}
         self._state_stamps: dict[int, tuple[int, int, int, int, int] | None] = {}
+        #: Each resident member's weights, in ``_weights`` order; ``None`` while members load per forward.
+        self._resident: dict[int, list[torch.Tensor]] | None = None
+        #: The model's tensors a member's weights take the place of.
+        self._weights: list[torch.Tensor] = []
+        #: What the other members' weights hold on each device while they are resident.
+        self._resident_bytes: dict[torch.device, int] = {}
         self.add_module(
             self._model_name,
             copy.deepcopy(model),
@@ -242,11 +262,17 @@ class ModelComposite(Network):
         replace = changed and index in self._state_cache
         if changed:
             self._drop_cached_state(index)
+            if self._resident is not None:
+                self._resident.pop(index, None)
             if self._loaded_state_index == index:
                 self._loaded_state_index = None
         if index in self._state_cache:
             self._state_cache.move_to_end(index)
-        if self._loaded_state_index != index:
+        resident = self._resident.get(index) if self._resident is not None else None
+        if self._loaded_state_index != index and resident is not None:
+            for tensor, weights in zip(self._weights, resident, strict=True):
+                tensor.data = weights
+        elif self._loaded_state_index != index:
             state = self._state_cache.get(index)
             if state is None:
                 state = self._read_state_source(source)
@@ -258,6 +284,11 @@ class ModelComposite(Network):
                 state = _inference_entries(model, state)
                 self._cache_state(index, state, replace=replace)
             self._state_stamps[index] = stamp
+            if self._resident:
+                # The model holds a resident member's weights: this member loads into a copy of its own.
+                with torch.inference_mode(False):
+                    for tensor in self._weights:
+                        tensor.data = tensor.data.clone()
             model.set_name(self._base_model_name)
             try:
                 model.load(state, init=False)
@@ -274,9 +305,64 @@ class ModelComposite(Network):
                 ) from error
             # A custom load() may append modules on CPU: co-locate them with the placed model.
             _colocate_loaded_modules(model)
+            if self._resident is not None:
+                self._resident[index] = [tensor.data for tensor in self._weights]
+        if self._loaded_state_index != index:
             model.set_name(f"{self._base_model_name}_{index}")
             self._loaded_state_index = index
         return model
+
+    def keep_resident(self) -> bool:
+        """Load every member of an ensemble into weights of its own on the model's devices, when the copies
+        fit in what a measured batch leaves of each device's VRAM (:func:`vram.resident_room`): run before the
+        batch is measured, which then counts them. ``False``, and members keep loading per forward, for a
+        single model, a weightless one, one whose class owns its ``load`` or ``initialized`` (either may set
+        more than the checkpoint's tensors), one with a module's ``extra_state`` (restored by the load, not a
+        tensor kept here), or copies that do not fit.
+        """
+        model = self._get_model()
+        if (
+            len(self._state_sources) < 2
+            or not _stock_loader(model)
+            or any(
+                type(network).initialized is not Network.initialized
+                for network in model.modules()
+                if isinstance(network, Network)
+            )
+            or any(type(module).get_extra_state is not torch.nn.Module.get_extra_state for module in model.modules())
+        ):
+            return False
+        weights = _member_weights(model)
+        need: dict[torch.device, int] = defaultdict(int)
+        for tensor in weights:
+            need[tensor.device] += tensor.nbytes * (len(self._state_sources) - 1)
+        if any(size > vram.resident_room(device) for device, size in need.items()):
+            return False
+        self._weights = weights
+        self._resident = {}
+        self._resident_bytes = dict(need)
+        self._loaded_state_index = None
+        try:
+            for index in range(len(self._state_sources)):
+                self._ensure_model_loaded(index)
+        except torch.cuda.OutOfMemoryError:
+            # The room was measured, not reserved: another process can take it meanwhile.
+            self.release_resident()
+            self._loaded_state_index = None
+            return False
+        return True
+
+    def release_resident(self) -> bool:
+        """Drop the other members' weights: members load per forward again. Whether any were resident."""
+        released = self._resident is not None
+        self._resident = None
+        self._weights = []
+        self._resident_bytes = {}
+        return released
+
+    def resident_bytes(self, device: int) -> int:
+        """What the other members' weights hold on CUDA ``device``: the room releasing them gives back."""
+        return self._resident_bytes.get(torch.device("cuda", device), 0)
 
     def _model_for_index(self, index: int) -> Network:
         # No checkpoint source means a weightless model (0 parameters): run it as constructed, once.
@@ -325,6 +411,7 @@ class ModelComposite(Network):
         self._state_cache_bytes = resident_bytes
         self._cache_entry_bytes = {}
         self._state_stamps = {}
+        self.release_resident()
         if len(self._state_sources) == 1:
             self._ensure_model_loaded(0)
 

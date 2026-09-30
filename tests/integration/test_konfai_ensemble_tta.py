@@ -28,6 +28,7 @@ oracles: the ensemble mean must match ``(A + B) / 2`` and a ``Concat`` TTA reduc
 with the ``Sum`` transform must yield ``A + B`` (one term per TTA branch).
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -47,11 +48,16 @@ TTA_SUM_AFTER_REDUCTION_BLOCK = """\
             dim: 0"""
 
 RUNNER_SOURCE = '''
+import json
+import os
 from pathlib import Path
 
 import torch
 
-from konfai.predictor import predict
+import konfai.predictor.loop as predictor_loop
+import konfai.utils.vram as vram_module
+from konfai.network.network import Network
+from konfai.predictor import build_predict, predict
 from konfai.trainer import train
 
 
@@ -110,6 +116,47 @@ def main() -> None:
     run_prediction([member_a, member_b], root / "PredictionTTA.yml", root / "Predictions_ensemble")
     run_prediction([member_a, member_b], root / "PredictionTTASum.yml", root / "Predictions_ensemble_sum")
 
+    # The same ensembles with their members resident, the rank run IN-PROCESS so the stubs stay visible:
+    # the room is stubbed (a CPU run), the loads counted, and the last run's first attempt runs out of memory.
+    os.environ["KONFAI_OVERWRITE"] = "True"
+    os.environ["KONFAI_VERBOSE"] = "False"
+    vram_module.resident_room = lambda device: float("inf")
+    record = {}
+    runs = {
+        "mean": ("PredictionTTA.yml", "Predictions_resident", False),
+        "sum": ("PredictionTTASum.yml", "Predictions_resident_sum", False),
+        "oom": ("PredictionTTA.yml", "Predictions_resident_oom", True),
+    }
+    for label, (prediction_file, predictions_dir, oom_first) in runs.items():
+        record[label] = run_resident([member_a, member_b], root / prediction_file, root / predictions_dir, oom_first)
+        (root / "resident.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def run_resident(models, prediction_file: Path, predictions_dir: Path, oom_first: bool) -> dict:
+    """One in-process prediction: the member loads it made and, per attempt, whether its members were resident."""
+    loads, attempts = [], []
+    load, run = Network.load, predictor_loop._Predictor.run
+
+    def counted_load(self, *args, **kwargs):
+        loads.append(self.get_name())
+        return load(self, *args, **kwargs)
+
+    def recorded_run(self):
+        attempts.append(getattr(self.model_composite.module, "_resident", None) is not None)
+        if oom_first and len(attempts) == 1:
+            raise torch.cuda.OutOfMemoryError("forced OOM: pretend the resident members leave no room")
+        return run(self)
+
+    Network.load, predictor_loop._Predictor.run = counted_load, recorded_run
+    try:
+        predictor = build_predict(models=models, prediction_file=prediction_file, predictions_dir=predictions_dir)
+        with predictor as configured:
+            configured.setup(1)
+            configured(0)
+    finally:
+        Network.load, predictor_loop._Predictor.run = load, run
+    return {"loads": len(loads), "attempts": attempts}
+
 
 if __name__ == "__main__":
     main()
@@ -146,6 +193,9 @@ def ensemble_experiment(tmp_path_factory: pytest.TempPathFactory) -> dict[str, P
         "single_b": experiment_dir / "Predictions_single_b",
         "ensemble": experiment_dir / "Predictions_ensemble",
         "ensemble_sum": experiment_dir / "Predictions_ensemble_sum",
+        "resident": experiment_dir / "Predictions_resident",
+        "resident_sum": experiment_dir / "Predictions_resident_sum",
+        "resident_oom": experiment_dir / "Predictions_resident_oom",
     }
 
 
@@ -217,3 +267,30 @@ def test_tta_branches_are_materialized_by_concat_sum_reduction(ensemble_experime
         assert np.isfinite(summed).all(), case
         np.testing.assert_allclose(summed, single_a + single_b, atol=1e-2, err_msg=case)
         assert np.abs(summed - (single_a + single_b) / 2.0).max() > 0.05, case
+
+
+def test_resident_members_load_once_and_predict_the_reloading_bits(ensemble_experiment: dict[str, Path]) -> None:
+    """Kept resident, each member loads once per run instead of once per batch, and the Mean and the
+    Concat-summed predictions are the reloading runs' to the bit."""
+    record = json.loads((ensemble_experiment["experiment_dir"] / "resident.json").read_text(encoding="utf-8"))
+    assert record["mean"] == {"loads": 2, "attempts": [True]}
+    assert record["sum"] == {"loads": 2, "attempts": [True]}
+    for case in _case_names(ensemble_experiment["dataset_dir"]):
+        for resident, reference in (("resident", "ensemble"), ("resident_sum", "ensemble_sum")):
+            np.testing.assert_array_equal(
+                _read_prediction(ensemble_experiment[resident], case),
+                _read_prediction(ensemble_experiment[reference], case),
+                err_msg=f"{resident} {case}",
+            )
+
+
+def test_an_ensemble_out_of_memory_restarts_with_its_members_reloaded(ensemble_experiment: dict[str, Path]) -> None:
+    """Out of memory with its members resident, a rank restarts as a reloading ensemble does, to the same bits."""
+    record = json.loads((ensemble_experiment["experiment_dir"] / "resident.json").read_text(encoding="utf-8"))
+    assert record["oom"]["attempts"] == [True, False]
+    for case in _case_names(ensemble_experiment["dataset_dir"]):
+        np.testing.assert_array_equal(
+            _read_prediction(ensemble_experiment["resident_oom"], case),
+            _read_prediction(ensemble_experiment["ensemble"], case),
+            err_msg=case,
+        )

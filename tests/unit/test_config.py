@@ -1686,3 +1686,18 @@ def test_a_tuple_annotation_binds_a_tuple(write_config, annotation, literal, exp
     write_config(f"Root:\n  value: {literal}\n")
     bound = apply_config("Root")(receive)()
     assert bound == expected and type(bound) is type(expected)
+
+
+def test_a_prediction_dataset_without_batch_size_measures_its_batch(write_config) -> None:
+    """A ``Predictor.Dataset`` that leaves ``batch_size`` out binds 0, written back: the batch is measured on
+    a GPU and runs one patch at a time on a CPU. A written value keeps its meaning."""
+    from konfai.data.data_manager import DataPrediction
+
+    path = write_config("Predictor:\n  Dataset:\n    num_workers: 0\n")
+    dataset = apply_config("Predictor")(DataPrediction)()
+    assert dataset.measures_batch
+    assert ruamel.yaml.YAML().load(path.read_text(encoding="utf-8"))["Predictor"]["Dataset"]["batch_size"] == 0
+
+    write_config("Predictor:\n  Dataset:\n    num_workers: 0\n    batch_size: 1\n")
+    dataset = apply_config("Predictor")(DataPrediction)()
+    assert (dataset.batch_size, dataset.measures_batch) == (1, False)

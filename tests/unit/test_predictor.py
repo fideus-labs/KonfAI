@@ -161,7 +161,8 @@ def _configure_blend(output: OutputDataset, patch_size: list[int], overlap: int)
         outputs_dataset={"L": output},
         model_composite=SimpleNamespace(module=SimpleNamespace(get_networks=dict)),
         dataloader_prediction=SimpleNamespace(
-            dataset=SimpleNamespace(get_patch_config=lambda: (patch_size, overlap), data_augmentations_list=[])
+            dataset=SimpleNamespace(get_patch_config=lambda: (patch_size, overlap), data_augmentations_list=[]),
+            batch_sampler=SimpleNamespace(batch_size=1),
         ),
     )
 

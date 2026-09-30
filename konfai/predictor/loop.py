@@ -40,6 +40,7 @@ from konfai.data.data_manager import (
     slice_batch,
 )
 from konfai.network.network import Model, NetState
+from konfai.predictor.ensemble import ModelComposite
 from konfai.predictor.output import PREDICTION_CLOCK, OutputDataset
 from konfai.utils import vram
 from konfai.utils.budget import per_rank_budget_bytes
@@ -111,6 +112,8 @@ class _Predictor:
             the loader's batches grow with it, the smaller ones it prefetched merged. ``None`` runs the
             loader's batches.
         batch_cap (int | None): The largest batch a measured one may take, after one ran out of memory.
+        device (int | None): The CUDA device the model runs on, ``None`` off CUDA: the ensemble's members kept
+            there stay only while they cost the batch nothing.
     """
 
     def __init__(
@@ -126,6 +129,7 @@ class _Predictor:
         dataloader_prediction: DataLoader,
         measure_batch_on: int | None = None,
         batch_cap: int | None = None,
+        device: int | None = None,
     ) -> None:
         self.world_size = world_size
         self.global_rank = global_rank
@@ -140,10 +144,23 @@ class _Predictor:
         # A cap under two leaves nothing to measure: the run stays at one patch.
         self.measure_batch_on = measure_batch_on if batch_cap is None or batch_cap >= 2 else None
         self.batch_cap = batch_cap
-        #: Patches per forward: 1 then 2 while ``measure_batch_on`` measures, then what they measured.
-        self.batch = 1
+        #: Patches per forward: the loader's batch; while ``measure_batch_on`` measures, 1 then 2, then what
+        #: they measured.
+        self.batch = (
+            1
+            if self.measure_batch_on is not None
+            else cast(GrowingBatchSampler, dataloader_prediction.batch_sampler).batch_size
+        )
         #: What the one-patch forward claimed and what its case kept allocated after it.
         self._one_patch: tuple[int, int] | None = None
+        #: The device a configured batch's first forward is weighed on while the members stay resident.
+        self._weigh_resident_on = (
+            device
+            if device is not None
+            and self.measure_batch_on is None
+            and cast(ModelComposite, model_composite.module).resident_bytes(device)
+            else None
+        )
         #: The batch sizes a forward ran at; the first of each (past the first) starts from an empty cache.
         self._sizes_run: set[int] = set()
         self._on_cuda = False
@@ -275,7 +292,7 @@ class _Predictor:
 
     def _step(self, batch_sample: BatchSample) -> None:
         """Forward one batch and hand each patch to its writers; while the batch is measured, size it."""
-        device = self.measure_batch_on
+        device = self.measure_batch_on if self.measure_batch_on is not None else self._weigh_resident_on
         if device is not None:
             before = torch.cuda.memory_allocated(device)
             torch.cuda.reset_peak_memory_stats(device)
@@ -331,17 +348,45 @@ class _Predictor:
         self.it += 1
         if device is None or patches != self.batch:
             return  # a tail smaller than the batch says nothing about the batch
+        composite = cast(ModelComposite, self.model_composite.module)
+        if self.measure_batch_on is None:
+            # A configured batch keeps the members resident only when its forward fits the usable VRAM beside them.
+            self._weigh_resident_on = None
+            if spent > vram.usable_after_oom(device):
+                self._release(composite, f"its forward of {patches} patches does not fit the usable VRAM beside them")
+            return
         if self._one_patch is None:
             # The case's accumulation, allocated by this first patch, is what the next case holds too.
             self._one_patch = (spent, max(torch.cuda.memory_allocated(device) - before, 0))
             self._grow(2)
             return
         spent_one, kept = self._one_patch
-        batch = vram.measured_batch(spent_one, spent, vram.usable_after_oom(device) - kept)
-        self._grow(vram.power_of_two_floor(min(batch, self.batch_cap or batch, _host_cap(batch_sample))))
+        usable = vram.usable_after_oom(device) - kept
+        batch = self._capped(vram.measured_batch(spent_one, spent, usable), batch_sample)
+        resident = composite.resident_bytes(device)
+        if resident:
+            # The members stay resident only when they cost the batch nothing: the same measurement with their
+            # bytes free is the batch a run loading them per batch takes.
+            reloading = self._capped(
+                vram.measured_batch(spent_one, spent, usable + vram.usable_vram(resident)), batch_sample
+            )
+            if reloading > batch:
+                self._release(composite, f"resident, they cut the measured batch from {reloading} to {batch} patches")
+                batch = reloading
+        self._grow(batch)
         self.measure_batch_on = None
         if self.global_rank == 0:
             print(f"[KonfAI] VRAM: measured batch {self.batch} patches.", flush=True)
+
+    def _capped(self, batch: int, batch_sample: BatchSample) -> int:
+        """``batch`` under the cap an out-of-memory set and what the host holds, as a power of two."""
+        return vram.power_of_two_floor(min(batch, self.batch_cap or batch, _host_cap(batch_sample)))
+
+    def _release(self, composite: ModelComposite, why: str) -> None:
+        """The members leave the device: from the next batch on, each loads per batch."""
+        composite.release_resident()
+        if self.global_rank == 0:
+            print(f"[KonfAI] VRAM: the checkpoints load per batch: {why}.", flush=True)
 
     def _grow(self, batch: int) -> None:
         """From now on the loader's batches hold ``batch`` patches, and the loop merges up to it."""

@@ -31,9 +31,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from konfai import config_file, cuda_visible_devices, konfai_root, predictions_directory
-from konfai.data.data_manager import (
-    DataPrediction,
-)
+from konfai.data.data_manager import DataPrediction, GrowingBatchSampler
 from konfai.data.reduction import Concat
 from konfai.network.network import Model, ModelLoader, Network, place_graph
 from konfai.predictor.ensemble import ModelComposite
@@ -288,7 +286,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         if self.channels_last:
             Network.set_channels_last(model_composite)
         if self.torch_compile:
-            # The replicas of an ensemble load their weights into this one model, so one compiled walk
+            # The replicas of an ensemble run in turn through this one model, so one compiled walk
             # serves them all.
             eager = self.model_composite._get_model().compile_walk()
             if eager is not None and global_rank == 0:
@@ -297,6 +295,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             # Co-locate the output writers with the model so their reduction/transforms know the GPU.
             for output_dataset in self.outputs_dataset.values():
                 output_dataset.to(local_rank * self.size)
+        # Before the first forward: a measured batch is measured beside the members kept on the device.
+        if self.model_composite.keep_resident() and global_rank == 0:
+            print(f"[KonfAI] VRAM: the {len(self.path_to_models)} checkpoints stay on the device.", flush=True)
         model_composite = Model(model_composite)
         device = local_rank * self.size if len(cuda_visible_devices()) else None
         dataloader = dataloaders[0]
@@ -304,7 +305,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         # size valid too.
         if self._vram_patch_candidate is None and self._presize_free_axes():
             dataloader = self._rank_dataloader(world_size, global_rank)
-        measure_batch_on = device if self.dataset.measures_batch else None
+        # The loader grows where the batch is measured: on a GPU, over patches that stack.
+        measure_batch_on = device if isinstance(dataloader.batch_sampler, GrowingBatchSampler) else None
         batch_cap: int | None = None
         while True:
             predictor = _Predictor(
@@ -319,6 +321,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 dataloader,
                 measure_batch_on,
                 batch_cap,
+                device,
             )
             try:
                 with predictor:
@@ -349,6 +352,12 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 measured = vram.transient_at_oom(device)
                 for output_dataset in self.outputs_dataset.values():
                     output_dataset.reset()
+                if self.model_composite.release_resident():
+                    # The resident members give their room back before the batch or the patch shrinks.
+                    vram.reset_peak(device)
+                    print(f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> checkpoints reload, restarting.")
+                    dataloader = self._rank_dataloader(world_size, global_rank)
+                    continue
                 if measure_batch_on is not None and predictor.batch > 1:
                     # A measured batch over what the device holds halves before any patch shrinks.
                     batch_cap = predictor.batch // 2

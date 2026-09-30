@@ -64,6 +64,15 @@ def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = 
 BATCH_SHARE = 0.5
 
 
+def resident_room(device: torch.device) -> float:
+    """What weights kept resident beside the run may take on ``device``: the usable VRAM a measured batch
+    does not claim. Nothing off CUDA."""
+    if device.type != "cuda":
+        return 0.0
+    free, _ = torch.cuda.mem_get_info(device)
+    return usable_vram(free) * (1 - BATCH_SHARE)
+
+
 def power_of_two_floor(value: int) -> int:
     """The largest power of two not above ``value`` (1 for anything under 2)."""
     return 1 << (max(1, value).bit_length() - 1)
