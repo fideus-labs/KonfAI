@@ -58,7 +58,7 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.p
 | `autocast` | `false` | Mixed precision: about 1.6 times faster; a few labels may change at boundaries. |
 | `channels_last` | `false` | Channels-last layout: a little faster on top of `autocast`, on some models. |
 | `cudnn_benchmark` | `false` | Fastest cuDNN kernels even with a seed, without exact replay. |
-| `torch_compile` | `false` | Compile the model once for all the members. Helps only models bound by their kernels. |
+| `torch_compile` | `false` | Compile the model once for all the members. Pays on long runs (TTA, many patches); the first run compiles. Where it cannot compile (no Triton), the model runs uncompiled. |
 | `gpu_checkpoints` | `null` | Modules to place on other GPUs. |
 | `data_log` | `null` | Outputs to log in TensorBoard. |
 
