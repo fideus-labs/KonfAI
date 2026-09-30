@@ -33,12 +33,7 @@ from queue import Empty
 from typing import Any, cast
 from uuid import uuid4
 
-from konfai.evaluator import build_evaluate
-from konfai.predictor import build_predict
-from konfai.trainer import build_train
-from konfai.transformer import build_transform
 from konfai.utils.errors import KonfAIError
-from konfai.utils.runtime import State, execute_distributed_object
 from konfai.utils.utils import env_flag
 
 from .workspace import WORKFLOW_CONFIG_FILES
@@ -279,6 +274,13 @@ def _build_workflow(
     model: str | None = None,
     lr: float | None = None,
 ):
+    # The builders import torch: the server process imports this module and never builds.
+    from konfai.evaluator import build_evaluate
+    from konfai.predictor import build_predict
+    from konfai.trainer import build_train
+    from konfai.transformer import build_transform
+    from konfai.utils.runtime import State
+
     resolved_config = Path(config).resolve()
     if command in ("TRAIN", "RESUME"):
         resume_model: Path | str | None = None
@@ -345,6 +347,8 @@ def run_workflow_api(
     cwd: str | None = None,
 ) -> None:
     """Child entrypoint that runs one KonfAI workflow (TRAIN/RESUME/PREDICTION/EVALUATION/TRANSFORM)."""
+    from konfai.utils.runtime import execute_distributed_object
+
     with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
         _ensure_local_imports()
         if single_process:
@@ -845,6 +849,12 @@ def validate_workflow_api(
     then removed; a single-file store (h5) is created if it was not already there. ``plan_transform``
     is the tool for a plan.
     """
+    from konfai.evaluator import build_evaluate
+    from konfai.predictor import build_predict
+    from konfai.trainer import build_train
+    from konfai.transformer import build_transform
+    from konfai.utils.runtime import State
+
     resolved_validate_root = (
         Path(validate_root).resolve()
         if validate_root is not None

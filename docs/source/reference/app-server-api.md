@@ -116,7 +116,7 @@ start with `-`. Either mistake is rejected with **422** naming the field.
 | --- | --- | --- |
 | `GET` | `/jobs/{job_id}` | `{"job_id","status","error"}`: status ∈ `queued/waiting/running/done/error/killed`. 404 unknown. |
 | `GET` | `/jobs/{job_id}/logs` | `text/event-stream` (SSE): see below. |
-| `GET` | `/jobs/{job_id}/result` | `application/zip` (`result.zip`); **202** while running; **500** on error. |
+| `GET` | `/jobs/{job_id}/result` | `application/zip` (`result.zip`); **202** while running; **422** with the message when the job refused its inputs or config; **500** on any other error. |
 | `POST` | `/jobs/{job_id}/kill` | `{"job_id","status","message"}`: SIGTERM → SIGKILL the process group (on Windows, kills the job and its descendants). |
 
 **SSE log stream**: each event is `data: <line>\n\n`; a `: keepalive` comment is

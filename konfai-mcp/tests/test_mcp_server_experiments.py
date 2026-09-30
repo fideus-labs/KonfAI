@@ -378,7 +378,7 @@ def test_validation_runner_creates_runtime_directories_for_setup(
             assert (validate_root / "Predictions").exists()
             assert (validate_root / "Evaluations").exists()
 
-    monkeypatch.setattr(mcp_runner, "build_train", lambda **_kwargs: DummyWorkflow())
+    monkeypatch.setattr("konfai.trainer.build_train", lambda **_kwargs: DummyWorkflow())
     payload = mcp_runner.validate_workflow_api(
         workflow="train",
         level="setup",

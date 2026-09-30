@@ -410,11 +410,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         continue
                     if line.startswith("data: "):
                         msg = line[6:]
-                        if msg == "__DONE__":
-                            return
-                        if msg.startswith("__ERROR__"):
-                            detail = msg[len("__ERROR__") :].strip()
-                            raise RuntimeError(f"Remote job failed: {detail}" if detail else "Remote job failed")
+                        if msg == "__DONE__" or msg.startswith("__ERROR__"):
+                            return  # the result says how the job ended
                         print(msg, flush=True)
 
         except requests.exceptions.ReadTimeout as e:
@@ -535,6 +532,14 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     if r.status_code == 202:
                         time.sleep(poll_interval)
                         continue
+                    if r.status_code in (422, 500):
+                        try:
+                            error = str(r.json().get("error") or "").strip()
+                        except (ValueError, AttributeError):  # a proxy's page, not the server's answer
+                            error = r.text.strip()
+                        if r.status_code == 422:
+                            raise KonfAIAppClientError(f"The server refused job {job_id}:", error)
+                        raise RuntimeError(f"Remote job failed: {error}" if error else "Remote job failed")
 
                     r.raise_for_status()
                     with open(zip_path, "wb") as f:

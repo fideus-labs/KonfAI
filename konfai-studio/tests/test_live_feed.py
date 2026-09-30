@@ -680,7 +680,13 @@ def test_a_status_change_re_announces_the_job_without_wiping_its_console(
                     if line.startswith("data: ") and json.loads(line[6:]).get("type") == "job":
                         announcements.append(json.loads(line[6:]))
                 if len(announcements) == 1:  # the run dies, on the log the console is already following
-                    job_record(session, **running, status="error", finished_at=time.time())
+                    job_record(
+                        session,
+                        **running,
+                        status="error",
+                        finished_at=time.time(),
+                        error="[Config] 'Trainer.Dataset' is empty.",
+                    )
                 elif len(announcements) >= 2:
                     break
 
@@ -696,6 +702,10 @@ def test_a_status_change_re_announces_the_job_without_wiping_its_console(
 
     assert [event["status"] for event in announcements] == ["running", "error"]
     assert [event["console_reset"] for event in announcements] == [True, False]
+    # The failed job carries its error and its reading, the cause and the fix, not the raw log alone.
+    assert announcements[0]["diagnosis"] is None
+    assert announcements[1]["error"] == "[Config] 'Trainer.Dataset' is empty."
+    assert {"kind", "summary", "fix"} <= set(announcements[1]["diagnosis"])
 
 
 def test_a_metric_that_is_not_a_number_still_leaves_valid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

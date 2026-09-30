@@ -106,8 +106,11 @@ jobs:
             pkg: "."
           - name: konfai-apps
             pkg: "konfai-apps"
+          # The wheel carries the repository's examples, copied in at build time (setup.py): built
+          # directly, since the sdist holds no examples to copy.
           - name: konfai-mcp
             pkg: "konfai-mcp"
+            build_args: "--wheel"
           - name: impact-synth-konfai
             pkg: "apps/impact_synth"
           - name: impact-seg-konfai
@@ -158,6 +161,15 @@ jobs:
           python -m pip install build setuptools-scm
           cd "${{ matrix.pkg }}"
           python -m build ${{ matrix.build_args }}
+
+      - name: Verify the konfai-mcp wheel ships the examples
+        if: matrix.name == 'konfai-mcp'
+        run: |
+          python -c "
+          import glob, sys, zipfile
+          names = set(zipfile.ZipFile(glob.glob('konfai-mcp/dist/*.whl')[0]).namelist())
+          sys.exit(0 if 'konfai_mcp/examples/Segmentation/Config.yml' in names else 'no examples in the wheel')
+          "
 
       - name: Verify the studio wheel ships the built front
         # web/ is non-Python payload swept in by package-data at build time: a setuptools or glob

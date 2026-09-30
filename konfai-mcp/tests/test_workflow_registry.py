@@ -58,8 +58,13 @@ def test_an_example_holding_every_workflow_config_loads_every_workflow(tmp_path:
 
 
 def test_every_workflow_command_builds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    for builder in ("build_train", "build_predict", "build_evaluate", "build_transform"):
-        monkeypatch.setattr(runner, builder, lambda builder=builder, **_: builder)
+    for module, builder in (
+        ("konfai.trainer", "build_train"),
+        ("konfai.predictor", "build_predict"),
+        ("konfai.evaluator", "build_evaluate"),
+        ("konfai.transformer", "build_transform"),
+    ):
+        monkeypatch.setattr(f"{module}.{builder}", lambda builder=builder, **_: builder)
 
     for spec in WORKFLOW_SPECS.values():
         assert runner._build_workflow(spec.command, str(tmp_path / spec.config_file)).startswith("build_")

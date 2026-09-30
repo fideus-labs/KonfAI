@@ -104,7 +104,9 @@ konfai_get_ram = konfai_pkg.get_ram
 konfai_get_vram = konfai_pkg.get_vram
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLES_ROOT = REPO_ROOT / "examples"
+# The wheel carries the examples (setup.py copies them in); a checkout reads them where they are.
+_PACKAGED_EXAMPLES = Path(__file__).resolve().parent / "examples"
+EXAMPLES_ROOT = _PACKAGED_EXAMPLES if _PACKAGED_EXAMPLES.is_dir() else REPO_ROOT / "examples"
 WORKSPACES_ROOT = (
     Path(os.environ.get("KONFAI_MCP_WORKSPACES_ROOT", Path.home() / "KonfAI_Workspaces")).expanduser().resolve()
 )
