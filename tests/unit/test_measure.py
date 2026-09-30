@@ -775,10 +775,10 @@ def test_perceptual_loss_loads_a_downloaded_checkpoint_as_weights_only(tmp_path,
 def test_missing_metric_dependency_raises_actionable_error():
     """Optional criterion deps must surface an actionable MeasureError, not ImportError."""
     with pytest.raises(MeasureError) as excinfo:
-        _require_optional("konfai_definitely_missing_pkg_zzz", criterion="SSIM", extra="ssim")
+        _require_optional("konfai_definitely_missing_pkg_zzz", criterion="LPIPS", extra="lpips")
     message = str(excinfo.value)
-    assert "SSIM" in message
-    assert "konfai[ssim]" in message
+    assert "LPIPS" in message
+    assert "konfai[lpips]" in message
 
 
 class TestImpactRegPCA:

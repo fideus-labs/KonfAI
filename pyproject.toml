@@ -58,7 +58,6 @@ imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr>=3", "ngff-zarr>=0.45", "d
 vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
-ssim = ["scikit-image"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
 omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
@@ -75,7 +74,6 @@ all = [
   "konfai[tensorboard]",
   "konfai[vtk]",
   "konfai[lpips]",
-  "konfai[ssim]",
   "konfai[cluster]",
   "konfai[dicom]",
   "konfai[omezarr]",

@@ -38,8 +38,15 @@ RUN chmod +x /usr/local/bin/konfai-entrypoint \
     && konfai_wheel="$(wheel_of konfai)" \
     && apps_wheel="$(wheel_of konfai_apps)" \
     && pip install --upgrade pip setuptools wheel \
-    && pip install --index-url "${TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple torch \
-    && pip install "${konfai_wheel}[${KONFAI_EXTRAS}]" "${apps_wheel}[server]" \
+    # pip ranks every index together, so torch is chosen from TORCH_INDEX_URL alone: with PyPI in the
+    # same step, a newer PyPI release (another CUDA) wins over the variant. torchvision comes with it:
+    # an app's requirements (segmentation_models_pytorch) would otherwise pull it from PyPI, built for
+    # another CUDA than the image's torch. Their dependencies need PyPI too, and the steps after it
+    # keep those exact builds.
+    && pip install --no-deps --index-url "${TORCH_INDEX_URL}" torch torchvision \
+    && torch_pins="$(python -c 'from importlib.metadata import version as v; print(*(f"{p}=={v(p)}" for p in ("torch", "torchvision")))')" \
+    && pip install --index-url "${TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple ${torch_pins} \
+    && pip install "${konfai_wheel}[${KONFAI_EXTRAS}]" "${apps_wheel}[server]" ${torch_pins} \
     && rm -rf /tmp/dist
 
 WORKDIR /workspace

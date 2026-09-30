@@ -144,8 +144,7 @@ every command from this directory:
 
 ```bash
 cd examples/Synthesis
-pip install "konfai[smp,ssim]"   # smp:  the generator wraps segmentation_models_pytorch
-                                 # ssim: the SSIM metric in Evaluation.yml needs scikit-image
+pip install "konfai[smp]"   # the generator wraps segmentation_models_pytorch
 ```
 
 ### 1. Train

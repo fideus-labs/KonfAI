@@ -78,7 +78,8 @@ given; anything else is forwarded to `konfai`, so `TRAIN ...` runs `konfai TRAIN
 
 ## GPU Runtime
 
-The default image installs a CUDA-enabled PyTorch wheel. GPU access still depends on the host runtime.
+The default image installs the newest PyTorch and torchvision that `TORCH_INDEX_URL` serves (CUDA 12.8
+by default), whatever PyPI carries. GPU access still depends on the host runtime.
 
 Quick CUDA check:
 
@@ -126,8 +127,8 @@ docker run --rm -it \
   vboussot/konfai EVALUATION -c Evaluation.yml
 ```
 
-The `Synthesis` example also needs `segmentation_models_pytorch` and scikit-image: build the image
-with `--build-arg KONFAI_EXTRAS=imaging,smp,ssim` to run it.
+The `Synthesis` example also needs `segmentation_models_pytorch`: build the image with
+`--build-arg KONFAI_EXTRAS=imaging,smp` to run it.
 
 ## Run KonfAI Apps
 
