@@ -433,8 +433,8 @@ def attributes(geometry: Geometry, group: str) -> Attribute:
     attribute["Spacing"] = np.asarray(spacings.get(group, geometry.spacing))
     attribute["Direction"] = directions.get(group, np.eye(geometry.rank)).reshape(-1)
     if group == "Ensemble":
-        # What a `combine: Concat` reduction writes: the per-model channel counts MergeLabels and
-        # Sum shift their label ranges by.
+        # What a `combine: Concat` reduction writes: the per-model channel counts MergeLabels shifts
+        # their label ranges by.
         attribute["number_of_channels_per_model"] = np.asarray([3, 3, 3])
     if group == "Boxed":
         # What Crop.transform_shape leaves on the case: [start, after] margins per spatial axis.
@@ -608,7 +608,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "Squeeze": [StageCase(Squeeze(0))],
         "Standardize": [StageCase(transform_module.Standardize(), atol=STAT_ATOL)],
         "StandardDeviation": [StageCase(StandardDeviation(), group="Ensemble")],
-        "Sum": [StageCase(Sum(0), group="Ensemble")],
+        "Sum": [StageCase(Sum(0)), StageCase(Sum(0), group="Ensemble")],
         "Variance": [StageCase(Variance(), group="Ensemble")],
     }
 

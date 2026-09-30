@@ -148,8 +148,8 @@ stage that changes no grid refuses rather than pretend.
 | `SelectLabel` | Remap labels; entries are `"(old,new)"` strings. | `labels` | no | no | **yes** |
 | `Mask` | Set voxels where mask==0 to `value_outside`. | `path="./default.mha", value_outside=0` | no | no | **yes**: per voxel; the dispatcher tells it where its region sits (`stream_region`) and it reads that part of the mask, a dataset group or an `.mha`; a sweep, and a case's patches, are told those reads ahead (`plan_region_reads`), so the decoded-chunk cache keeps a dataset mask's chunks by their next use |
 | `Dilate` | Binary dilation via max-pool (2D/3D). | `dilate=1` | no | no | **yes**: halo of `dilate` voxels, within half the patch |
-| `Sum` | Sum over `dim` (merges multi-model label maps). | `dim=0` | no† at `dim=0`; **yes** over a spatial axis (dropped) | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
-| `MergeLabels` | Merge the per-model `argmax` maps of a `combine: Concat` ensemble into one global label map (the correct alternative to `Sum` for disjoint-task ensembles, e.g. 5-task TotalSegmentator). |: | no | no | yes |
+| `Sum` | Sum over `dim`, a `combine: Concat` stack included (to merge an ensemble's label maps, use `MergeLabels`). | `dim=0` | no† at `dim=0`; **yes** over a spatial axis (dropped) | no | **yes** at `dim=0`; no over a spatial axis (the reduction spans the extent) |
+| `MergeLabels` | Merge the per-model `argmax` maps of a `combine: Concat` ensemble into one global label map (for disjoint-task ensembles, e.g. 5-task TotalSegmentator). |: | no | no | yes |
 | `Gradient` | Gradient-magnitude image (or components). | `per_dim=False` | no† | no | **yes**: halo of 1 voxel |
 
 ## Ensemble / uncertainty post-processing

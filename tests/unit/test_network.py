@@ -1554,3 +1554,45 @@ def test_the_custom_model_page_attaches_its_losses_to_outputs_with_a_gradient() 
 
     assert any(name in outputs for name in losses)
     assert [name for name in losses if name in outputs and not outputs[name].requires_grad] == []
+
+
+def test_a_network_given_fewer_inputs_than_its_graph_reads_is_refused() -> None:
+    """At a network's own level a numeric branch past its inputs is a missing input (a two-input
+    registration net given one), refused by name; inside a block it stays the input fallback."""
+    from konfai.utils.errors import ConfigError
+
+    class TwoInputs(Network):
+        def __init__(self) -> None:
+            super().__init__(in_channels=1, dim=1)
+            self.add_module("Fixed", torch.nn.Identity(), in_branch=[0], out_branch=["fixed"])
+            self.add_module("Moving", torch.nn.Identity(), in_branch=[1], out_branch=["moving"])
+
+    with pytest.raises(ConfigError, match="reads input 1, and the network was given 1 input"):
+        list(TwoInputs().named_forward(torch.zeros(1, 1, 4)))
+    assert set(dict(TwoInputs().named_forward(torch.zeros(1, 1, 4), torch.ones(1, 1, 4)))) == {"Fixed", "Moving"}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "factory",
+    [
+        "gan:Gan",
+        "diffusionGan:DiffusionGanV2",
+        "diffusionGan:CycleGanGeneratorV3",
+        "diffusionGan:DiffusionCycleGan",
+    ],
+)
+def test_a_shipped_gan_predicts_from_one_input(factory: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prediction feeds a GAN the image it translates, alone: what reads the second domain (the
+    discriminators, the B to A generator, the cycle terms) serves training and does not run."""
+    import importlib
+
+    from konfai.network.network import NetState
+
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    module, name = factory.split(":")
+    net = getattr(importlib.import_module(f"konfai.models.python.generation.{module}"), name)()
+    net.set_state(NetState.PREDICTION)
+    with torch.no_grad():
+        outputs = dict(net.named_forward(torch.randn(1, 1, 16, 16, 16)))
+    assert outputs and not any("Discriminator" in key for key in outputs)

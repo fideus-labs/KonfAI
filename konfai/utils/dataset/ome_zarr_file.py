@@ -44,6 +44,7 @@ from konfai.utils.dataset.attribute import (
     displacement_field_to_data,
     image_to_data,
     ome_zarr_attributes,
+    push_geometry,
     region_geometry,
 )
 from konfai.utils.dataset.staging import _recover_orphaned_backup, _replaced_name, _retire_dead_debris
@@ -261,8 +262,8 @@ class OmeZarrFile(AbstractFile):
             attributes.get_np_array("Direction"),
             normalized[1:],
         )
-        attributes["Origin"] = origin
-        attributes["Spacing"] = spacing
+        push_geometry(attributes, "Origin", origin)
+        push_geometry(attributes, "Spacing", spacing)
         return data, attributes
 
     def bounded_region_reads(self, name: str) -> bool:
