@@ -1,0 +1,35 @@
+Evaluator:
+  metrics:
+    FixedImage:
+      targets_criterions:
+        MovingImage;Mask:
+          criterions_loader:
+            MAESaveMap:
+              reduction: mean
+              dataset: ./Evaluations/ImpactReg/Output:mha
+              group: MAE_map
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          FixedImage:
+            transforms:
+              TensorCast:
+                dtype: float32
+      Reference_0:
+        groups_dest:
+          MovingImage:
+            transforms:
+              TensorCast:
+                dtype: float32
+      Mask_0:
+        groups_dest:
+          Mask:
+            transforms:
+              TensorCast:
+                dtype: uint8
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

@@ -120,6 +120,22 @@ def test_copy_output_keeps_the_produced_form(tmp_path: Path, suffix: str) -> Non
     assert copied.is_dir() == (suffix == ".ome.zarr")
 
 
+@pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
+def test_copy_output_moves_what_the_workspace_will_not_keep(tmp_path: Path, suffix: str) -> None:
+    """A preset's transform is moved out of the workspace, which is deleted next, instead of copied:
+    on a full-resolution grid the copy was tens of gigabytes written a second time."""
+    source, destination = tmp_path / "src", tmp_path / "out"
+    source.mkdir()
+    destination.mkdir()
+    _write_displacement_field(_field(), source / f"DVF{suffix}")
+
+    moved = _copy_output(source / f"DVF{suffix}", destination, "DVF", move=True)
+
+    assert moved.name == f"DVF{suffix}"
+    assert not (source / f"DVF{suffix}").exists()
+    assert read_displacement_field(moved).GetSize() == _field().GetSize()
+
+
 def test_copy_output_replaces_an_existing_store(tmp_path: Path) -> None:
     """Re-running a case overwrites its outputs; a directory cannot be overwritten by copytree."""
     source, destination = tmp_path / "src", tmp_path / "out"

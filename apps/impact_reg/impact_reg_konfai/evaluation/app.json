@@ -1,0 +1,8 @@
+{
+    "display_name": "IMPACT-Reg evaluation",
+    "short_description": "Image MAE, segmentation Dice and landmark TRE of a registration.",
+    "description": "The evaluation configs of impact-reg-konfai eval. Shipped with the package rather than read from a registration preset: they are the same for every preset, and resolving a preset only to read them installed its requirements and needed the network.",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": []
+}

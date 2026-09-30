@@ -17,11 +17,13 @@
 """Elastix-IMPACT runtime for the registration bundle.
 
 ``ElastixEngine`` installs the elastix-IMPACT binary, downloads the TorchScript feature models, stages the
-parameter maps (generated from the model matrix or copied + overridden), runs the subprocess, and resamples.
+parameter maps (their IMPACT lines generated from the models, or copied + overridden), runs the subprocess, and
+resamples.
 ``ElastixRegistration`` is the graph module ``RegistrationNet`` wires, it bridges KonfAI tensors <-> SITK
 images. The config -> parameter-map MAPPING lives in ``elastix.py`` and is imported here.
 """
 
+import math
 import os
 import re
 import shutil
@@ -31,29 +33,20 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
-import torch
 import tqdm
-from huggingface_hub import hf_hub_download
-from konfai.utils.dataset import Attribute, data_to_image, image_to_data
+from konfai.utils.dataset import image_to_data
+from konfai.utils.vram import device_out_of_memory
 
-from .elastix import _is_local_ref, _model_key, _sorted_specs, generate_impact_parameter_map, load_models_registry
-from .elastix_install import get_elastix_bin, install_elastix_impact, loader_env, try_elastix
-from .engine_errors import out_of_memory_as_torch
+from .elastix import generate_impact_parameter_map, has_impact_block, sampled_spatial_samples
+from .elastix_install import cuda_upgrade_available, get_elastix_bin, install_elastix_impact, loader_env, try_elastix
+from .impact_loss import check_models, feature_model, sorted_specs
+from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .orientation import world_aligned_pair
 
-# Elastix + IMPACT binary is cached once here (heavy: binary + LibTorch) and reused across runs.
+# Elastix + IMPACT binary is cached once here (with its own LibTorch when the environment's torch is another
+# version) and reused across runs.
 # Set KONFAI_ELASTIX_DIR to point at an existing install and skip the download.
 ELASTIX_CACHE = Path.home() / ".cache" / "konfai" / "elastix-impact"
-
-
-def _is_partial_mask(mask: "sitk.Image | None") -> bool:
-    """True only for a mask that actually restricts the metric region: some voxels in, some out. An
-    absent optional mask arrives as a whole-image (all-ones) default from KonfAI, and elastix then runs
-    without ``-fMask`` / ``-mMask`` (i.e. the whole image) instead of paying for a mask that restricts
-    nothing. An all-zero fixed mask never gets here: ``register`` returns a zero field for it."""
-    if mask is None:
-        return False
-    arr = sitk.GetArrayViewFromImage(mask)
-    return bool((arr > 0).any()) and bool((arr == 0).any())
 
 
 def _displacement_on(fixed: sitk.Image, transform: sitk.Transform) -> np.ndarray:
@@ -70,15 +63,96 @@ def _displacement_on(fixed: sitk.Image, transform: sitk.Transform) -> np.ndarray
     return dvf_np
 
 
+def _iterations_of(text: str) -> int:
+    """The iterations elastix runs for a parameter map: ``MaximumNumberOfIterations`` over its
+    ``NumberOfResolutions`` levels, a level without an entry of its own reading the first one (elastix's
+    default entry), so a single value counts once per level."""
+    budget = re.search(r"^\s*\(MaximumNumberOfIterations\s+([^)]*)\)", text, re.MULTILINE)
+    if budget is None:
+        return 0
+    tokens = [int(float(token)) for token in budget.group(1).split()]
+    levels = re.search(r"^\s*\(NumberOfResolutions\s+(\d+)", text, re.MULTILINE)
+    count = int(levels.group(1)) if levels else len(tokens)
+    return sum(tokens[k] if k < len(tokens) else tokens[0] for k in range(count))
+
+
+def _kept_log(work: Path) -> str:
+    """Copy elastix.log out of the run's directory, which is removed, and say where it went."""
+    log = work / "elastix.log"
+    if not log.is_file():
+        return ""
+    kept = Path(tempfile.gettempdir()) / f"{work.name}-elastix.log"
+    shutil.copyfile(log, kept)
+    return f" (log: {kept})"
+
+
 def _cuda_hint(captured: list[str], root: Path) -> str:
-    """What to do about an install that cannot see the GPU it was asked to use. A CPU build answers ``-h``
-    and passes for a valid install, so the failure only comes once IMPACT asks for the device."""
+    """What to do about an install that cannot run IMPACT as asked. A CPU build answers ``-h`` and passes for a
+    valid install, and so does a build whose IMPACT plugin is loaded only once a map asks for it (the
+    plugin-based elastix-IMPACT): the failure only comes mid-registration."""
+    if any("IMPACT" in line and "could not be loaded" in line for line in captured):
+        return (
+            f"\nThe IMPACT plugin of the elastix-IMPACT install at '{root}' could not be loaded: it was built "
+            "against another LibTorch than the one on its loader path. Point KONFAI_ELASTIX_EXTRA_LIB at the "
+            "LibTorch it was built against, or KONFAI_ELASTIX_DIR at a build for this machine."
+        )
     if not any("CUDA is not available" in line for line in captured):
         return ""
     return (
-        f"\nThe elastix-IMPACT install at '{root}' cannot use CUDA with this environment's torch "
-        f"({torch.__version__}): it is a CPU build, or one made for another CUDA. Point KONFAI_ELASTIX_DIR at "
-        "an elastix-IMPACT built against this torch, or run on the CPU (--cpu)."
+        f"\nThe elastix-IMPACT install at '{root}' cannot use CUDA: it is a CPU build. The installer takes the "
+        "CUDA one for a CUDA torch and an NVIDIA driver of 570.26 or later (delete the install to have it made "
+        "again); otherwise point KONFAI_ELASTIX_DIR at a CUDA build, or run on the CPU (--cpu)."
+    )
+
+
+def _mask_hint(captured: list[str]) -> str:
+    """What to do when the random sampler gives up on a thin fixed mask: it draws points in the mask's bounding
+    box and aborts after ten times the samples it needs."""
+    if not any("Could not find enough image samples" in line for line in captured):
+        return ""
+    return (
+        "\nThe fixed mask fills too little of its bounding box for elastix's random sampler: set "
+        "parameter_overrides to ['ImageSampler=\"RandomSparseMask\"'], which draws inside the mask."
+    )
+
+
+def _extent_hint(captured: list[str], maps: list[Path], image: sitk.Image) -> str:
+    """What to do when the image is too small for the grid IMPACT's models see it on (their ImpactVoxelSize): elastix
+    names neither the image nor the grid in the errors ``signs`` lists."""
+    signs = (
+        "rejected its input",
+        "Too many samples map outside moving image buffer",
+        "Expected more than 1 spatial element",
+    )
+    if not any(sign in line for sign in signs for line in captured):
+        return ""
+    dim = image.GetDimension()
+    extent = [size * spacing for size, spacing in zip(image.GetSize(), image.GetSpacing(), strict=True)]
+    coarsest = None  # (voxel, patch, level) of the coarsest model grid over every map and level
+    for pmap in maps:
+        text = pmap.read_text(encoding="utf-8")
+        for level, values in re.findall(r"^\(ImpactVoxelSize(\d+)((?:\s+[-\d.eE]+)+)\)", text, re.MULTILINE):
+            patches = re.search(rf"^\(ImpactPatchSize{level}((?:\s+\d+)+)\)", text, re.MULTILINE)
+            voxels = [float(v) for v in values.split()]
+            sizes = [int(v) for v in patches.group(1).split()] if patches else [0] * len(voxels)
+            for start in range(0, len(voxels) - dim + 1, dim):  # one voxel size (and patch) per model
+                voxel, patch = voxels[start : start + dim], sizes[start : start + dim]
+                if coarsest is None or max(voxel) > max(coarsest[0]):
+                    coarsest = (voxel, patch, level)
+    if coarsest is None:
+        return ""
+    voxel, patch, level = coarsest
+    grid = [e / v for e, v in zip(extent, voxel, strict=True)]
+    wider = [p * v for p, v, e in zip(patch, voxel, extent, strict=True) if p * v > e]
+    if min(grid) >= 16 and not wider:
+        return ""
+    spans = f", where its {max(patch)}-voxel patch spans {max(wider):g} mm" if wider else ""
+    return (
+        f"\nThe image, {' x '.join(f'{e:.1f}' for e in extent)} mm, is too small for the grid IMPACT's models see it "
+        f"on: {' x '.join(str(int(g)) for g in grid)} voxels at {' x '.join(f'{v:g}' for v in voxel)} mm (level "
+        f"{level}){spans}. The IMPACT presets are sized for CT and MR at millimetre scale: a small field of view "
+        "(microscopy, a crop) registers on its intensities (Generic_Rigid_BSpline, FireANTs_SyN), or on features at "
+        "a finer grid, with a smaller voxel_size for each of the preset's models."
     )
 
 
@@ -94,67 +168,79 @@ class ElastixEngine:
         parameter_maps: list[str],
         max_iterations: int = 0,
         final_grid_spacing: float = 0.0,
-        subset_features: int = 0,
         spatial_samples: int = 0,
         parameter_overrides: list[str] = [],
-        resolutions: dict = {},
+        models: dict = {},
+        levels: dict = {},
         mode: str = "Static",
+        normalize: bool = True,
+        feature_map_update_interval: int = -1,
+        mixed_precision: bool = False,
+        voxel_sampling: float = 1.0,
+        seed: int = 42,
     ) -> None:
         # The parameter-map .txt files are per-preset config staged into the run's working directory (KonfAIApp
         # chdir's into the app workspace before building the model), so resolve them against cwd, not this
         # module's directory, which is the installed package, not next to the .txt.
+        # An absolute path to a map of one's own is honoured.
         self._bundle_dir = Path.cwd()
-        self._parameter_maps = [self._bundle_dir / Path(p).name for p in parameter_maps]
-        # Matrix mode rewrites a template's resolution-dependent lines; it never creates one. Without a
+        self._parameter_maps = [
+            Path(p) if Path(p).is_absolute() and Path(p).is_file() else self._bundle_dir / Path(p).name
+            for p in parameter_maps
+        ]
+        # The models rewrite a template's IMPACT lines; they never create one. Without a
         # map, elastix would launch with no -p and die in a cryptic subprocess error: fail here instead.
         if not self._parameter_maps:
             raise ValueError(
-                "at least one parameter-map template is required; 'resolutions' rewrites a template, "
-                "it does not replace it."
+                "at least one parameter-map template is required; 'models' and 'levels' rewrite a template's "
+                "IMPACT lines, they do not replace it."
             )
         self._max_iterations = max_iterations
         self._final_grid_spacing = final_grid_spacing
-        self._subset_features = subset_features
         self._spatial_samples = spatial_samples
+        if not 0 < voxel_sampling <= 1:
+            raise ValueError(f"voxel_sampling is a share of the voxels, in (0, 1]: got {voxel_sampling}.")
+        self._voxel_sampling = float(voxel_sampling)
+        self._seed = int(seed)
         self._parameter_overrides = list(parameter_overrides)
         # ImpactMode: Static computes features once per level (PatchSize 0 0 0 = whole image); Jacobian
         # samples random FOV-sized patches each iteration. One mode per preset.
         self._mode = mode
-        # Matrix mode: with ``resolutions`` the map is GENERATED from it. Empty ``resolutions`` = an
-        # intensity preset (no IMPACT models): the fixed maps are staged with only the global overrides.
-        self._resolutions = resolutions
-        self._registry = load_models_registry() if resolutions else {}
-        # Feature models are DERIVED: the unique refs across the matrix cells (no flat ``models`` param).
-        models: list[str] = []
-        for res in _sorted_specs(resolutions):
-            for model in _sorted_specs(res.models):
-                if model.ref not in models:
-                    models.append(model.ref)
-        self._models = models
-        # Matrix mode reads each model's fixed properties (dimension, channels, FOV) from the registry
-        # at map-generation time: an absent key would surface as a bare KeyError mid-register, after
-        # the binary install and the first case already ran. Refuse at build instead.
-        missing = [ref for ref in models if _model_key(ref) not in self._registry]
-        if missing:
+        self._loss = {
+            "normalize": normalize,
+            "feature_map_update_interval": feature_map_update_interval,
+            "mixed_precision": mixed_precision,
+        }
+        # With ``models`` / ``levels`` each map's IMPACT block is GENERATED from them. Neither = an intensity
+        # preset (no IMPACT models): the fixed maps are staged with only the global overrides.
+        self._impact_models, self._levels = models, levels
+        if (models or levels) and not any(
+            has_impact_block(p.read_text(encoding="utf-8")) for p in self._parameter_maps
+        ):
             raise ValueError(
-                f"model ref(s) {missing} have no entry in the models registry; a local model needs one "
-                "(point KONFAI_IMPACT_MODELS_REGISTRY at a models.json that includes it)."
+                "'models' and 'levels' set the IMPACT metric, but no parameter map has an IMPACT block "
+                "((ImpactModelsPath0 ...) and its siblings) for them to rewrite."
             )
-        # ``iterations`` (the progress-bar total) is DERIVED: the sum of per-resolution iteration budgets.
-        self._iterations = self._total_iterations()
+        # Each model fetched and shaped by the registry, by (ref, layers_mask).
+        specs = sorted_specs(models) + [m for level in sorted_specs(levels) for m in sorted_specs(level.models)]
+        if specs:
+            check_models(specs, "elastix", dense=False)  # before any download
+        unique = {(m.ref, m.layers_mask): m for m in specs}
+        self._feature_models = {key: feature_model(m) for key, m in unique.items()}
+        # Jacobian mode differentiates the metric through the networks: probed at the first run, when the models are
+        # loaded, so a layer without a gradient is refused.
+        self._unchecked = mode.strip().strip('"').lower() == "jacobian"
+        # The maps are generated here once, so the progress-bar total counts the iterations elastix will run, over
+        # every map, overrides included. Any positive spacing: the build-time maps only count the iterations.
+        maps, unused = self._map_texts(
+            -1, (1.0, 1.0, 1.0), voxels=1
+        )  # voxels: a sampler voxel_sampling can't set fails here
+        if self._voxel_sampling < 1 and spatial_samples > 0:
+            print("[ImpactReg] note: voxel_sampling sets the IMPACT map's NumberOfSpatialSamples, not spatial_samples.")
+        for key in unused:
+            print(f"[ImpactReg] note: override '{key}' matched no entry in the preset's parameter maps.")
+        self._iterations = sum(_iterations_of(text) for _, text in maps)
         self._elastix_bin = self._ensure_binary()
-        self._local_models = self._download_models()
-
-    def _total_iterations(self) -> int:
-        """Total iterations across resolutions: the progress-bar budget, from the config (or the maps)."""
-        if self._resolutions:
-            return sum(int(res.max_iterations) for res in _sorted_specs(self._resolutions))
-        total = 0
-        for src in self._parameter_maps:
-            match = re.search(r"\(MaximumNumberOfIterations\s+([^)]*)\)", src.read_text(encoding="utf-8"))
-            if match:
-                total += sum(int(token) for token in match.group(1).split())
-        return total
 
     def _ensure_binary(self) -> Path:
         # Optional override: point at an existing elastix-IMPACT install (skips the download).
@@ -168,47 +254,34 @@ class ElastixEngine:
         ELASTIX_CACHE.mkdir(parents=True, exist_ok=True)
         try:
             try_elastix(ELASTIX_CACHE)
-        except Exception:
+        except RuntimeError:
+            # Staged and probed before it replaces the cache: it raises, once, when nothing runs.
             install_elastix_impact(ELASTIX_CACHE, force_cuda=False, force_cpu=False)
-            try_elastix(ELASTIX_CACHE)
+        else:
+            # A working install can be the CPU build of an environment that could use the CUDA one.
+            if cuda_upgrade_available(ELASTIX_CACHE):
+                try:
+                    install_elastix_impact(ELASTIX_CACHE, force_cuda=False, force_cpu=False)
+                except Exception as failure:
+                    print(f"[ImpactReg] note: keeping the CPU elastix-IMPACT install, the CUDA one failed: {failure}")
         return get_elastix_bin(ELASTIX_CACHE).resolve()
 
-    def _download_models(self) -> list[tuple[str, Path]]:
-        """Fetch the TorchScript feature models (``repo:filename``, or a local file); keep
-        ``(staged_name, local_path)``. The staged name equals ``_model_key(ref)`` (the path the
-        generated/preset map references), so a local ref stages under the very name the map resolves.
-        A missing local file fails HERE, at build: staging a broken path later would plant a dangling
-        symlink at the user-supplied location and crash the second case with an unrelated error."""
-        models = []
-        for ref in self._models:
-            if _is_local_ref(ref):
-                local = Path(ref).expanduser().resolve()
-                if not local.is_file():
-                    raise ValueError(f"local model ref '{ref}' does not exist (resolved to '{local}').")
-                models.append((ref, local))
-            else:
-                repo, filename = ref.split(":", 1)
-                local = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
-                models.append((filename, local))
-        return models
-
-    def _parameter_map_overrides(self, global_only: bool = False) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    def _parameter_map_overrides(self) -> tuple[dict[str, str], list[tuple[str, str]]]:
         """The tuned knobs as parameter-map overrides: ``(per_token, exact)``.
 
-        ``per_token`` maps an elastix key (or the ``ImpactSubsetFeatures`` prefix) to a value replacing
-        **each** existing token, preserving per-resolution / per-model multiplicity. ``exact`` entries (from
+        ``per_token`` maps an elastix key to a value replacing **each** existing token, preserving
+        per-resolution multiplicity: ``max_iterations`` replaces every level's budget, the global override its
+        annotation promises. ``exact`` entries (from
         ``parameter_overrides``, ``Key=value text``) replace the whole value verbatim and win over the named
-        knobs. A named knob only REPLACES a key the map already has; an ``exact`` entry the map lacks is
-        appended (``_apply_map_overrides``). ``global_only`` (matrix mode) drops ``max_iterations`` /
-        ``subset_features`` (the matrix already sets those per cell).
+        knobs; ``Map.txt:Key=value text`` touches the map of that name only (the IMPACT stage and not the rigid
+        one before it). A named knob only REPLACES a key the map already has; an ``exact`` entry the map lacks
+        is appended (``_apply_map_overrides``).
         """
         per_token: dict[str, str] = {}
-        if not global_only and self._max_iterations > 0:
+        if self._max_iterations > 0:
             per_token["MaximumNumberOfIterations"] = str(int(self._max_iterations))
         if self._final_grid_spacing > 0:
             per_token["FinalGridSpacingInPhysicalUnits"] = str(float(self._final_grid_spacing))
-        if not global_only and self._subset_features > 0:
-            per_token["ImpactSubsetFeatures"] = str(int(self._subset_features))  # prefix: indexed per metric
         if self._spatial_samples > 0:
             per_token["NumberOfSpatialSamples"] = str(int(self._spatial_samples))
         exact: list[tuple[str, str]] = []
@@ -222,16 +295,15 @@ class ElastixEngine:
     @staticmethod
     def _apply_map_overrides(
         text: str, per_token: dict[str, str], exact: list[tuple[str, str]], device_index: int
-    ) -> str:
+    ) -> tuple[str, set[str]]:
         """Patch a parameter map: set ImpactGPU to the device, apply exact key overrides, replace each token
-        of a per-token knob (preserving multiplicity), and warn for a requested key absent from the map.
+        of a per-token knob (preserving multiplicity); return the map and the override keys it took.
 
         On the CPU (``device_index`` below 0) ``ImpactUseMixedPrecision`` is forced to ``"false"``: half
-        precision has no 3-D pooling on the CPU, so a preset written for a GPU (every shipped IMPACT
-        preset turns it on) died in the feature model's first layer.
+        precision has no 3-D pooling on the CPU.
         """
-        entry_pattern = re.compile(r"^(\s*)\((\S+)((?:\s+[^)]*)?)\)\s*$")
-        requested = set(per_token) | {key for key, _ in exact}
+        # An entry may be followed by a '// comment'.
+        entry_pattern = re.compile(r"^(\s*)\((\S+)((?:\s+[^)]*)?)\)\s*(?://.*)?$")
         seen: set[str] = set()
         lines = []
         for line in text.splitlines():
@@ -239,6 +311,7 @@ class ElastixEngine:
             if match:
                 indent, key, values = match.group(1), match.group(2), match.group(3)
                 if key == "ImpactGPU":
+                    seen.add(key)
                     line = f"{indent}(ImpactGPU {device_index})"
                 elif key == "ImpactUseMixedPrecision" and device_index < 0:
                     # Handled here, so an exact override of the key is not appended behind it.
@@ -250,16 +323,14 @@ class ElastixEngine:
                         seen.add(key)
                         line = f"{indent}({key} {exact_value})"
                     else:
-                        token_key = "ImpactSubsetFeatures" if key.startswith("ImpactSubsetFeatures") else key
-                        if token_key in per_token:
-                            seen.add(token_key)
-                            replaced = " ".join(per_token[token_key] for _ in values.split())
+                        if key in per_token:
+                            seen.add(key)
+                            replaced = " ".join(per_token[key] for _ in values.split())
                             line = f"{indent}({key} {replaced})"
             lines.append(line)
         # A raw ``parameter_overrides`` entry is the escape hatch for ANY elastix parameter, including one
-        # the preset's map never mentions (an ITK default such as RequiredRatioOfValidSamples). Replacing
-        # only pre-existing keys made those silently do nothing, so an absent exact override is APPENDED.
-        # The named knobs (final_grid_spacing, spatial_samples, ...) keep replacing what exists and only
+        # the preset's map never mentions (an ITK default such as RequiredRatioOfValidSamples): an absent exact
+        # override is APPENDED. The named knobs (final_grid_spacing, spatial_samples, ...) keep replacing what exists and only
         # warn: injecting them into a map that does not use them is meaningless (e.g. a B-spline grid
         # spacing in a rigid-only preset).
         missing_exact = [(key, value) for key, value in exact if key not in seen]
@@ -267,29 +338,66 @@ class ElastixEngine:
             lines.append("// appended by impact_reg_konfai parameter_overrides")
             lines += [f"({key} {value})" for key, value in missing_exact]
             seen.update(key for key, _ in missing_exact)
-        for key in sorted(requested - seen):
-            print(f"[ImpactReg] note: override '{key}' matched no entry in the preset's parameter maps.")
-        return "\n".join(lines)
+        return "\n".join(lines), seen
 
-    def _stage_parameter_maps(self, work: Path, device_index: int) -> list[Path]:
-        """Stage the parameter maps into ``work``.
+    def _map_texts(
+        self, device_index: int, native_voxel_size: tuple[float, ...], voxels: int | None = None
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Each parameter map as elastix reads it on ``device_index``, as ``(name, text)``, and the overrides no
+        map took.
 
-        Matrix mode GENERATES each map from ``resolutions`` + the registry, then applies only the map-wide
-        knobs (the matrix already sets iterations/features per cell). Legacy mode copies the preset's maps and
-        applies every per-token / exact override. Both set the ImpactGPU device.
+        With models, each map carrying an IMPACT block is GENERATED from them + the registry, a model without a
+        voxel_size seeing the image at ``native_voxel_size``; without, the preset's maps are copied. Both then
+        apply every per-token / exact override and set the ImpactGPU device. With ``voxels`` (the fixed image's,
+        or its mask's) and a voxel_sampling below 1, the IMPACT maps then draw that share of them at each level.
         """
-        staged = []
+        maps = []
+        per_token, exact = self._parameter_map_overrides()
+        names = {src.name for src in self._parameter_maps}
+        consumed: set[str] = set()
         for src in self._parameter_maps:
-            if self._resolutions:
+            text = src.read_text(encoding="utf-8")
+            if self._impact_models or self._levels:
                 text = generate_impact_parameter_map(
-                    src.read_text(encoding="utf-8"), self._resolutions, self._registry, self._mode
+                    text,
+                    self._impact_models,
+                    self._levels,
+                    self._feature_models,
+                    native_voxel_size,
+                    self._mode,
+                    **self._loss,
                 )
-                per_token, exact = self._parameter_map_overrides(global_only=True)
-            else:
-                text = src.read_text(encoding="utf-8")
-                per_token, exact = self._parameter_map_overrides()
-            text = self._apply_map_overrides(text, per_token, exact, device_index)
-            dst = work / src.name
+            mine = [(key.rpartition(":")[2], value) for key, value in exact if key.rpartition(":")[0] in ("", src.name)]
+            # What the engine reads back is not the map's to choose: the composite transform file it samples,
+            # and for IMPACT the device (without ImpactGPU, elastix-IMPACT ran on the CPU).
+            owned = [("WriteITKCompositeTransform", '"true"'), ("ITKTransformOutputFileNameExtension", '"itk.txt"')]
+            if has_impact_block(text):
+                owned.append(("ImpactGPU", str(device_index)))
+            # The seed, in every map: elastix's generator, which the RandomCoordinate and RandomSparseMask samplers
+            # draw their points from (121212 without it), and the IMPACT metric's, which draws its channels, patches
+            # and 2D planes (from the clock without it). A RandomSeed override wins.
+            if "RandomSeed" not in dict(mine):
+                mine.append(("RandomSeed", str(self._seed)))
+            mine = owned + [(key, value) for key, value in mine if key not in dict(owned)]
+            text, seen = self._apply_map_overrides(text, per_token, mine, device_index)
+            if voxels is not None and self._voxel_sampling < 1 and has_impact_block(text):
+                text = sampled_spatial_samples(text, self._voxel_sampling, voxels)
+            consumed |= seen
+            maps.append((src.name, text))
+        # A knob the rigid map lacks and the B-spline map takes is no news: only one no map took is.
+        unused = sorted(set(per_token) - consumed) + [
+            key for key, _ in exact if key.rpartition(":")[0] not in {"", *names}
+        ]
+        return maps, unused
+
+    def _stage_parameter_maps(
+        self, work: Path, device_index: int, native_voxel_size: tuple[float, ...], voxels: int | None = None
+    ) -> list[Path]:
+        """Stage the parameter maps, as elastix reads them on ``device_index``, into ``work``, each under its rank, so
+        two maps of one name from two folders (``rigid/params.txt``, ``bspline/params.txt``) stay apart."""
+        staged = []
+        for index, (name, text) in enumerate(self._map_texts(device_index, native_voxel_size, voxels)[0]):
+            dst = work / f"{index}_{name}"
             dst.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
             staged.append(dst)
         return staged
@@ -309,39 +417,47 @@ class ElastixEngine:
         fixed mask with no voxel in it leaves nothing to register, so the field is zero.
         """
         if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
-            # Read as 'no mask', an empty one had elastix fit the whole patch, background included: in a
-            # tiled run every patch the tissue does not reach then deformed its background, and dragged
-            # the tissue edge of its neighbours through the blend.
+            # Nothing to register: in a tiled run, a patch the tissue does not reach.
             return _displacement_on(fixed, sitk.Transform(fixed.GetDimension(), sitk.sitkIdentity))
+        grid = fixed  # the field is sampled on the fixed image as it came
+        if self._feature_models:
+            for model in self._feature_models.values() if self._unchecked else ():
+                model.check(gradient=True)
+            self._unchecked = False
+            # IMPACT's features are computed along each image's voxel axes: both images go in with their voxel axes
+            # in LPS order, the transform comes back physical. A residual oblique rotation is sampled physically by
+            # elastix-IMPACT built on ITKIMPACT; the released 1.0.0 binary ignores it.
+            fixed, moving, fixed_mask, moving_mask = world_aligned_pair(fixed, moving, fixed_mask, moving_mask)
+        else:
+            # Grey values alone, compared through mutual information: a few hot voxels no longer squeeze the tissue
+            # into one bin. IMPACT's models read the intensities they were trained on, so an IMPACT run keeps them.
+            fixed, moving = winsorized(fixed), winsorized(moving)
         work = Path(tempfile.mkdtemp(prefix="konfai_reg_"))
         try:
             fixed_path, moving_path = work / "Fixed.mha", work / "Moving.mha"
             sitk.WriteImage(fixed, str(fixed_path))
             sitk.WriteImage(moving, str(moving_path))
 
-            # Stage the feature models at the relative path the maps reference (e.g. ImpactModelsPath0
-            # "MIND/R1D2_3D.pt"), resolved from the elastix working directory. An ABSOLUTE staged name
-            # (a local ref) needs no staging: the map references the real file directly, and `work /`
-            # would discard `work` and write at the user-supplied path.
-            for rel_name, model_path in self._local_models:
-                if Path(rel_name).is_absolute():
-                    continue
-                dst = work / rel_name
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if not dst.exists():
-                    dst.symlink_to(model_path)
-
             args = [str(self._elastix_bin), "-f", str(fixed_path), "-m", str(moving_path)]
             for flag, mask, name in (
                 ("-fMask", fixed_mask, "FixedMask.mha"),
                 ("-mMask", moving_mask, "MovingMask.mha"),
             ):
-                if _is_partial_mask(mask):
+                if is_partial_mask(mask):
                     mask_path = work / name
-                    sitk.WriteImage(sitk.Cast(mask, sitk.sitkUInt8), str(mask_path))
+                    # Binarised: a cast would truncate a soft mask and wrap labels.
+                    sitk.WriteImage(sitk.Cast(mask != 0, sitk.sitkUInt8), str(mask_path))
                     args += [flag, str(mask_path)]
+            # The ITK thread share konfai gave this rank, so N ranks do not oversubscribe the node.
+            args += ["-threads", str(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())]
             args += ["-out", str(work)]
-            for pmap in self._stage_parameter_maps(work, device_index):
+            # A model without a voxel_size sees the fixed image's grid, as elastix gets it.
+            # voxel_sampling counts the voxels the sampler draws from: the fixed mask's, when there is one.
+            voxels = math.prod(fixed.GetSize())
+            if is_partial_mask(fixed_mask):
+                voxels = int(np.count_nonzero(sitk.GetArrayViewFromImage(fixed_mask)))
+            staged = self._stage_parameter_maps(work, device_index, fixed.GetSpacing(), voxels)
+            for pmap in staged:
                 args += ["-p", str(pmap)]
 
             env = loader_env(self._elastix_root)
@@ -355,12 +471,12 @@ class ElastixEngine:
                 env=env,
             )
             # Drive a tqdm bar over elastix's iteration lines so SlicerKonfAI (which parses the "N% done"
-            # progress line) shows real progress. A tuned max_iterations makes the declared budget stale ->
-            # open-ended bar. The description mirrors KonfAI's bars: resolution level + the metric value.
+            # progress line) shows real progress. The description mirrors KonfAI's bars: resolution level + the
+            # metric value.
             captured: list[str] = []
             told: set[str] = set()
             iteration_line = re.compile(r"^\d+\s")
-            budget = None if self._max_iterations > 0 else (self._iterations or None)
+            budget = self._iterations or None
             progress = tqdm.tqdm(total=budget, desc="Registration", ncols=0, leave=True)
             assert proc.stdout is not None
             resolution = 0
@@ -390,8 +506,13 @@ class ElastixEngine:
             progress.close()
             returncode = proc.wait()
             if returncode != 0:
+                # elastix follows a CUDA out-of-memory with its C++ backtrace: the line leads the message, where
+                # out_of_memory_as_torch looks for it, so konfai re-plans the patch.
+                oom = [line for line in captured if device_out_of_memory(line)][:1]
                 raise RuntimeError(
-                    f"elastix failed (code {returncode}):\n{''.join(captured[-40:])}{_cuda_hint(captured, self._elastix_root)}"
+                    f"elastix failed (code {returncode}){_kept_log(work)}:\n{''.join(oom + captured[-40:])}"
+                    f"{_cuda_hint(captured, self._elastix_root)}{_mask_hint(captured)}"
+                    f"{_extent_hint(captured, staged, moving)}"
                 )
 
             transforms = sorted(
@@ -399,21 +520,14 @@ class ElastixEngine:
                 key=lambda p: int(p.name.split(".")[1].split("-")[0]),
             )
             if not transforms:
-                raise FileNotFoundError("elastix produced no composite transform file.")
-            return _displacement_on(fixed, sitk.ReadTransform(str(transforms[-1])))
+                raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
+            return _displacement_on(grid, sitk.ReadTransform(str(transforms[-1])))
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
 
-class ElastixRegistration(torch.nn.Module):
-    """Custom graph module: (fixed, moving) tensors + their geometry -> moved image on the fixed grid.
-
-    ``accepts_attributes = True`` opts this module into receiving, from the KonfAI graph, the per-branch
-    ``Attribute`` list alongside the tensors (same convention as ``CriterionWithAttribute``). elastix needs
-    the physical geometry (Origin/Spacing/Direction), which raw tensors do not carry.
-    """
-
-    accepts_attributes = True
+class ElastixRegistration(EngineRegistration):
+    """The elastix engine built from its settings, run as every engine is (``EngineRegistration``)."""
 
     def __init__(
         self,
@@ -421,46 +535,33 @@ class ElastixRegistration(torch.nn.Module):
         parameter_maps: list[str],
         max_iterations: int = 0,
         final_grid_spacing: float = 0.0,
-        subset_features: int = 0,
         spatial_samples: int = 0,
         parameter_overrides: list[str] = [],
-        resolutions: dict = {},
+        models: dict = {},
+        levels: dict = {},
         mode: str = "Static",
+        normalize: bool = True,
+        feature_map_update_interval: int = -1,
+        mixed_precision: bool = False,
+        voxel_sampling: float = 1.0,
+        seed: int = 42,
     ) -> None:
-        super().__init__()
         if engine != "elastix":
             raise NotImplementedError(f"ElastixRegistration engine '{engine}' is not implemented yet.")
-        self._engine = ElastixEngine(
-            parameter_maps,
-            max_iterations,
-            final_grid_spacing,
-            subset_features,
-            spatial_samples,
-            parameter_overrides,
-            resolutions,
-            mode,
+        super().__init__(
+            ElastixEngine(
+                parameter_maps,
+                max_iterations,
+                final_grid_spacing,
+                spatial_samples,
+                parameter_overrides,
+                models,
+                levels,
+                mode,
+                normalize,
+                feature_map_update_interval,
+                mixed_precision,
+                voxel_sampling,
+                seed,
+            )
         )
-
-    def forward(
-        self,
-        fixed: torch.Tensor,
-        moving: torch.Tensor,
-        fixed_mask: torch.Tensor,
-        moving_mask: torch.Tensor,
-        attributes: list[list[Attribute]],
-    ) -> torch.Tensor:
-        # attributes = [fixed, moving, fixed_mask, moving_mask] branch attrs; each a list[Attribute] over the
-        # batch. Returns, per sample, the moved image (1 channel) stacked with the DVF (dim channels), both on
-        # the fixed grid; downstream ChannelSelect splits them. A whole-image mask (the default) restricts nothing.
-        fixed_attrs, moving_attrs, fmask_attrs, mmask_attrs = attributes
-        device_index = fixed.device.index if fixed.device.type == "cuda" else -1
-        combined = []
-        for b in range(fixed.shape[0]):
-            fixed_img = data_to_image(fixed[b].detach().cpu().numpy(), fixed_attrs[b])
-            moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
-            fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
-            moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-            with out_of_memory_as_torch(device_index >= 0):
-                dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
-            combined.append(torch.from_numpy(dvf_np))
-        return torch.stack(combined, dim=0).to(fixed.device)

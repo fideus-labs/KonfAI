@@ -12,7 +12,8 @@ minute on a GPU.
 
 Unlike the `Segmentation` and `Synthesis` examples (raw `konfai TRAIN -> PREDICTION -> EVALUATION`), a
 registration *preset* is a self-contained KonfAI **app**: it produces, on the fixed grid, the moving
-image resampled onto the fixed image (`Moved`) and the displacement field (`DVF`). The
+displacement field, as an ITK transform (`Transform.h5`), from which the CLI derives the moving image resampled
+onto the fixed grid (`Moved`). The
 `impact-reg-konfai` CLI runs one or more presets, ensembles their fields, evaluates, and estimates
 uncertainty.
 
@@ -48,7 +49,7 @@ impact-reg-konfai register FireANTs_SyN \
   -o Output --gpu 0
 ```
 
-This writes `Output/P000/{Moved.mha, DVF.mha, Transform.h5}` on the fixed grid. Then score it:
+This writes `Output/P000/{Transform.h5, Moved.mha}` on the fixed grid. Then score it:
 
 ```bash
 impact-reg-konfai eval \
@@ -68,20 +69,16 @@ Add patch overrides and KonfAI registers overlapping patches, then reassembles t
 displacement field with a `Cosinus` partition-of-unity window, which leaves no seam in the field:
 
 ```bash
-impact-reg-konfai register FireANTs_SyN -f fixed.mha -m moving.mha -o Output --gpu 0 \
-  --set Predictor.Dataset.Patch.patch_size=[128,128,128] \
-  --set Predictor.Dataset.Patch.overlap=16 \
-  --set Predictor.outputs_dataset.MovedImage.OutputDataset.patch_combine=Cosinus \
-  --set Predictor.outputs_dataset.DisplacementField.OutputDataset.patch_combine=Cosinus
+impact-reg-konfai register FireANTs_SyN -f fixed.mha -m moving.mha -o Output --gpu 0 --max-voxels 20000000
 ```
 
-Every override is forwarded verbatim to `konfai-apps infer --set`, so the same command scales to any
-preset and any volume.
+A pair larger than what the preset registers whole is registered at native resolution in tiles, after one
+global pass on a coarse copy; `--max-voxels` sets that size and `--patch-size` the tile.
 
 ## What to adapt first
 
-1. **preset**: `register ConvexAdam_Fine ...` (itk-impact, GPU) or `register Generic_Rigid ...` (elastix, CPU);
-2. **ensemble**: pass several presets as positionals (`register FireANTs_SyN ConvexAdam_Fine ...`); the fields
+1. **preset**: `register ConvexAdam_Composite ...` (itk-impact, GPU) or `register Generic_Rigid ...` (elastix, CPU);
+2. **ensemble**: pass several presets as positionals (`register FireANTs_SyN ConvexAdam_Composite ...`); the fields
    are averaged, and `--uncertainty` retains the per-preset fields for an `impact-reg-konfai uncertainty` map;
 3. **patch size / overlap**: size the patch to your GPU budget; larger overlap = smoother blend;
 4. **inputs**: the same command reads OME-Zarr or DICOM directly (KonfAI auto-detects the store format).

@@ -19,6 +19,7 @@ at construction, not surface minutes later as a cryptic subprocess or autograd f
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -26,42 +27,9 @@ import SimpleITK as sitk
 import torch
 from impact_reg_konfai.models import elastix_engine as elastix_engine_module
 from impact_reg_konfai.models.elastix_engine import ElastixEngine
+from konfai.metric.measure.impact import _statistics
 from konfai.utils.dataset import Attribute
-
-
-def test_download_models_accepts_a_local_file_beside_hf_refs(tmp_path: Path, monkeypatch) -> None:
-    # The docs promise "a user may still point ``ref`` at a local model (path)"; an unconditional
-    # 'repo:filename' split crashed on it. A local ref stages under the very name the map references
-    # (_model_key(ref) == the ref), an HF ref under its repo-relative filename.
-    local = tmp_path / "custom.pt"
-    local.write_bytes(b"jit")
-    fetched = tmp_path / "fetched.pt"
-    monkeypatch.setattr(elastix_engine_module, "hf_hub_download", lambda repo_id, filename, repo_type: str(fetched))
-    engine = SimpleNamespace(_models=[str(local), "org/repo:MIND/R1D2.pt"])
-
-    staged = ElastixEngine._download_models(engine)
-
-    assert staged == [(str(local), local.resolve()), ("MIND/R1D2.pt", fetched)]
-
-
-def test_download_models_refuses_a_missing_local_file_at_build(tmp_path: Path) -> None:
-    # A typo'd local path must fail HERE: staged later it would plant a dangling symlink at the
-    # user-supplied location and crash the SECOND case with an unrelated FileExistsError.
-    engine = SimpleNamespace(_models=[str(tmp_path / "typo.pt")])
-    with pytest.raises(ValueError, match="does not exist"):
-        ElastixEngine._download_models(engine)
-
-
-def test_a_windows_drive_letter_is_a_local_path_not_an_hf_repo() -> None:
-    # 'C:/models/m.pt' contains ':' but is a path: splitting it as repo 'C' would send a Windows
-    # user's local ref to Hugging Face. The same rule keys the registry/staged name.
-    from impact_reg_konfai.models.elastix import _is_local_ref, _model_key
-
-    assert _is_local_ref("C:/models/m.pt") and _is_local_ref(r"D:\models\m.pt")
-    assert _is_local_ref("/abs/model.pt") and _is_local_ref("relative/model.pt")
-    assert not _is_local_ref("org/repo:MIND/R1D2.pt")
-    assert _model_key("C:/models/m.pt") == "C:/models/m.pt"
-    assert _model_key("org/repo:MIND/R1D2.pt") == "MIND/R1D2.pt"
+from konfai.utils.errors import MeasureError
 
 
 def test_an_empty_fixed_mask_is_a_zero_field_and_never_reaches_elastix(monkeypatch) -> None:
@@ -82,8 +50,9 @@ def test_an_empty_fixed_mask_is_a_zero_field_and_never_reaches_elastix(monkeypat
     assert not field.any()
 
 
-def _elastix_run(monkeypatch, lines: list[str], code: int):
-    """``ElastixEngine.register`` over a subprocess that prints ``lines`` and exits with ``code``."""
+def _elastix_run(monkeypatch, lines: list[str], code: int, parameter_map: str = "", fixed: sitk.Image | None = None):
+    """``ElastixEngine.register`` over a subprocess that prints ``lines`` and exits with ``code``, the run staging
+    ``parameter_map`` (if any) as its map."""
 
     class Process:
         stdout = iter(lines)
@@ -91,18 +60,64 @@ def _elastix_run(monkeypatch, lines: list[str], code: int):
         def wait(self) -> int:
             return code
 
+    def stage(work: Path, device_index: int, native_voxel_size: tuple, voxels: int | None = None) -> list[Path]:
+        if not parameter_map:
+            return []
+        (work / "map.txt").write_text(parameter_map)
+        return [work / "map.txt"]
+
     monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", lambda *args, **kwargs: Process())
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
-        _local_models=[],
+        _feature_models={},
         _elastix_bin="elastix",
         _elastix_root=Path("/opt/elastix-impact"),
-        _stage_parameter_maps=lambda work, device_index: [],
+        _stage_parameter_maps=stage,
         _max_iterations=0,
         _iterations=None,
     )
-    fixed = sitk.Image([6, 5, 4], sitk.sitkFloat32)
+    fixed = fixed if fixed is not None else sitk.Image([6, 5, 4], sitk.sitkFloat32)
     return ElastixEngine.register(engine, fixed, sitk.Image(fixed), 0)
+
+
+@pytest.mark.parametrize("impact", [False, True])
+def test_an_intensity_run_hands_elastix_its_images_winsorised(monkeypatch, impact: bool) -> None:
+    # Mutual information bins each image between its extremes: lone hot voxels put the tissue of two ExaSPIM brains in
+    # the first of 32 bins, and the rigid stage aligned noise. An IMPACT run keeps the intensities its models expect.
+    written = {}
+    monkeypatch.setattr(
+        elastix_engine_module.sitk,
+        "WriteImage",
+        lambda image, path, *args: written.__setitem__(Path(path).name, sitk.GetArrayFromImage(image)),
+    )
+
+    class Process:
+        stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
+    engine = SimpleNamespace(
+        _feature_models={("TS/M730.pt", "1"): object()} if impact else {},
+        _unchecked=False,
+        _elastix_bin="elastix",
+        _elastix_root=Path("/opt/elastix-impact"),
+        _stage_parameter_maps=lambda work, device_index, native_voxel_size, voxels=None: [],
+        _iterations=None,
+    )
+    tissue = np.zeros((30, 30, 30), np.uint16)
+    tissue[5:25, 5:25, 5:25] = 30
+    tissue[15, 15, 15] = 21668
+    fixed = sitk.GetImageFromArray(tissue)
+
+    with pytest.raises(FileNotFoundError, match="no composite transform"):
+        ElastixEngine.register(engine, fixed, sitk.Image(fixed), 0)
+
+    assert written["Fixed.mha"].max() == (21668 if impact else 30)
+    assert written["Moving.mha"].max() == (21668 if impact else 30)
+    assert written["Fixed.mha"].dtype == np.uint16
 
 
 def test_what_impact_says_about_device_memory_is_shown_once(monkeypatch, capsys) -> None:
@@ -125,6 +140,51 @@ def test_a_gpu_the_install_cannot_see_says_what_to_do(monkeypatch) -> None:
     with pytest.raises(RuntimeError) as other:
         _elastix_run(monkeypatch, ["no such parameter file\n"], 1)
     assert "KONFAI_ELASTIX_DIR" not in str(other.value)
+
+    # A plugin-based build passes -h without loading IMPACT, whose LibTorch may not be the one it was built against.
+    plugin = "ERROR: IMPACT requested but could not be loaded: libImpactMetric.so: undefined symbol: _ZN3c10\n"
+    with pytest.raises(RuntimeError, match="KONFAI_ELASTIX_EXTRA_LIB"):
+        _elastix_run(monkeypatch, [plugin], 1)
+
+
+def test_a_mask_too_thin_for_the_random_sampler_says_what_to_do(monkeypatch) -> None:
+    # The sampler draws in the mask's bounding box and gives up after ten times the samples it needs.
+    thin = "Description: itk::ERROR: ImageRandomCoordinateSampler: Could not find enough image samples within 10 x\n"
+    with pytest.raises(RuntimeError, match="RandomSparseMask"):
+        _elastix_run(monkeypatch, [thin], 1)
+
+
+def test_an_image_too_small_for_the_impact_grid_says_so(monkeypatch) -> None:
+    # An ExaSPIM brain at 160 um (53 x 40 x 21 mm) is a few voxels on the 6 mm grid of the IMPACT presets' coarsest
+    # level: elastix said only that no sample mapped inside the moving image, or that a model rejected its input.
+    brain = sitk.Image([443, 332, 129], sitk.sitkFloat32)
+    brain.SetSpacing((0.12032, 0.12032, 0.16))
+    impact_map = (
+        "(ImpactPatchSize0 11 11 11)\n(ImpactVoxelSize0 6 6 6)\n(ImpactPatchSize1 11 11 11)\n(ImpactVoxelSize1 3 3 3)\n"
+    )
+    no_sample = (
+        "Description: ITK ERROR: ImpactMetric(0x5f): Too many samples map outside moving image buffer: 0 / 2000\n"
+    )
+    with pytest.raises(RuntimeError) as raised:
+        _elastix_run(monkeypatch, [no_sample], 1, impact_map, brain)
+    assert "8 x 6 x 3 voxels at 6 x 6 x 6 mm (level 0), where its 11-voxel patch spans 66 mm" in str(raised.value)
+
+    # Static mode: whole images (patch 0), one voxel size per model on a line.
+    static_map = "(ImpactPatchSize0 0 0 0 0 0 0)\n(ImpactVoxelSize0 6 6 6 6 6 6)\n"
+    rejected = "Description: ITK ERROR: IMPACT: the model TS/M730.pt rejected its input. Check the number of channels\n"
+    with pytest.raises(RuntimeError, match="FireANTs_SyN") as raised:
+        _elastix_run(monkeypatch, [rejected], 1, static_map, brain)
+    assert "patch spans" not in str(raised.value)
+    # A TotalSegmentator encoder's normalisation, handed a slab one voxel thick at 6 mm (an APEX brain section).
+    slab = "builtins.ValueError: Expected more than 1 spatial element when training, got input size [1, 320, 1, 1, 1]\n"
+    with pytest.raises(RuntimeError, match="too small for the grid"):
+        _elastix_run(monkeypatch, [slab], 1, static_map, brain)
+
+    # A CT the grid suits failed for another reason: nothing to say about its size.
+    ct = sitk.Image([300, 300, 200], sitk.sitkFloat32)
+    with pytest.raises(RuntimeError) as other:
+        _elastix_run(monkeypatch, [no_sample], 1, impact_map, ct)
+    assert "too small" not in str(other.value)
 
 
 def test_elastix_engine_refuses_an_empty_parameter_map_list() -> None:
@@ -165,13 +225,6 @@ def test_fireants_moments_init_reaches_the_engine() -> None:
         assert net["Registration"]._engine._moments_init == seed
 
 
-def _plain_inputs(tensor, attribute):
-    """What ``ImpactFeatureModel.inputs`` returns, for a stub model that has no registry entry."""
-    import torch
-
-    return [tensor, torch.tensor([1]), torch.tensor([0.0, 1.0, 0.5, 0.2])]
-
-
 def test_fireants_deformable_masked_reaches_the_engine() -> None:
     # Dropped at RegistrationNet, the deformable stage would stay masked: a silent no-op.
     from impact_reg_konfai.models.fireants import RegistrationNet
@@ -206,7 +259,7 @@ def test_an_exact_mixed_precision_override_stays_off_on_the_cpu() -> None:
     # second, "true" entry and elastix ran the half precision the CPU cannot.
     text = '(ImpactGPU 0)\n(ImpactUseMixedPrecision "true" "true")\n(Metric "Impact")'
 
-    cpu = ElastixEngine._apply_map_overrides(text, {}, [("ImpactUseMixedPrecision", '"true"')], -1)
+    cpu, _ = ElastixEngine._apply_map_overrides(text, {}, [("ImpactUseMixedPrecision", '"true"')], -1)
 
     assert cpu.count("ImpactUseMixedPrecision") == 1
     assert '(ImpactUseMixedPrecision "false")' in cpu
@@ -217,8 +270,8 @@ def test_mixed_precision_is_off_on_the_cpu_and_kept_on_a_gpu() -> None:
     # half-precision kernel, so a run placed there with --cpu died in the first layer.
     text = '(ImpactGPU 0)\n(ImpactUseMixedPrecision "true" "true")\n(Metric "Impact")'
 
-    cpu = ElastixEngine._apply_map_overrides(text, {}, [], -1)
-    gpu = ElastixEngine._apply_map_overrides(text, {}, [], 1)
+    cpu, _ = ElastixEngine._apply_map_overrides(text, {}, [], -1)
+    gpu, _ = ElastixEngine._apply_map_overrides(text, {}, [], 1)
 
     assert '(ImpactUseMixedPrecision "false")' in cpu and "(ImpactGPU -1)" in cpu
     assert '(ImpactUseMixedPrecision "true" "true")' in gpu and "(ImpactGPU 1)" in gpu
@@ -240,6 +293,13 @@ def _registration_inputs(device: str = "cpu") -> tuple[torch.Tensor, list[list[A
         (False, "CUDA out of memory. Tried to allocate 224.00 MiB.", False),
         (True, "elastix failed (code 1):\nno such parameter file", False),
         (True, "std::bad_alloc: out of memory", False),
+        # cuBLAS and cuDNN report a failed device allocation in their own words, as itk-impact reads them too.
+        (
+            True,
+            "elastix failed (code 1):\nCUDA error: CUBLAS_STATUS_ALLOC_FAILED when calling cublasCreate(handle)",
+            True,
+        ),
+        (True, "cuDNN error: CUDNN_STATUS_ALLOC_FAILED", True),
     ],
 )
 def test_only_an_engine_s_cuda_out_of_memory_becomes_torch_s_class(
@@ -248,7 +308,7 @@ def test_only_an_engine_s_cuda_out_of_memory_becomes_torch_s_class(
     # An engine that allocates outside PyTorch (libtorch in itk-impact, the elastix subprocess) reports a
     # plain RuntimeError, and konfai shrinks a free patch axis on torch.cuda.OutOfMemoryError only. A CPU
     # run, a host allocation or any other failure keeps its class: none is a reason to cut a patch.
-    from impact_reg_konfai.models.engine_errors import out_of_memory_as_torch
+    from konfai.utils.vram import out_of_memory_as_torch
 
     with pytest.raises(RuntimeError) as raised, out_of_memory_as_torch(on_cuda):
         raise RuntimeError(message)
@@ -261,15 +321,15 @@ _needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="the tran
 @_needs_cuda
 def test_an_out_of_memory_inside_the_engine_reaches_konfai_as_torch_s_class() -> None:
     pytest.importorskip("itk")
-    from impact_reg_konfai.models.convexadam import ConvexAdamRegistration
+    from impact_reg_konfai.models.intensity import EngineRegistration
 
     class Engine:
-        def register(self, fixed, moving, device):
+        def register(self, fixed, moving, device, fixed_mask, moving_mask):
             raise RuntimeError("CUDA out of memory. Tried to allocate 224.00 MiB.")
 
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="out of memory"):
-        ConvexAdamRegistration(Engine())(image, image, image, image, attributes)
+        EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes)
 
 
 @_needs_cuda
@@ -307,73 +367,47 @@ def test_fireants_refuses_an_unknown_mode() -> None:
         RegistrationNet(mode="static")
 
 
-def test_fireants_tiled_extraction_leaves_no_seam() -> None:
-    # The tiles are blended by KonfAI's own cosine window, which sums to one over the overlap: features
-    # constant over the image must come back constant, or a seam shows as a band of half-weight voxels.
-    import torch
-    from impact_reg_konfai.models.fireants import _one_volume
+def test_fireants_takes_a_models_input_multiple_from_the_registry(monkeypatch, tmp_path: Path) -> None:
+    # The size an encoder-decoder's input must divide by is the model's own, read off the registry.
+    from impact_reg_konfai.models import fireants
+    from konfai.metric.measure import impact
 
-    class Constant(torch.nn.Module):
-        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
-            return [torch.full((tile.shape[0], 2, *tile.shape[2:]), 3.0)]
-
-    model = SimpleNamespace(model=Constant(), weights=[1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3)
-    image = torch.rand(1, 1, 40, 24, 70)
-    volume = _one_volume(
-        SimpleNamespace(model=model, _stats=lambda t: {}), 1.0, image, patch=32, overlap=0.25, normalization="none"
-    )
-    assert volume.shape == (1, 2, 40, 24, 70)
-    assert torch.allclose(volume, torch.full_like(volume, 3.0), atol=1e-5)
+    registry = {"m.pt": {"dimension": "3", "numberofchannels": "1", "fov": [3], "multiple": 16}}
+    monkeypatch.setattr(impact, "models_registry", lambda: registry)
+    monkeypatch.setattr(impact, "fetch_model", lambda ref: Path(_local_model(tmp_path)))
+    loss = fireants.ImpactFeatureLoss([[fireants.ModelSpec(ref="org/repo:m.pt")]], "Static", False, 5, 0, 0, False)
+    assert loss.cores[0].model.multiple == 16
 
 
-def test_fireants_rounds_the_extraction_up_for_a_model_that_needs_it() -> None:
-    # anatomix halves its input four times and its skip connections only meet on a multiple of 16: handed
-    # a 40-voxel image it raises inside the network. The padding must not reach the result.
-    import pytest
-    import torch
-    from impact_reg_konfai.models.fireants import RegistrationNet, _one_volume
-
-    class NeedsSixteen(torch.nn.Module):
-        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
-            if any(size % 16 for size in tile.shape[2:]):
-                raise RuntimeError(f"sizes of tensors must match: {tuple(tile.shape[2:])}")
-            return [tile.repeat(1, 4, 1, 1, 1)]
-
-    model = SimpleNamespace(
-        model=NeedsSixteen(), weights=[1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3
-    )
-    core = SimpleNamespace(model=model, _stats=lambda t: {})
-    image = torch.rand(1, 1, 40, 40, 40)
-    with pytest.raises(RuntimeError, match="sizes of tensors"):
-        _one_volume(core, 1.0, image, patch=0, overlap=0.25, normalization="none")
-    volume = _one_volume(core, 1.0, image, patch=0, overlap=0.25, normalization="none", multiple=16)
-    assert volume.shape == (1, 4, 40, 40, 40)
-    assert RegistrationNet(feature_multiple=16)["Registration"]._engine._feature_multiple == 16
-
-
-def test_fireants_static_settings_reach_the_engine() -> None:
+def test_fireants_impact_settings_reach_the_engine() -> None:
     # Dropped at RegistrationNet, each of these would silently keep its default: the run still produces a
     # field, computed with settings the caller did not ask for.
     from impact_reg_konfai.models.fireants import RegistrationNet
 
-    engine = RegistrationNet(
-        mode="Static", feature_overlap=0.5, feature_normalization="standardized", feature_metric="mi"
-    )["Registration"]._engine
-    assert (engine._feature_overlap, engine._feature_normalization, engine._feature_metric) == (
+    engine = RegistrationNet(mode="Static", feature_overlap=0.5, normalize=False, lncc_kernel=7, mixed_precision=True)[
+        "Registration"
+    ]._engine
+    assert (engine._feature_overlap, engine._normalize, engine._lncc_kernel, engine._mixed_precision) == (
         0.5,
-        "standardized",
-        "mi",
+        False,
+        7,
+        True,
     )
 
 
-def test_fireants_refuses_unknown_static_settings() -> None:
+def test_fireants_refuses_what_its_loss_cannot_honour(tmp_path: Path) -> None:
+    # Jacobian mode extracts the features at every step: a refresh interval means nothing there and is refused, as is
+    # an even LNCC window.
     import pytest
-    from impact_reg_konfai.models.fireants import RegistrationNet
+    from impact_reg_konfai.models.fireants import ModelSpec, RegistrationNet
 
-    with pytest.raises(ValueError, match="feature_normalization"):
-        RegistrationNet(feature_normalization="zscore")
-    with pytest.raises(ValueError, match="feature_metric"):
-        RegistrationNet(feature_metric="ncc")
+    impact = {"deformable_metric": "impact", "models": {"0": ModelSpec(ref=str(tmp_path / "m.pt"))}}
+    with pytest.raises(ValueError, match="feature_map_update_interval"):
+        RegistrationNet(**impact, mode="Jacobian", feature_map_update_interval=10)
+    with pytest.raises(ValueError, match="lncc_kernel"):
+        RegistrationNet(**impact, lncc_kernel=4)
+    with pytest.raises(ValueError, match="one per level"):
+        RegistrationNet(**impact, levels={"0": {"models": {}}})
 
 
 def test_fireants_refuses_an_even_correlation_window() -> None:
@@ -387,33 +421,128 @@ def test_fireants_refuses_an_even_correlation_window() -> None:
         RegistrationNet(cc_kernel=4)
 
 
-def test_fireants_static_puts_every_feature_layer_on_the_image_grid() -> None:
-    # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel
-    # tile). Concatenated as they come, the second layer would fail torch.cat outright.
+def test_fireants_jacobian_mode_refuses_a_segmentation_head(tmp_path: Path) -> None:
+    # Jacobian mode differentiates the metric through the network, and a one-hot head carries no gradient: selected
+    # alone, the deformable stage did not move and the run ended as if it had registered.
     import torch
-    from impact_reg_konfai.models.fireants import _one_volume
+    from impact_reg_konfai.models.fireants import ImpactFeatureLoss, ModelSpec
 
-    class TwoResolutions(torch.nn.Module):
-        def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
-            coarse = torch.nn.functional.avg_pool3d(tile, 2)
-            return [tile.repeat(1, 3, 1, 1, 1), coarse.repeat(1, 5, 1, 1, 1)]
+    class WithHead(torch.nn.Module):
+        def forward(self, x: torch.Tensor, nb_layers: torch.Tensor) -> list[torch.Tensor]:
+            return [x.repeat(1, 2, 1, 1, 1), (x > 0).long()]
 
-    model = SimpleNamespace(
-        model=TwoResolutions(), weights=[1.0, 1.0], in_channels=1, model_path="", inputs=_plain_inputs, dim=3
+    path = tmp_path / "with_head.pt"
+    torch.jit.script(WithHead()).save(str(path))
+
+    def loss(layers_mask: str, mode: str) -> ImpactFeatureLoss:
+        return ImpactFeatureLoss([[ModelSpec(ref=str(path), layers_mask=layers_mask)]], mode, True, 5, 0, 0, False)
+
+    with pytest.raises(MeasureError, match="layer 2 carries no gradient"):
+        loss("01", "Jacobian")
+    loss("10", "Jacobian")
+    loss("01", "Static")  # Static mode registers the maps themselves
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name"), [("fireants", "FireANTsEngine"), ("convexadam", "ConvexAdamEngine")]
+)
+def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field(module_name: str, class_name: str) -> None:
+    """As the elastix engine: an empty fixed mask leaves nothing to register, and nothing runs."""
+    if module_name == "convexadam":
+        pytest.importorskip("itk")
+    import importlib
+
+    engine_class = getattr(importlib.import_module(f"impact_reg_konfai.models.{module_name}"), class_name)
+    engine = engine_class.__new__(engine_class)  # unconfigured: any step past the check would raise
+    engine._linear_method = "none"  # as a tile: the tile pass runs no linear stage
+    image = sitk.GetImageFromArray(np.random.rand(4, 5, 6).astype(np.float32))
+    empty = sitk.GetImageFromArray(np.zeros((4, 5, 6), dtype=np.uint8))
+
+    field = engine.register(image, image, -1, fixed_mask=empty)
+
+    assert field.shape == (3, 4, 5, 6) and not field.any()
+
+
+def test_elastix_stages_the_pair_under_tmpdir(monkeypatch, tmp_path: Path) -> None:
+    # impact-reg-konfai points it at its work dir: not the system temp, RAM itself where /tmp is a tmpfs.
+    monkeypatch.setattr(elastix_engine_module.tempfile, "tempdir", str(tmp_path))
+    staged = []
+    monkeypatch.setattr(elastix_engine_module.sitk, "WriteImage", lambda image, path: staged.append(Path(path)))
+    with pytest.raises(FileNotFoundError):
+        _elastix_run(monkeypatch, [], 0)
+    assert staged and all(tmp_path in path.parents for path in staged)
+
+
+class _LocalFeatures(torch.nn.Module):
+    """A feature model with a 3-voxel receptive field and two channels, taking the inputs the IMPACT metric gives."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layers: torch.Tensor,
+        stats: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+        direction: Optional[torch.Tensor] = None,  # noqa: UP045 (TorchScript)
+    ) -> list[torch.Tensor]:
+        mean = torch.nn.functional.avg_pool3d(x, 3, 1, 1, count_include_pad=False)
+        return [torch.cat([mean, torch.nn.functional.avg_pool3d(x * x, 3, 1, 1, count_include_pad=False)], dim=1)]
+
+
+def _local_model(tmp_path: Path) -> str:
+    path = tmp_path / "local.pt"
+    torch.jit.script(_LocalFeatures()).save(str(path))
+    return str(path)
+
+
+def test_fireants_sampled_jacobian_compares_the_patch_centres(tmp_path: Path) -> None:
+    # elastix's Jacobian scheme: the network runs on the patch of its receptive field around each drawn point and only
+    # the centre voxel is compared. For a local model that is the whole-image feature at the point, whatever the
+    # batches, and the gradient reaches the image only inside the patches.
+    from impact_reg_konfai.models.fireants import ModelSpec, _ImpactCore
+
+    core = _ImpactCore(ModelSpec(ref=_local_model(tmp_path)), False)
+    moved = torch.rand(1, 1, 20, 20, 20, requires_grad=True)
+    fixed = torch.rand(1, 1, 20, 20, 20)
+    centres = torch.tensor([[5, 6, 7], [10, 10, 10], [14, 3, 12]])
+    value = core.sampled_distances(moved, fixed, centres, 5, [("L2", 0)], 0, 5)
+    network = core.model.network(torch.device("cpu"))
+    whole = [network(*core.model.inputs(image, _statistics(image)[0]))[0][0] for image in (moved, fixed)]
+    at = (slice(None), centres[:, 0], centres[:, 1], centres[:, 2])
+    assert torch.allclose(value[0], (whole[0][at] - whole[1][at]).pow(2).mean())
+    core.model.batch = 2  # two batches, the same points
+    assert torch.allclose(core.sampled_distances(moved, fixed, centres, 5, [("L2", 0)], 0, 5), value)
+    value.sum().backward()
+    touched = torch.nonzero(moved.grad[0, 0])
+    assert len(touched) and all(bool(((point - centres).abs().max(1).values <= 2).any()) for point in touched)
+
+
+def test_fireants_sampled_static_reads_a_share_of_the_voxels(tmp_path: Path) -> None:
+    # Static compares the warped feature volumes at the drawn voxels only: the value of a uniform difference is kept,
+    # and the gradient reaches no more voxels than were drawn.
+    from impact_reg_konfai.models.fireants import ImpactFeatureLoss, ModelSpec
+
+    loss = ImpactFeatureLoss(
+        [[ModelSpec(ref=_local_model(tmp_path))]], "Static", False, 5, 0, 0, False, voxel_sampling=0.01
     )
-    core = SimpleNamespace(model=model, _stats=lambda t: {})
-    volume = _one_volume(core, 1.0, torch.rand(1, 1, 16, 16, 16), patch=0, overlap=0.25, normalization="none")
-    assert volume.shape == (1, 8, 16, 16, 16)
+    loss._channels = [[2]]
+    moved = torch.rand(1, 2, 20, 20, 20, requires_grad=True)
+    value = loss(moved, moved.detach() + 1.0)
+    assert torch.allclose(value, torch.tensor(1.0))
+    value.backward()
+    assert 0 < int((moved.grad.abs().sum(1) > 0).sum()) <= round(0.01 * 20**3)
 
 
-def test_the_jacobian_patch_covers_the_deepest_selected_layer() -> None:
-    # A patch smaller than the receptive field crops the context the feature was trained to see. Measured
-    # on TS/M730, one output voxel's sensitivity to the input stays above 1 % of its peak over 5 voxels for
-    # the first layer and 11 for the second -- the study's own recommended map sets 11 for this mask.
-    from impact_reg_konfai.models.elastix import _fov_value
+def test_fireants_voxel_sampling_reaches_the_engine_and_is_refused_where_meaningless(tmp_path: Path) -> None:
+    # Dropped at RegistrationNet, the loss would read every voxel. A share out of (0, 1], an LNCC on drawn points and
+    # a Jacobian patch that cannot be sized (a local model has no registry FOV) are refused before the run.
+    from impact_reg_konfai.models.fireants import ImpactFeatureLoss, ModelSpec, RegistrationNet
 
-    fov = {"formula": "2^l+3"}
-    assert _fov_value(fov, "1") == 5
-    assert _fov_value(fov, "01") == 11
-    assert _fov_value(fov, "001") == 23
-    assert _fov_value({"formula": "2*r*d+1", "r": 1, "d": 2}, "1") == 5
+    assert RegistrationNet(voxel_sampling=0.25)["Registration"]._engine._voxel_sampling == 0.25
+    impact = {"deformable_metric": "impact", "models": {"0": ModelSpec(ref="m.pt", distance="LNCC")}}
+    with pytest.raises(ValueError, match="LNCC"):
+        RegistrationNet(**impact, voxel_sampling=0.5)
+    with pytest.raises(ValueError, match="share of the voxels"):
+        RegistrationNet(voxel_sampling=1.5)
+    with pytest.raises(ValueError, match="cannot be sized"):
+        ImpactFeatureLoss(
+            [[ModelSpec(ref=_local_model(tmp_path))]], "Jacobian", True, 5, 0, 0, False, voxel_sampling=0.1
+        )

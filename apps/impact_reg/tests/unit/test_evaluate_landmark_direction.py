@@ -54,11 +54,12 @@ def test_evaluate_warps_fixed_fiducials_onto_moving(tmp_path: Path, monkeypatch:
 
     def fake_evaluate(self, *, inputs, gt, evaluation_file, **kwargs) -> None:
         if evaluation_file == "Evaluation_with_fid.yml":
-            captured["reference"] = read_landmarks(Path(inputs[0][0]))
-            captured["moved"] = read_landmarks(Path(gt[0][0]))
+            captured["moved"] = read_landmarks(Path(inputs[0][0]))
+            captured["reference"] = read_landmarks(Path(gt[0][0]))
 
     monkeypatch.setattr(impact_reg_module.KonfAIApp, "__init__", fake_init)
     monkeypatch.setattr(impact_reg_module.KonfAIApp, "evaluate", fake_evaluate)
+    monkeypatch.setattr(impact_reg_module, "_write_evaluation_summary", lambda *args: None)  # the stub scores nothing
 
     app = impact_reg_module.ImpactRegKonfAIApp()
     app.evaluate(
