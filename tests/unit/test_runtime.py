@@ -1143,7 +1143,8 @@ def test_a_temporary_directory_too_long_for_a_socket_is_reached_through_a_short_
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A socket path past the AF_UNIX limit made torch's shared-memory manager fail and the DataLoader hang: the run
-    sees a short TMPDIR, and what it writes there lands in the long one."""
+    sees a short TMPDIR, and what it writes there lands in the long one. The link was removed as the run ended, under
+    the temporary directory multiprocessing still had to remove: a FileNotFoundError at exit."""
     import socket
     import tempfile
 
@@ -1159,4 +1160,7 @@ def test_a_temporary_directory_too_long_for_a_socket_is_reached_through_a_short_
         with socket.socket(socket.AF_UNIX) as listener:
             listener.bind(os.path.join(tempfile.mkdtemp(prefix="pymp-"), "listener-12345678"))
         assert any(long_dir.iterdir())
-    assert os.environ["TMPDIR"] == str(long_dir) and not os.path.exists(short)
+    # The link outlives the run: multiprocessing names its temporary directory through it for the whole process.
+    assert os.environ["TMPDIR"] == str(long_dir) and os.path.exists(short)
+    with short_socket_tmpdir():
+        assert os.environ["TMPDIR"] == short
