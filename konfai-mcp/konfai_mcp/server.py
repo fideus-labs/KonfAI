@@ -1482,6 +1482,59 @@ def run_app_evaluate(
     )
 
 
+_REG_CASES = " One path per case, paired by order with the other lists (or one used for every case)."
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_registration_evaluate"]))
+def run_registration_evaluate(
+    transforms: Annotated[
+        list[str] | None,
+        Field(
+            description="The registration's Transform.h5 (from run_app_infer's output, <case>/Transform.h5)."
+            + _REG_CASES
+            + " Omit it to score the pair as it is: the misalignment before registration."
+        ),
+    ] = None,
+    fixed_images: Annotated[list[str] | None, Field(description="Fixed images, for MAE." + _REG_CASES)] = None,
+    moving_images: Annotated[
+        list[str] | None, Field(description="ORIGINAL moving images, for MAE (same modality only)." + _REG_CASES)
+    ] = None,
+    fixed_seg: Annotated[list[str] | None, Field(description="Fixed label maps, for Dice." + _REG_CASES)] = None,
+    moving_seg: Annotated[
+        list[str] | None, Field(description="ORIGINAL moving label maps, for Dice." + _REG_CASES)
+    ] = None,
+    fixed_landmarks: Annotated[
+        list[str] | None, Field(description="Fixed landmark files (.fcsv/.json/.txt), for TRE." + _REG_CASES)
+    ] = None,
+    moving_landmarks: Annotated[
+        list[str] | None, Field(description="Moving landmark files, the same points in order, for TRE." + _REG_CASES)
+    ] = None,
+    mask: Annotated[list[str] | None, Field(description="Fixed-grid masks restricting MAE." + _REG_CASES)] = None,
+    output: Annotated[
+        str | None,
+        Field(description="Output directory (default: a unique dir under the session workspace AppEvaluations/)."),
+    ] = None,
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+) -> dict[str, Any]:
+    """Score a registration through its transform (impact-reg-konfai eval), as a tracked job."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_registration_evaluate(
+            transforms=transforms,
+            fixed_images=fixed_images,
+            moving_images=moving_images,
+            fixed_seg=fixed_seg,
+            moving_seg=moving_seg,
+            fixed_landmarks=fixed_landmarks,
+            moving_landmarks=moving_landmarks,
+            mask=mask,
+            output=output,
+            gpu=gpu,
+            cpu=cpu,
+        )
+    )
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_uncertainty"]))
 def run_app_uncertainty(
     ref: Annotated[str, Field(description=_APP_REF_DESC)],

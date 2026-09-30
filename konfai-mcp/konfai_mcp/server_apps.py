@@ -297,6 +297,9 @@ class AppService:
             # A remote app server keeps its code and data on the user's own machine: the MCP does not run
             # it, so route to discovery rather than to tools that would refuse the reference.
             next_actions.append("list_apps")
+        elif info.get_task() == "registration":
+            # Registered through impact-reg-konfai (see _registration_preset): scored through the transform.
+            next_actions.extend(["run_app_infer", "list_app_parameters", "run_registration_evaluate"])
         else:
             next_actions.extend(["run_app_infer", "list_app_parameters", "run_app_pipeline", "import_app"])
             if evaluation:
@@ -493,6 +496,25 @@ class AppService:
             )
         self._require_trust(self._infer_mode(ref), allow_untrusted_code, verb)
 
+    def _registration_preset(self, ref: str) -> tuple[str, str] | None:
+        """``(repo, preset)`` when ``ref`` is a registration app (``task: registration``), else None.
+
+        A registration app writes its displacement field only: the moved image, the grid a pair is registered
+        on, a pair too large for the device and the evaluation through the field are impact-reg-konfai's, so
+        such an app runs through it, as its CLI and SlicerImpactReg run it. ``repo`` is what
+        ``KONFAI_IMPACTREG_REPO`` takes: the folder holding a local app, else the Hugging Face repository (with
+        its revision) of ``repo:app``. Reads the manifest only, as describe_app does.
+        """
+        if self._is_remote(ref):
+            return None
+        if _import_app_repository().get_app_repository_info(ref, False).get_task() != "registration":
+            return None
+        path = Path(ref).expanduser()
+        if path.exists():
+            return str(path.resolve().parent), path.resolve().name
+        repo, _, preset = ref.rpartition(":")
+        return repo, preset
+
     def _app_label(self, ref: str) -> str:
         """Short, filesystem-safe name of the app behind a reference, used to label its runs."""
         if ":" in ref and not Path(ref).expanduser().exists():
@@ -604,6 +626,42 @@ class AppService:
             str(Path(output).expanduser().resolve()) if output else self._default_output("AppOutputs", label)
         )
 
+        registration = self._registration_preset(ref)
+        if registration is not None:
+            if ensemble or ensemble_models or batch_size or uncertainty:
+                raise ValueError(
+                    f"{ref!r} is a registration app: it has no checkpoints to ensemble, no batch and no stack to keep,"
+                    " so ensemble, ensemble_models, batch_size and uncertainty do not apply."
+                )
+            if not 2 <= len(normalized) <= 4:
+                raise ValueError(
+                    f"{ref!r} is a registration app: pass 2 to 4 input groups, in this order: the fixed images, the"
+                    " moving images, then optionally the fixed masks and the moving masks."
+                )
+            fixed, moving, *masks = normalized
+            return {
+                "kind": "infer",
+                "run_name": label,
+                "target": "konfai_mcp.runner:run_registration_api",
+                "command": ["konfai_mcp.runner:run_registration_api", ref, "->", resolved_output],
+                "kwargs": {
+                    "repo": registration[0],
+                    "preset": registration[1],
+                    "fixed": fixed,
+                    "moving": moving,
+                    "fixed_masks": masks[0] if masks else [],
+                    "moving_masks": masks[1] if len(masks) > 1 else [],
+                    "output": resolved_output,
+                    "gpu": gpu,
+                    "cpu": cpu,
+                    "tta": tta,
+                    "patch_size": patch_size,
+                    "config_overrides": config_overrides,
+                    "force_update": force_update,
+                },
+                "output": resolved_output,
+            }
+
         kwargs: dict[str, Any] = {
             "ref": ref,
             "inputs": normalized,
@@ -650,6 +708,12 @@ class AppService:
         """Shared spec builder for app actions run through ``runner.run_app_action_api``."""
         normalized_inputs = self._normalize_input_groups(inputs)
         self._require_local_app(ref, "Running", allow_untrusted_code)
+        if self._registration_preset(ref) is not None:
+            raise ValueError(
+                f"{ref!r} is a registration app: its own {action} configs read the images as they are, never through"
+                " the transform, so they would score the pair before registration. Register with run_app_infer, then"
+                " score the result with run_registration_evaluate, which applies the transform."
+            )
 
         normalized_gt = self._normalize_input_groups(gt, "gt") if gt is not None else None
         if needs_gt and not normalized_gt:
@@ -727,6 +791,64 @@ class AppService:
             cpu=cpu,
             extra={"evaluation_file": evaluation_file},
         )
+
+    def prepare_registration_evaluate(
+        self,
+        transforms: list[str] | None = None,
+        fixed_images: list[str] | None = None,
+        moving_images: list[str] | None = None,
+        fixed_seg: list[str] | None = None,
+        moving_seg: list[str] | None = None,
+        fixed_landmarks: list[str] | None = None,
+        moving_landmarks: list[str] | None = None,
+        mask: list[str] | None = None,
+        output: str | None = None,
+        gpu: list[int] | None = None,
+        cpu: int | None = None,
+    ) -> dict[str, Any]:
+        """Build the job spec that scores a registration through ``impact-reg-konfai eval``.
+
+        The moving side is the ORIGINAL moving data: the transform warps it onto the fixed grid itself. No
+        transform scores the pair as it is, the misalignment a registration starts from.
+        """
+        pairs = {
+            "images": (fixed_images, moving_images),
+            "segmentations": (fixed_seg, moving_seg),
+            "landmarks": (fixed_landmarks, moving_landmarks),
+        }
+        for name, (fixed, moving) in pairs.items():
+            if bool(fixed) != bool(moving):
+                raise ValueError(f"Pass the fixed and the moving {name} together, one per case each.")
+        if not any(fixed for fixed, _ in pairs.values()):
+            raise ValueError("Pass at least one fixed/moving pair to score: images (MAE), segmentations or landmarks.")
+        groups = {
+            "transforms": transforms,
+            "fixed_images": fixed_images,
+            "moving_images": moving_images,
+            "fixed_seg": fixed_seg,
+            "moving_seg": moving_seg,
+            "fixed_landmarks": fixed_landmarks,
+            "moving_landmarks": moving_landmarks,
+            "mask": mask,
+        }
+        kwargs: dict[str, Any] = {
+            name: self._normalize_input_groups([paths], name)[0] if paths else [] for name, paths in groups.items()
+        }
+        if cpu is not None and gpu is None:
+            gpu = []
+        label = self.workspace_layout.sanitize_name("eval_registration")
+        resolved_output = (
+            str(Path(output).expanduser().resolve()) if output else self._default_output("AppEvaluations", label)
+        )
+        kwargs.update({"output": resolved_output, "gpu": gpu, "cpu": cpu})
+        return {
+            "kind": "evaluate",
+            "run_name": label,
+            "target": "konfai_mcp.runner:run_registration_evaluate_api",
+            "command": ["konfai_mcp.runner:run_registration_evaluate_api", "->", resolved_output],
+            "kwargs": kwargs,
+            "output": resolved_output,
+        }
 
     def prepare_uncertainty(
         self,
