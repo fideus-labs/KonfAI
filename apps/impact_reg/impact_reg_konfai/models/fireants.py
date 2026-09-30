@@ -85,6 +85,7 @@ from konfai.metric.measure.impact import (
     grid_size,
     no_texpr_fuser,
     normalized_features,
+    onto_image_grid,
     pca_project,
     resampled,
     swept_order,
@@ -480,6 +481,9 @@ class ImpactFeatureLoss(torch.nn.Module):
             if core.pca > 0:  # onto the fixed image's basis, as the other engines fit it on the reference side
                 for index, (fixed_layer, moving_layer) in enumerate(zip(fixed_layers, moving_layers, strict=True)):
                     moving_layers[index], fixed_layers[index] = core._pca_project(moving_layer, fixed_layer)
+            # Normalised and reduced on its own grid, each layer is read at the image's voxels as elastix reads it.
+            fixed_layers = [onto_image_grid(layer, tuple(images["fixed"].shape[2:])) for layer in fixed_layers]
+            moving_layers = [onto_image_grid(layer, tuple(images["moving"].shape[2:])) for layer in moving_layers]
             if core.model.voxel_size is not None:
                 fixed_layers = [resampled(layer, tuple(fixed.shape[2:]), padding="border") for layer in fixed_layers]
                 moving_layers = [resampled(layer, tuple(moving.shape[2:]), padding="border") for layer in moving_layers]

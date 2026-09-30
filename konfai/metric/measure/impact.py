@@ -723,6 +723,60 @@ def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: 
     return grid
 
 
+def _rounded(value: float) -> int:
+    """``value`` rounded half away from zero, as itk-impact's ``llround``."""
+    return math.floor(value + 0.5)
+
+
+def _layer_accumulator(
+    grid: ModelPatch, shape: tuple[int, ...], tile: tuple[int, ...], layer: tuple[int, ...]
+) -> Accumulator:
+    """``grid``'s tiles over an image of ``shape``, at the resolution of a layer that answers ``layer`` for a ``tile``,
+    as itk-impact's tiler scales them (``ScalePatchGrid``): each axis by its own ratio, the starts and the overlap
+    rounded, the extent the image's scaled and held to what the tiles cover."""
+    scales = [out / into for out, into in zip(layer, tile, strict=True)]
+    starts = [
+        [_rounded(axis.start * scale) for axis, scale in zip(patch, scales, strict=True)]
+        for patch in grid.get_patch_slices()
+    ]
+    last = [max(column) for column in zip(*starts, strict=True)]
+    extent = [
+        min(max(_rounded(side * scale), stop + 1), stop + size)
+        for side, scale, stop, size in zip(shape, scales, last, layer, strict=True)
+    ]
+    size = [out if free else 0 for free, out in zip(grid.patch_size, layer, strict=True)]
+    combine = Cosinus()
+    combine.set_patch_config(
+        blend_axes(size),
+        [
+            _rounded(voxels * scale)
+            for voxels, scale in zip(cast(Cosinus, grid.patch_combine).overlaps, scales, strict=True)
+        ],
+    )
+    patches = [
+        tuple(slice(at, min(at + length, bound)) for at, length, bound in zip(start, layer, extent, strict=True))
+        for start in starts
+    ]
+    return Accumulator(patches, size, combine)
+
+
+def onto_image_grid(layer: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+    """A layer ``[B, C, *grid]`` brought linearly onto the image grid ``shape`` it was extracted from, placed as
+    itk-impact places a feature map (``AllocateFeatureImage``): its first voxel on the image's, its spacing the image's
+    extent over its own size, a point past its last voxel reading that voxel (ITK's linear interpolator)."""
+    # ponytail: one axis at a time holds two gathered copies of the map, a slab loop if a layer ever outgrows that.
+    for axis, extent in enumerate(shape):
+        size = layer.shape[2 + axis]
+        if size == extent:
+            continue
+        at = torch.arange(extent, device=layer.device, dtype=torch.float64) * (size / extent)
+        low = at.floor().long()
+        high = (low + 1).clamp(max=size - 1)
+        weight = (at - low).to(layer.dtype).view([-1 if dim == 2 + axis else 1 for dim in range(layer.dim())])
+        layer = torch.lerp(layer.index_select(2 + axis, low), layer.index_select(2 + axis, high), weight)
+    return layer
+
+
 class ImpactFeatureModel:
     """An IMPACT TorchScript feature extractor and what its inputs need: the channel count it expects
     (a narrower input is repeated to it), the per-layer weights, the tile it is fed (``None`` = the
@@ -840,33 +894,29 @@ class ImpactFeatureModel:
     @torch.no_grad()
     def _volume(self, image: torch.Tensor, normalization: str, patch: int, overlap: float) -> list[torch.Tensor]:
         """``volume`` in tiles of ``patch``: the intensity statistics are the whole image's, so every tile is normalised
-        alike, and a coarser layer (a segmentation network's deeper ones) is brought onto the tile to be blended."""
+        alike. Each layer is blended on its own grid, a segmentation network's deeper ones coarser, and normalised
+        there, as itk-impact's ImageToFeaturesMap does."""
         network = self.network(image.device)
         statistics = _statistics(image)[0]
         grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, self.multiple)
-        accumulator = Accumulator(grid.get_patch_slices(), grid.patch_size, grid.patch_combine)
-        channels: list[int] = []
+        accumulators: list[Accumulator] = []
         for index, (tile,) in enumerate(grid.disassemble(image)):
             outputs = network(*self.inputs(tile, statistics))
-            layers = [
-                normalized_features(
-                    layer
-                    if layer.shape[2:] == tile.shape[2:]
-                    else F.interpolate(layer, size=tile.shape[2:], mode="trilinear", align_corners=False),
-                    normalization,
-                )
-                for layer in (outputs[kept].float() for kept in self.kept)
-            ]
-            channels = [layer.shape[1] for layer in layers]
-            accumulator.add_layer(index, layers[0] if len(layers) == 1 else torch.cat(layers, dim=1))
-            del layers, outputs
-        return list(torch.split(accumulator.assemble(), channels, dim=1))
+            for rank, kept in enumerate(self.kept):
+                layer = outputs[kept].float()
+                if index == 0:
+                    accumulators.append(
+                        _layer_accumulator(grid, tuple(image.shape[2:]), tuple(tile.shape[2:]), tuple(layer.shape[2:]))
+                    )
+                accumulators[rank].add_layer(index, layer)
+            del outputs
+        return [normalized_features(accumulator.assemble(), normalization) for accumulator in accumulators]
 
     def volume(
         self, image: torch.Tensor, normalization: str = "none", patch: int = 0, overlap: float = 0.25
     ) -> tuple[list[torch.Tensor], int]:
-        """Each weighted layer's features over ``image`` [1, C, *spatial], normalised (``normalized_features``) and on
-        its grid, and the tile they took: ``patch`` a side (0: the whole image), tiles sharing ``overlap`` of their
+        """Each weighted layer's features over ``image`` [1, C, *spatial], normalised (``normalized_features``) on the
+        layer's own grid (``onto_image_grid`` brings it onto the image's), and the tile they took: ``patch`` a side (0: the whole image), tiles sharing ``overlap`` of their
         width blended by a cosine window. A pass that does not fit the card runs again in tiles of
         ``FIRST_FEATURE_TILE`` (or its largest halving shorter than the image), then half as wide each time."""
         tile = patch

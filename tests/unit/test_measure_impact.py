@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 import torch
 from konfai.metric.measure import impact
-from konfai.metric.measure.impact import _EPS, ImpactFeatureModel, IMPACTReg, distance
+from konfai.metric.measure.impact import _EPS, ImpactFeatureModel, IMPACTReg, distance, onto_image_grid
 from konfai.utils.errors import MeasureError
 
 
@@ -335,10 +335,20 @@ class _TwoResolutions(torch.nn.Module):
         return [tile.repeat(1, 3, 1, 1, 1), coarse.repeat(1, 5, 1, 1, 1)]
 
 
-def test_a_volume_puts_every_layer_on_the_image_grid() -> None:
-    # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel tile).
+class _HalfConstant(torch.nn.Module):
+    def forward(self, tile: torch.Tensor, nb_layers: torch.Tensor, stats: torch.Tensor) -> list[torch.Tensor]:
+        return [torch.full((tile.shape[0], 5, *(size // 2 for size in tile.shape[2:])), 3.0)]
+
+
+def test_a_volume_blends_each_layer_on_its_own_grid() -> None:
+    # A segmentation network hands back coarser deeper layers (M730: 64/32/16 voxels for a 64-voxel tile). As in
+    # itk-impact, they are blended and normalised on their grid, the tiles scaled to it, and read at the image voxels.
     layers, _ = _stub_model(_TwoResolutions(), [1.0, 1.0]).volume(torch.rand(1, 1, 16, 16, 16))
-    assert [tuple(layer.shape) for layer in layers] == [(1, 3, 16, 16, 16), (1, 5, 16, 16, 16)]
+    assert [tuple(layer.shape) for layer in layers] == [(1, 3, 16, 16, 16), (1, 5, 8, 8, 8)]
+    (coarse,), tile = _stub_model(_HalfConstant(), [1.0]).volume(torch.rand(1, 1, 40, 24, 70), patch=32)
+    assert tile == 32 and coarse.shape == (1, 5, 20, 12, 35)
+    assert torch.allclose(coarse, torch.full_like(coarse, 3.0), atol=1e-5)
+    assert onto_image_grid(coarse, (40, 24, 70)).shape == (1, 5, 40, 24, 70)
 
 
 class _WithHead(torch.nn.Module):
