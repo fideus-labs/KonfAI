@@ -448,8 +448,6 @@ class ElastixEngine:
                     # Binarised: a cast would truncate a soft mask and wrap labels.
                     sitk.WriteImage(sitk.Cast(mask != 0, sitk.sitkUInt8), str(mask_path))
                     args += [flag, str(mask_path)]
-            # The ITK thread share konfai gave this rank, so N ranks do not oversubscribe the node.
-            args += ["-threads", str(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())]
             args += ["-out", str(work)]
             # A model without a voxel_size sees the fixed image's grid, as elastix gets it.
             # voxel_sampling counts the voxels the sampler draws from: the fixed mask's, when there is one.
@@ -461,6 +459,10 @@ class ElastixEngine:
                 args += ["-p", str(pmap)]
 
             env = loader_env(self._elastix_root)
+            # The ITK thread share konfai gave this rank, so N ranks do not oversubscribe the node. Through the
+            # environment, which every copy of ITK in the process reads: the published elastix links ITK statically
+            # into the IMPACT plugin too, and its -threads crashes that plugin.
+            env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
             proc = subprocess.Popen(  # nosec B603
                 args,
                 cwd=str(work),

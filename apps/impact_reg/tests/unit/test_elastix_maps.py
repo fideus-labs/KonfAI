@@ -220,7 +220,8 @@ def test_a_mask_reaches_elastix_binarised(tmp_path: Path, monkeypatch: pytest.Mo
 
         def __init__(self, args, **kwargs) -> None:
             written["mask"] = sitk.GetArrayFromImage(sitk.ReadImage(args[args.index("-fMask") + 1]))
-            written["threads"] = args[args.index("-threads") + 1]
+            written["threads"] = kwargs["env"]["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"]
+            written["flags"] = args
 
         def wait(self) -> int:
             return 1
@@ -234,8 +235,10 @@ def test_a_mask_reaches_elastix_binarised(tmp_path: Path, monkeypatch: pytest.Mo
         engine.register(fixed, sitk.Image(fixed), -1, fixed_mask=mask)
 
     assert written["mask"][0, 0, :4].tolist() == [1, 1, 1, 0] and written["mask"].sum() == 3
-    # konfai's per-rank ITK share: elastix at full core count in every rank oversubscribed the node.
+    # konfai's per-rank ITK share: elastix at full core count in every rank oversubscribed the node. Not as -threads,
+    # which crashes the IMPACT plugin of the published elastix.
     assert written["threads"] == str(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
+    assert "-threads" not in written["flags"]
 
 
 def test_the_per_layer_rows_hold_one_entry_per_selected_layer() -> None:
