@@ -1,0 +1,16 @@
+# The sdist carries the konfai package and what builds it. The sibling packages and the app bundles
+# are released on their own, and the docs, examples, tests and development tooling live in the
+# repository, not in the package source.
+prune konfai-apps
+prune konfai-mcp
+prune konfai-studio
+prune apps
+prune docs
+prune examples
+prune tests
+prune benchmarks
+prune docker
+prune .claude
+prune .github
+exclude pixi.lock AGENTS.md CLAUDE.md logo.png .pre-commit-config.yaml .readthedocs.yaml
+global-exclude __pycache__ *.py[co]

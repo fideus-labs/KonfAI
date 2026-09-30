@@ -327,7 +327,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and publish Docker image
+      - name: Build the Docker image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: konfai:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Nothing is pushed unless the image carries the CUDA build of torch and torchvision it was built
+      # for: pip would take a newer PyPI release built for another CUDA without a word.
+      - name: Smoke-test the Docker image
+        run: |
+          docker run --rm --entrypoint python konfai:smoke -c "
+          import konfai, konfai_apps, torch, torchvision
+          versions = (torch.__version__, torchvision.__version__)
+          assert all(version.endswith('+cu128') for version in versions), versions
+          print(*versions)
+          "
+
+      - name: Publish the Docker image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .

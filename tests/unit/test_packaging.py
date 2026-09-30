@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -481,3 +482,27 @@ def test_every_source_file_carries_the_spdx_header() -> None:
         and "SPDX-License-Identifier: Apache-2.0" not in (_REPO_ROOT / name).read_text(encoding="utf-8")[:2000]
     ]
     assert not missing, missing
+
+
+@pytest.mark.slow
+def test_the_sdist_carries_the_konfai_package_and_what_builds_it(tmp_path: Path) -> None:
+    """The published sdist was the whole monorepo (9.5 MB: the sibling packages, the docs, the
+    tooling); it carries the package, and a wheel built from it ships what the tree's does."""
+    pytest.importorskip("build")
+    pytest.importorskip("setuptools_scm")
+    built = subprocess.run(
+        [sys.executable, "-m", "build", "--sdist", "--no-isolation", "--outdir", str(tmp_path)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert built.returncode == 0, built.stdout + built.stderr
+    (sdist,) = tmp_path.glob("konfai-*.tar.gz")
+    with tarfile.open(sdist) as archive:
+        top = {Path(name).parts[1] for name in archive.getnames() if len(Path(name).parts) > 1}
+        members = archive.getnames()
+    allowed = {"konfai", "konfai.egg-info", "pyproject.toml", "setup.cfg", "PKG-INFO", "README.md", "LICENSE"}
+    assert top <= allowed | {"CHANGELOG.md", "MANIFEST.in", ".gitignore"}, sorted(top - allowed)
+    assert any("/konfai/models/yaml/UNet.yml" in name for name in members)
+    assert any("/konfai/models/python/segmentation/" in name for name in members)

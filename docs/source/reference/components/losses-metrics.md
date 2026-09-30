@@ -112,6 +112,7 @@ every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
 | `MAE` | Masked mean-absolute error. | `reduction="mean"` |
 | `ME` | Signed mean error `(x−y).mean()` (bias). |: |
 | `PSNR` | Peak SNR over the mask. `dynamic_range` defaults to `4095` (HU range), which `None` also names. Metric only: `is_loss: true` is refused. | `dynamic_range=4095.0` |
+| `SSIM` | Masked structural similarity. `dynamic_range` defaults to `4095`, which `None` also names. A metric unless `is_loss: true`, which minimises `1 - SSIM`. | `dynamic_range=4095.0` |
 | `MAESaveMap` | MAE that also returns a voxelwise L1 error map (a 3-tuple, for a save-map consumer). | `reduction="mean", dataset=None, group=None` |
 
 ## Segmentation / classification
@@ -176,7 +177,6 @@ Imported lazily; a missing package raises a `MeasureError` with an install hint.
 
 | Name | Extra | Purpose | Key args |
 | --- | --- | --- | --- |
-| `SSIM` | `konfai[ssim]` (scikit-image) | Masked structural similarity. `dynamic_range` defaults to `4095`, which `None` also names. A metric unless `is_loss: true`, which minimises `1 - SSIM`. | `dynamic_range=4095.0` |
 | `LPIPS` | `konfai[lpips]` | Learned perceptual similarity (AlexNet by default), tiled over patches: a 2-D image whole, a volume slice by slice. | `model="alex"` |
 | `torchmetrics.image.fid:FrechetInceptionDistance` | `torchmetrics` | Fréchet Inception Distance, by classpath. FID is defined over dataset-level feature distributions, so compute it over the whole prediction set, never per case. | see torchmetrics |
 

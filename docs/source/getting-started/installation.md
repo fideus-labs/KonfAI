@@ -45,7 +45,6 @@ every extra but `monai`, `[dev]` adds the test, lint and docs tooling.
 | `smp` | `segmentation-models-pytorch` | the SMP model bridge, **required by `examples/Synthesis`** |
 | `monai` | `monai` | MONAI networks and losses named by classpath (`monai.networks.nets:UNet`) and MONAI Bundles, see {doc}`../usage/adopting-konfai` |
 | `lpips` | `lpips` | the `LPIPS` metric |
-| `ssim` | `scikit-image` | the `SSIM` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
