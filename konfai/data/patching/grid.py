@@ -241,9 +241,9 @@ class DatasetPatch(Patch):
     cuts them into patches; ``resample`` never cuts, and runs the case whole on a grid coarsened just enough, its
     outputs resampled back onto the case's grid (linear, nearest for a label dtype; a displacement field keeps its
     values). ``max_voxels`` is the most voxels a patch (``tile``) or a case's coarse grid (``resample``) holds,
-    sized before the run. Left unset, it is what the device holds at the peak cost per voxel the prediction declares,
-    ``vram_bytes_per_voxel`` on a GPU and ``ram_bytes_per_voxel`` on the CPU (``konfai.utils.vram.max_voxels``); with
-    neither, only an out-of-memory makes either happen.
+    sized before the run. Left unset, it is the tighter of what the GPU holds at ``vram_bytes_per_voxel`` and what the
+    rank's host budget holds at ``ram_bytes_per_voxel``, the peak costs per voxel the prediction declares
+    (``konfai.utils.vram.max_voxels``); with neither, only an out-of-memory makes either happen.
     """
 
     def __init__(
@@ -272,14 +272,13 @@ class DatasetPatch(Patch):
         self.ram_bytes_per_voxel = ram_bytes_per_voxel
 
     def voxel_budget(self, gpu: int | None) -> int | None:
-        """``max_voxels``, or what GPU ``gpu`` (None: the CPU) holds at the declared cost per voxel; None when
-        neither is known."""
-        cost = self.vram_bytes_per_voxel if gpu is not None else self.ram_bytes_per_voxel
-        if self.max_voxels or not cost:
+        """``max_voxels``, or what the declared costs per voxel let GPU ``gpu`` (None: the CPU) and this rank's host
+        budget hold (``konfai.utils.vram.max_voxels``); None when neither is known."""
+        if self.max_voxels:
             return self.max_voxels
         from konfai.utils.vram import max_voxels
 
-        return max_voxels(cost, gpu)
+        return max_voxels(self.vram_bytes_per_voxel, self.ram_bytes_per_voxel, gpu)
 
     def init(self, key: str = ""):
         pass

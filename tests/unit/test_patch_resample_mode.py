@@ -83,18 +83,25 @@ def test_the_patch_mode_is_tile_or_resample() -> None:
         DatasetPatch([0, 0, 0], max_voxels=0)
 
 
-def test_an_unset_max_voxels_is_what_the_device_holds_at_the_declared_cost(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The GPU's free VRAM (NVML, the card ``--gpu`` names) under KonfAI's margin, or on the CPU its automatic
-    memory budget, divided by the peak bytes per voxel the prediction declares for that device."""
+def test_an_unset_max_voxels_is_the_tighter_of_the_gpu_and_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a GPU, the tighter of its free VRAM (NVML, the card ``--gpu`` names, under KonfAI's margin) and the host
+    budget, each at the peak bytes per voxel the prediction declares for it; on the CPU, the host alone. The
+    published Elastix_IMPACT_Static (150 B of VRAM, 950 B of RAM per voxel) on 24 GiB free of GPU and 16 GiB of RAM
+    is bound by its RAM: planned from its VRAM, it would have claimed 121.6 GiB of a 12.8 GiB budget."""
     import konfai
     from konfai.utils import budget, vram
 
     asked: list = []
-    monkeypatch.setattr(konfai, "get_vram", lambda devices: asked.append(devices) or (2.0, 10.0))
-    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (10 * 2**30, "test"))
-    patch = DatasetPatch([0, 0, 0], mode="resample", vram_bytes_per_voxel=1024, ram_bytes_per_voxel=512)
-    assert patch.voxel_budget(3) == int(8 * 2**30 * vram.VRAM_BUDGET_SAFETY_FRACTION / 1024) and asked == [[3]]
-    assert patch.voxel_budget(None) == int(10 * 2**30 * budget.AUTO_MEMORY_SAFETY_FRACTION / 512)
+    monkeypatch.setattr(konfai, "get_vram", lambda devices: asked.append(devices) or (0.0, 24.0))
+    monkeypatch.setattr(budget, "available_memory_bytes", lambda: (16 * 2**30, "test"))
+    monkeypatch.setattr(budget, "_per_rank_bytes", None)
+    host = int(16 * 2**30 * budget.AUTO_MEMORY_SAFETY_FRACTION / 950)
+    patch = DatasetPatch([0, 0, 0], mode="resample", vram_bytes_per_voxel=150, ram_bytes_per_voxel=950)
+    assert patch.voxel_budget(3) == host and asked == [[3]]
+    assert patch.voxel_budget(None) == host
+    assert DatasetPatch([0, 0, 0], vram_bytes_per_voxel=1024).voxel_budget(3) == int(
+        24 * 2**30 * vram.VRAM_BUDGET_SAFETY_FRACTION / 1024
+    )
     assert DatasetPatch([0, 0, 0], max_voxels=1000, vram_bytes_per_voxel=1024).voxel_budget(3) == 1000
     assert DatasetPatch([0, 0, 0], vram_bytes_per_voxel=1024).voxel_budget(None) is None
 

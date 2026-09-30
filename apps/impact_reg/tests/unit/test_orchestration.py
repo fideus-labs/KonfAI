@@ -843,7 +843,10 @@ def test_register_records_the_overrides_each_pass_took(tmp_path: Path, monkeypat
     config = _CONFIG.format(own="deformable_iterations: [200, 100, 50]")
     _tiled_preset("P", config, _deformable_alone(config))
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": _TILING})
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: int(1000 * 1150 / cost))
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+    )
 
     def fake_run(command, **kwargs):
         out = Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000"
@@ -936,19 +939,24 @@ def test_max_voxels_pins_the_tiles_too(monkeypatch: pytest.MonkeyPatch) -> None:
     # A tile holds what the pair registered whole would take, whatever the device: one plan on every machine.
     manifest = {"vram_bytes_per_voxel": 1150, "tiling": {"tile": "P_tile.yml", "tile_vram_bytes_per_voxel": 575}}
     assert reg._plan(manifest, [0], 1000) == (1000, 2000)
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: int(1150 * 575 * 10 / cost))
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: int(1150 * 575 * 10 / (vram_cost if gpu is not None else ram_cost)),
+    )
     assert reg._plan(manifest, [0], None) == (5750, 11500)
 
 
-def test_every_preset_is_sized_from_the_costs_it_declares_for_its_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A preset without a tile pass is sized too (KonfAI resamples it), from its RAM cost on the CPU; a pass that
-    declares no cost is left unsized."""
+def test_every_preset_is_sized_from_both_costs_it_declares(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each pass goes to KonfAI's max_voxels with the VRAM and the RAM cost its preset declares, whatever the device:
+    a GPU run is bound by the host too. A preset without a tile pass is sized as well (KonfAI resamples it)."""
     asked: list = []
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: asked.append((cost, gpu)) or 10**6)
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: asked.append((vram_cost, ram_cost, gpu)) or 10**6,
+    )
     manifest = {"vram_bytes_per_voxel": 100, "ram_bytes_per_voxel": 40}
-    assert reg._plan(manifest, [], None) == (10**6, None) and asked == [(40.0, None)]
-    assert reg._plan(manifest, [2], None) == (10**6, None) and asked[-1] == (100.0, 2)
-    assert reg._plan({"vram_bytes_per_voxel": 100}, [], None) == (None, None)
+    assert reg._plan(manifest, [], None) == (10**6, None) and asked == [(100.0, 40.0, None)]
+    assert reg._plan(manifest, [2], None) == (10**6, None) and asked[-1] == (100.0, 40.0, 2)
 
 
 def test_a_pair_too_large_runs_its_global_stages_resampled_then_native_tiles_and_composes_them(
@@ -972,7 +980,10 @@ def test_a_pair_too_large_runs_its_global_stages_resampled_then_native_tiles_and
         seen["prewarped"] = sitk.GetArrayFromImage(sitk.ReadImage(str(moving_images[0])))
         return "DVF", {"P000": _write_dvf(out / "DVF.mha", (1.0, 0.0, 0.0), grid)}  # +1 mm more, on native tiles
 
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: int(1000 * 1150 / cost))
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+    )
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = preset  # type: ignore[method-assign]
     app.register(["P"], [fixed], [moving], output=tmp_path / "Output", max_voxels=1000, quiet=True)
@@ -1002,7 +1013,10 @@ def test_the_tiles_get_a_fixed_mask_on_the_fixed_grid(tmp_path: Path, monkeypatc
     sitk.WriteImage(mask, str(tmp_path / "mask.mha"))
     tiling = {"global": "Prediction_global.yml", "tile": "Prediction_tile.yml"}
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": tiling})
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: int(1000 * 1150 / cost))
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+    )
     seen: dict = {}
 
     def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
@@ -1208,7 +1222,10 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
     moving = _ramp(tmp_path / "moving.mha", 16)
     tiling = {"global": "Prediction_global.yml", "tile": "Prediction_tile.yml"}
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1, "tiling": tiling})
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: int(1000 / cost))
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: int(1000 / (vram_cost if gpu is not None else ram_cost)),
+    )
     calls: list = []
 
     def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
@@ -1232,7 +1249,10 @@ def test_a_pair_that_fits_is_registered_whole_under_its_budget(tmp_path: Path, m
     moving = _ramp(tmp_path / "moving.mha", 16)
     tiling = {"global": "Prediction.yml", "tile": "Prediction_tile.yml"}
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1, "tiling": tiling})
-    monkeypatch.setattr("konfai.utils.vram.max_voxels", lambda cost, gpu: int(10**6 / cost))
+    monkeypatch.setattr(
+        "konfai.utils.vram.max_voxels",
+        lambda vram_cost, ram_cost, gpu: int(10**6 / (vram_cost if gpu is not None else ram_cost)),
+    )
     calls: list = []
 
     def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):

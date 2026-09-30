@@ -104,20 +104,23 @@ def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = 
     return free_bytes * margin - resident_bytes
 
 
-def max_voxels(bytes_per_voxel: float, gpu: int | None) -> int:
-    """The voxels a pass whose peak costs ``bytes_per_voxel`` may hold where it runs: the free VRAM of GPU ``gpu``
-    (the id ``--gpu`` names, read through NVML so no CUDA context is opened) under :func:`usable_vram`'s margin, or
-    on the CPU (``gpu`` None) the automatic memory budget of :func:`~konfai.utils.budget.resolve_memory_budget`."""
-    if gpu is None:
-        from konfai.utils.budget import resolve_memory_budget
-
-        free = resolve_memory_budget(None).total_bytes
-    else:
+def max_voxels(vram_bytes_per_voxel: float | None, ram_bytes_per_voxel: float | None, gpu: int | None) -> int | None:
+    """The voxels a pass may hold where it runs, at the peak costs per voxel it declares: the tighter of what the
+    free VRAM of GPU ``gpu`` holds (the id ``--gpu`` names, read through NVML so no CUDA context is opened) under
+    :func:`usable_vram`'s margin, and what this rank's host budget holds. None when no declared cost bounds it: a
+    device whose cost is not declared promises nothing."""
+    caps = []
+    if gpu is not None and vram_bytes_per_voxel:
         from konfai import get_vram
 
         used, total = get_vram([gpu])
-        free = usable_vram((total - used) * 2**30)
-    return max(1, int(free / bytes_per_voxel))
+        caps.append(usable_vram((total - used) * 2**30) / vram_bytes_per_voxel)
+    if ram_bytes_per_voxel:
+        from konfai.utils.budget import node_local_ranks, per_rank_budget_bytes, resolve_memory_budget
+
+        host = per_rank_budget_bytes() or resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
+        caps.append(host / ram_bytes_per_voxel)
+    return max(1, int(min(caps))) if caps else None
 
 
 #: The share of the usable VRAM a measured batch's forward may claim. The rest stays free for the convolution

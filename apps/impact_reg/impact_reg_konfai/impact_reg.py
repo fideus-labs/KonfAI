@@ -331,13 +331,16 @@ def _plan(manifest: dict, gpu: list[int], max_voxels: int | None) -> tuple[int |
     from konfai.utils.vram import max_voxels as voxels_on
 
     tiling = manifest.get("tiling") or {}
-    device = "vram" if gpu else "ram"
-    whole = pass_cost(manifest, tiling.get("global") or "Prediction.yml").get(device)
-    tile = pass_cost(manifest, tiling["tile"]).get(device) if tiling.get("tile") else None
+    whole = pass_cost(manifest, tiling.get("global") or "Prediction.yml")
+    tile = pass_cost(manifest, tiling["tile"]) if tiling.get("tile") else None
     if max_voxels:
-        return max_voxels, int(max_voxels * whole / tile) if whole and tile else max_voxels
+        device = "vram" if gpu else "ram"
+        ratio = whole.get(device, 0) / tile[device] if tile and tile.get(device) else 0
+        return max_voxels, int(max_voxels * ratio) if ratio else max_voxels
     at = gpu[0] if gpu else None
-    return (voxels_on(whole, at) if whole else None), (voxels_on(tile, at) if tile else None)
+    return voxels_on(whole.get("vram"), whole.get("ram"), at), voxels_on(
+        tile.get("vram"), tile.get("ram"), at
+    ) if tile else None
 
 
 def _find_output_group(root: Path) -> str:
