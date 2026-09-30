@@ -21,13 +21,14 @@ import numpy as np
 import pytest
 import torch
 import tqdm
-from konfai.data.data_manager import BatchDataItem, DatasetIter
+from konfai.data.data_manager import BatchDataItem, DatasetIter, GrowingBatchSampler
 from konfai.data.reduction import Mean
 from konfai.data.transform import TransformInverse
 from konfai.network.network import Network, place_graph
 from konfai.predictor import PREDICTION_CLOCK, ModelComposite, OutputDataset
 from konfai.predictor.ensemble import _colocate_loaded_modules
 from konfai.predictor.loop import _prediction_report, _Predictor
+from konfai.utils import vram
 from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
 
@@ -576,6 +577,7 @@ def _loop_doubles(batches: int) -> tuple[_Predictor, Any, dict[str, Any], Any]:
     predictor_any.batch = 1
     predictor_any.measure_batch_on = None
     predictor_any._one_patch = None
+    predictor_any._weigh_resident_on = None
     predictor_any._sizes_run = set()
     predictor_any._on_cuda = False
     predictor_any.set_aside = {}
@@ -675,6 +677,173 @@ def test_a_measured_batch_merges_what_the_loader_prefetched_to_its_size_and_lose
     assert forwards == forwards_expected, "1, 2, then the size measured; the tail is what is left"
     assert seen == list(range(sum(sizes))), "every patch once, in order"
     assert loader.batch_sampler.batch_size == measured
+
+
+class _Patches(torch.utils.data.Dataset):
+    """``count`` patches of one case, each item its patch index."""
+
+    data_augmentations_list: ClassVar[list[object]] = []
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int) -> int:
+        return index
+
+    def get_patch_config(self):
+        return [1, 2, 2], 0
+
+    def load(self, label: str) -> None:
+        pass
+
+
+def _collate_patches(indices: list[int]) -> dict[str, BatchDataItem]:
+    size = len(indices)
+    item = BatchDataItem(
+        ["CASE_000"] * size, torch.ones(size, 1, 2, 2), [Attribute()] * size, [0] * size, [0] * size, indices, True
+    )
+    return {"input": item}
+
+
+def _run_patches(
+    monkeypatch: pytest.MonkeyPatch, loader: torch.utils.data.DataLoader, forwards: list[int], module=None, **kwargs
+) -> list[int]:
+    """Run ``loader`` through a ``_Predictor`` whose forward appends its batch size to ``forwards``; the
+    patches its writer received, in order."""
+    seen: list[int] = []
+
+    class Output:
+        def set_patch_config(self, *args) -> None:
+            pass
+
+        def add_layer(self, index, augmentation, patch, *rest) -> None:
+            seen.append(patch)
+
+        def is_done(self, index: int) -> bool:
+            return False
+
+        def finalize_writes(self) -> None:
+            pass
+
+    class Composite:
+        def __init__(self) -> None:
+            self.module = module or SimpleNamespace(get_networks=dict, set_state=lambda state: None)
+
+        def eval(self) -> None:
+            pass
+
+        def __call__(self, batch_sample, output_layers):
+            forwards.append(len(batch_sample["input"].x))
+            return [("out", [1], torch.ones(forwards[-1], 1, 2, 2))]
+
+    monkeypatch.setattr("konfai.predictor.loop.description", lambda model: "stub")
+    predictor = _Predictor(
+        1, 0, 0, False, cast(Any, None), None, {"out": Output()}, cast(Any, Composite()), loader, **kwargs
+    )
+    predictor.run()
+    return seen
+
+
+def test_a_configured_batch_runs_each_forward_at_that_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``batch_size: 4`` forwards four patches at a time, the tail what is left: the loop cut every
+    batch the loader delivered into single patches, whatever the configured size."""
+    forwards: list[int] = []
+    loader = torch.utils.data.DataLoader(_Patches(10), batch_size=4, collate_fn=_collate_patches)
+
+    seen = _run_patches(monkeypatch, loader, forwards)
+
+    assert forwards == [4, 4, 2]
+    assert seen == list(range(10)), "every patch once, in order"
+
+
+class _ResidentMembers:
+    """An ensemble whose other members hold ``resident`` bytes on the device until they are released."""
+
+    get_networks = staticmethod(dict)
+    set_state = staticmethod(lambda state: None)
+
+    def __init__(self, resident: int) -> None:
+        self.resident = resident
+        self.released = False
+
+    def resident_bytes(self, device: int) -> int:
+        return 0 if self.released else self.resident
+
+    def release_resident(self) -> bool:
+        self.released = True
+        return True
+
+
+def _stub_cuda_readings(monkeypatch: pytest.MonkeyPatch, forwards: list[int], usable: float) -> list[int]:
+    """A CUDA device read on a CPU run: a forward claims 100 bytes whatever its batch and 10 per patch, and
+    ``usable`` bytes are left beside what is allocated. The forward sizes whose peak was read."""
+    peaks: list[int] = []
+
+    def peak(device=None) -> int:
+        peaks.append(forwards[-1])
+        return 100 + 10 * forwards[-1]
+
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device=None: 0)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device=None: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", peak)
+    monkeypatch.setattr(vram, "usable_after_oom", lambda device: usable)
+    return peaks
+
+
+@pytest.mark.parametrize(
+    ("usable", "batch_cap", "released", "expected"),
+    [
+        # Beside the members' 50 bytes 31 patches fit, 16 as a power of two; with them free 33 fit, 32.
+        (820.0, None, True, [1, 2, 32, 5]),
+        # 35 fit beside them and 37 without: 32 either way.
+        (900.0, None, False, [1, 2, 32, 5]),
+        # An out-of-memory capped the batch at 16: 16 either way.
+        (820.0, 16, False, [1, 2, 16, 16, 5]),
+    ],
+    ids=["33 patches fit, 16 beside them: released", "32 either way: resident", "capped at 16: resident"],
+)
+def test_ensemble_members_stay_resident_only_when_they_cost_the_measured_batch_nothing(
+    monkeypatch: pytest.MonkeyPatch, usable: float, batch_cap: int | None, released: bool, expected: list[int]
+) -> None:
+    """The measured batch is the largest power of two that fits: members kept on the device can halve it
+    for the few hundred megabytes they hold. The same measurement with their bytes free is the batch a run
+    loading them per batch takes; when it is larger the members are released and the run takes it."""
+    forwards: list[int] = []
+    _stub_cuda_readings(monkeypatch, forwards, usable)
+    members = _ResidentMembers(50)
+    sampler = GrowingBatchSampler(torch.utils.data.SequentialSampler(range(40)), 1)
+    loader = torch.utils.data.DataLoader(_Patches(40), batch_sampler=sampler, collate_fn=_collate_patches)
+
+    seen = _run_patches(monkeypatch, loader, forwards, members, measure_batch_on=0, batch_cap=batch_cap, device=0)
+
+    assert forwards == expected
+    assert members.released is released
+    assert seen == list(range(40)), "every patch once, in order"
+
+
+@pytest.mark.parametrize(
+    ("resident", "usable", "released", "weighed"),
+    [(50, 140.0, False, [4]), (50, 139.0, True, [4]), (0, 0.0, False, [])],
+    ids=["fits beside them: resident", "a byte over: released", "nothing resident: nothing read"],
+)
+def test_a_configured_batch_keeps_the_members_resident_only_when_its_forward_fits_beside_them(
+    monkeypatch: pytest.MonkeyPatch, resident: int, usable: float, released: bool, weighed: list[int]
+) -> None:
+    """``batch_size: 4``: the first forward of four patches claims 140 bytes. The members stay on the device
+    when that fits the usable VRAM beside them, weighed once; a run with none resident reads no memory."""
+    forwards: list[int] = []
+    peaks = _stub_cuda_readings(monkeypatch, forwards, usable)
+    members = _ResidentMembers(resident)
+    loader = torch.utils.data.DataLoader(_Patches(10), batch_size=4, collate_fn=_collate_patches)
+
+    _run_patches(monkeypatch, loader, forwards, members, device=0)
+
+    assert forwards == [4, 4, 2]
+    assert members.released is released
+    assert peaks == weighed
 
 
 def test_prediction_loop_refreshes_its_status_every_tenth_batch_and_clocks_its_phases(

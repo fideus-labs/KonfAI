@@ -26,9 +26,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.reduction import Mean
+from konfai.data.data_manager import BatchDataItem
+from konfai.data.reduction import Concat, Mean
 from konfai.network.network import Network
 from konfai.predictor.ensemble import ModelComposite, _checkpoint_bytes
+from konfai.utils import vram
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import PredictorError
 
 
@@ -342,3 +345,159 @@ def test_checkpoint_cache_budget_binds_from_real_prediction_config_and_reaches_c
     assert predictor.checkpoint_cache_gib == 0.125
     assert predictor.model_composite._cache_limit_bytes == 128 * 1024**2
     assert ruamel.yaml.YAML().load(config_path.read_text())["Predictor"]["checkpoint_cache_gib"] == 0.125
+
+
+class FoldNet(Network):
+    """The stock loader, a weight and persistent buffers: a forward reads every tensor a member's checkpoint sets."""
+
+    def __init__(self) -> None:
+        super().__init__(in_channels=1, dim=2)
+        self.add_module("Conv", torch.nn.Conv2d(1, 2, 3, padding=1))
+        self.add_module("Norm", torch.nn.BatchNorm2d(2))
+
+    def forward(self, batch_sample, output_layers=[]):  # type: ignore[override]
+        tensor = next(iter(batch_sample.values())).tensor
+        return [("out", self["Norm"](self["Conv"](tensor)))]
+
+
+def _fold_sources(count: int, first_seed: int = 0) -> list[dict]:
+    sources = []
+    for seed in range(first_seed, first_seed + count):
+        torch.manual_seed(seed)
+        fold = FoldNet()
+        with torch.no_grad():
+            fold["Norm"].running_mean.uniform_(-1, 1)
+            fold["Norm"].running_var.uniform_(0.5, 2)
+        sources.append({"Model": fold.network_states()})
+    return sources
+
+
+def _fold_bytes(source: dict) -> int:
+    return sum(tensor.nbytes for weights in source["Model"].values() for tensor in weights.values())
+
+
+def _counted_loads(composite: ModelComposite) -> list[int]:
+    """The bytes of each member load into the model: what a forward copies host to device on a GPU."""
+    model = composite._get_model()
+    load = model.load
+    loads: list[int] = []
+
+    def counted(state, *args, **kwargs):
+        loads.append(_fold_bytes(state))
+        return load(state, *args, **kwargs)
+
+    model.load = counted
+    return loads
+
+
+def _fold_batches(count: int) -> list[dict[str, BatchDataItem]]:
+    generator = torch.Generator().manual_seed(0)
+    return [
+        {
+            "input": BatchDataItem(
+                ["CASE"] * 3,
+                torch.randn(3, 1, 8, 8, generator=generator),
+                [Attribute()] * 3,
+                [0] * 3,
+                [0] * 3,
+                [0, 1, 2],
+                True,
+            )
+        }
+        for _ in range(count)
+    ]
+
+
+def _fold_composite(sources: list, combine=Mean) -> ModelComposite:
+    composite = ModelComposite(FoldNet(), combine())
+    composite.load(sources)
+    composite.eval()
+    return composite
+
+
+def _assert_same_outputs(reference: list, outputs: list) -> None:
+    for expected, actual in zip(reference, outputs, strict=True):
+        for (key, channels, tensor), (other_key, other_channels, other) in zip(expected, actual, strict=True):
+            assert (key, channels) == (other_key, other_channels)
+            assert tensor.dtype == other.dtype and torch.equal(tensor, other)
+
+
+@pytest.mark.parametrize("combine", [Mean, Concat])
+def test_members_whose_weights_fit_load_once_and_predict_the_reloading_bits(combine, monkeypatch) -> None:
+    """Five members streamed through one model loaded five checkpoints per batch, each copied host to
+    device. Kept resident, each member loads once, before the first batch, and every output is the
+    reloading run's to the bit."""
+    monkeypatch.setattr(vram, "resident_room", lambda device: float("inf"))
+    sources = _fold_sources(5)
+    weights = _fold_bytes(sources[0])
+
+    reloading = _fold_composite(sources, combine)
+    reloads = _counted_loads(reloading)
+    reference = [reloading(batch, ["out"]) for batch in _fold_batches(4)]
+    assert reloads == [weights] * 20, "five loads per batch"
+
+    resident = _fold_composite(sources, combine)
+    loads = _counted_loads(resident)
+    assert resident.keep_resident()
+    assert loads == [weights] * 5, "each member once, before the first batch"
+    outputs = [resident(batch, ["out"]) for batch in _fold_batches(4)]
+    assert len(loads) == 5, "no load past the first batch"
+    _assert_same_outputs(reference, outputs)
+
+
+def test_members_whose_weights_do_not_fit_beside_the_batch_load_per_batch(monkeypatch) -> None:
+    """The copies the other members need are weighed against what a measured batch leaves of the VRAM:
+    a byte over it and the ensemble streams through one model as before."""
+    sources = _fold_sources(3)
+    copies = 2 * _fold_bytes(sources[0])
+    monkeypatch.setattr(vram, "resident_room", lambda device: copies - 1)
+    composite = _fold_composite(sources)
+    loads = _counted_loads(composite)
+    assert not composite.keep_resident()
+    for batch in _fold_batches(2):
+        composite(batch, ["out"])
+    assert len(loads) == 6
+    monkeypatch.setattr(vram, "resident_room", lambda device: copies)
+    assert _fold_composite(sources).keep_resident()
+
+
+def test_a_custom_loader_a_single_model_and_a_weightless_one_are_not_kept_resident(monkeypatch) -> None:
+    """A class that owns its ``load`` may set more than the tensors a checkpoint holds: it keeps loading.
+    A single model is loaded once already, and a weightless one loads nothing."""
+    monkeypatch.setattr(vram, "resident_room", lambda device: float("inf"))
+    custom = ModelComposite(PayloadNet(), Mean())
+    custom.load([_payload(1.0), _payload(2.0)])
+    single = _fold_composite(_fold_sources(1))
+    weightless = ModelComposite(PayloadNet(), Mean())
+    weightless.load([])
+    assert not any(composite.keep_resident() for composite in (custom, single, weightless))
+
+
+def test_a_resident_member_whose_file_changes_is_loaded_again_beside_the_others(tmp_path, monkeypatch) -> None:
+    """A member whose file changed on disk is read again, into weights of its own: the resident members
+    keep theirs."""
+    monkeypatch.setattr(vram, "resident_room", lambda device: float("inf"))
+    paths = [tmp_path / f"fold-{index}.pt" for index in range(3)]
+    for path, source in zip(paths, _fold_sources(3), strict=True):
+        torch.save(source, path)
+    composite = _fold_composite(paths)
+    assert composite.keep_resident()
+    reads = _count_reads(composite, monkeypatch)
+    torch.save(_fold_sources(1, first_seed=7)[0], paths[1])
+    outputs = [composite(batch, ["out"]) for batch in _fold_batches(2)]
+    assert reads == Counter({str(paths[1]): 1})
+    _assert_same_outputs([_fold_composite(paths)(batch, ["out"]) for batch in _fold_batches(2)], outputs)
+
+
+def test_released_members_load_per_batch_again_and_predict_the_same_bits(monkeypatch) -> None:
+    """Out of memory, the members stop being resident: each batch loads them into one model again."""
+    monkeypatch.setattr(vram, "resident_room", lambda device: float("inf"))
+    sources = _fold_sources(3)
+    composite = _fold_composite(sources)
+    assert composite.keep_resident()
+    assert composite.release_resident()
+    assert not composite.release_resident()
+    loads = _counted_loads(composite)
+    outputs = [composite(batch, ["out"]) for batch in _fold_batches(2)]
+    assert len(loads) == 6
+    _assert_same_outputs([_fold_composite(sources)(batch, ["out"]) for batch in _fold_batches(2)], outputs)

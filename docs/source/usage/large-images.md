@@ -67,7 +67,8 @@ ExaSPIM specimen `822174` (513 × 1331 × 1775, CC BY 4.0) region by region. The
    number is GiB; `"24GB"` and `"512mb"` also work.
 2. **`patch_size`.** A `0` on an axis lets KonfAI choose it: the whole axis when it fits, otherwise equal
    parts. Otherwise use the size your model needs.
-3. **`batch_size`.** Start at 1 and raise it while watching speed and GPU memory.
+3. **`batch_size`.** A prediction measures it when you leave it out and its patches share one shape. In training, start at 1 and raise it while
+   watching speed and GPU memory.
 4. **`overlap`.** Only as much as the borders need: more overlap is more reads and more forward passes.
 5. **`num_workers`.** Raise it until the disk or the CPU is saturated.
 6. **`pin_memory`.** Measure before keeping it: the copy to the GPU gets faster, but the step rarely does.

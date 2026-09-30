@@ -68,6 +68,11 @@ The members of an ensemble run one after the other in one model. Their weights s
 `checkpoint_cache_gib` (per process) and are reloaded when they do not fit; only the model's weights are kept,
 not the optimizer's. `0` turns the cache off.
 
+On a GPU, the members stay resident when that costs the batch nothing: each loads once, and a forward
+switches to its weights instead of copying a checkpoint in. When holding them would shrink the measured batch,
+they load per batch instead, as for a model whose class defines its own `load`; a rank that runs out of memory
+with them resident restarts with them loading per batch. At one batch size the outputs are the same to the bit.
+
 ## `Predictor.Dataset`
 
 | Field | Effect |
@@ -77,7 +82,7 @@ not the optimizer's. `0` turns the cache off.
 | `augmentations` | Test-time augmentation. A `Flip` gives the copies the distinct mirrors its `f_prob` allows, in turn (7 copies: all seven), rather than drawing them. |
 | `Patch` | How the volume is cut (below). |
 | `subset` | Which cases to predict. |
-| `batch_size` | Patches per batch. `0` measures the largest batch that fits on the GPU. |
+| `batch_size` | Patches per batch. `0`, the default, measures the largest batch that fits on the GPU, when the patches share one shape (a `0` axis keeps each case's own extent, and one patch per batch). |
 | `num_workers` | Loader workers (`null`: 0, or up to 4 when the format cannot read regions). Each worker holds the case it prepares, so more workers use more RAM. |
 | `pin_memory`, `prefetch_factor`, `persistent_workers` | DataLoader settings, as in training. |
 
