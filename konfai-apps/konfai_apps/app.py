@@ -34,7 +34,7 @@ import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, entry_files
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -1002,7 +1002,7 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         backend = KonfAIApp._unit_backend(suffix)
         root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
-        KonfAIApp.symlink(source, root / case / f"{entry}{suffix}")
+        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix}")
 
     @staticmethod
     def _declare_dataset_roots(config_file: str) -> None:
@@ -1034,6 +1034,22 @@ class KonfAIApp(AbstractKonfAIApp):
                         entries.append(spec)
         with open(path, "w", encoding="utf-8") as file:
             yaml.dump(data, file)
+
+    @staticmethod
+    def link_entry(src: Path, dst: Path) -> None:
+        """Link the image entry ``src`` as ``dst``, with the pixel file a detached header (.mhd, .hdr) names beside
+        it under the name the header gives it (``entry_files``): the header alone reads as nothing."""
+        KonfAIApp.symlink(src, dst)
+        for part in entry_files(src)[1:]:
+            companion = dst.with_name(part.name)
+            if companion.exists() and companion.resolve() != part.resolve():
+                from konfai.utils.errors import DatasetManagerError
+
+                raise DatasetManagerError(
+                    f"'{src}' and another input of its case both keep their pixels in a file named '{part.name}'.",
+                    "Convert one of them to .mha or .nii.gz, which hold their pixels in the same file.",
+                )
+            KonfAIApp.symlink(part, companion)
 
     @staticmethod
     def symlink(src: Path, dst: Path) -> None:
@@ -1229,7 +1245,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 n_channels = reader.GetNumberOfComponents()
                 if n_channels > 1:
                     suffix = KonfAIApp._supported_suffix(file)
-                    KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
+                    KonfAIApp.link_entry(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
                 else:
                     raise FileNotFoundError(
                         "Invalid input volume for inference: a multi-channel volume stack is required, "

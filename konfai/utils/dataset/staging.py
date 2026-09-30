@@ -23,7 +23,8 @@ import os
 import re
 import shutil
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from konfai.utils.errors import KonfAIWarning
@@ -60,6 +61,59 @@ def publish(staging: Path, final: Path) -> None:
         shutil.rmtree(staging, ignore_errors=True)
     if replaced:
         shutil.rmtree(backup, ignore_errors=True)
+
+
+@contextmanager
+def staged_entry(final: Path) -> Iterator[Path]:
+    """``final``'s own name in a hidden staging directory beside it, for a writer that may make companion files
+    (MetaImage's ``.raw``, Analyze's ``.img``). On a clean exit each file it made is published beside ``final``
+    under its own name, the companions first and ``final`` last, so a reader meets the entry complete and its header
+    names its pixels as they lie; on an error the directory goes."""
+    from konfai.utils.dataset.stream import DataStream  # stream builds on this module
+
+    directory = final.with_name(f".{final.name}.{DataStream.temporary_suffix()}")
+    directory.mkdir(parents=True)
+    try:
+        yield directory / final.name
+        for made in sorted(directory.iterdir(), key=lambda path: path.name == final.name):
+            publish(made, final.with_name(made.name))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def entry_files(path: Path) -> list[Path]:
+    """The files one image entry is made of: ``path``, then the pixel file a detached header names beside it
+    (MetaImage's ``ElementDataFile``, Analyze's ``.img``), which must travel with it."""
+    name = path.name.lower()
+    if name.endswith(".hdr"):
+        return [path, path.with_suffix(".img")]
+    if name.endswith(".mhd"):
+        with open(path, encoding="latin-1") as header:
+            for line in header:
+                key, _, value = line.partition("=")
+                if key.strip() == "ElementDataFile":
+                    return [path] if value.strip() == "LOCAL" else [path, path.parent / value.strip()]
+    return [path]
+
+
+def transfer_entry(src: Path, dest: Path, move: bool = False) -> None:
+    """Copy (``move``: move) the image entry ``src`` to ``dest``: a file, a store, or a detached header whose pixel
+    file follows under ``dest``'s name, a MetaImage header being told that name."""
+    parts = entry_files(src)
+    for part in parts[1:]:
+        (shutil.move if move else shutil.copy2)(part, dest.with_suffix(part.suffix))
+    if len(parts) > 1 and src.name.lower().endswith(".mhd"):
+        pixels = dest.with_suffix(parts[1].suffix).name
+        header = re.sub(
+            r"(?m)^(ElementDataFile\s*=\s*).*$", lambda match: match.group(1) + pixels, src.read_text("latin-1")
+        )
+        dest.write_text(header, "latin-1")
+        if move:
+            src.unlink()
+    elif move:
+        shutil.move(src, dest)
+    else:
+        (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
 
 
 def is_staging_entry(name: str) -> bool:

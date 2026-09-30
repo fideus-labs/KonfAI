@@ -1328,3 +1328,23 @@ def test_image_to_data_owns_the_vector_image_bytes_whatever_its_size() -> None:
 
     assert data.flags.owndata and data.shape == (3, 1, 1, 1)
     np.testing.assert_array_equal(data.reshape(-1), [1.0, 2.0, 3.0])
+
+
+def test_a_metaimage_entry_keeps_its_pixels_through_a_write_and_its_transfers(tmp_path: Path) -> None:
+    """A .mhd keeps its pixels in the .raw its header names: a transfer under another name must bring it, renamed,
+    or two outputs of one folder share one pixel file."""
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai.utils.dataset import entry_files, transfer_entry
+
+    attributes = Attribute()
+    attributes["Origin"], attributes["Spacing"], attributes["Direction"] = [0.0] * 3, [1.0] * 3, np.eye(3).flatten()
+    volume = np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)
+    Dataset(str(tmp_path / "out"), "mhd").write("Moved", "P000", volume, attributes)
+    written = tmp_path / "out" / "P000" / "Moved.mhd"
+    _, pixels = entry_files(written)
+
+    for name in ("a.mhd", "b.mhd"):  # two outputs of one directory, as apply writes them
+        transfer_entry(written, tmp_path / name)
+    pixels.unlink()
+    for name in ("a.mhd", "b.mhd"):
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / name))), volume[0])

@@ -44,8 +44,16 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
-from konfai.utils.dataset import Attribute, Dataset, DataStream, is_staging_entry, read_landmarks, write_landmarks
-from konfai.utils.dataset.staging import publish
+from konfai.utils.dataset import (
+    Attribute,
+    Dataset,
+    entry_files,
+    is_staging_entry,
+    read_landmarks,
+    staged_entry,
+    transfer_entry,
+    write_landmarks,
+)
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import displace_points, field_reach, jacobian_statistics
 from konfai.utils.utils import format_token, path_format_token, storage_form
@@ -389,8 +397,10 @@ def _is_entry(path: Path, stem: str) -> bool:
 
 def _drop_other_forms(dest_dir: Path, stem: str, suffixes: str) -> None:
     """Remove the outputs named ``stem`` in another form than ``<stem><suffixes>``, once that one is published:
-    discovery is by stem, so a re-run whose presets emit another form leaves only its own output standing."""
-    for stale in [p for p in dest_dir.iterdir() if _is_entry(p, stem) and p.name != stem + suffixes]:
+    discovery is by stem, so a re-run whose presets emit another form leaves only its own output standing. The
+    pixel file of the one kept (a detached header's) stays with it."""
+    kept = set(entry_files(dest_dir / (stem + suffixes)))
+    for stale in [p for p in dest_dir.iterdir() if _is_entry(p, stem) and p not in kept]:
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
 
 
@@ -609,20 +619,13 @@ def _leave(work: Path, error: BaseException | None) -> None:
 
 
 def _publish_output(src: Path, dest: Path, move: bool = False) -> Path:
-    """Put the output ``src`` (a file or a store) at ``dest``, staged beside it and published once complete, so a
-    failed copy or move leaves the previous ``dest`` standing. ``move`` moves it instead, for a source in a workspace
-    that is deleted next: a transform on a full-resolution grid is tens of gigabytes, and a copy wrote it twice."""
+    """Put the output ``src`` (a file, a store, or a header and the pixel file it names) at ``dest``, staged beside it
+    and published once complete (``staged_entry``), so a failed copy or move leaves the previous ``dest`` standing.
+    ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a full-resolution
+    grid is tens of gigabytes, and a copy wrote it twice."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(DataStream.staging_path(str(dest)))
-    try:
-        if move:
-            shutil.move(src, staging)
-        else:
-            (shutil.copytree if src.is_dir() else shutil.copy2)(src, staging)
-        publish(staging, dest)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True) if staging.is_dir() else staging.unlink(missing_ok=True)
-        raise
+    with staged_entry(dest) as staged:
+        transfer_entry(src, staged, move)
     if dest.is_dir():
         # A store put at a path already read is invisible to the reader's path-keyed memo, which
         # would otherwise pair the copy's voxels with the replaced store's axes and geometry.
@@ -668,13 +671,16 @@ def _stage_group(base: Path, group: str, entries: dict[str, Path]) -> str:
             stale.unlink() if stale.is_symlink() or stale.is_file() else shutil.rmtree(stale)
         # A copy where symlinks are refused (Windows without Developer Mode raises WinError 1314); lower case:
         # konfai probes an entry under its lower-case extension.
-        KonfAIApp.symlink(source.resolve(), case_dir / (group + suffixes.lower()))
+        KonfAIApp.link_entry(source.resolve(), case_dir / (group + suffixes.lower()))
     return f"{root}:{_backend(next(iter(entries.values())))}"
 
 
 def _the_output(dest_dir: Path, stem: str) -> Path:
-    """The single output named ``stem`` in ``dest_dir``, in any form (a DICOM series carries no extension): one."""
+    """The single output named ``stem`` in ``dest_dir``, in any form (a DICOM series carries no extension): one. The
+    pixel file a detached header names is part of that output, not another."""
     matches = sorted(path for path in dest_dir.iterdir() if _is_entry(path, stem))
+    companions = {part for match in matches for part in entry_files(match)[1:]}
+    matches = [match for match in matches if match not in companions]
     if len(matches) != 1:
         found = ", ".join(path.name for path in matches) or "none"
         raise FileNotFoundError(
@@ -1677,8 +1683,7 @@ class ImpactRegKonfAIApp:
             cpu,
             quiet,
         )
-        (moved,) = (out_root / "P000").iterdir()
-        return moved
+        return _the_output(out_root / "P000", "Moved")
 
     # --------------------------------------------------------------- uncertainty
 
