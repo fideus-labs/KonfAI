@@ -19,8 +19,9 @@
 Two halves. The COORDINATE PRODUCER turns a decoded transform into one source index per target
 voxel; the GATHER is ITK's sampler and is written once.
 
-Nothing here calls SimpleITK. A BSpline is evaluated from its coefficient grid and a dense field
-from its samples, with the same tensor-product kernel arithmetic ITK uses.
+Nothing here resamples through SimpleITK. A BSpline is evaluated from its coefficient grid and a
+dense field from its samples, with the same tensor-product kernel arithmetic ITK uses. The one thing
+read off SimpleITK is the world-to-index matrix ITK holds for a grid (:func:`scanline_index`).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import itertools
+import math
 import time
 from collections.abc import Iterator
 
@@ -159,6 +161,23 @@ def _saturate_overshoot(blended: torch.Tensor, payload_dtype: torch.dtype) -> to
     return blended.clamp(float(info.min), float(info.max))
 
 
+#: The signed dtype of each unsigned one torch has no ``masked_fill`` for: the same bits, one view away.
+_SIGNED_VIEW = {torch.uint16: torch.int16, torch.uint32: torch.int32, torch.uint64: torch.int64}
+
+
+def _masked_fill(values: torch.Tensor, mask: torch.Tensor, fill: float) -> torch.Tensor:
+    """``values.masked_fill(mask, fill)`` in ``values``' own dtype, whatever it is. An integer payload
+    takes the fill as ITK casts its default pixel value (-1 is 255 in a uint8 volume), and uint16,
+    uint32 and uint64 are filled through the signed view of the same bits."""
+    if values.is_floating_point() or values.dtype == torch.bool:
+        return values.masked_fill(mask, fill)
+    value = torch.tensor(fill, dtype=torch.float64).to(values.dtype)
+    signed = _SIGNED_VIEW.get(values.dtype)
+    if signed is None:
+        return values.masked_fill(mask, value.item())
+    return values.view(signed).masked_fill(mask, value.view(signed).item()).view(values.dtype)
+
+
 def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) -> torch.Tensor:
     """``translation + Σ_j column_j · p_j``, accumulated in ``j`` order: ITK's own association. Not
     ``points @ matrix.T + offset``, which BLAS is free to reassociate; the two answers differ in the
@@ -170,11 +189,16 @@ def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) ->
     return out
 
 
-def _to_index(world_xyz: torch.Tensor, grid: Grid, device: torch.device) -> torch.Tensor:
+def _to_index(
+    world_xyz: torch.Tensor, grid: Grid, device: torch.device, world_to_index: np.ndarray | None = None
+) -> torch.Tensor:
     """World to continuous index, in ITK's arithmetic: subtract the origin FIRST, then accumulate
     ``M[i][j] * (p_j - O_j)`` from zero, as ``TransformPhysicalPointToContinuousIndex`` does. Folding
-    the origin into a translation instead moves the last bit."""
-    matrix = torch.tensor(grid.world_to_index.matrix, dtype=_walk_dtype(), device=device)
+    the origin into a translation instead moves the last bit. ``M`` is the grid's exact inverse unless
+    ``world_to_index`` is given."""
+    matrix = torch.tensor(
+        grid.world_to_index.matrix if world_to_index is None else world_to_index, dtype=_walk_dtype(), device=device
+    )
     origin = torch.tensor(grid.origin_xyz, dtype=_walk_dtype(), device=device)
     shifted = world_xyz - origin
     out = torch.zeros_like(world_xyz)
@@ -379,6 +403,47 @@ def source_index_rows(
     return _to_index(world, source_grid, device)
 
 
+def scanline_map(target_grid: Grid, source_grid: Grid, stages: SpatialStages) -> bool:
+    """Whether a resample reads this map as ``sitk.Resample`` does (:func:`scanline_index`): a change
+    of grid and nothing else, up to three axes, where ITK's linear blend is the one :func:`_itk_linear`
+    reproduces. Whatever the two directions: a target that keeps the source's direction, permuted or
+    oblique, puts target voxels EXACTLY half-way between two source voxels, where the last bit of the
+    index decides the pick. A map whose matrices are exactly diagonal is read by the separable path
+    before this is asked."""
+    return not stages and target_grid.rank <= 3
+
+
+def scanline_index(
+    target_grid: Grid, source_grid: Grid, region_zyx: tuple[slice, ...], device: torch.device
+) -> torch.Tensor:
+    """The source continuous index ``sitk.Resample`` reads each voxel of ``region_zyx`` at, through no map.
+
+    ITK resamples through a linear map scanline by scanline (``ResampleImageFilter::
+    LinearThreadedGenerateData``): the index at x = 0 and at x = N of the WHOLE output grid, the voxel
+    at x taking ``start + (x / N) * (end - start)``, each end through the world-to-index matrix ITK
+    holds (:func:`~konfai.utils.ITK.physical_point_to_index`). Every term is global to
+    ``target_grid``, so a region reads exactly what the whole grid reads.
+    """
+    from konfai.utils.ITK import physical_point_to_index
+
+    dtype = _walk_dtype()
+    extent = int(target_grid.size_zyx[-1])
+    rows = [torch.arange(int(part.start), int(part.stop), dtype=dtype, device=device) for part in region_zyx[:-1]]
+    grids = list(torch.meshgrid(*rows, indexing="ij")) if rows else []
+    shape = tuple(int(part.stop - part.start) for part in region_zyx[:-1])
+    world_to_index = physical_point_to_index(source_grid)
+
+    def at(x: float) -> torch.Tensor:
+        index = torch.stack([torch.full(shape, x, dtype=dtype, device=device), *reversed(grids)], dim=-1)
+        return _to_index(_apply(index, target_grid.index_to_world, device), source_grid, device, world_to_index)
+
+    start = at(0.0)
+    along = at(float(extent)) - start
+    columns = region_zyx[-1]
+    alpha = torch.arange(int(columns.start), int(columns.stop), dtype=dtype, device=device) / float(extent)
+    return start.unsqueeze(-2) + alpha.unsqueeze(-1) * along.unsqueeze(-2)
+
+
 def _is_diagonal(matrix: np.ndarray) -> bool:
     """Whether every off-diagonal entry is EXACTLY zero: no tolerance. A tolerance would admit maps
     whose separable form is only nearly the general one, and an axis-aligned or axis-flipped grid
@@ -391,8 +456,12 @@ def separable_source_index(
     source_grid: Grid,
     stages: SpatialStages,
     device: torch.device,
+    region_zyx: tuple[slice, ...] | None = None,
 ) -> list[torch.Tensor] | None:
     """One source index per target ROW of each array axis, or ``None`` when the map does not factorise.
+
+    ``region_zyx`` takes the rows of one region, still indexed on ``target_grid``: a region's own
+    grid starts from an origin rounded once more, which moves an exact half-voxel tie.
 
     THE SAME ARITHMETIC, with the terms that are exactly zero left out: each component of
     :func:`source_index` is ``translation_k + Σ_j p_j · M[k, j]``, and with ``M`` diagonal every
@@ -415,7 +484,8 @@ def separable_source_index(
     axes: list[torch.Tensor] = []
     for array_axis in range(rank):
         axis = rank - 1 - array_axis  # the physical component this array axis runs along
-        index = torch.arange(int(target_grid.size_zyx[array_axis]), dtype=_walk_dtype(), device=device)
+        rows = slice(0, int(target_grid.size_zyx[array_axis])) if region_zyx is None else region_zyx[array_axis]
+        index = torch.arange(int(rows.start), int(rows.stop), dtype=_walk_dtype(), device=device)
         world = float(forward.translation[axis]) + index * float(forward.matrix[axis, axis])
         if not pending.is_identity:
             world = float(pending.translation[axis]) + world * float(pending.matrix[axis, axis])
@@ -532,7 +602,13 @@ def gather_separable(
     mask = inside_axes[0]
     for array_axis in range(1, rank):
         mask = mask.unsqueeze(-1) & inside_axes[array_axis]
-    return out.masked_fill(~mask.unsqueeze(0), fill).type(source.dtype)
+    return _masked_fill(out, ~mask.unsqueeze(0), fill).type(source.dtype)
+
+
+#: Voxels the host takes ITK's route for at a time (:func:`gather`): a chunk's corners and values stay
+#: in cache, up to four times faster per voxel than a slab-sized pass, and a few MiB are held beside
+#: the output whatever the slab.
+_HOST_ITK_VOXELS = 1 << 16
 
 
 def gather(
@@ -542,6 +618,7 @@ def gather(
     source_shape_zyx: list[int],
     mode: str,
     fill: float,
+    itk_blend: bool = False,
 ) -> torch.Tensor:
     """ITK's sampler at an arbitrary coordinate per voxel, over the region actually read.
 
@@ -555,12 +632,25 @@ def gather(
 
     Nearest is one gather on the exact index, the pick being discontinuous. Linear goes through
     ``grid_sample``, which normalises by the extent it is handed, so a streamed region and the whole
-    volume agree to ~1e-5 rather than exactly.
+    volume agree to ~1e-5 rather than exactly; ``itk_blend`` blends as ITK does instead
+    (:func:`_itk_linear`), exactly, for a map whose index is ITK's (:func:`scanline_map`).
     """
     rank = coordinates_xyz.shape[-1]
     window_zyx = [int(extent) for extent in source.shape[1:]]
     extent_zyx = list(coordinates_xyz.shape[:-1])
     device = source.device
+
+    voxels = math.prod(extent_zyx)
+    if itk_blend and device.type == "cpu" and voxels > _HOST_ITK_VOXELS:
+        # Each voxel's value is its own, so the host takes ITK's route a cache-sized chunk at a time.
+        points, source = coordinates_xyz.reshape(-1, rank), source.contiguous()
+        out = torch.empty((int(source.shape[0]), voxels), dtype=source.dtype)
+        for first in range(0, voxels, _HOST_ITK_VOXELS):
+            chunk = points[first : first + _HOST_ITK_VOXELS]
+            out[:, first : first + len(chunk)] = gather(
+                source, chunk, source_starts_zyx, source_shape_zyx, mode, fill, itk_blend
+            )
+        return out.reshape(int(source.shape[0]), *extent_zyx)
 
     inside = torch.ones(extent_zyx, dtype=torch.bool, device=device)
     for axis in range(rank):
@@ -573,6 +663,10 @@ def gather(
         # In the WORKING dtype then cast, exactly as the masked path fills: filling in float32 first
         # quantizes a float64 fill.
         return torch.full(out_shape, fill, device=device, dtype=sampling_dtype(source)).type(source.dtype)
+
+    if itk_blend and mode == "linear":
+        blended = _itk_cast(_itk_linear(source, coordinates_xyz, source_starts_zyx, source_shape_zyx))
+        return blended.masked_fill_(~inside.unsqueeze(0), fill).type(source.dtype)
 
     # A nearest pick copies voxels: no blend, no working dtype, and no float trip for a label, whose
     # values above 2**24 a float32 cannot carry back.
@@ -589,7 +683,9 @@ def gather(
             flat = flat * window_zyx[array_axis] + local
         # An index, not index_select: the same copy, several times faster on the host.
         picked = work.reshape(int(work.shape[0]), -1)[:, flat.reshape(-1)].reshape(out_shape)
-        return picked.masked_fill(~inside.unsqueeze(0), fill).type(source.dtype)
+        if itk_blend:
+            picked = _itk_cast(picked)
+        return _masked_fill(picked, ~inside.unsqueeze(0), fill).type(source.dtype)
 
     if mode == "cubic":
         # Keys' four taps per axis, corner by corner over a flat index: grid_sample has no cubic in
@@ -642,6 +738,58 @@ def gather(
         align_corners=False,
     ).squeeze(0)
     return out.masked_fill(~inside.unsqueeze(0), fill).type(source.dtype)
+
+
+def _itk_cast(values: torch.Tensor) -> torch.Tensor:
+    """ITK's cast into a float32 output (``CastPixelWithBoundsChecking``): an infinity lands on the
+    largest finite value of its sign. A float64 output keeps it."""
+    if values.dtype != torch.float32:
+        return values
+    bound = float(torch.finfo(torch.float32).max)
+    return values.clamp_(-bound, bound)
+
+
+def _itk_linear(
+    source: torch.Tensor, coordinates_xyz: torch.Tensor, source_starts_zyx: list[int], source_shape_zyx: list[int]
+) -> torch.Tensor:
+    """``LinearInterpolateImageFunction``'s value at each coordinate, blended in the walk's dtype and
+    returned in the sampling dtype: the base tap ``floor(c)`` held at the first voxel, then
+    ``v0 + (v1 - v0) * d`` folded along x, then y, then z. An axis whose distance is not positive, or
+    whose upper tap lies past the source, is not blended, as ITK's branches skip it: a NaN or an inf
+    on a tap the blend gives no weight stays out of the value.
+
+    Channel by channel over one set of corner offsets: what the blend holds beside its output does
+    not grow with the channel count, which :func:`walk_rows` does not price."""
+    rank = coordinates_xyz.shape[-1]
+    dtype = _walk_dtype()
+    window_zyx = [int(extent) for extent in source.shape[1:]]
+    # Flat window offsets of the 2**rank corners, one leading dimension per axis, z first, x last.
+    corners = torch.zeros((), dtype=torch.long, device=source.device)
+    blends: list[tuple[torch.Tensor, torch.Tensor]] = []
+    stride = 1
+    for axis in range(rank):
+        array_axis = rank - 1 - axis
+        coordinate = coordinates_xyz[..., axis].to(dtype)
+        base = torch.clamp(torch.floor(coordinate), min=0.0)
+        index = base.to(torch.long)
+        extent = source_shape_zyx[array_axis]
+        distance = coordinate - base
+        blends.append(((distance > 0) & (index + 1 < extent), distance))
+        place = (extent, source_starts_zyx[array_axis], window_zyx[array_axis])
+        taps = torch.stack([window_index(index, *place), window_index(index + 1, *place)]) * stride
+        corners = taps.reshape(2, *([1] * axis), *taps.shape[1:]) + corners
+        stride *= window_zyx[array_axis]
+    flat_source = source.reshape(int(source.shape[0]), -1)
+    out = torch.empty(
+        (int(source.shape[0]), *coordinates_xyz.shape[:-1]), dtype=sampling_dtype(source), device=source.device
+    )
+    for channel in range(int(source.shape[0])):
+        values = flat_source[channel][corners].to(dtype)
+        for folded, (blend, distance) in enumerate(blends):
+            low, high = values.unbind(rank - 1 - folded)
+            values = torch.where(blend, (high - low).mul_(distance).add_(low), low)
+        out[channel] = values
+    return out
 
 
 def source_window(

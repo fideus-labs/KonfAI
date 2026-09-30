@@ -188,8 +188,10 @@ flip and crop stages. Two cases differ by a tiny, bounded amount:
 - a linear `Resample` through a rotation or a displacement field, on the GPU or on an oblique volume: about
   1e-5 of the data's range (within 1 on integer volumes).
 
-Nearest, cubic and axis-aligned resampling are identical. The slab height depends on the machine's budget,
-and changes nothing else.
+Nearest, cubic and axis-aligned resampling are identical. A `Resample` with no map (a change of spacing or
+shape, or a reference grid) is identical on any volume, sagittal, coronal or oblique included: each region
+reads the index ITK reads for the whole volume. The slab height depends on the machine's budget, and changes
+nothing else.
 
 ## When it does not do what you expected
 
