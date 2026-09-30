@@ -666,7 +666,6 @@ def test_the_console_says_the_plan_in_one_line_whatever_the_cohort_size(
     many = startup(tmp_path / "many", 12)
 
     assert len(few) == len(many), (few, many)
-    assert many[0].startswith("[KonfAI] listing every case"), "the wait before the plan says what it is"
     assert "12 entr(ies): 12 STREAM" in many[-1]
     assert "log_0.txt" in many[-1]
     # Folded, not dropped: the line points at a plan the log actually holds.

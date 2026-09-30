@@ -258,9 +258,6 @@ class DataSources(ABC):
             {} if subset_requires_infos else None
         )
         empty_infos: dict[str, tuple[list[int], Attribute]] = {}
-        if requested is None:
-            roots = sorted({filename for entries in datasets.values() for filename, _ in entries})
-            print(f"[KonfAI] listing every case of {', '.join(sorted(datasets))} under {', '.join(roots)}")
         cohort: dict[str, set[str]] = {}
         # Seeded from the first group, whatever it holds: an empty first group empties the intersection.
         names: set[str] | None = None
