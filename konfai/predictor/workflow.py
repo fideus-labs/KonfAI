@@ -425,9 +425,11 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
 
     def _record_plan(self, rank: int, batch: int, restarts: int) -> None:
         """``Plan.json`` beside ``Prediction.yml`` (``Plan_<rank>.json`` past rank 0): the plan this rank finished on,
-        which an out-of-memory restart may have coarsened, cut smaller or given a smaller batch."""
+        which an out-of-memory restart may have coarsened, cut smaller or given a smaller batch. It does not describe
+        the cases the rank finished before a restart."""
         patch = self.dataset.patch
         plan = {
+            "rank": rank,
             "mode": patch.mode if patch is not None else None,
             "resample_voxels": self._resample_voxels,
             "patch_size": list(self._vram_patch_candidate) if self._vram_patch_candidate is not None else None,

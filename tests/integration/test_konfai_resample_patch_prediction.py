@@ -126,7 +126,7 @@ def test_the_case_runs_coarse_and_whole_and_comes_back_on_its_own_grid(resample_
     assert all(np.prod(shape) <= 768 // 2 for shape in shapes["oom"][1])
     # and the plan the run finished on is the one it records, not the one it started with
     plan = json.loads((resample_experiment["dir"] / "Predictions_oom" / TRAIN_NAME / "Plan.json").read_text())
-    assert plan["out_of_memory_restarts"] == 1 and plan["resample_voxels"] <= 768 // 2
+    assert plan["rank"] == 0 and plan["out_of_memory_restarts"] == 1 and plan["resample_voxels"] <= 768 // 2
     cases = sorted(path.name for path in resample_experiment["dataset_dir"].iterdir() if path.is_dir())
     for predictions in ("Predictions_budget", "Predictions_oom"):
         for case in cases:

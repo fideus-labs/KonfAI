@@ -56,8 +56,8 @@ is sized from the RAM before it starts.
 | `--fields-only` | write the transform only, skip the moved image |
 
 The plan follows the memory free when the run starts, so a busy GPU can change it, and with it the result, slightly.
-For runs that must be reproducible, pin `--max-voxels`. `register.json` records the plan every preset started with (`plans`) and the one it finished on after any
-out-of-memory re-plan (`ran`).
+For runs that must be reproducible, pin `--max-voxels`. `register.json` records the plan every preset started with (`plans`) and, per rank, the final plan it ran on after
+any out-of-memory re-plan (`ran`); the cases a rank finished before a restart ran on the plan before.
 
 ## Disk and RAM
 

@@ -794,9 +794,10 @@ class ImpactRegKonfAIApp:
         # The --set overrides each preset run took, by its workspace (``label``): ``applied`` in register.json.
         self._applied: dict[str, list[str]] = {}
         # Per preset, the voxels it registers whole and those a tile holds, KonfAI's ``max_voxels``: ``plans`` in
-        # register.json. What each run finished on, after any out-of-memory re-plan: KonfAI's Plan.json, ``ran``.
+        # register.json. The final plan per rank of each run, after any out-of-memory re-plan: KonfAI's Plan*.json,
+        # ``ran``. It does not describe the cases a rank finished before a restart.
         self._plans: dict[str, dict[str, int | None]] = {}
-        self._ran: dict[str, dict] = {}
+        self._ran: dict[str, list[dict]] = {}
 
     # ------------------------------------------------------------------ register
 
@@ -899,8 +900,9 @@ class ImpactRegKonfAIApp:
         # be computed from it: the moved image above all: is this layer's job. Looking for a Moved
         # here would make every preset carry an output it does not owe, and a tiled one blend it across
         # every patch seam for a caller that has the field.
-        if plan := next((out / "predictions").glob("*/Plan.json"), None):
-            self._ran[label or preset] = json.loads(plan.read_text(encoding="utf-8"))
+        plans = [json.loads(plan.read_text(encoding="utf-8")) for plan in (out / "predictions").glob("*/Plan*.json")]
+        if plans:
+            self._ran[label or preset] = sorted(plans, key=lambda plan: plan["rank"])
         group = _find_output_group(out / "predictions")
         return group, _find_outputs(out / "predictions", group)
 
