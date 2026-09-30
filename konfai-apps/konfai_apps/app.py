@@ -34,7 +34,7 @@ import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import Dataset
+from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -1135,6 +1135,29 @@ class KonfAIApp(AbstractKonfAIApp):
                 return split_format_level(file_format)[1]
         return 0
 
+    @staticmethod
+    def write_constant(
+        dataset: Dataset, group: str, name: str, shape: list[int], attributes: Attribute, value: int
+    ) -> None:
+        """Case ``name`` of ``group`` as ``shape`` uint8 voxels all at ``value``, placed by ``attributes``.
+
+        Written slab by slab along the first spatial axis, about 16 MiB a slab, so a default mask never holds its
+        volume; a format that takes no region write gets it whole.
+        """
+        shape = [int(extent) for extent in shape]
+        plane = int(np.prod([shape[0], *shape[2:]]))
+        region = [shape[0], max(1, min(shape[1], (1 << 24) // plane)), *shape[2:]]
+        stream = dataset.open_data_stream(group, name, shape, np.dtype(np.uint8), attributes, region_shape=region)
+        if stream is None:
+            dataset.write(group, name, np.full(shape, value, dtype=np.uint8), attributes)
+            return
+        block = np.full(region, value, dtype=np.uint8)
+        with stream:
+            for start in range(0, shape[1], region[1]):
+                stop = min(start + region[1], shape[1])
+                slices = (slice(0, shape[0]), slice(start, stop), *(slice(0, extent) for extent in shape[2:]))
+                stream.write_slice(slices, block[:, : stop - start])
+
     def _fill_optional_inputs(self, provided: int, prediction_file: str = "Prediction.yml") -> None:
         """Synthesise declared defaults for optional inputs the caller did not provide.
 
@@ -1168,8 +1191,7 @@ class KonfAIApp(AbstractKonfAIApp):
             for name in dataset.get_names("Volume_0"):
                 shape, attributes = dataset.get_infos("Volume_0", name)  # header only, no pixel read
                 for i, default in fills.items():
-                    data = np.full(shape, fill_value[default], dtype=np.uint8)
-                    dataset.write(f"Volume_{i}", name, data, attributes)
+                    KonfAIApp.write_constant(dataset, f"Volume_{i}", name, shape, attributes, fill_value[default])
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
         """
@@ -1239,7 +1261,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 dataset = Dataset(str(root), KonfAIApp._detect_group_format(root, "Volume_0"))
                 for name in dataset.get_names("Volume_0"):
                     shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
-                    dataset.write("Mask_0", name, np.ones(shape, dtype=np.uint8), attr)
+                    KonfAIApp.write_constant(dataset, "Mask_0", name, shape, attr, 1)
         else:
             primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
             for i, mask_path in enumerate(mask):

@@ -550,7 +550,7 @@ def _neutral_fixed_masks(work: Path, fixed: list[Path]) -> list[Path]:
     for index, unit in enumerate(units):
         case = f"P{index:03d}"
         shape, attributes = _read_header(work / "headers" / case, "Fixed", unit)
-        Dataset(work, backend).write("FixedMask", case, np.ones([1, *shape[1:]], dtype=np.uint8), attributes)
+        KonfAIApp.write_constant(Dataset(work, backend), "FixedMask", case, [1, *shape[1:]], attributes, 1)
         masks.append(work / case / f"FixedMask{form}")
     return masks
 
