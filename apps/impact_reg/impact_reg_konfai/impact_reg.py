@@ -44,7 +44,8 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
-from konfai.utils.dataset import Attribute, Dataset, read_landmarks, write_landmarks
+from konfai.utils.dataset import Attribute, Dataset, DataStream, is_staging_entry, read_landmarks, write_landmarks
+from konfai.utils.dataset.staging import publish
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
 from konfai.utils.ITK import apply_to_data_transform, displace_points, field_reach, jacobian_statistics
 from konfai.utils.utils import format_token, path_format_token, storage_form
@@ -376,22 +377,17 @@ def _find_outputs(root: Path, stem: str) -> dict[str, Path]:
 
 
 def _is_entry(path: Path, stem: str) -> bool:
-    """Whether ``path`` is an entry named ``stem``, in any form: extension, store, or bare name.
-
-    The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
+    """Whether ``path`` is an entry named ``stem``, in any form: extension, store, or bare name; never a writer's
+    staging entry. The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
     """
-    return path.name == stem or path.name.startswith(f"{stem}.")
+    return (path.name == stem or path.name.startswith(f"{stem}.")) and not is_staging_entry(path.name)
 
 
-def _output_path(dest_dir: Path, stem: str, suffixes: str) -> Path:
-    """The path ``<stem><suffixes>`` in ``dest_dir``, with every earlier output of that stem removed.
-
-    Discovery is by stem, so a re-run whose presets emit the other form leaves only its own output standing.
-    """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for stale in [p for p in dest_dir.iterdir() if _is_entry(p, stem)]:
+def _drop_other_forms(dest_dir: Path, stem: str, suffixes: str) -> None:
+    """Remove the outputs named ``stem`` in another form than ``<stem><suffixes>``, once that one is published:
+    discovery is by stem, so a re-run whose presets emit another form leaves only its own output standing."""
+    for stale in [p for p in dest_dir.iterdir() if _is_entry(p, stem) and p.name != stem + suffixes]:
         shutil.rmtree(stale) if stale.is_dir() else stale.unlink()
-    return dest_dir / (stem + suffixes)
 
 
 def _units(paths: list[Path]) -> list[Path]:
@@ -614,11 +610,19 @@ def _copy_output(src: Path, dest_dir: Path, stem: str, move: bool = False) -> Pa
     ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a
     full-resolution grid is tens of gigabytes, and a copy wrote it a second time beside the first.
     """
-    dest = _output_path(dest_dir, stem, _form(src))
-    if move:
-        shutil.move(src, dest)
-    else:
-        (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (stem + _form(src))
+    staging = Path(DataStream.staging_path(str(dest)))
+    try:
+        if move:
+            shutil.move(src, staging)
+        else:
+            (shutil.copytree if src.is_dir() else shutil.copy2)(src, staging)
+        publish(staging, dest)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True) if staging.is_dir() else staging.unlink(missing_ok=True)
+        raise
+    _drop_other_forms(dest_dir, stem, _form(src))
     if dest.is_dir():
         # A store put at a path already read is invisible to the reader's path-keyed memo, which
         # would otherwise pair the copy's voxels with the replaced store's axes and geometry.
@@ -1378,7 +1382,6 @@ class ImpactRegKonfAIApp:
 
         members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
         suffixes, backend = _form(dvf_paths[0]), _backend(dvf_paths[0])
-        _output_path(output / case, group, suffixes)  # drop a stale other-form output before writing
         _run_transform(
             f"impact_reg_ensemble_{case}",
             [members],
@@ -1395,6 +1398,7 @@ class ImpactRegKonfAIApp:
             cpu,
             quiet,
         )
+        _drop_other_forms(output / case, group, suffixes)
 
     def _derive_moved(
         self,
@@ -1428,8 +1432,6 @@ class ImpactRegKonfAIApp:
         # below, so the first case's form speaks for the cohort.
         moving = next(iter(cases.values()))
         suffixes, backend = _form(moving), _backend(moving)
-        for case in fields:
-            _output_path(output / case, "Moved", suffixes)  # drop a stale other-form Moved
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
         field_root = _stage_group(work / "moved_stage", "DVF", fields)
         _run_transform(
@@ -1451,6 +1453,8 @@ class ImpactRegKonfAIApp:
             cpu,
             quiet,
         )
+        for case in fields:
+            _drop_other_forms(output / case, "Moved", suffixes)
 
     # ------------------------------------------------------------------ evaluate
 
@@ -1703,7 +1707,6 @@ class ImpactRegKonfAIApp:
             members = _units(list(dvfs))
             spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
             suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
-            _output_path(output / "uncertainty", "Uncertainty", suffixes)  # drop a stale other-form map
             _run_transform(
                 "impact_reg_uncertainty",
                 [spec],
@@ -1721,6 +1724,7 @@ class ImpactRegKonfAIApp:
                 cpu,
                 quiet,
             )
+            _drop_other_forms(output / "uncertainty", "Uncertainty", suffixes)
         except BaseException as error:
             _leave(work, error)
             raise

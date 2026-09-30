@@ -38,6 +38,30 @@ def _replaced_name(name: str) -> str:
     return f"{name}{_REPLACED_MARKER}{os.getpid()}"
 
 
+def publish(staging: Path, final: Path) -> None:
+    """Put the complete ``staging`` entry, a file or a directory, at ``final``; the entry already there is replaced
+    only once its successor is in place. A file goes by ``os.replace``; a directory through the :func:`_replaced_name`
+    hop, which a failed rename puts back. A concurrent writer that published the same entry first keeps it."""
+    if not staging.is_dir():
+        os.replace(staging, final)
+        return
+    backup = final.with_name(_replaced_name(final.name))
+    replaced = final.exists()
+    if replaced:
+        shutil.rmtree(backup, ignore_errors=True)
+        os.rename(final, backup)
+    try:
+        os.rename(staging, final)
+    except OSError:
+        if not final.exists():
+            if replaced:
+                os.rename(backup, final)
+            raise
+        shutil.rmtree(staging, ignore_errors=True)
+    if replaced:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
 def is_staging_entry(name: str) -> bool:
     """Whether ``name`` (a path or an h5 key) is a writer's staging entry, never a case: a temporary
     carrying the ``.tmp`` marker of :meth:`DataStream.temporary_suffix` or :meth:`DataStream.staging_path`,
