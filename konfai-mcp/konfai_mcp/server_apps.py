@@ -598,6 +598,7 @@ class AppService:
         ensemble: int = 0,
         ensemble_models: list[str] | None = None,
         patch_size: list[int] | None = None,
+        max_voxels: int | None = None,
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         uncertainty: bool = False,
@@ -628,10 +629,11 @@ class AppService:
 
         registration = self._registration_preset(ref)
         if registration is not None:
-            if ensemble or ensemble_models or batch_size or uncertainty:
+            if ensemble or ensemble_models or batch_size or uncertainty or patch_size:
                 raise ValueError(
                     f"{ref!r} is a registration app: it has no checkpoints to ensemble, no batch and no stack to keep,"
-                    " so ensemble, ensemble_models, batch_size and uncertainty do not apply."
+                    " and sizes its passes from max_voxels, so ensemble, ensemble_models, batch_size, uncertainty and"
+                    " patch_size do not apply."
                 )
             if not 2 <= len(normalized) <= 4:
                 raise ValueError(
@@ -655,7 +657,7 @@ class AppService:
                     "gpu": gpu,
                     "cpu": cpu,
                     "tta": tta,
-                    "patch_size": patch_size,
+                    "max_voxels": max_voxels,
                     "config_overrides": config_overrides,
                     "force_update": force_update,
                 },
@@ -672,6 +674,7 @@ class AppService:
             "ensemble": ensemble,
             "ensemble_models": ensemble_models or [],
             "patch_size": patch_size,
+            "max_voxels": max_voxels,
             "batch_size": batch_size,
             "config_overrides": config_overrides,
             "uncertainty": uncertainty,

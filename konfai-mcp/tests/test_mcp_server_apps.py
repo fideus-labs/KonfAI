@@ -1157,7 +1157,7 @@ def _registration_app(tmp_path: Path) -> Path:
     return app_dir
 
 
-def test_a_registration_app_runs_through_impact_reg(tmp_path: Path) -> None:
+def test_a_registration_app_runs_through_impact_reg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The preset writes its field only: impact-reg-konfai derives the moved image, so the app runs through it,
     the repository being the folder that holds the preset, the groups read as fixed, moving, then the masks."""
     app_dir = _registration_app(tmp_path)
@@ -1170,6 +1170,24 @@ def test_a_registration_app_runs_through_impact_reg(tmp_path: Path) -> None:
     assert (kwargs["repo"], kwargs["preset"]) == (str(app_dir.parent), "TinyRigid")
     assert (kwargs["fixed"], kwargs["moving"]) == ([fixed], [moving])
     assert (kwargs["fixed_masks"], kwargs["moving_masks"]) == ([mask], [])
+
+    # The runner against the real register(): a stand-in taking **kwargs let through an argument it does not have.
+    from contextlib import nullcontext
+    from unittest.mock import patch
+
+    from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp
+
+    from konfai_mcp import runner
+
+    monkeypatch.setenv("KONFAI_IMPACTREG_REPO", "unused")  # the runner points it at the repository
+    with (
+        patch.object(runner, "_runtime_context", side_effect=lambda **_: nullcontext()),
+        patch.object(runner, "_ensure_local_imports"),
+        patch.object(ImpactRegKonfAIApp, "__init__", return_value=None),
+        patch.object(ImpactRegKonfAIApp, "register", autospec=True) as register,
+    ):
+        runner.run_registration_api(**kwargs)
+    register.assert_called_once()
 
     with pytest.raises(ValueError, match="2 to 4 input groups"):
         service.prepare_infer(ref=str(app_dir), inputs=[[fixed]], allow_untrusted_code=True)

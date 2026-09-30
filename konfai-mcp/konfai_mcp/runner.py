@@ -374,6 +374,7 @@ def run_app_api(
     ensemble: int = 0,
     ensemble_models: list[str] | None = None,
     patch_size: list[int] | None = None,
+    max_voxels: int | None = None,
     batch_size: int | None = None,
     config_overrides: list[str] | None = None,
     uncertainty: bool = False,
@@ -399,6 +400,7 @@ def run_app_api(
             "ensemble_models": ensemble_models or [],
             "tta": tta,
             "patch_size": patch_size,
+            "max_voxels": max_voxels,
             "batch_size": batch_size,
             "uncertainty": uncertainty,
             "quiet": quiet,
@@ -470,7 +472,7 @@ def run_registration_api(
     gpu: list[int] | None = None,
     cpu: int | None = None,
     tta: int = 0,
-    patch_size: list[int] | None = None,
+    max_voxels: int | None = None,
     config_overrides: list[str] | None = None,
     force_update: bool = False,
     cwd: str | None = None,
@@ -496,7 +498,7 @@ def run_registration_api(
             cpu=cpu,
             tta=tta,
             config_overrides=config_overrides,
-            patch_size=patch_size,
+            max_voxels=max_voxels,
         )
 
 

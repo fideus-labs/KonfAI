@@ -1382,6 +1382,10 @@ _APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's ma
 _APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
 _APP_ENSEMBLE_MODELS_DESC = "Explicit checkpoint names to ensemble (see describe_app checkpoints; overrides ensemble)."
 _APP_PATCH_SIZE_DESC = "Force the inference patch size (overrides the app's config default)."
+_APP_MAX_VOXELS_DESC = (
+    "Voxels a pass holds before KonfAI resamples or tiles it (default: sized from the free GPU memory and the RAM "
+    "budget)."
+)
 _APP_BATCH_SIZE_DESC = (
     "Force the inference batch size (overrides the app's config, whose `batch_size: 0` measures it on the GPU)."
 )
@@ -1410,6 +1414,7 @@ def run_app_infer(
     ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
     ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
     patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
+    max_voxels: Annotated[int | None, Field(description=_APP_MAX_VOXELS_DESC)] = None,
     batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
     set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
     uncertainty: Annotated[
@@ -1431,6 +1436,7 @@ def run_app_infer(
             ensemble=ensemble,
             ensemble_models=ensemble_models,
             patch_size=patch_size,
+            max_voxels=max_voxels,
             batch_size=batch_size,
             config_overrides=_config_overrides(set_parameters),
             uncertainty=uncertainty,
