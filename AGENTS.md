@@ -142,7 +142,9 @@ PyPI via OIDC → build the Docker image once `konfai` is visible on PyPI. `apps
 `konfai-apps==`, and `konfai-studio` pins `konfai-mcp==` (via its `setup.py`), all the same version, so the
 whole matrix releases in lockstep. `konfai-studio` is the one exception to the pure-Python build: the build
 job runs `npm ci && npm run build` first (its React front is git-ignored) and then `python -m build --wheel`
-(wheel-only, because the sdist file-finder would drop the built `web/`).
+(wheel-only, because the sdist file-finder would drop the built `web/`). `konfai-mcp` is wheel-only too: its
+`setup.py` copies the repository's `examples/` into the wheel, and an sdist holds none to copy. A break may ship in
+any release, with a refusal naming the new spelling and no deprecation period (`docs/source/development.md`).
 
 Before tagging: `pixi run check` green; both sibling suites green; the HF bundles tagged `vX.Y.Z` too (§7b); `pixi run perf-check` within its thresholds on a quiet machine (or the regression named in the release notes; the facts of the series, voxel identity and exact differences, also gate every pull request on a GitHub runner, see `benchmarks/perf/README.md`); and, because the test job only exercises
 the **source tree**, confirm the built wheel still ships `konfai/models/python/**` and `konfai/models/yaml/*.yml`

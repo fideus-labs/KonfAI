@@ -238,14 +238,22 @@ that builds a **9-package matrix**, all sharing a tag-derived version:
 
 - `konfai` (the core framework)
 - `konfai-apps`, `konfai-mcp` and `konfai-studio` (the standalone Apps, MCP and
-  Studio packages. Studio is wheel-only, and its build job runs `npm ci &&
-  npm run build` first because the React front is not in git)
+  Studio packages. konfai-mcp is wheel-only, the wheel carrying the repository's
+  examples; Studio is too, and its build job runs `npm ci && npm run build` first
+  because the built React front is not in git, only its source)
 - the five App bundles: `impact-synth-konfai`, `impact-seg-konfai`,
   `mrsegmentator-konfai`, `totalsegmentator-konfai`, `impact-reg-konfai`
 
 The bundles pin `konfai==` and `konfai-apps==` the same version, so the whole
 matrix releases in lockstep. A change to the core package can therefore affect
 the framework, the two sibling packages, and every published App.
+
+### Breaking changes
+
+A change may break a published config, checkpoint or call in any release. A
+renamed key, class or argument is refused with a message that names the one to write instead:
+there is no deprecation period, and no table of removed names to keep. The
+changelog lists each break under its own heading.
 
 ### Cutting a release
 

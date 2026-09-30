@@ -1,9 +1,6 @@
 # Troubleshooting
 
-Symptom-first fixes for the most common KonfAI failures. Scan the headings for
-what you are seeing (a missing command, a rejected config key, an empty
-metric file), and each entry gives the likely cause and the fix. Come here
-whenever a command fails or an expected output never appears.
+Find what you see in the headings; each entry gives the likely cause and the fix.
 
 ## Installation problems
 
@@ -28,10 +25,7 @@ Both come from the standalone `konfai-apps` package:
 python -m pip install konfai-apps
 ```
 
-`konfai-cluster` ships with the core package. If its command is missing, check
-the active environment and its scripts directory on PATH. The `cluster` extra
-adds `submitit`, which is imported at submission time: install `konfai[cluster]`
-when submission reports that dependency missing.
+`konfai-cluster` comes with `konfai`; submitting jobs needs `pip install "konfai[cluster]"`.
 
 ### GPU works in Python but not in KonfAI
 
@@ -71,74 +65,39 @@ When in doubt, `cd` into the directory that contains the YAML before launching
 
 ### A metric or output path is rejected
 
-Keys used in `outputs_criterions` and similar sections must match real module
-paths in the model graph. The runtime validates these names against the actual
-submodules and raises an error if they do not exist.
-
-When in doubt:
-
-- start from a working example
-- rename output paths gradually
-- keep training, prediction, and evaluation aligned on the same output names
+An `outputs_criterions` or `outputs_dataset` key must be the exact path of a module of the model
+(`UNetBlock_0:Head:Softmax`). Start from a working example, and use the same output names in training,
+prediction and evaluation ({doc}`reference/components/models`).
 
 ### Validation split behaves unexpectedly
 
-`Dataset.validation` is flexible. In code it can be:
-
-- `None`
-- a float ratio (a share of the patch entries, cut at the closest case boundary)
-- a `start:stop` slice string (a negative stop counts from the end)
-- a path to a text file (`~path.txt` excludes instead)
-- an explicit list of indices
-- an explicit list of case names
-- a list mixing case names and text-file paths
-
-`subset` accepts the same spellings: one grammar. If the split looks wrong,
-check which form your config is actually using.
+`validation` takes a share (`0.2`), or a list of case indices, slices (`0:10`), case names or files of case
+names (`~` excludes). Check which form your config uses ({doc}`config_guide/index`). To keep a split fixed across runs,
+give case names.
 
 ## Runtime problems
 
 ### The streaming regime still uses memory proportional to a case
 
-The stream/buffer regime bounds retention across cases; direct regional reads depend
-on the transforms. What streams is narrower than it looks, because a transform's kind
-depends on its arguments: pointwise covers `TensorCast`, `Clip` with **fixed** bounds
-and `Standardize` given **both** `mean` and `std`; `Normalize` and an automatic
-`Standardize` are global-statistic (still streamable, one statistics pass first); and
-the region kinds are `Flip`, `Permute`, **axis-aligned** `Canonical`,
-`Resample` (to a grid, or through a stored transform or field), `Padding`,
-`Dilate` and `Gradient`; and `Mask` streams as a pointwise stage, reading its
-companion mask by region. A masked `Clip` with `min`/`max` bounds or a masked automatic `Standardize`
-is global-statistic too: the stage measures its statistic under the mask once,
-then streams. A `Clip` with a percentile bound needs the whole histogram.
-See the transform reference for the per-transform answer.
-A global histogram (`HistogramMatching`) or an undeclared custom transform uses
-the bounded full-volume path.
-
-Reduce the transform chain to identify the boundary, or materialise expensive
-preprocessing once with `Save` and stream from that prepared dataset. See
-{doc}`usage/large-images`.
+A stage in the chain needs the whole volume: percentile `Clip`, `HistogramMatching`, `Canonical` on an
+oblique volume, a statistic after a stage that changes values, or a custom transform that declares nothing.
+{doc}`usage/large-images` lists which stages stream. Remove stages one at a time to find it, or run the
+expensive part once with `Save` and stream from the saved copy.
 
 ### Patch inference is slow
 
-Profile the complete execution path:
+Look at, one change at a time on the same cases:
 
-- patch size and overlap (overlap repeats I/O and forward work)
-- OME-Zarr chunk shape or DICOM slice decoding
-- `batch_size`, `num_workers`, `prefetch_factor`, and `pin_memory`
-- number of TTA variants and checkpoints
-- output-channel count and CPU/GPU reconstruction device
-
-Change one variable at a time on identical cases. KonfAI owns all these stages,
-which makes the end-to-end path tunable from one workflow; a controlled
-cross-framework benchmark is still required for comparative speed claims.
+- patch size and overlap (overlap repeats reads and forward passes);
+- OME-Zarr chunk shape, DICOM decoding;
+- `batch_size`, `num_workers`, `prefetch_factor`, `pin_memory`;
+- the number of TTA copies and checkpoints;
+- the number of output channels.
 
 ### CUDA OOM occurs during reconstruction or reduction
 
-The peak may be a volume-sized multi-class accumulator rather than the model
-forward. Reduce inference batch size, TTA/ensemble count, or output channels.
-The predictor can move accumulation to CPU when the full output does not fit
-free VRAM, trading throughput for memory safety.
+The peak is the output being assembled, not the model. Lower the batch size, the TTA or ensemble size, or
+the output channels. When the output does not fit the GPU, KonfAI assembles it in host memory, more slowly.
 
 ### KonfAI asks before overwriting an existing run
 
@@ -150,22 +109,13 @@ konfai TRAIN -y --config Config.yml
 
 ### Training fails in a restricted environment with socket or port errors
 
-This can happen in sandboxes, some notebooks, or hardened servers.
-
-KonfAI's launcher reserves a free TCP port before it starts the ranks, by
-binding a socket to find one; several ranks then open a PyTorch distributed
-group over it, a single rank opens none. An environment that forbids binding a
-socket stops the run at that reservation, before training begins.
-
-In practice, test the workflow on a normal local machine or GPU server first.
+KonfAI opens a local port to coordinate its processes. A sandbox that forbids opening ports stops the run
+before training starts. Run it on a normal machine.
 
 ### Live logs do not match TensorBoard exactly
 
-That is expected. KonfAI logs some values live through the textual training
-description, while validation summaries are written on their own schedule.
-
-If you are debugging live behavior, inspect the log stream first. If you are
-ranking completed runs, inspect the saved evaluation JSON files.
+That is expected: the console shows running values, TensorBoard the validation summaries. Compare finished
+runs with the evaluation JSON files.
 
 ### Evaluation refuses: a group not found, or no case in common
 

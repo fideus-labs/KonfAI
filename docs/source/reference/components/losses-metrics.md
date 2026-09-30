@@ -1,253 +1,146 @@
-# Losses & metrics
+# Losses and metrics
 
-Losses and metrics are both **criteria**: subclasses of
-`konfai.metric.measure.Criterion` in `konfai/metric/measure/`. You attach them
-to a **named model output** and one or more **target dataset groups**, under
-`outputs_criterions:` (training) or `metrics:` (evaluation). Bare names resolve
-inside `konfai.metric.measure`; you can also point at any library, e.g.
-`torch:nn:L1Loss` or `monai.losses:DiceLoss`.
+Losses and metrics are the same kind of object, a criterion (`konfai.metric.measure`). A criterion is
+attached to a model output and a target, under `outputs_criterions:` in training or `metrics:` in
+evaluation. A bare name (`Dice`) is a KonfAI criterion; `torch:nn:L1Loss` or `monai.losses:DiceLoss` name
+one from another library.
 
-## Loss vs metric: how KonfAI actually decides
+## Loss or metric
 
-```{important}
-Whether a criterion is **back-propagated is decided by the `is_loss:` flag in the
-config, not by the Python return type.** `is_loss: true` adds the returned tensor
-to the training loss; `is_loss: false` detaches it and only logs it. In an
-`Evaluation.yml`, every criterion is a metric.
+`is_loss: true` makes a criterion a loss (its value is back-propagated); `is_loss: false` only logs it. In
+`Evaluation.yml` every criterion is a metric. Without `is_loss`, a criterion takes its own role: a loss,
+except `PSNR` and `SSIM`, which are metrics.
 
-The return *shape* controls **logging**: a criterion may return a bare `Tensor`,
-or a tuple `(tensor, value)` where the value is a float, a 0-d tensor read back
-lazily, a per-label dict, or a `(values, labels)` pair (also read back lazily).
-The tuple form is what lets `Dice`, `TRE`, etc. log clean per-label values while
-still driving the gradient with the tensor.
-```
+- `PSNR` cannot be a loss (it grows as the output improves): train on `MSE`.
+- `SSIM` with `is_loss: true` minimises `1 - SSIM` and still reports the SSIM.
 
-So most pixelwise criteria are **dual-use**: the same class is a training loss or
-a logged metric depending on `is_loss`. Leaving `is_loss` out takes the criterion's
-own role: a loss for most of them, a metric for `PSNR` and `SSIM`. The resolved
-value is written back to the config.
-
-- `PSNR` is a metric only: it rises as the output nears the target, so minimising it
-  would push the output away. `is_loss: true` on it is refused; train on `MSE`, which
-  it is a function of.
-- `SSIM` becomes a loss only with `is_loss: true`: it then minimises `1 - SSIM` with
-  its gradient, and still reports the SSIM.
-
-## Attaching a criterion (training)
+## Attaching a criterion
 
 ```yaml
 outputs_criterions:
-  UNetBlock_0:Head:Conv:          # named model output (dotted path; ':' or '.')
+  UNetBlock_0:Head:Conv:          # a model output
     targets_criterions:
-      SEG:                        # target group ("CT;MASK" to add a mask)
+      SEG:                        # the target group ("CT;MASK" adds a mask)
         criterions_loader:
-          CrossEntropyLoss:       # criterion name (bare → konfai.metric.measure)
-            is_loss: true         # true → back-propagated; false → metric only; left out → the criterion's role
+          CrossEntropyLoss:
+            is_loss: true
             schedulers:
-              Constant: { nb_step: 0, value: 1 }   # weight schedule
-            group: 0              # loss/optimizer group (e.g. GAN G vs D)
-            start: 0              # first active iteration
-            stop: None            # last active iteration (None = never)
+              Constant: { nb_step: 0, value: 1 }   # the loss weight over time
+            group: 0              # losses of one group are summed (a GAN's generator vs discriminator)
+            start: 0              # first iteration it is active
+            stop: None            # last iteration (None: never stops)
             accumulation: false
-            # any remaining keys are forwarded to the criterion's constructor:
-            reduction: mean
+            reduction: mean       # any other key is the criterion's own argument
 ```
 
-The reserved keys (`is_loss`, `group`, `start`, `stop`, `accumulation`, plus the
-`schedulers:` subtree) are consumed by KonfAI; **all other keys are the
-criterion's own constructor arguments**. For evaluation the shape is the same,
-without `is_loss`/`schedulers`/`group`:
+In evaluation, the same without `is_loss`, `schedulers` or `group`:
 
 ```yaml
 metrics:
   sCT:
     targets_criterions:
-      CT;MASK:                    # ';' joins target + mask into one masked metric
+      CT;MASK:
         criterions_loader:
           MAE:  { reduction: mean }
           PSNR: { dynamic_range: 4095 }
           SSIM: { dynamic_range: 4095 }
 ```
 
-Each criterion is logged and reported as `output:target:Name`. Two criteria of one class on
-one output and target (the list spelling, `- Dice: {labels: [1]}` then `- Dice: {labels: [2]}`)
-keep one entry each, the second as `Dice#2`: their losses add up, and each has its own row.
+Each value is logged as `output:target:Name`. The same criterion twice on one output (in list form) is logged
+as `Dice` and `Dice#2`.
 
-## How a logged value averages batches
+A mask is a target placed after the image (`CT;MASK`): a voxel counts where the mask is not 0. Several masks
+keep the voxels inside all of them.
 
-The boards, the checkpoint score, early stopping and `ReduceLROnPlateau` read a
-criterion over a run of batches: a validation pass, or the last `it_validation`
-training steps. A criterion that declares `batch_mean` reports the mean of one
-value per patch of the batch, so each batch weighs its patch count and the value
-is the mean over every patch, whatever the batch size, a partial last batch, or
-the number of ranks the validation is split over. Any other criterion weighs one
-per batch.
+Logged values are averaged over the patches of the validation or of the last training steps, whatever the
+batch size and the number of GPUs. Criteria computed on the batch as a whole (`Dice`, `PSNR`, `LPIPS`, a `sum`
+reduction, a criterion from another library) are averaged per batch instead.
 
-- Declared: `MAE` and `MSE` with `reduction: mean`, `ME`, `SSIM`, `TRE`, `BCE`,
-  `KLDivergence`, `FocalLoss` with `reduction: mean`, `CrossEntropyLoss` with
-  `reduction: mean` and no `weight`, `Variance`, `Mean`, `PatchGanLoss`,
-  `IMPACTReg`, `IMPACTSynth` and `SAM_Perceptual`. A masked mean runs over the
-  patches the mask reaches: it is the mean over every patch when each patch holds
-  a mask voxel.
-- One per batch: `Dice` and `DiceSaveMap` (a ratio of the batch's pooled sums),
-  `PSNR` and `LPIPS` (pooled over the batch without a mask), `GradientImages`,
-  `Gram` and `PerceptualLoss`, `Accuracy`, a `sum` reduction, a class-weighted
-  `CrossEntropyLoss`, and a criterion from another library (`torch:nn:L1Loss`).
+## Regression
 
-Under several ranks the validation is split without duplicates: each patch is
-scored once, and a rank a batch short runs one more batch, which it does not
-score, so the ranks still run as many forwards.
-
-## Pixelwise / regression
-
-All subclass `MaskedLoss` and return `(Tensor, float)` (dual-use, except `PSNR`,
-a metric only). Extra target
-groups act as a mask: a voxel is inside wherever the mask is not 0 (0/1 and 0/255
-alike), and several masks keep the voxels inside all of them. The same rule holds for
-every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
-
-| Name | Purpose | Key args (defaults) |
+| Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
-| `MSE` | Masked mean-squared error. | `reduction="mean"` |
-| `MAE` | Masked mean-absolute error. | `reduction="mean"` |
-| `ME` | Signed mean error `(x−y).mean()` (bias). |: |
-| `PSNR` | Peak SNR over the mask. `dynamic_range` defaults to `4095` (HU range), which `None` also names. Metric only: `is_loss: true` is refused. | `dynamic_range=4095.0` |
-| `SSIM` | Masked structural similarity. `dynamic_range` defaults to `4095`, which `None` also names. A metric unless `is_loss: true`, which minimises `1 - SSIM`. | `dynamic_range=4095.0` |
-| `MAESaveMap` | MAE that also returns a voxelwise L1 error map (a 3-tuple, for a save-map consumer). | `reduction="mean", dataset=None, group=None` |
+| `MSE` | Mean squared error. | `reduction="mean"` |
+| `MAE` | Mean absolute error. | `reduction="mean"` |
+| `ME` | Mean signed error (bias). | |
+| `PSNR` | Peak signal-to-noise ratio. Metric only. | `dynamic_range=4095.0` |
+| `SSIM` | Structural similarity. A metric unless `is_loss: true`. | `dynamic_range=4095.0` |
+| `MAESaveMap` | MAE that also writes the error map. | `reduction="mean", dataset=None, group=None` |
 
-## Segmentation / classification
+## Segmentation and classification
 
-| Name | Role | Purpose | Key args (defaults) |
-| --- | --- | --- | --- |
-| `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). A one-channel output is read as a label map: a float one with non-integer values (a sigmoid probability) is refused, so give it two channels or threshold it first. A multi-channel output is read as probabilities: one outside [0, 1] (logits, before a Softmax) is refused on the first call. | `labels=None` (None → all present labels) |
-| `CrossEntropyLoss` | `Tensor` loss | Wraps `nn.CrossEntropyLoss` (squeezes the target channel). | `weight=None, reduction="mean"` |
-| `FocalLoss` | `Tensor` loss | Multi-class focal loss. `alpha` is an optional per-label weight list indexed by label id; `None` weights every class equally, and a list shorter than the class count is refused. | `gamma=2.0, alpha=None, reduction="mean"` |
-| `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. |: |
-| `DiceSaveMap` | 3-tuple | Dice + voxelwise error map (for a save-map consumer). | `labels=None, dataset=None, group=None` |
-
-## Adversarial / style
-
-| Name | Purpose | Key args (defaults) |
+| Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
-| `BCE` | `BCEWithLogitsLoss` against a constant real/fake target. | `target=0` |
-| `PatchGanLoss` | LSGAN-style MSE against a constant target. | `target=0` |
-| `Gram` | Gram-matrix (style) loss. |: |
-| `PerceptualLoss` | Feature-space perceptual loss over a pretrained KonfAI `Network` (custom multi-model forward; requires a real `path_model` checkpoint). | `model_loader`, `path_model`, `modules`, `shape` |
+| `Dice` | Dice per label; the loss is `1 - mean`. Takes probabilities (after a `Softmax`) or a label map; logits are refused. | `labels=None` (every label present) |
+| `CrossEntropyLoss` | Cross entropy, on logits. | `weight=None, reduction="mean"` |
+| `FocalLoss` | Focal loss; `alpha` weights each label. | `gamma=2.0, alpha=None, reduction="mean"` |
+| `Accuracy` | Classification accuracy. | |
+| `DiceSaveMap` | Dice that also writes the error map. | `labels=None, dataset=None, group=None` |
 
-## Registration / distributions
+## Adversarial and perceptual
 
-| Name | Role | Purpose | Key args (defaults) |
-| --- | --- | --- | --- |
-| `TRE` | `(Tensor, dict)` metric | Target Registration Error between predicted/target landmark coordinates. |: |
-| `GradientImages` | `Tensor` loss | Image-gradient smoothness loss (2D/3D auto); regulariser, or gradient-difference if a target is given. |: |
-| `monai.losses:GlobalMutualInformationLoss` | `Tensor` loss | Parzen-window mutual information, by classpath (needs MONAI installed). | see MONAI |
-| `KLDivergence` | `Tensor` loss | VAE KL term. **Rewires the graph** on init, inserting a `LatentDistribution` block; computes the closed-form KL between the latent Gaussian (the block's `mu` output and its `log_std` output, which holds the log-variance) and the prior N(`mu`, `std`²) its arguments set. | `shape` (**required**), `dim=100, mu=0, std=1` |
-
-## Uncertainty / bookkeeping
-
-| Name | Role | Purpose | Key args |
-| --- | --- | --- | --- |
-| `Variance` | `(Tensor, value)` metric | Channel-wise variance mean (ensemble/uncertainty). | `name="Variance"` |
-| `Mean` | `(Tensor, value)` metric | Mean of the output tensor. | `name="Mean"` |
-| `torch:nn:TripletMarginLoss` | `Tensor` loss | Triplet margin loss, by classpath. | see PyTorch |
-
-## IMPACT feature-based criteria
-
-These download TorchScript feature extractors from Hugging Face at construction
-(`hf_hub_download`), so they need **network access**. The sanity check that probes the
-extractor runs on the **CPU**: deliberately, since touching a GPU there crashed
-CPU-only hosts and pinned every DDP rank to the same device.
-All are `CriterionWithAttribute` and read the `Image*` statistics the `Statistics` transform
-records. A target is read with its own. The output is read with its own when it has any (a
-prediction under `EVALUATION`, for `IMPACTReg` and the content pass of `IMPACTSynth`), with the
-reference's otherwise; `SAM_Perceptual` reads both with the reference's, and the style pass of
-`IMPACTSynth` both with the style image's.
-The mask, when given, is the target after the image (`Reference;Mask`), after the
-content and style images for `IMPACTSynth`, whatever its type.
-
-| Name | Purpose | Key args (defaults) |
+| Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
-| `IMPACTReg` | Feature-space registration loss over the layers of a TorchScript model. | `name="Reg", model_name="TS/M291.pt", shape=[0,0], in_channels=3, loss="torch:nn:L1Loss", weights=[0,1]` |
-| `IMPACTSynth` | Content (MSE) + style (Gram) perceptual synthesis loss over two TorchScript models. | `model_content_name`, `model_style_name` (**required**), plus per-branch shapes/channels/weights |
-| `SAM_Perceptual` | SAM2-feature perceptual criterion (2D only). | `train=False, model_name="SAM2.1_Small.pt", weights=None` |
+| `BCE` | Binary cross entropy against a constant real/fake target. | `target=0` |
+| `PatchGanLoss` | Least-squares GAN loss. | `target=0` |
+| `Gram` | Style loss on Gram matrices. | |
+| `PerceptualLoss` | Feature loss through a pretrained KonfAI network. | `model_loader`, `path_model`, `modules`, `shape` |
+| `LPIPS` | Learned perceptual similarity (`konfai[lpips]`), slice by slice on volumes. It ignores global intensity scale: pair it with `MAE` or `PSNR`. | `model="alex"` |
 
-## Optional-dependency criteria
+## Registration and other
 
-Imported lazily; a missing package raises a `MeasureError` with an install hint.
+| Name | Purpose | Key arguments (defaults) |
+| --- | --- | --- |
+| `TRE` | Target registration error between landmarks. | |
+| `GradientImages` | Gradient smoothness (or gradient difference with a target). | |
+| `KLDivergence` | VAE KL term, against the prior N(`mu`, `std`²). | `shape` (required), `dim=100, mu=0, std=1` |
+| `Variance`, `Mean` | Variance or mean of the output (uncertainty). | |
+| `monai.losses:GlobalMutualInformationLoss` | Mutual information (needs MONAI). | |
+| `torch:nn:TripletMarginLoss` | Triplet loss. | |
+| `torchmetrics.image.fid:FrechetInceptionDistance` | FID, over the whole prediction set, never per case. | |
 
-| Name | Extra | Purpose | Key args |
-| --- | --- | --- | --- |
-| `LPIPS` | `konfai[lpips]` | Learned perceptual similarity (AlexNet by default), tiled over patches: a 2-D image whole, a volume slice by slice. | `model="alex"` |
-| `torchmetrics.image.fid:FrechetInceptionDistance` | `torchmetrics` | Fréchet Inception Distance, by classpath. FID is defined over dataset-level feature distributions, so compute it over the whole prediction set, never per case. | see torchmetrics |
+## IMPACT criteria
 
-`LPIPS` rescales the output and the target to [-1, 1], each with its own min and max taken over
-the whole batch. In training, one image's value therefore depends on the other images of its batch;
-a batch of one is rescaled per image. The rescaling also removes any global gain and offset of
-intensity (an output equal to `0.5 * target + 100` scores about 0), so pair it with `MAE` or
-`PSNR` when intensities matter. A constant output or target (a background patch in a batch of one)
-has no range. As a metric (`is_loss: false`, or in `Evaluation.yml`) it scores NaN, which the
-averages skip. As a loss (`is_loss: true`, or `is_loss` left out: `LPIPS` is a loss by default) it
-is rescaled to 0, so the loss and its gradient stay finite; any other input scores the same in both
-roles.
-Under a mask (`CT;MASK`), the voxels outside it are set to 0 in both images and each image of the
-batch is rescaled and scored on its own; the value is the mean over the images whose mask is not
-empty.
+These compare images in the feature space of a pretrained network. They download it from Hugging Face on
+first use, so they need network access once. They read the image statistics that the `Statistics` transform
+records, so add `Statistics` to the chains of the groups they compare. A mask goes after the images
+(`Reference;Mask`).
 
-None of these pins a device. The `IMPACT*` sanity check probes its TorchScript
-extractor on the CPU and discards the result; `LPIPS` follows the device
-of the tensor it is given: the rank's GPU under DDP, or the CPU. `SAM_Perceptual`
-runs no sanity check at all.
+| Name | Purpose | Key arguments (defaults) |
+| --- | --- | --- |
+| `IMPACTReg` | Registration loss on the features of a TorchScript model. | `model_name="TS/M291.pt", shape=[0,0], in_channels=3, loss="torch:nn:L1Loss", weights=[0,1]` |
+| `IMPACTSynth` | Content and style loss for synthesis, on two models. | `model_content_name`, `model_style_name` (required) |
+| `SAM_Perceptual` | Perceptual criterion on SAM2 features (2D). | `train=False, model_name="SAM2.1_Small.pt", weights=None` |
 
 ## Schedulers
 
-KonfAI has **two distinct scheduler families**, resolved by different loaders.
-Don't confuse them. Use this section when filling in a `schedulers:` block: first
-check *which* of the two blocks you are in, then pick a name from the matching
-table.
+There are two kinds, in two different places.
 
-### A. Criterion-weight schedulers
+**Loss weights**, in a criterion's `schedulers:` block:
 
-These schedule the **weight of a loss** over training, in the `schedulers:`
-subtree of a criterion (`konfai/metric/schedulers.py`, base class `Scheduler`):
-
-```yaml
-CrossEntropyLoss:
-  is_loss: true
-  schedulers:
-    Constant: { nb_step: 0, value: 1 }
-```
-
-| Name | Purpose | Config args (defaults) |
+| Name | Purpose | Arguments (defaults) |
 | --- | --- | --- |
-| `Constant` | Fixed weight for all iterations. | `value=1` (+ `nb_step`) |
-| `CosineAnnealing` | Cosine anneal from `start_value` to `eta_min` over `t_max`. | `start_value=1, eta_min=1e-5, t_max=100` (+ `nb_step`) |
+| `Constant` | A fixed weight. | `value=1`, `nb_step` |
+| `CosineAnnealing` | From `start_value` down to `eta_min` over `t_max`. | `start_value=1, eta_min=1e-5, t_max=100`, `nb_step` |
 
-Each entry carries an `nb_step` (window width). Multiple schedulers can be
-**chained** into consecutive iteration windows; an `nb_step: 0` (or `None`)
-window is the terminal, always-on schedule.
+`nb_step` is how many iterations a scheduler lasts; several chain one after the other, and `nb_step: 0` lasts
+until the end.
 
-### B. Learning-rate schedulers
-
-These schedule the **optimizer learning rate**, in the model's `schedulers:`
-block. The loader searches **both** `torch.optim.lr_scheduler` **and**
-`konfai.metric.schedulers`, so you can use any torch scheduler (`StepLR`,
-`ReduceLROnPlateau`, `CosineAnnealingLR`, …) **plus** the two KonfAI additions:
+**Learning rates**, in the model's `schedulers:` block. Any `torch.optim.lr_scheduler` class works
+(`StepLR`, `ReduceLROnPlateau`, `CosineAnnealingLR`, …), plus two from KonfAI:
 
 ```yaml
 schedulers:
-  StepLR: { step_size: 20, gamma: 0.5 }     # any torch LR scheduler works
+  StepLR: { step_size: 20, gamma: 0.5 }
 ```
 
-| Name | Purpose | Config args (defaults) |
+| Name | Purpose | Arguments (defaults) |
 | --- | --- | --- |
-| `Warmup` | Linear LR warmup wrapper (`LambdaLR`). | `warmup_steps=10, last_epoch=-1` (+ `nb_step`) |
-| `PolyLRScheduler` | nnU-Net-style polynomial LR decay `lr = initial_lr·(1 − step/max_steps)^exponent`. | `initial_lr` (**required**), `max_steps` (**required**), `exponent=0.9` (+ `nb_step`) |
-
-The `optimizer` itself is injected by the framework, you do not write it under
-`schedulers:`.
+| `Warmup` | Linear warm-up. | `warmup_steps=10`, `nb_step` |
+| `PolyLRScheduler` | nnU-Net polynomial decay. | `initial_lr`, `max_steps` (required), `exponent=0.9`, `nb_step` |
 
 ## Next steps
 
-- {doc}`models`: the named outputs criteria attach to
-- {doc}`../../config_guide/training`: the `optimizer:` / `schedulers:` blocks
-- {doc}`../../usage/custom-models`: write your own `Criterion`
+- {doc}`models`: the outputs criteria attach to.
+- {doc}`../../config_guide/training`: the `optimizer` and `schedulers` blocks.
+- {doc}`../../usage/custom-models`: writing your own criterion.

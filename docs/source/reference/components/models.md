@@ -1,32 +1,11 @@
 # Models
 
-A KonfAI model is a **named module graph**: a subclass of `konfai.network.network.Network`
-whose modules are wired by `add_module`, or the same graph written as a `.yml`.
-Every module has a dotted path, and that path is what a config writes to attach
-a loss, a metric or an exported prediction to it. This page is the whole model
-story: how outputs are addressed, which networks ship (as Python classes and as
-a declarative catalog), how to write a graph in YAML, and how to seed it from
-weights trained elsewhere. Reference a built-in by `classpath`
-(`classpath: segmentation.UNet.UNet`, or `classpath: default|UNet.yml`).
-
-**"YAML-buildable" column.** A model is buildable from a `.yml` (via the safe
-[YAML model builder](#declarative-yaml-model-graphs)) only if it is a pure graph
-of registry node types. Models whose graph contains a leaf the registry does
-not know (diffusion samplers, StyleGAN, ConvNeXt, VoxelMorph's warping
-components) are written as Python classes instead. (Most of them do not
-override `forward()`; what keeps them out of YAML is the node types they
-compose, not a custom forward pass.) The registry is deliberately small.
+A KonfAI model is a graph of named modules: a `konfai.network.network.Network` subclass built with
+`add_module`, or the same graph written as a `.yml`. Each module has a path, and a config attaches losses,
+metrics and saved outputs to those paths. Pick a model with `classpath`: `segmentation.UNet.UNet` for a
+Python class, `default|UNet.yml` for the YAML catalog, `UNet.yml` for a file next to the config.
 
 ## Model graph and output naming
-
-This section explains the naming scheme behind every `outputs_criterions` and
-`outputs_dataset` key: how KonfAI addresses individual modules inside a model
-graph. Read it before attaching a loss, metric, or exported prediction to a
-model output.
-
-KonfAI models are not treated as opaque single-output blocks. A model is a
-**named module graph**, and KonfAI lets you attach losses, metrics, and exported
-datasets to specific named outputs.
 
 ```{mermaid}
 flowchart TB
@@ -40,52 +19,18 @@ flowchart TB
 
 ```
 
-Every module has a dotted path, and that path is the key you write in the config.
-Two losses can read two different outputs of the same head, which is what the
-dashed arrows above are: `Conv` carries the raw logits CrossEntropy expects,
-`Softmax` the probabilities Dice expects.
-
-### Networks
-
-The core abstractions live in `konfai.network.network`:
-
-- `Network`
-- `ModelLoader`
-- `OptimizerLoader`
-- `TargetCriterionsLoader`
-- `Measure`
-
-The selected model class is configured under `Model.classpath`, then further
-configured under a section named after that class.
-
-Example:
-
-```yaml
-Model:
-  classpath: UNet.yml
-  UNet:
-    parameters:
-      dim: 2
-      nb_class: 41
-```
-
-### Addressing outputs
-
-Losses and metrics are attached through `outputs_criterions`. Keys in this
-mapping correspond to named modules or outputs in the model graph.
-
-Example from the segmentation baseline, which attaches two losses to two different
-outputs of the same head: cross entropy wants logits, Dice wants probabilities:
+A module's path joins the names of its parents with `:`. The segmentation example attaches two losses to
+two outputs of the same head: cross entropy to the logits, Dice to the probabilities.
 
 ```yaml
 outputs_criterions:
-  UNetBlock_0:Head:Conv:          # raw logits
+  UNetBlock_0:Head:Conv:          # logits
     targets_criterions:
       SEG:
         criterions_loader:
           CrossEntropyLoss:
             is_loss: true
-  UNetBlock_0:Head:Softmax:       # class probabilities
+  UNetBlock_0:Head:Softmax:       # probabilities
     targets_criterions:
       SEG:
         criterions_loader:
@@ -94,39 +39,11 @@ outputs_criterions:
             labels: None          # every label present in the patch
 ```
 
-A bare name (`CrossEntropyLoss`, `Dice`) resolves inside the criterion package;
-`torch:nn:CrossEntropyLoss` would import the torch class directly instead.
+The key must match a path exactly; a key that matches none is an error. Each output can have several
+targets, and each target several criteria.
 
-An `outputs_criterions` or `outputs_dataset` key must match a module's dotted
-path **exactly**: the `:` separators between graph levels are load-bearing. A
-key that does not match any module path raises a configuration error at
-runtime.
-
-### Targets and metrics
-
-For each output group you can define one or more target groups, then one or more
-criteria for each target:
-
-```yaml
-outputs_criterions:
-  Head:Tanh:
-    targets_criterions:
-      CT:
-        criterions_loader:
-          MAE:
-            is_loss: true
-```
-
-This structure lets you express:
-
-- multiple heads
-- multiple targets per head
-- multiple losses or metrics per target
-- independent scheduler weights per criterion
-
-A target can also be another output of the model, named by its module path with `:` as an output
-key is. `Representation` trains this way: the anchor embedding is the output, and the positive and
-negative embeddings are the targets, in the order the criterion takes them:
+A target can also be another output of the model. `Representation` trains an anchor embedding against a
+positive and a negative one:
 
 ```yaml
 outputs_criterions:
@@ -138,42 +55,9 @@ outputs_criterions:
             margin: 1.0
 ```
 
-A target output reaches the criterion detached, as a dataset group does: the gradient flows through
-the output the criterion is attached to.
+A target output receives no gradient: it flows only through the output the criterion is attached to.
 
-### Dataset patching vs model patching
-
-KonfAI supports patching at two different levels:
-
-- **dataset patching** with `Dataset.Patch`
-- **model patching** with `Model.<Class>.ModelPatch`
-
-Dataset patching controls what reaches the model. Model patching controls how a
-network internally re-processes those tensors.
-
-The `examples/Synthesis` GAN variant is the clearest example:
-
-- `Dataset.Patch` provides a 3D chunk to the whole GAN
-- `Model.Gan.UNetpp5.ModelPatch` reprocesses the chunk slice-wise inside the generator
-
-### `;accu;` outputs
-
-A network with a `ModelPatch` runs its forward once per patch. Each layer's
-output for one patch is named with the `;accu;` marker before the layer's name;
-the outputs of its terminal modules are then re-assembled and named without it.
-`;accu;` therefore names the patch-wise outputs **before final re-assembly**.
-
-This matters in the synthesis GAN example:
-
-- `Generator_A_to_B:;accu;Head:Tanh` is used for patch-wise reconstruction loss
-- `Discriminator_pB:Head:Conv` is used after the generator output has been re-assembled
-
-### Prediction outputs
-
-Inference uses a separate `outputs_dataset` mapping to decide what should be
-written to disk.
-
-Example:
+Prediction chooses what to save with `outputs_dataset`, keyed the same way:
 
 ```yaml
 outputs_dataset:
@@ -184,98 +68,50 @@ outputs_dataset:
       reduction: Mean
 ```
 
-This lets you control:
+### Patching inside the model
 
-- which model output is exported
-- how multiple predictions are reduced
-- what final transforms are applied before writing files
+`Dataset.Patch` decides what reaches the model; `ModelPatch`, under the model's class, cuts again inside it.
+In the `examples/Synthesis` GAN, the dataset hands 3-D blocks to the GAN and the generator works on 2-D
+slices. With a `ModelPatch`, an output for one patch carries `;accu;` in its path, before the patches are
+put back together: `Generator_A_to_B:;accu;Head:Tanh` is the generator's output patch by patch,
+`Discriminator_pB:Head:Conv` a module reading the reassembled volume.
 
 ## Python models
 
-The built-in `Network` subclasses under `konfai/models/python/`, by family.
+Classpaths are relative to `konfai.models.python`. The last column says whether the model also exists in the
+YAML catalog.
 
-### Segmentation: `konfai.models.python.segmentation`
+### Segmentation
 
-`PlainConvUNet` is the parametric nnU-Net backbone (n_stages / features_per_stage /
-strides / n_conv_per_stage as real arguments), weight-exact to
-`dynamic_network_architectures.PlainConvUNet` for any topology: a real nnU-Net /
-TotalSegmentator / MRSeg checkpoint loads into it through the pretrained bridge. Every
-decoder resolution has a deep-supervision head as a named output.
-
-`SMP` wraps any `segmentation_models_pytorch` architecture/encoder pair (Unet,
-UnetPlusPlus, FPN, DeepLabV3Plus, … × resnet/efficientnet/timm encoders), with
-optional ImageNet encoder weights (`encoder_weights: imagenet`) that survive
-training start. 2D-only (SMP's encoder zoo is 2D); use slice-wise patches or
-2.5D channels on volumes. Requires `pip install konfai[smp]`.
-
-| Model | Classpath | Purpose | Key args (defaults) | Dims | YAML-buildable |
+| Model | Classpath | Purpose | Key arguments (defaults) | Dims | YAML |
 | --- | --- | --- | --- | --- | --- |
-| `UNet` | `segmentation.UNet.UNet` | Classic encoder–decoder U-Net; optional attention gates and deep-supervision heads. | `channels=[1,64,128,256,512,1024]`, `nb_class=2`, `dim=3`, `block_config=BlockConfig()`, `nb_conv_per_stage=2`, `downsample_mode="MAXPOOL"`, `upsample_mode="CONV_TRANSPOSE"`, `attention=False`, `block_type="Conv"` | 2D / 3D | Yes |
-| `NestedUNet` | `segmentation.NestedUNet.NestedUNet` | UNet++ with dense nested skips and per-level deep-supervision heads. | as `UNet` + `activation="Softmax"` | 2D / 3D | Yes |
-| `UNetPlusPlus` | `segmentation.unetplusplus.UNetPlusPlus` | Parametric UNet++ on a **pretrained ResNet backbone**: **weight-exact vs `smp.UnetPlusPlus`** (resnet18/34). Use this to load an smp / ImpactSynth checkpoint into an addressable KonfAI graph. | `dim=2`, `in_channels=3`, `classes=1`, `encoder_name="resnet34"`, `decoder_channels=[256,128,64,32,16]`, `activation=None` (`"tanh"` for sCT) | 2D or 3D | Yes (params) |
-| `ResidualEncoderUNet` | `segmentation.residualencoderunet.ResidualEncoderUNet` | Parametric nnU-Net **residual-encoder** U-Net for any topology: **weight-exact vs `dynamic_network_architectures.ResidualEncoderUNet`**. Loads a real nnU-Net ResEnc / ImpactSeg checkpoint via the bridge. | `dim=3`, `in_channels=1`, `n_stages=6`, `features_per_stage=[32,64,128,256,320,320]`, `strides=[1,2,2,2,2,2]`, `n_blocks_per_stage=[1,3,4,6,6,6]`, `num_classes=2`, `deep_supervision=True` | 2D / 3D | Yes (params) |
+| `UNet` | `segmentation.UNet.UNet` | U-Net, with optional attention and deep supervision. | `channels=[1,64,128,256,512,1024]`, `nb_class=2`, `dim=3`, `attention=False` | 2D/3D | yes |
+| `NestedUNet` | `segmentation.NestedUNet.NestedUNet` | UNet++ with a head per level. | as `UNet` | 2D/3D | yes |
+| `UNetPlusPlus` | `segmentation.unetplusplus.UNetPlusPlus` | UNet++ on a pretrained ResNet, weight-exact to `smp.UnetPlusPlus` (loads ImpactSynth checkpoints). | `dim=2`, `in_channels=3`, `classes=1`, `encoder_name="resnet34"`, `activation=None` | 2D/3D | yes |
+| `ResidualEncoderUNet` | `segmentation.residualencoderunet.ResidualEncoderUNet` | nnU-Net residual-encoder U-Net, weight-exact (loads ImpactSeg checkpoints). | `dim=3`, `n_stages=6`, `features_per_stage`, `strides`, `n_blocks_per_stage`, `num_classes=2`, `deep_supervision=True` | 2D/3D | yes |
+| `PlainConvUNet` | `segmentation.plainconvunet.PlainConvUNet` | nnU-Net plain U-Net, weight-exact (loads TotalSegmentator and MRSegmentator checkpoints). | `n_stages`, `features_per_stage`, `strides`, `n_conv_per_stage` | 2D/3D | yes |
+| `SMP` | `segmentation.smp.SMP` | Any `segmentation_models_pytorch` architecture and encoder, with optional ImageNet weights (`konfai[smp]`). | `arch`, `encoder_name`, `encoder_weights` | 2D | no |
 
-Two UNet++ flavours: `NestedUNet` (academic, plain-conv encoder trained from scratch) and
-`UNetPlusPlus` (the **smp-faithful** UNet++ with a real pretrained ResNet backbone: the one
-that loads `smp.UnetPlusPlus` checkpoints). Pick `UNetPlusPlus` when you need smp
-weight-compatibility (e.g. the ImpactSynth app).
+### Other families
 
-The `Model:UNetpp5` used in the `Synthesis` example is a **local** class in
-`examples/Synthesis/Model.py` wrapping `segmentation_models_pytorch`; the built-in
-`UNetPlusPlus` above is the maintained, smp-weight-exact equivalent.
-
-### Classification: `konfai.models.python.classification`
-
-| Model | Classpath | Purpose | Key args (defaults) | Dims | YAML-buildable |
-| --- | --- | --- | --- | --- | --- |
-| `ResNet` | `classification.resnet.ResNet` | ResNet-18/34/50/101/152 family with torchvision-compatible weight aliases. | `dim=3`, `in_channels=1`, `depths=[2,2,2,2]`, `widths=[64,64,128,256,512]`, `num_classes=10`, `use_bottleneck=False` | 2D / 3D | Yes |
-| `ConvNeXt` | `classification.convNeXt.ConvNeXt` | ConvNeXt (tiny→xlarge presets) with a multi-head classifier (`num_classes` is a list). | `dim=3`, `in_channels=1`, `depths=[3,3,27,3]`, `widths=[128,256,512,1024]`, `drop_p=0.1`, `num_classes=[4,7]` | 2D or 3D (`dim` parameterised) | No (non-registry leaves) |
-
-### Generation: `konfai.models.python.generation`
-
-| Model | Classpath | Purpose | Dims | YAML-buildable |
+| Model | Classpath | Purpose | Dims | YAML |
 | --- | --- | --- | --- | --- |
-| `VAE` | `generation.vae.VAE` | Convolutional auto-encoder. **Deterministic**: despite the name there is no latent sampling. | 2D / 3D | Yes |
-| `LinearVAE` | `generation.vae.LinearVAE` | Fully-connected variational AE (`LatentDistribution` reparam bottleneck). Pairs with the `KLDivergence` loss. | 1D (flat vectors) | No (`LatentDistribution`) |
-| `Generator` / `Discriminator` / `Gan` | `generation.gan.*` | PatchGAN discriminator + ResNet-autoencoder generator + composite adversarial graph. | 2D / 3D | No |
-| `DiffusionGan`, `DiffusionGanV2`, `DiffusionCycleGan`, `CycleGan*` | `generation.diffusionGan.*` | Adversarial + diffusion + CycleGAN family. | 2D / 3D | No |
-| `cStyleGan.Generator` | `generation.cStyleGan.Generator` | Conditional StyleGAN-style generator with weight-modulated convs. **Construction only: its forward raises a `RuntimeError`**, so it cannot be trained or run as shipped. | 2D / 3D | No |
+| `ResNet` | `classification.resnet.ResNet` | ResNet-18 to 152, torchvision-compatible. | 2D/3D | yes |
+| `ConvNeXt` | `classification.convNeXt.ConvNeXt` | ConvNeXt with one classifier per task. | 2D/3D | no |
+| `VAE` | `generation.vae.VAE` | Convolutional auto-encoder (no latent sampling). | 2D/3D | yes |
+| `LinearVAE` | `generation.vae.LinearVAE` | Variational auto-encoder on vectors; pairs with `KLDivergence`. | 1D | no |
+| `Gan`, `Generator`, `Discriminator` | `generation.gan.*` | GAN with a PatchGAN discriminator. | 2D/3D | no |
+| `DiffusionGan`, `CycleGan*`, … | `generation.diffusionGan.*` | Adversarial, diffusion and CycleGAN models. | 2D/3D | no |
+| `VoxelMorph` | `registration.registration.VoxelMorph` | Learned deformable registration. | 2D/3D | no |
+| `Representation` | `representation.representation.Representation` | Triplet representation learning (above). | 3D | no |
+| `MIND` | `features.mind.MIND` | MIND feature descriptor. | 2D/3D | no |
 
-### Registration: `konfai.models.python.registration`
-
-| Model | Classpath | Purpose | Dims | YAML-buildable |
-| --- | --- | --- | --- | --- |
-| `VoxelMorph` | `registration.registration.VoxelMorph` | Learning-based deformable/rigid registration (U-Net flow field + spatial-transformer warp + scaling-and-squaring integration). `dim` 2 or 3 (default 3), with a `shape` of that many axes. | 2D / 3D | No |
-
-### Representation: `konfai.models.python.representation`
-
-| Model | Classpath | Purpose | Dims | YAML-buildable |
-| --- | --- | --- | --- | --- |
-| `Representation` | `representation.representation.Representation` | Triplet representation learner: a frozen conv encoder + trainable linear projection head, shared by three inputs whose embeddings are the outputs `Model:Anchor`, `Model:Positive` and `Model:Negative` (see [Targets and metrics](#targets-and-metrics)). | 3D | No |
-
-### Features: `konfai.models.python.features`
-
-| Model | Classpath | Purpose | Dims |
-| --- | --- | --- | --- |
-| `MIND` | `features.mind.MIND` | Modality-independent neighbourhood-descriptor feature extractor (used as a registration/synthesis feature space). | 2D/3D |
+At inference, a GAN runs only its generator. `cStyleGan.Generator` builds but cannot run.
 
 ## Declarative YAML model graphs
 
-The YAML model builder describes a complete
-network as a `.yml` file instead of a Python class. Use it when you want a
-model that lives entirely in configuration, with the same named outputs and
-routing as code-defined models.
-
-`konfai.utils.model_builder` builds a full `konfai.network.network.Network`.
-Every YAML entry is installed through `ModuleArgsDict.add_module`, so YAML
-models support the same named outputs, branch routing, aliases, checkpoint
-metadata, optimizer configuration, and loss attachment as Python models.
-
-The segmentation example is defined in `examples/Segmentation/UNet.yml`; its
-training and prediction configs load it with `classpath: UNet.yml`. The older
-Python `konfai.models.python.segmentation.UNet` remains available for compatibility.
-
-### Document structure
+A `.yml` can describe a whole network. The result is a real `Network`: named outputs, routing, aliases,
+optimizer and losses work exactly as for a Python model.
 
 ```yaml
 name: RoutedHead
@@ -302,254 +138,74 @@ modules:
     args: {dim: 1}
 ```
 
-`build_model_from_yaml(yaml_path="model.yml")` returns a `YamlNetwork`, not a
-`torch.nn.Sequential`. `ModelLoader` also accepts `.yml` and `.yaml` paths.
-**Relative paths are resolved next to the active `KONFAI_config_file`**: the
-model `.yml` is looked up relative to the config file that references it, not
-the current working directory.
+- `${name}` reads a parameter (`${channels.2}` for a list item). The config can override `parameters`
+  under the model's section.
+- A module takes the routing fields of `add_module`: `in_branch`, `out_branch`, `alias`, `pretrained`,
+  `requires_grad`, `training`. A nested `modules` list makes a sub-graph (`Encoder:Conv`).
+- `$object: BlockConfig` builds a configuration object, `$multiply` multiplies numbers.
+- A relative `.yml` path is read next to the config that names it.
+- Only registered module types are allowed, and nothing is evaluated or imported: a `.yml` from someone
+  else is safe to build. `list_registered_modules()` lists the types (convolutions, pooling, normalization,
+  activations, `Linear`, `Concat`, `Add`, `ConvBlock`, `ResBlock`, `Attention`, `MultiHeadSelfAttention`,
+  …); `register_module(name, cls)` adds a trusted one.
 
-### Routing and nested graphs
+`examples/Segmentation/UNet.yml` is a complete example.
 
-Module entries accept the routing fields from `add_module`:
+### The catalog
 
-- `in_branch` and `out_branch`
-- `alias`
-- `pretrained`
-- `requires_grad`
-- `training`
-
-A nested `modules` list creates a `ModuleArgsDict` subgraph:
-
-```yaml
-modules:
-  - name: Encoder
-    modules:
-      - name: Conv
-        type: Conv2d
-        args: {in_channels: 1, out_channels: 8, kernel_size: 3, padding: 1}
-  - name: Preserve
-    type: Identity
-    out_branch: [1]
-  - name: Join
-    type: Concat
-    in_branch: [0, 1]
-```
-
-Module paths remain stable (`Encoder:Conv`, `Join`, and so on) for
-`outputs_criterions` and `outputs_dataset`.
-
-### Parameters and safe objects
-
-An exact `${path}` value references `parameters`; list indices use dotted
-numbers such as `${channels.2}`. Runtime configuration can override the entire
-`parameters` mapping under the model section.
-
-Some KonfAI blocks need configuration objects. They are constructed through a
-separate safe object registry:
-
-```yaml
-parameters:
-  block_configs:
-    - $object: BlockConfig
-      args:
-        kernel_size: 3
-        padding: 1
-        activation: ReLU
-        norm_mode: NONE
-modules:
-  - name: Block
-    type: ConvBlock
-    args:
-      in_channels: 1
-      out_channels: 32
-      dim: 2
-      block_configs: ${block_configs}
-```
-
-`$multiply` provides safe numeric multiplication for derived channel counts.
-No YAML value is passed to `eval` or used as an import path.
-
-### Registry
-
-Built-ins, grouped:
-
-- **Dimension-aware factories** (pick the 1-D/2-D/3-D variant from `dim`):
-  `Conv`, `ConvTranspose`, `MaxPool`, `AvgPool`, `AdaptiveAvgPool`, `BatchNorm`,
-  `InstanceNorm`; explicit `Conv1d`/`Conv2d`/`Conv3d` and `Dropout`/`Dropout1d`/`2d`/`3d`.
-- **Normalization / regularization:** `GroupNorm`, `LayerNorm`, `Dropout`.
-- **Activations:** `ReLU`, `LeakyReLU`, `PReLU`, `GELU`, `Sigmoid`, `Tanh`, `Softmax`.
-- **Linear / shape:** `Linear`, `Flatten`, `Upsample`, `Identity`, `Permute`, `View`,
-  `Select`, `Unsqueeze`, `ArgMax`.
-- **Routing leaves:** `Concat`, `Add`, `Multiply`.
-- **Composite blocks:** `ConvBlock`, `ResBlock`, `Attention`.
-- **Transformer:** `MultiHeadSelfAttention`, `PositionalEmbedding` (with `LayerNorm`,
-  `Linear`, `GELU`): enough to express a ViT encoder.
-
-Call `list_registered_modules()` for the authoritative, up-to-date list. Applications
-may add a trusted `torch.nn.Module` subclass with `register_module(name, cls)`.
-Duplicate names and non-module classes raise `ConfigError`.
-
-### Shipped model catalog
-
-`konfai/models/` is split by form: `python/` holds the builtin Python model classes
-(referenced as `classpath: segmentation.UNet.UNet`), `yaml/` the declarative catalog.
-KonfAI ships a catalog of common medical-imaging architectures as declarative YAML
-under `konfai/models/yaml/`. Reference one from any config with a `default|` marker: the declarative counterpart of a Python model classpath:
+`default|<Name>.yml` picks a model from KonfAI's catalog (`konfai/models/yaml/`):
 
 ```yaml
 Model:
   classpath: default|AttentionUNet.yml
 ```
 
-Every catalog entry is built from the curated registry (no code execution) and is
-locked by a test at the strongest available level: weight-exact graph equivalence
-against a reference implementation where one exists, otherwise a structural check
-(builds, forward on 2-D and 3-D inputs, correct output shape, deep-supervision heads)
-with any divergence from the reference documented in the file header:
+| Entry | Checked against | Loads weights from |
+| --- | --- | --- |
+| `UNet`, `NestedUNet`, `ResNet` | KonfAI's Python classes, weight-exact | KonfAI checkpoints |
+| `SegResNet`, `VNet`, `DynUNet` | MONAI, weight-exact | MONAI |
+| `ResNet18`, `VGG16` | torchvision, weight-exact | torchvision ImageNet |
+| `PlainConvUNet` | nnU-Net, weight-exact | nnU-Net, TotalSegmentator, MRSegmentator |
+| `ResidualEncoderUNet` | nnU-Net, weight-exact | nnU-Net ResEnc, ImpactSeg |
+| `UNetPlusPlus` | `segmentation_models_pytorch`, weight-exact | smp, ImpactSynth |
+| `ViT` | MONAI's encoder features | |
+| `AttentionUNet`, `UNETR` | structure only (the graph differs from MONAI's, as documented in the file) | |
 
-| Entry | Validation | Loads pretrained from |
-|---|---|---|
-| `UNet`, `NestedUNet`, `ResNet` | weight-exact vs their KonfAI Python classes | KonfAI checkpoints |
-| `SegResNet`, `VNet`, `DynUNet` | weight-exact vs MONAI | MONAI checkpoints (via the bridge) |
-| `ResNet18` | weight-exact vs torchvision ResNet-18 | torchvision ImageNet (via the bridge) |
-| `PlainConvUNet` | weight-exact vs nnU-Net `dynamic_network_architectures.PlainConvUNet` | nnU-Net / TotalSegmentator / MRSeg checkpoints (via the bridge) |
-| `VGG16` | weight-exact vs torchvision (all 5 feature maps exact) | torchvision ImageNet (via the bridge) |
-| `ViT` | structural + encoder token-features allclose vs MONAI |: (encoder maths verified) |
-| `AttentionUNet`, `UNETR` | structural-strict (graph differs from MONAI, documented) |: |
-| `ResidualEncoderUNet` *(parametric)* | weight-exact vs nnU-Net `dynamic_network_architectures.ResidualEncoderUNet` (`deep_supervision` toggle) | nnU-Net ResEnc / ImpactSeg checkpoints (via the bridge) |
-| `UNetPlusPlus` *(parametric)* | weight-exact vs `segmentation_models_pytorch.UnetPlusPlus` (ResNet-18/34 encoder, `activation` configurable) | smp / ImpactSynth checkpoints (via the bridge) |
+`VGG16` exposes its five feature maps (`Block_0:Out` to `Block_4:Out`) for perceptual losses.
 
-`PlainConvUNet`, `ResidualEncoderUNet` and `UNetPlusPlus` ship **both** ways: as a
-fixed-topology entry in the catalog above, and as a **parametric** Python class
-(`konfai/models/python/segmentation/`). Reference the class when you want one model to
-cover any depth / width / class count and declare the architecture inline: e.g.
+### Which form to use
 
-```yaml
-Model:
-  classpath: segmentation.residualencoderunet.ResidualEncoderUNet
-  ResidualEncoderUNet:
-    dim: 2
-    in_channels: 5
-    n_stages: 6
-    features_per_stage: [24, 48, 96, 192, 256, 256]
-    strides: [1, 2, 2, 2, 2, 2]
-    n_blocks_per_stage: [1, 2, 2, 3, 3, 3]
-    num_classes: 12
-    deep_supervision: false
-```
+| You want to | Use |
+| --- | --- |
+| Run a model as it is, one output, one loss | its class directly: `classpath: monai.networks.nets:SegResNet` |
+| Supervise inner layers, or edit the architecture without code | the catalog: `default\|SegResNet.yml` |
+| The same, starting from someone's pretrained weights | the catalog and `pretrained_from` (below) |
 
-`VGG16` is the feature-extractor entry: it exposes five named multi-layer outputs
-(`Block_0:Out` … `Block_4:Out`, channels 64/128/256/512/512: the torchvision
-`features` slices `[0:4]/[4:9]/[9:16]/[16:23]/[23:30]`) so a perceptual / feature /
-IMPACT-style loss can be attached to any of them through `outputs_criterions`.
+A model named by its class is a black box: only its final output can take a loss. The YAML form makes every
+module addressable.
 
-The MCP server lists the catalog via `list_components(kind="model")` alongside the
-Python model classes.
+## Starting from other weights: `pretrained_from`
 
-### Which form should I use?
-
-There are three ways to put a common architecture into a KonfAI config, and they are
-not redundant: pick by what you need:
-
-| You want to… | Use | Why |
-|---|---|---|
-| Train/run the vanilla model as-is, one output, one loss | `classpath: monai.networks.nets:SegResNet` (or any installed class) | KonfAI wraps any `nn.Module` in `MinimalModel` automatically: no rebuild needed. Simplest path. |
-| Supervise **internal** layers (deep supervision, feature/perceptual losses), edit the architecture without code, or share it safely | `classpath: default\|SegResNet.yml` | The YAML builds a KonfAI `Network` whose every submodule is addressable in `outputs_criterions`, editable in YAML, and safe by construction (registry-only, no imported code). |
-| Do the above **and** start from someone's pretrained weights | `default\|<Name>.yml` + the pretrained bridge (below) | You get the reference's trained weights inside the addressable KonfAI graph. |
-
-An imported `nn.Module` is a black box: only its final output is visible to KonfAI's
-loss/evaluation machinery. The YAML form is what unlocks per-node supervision, that is
-the reason to rebuild an architecture rather than import it.
-
-### Configuration example
-
-```yaml
-Trainer:
-  Model:
-    classpath: UNet.yml
-    UNet:
-      parameters:
-        dim: 2
-        channels: [1, 32, 64, 128, 256]
-        nb_class: 41
-      optimizer:
-        name: AdamW
-        lr: 0.001
-      outputs_criterions:
-        UNetBlock_0:Head:Conv:
-          targets_criterions: {}
-```
-
-See `examples/Segmentation/UNet.yml` for a complete routed encoder/decoder with
-skip connections and nested heads.
-
-## Building blocks (`konfai.network.blocks`)
-
-If you author your own model (as a Python `Network` or a YAML graph) these
-reusable pieces are the vocabulary:
-
-- **Conv graphs:** `ConvBlock` (`[Conv → Norm → Activation]×N`), `ResBlock`
-  (residual with projected skip), `Attention` (Attention-U-Net gate),
-  `LatentDistribution` (VAE reparameterisation, exposes `mu`/`log_std`/`z`;
-  `log_std` holds the log-variance).
-- **`BlockConfig`**: one conv stage: `kernel_size=3, stride=1, padding=1,
-  bias=True, activation="ReLU", norm_mode="NONE"`. `activation` accepts a name,
-  a `";"`-separated spec (`"LeakyReLU;0.2;True"`), a callable, or `None`.
-- **Enums:** `NormMode` (`NONE/BATCH/INSTANCE/GROUP/LAYER/SYNCBATCH/INSTANCE_AFFINE`),
-  `UpsampleMode` (`CONV_TRANSPOSE/UPSAMPLE`), `DownsampleMode`
-  (`MAXPOOL/AVGPOOL/CONV_STRIDE`). `SYNCBATCH` builds a `torch.nn.SyncBatchNorm`,
-  which synchronises its statistics across GPUs and refuses CPU tensors in
-  training: for a multi-process CPU run (`--cpu N` with N > 1) use `BATCH`.
-- **Tensor ops** (leaf modules): `Add`, `Multiply`, `Concat`, `Detach`,
-  `ArgMax`, `Select`, `View`, `Permute`, `NormalNoise`, and more.
-
-## Start from MONAI, torchvision or nnU-Net weights (`pretrained_from`)
-
-A fresh TRAIN can seed its model from a checkpoint trained in another
-framework, from config alone. `Model.pretrained_from` builds the reference
-network, loads the checkpoint into it, and transfers the weights into the
-KonfAI graph by forward-execution order (no key map): the bridge fills **every**
-target tensor or raises, so a partial transfer is never reported as success.
-It then runs the reference and the seeded model on the same input and raises a
-`ConfigError` unless each tensor the reference returns (every head of an nnU-Net
-deep-supervision list) is reproduced by a named output of the model, to 1e-3 of
-its largest magnitude. Layers paired in the wrong order are caught there when that
-changes a tensor the reference returns (two same-shaped heads that trade places
-each still find a match); heads the KonfAI graph adds of its own (Softmax, ArgMax)
-do not matter. A ModelPatch that tiles the input, on the model or on a network
-nested in it, is lifted for the check, which runs the input whole, as the reference
-did. A ModelPatch with an axis of 1 (a 2D or 2.5D graph in a 3D workflow) squeezes
-that axis, so the graph cannot run the input whole: such a model is seeded without
-this check.
+A new training can start from a checkpoint trained in another framework:
 
 ```yaml
 Trainer:
   Model:
     classpath: default|PlainConvUNet.yml
     pretrained_from:
-      checkpoint: ./nnunet_fold0.pt        # raw state_dict, or a dict with a 'state_dict' entry;
-                                           # an https:// URL is accepted (weights-only load)
-      builder: monai.networks.nets:UNet    # classpath of the reference class
+      checkpoint: ./nnunet_fold0.pt        # a state_dict (or an https:// URL)
+      builder: monai.networks.nets:UNet    # the class the checkpoint belongs to
       args: {spatial_dims: 3, in_channels: 1, out_channels: 2, channels: [32, 64], strides: [2]}
-      input_shape: [96, 96, 96]            # optional; else derived from the model's own
-                                           # patch size or downsampling factors
+      input_shape: [96, 96, 96]            # optional
 ```
 
-The seed runs only on a fresh TRAIN: a RESUME or PREDICTION checkpoint always
-wins, and PREDICTION never builds (or needs) the reference. A multi-input graph
-or a free-axis patch size cannot derive a synthetic input on its own:
-`input_shape` is the escape hatch, and the failure is a `ConfigError` naming
-`Model.pretrained_from`. The transfer itself is
-`konfai.utils.pretrained.transfer_weights_by_execution_order` (see the API
-reference).
+KonfAI builds the original model, loads the checkpoint, copies the weights into the KonfAI graph layer by
+layer in execution order, then checks that the KonfAI model reproduces the original's outputs. Any mismatch
+is an error: a partial copy is never accepted. It only applies to a new `TRAIN`; `RESUME` and `PREDICTION`
+use their own checkpoint. Give `input_shape` when the model cannot guess an input (several inputs, a free
+patch axis).
 
-### Loading pretrained weights
-
-A catalog entry that is weight-exact to a reference (e.g. `SegResNet.yml` ↔ MONAI
-`SegResNet`) can be loaded from that reference's checkpoint even though the two use
-different module names, via `konfai.utils.pretrained.transfer_weights_by_execution_order`.
-It pairs the two graphs' weighted leaves in forward-execution order and copies them with
-a shape check, so no hand-written key map is needed:
+From Python, `konfai.utils.pretrained.transfer_weights_by_execution_order` does the same copy:
 
 ```python
 from monai.networks.nets import SegResNet
@@ -558,7 +214,7 @@ from konfai.utils.pretrained import transfer_weights_by_execution_order
 
 reference = SegResNet(spatial_dims=3, init_filters=8, in_channels=1, out_channels=2,
                       blocks_down=(1, 2, 2, 4), blocks_up=(1, 1, 1))
-reference.load_state_dict(torch.load("segresnet_pretrained.pt"))  # your trained checkpoint
+reference.load_state_dict(torch.load("segresnet_pretrained.pt"))
 
 net = build_model_from_yaml(yaml_path="konfai/models/yaml/SegResNet.yml",
                             parameters={"dim": 3, "upsample_mode": "trilinear", "nb_class": 2})
@@ -570,18 +226,11 @@ transfer_weights_by_execution_order(
 )
 ```
 
-The transfer is strict: if the two graphs are not weight-exact (different leaf count or a
-mismatched shape) it raises `ConfigError` rather than silently mis-loading a network.
+## A different number of classes: `allow_head_resize`
 
-## Fine-tuning across a different head (`allow_head_resize`)
-
-By default a checkpoint load **refuses shape mismatches**: the strict load
-raises, naming the tensor and both shapes. To fine-tune across a head whose
-shape changed (a different label count, say), opt in with
-`Model.allow_head_resize: true`: the load then warm-starts the overlapping
-slice of each mismatched tensor and logs a warning per resized tensor. The
-loader propagates the opt-in to every nested network and can only enable it,
-never disable a model class's own constructor opt-in.
+A checkpoint whose tensor shapes differ from the model's is refused. To fine-tune with a different number
+of classes, set `allow_head_resize: true`: the matching part of each tensor is loaded, and each resized
+tensor is reported.
 
 ```yaml
 Trainer:
@@ -590,10 +239,19 @@ Trainer:
     allow_head_resize: true
 ```
 
+## Building blocks
+
+To write your own model, `konfai.network.blocks` provides:
+
+- `ConvBlock` (convolution, normalization, activation), `ResBlock`, `Attention`, `LatentDistribution`;
+- `BlockConfig` for one convolution stage (`kernel_size=3, stride=1, padding=1, activation="ReLU",
+  norm_mode="NONE"`);
+- `NormMode` (`NONE`, `BATCH`, `INSTANCE`, `GROUP`, `LAYER`, `SYNCBATCH`), `UpsampleMode`, `DownsampleMode`.
+  `SYNCBATCH` needs GPUs: use `BATCH` for a multi-process CPU run;
+- small modules: `Add`, `Multiply`, `Concat`, `Detach`, `ArgMax`, `Select`, `View`, `Permute`.
+
 ## Next steps
 
-- {doc}`losses-metrics`: attach losses and metrics to a model's named outputs.
-- {doc}`../../usage/custom-models`: subclass `Network` yourself.
-- {doc}`../../usage/adopting-konfai`: the routes into KonfAI from an existing
-  PyTorch, MONAI or nnU-Net model.
-- {doc}`../../examples/segmentation`: a complete training run driven by `UNet.yml`.
+- {doc}`losses-metrics`: the losses and metrics.
+- {doc}`../../usage/custom-models`: writing your own `Network`.
+- {doc}`../../usage/adopting-konfai`: bringing a PyTorch, MONAI or nnU-Net model.
