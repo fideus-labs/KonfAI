@@ -27,7 +27,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from konfai.utils.errors import KonfAIWarning
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning
 
 #: The suffix an entry is moved to while its replacement is published. Per pid, so two writers of
 #: one entry never share a backup.
@@ -69,9 +69,17 @@ def staged_entry(final: Path) -> Iterator[Path]:
     (MetaImage's ``.raw``, Analyze's ``.img``). On a clean exit each file it made is published beside ``final``
     under its own name, the companions first and ``final`` last, so a reader meets the entry complete; the pixel files
     the replaced entry read go once it is replaced, when named after it. A MetaImage written under a pixel name of its
-    own (``transfer_entry``) is thus replaced whole or not at all; Analyze pairs its files by name and cannot be."""
+    own (``transfer_entry``) is thus replaced whole or not at all. Analyze pairs its files by name, so two renames
+    could leave the old header over the new pixels: an existing pair is refused, before any work."""
     from konfai.utils.dataset.stream import DataStream  # stream builds on this module
 
+    if final.name.lower().endswith(".hdr") and final.exists():
+        raise DatasetManagerError(
+            f"'{final}' already exists as an Analyze pair (.hdr/.img), which cannot be replaced whole: "
+            "its two files pair by name.",
+            "Write to a new destination, remove the existing pair first, or use .nii.gz, "
+            "which holds its pixels in the same file.",
+        )
     directory = final.with_name(f".{final.name}.{DataStream.temporary_suffix()}")
     directory.mkdir(parents=True)
     try:
