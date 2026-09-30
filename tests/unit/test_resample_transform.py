@@ -174,6 +174,7 @@ def test_a_float32_field_is_warped_and_says_what_the_float64_transform_says(
 
     captured: list[tuple] = []
     real_resample = transform_module._resample_with_sitk
+    transform_module._itk_picks_as_the_walk()  # cached here: its probe resamples through the same call
 
     def capture(payload, region, source, stages, starts, mode, fill, sitk_input=None):
         captured.append((payload, region, source, stages, starts, mode, fill))

@@ -17,6 +17,7 @@
 
 """Resampling onto a target grid: reference grids, stored maps, displacement fields, the SimpleITK host path."""
 
+import functools
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from konfai.data.sampling import (
     gather,
     gather_separable,
     sampling_dtype,
+    scanline_index,
+    scanline_map,
     separable_source_index,
     source_index,
     source_index_rows,
@@ -311,6 +314,32 @@ def _warp_field_float32(stages: SpatialStages, region: Grid) -> "Any | None":
     field.SetSpacing(np.asarray(grid.spacing_xyz, dtype=np.float64).tolist())
     field.SetDirection(np.asarray(grid.direction_xyz, dtype=np.float64).ravel().tolist())
     return field
+
+
+@functools.cache
+def _itk_picks_as_the_walk() -> bool:
+    """Whether this platform's ITK reads a change of grid at the index the walk reads
+    (:func:`~konfai.data.sampling.scanline_index`). ITK's arithmetic is its compiler's, which fuses
+    multiply-adds on some platforms and so moves an exact half-voxel tie. Where it does not pick as the
+    walk picks, a whole volume is walked as its regions are, so a route or a budget never changes a voxel.
+    Probed once per process on a half-spacing resample of a permuted and of an oblique grid."""
+    if sitk is None:
+        return False
+    tilt = np.deg2rad(3.0)
+    permuted = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    oblique = np.array([[1.0, 0.0, 0.0], [0.0, np.cos(tilt), -np.sin(tilt)], [0.0, np.sin(tilt), np.cos(tilt)]])
+    origin, spacing = np.array([-11.3, 5.9, 3.3]), np.array([0.77, 1.31, 2.05])
+    volume = torch.arange(7.0 * 9 * 11, dtype=torch.float64).reshape(1, 7, 9, 11)
+    for direction in (permuted, oblique @ permuted):
+        source = Grid((7, 9, 11), origin, spacing, direction)
+        target = Grid((14, 18, 22), origin, spacing / 2, direction)
+        itk = _resample_with_sitk(volume, target, source, (), [0, 0, 0], "nearest", 0.0)
+        with coordinate_precision(torch.float64):
+            index = scanline_index(target, source, tuple(slice(0, extent) for extent in target.size_zyx), volume.device)
+            walked = gather(volume, index, [0, 0, 0], [7, 9, 11], "nearest", 0.0, True)
+        if itk is None or not torch.equal(itk, walked):
+            return False
+    return True
 
 
 def _resample_with_sitk(
@@ -831,8 +860,9 @@ class Resample(TransformInverse):
     def slab_height_sensitive(self, name: str) -> bool:
         """Whether this case's streamed values can depend on the slab height: only a map that does
         not factorise (a rotation, a displacement field) interpolates through per-voxel coordinates
-        whose float rounding differs with where the region starts. True when the headers cannot
-        settle it."""
+        whose float rounding differs with where the region starts, and a change of grid with no map
+        is walked as ITK walks the whole grid (``scanline_map``). True when the headers cannot settle
+        it."""
         try:
             source, target = self._grids_of(name)
             if self.displacement is not None:
@@ -845,7 +875,8 @@ class Resample(TransformInverse):
                 if not stored.affine:
                     return True
                 stages = (AffineStage(stored.bound.affine),)
-            return separable_source_index(target, source, stages, torch.device("cpu")) is None
+            walked_as_itk = self.interpolation != "cubic" and scanline_map(target, source, stages)
+            return separable_source_index(target, source, stages, torch.device("cpu")) is None and not walked_as_itk
         except Exception:  # nosec B110 - a map this cannot read is priced as the general path
             return True
 
@@ -1283,7 +1314,7 @@ class Resample(TransformInverse):
         # A map that factorises is read one axis at a time, the same arithmetic without the terms
         # that are zero and without a coordinate per voxel, and it is most maps. The general form is
         # what a rotation or a displacement needs; the two are bit-identical wherever both apply.
-        axes = separable_source_index(region, source, stages, sub_tensor.device)
+        axes = separable_source_index(target, source, stages, sub_tensor.device, target_slices)
         if axes is not None:
             order = blend_order(target, source)
             return gather_separable(sub_tensor, axes, region_starts, shape, mode, self.fill_value, order)
@@ -1294,47 +1325,76 @@ class Resample(TransformInverse):
         # INTEGER payload that ulp can straddle a truncation boundary and become one whole unit
         # (2 voxels in 7560 through a rotation, pinned in test_sampling.py); a nearest pick copies
         # voxels and has no such seam. On the host the exact answer is also the cheapest.
-        if sub_tensor.device.type == "cpu" and sitk is not None:
+        #
+        # A REGION is read by the filter through its own origin and scanline, not the whole grid's,
+        # which moves exact half-voxel ties. With no map between the grids, a region is walked on
+        # the whole grid's terms instead, as ITK reads the whole grid (scanline_map).
+        # Cubic is Keys' kernel, which ITK does not have: it keeps its own walk.
+        as_itk = mode != "cubic" and scanline_map(target, source, stages)
+        whole = region.size_zyx == target.size_zyx and list(sub_tensor.shape[1:]) == shape
+        # The whole grid through the filter only where ITK picks the ties the regions' walk picks.
+        itk_whole = whole and _itk_picks_as_the_walk()
+        if sub_tensor.device.type == "cpu" and sitk is not None and (itk_whole or not as_itk):
             resampled = _resample_with_sitk(
                 sub_tensor, region, source, stages, region_starts, mode, self.fill_value, self._sitk_input
             )
             if resampled is not None:
                 return resampled
-        return self._walk(sub_tensor, region, source, stages, region_starts, budget_bytes)
+        if as_itk and sub_tensor.device.type == "cpu":
+            # On the host this walk stands in for ITK's filter, so it keeps ITK's float64 whatever
+            # the precision: 'fast' is a trade the device walk makes.
+            with coordinate_precision(torch.float64):
+                return self._walk(
+                    sub_tensor, target, source, stages, target_slices, region_starts, mode, True, budget_bytes
+                )
+        return self._walk(sub_tensor, target, source, stages, target_slices, region_starts, mode, as_itk, budget_bytes)
 
     def _walk(
         self,
-        tensor: torch.Tensor,
-        region: Grid,
+        sub_tensor: torch.Tensor,
+        target: Grid,
         source: Grid,
         stages: SpatialStages,
+        target_slices: tuple[slice, ...],
         region_starts: list[int],
-        budget_bytes: float | None = None,
+        mode: str,
+        as_itk: bool,
+        budget_bytes: float | None,
     ) -> torch.Tensor:
-        """The general path: one source coordinate per target voxel, walked and gathered slab by slab.
-
-        The walk's coordinate tensor is float64 x rank: on a large region it dwarfs the gathered
-        payload (9 GB beside a 1 GB slab). Walking and gathering slab by slab bounds both under one
-        budget and changes no value: the row indices stay global to the region and the gather's
-        window and starts are the region's own.
-        """
-        shape, mode = list(source.size_zyx), self._mode(tensor)
+        """One region through the torch walk: the device's route, and the host's where ITK's filter
+        cannot answer as it answers for the whole grid. ``as_itk`` walks ITK's own index and blend
+        (:func:`~konfai.data.sampling.scanline_index`)."""
+        region = target.sub_grid(target_slices)
+        shape = list(source.size_zyx)
+        # The walk's coordinate tensor is float64 x rank: on a large region it dwarfs the gathered
+        # payload (9 GB beside a 1 GB slab). Walking and gathering slab by slab bounds both under one
+        # budget and changes no value: the row indices stay global to the region and the gather's
+        # window and starts are the region's own.
         rows_total = int(region.size_zyx[0])
-        rows = walk_rows(region, stages, tensor.device, budget_bytes)
+        rows = walk_rows(region, stages, sub_tensor.device, budget_bytes)
+
+        def walk(start: int, stop: int) -> torch.Tensor:
+            if not as_itk:
+                return source_index_rows(region, source, stages, sub_tensor.device, start, stop)
+            first = int(target_slices[0].start)
+            return scanline_index(
+                target, source, (slice(first + start, first + stop), *target_slices[1:]), sub_tensor.device
+            )
+
         if rows >= rows_total:
-            coordinates = source_index(region, source, stages, tensor.device)
-            return gather(tensor, coordinates, region_starts, shape, mode, self.fill_value)
+            coordinates = walk(0, rows_total) if as_itk else source_index(region, source, stages, sub_tensor.device)
+            return gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value, as_itk)
         # Each slab lands in the one output as it is gathered. Slabs held for a cat were a second
         # output resident at the join, on exactly the regions that are large against the budget.
         out = torch.empty(
-            (int(tensor.shape[0]), *(int(extent) for extent in region.size_zyx)),
-            dtype=tensor.dtype,
-            device=tensor.device,
+            (int(sub_tensor.shape[0]), *(int(extent) for extent in region.size_zyx)),
+            dtype=sub_tensor.dtype,
+            device=sub_tensor.device,
         )
         for start in range(0, rows_total, rows):
             stop = min(rows_total, start + rows)
-            coordinates = source_index_rows(region, source, stages, tensor.device, start, stop)
-            out[:, start:stop] = gather(tensor, coordinates, region_starts, shape, mode, self.fill_value)
+            coordinates = walk(start, stop)
+            out[:, start:stop] = gather(sub_tensor, coordinates, region_starts, shape, mode, self.fill_value, as_itk)
             del coordinates
         return out
 
@@ -1612,13 +1672,16 @@ class Resample(TransformInverse):
         region_starts: list[int],
     ) -> torch.Tensor:
         """One region of ``target``, read off ``source`` with no map between them."""
-        region = target.sub_grid(target_slices)
         shape, mode = list(source.size_zyx), self._mode(tensor)
-        axes = separable_source_index(region, source, (), tensor.device)
+        axes = separable_source_index(target, source, (), tensor.device, target_slices)
         if axes is not None:
             order = blend_order(target, source)
             return gather_separable(tensor, axes, region_starts, shape, mode, self.fill_value, order)
-        return self._walk(tensor, region, source, (), region_starts)
+        # ITK's index and blend on the host, as the forward reads a region: a slab holds what the whole
+        # holds. A device keeps its fused gather, twice as fast on an oblique or permuted case. Either
+        # walks slab by slab under the budget.
+        as_itk = mode != "cubic" and tensor.device.type == "cpu" and scanline_map(target, source, ())
+        return self._walk(tensor, target, source, (), target_slices, region_starts, mode, as_itk, None)
 
     @property
     def _target_is_own(self) -> bool:
