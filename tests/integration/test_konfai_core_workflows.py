@@ -28,6 +28,8 @@ from harness import konfai_cli_command, prepare_experiment_dir, replace_once, ru
 from konfai.evaluator import build_evaluate
 from konfai.predictor import build_predict
 from konfai.trainer import build_train
+from konfai.transformer import build_transform
+from konfai.utils.errors import DatasetManagerError
 
 pytestmark = pytest.mark.integration
 
@@ -182,6 +184,83 @@ def test_konfai_build_steps_construct_workflows_without_execution(
     assert trainer.name == train_name
     assert predictor.name == train_name
     assert evaluator.name == train_name
+
+
+# What the builders export to the environment.
+_WORKFLOW_ENVIRONMENT = (
+    "KONFAI_ROOT",
+    "KONFAI_STATE",
+    "KONFAI_CHECKPOINTS_DIRECTORY",
+    "KONFAI_STATISTICS_DIRECTORY",
+    "KONFAI_PREDICTIONS_DIRECTORY",
+    "KONFAI_EVALUATIONS_DIRECTORY",
+    "KONFAI_TRANSFORMS_DIRECTORY",
+)
+
+_TRANSFORM_CONFIG = """\
+Transformer:
+  name: WRITE_BACK
+  Dataset:
+    dataset_filenames:
+      - {dataset}:a:mha
+    groups_src:
+      MR:
+        groups_dest:
+          MR_out:
+            transforms:
+              Clip:
+                min_value: 0.0
+                max_value: 1.0
+              Write:
+                dataset: {out}:mha
+"""
+
+
+# Each workflow's builder, as its CLI command calls it, over the config at `path` in the experiment `root`.
+_BUILDS = {
+    "Config.yml": lambda path, root: build_train(
+        config=path, checkpoints_dir=root / "Checkpoints", statistics_dir=root / "Statistics"
+    ),
+    "Prediction.yml": lambda path, root: build_predict(
+        models=[root / "dummy.pt"], prediction_file=path, predictions_dir=root / "Predictions"
+    ),
+    "Evaluation.yml": lambda path, root: build_evaluate(evaluations_file=path, evaluations_dir=root / "Evaluations"),
+    "Transform.yml": lambda path, root: build_transform(transform_file=path, transforms_dir=root / "Transforms"),
+}
+
+
+@pytest.mark.parametrize("name", list(_BUILDS))
+def test_a_failed_build_leaves_the_config_as_written_and_a_successful_one_writes_it(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workflow's config, built with its dataset directory missing, then as written: the failed build
+    leaves the file byte-identical, the successful one writes the resolved defaults back. Each of the
+    four wrote what resolved before the error (Config.yml 75 -> 88 lines)."""
+    # Pinned, so what the builders export is taken back after the test.
+    for key in _WORKFLOW_ENVIRONMENT:
+        monkeypatch.setenv(key, "sentinel")
+        monkeypatch.delenv(key)
+    experiment_dir = tmp_path / "experiment_write_back"
+    paths = prepare_experiment_dir(experiment_dir, "WRITE_BACK")
+    dataset = paths["dataset_dir"]
+    _create_prediction_dataset_stub(paths["predictions_dir"] / "WRITE_BACK" / "Dataset")
+    (experiment_dir / "Transform.yml").write_text(
+        _TRANSFORM_CONFIG.format(dataset=dataset, out=experiment_dir / "Out"), encoding="utf-8"
+    )
+    monkeypatch.chdir(experiment_dir)
+    monkeypatch.syspath_prepend(str(experiment_dir))
+    path = experiment_dir / name
+    written = path.read_text(encoding="utf-8")
+    path.write_text(replace_once(written, f"{dataset}:a:mha", f"{dataset}_moved:a:mha"), encoding="utf-8")
+    broken = path.read_bytes()
+
+    with pytest.raises(DatasetManagerError, match="not found in any dataset"):
+        _BUILDS[name](path, experiment_dir)
+    assert path.read_bytes() == broken
+
+    path.write_text(written, encoding="utf-8")
+    _BUILDS[name](path, experiment_dir)
+    assert len(path.read_text(encoding="utf-8").splitlines()) > len(written.splitlines())
 
 
 def _validation_scores(tmp_path: Path, ranks: int, batch_size: int) -> set[float]:

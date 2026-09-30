@@ -22,6 +22,7 @@ keys), and the config env-var bookkeeping.
 """
 
 import _pyio
+import contextlib
 import functools
 import os
 import sys
@@ -32,8 +33,9 @@ from typing import Literal
 
 import pytest
 import ruamel.yaml
-from konfai.utils.config import Config, _load_tree, _write_tree, apply_config, config, strict_config
+from konfai.utils.config import Config, _load_tree, _write_tree, apply_config, config, initializing, strict_config
 from konfai.utils.errors import ConfigError
+from konfai.utils.utils import OverlapSpec
 
 
 def _fail_input(_: str) -> str:
@@ -352,7 +354,7 @@ def test_apply_config_converts_sequence_of_union_scalars(write_config) -> None:
 
 
 def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_config) -> None:
-    # A value whose YAML type already matches a union member must bind unchanged: coercing in
+    # Patch.overlap's union. A value whose YAML type already matches a member must bind unchanged: coercing in
     # declaration order turns ``overlap: 0.25`` into ``int(0.25) == 0`` (silent no overlap),
     # lets ``str`` swallow a list, and never reaches a ``list[...]`` member at all.
     write_config("Root:\n  frac: 0.25\n  voxels: 8\n  percent: '20%'\n  per_axis:\n    - 10\n    - 20\n    - 0\n")
@@ -360,10 +362,10 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     class Root:
         def __init__(
             self,
-            frac: int | float | str | list[int] | None = None,
-            voxels: int | float | str | list[int] | None = None,
-            percent: int | float | str | list[int] | None = None,
-            per_axis: int | float | str | list[int] | None = None,
+            frac: OverlapSpec = None,
+            voxels: OverlapSpec = None,
+            percent: OverlapSpec = None,
+            per_axis: OverlapSpec = None,
         ) -> None:
             self.frac = frac
             self.voxels = voxels
@@ -1088,10 +1090,27 @@ def test_an_emptied_dataset_or_model_under_a_workflow_root_is_refused(
 def test_strict_config_can_warn_instead_of_refusing(write_config) -> None:
     """The legacy workflows' setting: existing files carry keys older versions wrote back, so the
     reader is told and the run goes on."""
-    write_config("Root:\n  kep: 2\n")
-    with pytest.warns(UserWarning, match=r"'Root\.kep'.*Did you mean 'kept'"), strict_config("Root", refuse=False):
+    write_config("Root:\n  written_by_1_7: 2\n")
+    with pytest.warns(UserWarning, match=r"'Root\.written_by_1_7'"), strict_config("Root", refuse=False):
         root = apply_config("Root")(_StrictRoot)()
     assert root.kept == 0
+
+
+@pytest.mark.parametrize("initializing_", [False, True])
+def test_a_warning_strict_block_refuses_a_key_whose_value_the_default_would_take(
+    write_config, initializing_: bool
+) -> None:
+    """`epoch: 20` beside `epochs`, which took its default: the run would train 100 epochs on a warning.
+    Refused, and the file left as written."""
+    config_path = write_config("Root:\n  kep: 2\n")
+    before = config_path.read_bytes()
+    with (
+        initializing() if initializing_ else contextlib.nullcontext(),
+        pytest.raises(ConfigError, match=r"value would be lost[\s\S]*'Root\.kep': did you mean 'kept'"),
+        strict_config("Root", refuse=False),
+    ):
+        apply_config("Root")(_StrictRoot)()
+    assert config_path.read_bytes() == before
 
 
 class _Pair:
@@ -1275,13 +1294,41 @@ def test_a_strict_block_that_refuses_leaves_the_file_untouched(write_config) -> 
     assert config_path.read_text(encoding="utf-8") == before
 
 
+def _failing_build(kept: int = 0, leaf: _Leaf = _Leaf(), nested: _Nested = _Nested()) -> None:
+    raise ValueError("the build failed after binding")
+
+
+@pytest.mark.parametrize("refuse", [True, False])
+def test_a_strict_block_that_fails_leaves_the_file_as_it_was(write_config, refuse: bool) -> None:
+    """A build that fails leaves the file byte-identical: TRAIN, PREDICTION and EVALUATION wrote what
+    resolved before the error back into it (+4 lines on each failing CLI probe of the audit)."""
+    config_path = write_config("Root:\n  kept: 1\n")
+    before = config_path.read_bytes()
+    with pytest.raises(ValueError, match="failed after binding"), strict_config("Root", refuse=refuse):
+        apply_config("Root")(_failing_build)()
+    assert config_path.read_bytes() == before
+
+
+def test_under_initializing_a_strict_block_that_fails_writes_what_resolved(write_config) -> None:
+    """--init keeps what resolved before the error, for the author to complete."""
+    config_path = write_config("Root:\n  kept: 1\n")
+    with (
+        pytest.raises(ValueError, match="failed after binding"),
+        initializing(),
+        strict_config("Root", refuse=False),
+    ):
+        apply_config("Root")(_failing_build)()
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert written["Root"] == {"kept": 1, "depth": 1, "Nested": {"width": 2}}
+
+
 def test_a_warning_strict_block_still_writes_the_resolved_file(write_config) -> None:
     """refuse=False (TRAIN/PREDICTION/EVALUATION): the run proceeds, so the resolved file is kept."""
-    config_path = write_config("Root:\n  kep: 2\n")
+    config_path = write_config("Root:\n  written_by_1_7: 2\n")
     with pytest.warns(UserWarning, match="Unknown key"), strict_config("Root", refuse=False):
         apply_config("Root")(_StrictRoot)()
     written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
-    assert written["Root"] == {"kep": 2, "depth": 1, "kept": 0, "Nested": {"width": 2}}
+    assert written["Root"] == {"written_by_1_7": 2, "depth": 1, "kept": 0, "Nested": {"width": 2}}
 
 
 def test_a_strict_block_does_not_create_a_file_a_context_refused(tmp_path: Path, monkeypatch) -> None:

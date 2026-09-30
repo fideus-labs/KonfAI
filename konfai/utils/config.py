@@ -168,8 +168,8 @@ class _SharedTree:
     """The config tree a ``strict_config`` block holds in memory.
 
     Every ``Config`` context opened inside the block on this file reads and writes this one tree,
-    and the block writes the file once, when it ends. Outside a block a context loads and writes
-    the file itself.
+    and the block writes the file once, when it ends without an error. Outside a block a context
+    loads and writes the file itself.
     """
 
     def __init__(self, filename: Path, tree: dict) -> None:
@@ -286,6 +286,26 @@ class _KeyLedger:
 # The ledgers of the open strict_config() blocks; empty outside them, where the binder records nothing.
 _ledgers: list[_KeyLedger] = []
 
+# Whether an initializing() block is open.
+_initializing = False
+
+
+def is_initializing() -> bool:
+    """Whether ``--init`` is resolving a configuration: the build binds it and reads no data."""
+    return _initializing
+
+
+@contextmanager
+def initializing() -> Iterator[None]:
+    """``konfai <COMMAND> --init``: a :func:`strict_config` block that fails inside this one still writes
+    what resolved before the error, for the author to complete."""
+    global _initializing
+    previous, _initializing = _initializing, True
+    try:
+        yield
+    finally:
+        _initializing = previous
+
 
 @contextmanager
 def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
@@ -300,7 +320,8 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
 
     The file is read once here and written once when the block ends, whatever the number of contexts
     and nested blocks opened over it: they all resolve against the one tree held in memory, read and
-    written by the outermost.
+    written by the outermost. A block that ends on an error leaves the file as it was, unless
+    :func:`initializing` is open.
     """
     filename = os.environ.get("KONFAI_config_file")
     tree: dict = {}
@@ -332,8 +353,10 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     if shared is not None:
         _shared_trees.append(shared)
     unknown: list[str] = []
+    completed = False
     try:
         yield
+        completed = True
     except Exception as error:
         misspellings = ledger.misspellings(root)
         if misspellings:
@@ -345,11 +368,21 @@ def strict_config(root: str, refuse: bool = True) -> Iterator[None]:
     finally:
         _ledgers.remove(ledger)
         unknown = ledger.unknown(root)
+        # A misspelt key beside the key that took its default in its place: the value written would be
+        # lost to the default, so the workflows that only warn about an unknown key refuse this one.
+        misspelt = ledger.misspellings(root) if completed and not refuse else []
         if shared is not None:
             _shared_trees.remove(shared)
-            # Not written when the block is about to refuse the config: a refused run leaves the file as it was.
-            if not (refuse and unknown):
+            # A failed or refused run leaves the file as it was.
+            if (completed or _initializing) and not ((refuse and unknown) or misspelt):
                 shared.flush()
+    if misspelt:
+        raise ConfigError(
+            f"Misspelt key(s) in the {root} configuration: each sits beside a key that took its default,"
+            " so its value would be lost.",
+            *misspelt,
+            "Fix the spelling, or remove the key.",
+        )
     if unknown:
         _report(
             refuse,

@@ -129,12 +129,14 @@ def test_init_reports_a_refusal_by_its_message_and_a_bug_by_its_traceback(
 ) -> None:
     """A user model's NameError under --init printed "[KonfAI] name 'nb_classes' is not defined": no type,
     no file, no line. A bug propagates as the run path lets it; a designed refusal stays a message."""
+    from konfai.utils.config import _write_tree
     from konfai.utils.errors import ConfigError
 
     config = tmp_path / "Config.yml"
     monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--init", "-c", str(config)])
 
     def buggy_build(config: Path) -> None:
+        _write_tree(config, {"Trainer": {"resolved": 1}})  # as KonfAI writes it: a new file
         raise NameError("name 'nb_classes' is not defined")
 
     monkeypatch.setattr(trainer_module, "build_train", buggy_build)
@@ -143,14 +145,22 @@ def test_init_reports_a_refusal_by_its_message_and_a_bug_by_its_traceback(
     assert "Wrote what resolved before the error" in capsys.readouterr().out
 
     def refusing_build(config: Path) -> None:
+        _write_tree(config, {"Trainer": {"resolved": 2}})
         raise ConfigError("'Trainer.Dataset' is empty.")
 
     monkeypatch.setattr(trainer_module, "build_train", refusing_build)
+    main_module.main()  # the file is written: --init succeeds and names what to complete
+    printed = capsys.readouterr()
+    assert "Complete it before running" in printed.out and "[Config] 'Trainer.Dataset' is empty." in printed.err
+
+    def refusing_unwritten(config: Path) -> None:
+        raise ConfigError("'Trainer.bogus' is a key nothing reads.")
+
+    monkeypatch.setattr(trainer_module, "build_train", refusing_unwritten)
     with pytest.raises(SystemExit) as exited:
-        main_module.main()
-    assert exited.value.code == 1
-    out = capsys.readouterr().out
-    assert "Wrote what resolved before the error" in out and "[Config] 'Trainer.Dataset' is empty." in out
+        main_module.main()  # nothing was written: no claim that it was, and the refusal fails the command
+    printed = capsys.readouterr()
+    assert exited.value.code == 1 and "Wrote" not in printed.out and "'Trainer.bogus'" in printed.err
 
 
 def test_a_refusal_prints_its_notes(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -546,3 +556,17 @@ def test_a_finished_run_names_where_its_outputs_are(
 
     lines = [line for line in capsys.readouterr().out.splitlines() if "outputs in" in line]
     assert lines == ([f"[KonfAI] outputs in {tmp_path / 'Predictions/RUN/Dataset'}"] if printed else [])
+
+
+@pytest.mark.parametrize("command", ["TRAIN", "PREDICTION", "EVALUATION", "TRANSFORM"])
+def test_init_in_an_empty_folder_writes_the_configuration_and_succeeds(tmp_path: Path, command: str) -> None:
+    """The refusal of a missing config recommends --init, which then failed on the dataset it had not
+    been given: it reads no data, writes the file and names what to complete."""
+    for _ in range(2):  # a second --init on the resolved file succeeds as the first did
+        init = subprocess.run(
+            [sys.executable, "-m", "konfai.main", command, "--init"], cwd=tmp_path, capture_output=True, text=True
+        )
+        assert init.returncode == 0, init.stdout + init.stderr
+    assert "--init reads no data" in init.stdout
+    (written,) = tmp_path.glob("*.yml")
+    assert "dataset_filenames" in written.read_text(encoding="utf-8")

@@ -15,39 +15,23 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""Prediction workflow entrypoints and orchestration for KonfAI.
+"""Prediction workflow entrypoints and orchestration for KonfAI. A bare ``combine`` or ``reduction``
+name (``combine: Mean``) resolves in :mod:`konfai.data.reduction`."""
 
-Every reduction of :mod:`konfai.data.reduction` is re-exported: a bare ``combine`` or ``reduction`` name,
-the spelling published configs use (``combine: Mean``), resolves here."""
-
-from konfai.data.reduction import Concat as Concat
-from konfai.data.reduction import Mean as Mean
-from konfai.data.reduction import Median as Median
-from konfai.data.reduction import Reduction as Reduction
-from konfai.data.reduction import Std as Std
-from konfai.data.reduction import Vote as Vote
 from konfai.predictor.ensemble import ModelComposite as ModelComposite
 from konfai.predictor.output import PREDICTION_CLOCK as PREDICTION_CLOCK
 from konfai.predictor.output import OutputDataset as OutputDataset
 from konfai.predictor.output import OutputDatasetLoader as OutputDatasetLoader
-from konfai.predictor.output import OutSameAsGroupDataset as OutSameAsGroupDataset
 from konfai.predictor.workflow import Predictor as Predictor
 from konfai.predictor.workflow import build_predict as build_predict
 from konfai.predictor.workflow import predict as predict
 
 __all__ = [
     "PREDICTION_CLOCK",
-    "Concat",
-    "Mean",
-    "Median",
     "ModelComposite",
-    "OutSameAsGroupDataset",
     "OutputDataset",
     "OutputDatasetLoader",
     "Predictor",
-    "Reduction",
-    "Std",
-    "Vote",
     "build_predict",
     "predict",
 ]

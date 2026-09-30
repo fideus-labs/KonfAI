@@ -127,12 +127,20 @@ class DistributedObject(ABC):
     def __init__(self, name: str) -> None:
         self.dataloader: list[list[DataLoader]]
         self.manual_seed: int | None = None
+        #: The seed the run's draws come from when it is not ``manual_seed``: one the workflow drew and
+        #: recorded, so that ``manual_seed: <it>`` replays the run. cuDNN's flags follow ``manual_seed``.
+        self.drawn_seed: int | None = None
         #: Whether cuDNN benchmarks its kernels under ``manual_seed`` too (:func:`cudnn_flags`).
         self.cudnn_benchmark = False
         self.name = name
         self.size = 1
         #: The launcher's clock, handed over before the ranks start; rank 0 reports it.
         self.startup_clock: StartupClock | None = None
+
+    @property
+    def run_seed(self) -> int | None:
+        """What the run seeds its draws with: ``manual_seed``, else the seed the workflow drew."""
+        return self.manual_seed if self.manual_seed is not None else self.drawn_seed
 
     @abstractmethod
     def setup(self, world_size: int):
@@ -262,8 +270,8 @@ class DistributedObject(ABC):
         with run_scope(), Log(self.name, global_rank):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
-            if self.manual_seed is not None:
-                seed_all(self.manual_seed * world_size + global_rank)
+            if self.run_seed is not None:
+                seed_all((self.run_seed * world_size + global_rank) % 2**32)
             torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = cudnn_flags(
                 self.manual_seed, self.cudnn_benchmark
             )
@@ -451,8 +459,8 @@ def execute_distributed_object(
             clock = startup_clock()
             with distributed_object as configured_object:
                 with Log(configured_object.name, 0):
-                    if configured_object.manual_seed is not None:
-                        seed_all(configured_object.manual_seed)
+                    if configured_object.run_seed is not None:
+                        seed_all(configured_object.run_seed)
                     if cluster_config is not None:
                         with clock.phase("setup"):
                             configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])

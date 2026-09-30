@@ -1176,8 +1176,11 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             raise ConfigError("Trainer requires KONFAI_CONFIG_MODE='Done' before initialization.")
         super().__init__(train_name)
         self.manual_seed = manual_seed
+        # Without manual_seed, a seed is drawn (read back on RESUME) and every draw of the run comes
+        # from it, as from a configured one: manual_seed set to the recorded Seed.txt replays the run.
+        self.drawn_seed = self._resolve_seed(State[konfai_state()])
         self.dataset = dataset
-        self.dataset.manual_seed = manual_seed
+        self.dataset.manual_seed = self.run_seed
         self._capture_vram_patch_template(dataset.patch)
         self.autocast = autocast
         self.channels_last = channels_last
@@ -1192,8 +1195,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self.it_validation = it_validation
         self.it_lr_update = it_lr_update
         # A weight the load(init=True) of a TRAIN does not redraw (an Embedding) keeps the draw made here.
-        if manual_seed is not None:
-            seed_all(manual_seed)
+        seed_all(self.drawn_seed)
         with startup_clock().phase("model"):
             self.model = model.get_model(train=True)
         self.ema_decay = ema_decay
@@ -1210,10 +1212,9 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         state = State[konfai_state()]
         # The model's downsampling multiple is final before init(); each case's free axis rounds up to it.
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
-        # The split is drawn on the launcher before spawn, from a concrete seed (configured, recorded,
-        # or fresh): an unseeded split would be redrawn on RESUME and leak validation cases into training.
-        self._split_seed = self._resolve_split_seed(state)
-        seed_all(self._split_seed)
+        # The split is drawn on the launcher before spawn, from the run's seed: an unseeded split would be
+        # redrawn on RESUME and leak validation cases into training.
+        seed_all(self.drawn_seed)
         self.dataset.prepare()
         self.model.bind(
             self.autocast, state, self.dataset.get_groups_dest(), self.gradient_checkpoints, self.gpu_checkpoints
@@ -1221,19 +1222,19 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()
 
-    def _resolve_split_seed(self, state: State) -> int:
-        """The seed every draw in ``prepare()`` comes from: the configured ``manual_seed``, else the seed
-        the TRAIN run recorded (RESUME rebuilds the split the checkpoint trained on), else a fresh draw
-        recorded by ``setup`` for the next RESUME."""
+    def _resolve_seed(self, state: State) -> int:
+        """The seed every draw of the run comes from: the configured ``manual_seed``, else the seed the
+        TRAIN run recorded (RESUME rebuilds the split the checkpoint trained on), else a fresh draw
+        recorded by ``setup`` for the next RESUME and for a replay."""
         if self.manual_seed is not None:
             return self.manual_seed
         if state == State.RESUME:
-            recorded = self._recorded_split_seed()
+            recorded = self._recorded_seed()
             if recorded is not None:
                 return recorded
         return int.from_bytes(os.urandom(4), "little")
 
-    def _recorded_split_seed(self) -> int | None:
+    def _recorded_seed(self) -> int | None:
         try:
             return int((statistics_directory() / self.name / "Seed.txt").read_text().strip())
         except (OSError, ValueError):
@@ -1297,8 +1298,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             # Written as a subset or validation list reads it back.
             path = statistics_directory() / self.name / f"{split}_{self.it}.txt"
             path.write_text("".join(f"{name}\n" for name in names), encoding=case_list_encoding())
-        # The split seed, where _resolve_split_seed reads it on RESUME; written after the clearing above.
-        (statistics_directory() / self.name / "Seed.txt").write_text(f"{self._split_seed}\n")
+        # The run's seed, where _resolve_seed reads it on RESUME; written after the clearing above.
+        (statistics_directory() / self.name / "Seed.txt").write_text(f"{self.drawn_seed}\n")
 
     def _report_split_drift(self, train_names: list[str], validation_names: list[str]) -> None:
         """Warn when the split RESUME redrew is not the one the run recorded last.

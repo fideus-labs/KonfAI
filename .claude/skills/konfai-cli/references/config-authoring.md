@@ -22,8 +22,9 @@ The root key is mandatory and load-bearing: a `Prediction.yml` must open with `P
 
 `apply_config` reads a callable's signature and fills its arguments from the YAML subtree it
 owns (`@config("Key")`), recursing into nested `@config` objects. **Resolved defaults are
-written back to the file**, so every `konfai` run rewrites its config in place, materialising
-defaults. Consequences for a CLI user:
+written back to the file**, so every `konfai` run that builds its workflow rewrites its config in
+place, materialising defaults; a run whose build fails leaves the file as written. Consequences for a
+CLI user:
 
 - After a run, the on-disk YAML is the fully-resolved snapshot: commit it as the record of
   the experiment; a re-run is reproducible from it.
