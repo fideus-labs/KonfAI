@@ -73,7 +73,9 @@ pip install konfai-mcp
 ```
 
 Add `pip install "konfai[imaging]"` if the agent will read `.mha`/`.nii` data or
-run training. This gives you the MCP entrypoint, `konfai-mcp`.
+run training. This gives you the MCP entrypoint, `konfai-mcp`. The wheel carries
+the repository's `examples/`, the templates a session starts from
+(`templates://list`); run from a checkout, the server reads them in place.
 
 ### From the KonfAI repository
 

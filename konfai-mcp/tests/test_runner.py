@@ -67,7 +67,7 @@ def test_validation_reads_a_scratch_copy_beside_the_original(tmp_path: Path, mon
         config_path.write_bytes(authored + b"  epochs: 3\r\n")  # an edit landing meanwhile
         return object()
 
-    monkeypatch.setattr(runner, "build_train", build)
+    monkeypatch.setattr("konfai.trainer.build_train", build)
     payload = runner.validate_workflow_api(
         workflow="train",
         level="instantiate",
@@ -110,7 +110,7 @@ def test_a_validation_refusal_is_its_message_and_a_crash_keeps_its_traceback(
     def build(**kwargs: Any) -> object:
         raise raised
 
-    monkeypatch.setattr(runner, "build_train", build)
+    monkeypatch.setattr("konfai.trainer.build_train", build)
     payload = runner.validate_workflow_api(
         workflow="train",
         level="instantiate",
@@ -226,3 +226,16 @@ def test_smoke_test_non_differentiable_loss_is_not_ok(tmp_path: Path) -> None:
     assert result["backward_ok"] is False
     assert result["ok"] is False
     assert "backward" in result.get("error", "").lower()
+
+
+def test_the_server_process_lists_its_tools_without_importing_torch() -> None:
+    """Studio counts the tools by importing the server: the workflow builders, which bring torch and
+    SimpleITK, belong to the spawn children that build."""
+    import subprocess
+
+    probe = (
+        "import asyncio, sys; from konfai_mcp.server import mcp; n = len(asyncio.run(mcp.list_tools())); "
+        "print(n, 'torch' in sys.modules, 'SimpleITK' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.split()
+    assert int(out[0]) > 0 and out[1:] == ["False", "False"]

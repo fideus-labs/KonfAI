@@ -14,10 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import shutil
 from email import message_from_string
 from pathlib import Path
 
 from setuptools import setup
+from setuptools.command.build_py import build_py
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,12 +54,30 @@ def _sibling(name: str, version: str) -> str:
     return f"{name}>={floor}"
 
 
+class _BuildWithExamples(build_py):
+    """The wheel carries the repository's examples: the templates a session starts from, which an
+    installed server cannot reach in a checkout it does not have. Built from the tree, so the release
+    builds the wheel directly (an sdist holds no examples to copy)."""
+
+    def run(self) -> None:
+        super().run()
+        examples = _ROOT / "examples"
+        if examples.is_dir():
+            shutil.copytree(
+                examples,
+                Path(self.build_lib) / "konfai_mcp" / "examples",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".ipynb_checkpoints"),
+                dirs_exist_ok=True,
+            )
+
+
 # konfai and konfai-apps are pinned to the exact release version at a tag: runner.py imports core
 # internals (konfai.transformer, konfai.network.network) whose layout moves between minor releases, so
 # the family ships in lockstep, like the apps/* bundles pin konfai and studio pins konfai-mcp.
 _version = _release_version()
 
 setup(
+    cmdclass={"build_py": _BuildWithExamples},
     install_requires=[
         _sibling("konfai", _version),
         _sibling("konfai-apps", _version),
@@ -66,5 +86,5 @@ setup(
         "fastmcp>=2.10.2",
         "ruamel.yaml",
         "numpy",
-    ]
+    ],
 )

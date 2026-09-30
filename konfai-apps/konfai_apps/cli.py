@@ -39,6 +39,11 @@ if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
 
 
+#: Where a designed refusal also writes its message, when set: the app server reads it back to answer
+#: the job's result with the refusal (422) rather than a bare exit code.
+REFUSAL_FILE_ENV = "KONFAI_APPS_REFUSAL_FILE"
+
+
 @contextmanager
 def _exit_on_refusal() -> Iterator[None]:
     """A designed refusal (the app layer's or a workflow's it runs) prints its message and exits 1, as the
@@ -48,7 +53,10 @@ def _exit_on_refusal() -> Iterator[None]:
     except KonfAIError as error:
         if env_flag("KONFAI_DEBUG", False):
             raise
-        print(str(error).strip(), file=sys.stderr)
+        message = str(error).strip()
+        print(message, file=sys.stderr)
+        if refusal_file := os.environ.get(REFUSAL_FILE_ENV):
+            Path(refusal_file).write_text(message + "\n", encoding="utf-8")
         sys.exit(1)
 
 

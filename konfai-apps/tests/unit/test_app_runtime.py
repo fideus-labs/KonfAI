@@ -459,11 +459,15 @@ def _stub_client(monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> "app_modu
     return client
 
 
-def test_stream_logs_raises_on_error_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _stub_client(monkeypatch, ["data: hello", "data: __ERROR__ boom happened", "data: __DONE__"])
+def test_stream_logs_stops_at_the_error_marker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The job's result, not its log, says whether it failed or was refused."""
+    client = _stub_client(monkeypatch, ["data: hello", "data: __ERROR__ boom happened", "data: after"])
 
-    with pytest.raises(RuntimeError, match="boom happened"):
-        client.stream_logs("job123")
+    client.stream_logs("job123")
+    out = capsys.readouterr().out
+    assert "hello" in out and "after" not in out
 
 
 def test_stream_logs_returns_on_done_marker(
