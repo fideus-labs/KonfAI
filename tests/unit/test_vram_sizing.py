@@ -23,7 +23,8 @@ primitive itself runs on a real CUDA device when one is present.
 
 import numpy as np
 import pytest
-from konfai.predictor import Mean, Predictor, Reduction
+from konfai.data.reduction import Mean, Reduction
+from konfai.predictor import Predictor
 from konfai.utils.utils import concretize_patch_size, get_patch_slices_from_shape
 from konfai.utils.vram import (
     VramAutoPatchMixin,

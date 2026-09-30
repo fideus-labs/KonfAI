@@ -32,9 +32,10 @@ from konfai.data.augmentation import Brightness, DataAugmentationsList, Flip, Pe
 from konfai.data.data_manager import DatasetIter
 from konfai.data.data_manager.order import _interleaved_case_entries
 from konfai.data.patching import DatasetPatch, Gaussian, SlabAligner
+from konfai.data.reduction import Concat, Mean, Median
 from konfai.data.transform import Flip as FlipTransform
 from konfai.data.transform import InferenceStack, LocalityKind, Sum
-from konfai.predictor import Concat, Mean, Median, OutputDataset
+from konfai.predictor import OutputDataset
 from konfai.utils.dataset import Attribute, Dataset
 from oracle_support import geometry
 

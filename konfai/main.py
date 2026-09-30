@@ -244,15 +244,23 @@ _INIT_TARGETS: dict[str, tuple[str, str, str]] = {
 }
 
 
+def _file_identity(path: "os.PathLike[str]") -> tuple[int, int]:
+    """What changes when the config is written back: its atomic replace swaps the file even for the same bytes."""
+    status = os.stat(path)
+    return status.st_ino, status.st_mtime_ns
+
+
 def _run_init(args: dict[str, Any]) -> None:
     """``--init``: bind the workflow once so every default resolves and lands in the file, then exit.
 
-    The file is created seeded with its root key when missing. The build runs nothing, and a build
-    error after partial binding still leaves what resolved on disk.
+    The file is created seeded with its root key when missing. The build reads no data and runs
+    nothing. A refusal the defaults leave (a dataset, an output module, a Write to name) is what the
+    author completes: the file is written and the refusal printed as that, and --init succeeds.
     """
     import inspect
     from pathlib import Path
 
+    from konfai.utils.config import initializing
     from konfai.utils.errors import KonfAIError
 
     command = args["command"]
@@ -263,20 +271,32 @@ def _run_init(args: dict[str, Any]) -> None:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(f"{root}: {{}}\n", encoding="utf-8")
     args[config_key] = config_path
+    before = _file_identity(config_path)
     from konfai.utils.runtime.logging import konfai_warnings
 
     builder = getattr(importlib.import_module(module_name), builder_name)
     accepted = inspect.signature(builder).parameters
     try:
-        with konfai_warnings():
+        with konfai_warnings(), initializing():
             builder(**{name: value for name, value in args.items() if name in accepted})
-    except Exception as error:
-        print(f"[KonfAI] Wrote what resolved before the error to '{config_path}'.", flush=True)
-        if not isinstance(error, KonfAIError):
-            raise  # not a designed refusal: its type and traceback are the message, as on the run path
-        print(f"[KonfAI] {error}", *getattr(error, "__notes__", ()), sep="\n")
-        sys.exit(1)
-    print(f"[KonfAI] Resolved default configuration written to '{config_path}'.")
+    except KonfAIError as error:
+        written = _file_identity(config_path) != before
+        if written:
+            print(f"[KonfAI] Wrote the configuration to '{config_path}'. Complete it before running:", flush=True)
+        print(str(error).strip(), *getattr(error, "__notes__", ()), sep="\n", file=sys.stderr)
+        if not written:
+            sys.exit(1)  # nothing to complete: the refusal is the answer, as on the run path
+    except Exception:
+        # Not a designed refusal: its type and traceback are the message, as on the run path.
+        if _file_identity(config_path) != before:
+            print(f"[KonfAI] Wrote what resolved before the error to '{config_path}'.", flush=True)
+        raise
+    else:
+        print(f"[KonfAI] Resolved default configuration written to '{config_path}'.")
+    print(
+        f"[KonfAI] --init reads no data: '{root}.Dataset.dataset_filenames' and '{root}.Dataset.groups_src'"
+        " are checked when the workflow runs."
+    )
 
 
 def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:

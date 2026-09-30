@@ -58,7 +58,7 @@ from konfai.utils.budget import (
     resolve_memory_budget,
 )
 from konfai.utils.clock import startup_clock
-from konfai.utils.config import config
+from konfai.utils.config import config, is_initializing
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
@@ -161,7 +161,8 @@ class DataSources(ABC):
             raise DatasetManagerError(
                 "At least one group must be defined with 'is_input: true' to provide input to the network."
             )
-
+        if is_initializing():
+            return  # --init resolves the configuration; the run reads the data
         self._prepare_datasets()
 
     def _prepare_datasets(self) -> None:

@@ -22,9 +22,10 @@ import pytest
 import torch
 import tqdm
 from konfai.data.data_manager import BatchDataItem, DatasetIter
+from konfai.data.reduction import Mean
 from konfai.data.transform import TransformInverse
 from konfai.network.network import Network, place_graph
-from konfai.predictor import PREDICTION_CLOCK, Mean, ModelComposite, OutputDataset
+from konfai.predictor import PREDICTION_CLOCK, ModelComposite, OutputDataset
 from konfai.predictor.ensemble import _colocate_loaded_modules
 from konfai.predictor.loop import _prediction_report, _Predictor
 from konfai.utils.clock import SweepClock

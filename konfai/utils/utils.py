@@ -43,6 +43,7 @@ def env_flag(name: str, default: bool) -> bool:
 
 
 _OCCURRENCE = re.compile(r"#\d+$")
+_LEGACY_OCCURRENCE = re.compile(r"([A-Za-z_]\w*)/\d+$")
 
 
 def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
@@ -51,10 +52,15 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     A ``:`` separates the module from the name: everything before the last one is the module, so
     ``torch:nn:L1Loss`` and ``torch.nn:L1Loss`` name the same class. Without one the name comes from the
     kind's own package, dots leading into its subpackages (``segmentation.UNet.UNet``)."""
-    # A chain spelled as a list binds its stages under occurrence keys (`Clip#2`), and published configs
-    # key a repeated stage `Clip/1`: either suffix is the stage's identity in the config, not part of the
-    # class it names.
+    # A repeated stage is keyed by occurrence (`Clip#2`): the suffix is the stage's identity in the
+    # config, not part of the class it names.
     classpath = classpath.rsplit("#", 1)[0] if _OCCURRENCE.search(classpath) else classpath
+    if legacy := _LEGACY_OCCURRENCE.search(classpath):
+        stage = legacy.group(1)
+        raise ConfigError(
+            f"'{classpath}' keys a repeated stage with '/', which is no longer read.",
+            f"Key its occurrences '{stage}', '{stage}#2', '{stage}#3' in the order they run.",
+        )
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])
         name = classpath.split(":")[-1]
@@ -79,7 +85,7 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
             os.environ.pop("KONFAI_CONFIG_MODE", None)
         else:
             os.environ["KONFAI_CONFIG_MODE"] = previous_mode
-    return module, name.split("/")[0]
+    return module, name
 
 
 def _closest(name: str, candidates: list[str]) -> str:
@@ -132,7 +138,7 @@ def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice
 #: Default overlap on tiled axes when a free-axis patch does not say otherwise: 20 % of the patch.
 DEFAULT_OVERLAP_FRACTION = 0.2
 
-OverlapSpec = int | float | str | list["int | float | str"] | None
+OverlapSpec = int | float | str | list[int | float | str] | None
 
 
 def concretize_patch_size(

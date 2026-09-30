@@ -24,7 +24,8 @@ import pytest
 import torch
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import DatasetIter
-from konfai.predictor import Mean, OutputDataset, Reduction
+from konfai.data.reduction import Mean, Reduction
+from konfai.predictor import OutputDataset
 from konfai.utils import budget as budget_module
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import get_patch_slices_from_shape

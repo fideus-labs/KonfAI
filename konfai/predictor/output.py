@@ -222,7 +222,7 @@ class OutputDataset(Dataset, NeedDevice):
 
     def __init__(
         self,
-        same_as_group: str = "default",
+        same_as_group: str = "default:default",
         dataset_filename: str = "default|./Dataset:mha",
         group: str = "default",
         before_reduction_transforms: dict[str, TransformLoader] | None = None,
@@ -278,6 +278,11 @@ class OutputDataset(Dataset, NeedDevice):
         else:
             self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
+        if same_as_group.count(":") != 1:
+            raise PredictorError(
+                f"same_as_group '{same_as_group}' names no input group: it is '<group_src>:<group_dest>'.",
+                "Name the input group the output takes its geometry from, e.g. same_as_group: CT:CT.",
+            )
         self.group_src, self.group_dest = same_as_group.split(":")
         # Slab streaming has no config knob: applied per case whenever it is byte-identical to the
         # assembled path (``_plan_stream``). ``KONFAI_STREAMED_WRITES=0`` is a global kill-switch.
@@ -376,7 +381,7 @@ class OutputDataset(Dataset, NeedDevice):
         module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
         self.patch_combine = apply_config(konfai_args)(module_attribute(module, name))()
 
-        module, name = get_module(self.reduction_classpath, "konfai.predictor")
+        module, name = get_module(self.reduction_classpath, "konfai.data.reduction")
         # The classpath is one key, dots and all: escaped so the dotted path is not split through it.
         subtree = f"{konfai_args}.{_escape_key_component(self.reduction_classpath)}"
         self.reduction = apply_config(subtree)(module_attribute(module, name))()
@@ -1298,10 +1303,6 @@ class OutputDataset(Dataset, NeedDevice):
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
         return result.cpu() if result.device.type != "cpu" else result
-
-
-# ``name_class: OutSameAsGroupDataset`` is what published Prediction.yml carry.
-OutSameAsGroupDataset = OutputDataset
 
 
 @config("OutputDataset")
