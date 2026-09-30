@@ -28,7 +28,7 @@ leaves the file as you wrote it ({doc}`../config_guide/index`).
 | Option | Meaning |
 | --- | --- |
 | `-c`, `--config` | The YAML file. |
-| `-y`, `--overwrite` | Overwrite existing outputs without asking. Under `TRANSFORM`, recompute cases that are already written. |
+| `-y`, `--overwrite` | Overwrite existing outputs without asking. Under `TRANSFORM` and `PREDICTION`, recompute cases that are already written. Without it, `PREDICTION` skips them, and refuses a `Prediction.yml` or checkpoints other than the ones they were written with. |
 | `--gpu` | GPU ids (`--gpu 0 1`). Without it, the run is on the CPU. |
 | `--cpu` | Number of CPU processes when no `--gpu` is given. Under `TRANSFORM`, the number of processes sharing the cases. |
 | `-q`, `--quiet` | Less console output. |
@@ -111,7 +111,7 @@ Per command:
 
 | Command | Options |
 | --- | --- |
-| `infer` | `--ensemble` or `--ensemble-models`, `--tta`, `--mc`, `-uncertainty`, `--prediction-file` |
+| `infer` | `--ensemble` or `--ensemble-models`, `--tta`, `-uncertainty`, `--prediction-file` |
 | `eval` | `--gt`, `--mask`, `--evaluation-file` |
 | `uncertainty` | `--uncertainty-file` |
 | `pipeline` | those of `infer`, `eval` and `uncertainty` |

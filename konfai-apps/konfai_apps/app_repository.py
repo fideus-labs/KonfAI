@@ -566,6 +566,10 @@ class LocalAppRepository(AppRepositoryInfo):
             yaml.dump(data, file)
 
     def _disable_uncertainty(self, inference_file_path: str) -> None:
+        from konfai.data.transform import InferenceStack
+        from konfai.utils.errors import KonfAIError
+        from konfai.utils.utils import get_module
+
         yaml = YAML()
         with open(inference_file_path) as file:
             data = yaml.load(file)
@@ -573,13 +577,26 @@ class LocalAppRepository(AppRepositoryInfo):
         predictor = data["Predictor"]
         outputs = predictor["outputs_dataset"]
 
-        has_inference_stack = False
-        for value in outputs.values():
-            after = value["OutputDataset"]["after_reduction_transforms"]
-            if "InferenceStack" in after:
-                has_inference_stack = True
-                break
-        if not has_inference_stack:
+        # A chain is a mapping keyed by stage, a list of one-stage entries, or absent (null, "None"), as core
+        # reads it; a key names its class as core resolves it (`InferenceStack#2`, a module-qualified name).
+        def is_stack(entry: Any) -> bool:
+            try:
+                module, name = get_module(
+                    entry if isinstance(entry, str) else next(iter(entry)), "konfai.data.transform"
+                )
+            except (ImportError, KonfAIError):
+                return False  # a stage that does not import is not KonfAI's InferenceStack
+            return getattr(module, name, None) is InferenceStack
+
+        def without_stack(chain: Any) -> Any:
+            if isinstance(chain, list):
+                return [entry for entry in chain if not is_stack(entry)]
+            if isinstance(chain, dict):
+                return {name: kwargs for name, kwargs in chain.items() if not is_stack(name)}
+            return chain
+
+        chains = [value["OutputDataset"].get("after_reduction_transforms") for value in outputs.values()]
+        if all(without_stack(chain) == chain for chain in chains):
             return
 
         predictor["combine"] = "Mean"
@@ -589,8 +606,7 @@ class LocalAppRepository(AppRepositoryInfo):
             if output.get("reduction") != "Mean":
                 output.pop(output.get("reduction"), None)
             output["reduction"] = "Mean"
-            if "InferenceStack" in output["after_reduction_transforms"]:
-                del output["after_reduction_transforms"]["InferenceStack"]
+            output["after_reduction_transforms"] = without_stack(output.get("after_reduction_transforms"))
 
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
@@ -1041,6 +1057,11 @@ class LocalAppRepository(AppRepositoryInfo):
         forced_batch_size: int | None = None,
         config_overrides: list[str] | None = None,
     ) -> list[Path]:
+        if number_of_mc_dropout:
+            raise AppRepositoryError(
+                f"Monte Carlo dropout ({number_of_mc_dropout} samples) is not implemented: it would change nothing.",
+                "Use test-time augmentation (--tta) or an ensemble of checkpoints for an uncertainty.",
+            )
         if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = len(self._checkpoints_name)
 
@@ -1056,7 +1077,6 @@ class LocalAppRepository(AppRepositoryInfo):
 
         shutil.copy2(inference_file_path, prediction_file)
         self._set_number_of_augmentation(prediction_file, number_of_augmentation)
-        # `number_of_mc_dropout` is plumbed through but not applied to the prediction config.
         if not uncertainty:
             self._disable_uncertainty(prediction_file)
         # An explicit patch or batch wins; otherwise the app's config decides (``batch_size: 0`` there

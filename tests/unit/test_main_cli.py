@@ -338,7 +338,11 @@ def test_plan_transform_sizes_the_plan_for_the_run_world_size(monkeypatch: pytes
         return SimpleNamespace(report=lambda: "")
 
     monkeypatch.setattr(
-        transformer_module, "build_transform", lambda **kwargs: SimpleNamespace(compute_plan=compute_plan)
+        transformer_module,
+        "build_transform",
+        lambda **kwargs: SimpleNamespace(
+            compute_plan=compute_plan, _guard_sharded_destinations=lambda world_size: None
+        ),
     )
 
     transformer_module.plan_transform(gpu=[0, 1], cpu=None, transform_file="Transform.yml")
