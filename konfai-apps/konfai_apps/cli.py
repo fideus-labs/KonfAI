@@ -464,7 +464,9 @@ def main_apps() -> None:
         help="Explicit list of model identifiers/paths to use.",
     )
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
-    infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
+    infer_p.add_argument(
+        "--mc", type=int, default=0, help="Monte Carlo dropout: not implemented, any value but 0 is refused."
+    )
     _add_patch_overrides(infer_p)
     _add_config_overrides(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
@@ -512,7 +514,9 @@ def main_apps() -> None:
         help="Explicit list of model identifiers/paths to use.",
     )
     pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
-    pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
+    pipe_p.add_argument(
+        "--mc", type=int, default=0, help="Monte Carlo dropout: not implemented, any value but 0 is refused."
+    )
     _add_patch_overrides(pipe_p)
     _add_config_overrides(pipe_p)
     pipe_p.add_argument(
@@ -522,7 +526,7 @@ def main_apps() -> None:
         default="Prediction.yml",
         help="Optional prediction config filename",
     )
-    _add_gt(pipe_p, required=True)
+    _add_gt(pipe_p, required=False)
     _add_mask(pipe_p)
     pipe_p.add_argument(
         "--evaluation-file",

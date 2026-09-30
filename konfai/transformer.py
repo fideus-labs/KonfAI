@@ -1142,8 +1142,11 @@ def plan_transform(
     del quiet
     workflow = build_transform(transform_file=transform_file, transforms_dir=transforms_dir)
     world_size = len(gpu or []) or max(1, int(cpu or 1))
-    plan = cast(Transformer, workflow).compute_plan(world_size, bool(overwrite))
+    workflow = cast(Transformer, workflow)
+    plan = workflow.compute_plan(world_size, bool(overwrite))
     print(plan.report())
+    # The launch's destination refusal, said by the plan too: a plan the run would refuse is not a go.
+    workflow._guard_sharded_destinations(world_size)
     return plan
 
 

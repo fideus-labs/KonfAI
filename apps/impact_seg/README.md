@@ -112,7 +112,6 @@ impact-seg-konfai pipeline body -i image.nii.gz --gt reference_mask.nii.gz --mas
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`segment` / `pipeline`) | `0` |
 | `--tta` | Number of test-time augmentations (`segment` / `pipeline`) | `0` |
-| `--mc` | Monte Carlo dropout samples (`segment` / `pipeline`) | `0` |
 | `-uncertainty` | Also write the inference stack (`segment` / `pipeline`) | `False` |
 | `--gt` | Reference labels: required by `eval`, optional in `pipeline` | *unset* |
 | `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |
@@ -120,7 +119,7 @@ impact-seg-konfai pipeline body -i image.nii.gz --gt reference_mask.nii.gz --mas
 | `--cpu` | Number of CPU worker processes | *unset* |
 | `-q`, `--quiet` | Suppress console output | `False` |
 
-> When `--ensemble`, `--tta`, and `--mc` are left at `0`, the values declared in the app bundle (`app.json`) are used.
+> When `--ensemble` and `--tta` are left at `0`, the values declared in the app bundle (`app.json`) are used.
 
 See the full help of any sub-command with:
 

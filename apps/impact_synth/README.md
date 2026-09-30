@@ -78,7 +78,6 @@ impact-synth-konfai pipeline CBCT -i patient01.nii.gz --gt ct.nii.gz -o patient0
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`synthesize` / `pipeline`) | `0` |
 | `--tta` | Number of test-time augmentations (`synthesize` / `pipeline`) | `0` |
-| `--mc` | Monte Carlo dropout samples (`synthesize` / `pipeline`) | `0` |
 | `-uncertainty` | Also write the inference stack (`synthesize` / `pipeline`) | `False` |
 | `--gt` | Reference CT(s): required by `eval`, optional in `pipeline` | *unset* |
 | `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |

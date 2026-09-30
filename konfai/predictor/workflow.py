@@ -17,10 +17,13 @@
 
 """The configured prediction workflow and its Python entrypoints."""
 
+import hashlib
+import json
 import multiprocessing
 import os
 import shutil
 import warnings
+import zipfile
 from collections.abc import Sequence
 from multiprocessing.sharedctypes import SynchronizedArray
 from pathlib import Path
@@ -40,7 +43,7 @@ from konfai.predictor.output import OutputDatasetLoader
 from konfai.utils import vram
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import startup_clock
-from konfai.utils.config import apply_config, config, strict_config
+from konfai.utils.config import _load_tree, apply_config, config, strict_config
 from konfai.utils.dataset import refuse_shared_single_file
 from konfai.utils.errors import ConfigError, KonfAIWarning, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
@@ -228,7 +231,23 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                     " case(s) already written -> skipped (--overwrite recomputes)."
                 )
 
-        shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
+        # The kept cases' recipe, config and weights, is the archived one: a changed recipe is not written
+        # over it, and the new cases are not computed with it.
+        archived, weights = self.predict_path / "Prediction.yml", self.predict_path / "Weights.json"
+        identity = [weights_identity(source) for source in checkpoint_sources(self.path_to_models)]
+        if self._done_case_indices and not (
+            archived.exists()
+            and weights.exists()
+            and _load_tree(archived) == _load_tree(config_file())
+            and json.loads(weights.read_text()) == identity
+        ):
+            raise PredictorError(
+                f"{len(self._done_case_indices)} case(s) in '{self.predict_path}' were written by another "
+                "Prediction.yml or other checkpoints, which this run would no longer describe.",
+                "Run with --overwrite to recompute them with this one, or give this run another train_name.",
+            )
+        shutil.copyfile(config_file(), archived)
+        weights.write_text(json.dumps(identity))
 
         self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
         if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
@@ -475,8 +494,23 @@ def checkpoint_sources(path_to_models: Sequence[Path | str]) -> list[Path | str]
     return [checkpoint_source(path_to_model, PredictorError) for path_to_model in path_to_models]
 
 
+def weights_identity(source: Path | str) -> str:
+    """What a checkpoint holds, read cheaply. A URL is its address. A torch checkpoint is a zip whose
+    directory lists each tensor's CRC-32 and size, read without the weights; its top folder is named
+    after the file, so a copy under another name holds the same weights. Another file is its SHA-256."""
+    if isinstance(source, str):
+        return source
+    try:
+        with zipfile.ZipFile(source) as archive:
+            members = sorted((info.filename.split("/", 1)[-1], info.CRC, info.file_size) for info in archive.infolist())
+        return hashlib.sha256(repr(members).encode()).hexdigest()
+    except zipfile.BadZipFile:
+        with open(source, "rb") as file:
+            return hashlib.file_digest(file, "sha256").hexdigest()
+
+
 def build_predict(
-    models: list[Path],
+    models: Sequence[Path | str],
     prediction_file: Path | str | dict = Path("./Prediction.yml"),
     predictions_dir: Path | str = Path("./Predictions"),
 ) -> DistributedObject:
@@ -508,7 +542,7 @@ def _nothing_predicted(cases: int) -> PredictorError:
 
 @run_distributed_app
 def predict(
-    models: list[Path],
+    models: Sequence[Path | str],
     overwrite: bool = False,
     gpu: list[int] | None = None,
     cpu: int = 1,
