@@ -140,10 +140,14 @@ def test_list_and_show_read_an_app_repository(
 
     config = "Predictor:\n  Model:\n    classpath: torch.nn:Identity\n    Identity:\n      iterations: 3\n"
     (tmp_path / "A_app" / "Prediction.yml").write_text(config)
+    manifest = json.loads((tmp_path / "A_app" / "app.json").read_text())
+    manifest["model_files"] = [{"repo_id": "org/models", "revision": "0" * 40, "filename": "net.pt"}]
+    (tmp_path / "A_app" / "app.json").write_text(json.dumps(manifest))
     monkeypatch.setattr(sys, "argv", ["konfai-apps", "show", str(tmp_path / "A_app")])
     apps_cli_module.main_apps()
     out = capsys.readouterr().out
     assert out.startswith("A_app: A_APP\n\nDoes it.") and "torch.nn:Identity" in out and "  iterations = 3" in out
+    assert "org/models:net.pt (not cached yet" in out and "model_files" not in out
     with pytest.raises(AppRepositoryError, match="Did you mean 'A_app'"):
         apps_cli_module.describe_app(str(tmp_path), "A_ap")
 

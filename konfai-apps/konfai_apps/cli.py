@@ -243,10 +243,10 @@ def _split_app(app: str) -> tuple[str, str]:
 def describe_app(repo: str, name: str) -> dict[str, Any]:
     """What app ``name`` of ``repo`` runs, read from its own files before it runs (a warm cache answers offline): its
     ``app.json`` (``manifest``), the model ``classpath``, the ``--set`` ``parameters`` (``get_parameters``), the
-    model files its parameters name (``ref``) with their size in bytes once cached, else None (``models``), and the
-    ``requirements`` installed on first use."""
+    model files it downloads on its first run (``model_files`` in ``app.json``: ``repo_id``, ``revision``,
+    ``filename``) with their size in bytes once cached, else None (``models``), and the ``requirements`` installed on
+    first use."""
     from huggingface_hub import try_to_load_from_cache
-    from konfai.metric.measure.impact import split_model_ref
     from ruamel.yaml import YAML
 
     try:
@@ -263,23 +263,16 @@ def describe_app(repo: str, name: str) -> dict[str, Any]:
     files = {path.name: path for path in info.download_config_file()}
     config = YAML(typ="safe").load(files["Prediction.yml"].read_text(encoding="utf-8"))
     parameters = info.get_parameters()
-
-    def refs(node: object) -> list[str]:
-        if isinstance(node, dict):
-            return [ref for key, value in node.items() for ref in ([value] if key == "ref" else refs(value)) if ref]
-        return [ref for item in node for ref in refs(item)] if isinstance(node, list) else []
-
+    manifest = json.loads(files["app.json"].read_text(encoding="utf-8"))
     models: dict[str, int | None] = {}
-    for ref in dict.fromkeys(refs(parameters["values"])):
-        path = Path(ref)
-        if not path.is_file() and ":" in ref:
-            model_repo, revision, filename = split_model_ref(ref)
-            cached = try_to_load_from_cache(model_repo, filename, revision=revision)
-            path = Path(cached) if isinstance(cached, str) else path
-        models[ref] = path.stat().st_size if path.is_file() else None
+    for model in manifest.get("model_files", []):
+        cached = try_to_load_from_cache(model["repo_id"], model["filename"], revision=model.get("revision"))
+        models[f"{model['repo_id']}:{model['filename']}"] = (
+            Path(cached).stat().st_size if isinstance(cached, str) else None
+        )
     lines = files["requirements.txt"].read_text(encoding="utf-8").splitlines() if "requirements.txt" in files else []
     return {
-        "manifest": json.loads(files["app.json"].read_text(encoding="utf-8")),
+        "manifest": manifest,
         "classpath": config["Predictor"]["Model"]["classpath"],
         "parameters": parameters,
         "models": models,
@@ -304,7 +297,16 @@ def print_apps(prog: str, apps: list[tuple[str, dict]]) -> None:
 
 
 #: The ``app.json`` keys ``show`` prints in its header or leaves to a UI; the others are printed as they are.
-_SHOWN_KEYS = {"display_name", "description", "short_description", "inputs", "outputs", "terminology", "icon"}
+_SHOWN_KEYS = {
+    "display_name",
+    "description",
+    "short_description",
+    "inputs",
+    "outputs",
+    "terminology",
+    "icon",
+    "model_files",
+}
 
 
 def print_app(name: str, described: dict[str, Any]) -> None:
