@@ -18,6 +18,9 @@
 
 from __future__ import annotations
 
+import copy
+import difflib
+import functools
 import importlib.metadata
 import importlib.util
 import inspect
@@ -27,23 +30,26 @@ import re
 import shutil
 import subprocess  # nosec B404
 import sys
+import tempfile
+import types
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal, get_args, get_origin
+from typing import Any, Literal, Union, get_args, get_origin
 
 import numpy as np
 import requests
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
-from konfai.utils.config import Choices, Range
+from konfai.utils.config import Choices, Range, _coerce_config_value
 from konfai.utils.errors import ConfigError
 from konfai.utils.utils import is_windows_absolute_path
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
-from ruamel.yaml import YAML
+from ruamel.yaml import YAML, YAMLError
 
 from .errors import AppMetadataError, AppRepositoryError
 
@@ -55,6 +61,21 @@ def _plain(value: Any) -> Any:
     if isinstance(value, list):
         return [_plain(item) for item in value]
     return value
+
+
+def _is_plain(value: Any) -> bool:
+    """Whether ``value`` is JSON-clean as it is (scalars, and lists or string-keyed dicts of them)."""
+    if isinstance(value, dict):
+        return all(isinstance(key, str) and _is_plain(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return all(_is_plain(item) for item in value)
+    return value is None or isinstance(value, (bool, int, float, str))
+
+
+def _defaults_of_class(cls: type) -> dict[str, Any]:
+    """The arguments of ``cls.__init__`` that have a default, with it."""
+    parameters = inspect.signature(cls.__init__).parameters.items()  # type: ignore[misc]
+    return {name: param.default for name, param in parameters if param.default is not inspect.Parameter.empty}
 
 
 def _constraint_of_annotation(annotation: Any) -> dict[str, Any] | None:
@@ -98,6 +119,108 @@ def _constraints_of_class(cls: type) -> dict[str, Any]:
     return out
 
 
+def _base(annotation: Any) -> Any:
+    """The type a parameter binds, read as the config binder reads it: ``Annotated[T, ...]`` -> ``T``, then
+    ``T | None`` -> ``T``."""
+    if getattr(annotation, "__metadata__", None) is not None:
+        annotation = get_args(annotation)[0]
+    if get_origin(annotation) in (Union, types.UnionType):
+        members = [member for member in get_args(annotation) if member is not type(None)]
+        if len(members) == 1:
+            return members[0]
+    return annotation
+
+
+def _fields(annotation: Any) -> dict[str, inspect.Parameter]:
+    """The keyword arguments of the class ``annotation`` binds (none when it binds no class). A string annotation
+    (``from __future__ import annotations``) is text here: its values go unchecked, as ``get_parameters`` reads none."""
+    cls = _base(annotation)
+    if not inspect.isclass(cls):
+        return {}
+    try:
+        parameters = inspect.signature(cls.__init__).parameters  # type: ignore[misc]
+    except (TypeError, ValueError):
+        return {}
+    variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    return {name: param for name, param in parameters.items() if name != "self" and param.kind not in variadic}
+
+
+def _declared(model_class: type, keys: list[str]) -> Any:
+    """The annotation the model declares at ``keys``, a path inside its parameter block, or None.
+
+    The path walks the model's own arguments, then the entries of a ``dict[str, X]`` (any key is an ``X``) and the
+    fields of a dataclass (``models.0.feature_normalization``), as the binder builds them. It stops at any other class:
+    a loader such as ``optimizer`` binds its block to the arguments of another callable, which only the binder knows.
+    """
+    annotation: Any = model_class
+    for depth, key in enumerate(keys):
+        base = _base(annotation)
+        if get_origin(base) is dict:
+            annotation = get_args(base)[1]
+        elif depth == 0 or is_dataclass(base):
+            fields = _fields(base)
+            if key not in fields:
+                return None
+            annotation = fields[key].annotation
+        else:
+            return None
+    return annotation
+
+
+def _check_value(value: Any, annotation: Any, where: str) -> None:
+    """Refuse a ``--set`` value its declared type rejects, before the config is written.
+
+    What the binder refuses once the run has started (a ``Literal``, a type, a dict key that is not a string), and what
+    it lets through: a ``Range``, which it reads as a UI hint; a field a dataclass does not have, bound as its default
+    with a warning (``strict_config(refuse=False)``); a string YAML reads as a number inside a mapping (``01`` as 1: the
+    wrong layers of a ``layers_mask``); an entry without a field it requires (a model without its ``ref``).
+    """
+    if value is None or value == "None" or annotation is inspect.Parameter.empty or isinstance(annotation, str):
+        return
+    base = _base(annotation)
+    if get_origin(base) is Literal:
+        if not any(str(value) == str(choice) for choice in get_args(base)):
+            raise AppRepositoryError(f"Cannot apply --set '{where}': '{value}' is not one of {list(get_args(base))}.")
+    elif get_origin(base) is dict and isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise AppRepositoryError(f"Cannot apply --set '{where}': the key {key} must be a string: quote it.")
+            _check_value(item, get_args(base)[1], f"{where}.{key}")
+    elif is_dataclass(base):
+        name = getattr(base, "__name__", str(base))
+        if not isinstance(value, dict):
+            raise AppRepositoryError(
+                f"Cannot apply --set '{where}': it takes a mapping of the fields of {name}, not '{value}'."
+            )
+        fields = _fields(base)
+        for key, item in value.items():
+            if key not in fields:
+                raise AppRepositoryError(
+                    f"Cannot apply --set '{where}.{key}': {name} has no field '{key}'.{did_you_mean(str(key), fields)}"
+                )
+            _check_value(item, fields[key].annotation, f"{where}.{key}")
+        missing = [field for field, param in fields.items() if param.default is param.empty and field not in value]
+        if missing:
+            raise AppRepositoryError(f"Cannot apply --set '{where}': {name} needs {', '.join(missing)}.")
+    elif inspect.isclass(base) and base not in (bool, int, float, str, list, tuple, dict):
+        return  # a loader (see _declared): the binder checks its block
+    elif base is str and not isinstance(value, str):
+        raise AppRepositoryError(
+            f"Cannot apply --set '{where}': it takes a string, not the number {value}: quote it (YAML reads 01 as 1)."
+        )
+    else:
+        try:
+            _coerce_config_value(value, base, "the value")
+        except ConfigError as error:
+            raise AppRepositoryError(f"Cannot apply --set '{where}': {' '.join(map(str, error.args))}") from None
+    for bounds in (meta for meta in getattr(annotation, "__metadata__", ()) if isinstance(meta, Range)):
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, int | float) and not isinstance(item, bool) and not bounds.min <= item <= bounds.max:
+                raise AppRepositoryError(
+                    f"Cannot apply --set '{where}': {item} is outside its range [{bounds.min}, {bounds.max}]."
+                )
+
+
 def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str]:
     """Return the list of app identifiers exposed by a remote KonfAI app server."""
     r = requests.get(
@@ -117,22 +240,21 @@ def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str
 
 
 def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]:
-    """List app folders available inside a Hugging Face repository."""
-    api = HfApi()
-    app_names: list[str] = []
-    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+    """List the app folders of a Hugging Face repository: its top-level folders holding an ``app.json``.
 
-    if force_update:
-        try:
-            tree = api.list_repo_tree(repo_id=base_repo_id, revision=revision, repo_type="model")
-            for entry in tree:
-                app_name = Path(entry.path).name
-                if isinstance(entry, RepoFolder) and is_app_repo(
-                    LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, True)
-                ):
-                    app_names.append(app_name)
-            return app_names
-        except Exception as exc:
+    Read from the Hub in one tree listing, so a cache holding some apps never hides the others. When the
+    Hub cannot be reached (offline, ``HF_HUB_OFFLINE``), the cached snapshot of the same revision is
+    listed instead and said to be, since a cache holds only the apps already used; ``force_update``
+    refuses that fallback.
+    """
+    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+    try:
+        tree = HfApi().list_repo_tree(repo_id=base_repo_id, revision=revision, repo_type="model", recursive=True)
+        paths = [PurePosixPath(entry.path) for entry in tree]
+        return sorted(path.parts[0] for path in paths if len(path.parts) == 2 and path.name == "app.json")
+    except Exception as exc:
+        cached = None if force_update else _cached_apps(base_repo_id, revision)
+        if cached is None:
             raise AppRepositoryError(
                 f"Failed to inspect Hugging Face repository '{repo_id}'. "
                 "Unable to list its tree and detect valid application folders. "
@@ -140,28 +262,43 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]
                 "that your authentication is valid, and that your internet connection is working.\n"
                 f"Original error: {exc}"
             ) from exc
+        print(f"[KonfAI-Apps] The Hugging Face Hub cannot be reached: listing the apps of '{repo_id}' cached here.")
+        return cached
 
-    try:
-        snapshot_dir = snapshot_download(
-            repo_id=base_repo_id,
-            repo_type="model",
-            local_files_only=True,
-            revision=revision,
-        )  # nosec B615
-        root = Path(snapshot_dir)
-        for path in root.iterdir():
-            if path.is_dir():
-                app_name = path.name
-                if is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, False)):
-                    app_names.append(app_name)
-        return app_names
-    except Exception:
-        return get_available_apps_on_hf_repo(repo_id, True)
+
+def _cached_apps(repo_id: str, revision: str | None) -> list[str] | None:
+    """The app folders of the cached snapshot of ``repo_id`` at ``revision`` (a branch, tag or commit;
+    ``main`` when ``None``), or ``None`` when that revision is not cached. The snapshot is read as it
+    is: huggingface_hub calls one without every file of the repository incomplete and will not list it."""
+    from huggingface_hub import constants
+    from huggingface_hub.file_download import repo_folder_name
+
+    root = Path(constants.HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
+    ref = root / "refs" / (revision or "main")
+    commit = ref.read_text(encoding="utf-8").strip() if ref.is_file() else revision
+    if not commit or not (root / "snapshots" / commit).is_dir():
+        return None
+    return sorted(path.parent.name for path in (root / "snapshots" / commit).glob("*/app.json"))
 
 
 def is_app_repo(filenames: list[str]) -> bool:
     """Return whether the given repository file list looks like a KonfAI app."""
     return "app.json" in filenames
+
+
+def pass_cost(manifest: dict[str, Any], prediction_file: str) -> dict[str, float]:
+    """The peak bytes per voxel one of an app's prediction configs costs, ``{"vram": ..., "ram": ...}``, as its
+    ``app.json`` declares them: ``tiling["tile_<device>_bytes_per_voxel"]`` for the config ``tiling["tile"]`` names
+    (the app's own figure where the tile pass declares none), ``<device>_bytes_per_voxel`` for any other."""
+    tiling = manifest.get("tiling") or {}
+    tile = prediction_file == tiling.get("tile")
+    costs = {}
+    for device in ("vram", "ram"):
+        key = f"{device}_bytes_per_voxel"
+        cost = tiling.get(f"tile_{key}", manifest.get(key)) if tile else manifest.get(key)
+        if cost:
+            costs[device] = float(cost)
+    return costs
 
 
 def current_free_vram(devices: list[int], remote_server: RemoteServer | None = None) -> float | None:
@@ -209,6 +346,95 @@ _DOTTED_PATH_HINT = (
     " e.g. 'Predictor.Dataset.batch_size=4' in an inference config or 'Trainer.Dataset.batch_size=4'"
     " in a fine-tune one."
 )
+
+
+def did_you_mean(name: str, candidates: Any, count: int = 1) -> str:
+    """`` Did you mean 'A'?`` for the ``count`` candidates closest to ``name``; empty when none is close."""
+    close = difflib.get_close_matches(name, list(candidates), n=count)
+    return f" Did you mean {' or '.join(repr(match) for match in close)}?" if close else ""
+
+
+def check_overrides(data: Any, overrides: list[str]) -> None:
+    """Refuse, before the config ``data`` runs elsewhere, the ``--set`` overrides its run would refuse: they are applied
+    to a copy, the model class imported from the installed module its ``classpath`` names (not importable: only the
+    config's own keys are known)."""
+    root = (data or {}).get("Predictor") or (data or {}).get("Trainer") or {}
+    module, _, name = str((root.get("Model") or {}).get("classpath", "")).partition(":")
+
+    def model_class() -> type | None:
+        try:
+            return getattr(importlib.import_module(module), name)
+        except Exception:
+            return None
+
+    apply_overrides(copy.deepcopy(data), overrides, model_class)
+
+
+def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], type | None]) -> None:
+    """Apply ``--set NAME=VALUE`` overrides to the loaded config ``data``, in place: the one resolver of every
+    ``--set``, which :meth:`LocalAppRepository._apply_config_overrides` writes into a config file.
+
+    A bare ``NAME`` is the dotted path into ``<Root>.Model.<ClassName>``. Inside that block a path the model declares
+    (``_declared``) may name a key the config leaves out: an argument of the model, a field of a ``models`` entry
+    (``models.0.feature_normalization``), a new entry (``models.2={ref: ..}``); its value is checked against the
+    declared type (``_check_value``). Any other key must exist. ``model_class`` returns the class the ``classpath``
+    names, or None when it names none or does not import (then only the config's own keys are known); it is called
+    once, and only when a path enters the model block. ``check_overrides`` applies them to a copy, to refuse before a run
+    what the run would refuse.
+    """
+    value_parser = YAML(typ="safe")
+    class_name, model_params = LocalAppRepository._model_param_block(data)
+    model_path = ["Predictor" if (data or {}).get("Predictor") else "Trainer", "Model", class_name or ""]
+    resolved = functools.cache(model_class)
+    for override in overrides:
+        key_path, sep, raw_value = override.partition("=")
+        if not sep:
+            raise AppRepositoryError(f"Invalid --set '{override}': expected NAME=VALUE (e.g. iterations=300).")
+        key_path = key_path.strip()
+        if not key_path:
+            raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
+        if "." in key_path:
+            # Full dotted path from the config root (any key, for advanced overrides).
+            keys = [key for key in key_path.split(".") if key]
+        elif model_params is None:
+            raise AppRepositoryError(
+                f"Cannot apply --set '{override}': the config has no model parameter block. {_DOTTED_PATH_HINT}"
+            )
+        else:
+            # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
+            keys = [*model_path, key_path]
+        node = data
+        for key in keys[:-1]:
+            if not isinstance(node, dict) or key not in node:
+                raise AppRepositoryError(
+                    f"Cannot apply --set '{override}': config path '{key_path}' has no key '{key}'."
+                )
+            node = node[key]
+        leaf, inside = keys[-1], keys[3:] if keys[:3] == model_path else []
+        model = resolved() if inside else None
+        declared = _declared(model, inside) if model is not None else None
+        if not isinstance(node, dict) or (leaf not in node and declared is None):
+            parent = _declared(model, inside[:-1]) if model is not None else None
+            known = [*node, *_fields(parent)] if isinstance(node, dict) else []
+            raise AppRepositoryError(
+                f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
+                + did_you_mean(leaf, known),
+                *([] if "." in key_path else [_DOTTED_PATH_HINT]),
+            )
+        try:
+            value = value_parser.load(raw_value)
+        except YAMLError as error:
+            problem = getattr(error, "problem", None) or error
+            raise AppRepositoryError(f"Invalid --set '{override}': its VALUE is not YAML ({problem}).") from None
+        # YAML reads a digit string as a number and drops its leading zeros ('01' -> 1): a string the model declares,
+        # or one the config holds (a layers_mask bitmask), keeps the text given.
+        if declared is not None and _base(declared) is str and isinstance(value, int | float):
+            value = raw_value.strip()
+        elif isinstance(node.get(leaf), str) and type(value) is int and str(value) != raw_value.strip():
+            value = raw_value.strip()
+        if declared is not None:
+            _check_value(value, declared, key_path)
+        node[leaf] = value
 
 
 def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
@@ -530,6 +756,12 @@ class LocalAppRepository(AppRepositoryInfo):
         return None
 
     def _set_number_of_augmentation(self, inference_file_path: str, new_value: int) -> None:
+        if new_value > self._maximum_tta:
+            # Said, not refused: a UI may offer more copies than an app allows, and the run is still valid.
+            print(
+                f"[KonfAI-Apps] {new_value} test-time augmentation(s) asked, but app '{self._app_name}' allows"
+                f" {self._maximum_tta} (app.json 'tta'): running {self._maximum_tta}."
+            )
         new_value = int(np.clip(new_value, 0, self._maximum_tta))
         yaml = YAML()
         with open(inference_file_path) as file:
@@ -580,13 +812,14 @@ class LocalAppRepository(AppRepositoryInfo):
         inference_file_path: str,
         patch_size: list[int] | None = None,
         batch_size: int | None = None,
+        max_voxels: int | None = None,
     ) -> None:
-        """Write the inference ``Patch.patch_size`` / ``batch_size``, overriding only the values given.
+        """Write the inference ``Patch.patch_size`` / ``max_voxels`` / ``batch_size``, overriding only the values given.
 
         A single-element ``patch_size`` is broadcast to the config's spatial dimensionality (an isotropic
         cube), so ``--patch-size 192`` works regardless of 2D/3D; a full list is written verbatim.
         """
-        if patch_size is None and batch_size is None:
+        if patch_size is None and batch_size is None and max_voxels is None:
             return
         yaml = YAML()
         with open(inference_file_path) as file:
@@ -599,10 +832,30 @@ class LocalAppRepository(AppRepositoryInfo):
                 dim = len(existing) if isinstance(existing, list) and len(existing) > 1 else 3
                 patch_size = patch_size * dim
             tmp["Patch"]["patch_size"] = patch_size
+        if max_voxels is not None:
+            tmp["Patch"]["max_voxels"] = max_voxels
         if batch_size is not None:
             tmp["batch_size"] = batch_size
 
         with open(inference_file_path, "w") as file:
+            yaml.dump(data, file)
+
+    def _set_pass_cost(self, prediction_file: str) -> None:
+        """Hand the prediction's ``Patch`` the peak bytes per voxel ``app.json`` declares for this config
+        (:func:`pass_cost`), which KonfAI sizes it from when it sets no ``max_voxels``."""
+        with open(self._download("app.json"), encoding="utf-8") as file:
+            costs = pass_cost(json.load(file), prediction_file)
+        if not costs:
+            return
+        yaml = YAML()
+        with open(prediction_file) as file:
+            data = yaml.load(file)
+        patch = ((data.get("Predictor") or {}).get("Dataset") or {}).get("Patch")
+        if not isinstance(patch, dict):
+            return
+        for device, cost in costs.items():
+            patch.setdefault(f"{device}_bytes_per_voxel", cost)
+        with open(prediction_file, "w") as file:
             yaml.dump(data, file)
 
     def _apply_config_overrides(self, inference_file_path: str, overrides: list[str] | None) -> None:
@@ -611,51 +864,21 @@ class LocalAppRepository(AppRepositoryInfo):
         A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
         ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly. A dotted
         ``NAME`` (e.g. ``Predictor.Dataset.batch_size``) is a full path from the config root, for any other
-        key. Either way the key must already exist: the resolved config lists every parameter, so a typo
-        raises here instead of silently adding a dead key. ``VALUE`` is parsed as YAML: ``300`` is an int,
-        ``2.0`` a float, ``true`` a bool, ``[1, 2, 3]`` a list, and ``L1`` a string (KonfAI's literal ``None``
-        string is preserved). This is the generic override the UI (SlicerKonfAI) drives to tune a preset.
+        key. Either way the key must exist, in the config or, inside the model block, among what the model
+        declares there (an argument of its class, a field of a ``models`` entry: a preset lists what it sets, not
+        every knob its model takes), so a typo raises here instead of silently adding a dead key; a value the
+        declared type refuses (a choice, a type, a range) raises here too, not once the run has started. ``VALUE``
+        is parsed as YAML: ``300`` is an int, ``2.0`` a float, ``true`` a bool, ``[1, 2, 3]`` a list, and ``L1`` a
+        string (KonfAI's literal ``None`` string is preserved); a digit string with leading zeros given to a string
+        key stays that string (``layers_mask=01``). This is the generic override the UI (SlicerKonfAI) drives to
+        tune a preset; :func:`apply_overrides` resolves it.
         """
         if not overrides:
             return
         yaml = YAML()
-        value_parser = YAML(typ="safe")
         with open(inference_file_path) as file:
             data = yaml.load(file)
-        _, model_params = self._model_param_block(data)
-
-        for override in overrides:
-            key_path, sep, raw_value = override.partition("=")
-            if not sep:
-                raise AppRepositoryError(f"Invalid --set '{override}': expected NAME=VALUE (e.g. iterations=300).")
-            key_path = key_path.strip()
-            if not key_path:
-                raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
-            if "." in key_path:
-                # Full dotted path from the config root (any key, for advanced overrides).
-                keys = [key for key in key_path.split(".") if key]
-                node = data
-                for key in keys[:-1]:
-                    if not isinstance(node, dict) or key not in node:
-                        raise AppRepositoryError(
-                            f"Cannot apply --set '{override}': config path '{key_path}' has no key '{key}'."
-                        )
-                    node = node[key]
-                target, leaf = node, keys[-1]
-            else:
-                # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
-                if model_params is None:
-                    raise AppRepositoryError(
-                        f"Cannot apply --set '{override}': the config has no model parameter block. {_DOTTED_PATH_HINT}"
-                    )
-                target, leaf = model_params, key_path
-            if not isinstance(target, dict) or leaf not in target:
-                hint = "" if "." in key_path else f" {_DOTTED_PATH_HINT}"
-                raise AppRepositoryError(
-                    f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config.{hint}"
-                )
-            target[leaf] = value_parser.load(raw_value)
-
+        apply_overrides(data, overrides, lambda: self._model_class(data))
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
 
@@ -681,15 +904,33 @@ class LocalAppRepository(AppRepositoryInfo):
         values = {name: _plain(value) for name, value in (params or {}).items() if name not in structural}
 
         constraints: dict[str, Any] = {}
-        model = ((data or {}).get("Predictor") or {}).get("Model") or {}
-        classpath = model.get("classpath") if isinstance(model, dict) else None
-        if isinstance(classpath, str) and ":" in classpath:
-            stem, class_name = (part.strip() for part in classpath.split(":", 1))
+        model_class = self._model_class(data, filenames)
+        if model_class is not None:
             try:
-                constraints = _constraints_of_class(self._import_model_class(stem, class_name, filenames))
+                constraints = _constraints_of_class(model_class)
             except Exception:  # constraints are an optional UI hint: a load/inspect failure just omits them
                 constraints = {}
+            # The model's other arguments, at their defaults: --set reaches them as it reaches the listed ones.
+            for name, default in _defaults_of_class(model_class).items():
+                if name not in structural and name not in values and _is_plain(default):
+                    values[name] = default
         return {"values": values, "constraints": constraints}
+
+    def _model_class(self, data: Any, filenames: list[str] | None = None) -> type | None:
+        """The class a config's model ``classpath`` names, imported without instantiating it; None when the
+        config names none or it does not import (then only the config's own keys are known)."""
+        root = ((data or {}).get("Predictor") or (data or {}).get("Trainer")) or {}
+        model = (root or {}).get("Model") or {}
+        classpath = model.get("classpath") if isinstance(model, dict) else None
+        if not isinstance(classpath, str) or ":" not in classpath:
+            return None
+        stem, class_name = (part.strip() for part in classpath.split(":", 1))
+        try:
+            return self._import_model_class(
+                stem, class_name, self._all_repo_filenames() if filenames is None else filenames
+            )
+        except Exception:
+            return None
 
     def _import_model_class(self, module_stem: str, class_name: str, filenames: list[str]) -> type:
         """Import the app's model module (the ``classpath`` stem) and return the CLASS without instantiating
@@ -926,56 +1167,85 @@ class LocalAppRepository(AppRepositoryInfo):
         return models_path, inference_file_path, codes_path
 
     def _install_requirements(self, filenames: list[str]) -> None:
-        """Install missing/outdated packages listed in the app's requirements.txt.
+        """Install missing/outdated packages listed in the app's requirements.txt, and those its ``app.json`` lists
+        under ``requirements_no_deps`` without their dependencies (a package whose own pins cannot be met, such as a
+        SimpleITK version without a wheel for this Python; requirements.txt then lists what it needs).
 
         Runs on every local app resolution: resolving an app pip-installs the extra dependencies
         its custom code needs (the documented trust model: only resolve apps you trust). Set
         ``KONFAI_APPS_INSTALL_REQUIREMENTS=0`` to opt out (offline / CI / reproducible
         environments). Only missing or version-mismatched packages are installed, so repeat runs
-        are a no-op. Core packages (torch, konfai, …) are never installed or altered when named
-        directly: pip may still move them to satisfy another requirement's transitive dependency,
-        which this filter does not police. Lines that are not PEP 508 requirements (``-r``,
-        ``--extra-index-url``, ``git+https``…) are skipped.
+        are a no-op. Core packages (torch, konfai, …) are never installed or altered: a line naming
+        one is skipped, and pip is given a constraints file pinning each installed one at its
+        version, so a requirement whose own dependencies would move it (itk-impact pins
+        ``torch==2.12.*`` for its C++ ABI) fails with the conflict named instead of replacing the
+        torch the process already imported. Other transitive dependencies are not policed. Lines
+        that are not PEP 508 requirements (``-r``, ``--extra-index-url``, ``git+https``…) are skipped.
         """
         if os.environ.get("KONFAI_APPS_INSTALL_REQUIREMENTS", "1").strip().lower() in {"0", "false", "no"}:
             return
+        required_lines: list[str] = []
         requirements_filename = self._find_repo_filename("requirements.txt", filenames)
-        if requirements_filename is None:
-            return
+        if requirements_filename is not None:
+            with open(self._download(requirements_filename), encoding="utf-8") as file:
+                required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
+        with open(self._download("app.json"), encoding="utf-8") as file:
+            no_deps = [str(line) for line in json.load(file).get("requirements_no_deps", [])]
         # Compare PEP 503 canonical names throughout: pip resolves 'konfai_apps' and 'Konfai.Apps' to the
         # same project as 'konfai-apps', so a plain .lower() would let those spellings past the guard.
         protected = {
             canonicalize_name(name) for name in ("torch", "torchvision", "torchaudio", "konfai", "konfai-apps")
         }
-        with open(self._download(requirements_filename), encoding="utf-8") as file:
-            required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
         installed = {
             canonicalize_name(dist.metadata["Name"]): dist.version
             for dist in importlib.metadata.distributions()
             if dist.metadata["Name"]
         }
-        missing_or_outdated = []
-        for line in required_lines:
-            try:
-                req = Requirement(line)
-            except InvalidRequirement:
-                continue
-            name = canonicalize_name(req.name)
-            if name in protected:
-                print(f"[KonfAI-Apps] Skipping protected requirement '{line}'.")
-                continue
-            installed_version_str = installed.get(name)
-            if installed_version_str is None:
-                missing_or_outdated.append(line)
-                continue
-            if req.specifier and not req.specifier.contains(installed_version_str, prereleases=True):
-                missing_or_outdated.append(line)
 
-        if missing_or_outdated:
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", *missing_or_outdated])  # nosec B603
-            except subprocess.CalledProcessError as exc:
-                raise AppRepositoryError(f"Failed to install packages: {exc}") from exc
+        def missing_or_outdated(lines: list[str]) -> list[str]:
+            found = []
+            for line in lines:
+                try:
+                    req = Requirement(line)
+                except InvalidRequirement:
+                    continue
+                name = canonicalize_name(req.name)
+                if name in protected:
+                    print(f"[KonfAI-Apps] Skipping protected requirement '{line}'.")
+                    continue
+                version = installed.get(name)
+                if version is None or (req.specifier and not req.specifier.contains(version, prereleases=True)):
+                    found.append(line)
+            return found
+
+        pins = [f"{name}=={installed[name]}" for name in sorted(protected) if name in installed]
+        for lines, flags in ((required_lines, []), (no_deps, ["--no-deps"])):
+            to_install = missing_or_outdated(lines)
+            if to_install:
+                self._pip_install(to_install, flags, pins)
+
+    @staticmethod
+    def _pip_install(requirements: list[str], flags: list[str], pins: list[str]) -> None:
+        """``pip install`` ``requirements`` with ``flags``, the core packages held at ``pins``."""
+        with tempfile.TemporaryDirectory() as directory:
+            constraints = Path(directory) / "constraints.txt"
+            constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
+            command = [sys.executable, "-m", "pip", "install", *flags, "-c", str(constraints), *requirements]
+            # pip's report is echoed as it comes, and kept: the lines that name a conflict go in the error.
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as pip:  # nosec B603
+                report = []
+                for line in pip.stdout or []:
+                    print(line, end="", flush=True)
+                    report.append(line.strip())
+        if pip.returncode:
+            conflict = list(dict.fromkeys(line for line in report if " depends on " in line or "(constraint)" in line))
+            raise AppRepositoryError(
+                f"Failed to install {', '.join(requirements)}"
+                + (f": {'; '.join(conflict)}." if conflict else f" (pip exited with {pip.returncode}).")
+                + f" An app's requirements never replace the installed {', '.join(pins) or 'core packages'}.",
+                "Install versions of these core packages that the app's requirements accept, or set"
+                " KONFAI_APPS_INSTALL_REQUIREMENTS=0 and install them yourself.",
+            )
 
     def download_app(self) -> list[tuple[str, Path]]:
         filenames = self._get_filenames()
@@ -1016,6 +1286,7 @@ class LocalAppRepository(AppRepositoryInfo):
         uncertainty: bool,
         prediction_file: str,
         forced_patch_size: list[int] | None = None,
+        forced_max_voxels: int | None = None,
         forced_batch_size: int | None = None,
         config_overrides: list[str] | None = None,
     ) -> list[Path]:
@@ -1039,7 +1310,8 @@ class LocalAppRepository(AppRepositoryInfo):
             self._disable_uncertainty(prediction_file)
         # An explicit patch or batch wins; otherwise the app's config decides (``batch_size: 0`` there
         # measures the batch on the GPU).
-        self._set_patch_size_and_batch_size(prediction_file, forced_patch_size, forced_batch_size)
+        self._set_patch_size_and_batch_size(prediction_file, forced_patch_size, forced_batch_size, forced_max_voxels)
+        self._set_pass_cost(prediction_file)
         # Applied last, after the patch/batch override, so an explicit --set always wins.
         self._apply_config_overrides(prediction_file, config_overrides)
 
@@ -1541,10 +1813,14 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
 
 
 def _resolve_local_app_path(app_id: str) -> Path | None:
-    """Resolve *app_id* as a local path when it clearly targets the filesystem."""
+    """Resolve *app_id* as a local path when it clearly targets the filesystem.
+
+    Made absolute here: a run chdirs into its workspace before reading the app's files, where a
+    relative path (``./dist/CT_SEG``) would name nothing.
+    """
     path = Path(app_id).expanduser()
     if path.exists():
-        return path
+        return path.resolve()
     if is_windows_absolute_path(app_id):
         return path
     return None

@@ -14,22 +14,32 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Standalone KonfAI Apps package."""
+"""Standalone KonfAI Apps package.
 
-from .app import AbstractKonfAIApp, KonfAIApp, KonfAIAppClient, run_distributed_app, run_remote_job
-from .cli import add_common_konfai_apps, main_apps, main_apps_server
-from .transforms import DEFAULT_INFERENCE_MODEL_NAME, DEFAULT_INFERENCE_REPO_ID, KonfAIInference
+Its names are imported on first use: a light submodule (``konfai_apps.options``) stays light, without torch.
+"""
 
-__all__ = [
-    "DEFAULT_INFERENCE_MODEL_NAME",
-    "DEFAULT_INFERENCE_REPO_ID",
-    "AbstractKonfAIApp",
-    "KonfAIApp",
-    "KonfAIAppClient",
-    "KonfAIInference",
-    "add_common_konfai_apps",
-    "main_apps",
-    "main_apps_server",
-    "run_distributed_app",
-    "run_remote_job",
-]
+import importlib
+from typing import Any
+
+_EXPORTS = {
+    "AbstractKonfAIApp": ".app",
+    "KonfAIApp": ".app",
+    "KonfAIAppClient": ".app",
+    "run_distributed_app": ".app",
+    "run_remote_job": ".app",
+    "add_common_konfai_apps": ".cli",
+    "main_apps": ".cli",
+    "main_apps_server": ".cli",
+    "DEFAULT_INFERENCE_MODEL_NAME": ".transforms",
+    "DEFAULT_INFERENCE_REPO_ID": ".transforms",
+    "KonfAIInference": ".transforms",
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(_EXPORTS[name], __name__), name)

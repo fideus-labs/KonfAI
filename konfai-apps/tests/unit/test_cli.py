@@ -109,3 +109,65 @@ def test_main_apps_server_rejects_a_config_without_an_apps_list(
     apps_config.write_text(json.dumps({"applications": ["demo/app"]}), encoding="utf-8")
 
     assert "Invalid config file" in _run_apps_server(monkeypatch, apps_config)
+
+
+def test_python_m_konfai_apps_runs_the_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    import runpy
+
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "--help"])
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_module("konfai_apps", run_name="__main__")
+    assert exit_info.value.code == 0 and "konfai-apps" in capsys.readouterr().out
+
+
+def test_list_and_show_read_an_app_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from konfai_apps.errors import AppRepositoryError
+
+    for name, task in (("B_app", "segmentation"), ("A_app", "registration"), ("Other", "evaluation")):
+        (tmp_path / name).mkdir()
+        manifest = {"display_name": name.upper(), "short_description": "Does.", "description": "Does it."}
+        (tmp_path / name / "app.json").write_text(json.dumps({**manifest, "task": task, "tta": 0, "mc_dropout": 0}))
+    (tmp_path / "not_an_app").mkdir()
+    assert apps_cli_module.app_id(str(tmp_path), "A_app") == str(tmp_path / "A_app")
+    assert apps_cli_module.app_id("org/repo@v1", "A_app") == "org/repo@v1:A_app"
+    assert [name for name, _ in apps_cli_module.list_apps(str(tmp_path), "registration")] == ["A_app"]
+
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "list", str(tmp_path)])
+    apps_cli_module.main_apps()
+    assert capsys.readouterr().out.splitlines()[:3] == ["A_app  A_APP", "       Does.", "B_app  B_APP"]
+
+    config = "Predictor:\n  Model:\n    classpath: torch.nn:Identity\n    Identity:\n      iterations: 3\n"
+    (tmp_path / "A_app" / "Prediction.yml").write_text(config)
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "show", str(tmp_path / "A_app")])
+    apps_cli_module.main_apps()
+    out = capsys.readouterr().out
+    assert out.startswith("A_app: A_APP\n\nDoes it.") and "torch.nn:Identity" in out and "  iterations = 3" in out
+    with pytest.raises(AppRepositoryError, match="Did you mean 'A_app'"):
+        apps_cli_module.describe_app(str(tmp_path), "A_ap")
+
+
+def test_check_overrides_refuses_what_the_run_would_and_leaves_the_config_alone() -> None:
+    from konfai_apps.app_repository import check_overrides
+    from konfai_apps.errors import AppRepositoryError
+
+    config = {"Predictor": {"Model": {"classpath": "torch.nn:Identity", "Identity": {"iterations": 3}}}}
+    check_overrides(config, ["iterations=5"])
+    assert config["Predictor"]["Model"]["Identity"]["iterations"] == 3
+    with pytest.raises(AppRepositoryError, match="Did you mean 'iterations'"):
+        check_overrides(config, ["iteration=5"])
+
+
+def test_the_shared_options_refuse_a_uri_and_a_negative_gpu() -> None:
+    import argparse
+
+    from konfai_apps.options import add_device, local_path
+
+    parser = argparse.ArgumentParser()
+    add_device(parser)
+    assert parser.parse_args(["--gpu", "0", "--force-update"]).force_update
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--gpu", "-1"])
+    with pytest.raises(argparse.ArgumentTypeError, match="URI"):
+        local_path("s3://bucket/image.nii.gz")

@@ -676,6 +676,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         tta: int = 0,
         mc: int = 0,
         patch_size: list[int] | None = None,
+        max_voxels: int | None = None,
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         uncertainty: bool = False,
@@ -726,6 +727,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         tta: int = 0,
         mc: int = 0,
         patch_size: list[int] | None = None,
+        max_voxels: int | None = None,
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
@@ -971,10 +973,67 @@ class KonfAIApp(AbstractKonfAIApp):
                 if not matches:
                     continue
                 suffix = KonfAIApp._directory_volume_suffix(matches[0])
-                if suffix is not None:
-                    return "omezarr" if suffix in (".ome.zarr", ".zarr") else "dicom"
-                return "mha"
+                return "mha" if suffix is None else KonfAIApp._unit_backend(suffix)
         return "mha"
+
+    @staticmethod
+    def _unit_backend(suffix: str) -> str:
+        """The backend token a staged unit is read through, from its staging suffix: an OME-Zarr store,
+        a DICOM series (a bare directory, no suffix) or a single file."""
+        if suffix in (".ome.zarr", ".zarr"):
+            return "omezarr"
+        return "dicom" if suffix == "" else "mha"
+
+    @staticmethod
+    def _dataset_roots() -> list[Path]:
+        """The staging roots on disk: ``./Dataset``, then one ``./Dataset_<backend>`` per other backend."""
+        roots = [Path("Dataset"), *(Path(f"Dataset_{backend}") for backend in ("mha", "dicom", "omezarr"))]
+        return [root for root in roots if root.exists() or root.is_symlink()]
+
+    @staticmethod
+    def _stage(source: Path, suffix: str, case: str, entry: str, primary: str) -> None:
+        """Link one input unit as ``<root>/<case>/<entry><suffix>``, in the root of its backend.
+
+        A directory dataset's backend is detected from its first case, so one OME-Zarr store or DICOM
+        series staged beside plain files flips the whole root and the files stop resolving ('Group
+        source not found'). A unit of the backend of ``Volume_0``'s first case (``primary``) goes to
+        ``./Dataset``, the root every config reads; any other to ``./Dataset_<backend>``, which
+        :meth:`_declare_dataset_roots` adds to the config.
+        """
+        backend = KonfAIApp._unit_backend(suffix)
+        root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
+        KonfAIApp.symlink(source, root / case / f"{entry}{suffix}")
+
+    @staticmethod
+    def _declare_dataset_roots(config_file: str) -> None:
+        """Read the ``./Dataset_<backend>`` roots :meth:`_stage` split off wherever the config reads
+        ``./Dataset``, with the same flag: KonfAI resolves each group of a case in whichever root
+        holds it."""
+        extra = [root for root in KonfAIApp._dataset_roots() if root.name != "Dataset"]
+        path = Path(config_file)
+        if not extra or not path.is_file():
+            return
+        yaml = YAML()
+        with open(path, encoding="utf-8") as file:
+            data = yaml.load(file)
+        target = Path("Dataset").resolve()
+        for section in (data or {}).values():
+            dataset = section.get("Dataset") if isinstance(section, dict) else None
+            entries = dataset.get("dataset_filenames") if isinstance(dataset, dict) else None
+            if not entries:
+                continue
+            for entry in list(entries):
+                filename, flag, _ = split_path_spec(
+                    str(entry), default_format="mha", allowed_flags={"a", "i"}, supported_formats=SUPPORTED_FORMATS
+                )
+                if Path(filename).resolve() != target:
+                    continue
+                for root in extra:
+                    spec = f"./{root.name}/:{f'{flag}:' if flag else ''}{root.name.removeprefix('Dataset_')}"
+                    if spec not in entries:
+                        entries.append(spec)
+        with open(path, "w", encoding="utf-8") as file:
+            yaml.dump(data, file)
 
     @staticmethod
     def symlink(src: Path, dst: Path) -> None:
@@ -1022,6 +1081,9 @@ class KonfAIApp(AbstractKonfAIApp):
         Expected structure:
             ./Dataset/P{idx}/Volume_{i}{suffix}
 
+        (a unit whose storage backend differs from the first input's goes to ``./Dataset_<backend>``, see
+        :meth:`_stage`).
+
         Where:
         - i is the input-group index (e.g., channel/modalities)
         - idx is the patient/case index
@@ -1031,12 +1093,12 @@ class KonfAIApp(AbstractKonfAIApp):
         inputs : list[list[Path]]
             Nested list of paths. Each inner list is scanned for supported files.
         """
-        dataset_path = Path("./Dataset/")
-        if dataset_path.exists():
-            shutil.rmtree(dataset_path)
-        for i, input_path in enumerate(inputs):
-            for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(input_path)):
-                KonfAIApp.symlink(source, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
+        KonfAIApp._clear_dataset()
+        units = [KonfAIApp._list_input_units(input_path) for input_path in inputs]
+        primary = KonfAIApp._unit_backend(units[0][0][1]) if units else "mha"
+        for i, group in enumerate(units):
+            for idx, (source, suffix) in enumerate(group):
+                KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"Volume_{i}", primary)
 
     @staticmethod
     def _dataset_level(prediction_file: str, dataset_dir: Path) -> int:
@@ -1098,14 +1160,16 @@ class KonfAIApp(AbstractKonfAIApp):
         if not fills:
             return
         fill_value = {"ones": 1, "zeros": 0}
-        dataset_dir = Path("Dataset")
-        file_format = KonfAIApp._detect_group_format(dataset_dir, "Volume_0")
-        level = KonfAIApp._dataset_level(prediction_file, dataset_dir)
-        dataset = Dataset("Dataset", f"{file_format}@{level}" if level else file_format)
-        for name in dataset.get_names("Volume_0"):
-            shape, attributes = dataset.get_infos("Volume_0", name)  # header only, no pixel read
-            for i, default in fills.items():
-                dataset.write(f"Volume_{i}", name, np.full(shape, fill_value[default], dtype=np.uint8), attributes)
+        # Beside each case's Volume_0, in whichever root its storage backend staged it (see _stage).
+        for dataset_dir in KonfAIApp._dataset_roots():
+            file_format = KonfAIApp._detect_group_format(dataset_dir, "Volume_0")
+            level = KonfAIApp._dataset_level(prediction_file, dataset_dir)
+            dataset = Dataset(str(dataset_dir), f"{file_format}@{level}" if level else file_format)
+            for name in dataset.get_names("Volume_0"):
+                shape, attributes = dataset.get_infos("Volume_0", name)  # header only, no pixel read
+                for i, default in fills.items():
+                    data = np.full(shape, fill_value[default], dtype=np.uint8)
+                    dataset.write(f"Volume_{i}", name, data, attributes)
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
         """
@@ -1149,9 +1213,10 @@ class KonfAIApp(AbstractKonfAIApp):
         gt : list[list[Path]]
             Ground truth file paths grouped similarly to inputs.
         """
+        primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
         for i, gt_path in enumerate(gt):
             for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(gt_path)):
-                KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Reference_{i}{suffix}"))
+                KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"Reference_{i}", primary)
 
     def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
         """
@@ -1170,15 +1235,16 @@ class KonfAIApp(AbstractKonfAIApp):
             Optional mask paths.
         """
         if mask is None:
-            dataset = Dataset("Dataset", KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0"))
-            names = dataset.get_names("Volume_0")
-            for name in names:
-                shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
-                dataset.write("Mask_0", name, np.ones(shape, dtype=np.uint8), attr)
+            for root in KonfAIApp._dataset_roots():
+                dataset = Dataset(str(root), KonfAIApp._detect_group_format(root, "Volume_0"))
+                for name in dataset.get_names("Volume_0"):
+                    shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
+                    dataset.write("Mask_0", name, np.ones(shape, dtype=np.uint8), attr)
         else:
+            primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
             for i, mask_path in enumerate(mask):
                 for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(mask_path)):
-                    KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
+                    KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"Mask_{i}", primary)
 
     @staticmethod
     def _stage_result_dir(output: Path, tmp_dir: Path | None, name: str) -> Path:
@@ -1193,16 +1259,16 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def _clear_dataset() -> None:
-        """Drop the ``./Dataset`` staging.
+        """Drop the ``./Dataset`` staging (and its ``./Dataset_<backend>`` siblings).
 
         The auto-created temp workspace is deleted wholesale, so this only matters when the caller owns
         the workspace (``tmp_dir`` set): there ``output`` must keep the results alone, not the inputs.
         """
-        link = Path("./Dataset")
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        elif link.is_dir():
-            shutil.rmtree(link, ignore_errors=True)
+        for link in KonfAIApp._dataset_roots():
+            if link.is_symlink() or link.is_file():
+                link.unlink()
+            elif link.is_dir():
+                shutil.rmtree(link, ignore_errors=True)
 
     @staticmethod
     def _collect_result(output: Path, tmp_dir: Path | None, name: str) -> None:
@@ -1210,13 +1276,20 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Without a caller-owned workspace (``tmp_dir`` unset) the stage wrote ``./<name>`` in the isolated
         temp workspace; copy it into ``output`` before the workspace is deleted. With a caller-owned
-        workspace the stage already wrote straight into ``output``; only drop the ``./Dataset`` staging.
+        workspace the stage wrote straight into ``output``, all but the files a criterion saves at its own
+        relative path, which are copied over; the ``./Dataset`` staging is dropped.
         """
         if tmp_dir is None:
             result = Path(f"./{name}")
             if result.exists():
                 shutil.copytree(result, output, dirs_exist_ok=True)
         else:
+            # What a criterion saves by itself (an evaluation's MAE or Dice map, at the ``dataset`` path its
+            # config names, ``./Evaluations/...``) lands in the workspace rather than in ``output``: bring it
+            # along, unless one of the two folders holds the other already.
+            result, target = Path(f"./{name}").resolve(), output.resolve()
+            if result.exists() and result != target and target not in result.parents and result not in target.parents:
+                shutil.copytree(result, target, dirs_exist_ok=True)
             KonfAIApp._clear_dataset()
 
     @run_distributed_app
@@ -1229,6 +1302,7 @@ class KonfAIApp(AbstractKonfAIApp):
         tta: int = 0,
         mc: int = 0,
         patch_size: list[int] | None = None,
+        max_voxels: int | None = None,
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         uncertainty: bool = False,
@@ -1262,12 +1336,14 @@ class KonfAIApp(AbstractKonfAIApp):
             uncertainty,
             prediction_file,
             forced_patch_size=patch_size,
+            forced_max_voxels=max_voxels,
             forced_batch_size=batch_size,
             config_overrides=config_overrides,
         )
         # After install_inference, not before: the defaults are sized from the level the config asks for,
         # and that config only exists here: installation is what writes it out with any --set applied.
         self._fill_optional_inputs(len(inputs), prediction_file)
+        self._declare_dataset_roots(prediction_file)
         from konfai.predictor import predict
 
         # predictions_dir is passed explicitly: predict()'s default is resolved when konfai.predictor is
@@ -1319,6 +1395,7 @@ class KonfAIApp(AbstractKonfAIApp):
         self._write_gt_to_dataset(gt)
         self._write_mask_or_default(mask)
         self.app_repository.install_evaluation(evaluation_file)
+        self._declare_dataset_roots(evaluation_file)
         from konfai.evaluator import evaluate
 
         # evaluations_dir passed explicitly for the same import-time-default reason as predict() above.
@@ -1378,6 +1455,7 @@ class KonfAIApp(AbstractKonfAIApp):
         tta: int = 0,
         mc: int = 0,
         patch_size: list[int] | None = None,
+        max_voxels: int | None = None,
         batch_size: int | None = None,
         config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
@@ -1415,6 +1493,7 @@ class KonfAIApp(AbstractKonfAIApp):
             tta=tta,
             mc=mc,
             patch_size=patch_size,
+            max_voxels=max_voxels,
             batch_size=batch_size,
             config_overrides=config_overrides,
             uncertainty=uncertainty,

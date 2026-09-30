@@ -275,6 +275,69 @@ def test_fill_optional_inputs_leaves_input_without_default_absent(
     assert not (tmp_path / "Dataset" / "P000" / "Volume_1.mha").exists()
 
 
+def test_inputs_in_different_storage_forms_each_resolve_from_their_own_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A directory dataset's backend is detected from its first case: an OME-Zarr moving staged beside a
+    # .mha fixed flipped the one ./Dataset root to OME-Zarr, and Volume_0 stopped resolving ('Group
+    # source not found'). Each backend now has its root, and the config reads both.
+    from konfai.utils.dataset import Attribute, Dataset
+    from konfai.utils.utils import split_path_spec
+    from ruamel.yaml import YAML
+
+    data = tmp_path / "data"
+    data.mkdir()
+    _write_volume(data / "fixed.mha", value=7)
+    geometry = Attribute({"Origin": np.zeros(3), "Spacing": np.ones(3), "Direction": np.eye(3).flatten()})
+    Dataset(str(data / "stores"), "omezarr").write("moving", "case", np.full((1, 3, 3, 3), 5, np.int16), geometry)
+    store = next((data / "stores").rglob("*.ome.zarr"))
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset/:mha\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app._write_inputs_to_dataset([[data / "fixed.mha"], [store]])
+    app._declare_dataset_roots(str(config))
+
+    entries = YAML().load(config)["Predictor"]["Dataset"]["dataset_filenames"]
+    assert entries == ["./Dataset/:mha", "./Dataset_omezarr/:omezarr"]
+    for entry, group, value in ((entries[0], "Volume_0", 7), (entries[1], "Volume_1", 5)):
+        filename, _, file_format = split_path_spec(entry)
+        dataset = Dataset(filename, file_format)
+        assert dataset.get_names(group) == ["P000"]
+        assert np.all(dataset.read_data(group, "P000")[0] == value)
+
+
+def test_optional_defaults_follow_each_case_into_the_root_of_its_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # One input folder holding a .mha case and an OME-Zarr case stages them in two roots; a default
+    # written into ./Dataset alone would leave the OME-Zarr case without it, and the case would drop out.
+    from konfai.utils.dataset import Attribute, Dataset
+
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    _write_volume(cases / "a.mha")
+    geometry = Attribute({"Origin": np.zeros(3), "Spacing": np.ones(3), "Direction": np.eye(3).flatten()})
+    Dataset(str(tmp_path / "stores"), "omezarr").write("b", "case", np.full((1, 3, 3, 3), 5, np.int16), geometry)
+    (tmp_path / "stores" / "case" / "b.ome.zarr").rename(cases / "b.ome.zarr")
+    monkeypatch.chdir(tmp_path)
+
+    app = _app_with_inputs(
+        {
+            "Image": DataEntry("Image", VolumeType.VOLUME, True),
+            "Mask": DataEntry("Mask", VolumeType.SEGMENTATION, False, default="ones"),
+        }
+    )
+    app._write_inputs_to_dataset([[cases]])
+    app._fill_optional_inputs(1)
+
+    assert Dataset("Dataset", "mha").get_names("Volume_1") == ["P000"]
+    assert Dataset("Dataset_omezarr", "omezarr").get_names("Volume_1") == ["P001"]
+
+
 def test_write_mask_or_default_reads_header_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -609,3 +672,34 @@ def test_run_remote_job_packs_dataset_directory_as_single_zip(
 
     # No explicit GPU selection encodes as an empty string (auto mode on the server).
     assert captured["data"]["gpu"] == ""
+
+
+def test_a_caller_owned_workspace_hands_over_the_maps_a_criterion_saves(tmp_path: Path, monkeypatch) -> None:
+    # With a caller-owned workspace the metrics go straight to ``output``, but a criterion such as
+    # MAESaveMap writes its map at its own ``./Evaluations/...`` path, inside the workspace the caller then
+    # deletes (impact-reg-konfai eval did, and its maps never reached the Slicer panel).
+    workspace, output = tmp_path / "work", tmp_path / "out"
+    saved = workspace / "Evaluations" / "ImpactReg" / "Output" / "P000"
+    saved.mkdir(parents=True)
+    (saved / "MAE_map.mha").write_bytes(b"map")
+    (output / "ImpactReg").mkdir(parents=True)
+    (output / "ImpactReg" / "Metric_TRAIN.json").write_text("{}")
+    monkeypatch.chdir(workspace)
+
+    app_module.KonfAIApp._collect_result(output, workspace, "Evaluations")
+
+    assert (output / "ImpactReg" / "Output" / "P000" / "MAE_map.mha").read_bytes() == b"map"
+    assert (output / "ImpactReg" / "Metric_TRAIN.json").read_text() == "{}"
+
+
+def test_a_workspace_holding_the_output_is_not_copied_into_itself(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "Evaluations" / "Run").mkdir(parents=True)
+    (tmp_path / "Evaluations" / "Run" / "Metric_TRAIN.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+
+    app_module.KonfAIApp._collect_result(tmp_path / "Evaluations", tmp_path, "Evaluations")
+    app_module.KonfAIApp._collect_result(tmp_path / "Evaluations" / "Run", tmp_path, "Evaluations")
+
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()) == [
+        "Evaluations/Run/Metric_TRAIN.json"
+    ]

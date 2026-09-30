@@ -19,9 +19,12 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.metadata
 import json
 import os
+import shutil
+import textwrap
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,7 +32,15 @@ from typing import TYPE_CHECKING, Any
 from konfai import RemoteServer
 
 from . import app as app_module
-from .app_repository import LocalAppRepository, get_app_repository_info
+from .app_repository import (
+    LocalAppRepository,
+    LocalAppRepositoryFromHF,
+    did_you_mean,
+    get_app_repository_info,
+    get_available_apps_on_hf_repo,
+)
+from .errors import AppRepositoryError
+from .options import add_device, add_tmp_dir
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
@@ -80,35 +91,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     if with_uncertainty:
         parser.add_argument("-uncertainty", action="store_true", help="Run uncertainty workflow.")
 
-    device_group = parser.add_mutually_exclusive_group()
-    device_group.add_argument(
-        "--gpu",
-        type=int,
-        nargs="+",
-        default=[],
-        help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
-    )
-
-    def non_negative_int(value: str) -> int:
-        ivalue = int(value)
-        if ivalue <= 0:
-            raise argparse.ArgumentTypeError("CPU value must be > 0")
-        return ivalue
-
-    device_group.add_argument(
-        "--cpu",
-        type=non_negative_int,
-        default=None,
-        help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
-    )
-
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
-    parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront")
-    parser.add_argument(
-        "--force_update",
-        action="store_true",
-        help="Ensure required files are updated to the latest version during execution",
-    )
+    add_device(parser)
 
     kwargs = vars(parser.parse_args())
     if kwargs["cpu"] is not None:
@@ -120,13 +103,6 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
 def _resolved_path(value: str) -> Path:
     return Path(value).resolve()
-
-
-def _positive_int(value: str) -> int:
-    ivalue = int(value)
-    if ivalue <= 0:
-        raise argparse.ArgumentTypeError("CPU value must be > 0")
-    return ivalue
 
 
 def _add_app_io(parser: argparse.ArgumentParser) -> None:
@@ -143,22 +119,8 @@ def _add_app_io(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-o", "--output", type=_resolved_path, default=Path("./Output").resolve(), help="Output directory / file."
     )
-    parser.add_argument(
-        "--tmp-dir",
-        "--tmp_dir",
-        dest="tmp_dir",
-        type=_resolved_path,
-        default=None,
-        help="Temporary directory (optional).",
-    )
-    device = parser.add_mutually_exclusive_group()
-    device.add_argument(
-        "--gpu", type=int, nargs="+", default=[], help="GPU device ids, e.g. '0' or '0 1'. CPU if omitted."
-    )
-    device.add_argument("--cpu", type=_positive_int, default=None, help="Run on CPU using N worker processes.")
-    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output.")
-    parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront.")
-    parser.add_argument("--force_update", action="store_true", help="Refresh required app files before running.")
+    add_tmp_dir(parser)
+    add_device(parser)
 
 
 def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
@@ -195,6 +157,15 @@ def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
         help="Override the inference patch size, e.g. '192' (cube) or '192 192 192'. Default: the app's config.",
     )
     parser.add_argument(
+        "--max-voxels",
+        "--max_voxels",
+        dest="max_voxels",
+        type=int,
+        default=None,
+        help="Override the voxels a pass holds before KonfAI resamples or tiles it (the config's Patch.max_voxels). "
+        "Default: sized from the device and the cost the app declares.",
+    )
+    parser.add_argument(
         "--batch-size",
         "--batch_size",
         dest="batch_size",
@@ -221,6 +192,172 @@ def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def app_id(repo: str, name: str) -> str:
+    """The id of app ``name`` in ``repo``: a local directory of app folders, or a Hugging Face ``repo[@revision]``."""
+    root = Path(repo).expanduser()
+    return str(root / name) if root.is_dir() else f"{repo}:{name}"
+
+
+def app_file(repo: str, name: str, filename: str) -> Path:
+    """One file of app ``name`` in ``repo``, read cache first as the app's own run reads it."""
+    root = Path(repo).expanduser()
+    if root.is_dir():
+        return root / name / filename
+    return LocalAppRepositoryFromHF.download(repo, f"{name}/{filename}", False)
+
+
+def app_names(repo: str, force_update: bool = False) -> list[str]:
+    """The apps of ``repo``, sorted: its folders holding an ``app.json``."""
+    root = Path(repo).expanduser()
+    if root.is_dir():
+        return sorted(folder.name for folder in root.iterdir() if (folder / "app.json").is_file())
+    return get_available_apps_on_hf_repo(repo, force_update)
+
+
+def list_apps(repo: str, task: str | None = None) -> list[tuple[str, dict]]:
+    """Each app of ``repo`` with its ``app.json``, by name; with ``task``, those declaring another task left out (one
+    declaring none is kept)."""
+    apps = [
+        (name, json.loads(app_file(repo, name, "app.json").read_text(encoding="utf-8"))) for name in app_names(repo)
+    ]
+    return [(name, manifest) for name, manifest in apps if task is None or manifest.get("task", task) == task]
+
+
+def _show(app: str) -> None:
+    """``show``: ``describe_app`` of ``app`` (``repo:name`` or a local app folder), printed."""
+    repo, name = _split_app(app)
+    print_app(name, describe_app(repo, name))
+
+
+def _split_app(app: str) -> tuple[str, str]:
+    """``repo:name`` or a local app folder -> ``(repo, name)``."""
+    path = Path(app).expanduser()
+    if path.is_dir():
+        return str(path.resolve().parent), path.name
+    repo, colon, name = app.partition(":")
+    if not colon:
+        raise AppRepositoryError(f"'{app}' names no app.", "Name it 'repo_id:app_name', or give a local app folder.")
+    return repo, name
+
+
+def describe_app(repo: str, name: str) -> dict[str, Any]:
+    """What app ``name`` of ``repo`` runs, read from its own files before it runs (a warm cache answers offline): its
+    ``app.json`` (``manifest``), the model ``classpath``, the ``--set`` ``parameters`` (``get_parameters``), the
+    model files its parameters name (``ref``) with their size in bytes once cached, else None (``models``), and the
+    ``requirements`` installed on first use."""
+    from huggingface_hub import try_to_load_from_cache
+    from konfai.metric.measure.impact import split_model_ref
+    from ruamel.yaml import YAML
+
+    try:
+        info = get_app_repository_info(app_id(repo, name), False)
+    except AppRepositoryError:
+        names = app_names(repo)  # only now: a warm cache resolves one app offline, not the listing
+        if name in names:
+            raise
+        raise AppRepositoryError(
+            f"No app '{name}' in {repo}.{did_you_mean(name, names, 3)}", f"Its apps: {', '.join(names)}."
+        ) from None
+    if not isinstance(info, LocalAppRepository):
+        raise AppRepositoryError(f"'{name}' is not a local or Hugging Face app.")
+    files = {path.name: path for path in info.download_config_file()}
+    config = YAML(typ="safe").load(files["Prediction.yml"].read_text(encoding="utf-8"))
+    parameters = info.get_parameters()
+
+    def refs(node: object) -> list[str]:
+        if isinstance(node, dict):
+            return [ref for key, value in node.items() for ref in ([value] if key == "ref" else refs(value)) if ref]
+        return [ref for item in node for ref in refs(item)] if isinstance(node, list) else []
+
+    models: dict[str, int | None] = {}
+    for ref in dict.fromkeys(refs(parameters["values"])):
+        path = Path(ref)
+        if not path.is_file() and ":" in ref:
+            model_repo, revision, filename = split_model_ref(ref)
+            cached = try_to_load_from_cache(model_repo, filename, revision=revision)
+            path = Path(cached) if isinstance(cached, str) else path
+        models[ref] = path.stat().st_size if path.is_file() else None
+    lines = files["requirements.txt"].read_text(encoding="utf-8").splitlines() if "requirements.txt" in files else []
+    return {
+        "manifest": json.loads(files["app.json"].read_text(encoding="utf-8")),
+        "classpath": config["Predictor"]["Model"]["classpath"],
+        "parameters": parameters,
+        "models": models,
+        "requirements": [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")],
+    }
+
+
+def _megabytes(size: int) -> str:
+    """A file size as read in a listing: 0.015 MB, 24 MB, 123 MB."""
+    return f"{size / 1e6:.2g} MB" if size < 1e7 else f"{size / 1e6:.0f} MB"
+
+
+def print_apps(prog: str, apps: list[tuple[str, dict]]) -> None:
+    """``list``: each app's name and display name, its short description wrapped under them."""
+    width = max((len(name) for name, _ in apps), default=0)
+    columns = max(shutil.get_terminal_size().columns - width - 2, 40)
+    for name, manifest in apps:
+        print(f"{name:<{width}}  {manifest.get('display_name', '')}".rstrip())
+        for line in textwrap.wrap(manifest.get("short_description", ""), columns):
+            print(f"{'':<{width}}  {line}")
+    print(f"\n'{prog} show NAME' says what an app runs, what it needs and what --set tunes.")
+
+
+#: The ``app.json`` keys ``show`` prints in its header or leaves to a UI; the others are printed as they are.
+_SHOWN_KEYS = {"display_name", "description", "short_description", "inputs", "outputs", "terminology", "icon"}
+
+
+def print_app(name: str, described: dict[str, Any]) -> None:
+    """``show NAME``: what the app does, runs and needs, its other ``app.json`` fields, and its --set parameters."""
+    manifest = described["manifest"]
+    fill = functools.partial(textwrap.fill, width=shutil.get_terminal_size().columns, break_on_hyphens=False)
+    print(f"{name}: {manifest.get('display_name', '')}\n")
+    print(fill(manifest.get("description") or manifest.get("short_description", "")), end="\n\n")
+    model_class = described["classpath"].partition(":")[2]
+    models = [
+        f"{ref} ({_megabytes(size)})" if size else f"{ref} (not cached yet: downloaded on the first run)"
+        for ref, size in described["models"].items()
+    ]
+    rows = [
+        ("Model", described["classpath"]),
+        ("Models", "; ".join(models) or "none"),
+        ("Installs", f"{', '.join(described['requirements'])}, on first use" if described["requirements"] else ""),
+    ]
+    rows += [(key, json.dumps(value)) for key, value in manifest.items() if key not in _SHOWN_KEYS]
+    width = max(len(label) for label, _ in rows) + 1
+    for label, value in rows:
+        if value:
+            print(fill(value, initial_indent=f"  {label:<{width}}", subsequent_indent=" " * (width + 2)))
+
+    print("\nParameters: --set NAME=VALUE (repeatable); a nested one takes its full path.")
+    parameters, described_already = described["parameters"], set()
+
+    def rows_of(values: dict, constraints: dict, prefix: str) -> list[tuple[str, object, dict]]:
+        found = []
+        for key, value in values.items():
+            constraint = constraints.get(key) or constraints.get("*") or {}
+            if isinstance(value, dict) and value:
+                found += rows_of(value, constraint, f"{prefix or f'Predictor.Model.{model_class}.'}{key}.")
+            else:
+                found.append((f"{prefix}{key}", value, constraint))
+        return found
+
+    for path, value, constraint in rows_of(parameters["values"], parameters["constraints"], ""):
+        shown = value if isinstance(value, str) else json.dumps(value)
+        choices = constraint.get("choices") or []
+        if 0 < len(choices) <= 8:
+            shown += f"  ({' | '.join(map(str, choices))})"
+        elif choices:
+            shown += f"  (one of {len(choices)})"
+        elif "min" in constraint:
+            shown += f"  ({constraint['min']} to {constraint['max']})"
+        print(fill(f"{path} = {shown}", initial_indent="  ", subsequent_indent="      "))
+        description = constraint.get("description")
+        if description and description not in described_already:
+            described_already.add(description)
+            print(fill(description, initial_indent="      ", subsequent_indent="      "))
+
+
 def build_app_cli(
     prog: str,
     description: str,
@@ -231,6 +368,7 @@ def build_app_cli(
     resolve_infer: Callable[[argparse.Namespace], dict[str, Any]] | None = None,
     infer_command: str = "infer",
     with_uncertainty: bool = True,
+    repo: str | None = None,
 ) -> Callable[[], None]:
     """Build a ``main()`` for a repo-pinned app CLI exposing ``<infer_command>``/eval/uncertainty/pipeline.
 
@@ -243,6 +381,7 @@ def build_app_cli(
 
     ``infer_command`` names the inference operation with the app's own vocabulary (e.g. ``segment``,
     ``synthesize``); ``with_uncertainty=False`` drops the uncertainty command for models that do not support it.
+    ``show`` says what the selected app runs and tunes; ``repo``, the repository the apps come from, adds ``list``.
     """
     select = add_selection or (lambda parser: None)
     knobs = add_infer_knobs or (lambda parser: None)
@@ -256,6 +395,10 @@ def build_app_cli(
             allow_abbrev=False,
         )
         subparsers = parser.add_subparsers(dest="command", required=True)
+
+        if repo is not None:
+            subparsers.add_parser("list", help=f"List the apps of {repo}.")
+        select(subparsers.add_parser("show", help="Say what an app runs, what it needs and what --set tunes."))
 
         run_p = subparsers.add_parser(infer_command, help=f"Run {infer_command} (model inference).")
         select(run_p)
@@ -333,6 +476,12 @@ def build_app_cli(
             pipe_p.add_argument("-uncertainty", action="store_true", help="Also run the uncertainty workflow.")
 
         args = parser.parse_args()
+        if args.command == "list":
+            print_apps(prog, list_apps(str(repo)))
+            return
+        if args.command == "show":
+            _show(resolve_app(args))
+            return
         gpu = [] if args.cpu is not None else args.gpu
         konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
 
@@ -347,6 +496,7 @@ def build_app_cli(
                 uncertainty=getattr(args, "uncertainty", False),
                 prediction_file=args.prediction_file,
                 patch_size=args.patch_size,
+                max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
                 config_overrides=args.config_overrides,
                 **infer_kwargs(args),
@@ -388,6 +538,7 @@ def build_app_cli(
                 cpu=args.cpu,
                 quiet=args.quiet,
                 patch_size=args.patch_size,
+                max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
                 config_overrides=args.config_overrides,
                 **infer_kwargs(args),
@@ -460,44 +611,8 @@ def main_apps() -> None:
         )
 
         if not is_fine_tune:
-            parser.add_argument(
-                "--tmp-dir",
-                "--tmp_dir",
-                type=lambda x: Path(x).resolve(),
-                default=None,
-                help="Temporary directory (optional).",
-            )
-        device_group = parser.add_mutually_exclusive_group()
-        device_group.add_argument(
-            "--gpu",
-            type=int,
-            nargs="+",
-            default=[],
-            help="GPU device ids to use, e.g. '0' or '0,1,2'. If omitted runs on CPU.",
-        )
-
-        def non_negative_int(value: str) -> int:
-            ivalue = int(value)
-            if ivalue <= 0:
-                raise argparse.ArgumentTypeError("CPU value must be > 0")
-            return ivalue
-
-        device_group.add_argument(
-            "--cpu",
-            type=non_negative_int,
-            default=None,
-            help="Run on CPU using N worker processes/cores. If omitted, uses GPU when available.",
-        )
-
-        parser.add_argument(
-            "-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution"
-        )
-        parser.add_argument("--download", action="store_true", help="Download the full KonfAI app upfront")
-        parser.add_argument(
-            "--force_update",
-            action="store_true",
-            help="Ensure required files are updated to the latest version during execution",
-        )
+            add_tmp_dir(parser)
+        add_device(parser)
 
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
     add_common_args(infer_p)
@@ -694,6 +809,12 @@ def main_apps() -> None:
     bundle_p.add_argument("--in-channels", type=int, help="Override --onnx input channels (else read from config).")
     bundle_p.add_argument("--output-module", help="Named head to export for --onnx (default: last graph output).")
 
+    list_p = subparsers.add_parser("list", help="List the apps of a repository.")
+    list_p.add_argument("repo", help="A Hugging Face repository ('repo_id[@revision]') or a local directory of apps.")
+    list_p.add_argument("--task", default=None, help="Only the apps declaring this task.")
+    show_p = subparsers.add_parser("show", help="Say what an app runs, what it needs and what --set tunes.")
+    show_p.add_argument("app", help="'repo_id:app_name', or a local app folder.")
+
     download_p = subparsers.add_parser(
         "download", help="Download KonfAI App files from Hugging Face into the local cache."
     )
@@ -722,6 +843,14 @@ def main_apps() -> None:
 
     if kwargs.get("command") == "download":
         run_download_cli(kwargs)
+        return
+
+    if kwargs.get("command") == "list":
+        print_apps("konfai-apps", list_apps(kwargs["repo"], kwargs["task"]))
+        return
+
+    if kwargs.get("command") == "show":
+        _show(kwargs["app"])
         return
 
     host = kwargs.pop("host")
