@@ -34,7 +34,7 @@ import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import Attribute, Dataset, entry_files
+from konfai.utils.dataset import Attribute, Dataset, entry_links
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -1037,18 +1037,19 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def link_entry(src: Path, dst: Path) -> None:
-        """Link the image entry ``src`` as ``dst``, with the pixel file a detached header (.mhd, .hdr) names beside
-        it under the name the header gives it (``entry_files``): the header alone reads as nothing."""
-        KonfAIApp.symlink(src, dst)
-        for part in entry_files(src)[1:]:
-            companion = dst.with_name(part.name)
+        """Link the image entry ``src`` as ``dst``, with the pixel file a detached header (.mhd, .hdr) reads where it
+        reads it from ``dst`` (``entry_links``): the header alone reads as nothing."""
+        (header, _), *companions = entry_links(src, dst)
+        KonfAIApp.symlink(header, dst)
+        for part, companion in companions:
             if companion.exists() and companion.resolve() != part.resolve():
                 from konfai.utils.errors import DatasetManagerError
 
                 raise DatasetManagerError(
-                    f"'{src}' and another input of its case both keep their pixels in a file named '{part.name}'.",
+                    f"'{src}' and another input of its case both keep their pixels at '{companion.name}'.",
                     "Convert one of them to .mha or .nii.gz, which hold their pixels in the same file.",
                 )
+            companion.parent.mkdir(parents=True, exist_ok=True)
             KonfAIApp.symlink(part, companion)
 
     @staticmethod

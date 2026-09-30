@@ -81,19 +81,32 @@ def staged_entry(final: Path) -> Iterator[Path]:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def entry_files(path: Path) -> list[Path]:
-    """The files one image entry is made of: ``path``, then the pixel file a detached header names beside it
-    (MetaImage's ``ElementDataFile``, Analyze's ``.img``), which must travel with it."""
-    name = path.name.lower()
+def _mhd_data_file(path: Path) -> str | None:
+    """The ``ElementDataFile`` a MetaImage header names, ``None`` when its pixels follow the header (``LOCAL``)."""
+    with open(path, encoding="latin-1") as header:
+        for line in header:
+            key, _, value = line.partition("=")
+            if key.strip() == "ElementDataFile":
+                return None if value.strip() == "LOCAL" else value.strip()
+    return None
+
+
+def entry_links(src: Path, dest: Path) -> list[tuple[Path, Path]]:
+    """Each file of the image entry ``src`` and where it must lie for its header, left as it is, to read it as
+    ``dest``: the header at ``dest``, Analyze's pixels beside it under its name, a MetaImage's where its
+    ``ElementDataFile`` points from ``dest`` (an absolute one is read where it lies)."""
+    links = [(src, dest)]
+    name = src.name.lower()
     if name.endswith(".hdr"):
-        return [path, path.with_suffix(".img")]
-    if name.endswith(".mhd"):
-        with open(path, encoding="latin-1") as header:
-            for line in header:
-                key, _, value = line.partition("=")
-                if key.strip() == "ElementDataFile":
-                    return [path] if value.strip() == "LOCAL" else [path, path.parent / value.strip()]
-    return [path]
+        links.append((src.with_suffix(".img"), dest.with_suffix(".img")))
+    elif name.endswith(".mhd") and (data := _mhd_data_file(src)) is not None and not Path(data).is_absolute():
+        links.append((src.parent / data, dest.parent / data))
+    return links
+
+
+def entry_files(path: Path) -> list[Path]:
+    """The files one image entry is made of beside its header: ``path``, then the pixel file it names."""
+    return [part for part, _ in entry_links(path, path)]
 
 
 def transfer_entry(src: Path, dest: Path, move: bool = False) -> None:

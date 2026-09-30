@@ -47,6 +47,7 @@ from konfai.utils.dataset.landmarks import write_landmarks as write_landmarks
 from konfai.utils.dataset.ome_zarr_file import OmeZarrFile as OmeZarrFile
 from konfai.utils.dataset.sitk_file import SitkFile as SitkFile
 from konfai.utils.dataset.staging import entry_files as entry_files
+from konfai.utils.dataset.staging import entry_links as entry_links
 from konfai.utils.dataset.staging import is_staging_entry as is_staging_entry
 from konfai.utils.dataset.staging import staged_entry as staged_entry
 from konfai.utils.dataset.staging import transfer_entry as transfer_entry
@@ -66,6 +67,7 @@ __all__ = [
     "data_to_transform",
     "displacement_field_to_data",
     "entry_files",
+    "entry_links",
     "get_infos",
     "image_to_data",
     "is_an_image",
