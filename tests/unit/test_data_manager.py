@@ -48,6 +48,7 @@ from konfai.data.data_manager import (
     concatenate_batches,
     slice_batch,
 )
+from konfai.data.data_manager import samples as samples_module
 from konfai.data.data_manager.samples import _cache_worker_count
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, Resample, Standardize, TensorCast, Transform, TransformLoader
@@ -1472,7 +1473,7 @@ def _prepared_prediction(
     for name in ("CASE_000", "CASE_001"):
         store.write("CT", name, np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     dataset = DataPrediction(
-        augmentations=None,
+        augmentations=kwargs.pop("augmentations", None),
         dataset_filenames=[f"{root}:{file_format}"],
         groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
         patch=None if patch_size is None else DatasetPatch(patch_size=list(patch_size), overlap=None),
@@ -1502,6 +1503,29 @@ def test_prediction_spins_workers_only_where_a_patch_read_decodes_the_volume(
     dataset = _prepared_prediction(tmp_path / file_format, file_format)
 
     assert (dataset.resolved_num_workers > 0) is spins_workers
+
+
+@pytest.mark.parametrize(
+    ("copies", "budget", "loaded"),
+    [(1, 1 << 40, True), (1, 1000, False), (0, 1 << 40, False)],
+    ids=["TTA that fits", "its copies over the budget", "no TTA"],
+)
+def test_a_one_pass_reader_loads_a_tta_case_that_fits_the_budget_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, copies: int, budget: int, loaded: bool
+) -> None:
+    """Loaded, a case's chain runs once for every TTA copy, where a sweep replays it for each. The budget
+    holds the whole-volume pass, every copy and the next case (an 8x8 float case: 512 bytes of pass, 256 per
+    copy, two cases held). Without copies the sweep hides behind the forward, so the case streams."""
+    pytest.importorskip("SimpleITK")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    monkeypatch.setattr(samples_module, "per_rank_budget_bytes", lambda: budget)
+    augmentations = {"DataAugmentation_0": DataAugmentationsList(nb=copies, data_augmentations={})} if copies else None
+    (loaders,), _, _ = _prepared_prediction(tmp_path / "mha", "mha", augmentations=augmentations).get_data(1)
+    samples = loaders[0].dataset
+
+    samples[0]
+
+    assert samples.data["CT"][0].loaded is loaded
 
 
 def test_an_explicit_worker_count_wins_over_the_read_route(tmp_path: Path) -> None:
