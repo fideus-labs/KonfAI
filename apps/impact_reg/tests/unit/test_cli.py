@@ -25,7 +25,7 @@ import subprocess
 import sys
 
 import pytest
-from impact_reg_konfai import cli, impact_reg
+from impact_reg_konfai import PRESETS_REVISION, cli, impact_reg
 from konfai.utils.errors import KonfAIError
 
 
@@ -189,7 +189,7 @@ def test_show_says_what_a_preset_will_do(
 
 @pytest.mark.parametrize(
     ("override", "expected"),
-    [(None, ("VBoussot/ImpactReg", "main")), ("me/Presets@v2", ("me/Presets", "v2"))],
+    [(None, ("VBoussot/ImpactReg", PRESETS_REVISION)), ("me/Presets@v2", ("me/Presets", "v2"))],
 )
 def test_the_preset_repo_reaches_konfai_apps_with_its_revision(override: str | None, expected: tuple) -> None:
     # A release pins the presets by setting PRESETS_REVISION; konfai-apps must read it back as the revision of
