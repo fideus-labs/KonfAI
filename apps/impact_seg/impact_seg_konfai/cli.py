@@ -45,6 +45,7 @@ main = build_app_cli(
     "impact-seg-konfai",
     "IMPACT-Seg (KonfAI app wrapper): multimodal segmentation.",
     resolve_app=lambda args: f"{IMPACT_SEG_KONFAI_REPO}:{args.model}",
+    repo=IMPACT_SEG_KONFAI_REPO,
     add_selection=_add_selection,
     add_infer_knobs=_add_infer_knobs,
     resolve_infer=lambda args: {"ensemble": args.ensemble, "ensemble_models": [], "tta": args.tta, "mc": args.mc},

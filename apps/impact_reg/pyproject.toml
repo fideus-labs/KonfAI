@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
+# 77: the first setuptools to write a license expression (PEP 639) into the metadata.
+requires = ["setuptools>=77", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,18 +8,32 @@ name = "impact-reg-konfai"
 dynamic = ["version", "dependencies"]
 description = "Fast and lightweight CLI for pairwise registration workflows with IMPACT-Reg presets through the KonfAI runtime."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 
 authors = [
   { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
 ]
 
+keywords = ["image registration", "multimodal registration", "medical imaging", "IMPACT", "KonfAI"]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+
 [project.urls]
-Homepage = "https://github.com/vboussot/ImpactLoss"
-Repository = "https://github.com/vboussot/ImpactLoss"
-Issues = "https://github.com/vboussot/ImpactLoss/issues"
-License = "https://www.apache.org/licenses/LICENSE-2.0"
+Homepage = "https://github.com/fideus-labs/KonfAI/tree/main/apps/impact_reg"
+Repository = "https://github.com/fideus-labs/KonfAI"
+Issues = "https://github.com/fideus-labs/KonfAI/issues"
+Presets = "https://huggingface.co/VBoussot/ImpactReg"
 
 [project.scripts]
 impact-reg-konfai = "impact_reg_konfai.cli:main"
@@ -27,6 +42,15 @@ impact-reg-konfai = "impact_reg_konfai.cli:main"
 root = "../.."
 tag_regex = "^v(?P<version>.*)$"
 local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+# The package alone: tutorials/ and docs/ sit beside it, and setuptools' automatic discovery refused a flat layout
+# with two top-level candidates (tutorials holds scripts), so pip could not build the app at all.
+include = ["impact_reg_konfai*"]
+
+[tool.setuptools.package-data]
+# The evaluation configs 'eval' runs: the same for every preset, so they ship with the package.
+"impact_reg_konfai" = ["evaluation/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

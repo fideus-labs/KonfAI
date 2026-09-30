@@ -540,7 +540,7 @@ class Transformer(DistributedObject):
             if stream is None:
                 return (
                     f"destination '{destination.filename}' cannot serve region writes"
-                    " (h5 and omezarr always can; mha only with image geometry)."
+                    " (h5 and omezarr always can; mha, nii, nii.gz and nrrd with image geometry)."
                 )
             stream.__enter__()
             stream.abort(RuntimeError("plan probe"))

@@ -194,3 +194,47 @@ def test_a_unit_that_cannot_be_converted_is_written_back_as_it_was(tmp_path: Pat
     assert _axis_units(destination) == {"c": None, "z": "Pixel", "y": "Pixel", "x": "Pixel"}
     written = get_ome_zarr_info(destination)
     assert np.allclose([written["geometry"][axis]["scale"] for axis in "zyx"], [40.0, 30.08, 30.08])
+
+
+@pytest.mark.parametrize("source_unit", ["micrometer", None])
+def test_a_displacement_field_is_written_in_the_unit_its_grid_declares(tmp_path: Path, source_unit: str | None) -> None:
+    # KonfAI registers in millimetres and writes the grid back in the source's unit; the vectors are
+    # lengths too, so a reader applying them in the store's unit must get the same motion. A field
+    # read back by KonfAI is millimetres again, converted once each way. None: a NIfTI source (mm).
+    sitk = pytest.importorskip("SimpleITK")
+    import zarr
+    from konfai.utils.dataset import Dataset
+    from konfai.utils.dataset.attribute import Attribute
+    from konfai.utils.ITK import read_displacement_field
+
+    if source_unit is None:
+        attributes = Attribute()
+        attributes["Spacing"] = np.asarray([0.03008, 0.03008, 0.04])
+        attributes["Origin"] = np.asarray([-40.6, 11.0, -23.819])
+        attributes["Direction"] = np.eye(3).flatten()
+    else:
+        attributes = ome_zarr_attributes(get_ome_zarr_info(_micrometre_store(tmp_path / "micron.ome.zarr")))
+    per_unit = millimetres_per_unit(source_unit) or 1.0
+    shift_mm = np.asarray([0.3, -0.12, 0.04])  # (x, y, z): 300, -120, 40 micrometres
+
+    field = sitk.GetImageFromArray(np.broadcast_to(shift_mm, (4, 5, 6, 3)).copy(), isVector=True)
+    field.SetSpacing(attributes.get_np_array("Spacing").tolist())
+    field.SetOrigin(attributes.get_np_array("Origin").tolist())
+    root = tmp_path / "out"
+    root.mkdir()
+    Dataset.OmeZarrFile(str(root), read=False).data_to_file(
+        "DVF", sitk.DisplacementFieldTransform(sitk.Cast(field, sitk.sitkVectorFloat64)), attributes
+    )
+    store = root / "DVF.ome.zarr"
+
+    # On disk: components in the spec's (dz, dy, dx) order, in the unit the axes declare.
+    expected_unit = source_unit or DEFAULT_LENGTH_UNIT
+    assert _axis_units(store) == {"c": None, "z": expected_unit, "y": expected_unit, "x": expected_unit}
+    level0 = zarr.open_group(str(store), mode="r")[nz.from_ngff_zarr(str(store)).metadata.datasets[0].path]
+    assert np.allclose(np.asarray(level0)[:, 2, 2, 2], shift_mm[::-1] / per_unit, rtol=1e-5)
+
+    # Read back by KonfAI: millimetres, grid and vectors alike, not converted a second time.
+    clear_ome_zarr_cache(store)
+    read = read_displacement_field(store)
+    assert np.allclose(read.GetSpacing(), attributes.get_np_array("Spacing"))
+    assert np.allclose(sitk.GetArrayFromImage(read)[2, 2, 2], shift_mm, rtol=1e-5)

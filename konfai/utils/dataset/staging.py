@@ -23,7 +23,8 @@ import os
 import re
 import shutil
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from konfai.utils.errors import KonfAIWarning
@@ -36,6 +37,83 @@ _REPLACED_MARKER = ".replaced-"
 def _replaced_name(name: str) -> str:
     """Where ``name`` (an h5 key or a directory leaf) is kept while its replacement is published."""
     return f"{name}{_REPLACED_MARKER}{os.getpid()}"
+
+
+def publish(staging: Path, final: Path) -> None:
+    """Put the complete ``staging`` entry, a file or a directory, at ``final``; the entry already there is replaced
+    only once its successor is in place. A file goes by ``os.replace``; a directory through the :func:`_replaced_name`
+    hop, which a failed rename puts back. A concurrent writer that published the same entry first keeps it."""
+    if not staging.is_dir():
+        os.replace(staging, final)
+        return
+    backup = final.with_name(_replaced_name(final.name))
+    replaced = final.exists()
+    if replaced:
+        shutil.rmtree(backup, ignore_errors=True)
+        final.rename(backup)
+    try:
+        staging.rename(final)
+    except OSError:
+        if not final.exists():
+            if replaced:
+                backup.rename(final)
+            raise
+        shutil.rmtree(staging, ignore_errors=True)
+    if replaced:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+@contextmanager
+def staged_entry(final: Path) -> Iterator[Path]:
+    """``final``'s own name in a hidden staging directory beside it, for a writer that may make companion files
+    (MetaImage's ``.raw``, Analyze's ``.img``). On a clean exit each file it made is published beside ``final``
+    under its own name, the companions first and ``final`` last, so a reader meets the entry complete and its header
+    names its pixels as they lie; on an error the directory goes."""
+    from konfai.utils.dataset.stream import DataStream  # stream builds on this module
+
+    directory = final.with_name(f".{final.name}.{DataStream.temporary_suffix()}")
+    directory.mkdir(parents=True)
+    try:
+        yield directory / final.name
+        for made in sorted(directory.iterdir(), key=lambda path: path.name == final.name):
+            publish(made, final.with_name(made.name))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def entry_files(path: Path) -> list[Path]:
+    """The files one image entry is made of: ``path``, then the pixel file a detached header names beside it
+    (MetaImage's ``ElementDataFile``, Analyze's ``.img``), which must travel with it."""
+    name = path.name.lower()
+    if name.endswith(".hdr"):
+        return [path, path.with_suffix(".img")]
+    if name.endswith(".mhd"):
+        from konfai.utils.dataset.raw_block import _mha_header  # raw_block builds on this module
+
+        fields = _mha_header(str(path))
+        pixels = fields[0].get("ElementDataFile", "LOCAL") if fields else "LOCAL"
+        return [path] if pixels == "LOCAL" else [path, path.parent / pixels]
+    return [path]
+
+
+def transfer_entry(src: Path, dest: Path, move: bool = False) -> None:
+    """Copy (``move``: move) the image entry ``src`` to ``dest``: a file, a store, or a detached header whose pixel
+    file follows under ``dest``'s name, a MetaImage header being told that name."""
+    parts = entry_files(src)
+    for part in parts[1:]:
+        (shutil.move if move else shutil.copy2)(part, dest.with_suffix(part.suffix))
+    if len(parts) > 1 and src.name.lower().endswith(".mhd"):
+        pixels = dest.with_suffix(parts[1].suffix).name
+        header = re.sub(
+            r"(?m)^(ElementDataFile\s*=\s*).*$", lambda match: match.group(1) + pixels, src.read_text("latin-1")
+        )
+        dest.write_text(header, "latin-1")
+        if move:
+            src.unlink()
+    elif move:
+        shutil.move(src, dest)
+    else:
+        (shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
 
 
 def is_staging_entry(name: str) -> bool:

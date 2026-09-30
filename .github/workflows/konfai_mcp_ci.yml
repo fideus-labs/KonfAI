@@ -76,8 +76,9 @@ jobs:
           pip install -e ./konfai-apps
 
       - name: Install standalone MCP package
+        # impact-reg-konfai too: the runner registers through it, and its test calls the real register().
         run: |
-          pip install -e ./konfai-mcp
+          pip install -e ./konfai-mcp -e ./apps/impact_reg
 
       - name: Lint and format check
         run: |

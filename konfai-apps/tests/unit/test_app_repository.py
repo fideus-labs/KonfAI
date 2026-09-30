@@ -79,6 +79,22 @@ def test_get_app_repository_info_supports_local_directory(tmp_path: Path) -> Non
     assert repo.get_description() == "Local test app"
 
 
+def test_a_relative_local_app_path_still_names_the_app_after_a_chdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A run chdirs into its workspace before it reads the app's files: './demo_app' then named nothing
+    # and the run died on a misleading 'Prediction.yml not found'.
+    app_root = tmp_path / "demo_app"
+    _write_app_with_requirements(app_root, "")
+    (app_root / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    repo = app_repository_module.get_app_repository_info("./demo_app", False)
+
+    monkeypatch.chdir(tmp_path.parent)
+
+    assert repo._download("Prediction.yml").is_file()
+
+
 def test_get_app_repository_info_prefers_windows_local_path_over_hf_identifier(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -887,21 +903,55 @@ def _write_app_with_requirements(app_root: Path, requirements: str) -> None:
     (app_root / "requirements.txt").write_text(requirements, encoding="utf-8")
 
 
+def test_a_clipped_tta_request_is_said(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # app.json 'tta' caps the copies: every IMPACT-Reg preset declares 0, and '--tta 2' ran none, silently.
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "")
+    config = tmp_path / "Prediction.yml"
+    config.write_text(
+        "Predictor:\n  Dataset:\n    augmentations:\n      DataAugmentation_0:\n        nb: 2\n", encoding="utf-8"
+    )
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+
+    repo._set_number_of_augmentation(str(config), 2)
+
+    assert "2 test-time augmentation(s) asked, but app 'demo_app' allows 0" in capsys.readouterr().out
+    assert YAML().load(config)["Predictor"]["Dataset"]["augmentations"] == {}
+
+
+def _capture_pip(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Replace the pip subprocess by one that records its command and succeeds."""
+    captured: list[list[str]] = []
+
+    class _Pip:
+        def __init__(self, command: list[str], **kwargs: object) -> None:
+            captured.append(command)
+            self.stdout: list[str] = []
+            self.returncode = 0
+
+        def __enter__(self) -> "_Pip":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(app_repository_module.subprocess, "Popen", _Pip)
+    return captured
+
+
 def test_install_requirements_runs_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app_root = tmp_path / "repo" / "demo_app"
     _write_app_with_requirements(app_root, "konfai-nonexistent-xyz==1.2.3\n")
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
     monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
-    captured: list[list[str]] = []
-    monkeypatch.setattr(
-        app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
-    )
+    captured = _capture_pip(monkeypatch)
 
     repo._install_requirements(repo._get_filenames())
 
     assert len(captured) == 1
-    assert captured[0][:5] == [sys.executable, "-m", "pip", "install", "konfai-nonexistent-xyz==1.2.3"]
+    assert captured[0][:5] == [sys.executable, "-m", "pip", "install", "-c"]
+    assert captured[0][6:] == ["konfai-nonexistent-xyz==1.2.3"]
 
 
 def test_install_requirements_opt_out_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -910,8 +960,7 @@ def test_install_requirements_opt_out_is_a_noop(tmp_path: Path, monkeypatch: pyt
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
     monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
-    calls: list[object] = []
-    monkeypatch.setattr(app_repository_module.subprocess, "check_call", lambda *args, **kwargs: calls.append(args))
+    calls = _capture_pip(monkeypatch)
 
     repo._install_requirements(repo._get_filenames())
 
@@ -940,19 +989,15 @@ def test_install_requirements_skips_protected_and_non_pep508_lines(
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
     monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
-    captured: list[list[str]] = []
-    monkeypatch.setattr(
-        app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
-    )
+    captured = _capture_pip(monkeypatch)
 
     repo._install_requirements(repo._get_filenames())
 
     assert len(captured) == 1
     cmd = captured[0]
-    assert cmd[:5] == [sys.executable, "-m", "pip", "install", "konfai-nonexistent-xyz==1.2.3"]
+    assert cmd[6:] == ["konfai-nonexistent-xyz==1.2.3"]
     assert "torch==1.0.0" not in cmd
     assert "konfai==0.0.1" not in cmd
-    assert not any(part.startswith(("-r", "--extra-index-url", "git+")) for part in cmd[4:])
 
 
 def test_install_requirements_protects_against_non_canonical_spellings(
@@ -969,17 +1014,50 @@ def test_install_requirements_protects_against_non_canonical_spellings(
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
 
     monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
-    captured: list[list[str]] = []
-    monkeypatch.setattr(
-        app_repository_module.subprocess, "check_call", lambda cmd, *args, **kwargs: captured.append(cmd)
-    )
+    captured = _capture_pip(monkeypatch)
 
     repo._install_requirements(repo._get_filenames())
 
     assert len(captured) == 1
-    cmd = captured[0]
-    assert not any("konfai_apps" in part or part.lower().startswith("torch") for part in cmd), cmd
-    assert cmd[:5] == [sys.executable, "-m", "pip", "install", "konfai-nonexistent-xyz==1.2.3"]
+    assert captured[0][6:] == ["konfai-nonexistent-xyz==1.2.3"]
+
+
+def test_install_requirements_refuses_a_dependency_that_would_replace_torch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # itk-impact pins torch==2.12.* for its C++ ABI: resolving it next to another torch made pip swap
+    # the torch the process had already imported. A real pip run, offline, on a local wheel that pins
+    # torch the same way: the constraint on the installed torch turns the swap into a refusal naming it.
+    import importlib.metadata
+    import zipfile
+
+    links = tmp_path / "links"
+    links.mkdir()
+    with zipfile.ZipFile(links / "konfai_probe_dep-1.0-py3-none-any.whl", "w") as wheel:
+        info = "konfai_probe_dep-1.0.dist-info"
+        wheel.writestr(
+            f"{info}/METADATA",
+            "Metadata-Version: 2.1\nName: konfai-probe-dep\nVersion: 1.0\nRequires-Dist: torch==0.0.1\n",
+        )
+        wheel.writestr(
+            f"{info}/WHEEL", "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        )
+        wheel.writestr(f"{info}/RECORD", "")
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "konfai-probe-dep\n")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
+    monkeypatch.setenv("PIP_NO_INDEX", "1")
+    monkeypatch.setenv("PIP_FIND_LINKS", str(links))
+    monkeypatch.setenv("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+
+    with pytest.raises(AppRepositoryError) as refusal:
+        repo._install_requirements(repo._get_filenames())
+
+    torch_version = importlib.metadata.version("torch")
+    assert "konfai-probe-dep 1.0 depends on torch==0.0.1" in str(refusal.value)
+    assert f"torch=={torch_version}" in str(refusal.value)
+    assert importlib.metadata.version("torch") == torch_version
 
 
 def _local_repo_with_config(tmp_path: Path, config: str) -> tuple[object, Path]:
@@ -995,6 +1073,27 @@ def _local_repo_with_config(tmp_path: Path, config: str) -> tuple[object, Path]:
     prediction.write_text(config, encoding="utf-8")
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     return repo, prediction
+
+
+def test_each_prediction_config_gets_the_cost_app_json_declares_for_its_pass(tmp_path: Path) -> None:
+    """The tile pass takes the tile figures, any other config the app's own; an explicit value in the config stays."""
+    manifest = {
+        "vram_bytes_per_voxel": 1150,
+        "ram_bytes_per_voxel": 900,
+        "tiling": {"tile": "Prediction_tile.yml", "tile_vram_bytes_per_voxel": 620},
+    }
+    assert app_repository_module.pass_cost(manifest, "Prediction.yml") == {"vram": 1150.0, "ram": 900.0}
+    assert app_repository_module.pass_cost(manifest, "Prediction_tile.yml") == {"vram": 620.0, "ram": 900.0}
+    assert app_repository_module.pass_cost({}, "Prediction.yml") == {}
+
+    repo, prediction = _local_repo_with_config(
+        tmp_path, "Predictor:\n  Dataset:\n    Patch:\n      patch_size: [0, 0, 0]\n      ram_bytes_per_voxel: 10\n"
+    )
+    app_json = prediction.with_name("app.json")
+    app_json.write_text(json.dumps({**json.loads(app_json.read_text()), **manifest}), encoding="utf-8")
+    repo._set_pass_cost(str(prediction))
+    patch = YAML().load(prediction.read_text())["Predictor"]["Dataset"]["Patch"]
+    assert patch["vram_bytes_per_voxel"] == 1150 and patch["ram_bytes_per_voxel"] == 10
 
 
 _CONFIG = (
@@ -1026,6 +1125,19 @@ def test_apply_config_overrides_patches_typed_values(tmp_path: Path) -> None:
     assert float(net["learning_rate"]) == 0.05
     assert net["linear"] is False
     assert list(net["subset_features"]) == [0, 1, 2]
+
+
+def test_apply_config_overrides_keeps_a_bitmask_string_with_leading_zeros(tmp_path: Path) -> None:
+    # YAML reads '01' as 1: layers_mask=01 silently selected feature layer 0 instead of layer 1.
+    from ruamel.yaml import YAML
+
+    repo, prediction = _local_repo_with_config(tmp_path, _CONFIG + "      layers_mask: '1'\n      name: x\n")
+    repo._apply_config_overrides(str(prediction), ["layers_mask=0000001", "name=10", "iterations=0300"])
+
+    net = YAML().load(prediction.read_text())["Predictor"]["Model"]["RegistrationNet"]
+    assert net["layers_mask"] == "0000001"
+    assert net["name"] == 10  # no text lost: the binder reads it into the parameter's type
+    assert net["iterations"] == 300  # an integer key stays an integer
 
 
 def test_apply_config_overrides_noop_when_empty(tmp_path: Path) -> None:
@@ -1133,6 +1245,144 @@ def test_get_parameters_constraints_read_from_model_types(tmp_path: Path) -> Non
         "spatial_samples": {"min": 0, "max": 100000},
         "ref": {"choices": ["a:x.pt", "b:y.pt"]},
     }
+
+
+def test_apply_config_overrides_refuses_a_value_outside_its_range(tmp_path: Path) -> None:
+    # Range bounds were UI hints only: Slicer applied them, the CLI let a negative or huge value through.
+    repo, prediction = _local_repo_with_config(tmp_path, _TYPED_MODEL_CONFIG)
+    (prediction.parent / "Model.py").write_text(_TYPED_MODEL_PY, encoding="utf-8")
+
+    repo._apply_config_overrides(str(prediction), ["spatial_samples=100000"])
+    for override in ("spatial_samples=-3", "spatial_samples=100001"):
+        with pytest.raises(AppRepositoryError, match="outside its range"):
+            repo._apply_config_overrides(str(prediction), [override])
+
+
+# A model whose feature models are a dict of dataclass entries, as the IMPACT-Reg engines declare theirs (ModelSpec),
+# and whose optimizer is a loader: its block holds the arguments of another callable, not the loader's own.
+_NESTED_MODEL_PY = (
+    "from dataclasses import dataclass\n"
+    "from typing import Annotated, Literal\n"
+    "from konfai.utils.config import Range\n"
+    "\n\n"
+    "@dataclass\n"
+    "class Spec:\n"
+    "    ref: str\n"
+    "    layers_mask: str = '1'\n"
+    "    pca: Annotated[int, Range(0, 100)] = 0\n"
+    "    norm: Literal['none', 'l2'] = 'none'\n"
+    "\n\n"
+    "class Loader:\n"
+    "    def __init__(self, name: str = 'AdamW') -> None:\n"
+    "        self.name = name\n"
+    "\n\n"
+    "class RegistrationNet:\n"
+    "    def __init__(\n"
+    "        self,\n"
+    "        spatial_samples: Annotated[int, Range(0, 100000)] = 0,\n"
+    "        models: dict[str, Spec] = {},\n"
+    "        optimizer: Loader = Loader(),\n"
+    "    ) -> None:\n"
+    "        pass\n"
+)
+
+_NESTED_MODEL_CONFIG = (
+    "Predictor:\n"
+    "  Model:\n"
+    "    classpath: Model:RegistrationNet\n"
+    "    RegistrationNet:\n"
+    "      spatial_samples: 2000\n"
+    "      models:\n"
+    "        '0':\n"
+    "          ref: a:x.pt\n"
+    "      optimizer:\n"
+    "        lr: 0.001\n"
+)
+
+
+def _nested_repo(tmp_path: Path) -> tuple[object, Path]:
+    repo, prediction = _local_repo_with_config(tmp_path, _NESTED_MODEL_CONFIG)
+    (prediction.parent / "Model.py").write_text(_NESTED_MODEL_PY, encoding="utf-8")
+    return repo, prediction
+
+
+def _net(prediction: Path) -> dict:
+    return YAML().load(prediction.read_text())["Predictor"]["Model"]["RegistrationNet"]
+
+
+def test_a_dotted_set_is_checked_as_its_bare_name_is(tmp_path: Path) -> None:
+    # The dotted spelling of a model parameter skipped the range check of its bare name: iterations=-1 was refused,
+    # Predictor.Model.RegistrationNet.iterations=-1 written into the config.
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.spatial_samples=100000"])
+    with pytest.raises(AppRepositoryError, match="outside its range"):
+        repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.spatial_samples=-3"])
+
+
+def test_set_adds_a_field_the_model_declares_where_the_config_leaves_it_out(tmp_path: Path) -> None:
+    # A preset writes the fields of a feature model it sets, not all of them: a field it leaves at its default
+    # (feature_normalization in the ConvexAdam presets) could only be tuned by replacing the whole models block.
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.norm=l2"])
+    assert _net(prediction)["models"]["0"] == {"ref": "a:x.pt", "norm": "l2"}
+    with pytest.raises(AppRepositoryError, match="Did you mean 'norm'"):
+        repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.models.0.nrom=l2"])
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "Predictor.Model.RegistrationNet.models.0.pca=-5",  # out of its Range, which the binder reads as a hint
+        "Predictor.Model.RegistrationNet.models.0.norm=L2",  # not a choice: the binder refused it once the run started
+        "models={0: {ref: 'a:x.pt'}}",  # an integer key: the binder refused it once the run started
+        "models={'0': {ref: 'a:x.pt', nrom: l2}}",  # a field Spec lacks: bound as its default, with a warning only
+        "models={'0': {ref: 'a:x.pt', layers_mask: 01}}",  # YAML reads the bitmask as 1: the wrong layer, silently
+        "Predictor.Model.RegistrationNet.models.1={layers_mask: '1'}",  # an entry without the ref it requires
+    ],
+)
+def test_set_refuses_a_nested_value_the_run_would_refuse_or_misread(tmp_path: Path, override: str) -> None:
+    repo, prediction = _nested_repo(tmp_path)
+    before = prediction.read_text()
+    with pytest.raises(AppRepositoryError):
+        repo._apply_config_overrides(str(prediction), [override])
+    assert prediction.read_text() == before
+
+
+def test_set_adds_a_models_entry_and_keeps_a_declared_string_as_given(tmp_path: Path) -> None:
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(
+        str(prediction),
+        [
+            "Predictor.Model.RegistrationNet.models.1={ref: 'b:y.pt', layers_mask: '01'}",  # a second feature model
+            "Predictor.Model.RegistrationNet.models.0.layers_mask=01",  # a declared string the config leaves out
+        ],
+    )
+    models = _net(prediction)["models"]
+    assert models["1"] == {"ref": "b:y.pt", "layers_mask": "01"} and models["0"]["layers_mask"] == "01"
+    # SlicerKonfAI's spelling: the whole block as a flow mapping, every key and string quoted.
+    repo._apply_config_overrides(
+        str(prediction), ['models={"0": {"ref": "a:x.pt", "layers_mask": "01", "norm": "l2"}}']
+    )
+    assert _net(prediction)["models"] == {"0": {"ref": "a:x.pt", "layers_mask": "01", "norm": "l2"}}
+
+
+def test_set_leaves_a_loader_block_to_the_binder(tmp_path: Path) -> None:
+    # An optimizer block holds the torch optimizer's arguments, not the fields of its loader: it is not checked
+    # against them, and a key inside it must exist, as before.
+    repo, prediction = _nested_repo(tmp_path)
+    repo._apply_config_overrides(
+        str(prediction), ["optimizer={lr: 0.1}", "Predictor.Model.RegistrationNet.optimizer.lr=0.01"]
+    )
+    assert _net(prediction)["optimizer"] == {"lr": 0.01}
+    with pytest.raises(AppRepositoryError, match="does not exist"):
+        repo._apply_config_overrides(str(prediction), ["Predictor.Model.RegistrationNet.optimizer.betas=[0.9, 0.99]"])
+
+
+def test_set_refuses_a_value_that_is_not_yaml(tmp_path: Path) -> None:
+    # A malformed value ended the run on a ruamel traceback.
+    repo, prediction = _nested_repo(tmp_path)
+    with pytest.raises(AppRepositoryError, match="is not YAML"):
+        repo._apply_config_overrides(str(prediction), ["spatial_samples=[1, 2"])
 
 
 def test_get_parameters_constraints_from_an_installed_package_classpath(tmp_path: Path) -> None:
@@ -1478,3 +1728,51 @@ def test_disabling_uncertainty_drops_the_replaced_reduction_block(tmp_path: Path
     assert output["reduction"] == "Mean"
     assert "Concat" not in output
     assert "InferenceStack" not in output["after_reduction_transforms"]
+
+
+def test_a_model_argument_the_preset_leaves_out_is_still_tunable(tmp_path: Path) -> None:
+    # A preset's YAML lists the knobs it sets; the others keep their defaults and must stay reachable by --set
+    # and shown by get_parameters (FireANTs' moments_init, linear_method, mode... are absent from its presets).
+    from ruamel.yaml import YAML
+
+    config = _TYPED_MODEL_CONFIG.replace("      note: hello\n", "")
+    repo, prediction = _local_repo_with_config(tmp_path, config)
+    (prediction.parent / "Model.py").write_text(_TYPED_MODEL_PY, encoding="utf-8")
+
+    assert repo.get_parameters()["values"]["note"] == ""
+    repo._apply_config_overrides(str(prediction), ["note=tuned"])
+    assert YAML().load(prediction.read_text())["Predictor"]["Model"]["RegistrationNet"]["note"] == "tuned"
+    with pytest.raises(AppRepositoryError):  # a typo is still refused
+        repo._apply_config_overrides(str(prediction), ["noet=tuned"])
+
+
+def test_install_requirements_installs_the_no_deps_ones_without_their_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FireANTs pins a SimpleITK that has no wheel for recent Pythons: its preset lists it under requirements_no_deps,
+    # and what it needs in requirements.txt.
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "konfai-nonexistent-dep==1.0\n")
+    manifest = json.loads((app_root / "app.json").read_text(encoding="utf-8"))
+    manifest["requirements_no_deps"] = ["konfai-nonexistent-pinned>=1.5,<1.6"]
+    (app_root / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    monkeypatch.delenv("KONFAI_APPS_INSTALL_REQUIREMENTS", raising=False)
+    captured = _capture_pip(monkeypatch)
+
+    repo._install_requirements(repo._get_filenames())
+
+    assert [command[4] for command in captured] == ["-c", "--no-deps"]
+    assert captured[0][-1] == "konfai-nonexistent-dep==1.0" and captured[1][-1] == "konfai-nonexistent-pinned>=1.5,<1.6"
+
+
+def test_max_voxels_lands_in_the_prediction_patch(tmp_path: Path) -> None:
+    """--max-voxels writes Patch.max_voxels, which a --set could not: the key is KonfAI's, not the app config's."""
+    from konfai_apps.remote_options import collect_remote_options
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor:\n  Dataset:\n    Patch:\n      patch_size: [0, 0, 0]\n    batch_size: 1\n")
+    app_repository_module.LocalAppRepository._set_patch_size_and_batch_size(None, str(config), max_voxels=5000)
+
+    assert YAML(typ="safe").load(config.read_text())["Predictor"]["Dataset"]["Patch"]["max_voxels"] == 5000
+    assert collect_remote_options("infer", {"max_voxels": 5000}) == {"max_voxels": 5000}

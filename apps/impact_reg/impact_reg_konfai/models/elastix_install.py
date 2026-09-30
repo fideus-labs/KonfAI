@@ -15,13 +15,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import hashlib
 import os
 import platform
 import re
 import shutil
 import stat
 import subprocess  # nosec B404
+import tempfile
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import requests
@@ -32,23 +35,47 @@ from tqdm import tqdm
 #
 # Key format: (OS, ARCH, FLAVOR)
 #   - OS     : platform.system() -> "Linux", "Windows", "Darwin"
-#   - ARCH   : normalized architecture -> "x86_64"
-#   - FLAVOR : "cpu", "cu128" or "cu130"
+#   - ARCH   : normalized architecture -> "x86_64", "arm64"
+#   - FLAVOR : "cpu" or "cu128", only those GITHUB_TAG publishes
 #
-# No asset bundles LibTorch: both flavors link it from the environment's pip ``torch`` (loader_env).
-# The flavors differ in linkage, a CUDA one additionally needing libtorch_cuda and the CUDA runtime.
-# The CUDA flavor has to match the CUDA the environment's torch was built against: a CUDA 13 torch
-# ships no CUDA 12 runtime, so the cu128 binary cannot load beside it, and the reverse holds too.
+# No asset bundles LibTorch, yet each binary links the LibTorch it was built against (ASSET_LIBTORCH), which
+# keeps no ABI across minor versions. The environment's pip ``torch`` serves when it is that major.minor;
+# otherwise the installer downloads that exact LibTorch beside the binary (loader_env searches it first).
+# elastix runs as a subprocess, so its LibTorch never has to be the one the Python process imported: the
+# cu128 asset with its own LibTorch (CUDA runtime included) runs beside a CUDA 13 torch.
 # -----------------------------------------------------------------------------
 ELX_ASSET_TEMPLATE = {
     ("Linux", "x86_64", "cpu"): "elastix-impact-linux-x86_64-cpu.zip",
     ("Linux", "x86_64", "cu128"): "elastix-impact-linux-x86_64-cu128.zip",
-    ("Linux", "x86_64", "cu130"): "elastix-impact-linux-x86_64-cu130.zip",
     ("Windows", "x86_64", "cpu"): "elastix-impact-windows-x86_64-cpu.zip",
     ("Windows", "x86_64", "cu128"): "elastix-impact-windows-x86_64-cu128.zip",
-    ("Windows", "x86_64", "cu130"): "elastix-impact-windows-x86_64-cu130.zip",
-    ("Darwin", "x86_64", "cpu"): "elastix-impact-macos-14-x86_64-cpu.zip",
+    # Built on macos-14, Apple Silicon: the name says x86_64, the binary is arm64.
+    ("Darwin", "arm64", "cpu"): "elastix-impact-macos-14-x86_64-cpu.zip",
 }
+
+#: The sha256 GitHub publishes for each asset of GITHUB_TAG, a prerelease: an archive that differs is refused rather
+#: than run.
+ASSET_SHA256 = {
+    "elastix-impact-linux-x86_64-cpu.zip": "cfdbb65c2a18bc0a535b50cb8e497a9671ef35fb7a34c3ec56cc5faf0c5c8fac",
+    "elastix-impact-linux-x86_64-cu128.zip": "fb21d43b9c1449a0423d1e80544765f1aac2ad113719caaaeaf6333c66cfbb05",
+    "elastix-impact-windows-x86_64-cpu.zip": "709493cecf9d752ab6a8bbcd2c953503c9c3c7bd6f776396496afd3be422e7fe",
+    "elastix-impact-windows-x86_64-cu128.zip": "f2e1d5d3279f5414d73c01b9bfb8a9ae7a42e79c10e2e9308a4f040c865bb225",
+    "elastix-impact-macos-14-x86_64-cpu.zip": "9df7ce62b5602ba5348d18eb9b03283ab1fb0409ef372cd90f48b42e78955755",
+}
+
+#: The LibTorch each flavor of GITHUB_TAG was built against (the release notes of ImpactElastix 1.0.0). From
+#: torch 2.9 on, c10::SymInt::sym_ne is inline and those binaries no longer load against the pip torch.
+ASSET_LIBTORCH = {"cpu": "2.8.0", "cu128": "2.8.0"}
+
+
+def libtorch_url(os_name: str, flavor: str) -> str:
+    """The official shared LibTorch the ``flavor`` asset was built against, for ``os_name``."""
+    version = ASSET_LIBTORCH[flavor]
+    if os_name == "Darwin":
+        return f"https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-{version}.zip"
+    archive = "libtorch-win-shared-with-deps" if os_name == "Windows" else "libtorch-shared-with-deps"
+    return f"https://download.pytorch.org/libtorch/{flavor}/{archive}-{version}%2B{flavor}.zip"
+
 
 # -----------------------------------------------------------------------------
 # Minimum NVIDIA driver versions per CUDA flavor, from NVIDIA's own compatibility
@@ -103,7 +130,7 @@ def driver_ok_for_cuda(os_name: str, drv: tuple[int, int] | None, flavor: str | 
     """Whether the detected NVIDIA driver meets the minimum for the CUDA the asset links.
 
     ``flavor`` is the asset that would be installed (``torch_cuda_flavor``); without one the CUDA 12.8
-    floor is used, which is what every caller asked for before a CUDA 13 asset existed.
+    floor is used.
     """
     if drv is None:
         return False
@@ -149,13 +176,17 @@ def download_file(url: str, dst: Path) -> None:
                     for chunk in r.iter_content(chunk_size=8192):
                         f.write(chunk)
                         pbar.update(len(chunk))
-    except Exception as e:
-        raise e
+    except requests.RequestException as e:
+        raise RuntimeError(
+            f"Could not download {url} ({e}). Offline, set KONFAI_ELASTIX_DIR to an elastix-IMPACT install, or make "
+            "one on a connected machine: python -m impact_reg_konfai.models.elastix_install --install-path "
+            "~/.cache/konfai/elastix-impact"
+        ) from e
 
 
-def extract_archive(archive: Path, dst_dir: Path) -> None:
+def extract_archive(archive: Path, dst_dir: Path, keep: Callable[[str], bool] | None = None) -> None:
     """
-    Extract a ZIP archive to the destination directory.
+    Extract a ZIP archive to the destination directory, only the members ``keep`` accepts when given.
 
     Each member is validated to resolve inside ``dst_dir`` before extraction, so a tampered archive with
     absolute or ``../`` entries cannot write outside the install root (Zip Slip).
@@ -164,67 +195,106 @@ def extract_archive(archive: Path, dst_dir: Path) -> None:
     print(f"Extracting: {archive} -> {dst_dir}", flush=True)
     root = dst_dir.resolve()
     with zipfile.ZipFile(archive, "r") as z:
-        for member in z.namelist():
+        members = [member for member in z.namelist() if keep is None or keep(member)]
+        for member in members:
             target = (root / member).resolve()
             if target != root and root not in target.parents:
                 raise ValueError(f"Refusing to extract '{member}': it escapes '{root}'.")
-        z.extractall(dst_dir)
+        z.extractall(dst_dir, members=members)
     archive.unlink()
 
 
-_NO_CUDA_ASSET = (
-    "No elastix-IMPACT asset is published for the CUDA this environment's torch was built against, and a "
-    "binary linking another CUDA cannot load beside it. For the GPU, point KONFAI_ELASTIX_DIR at an "
-    "elastix-IMPACT built against this torch."
-)
-
-
 def torch_cuda_flavor() -> str | None:
-    """The CUDA asset the environment's torch can load, ``None`` for a CPU torch or one built for another
-    CUDA: no asset bundles LibTorch, so the binary finds the CUDA runtime where torch keeps its own."""
+    """The CUDA asset for a CUDA torch, ``None`` for a CPU torch (konfai then never runs on the GPU). The
+    asset brings the LibTorch it was built against, CUDA runtime included, whenever the environment's torch
+    is another one, so any CUDA torch can use it: only the driver has to be recent enough."""
     import torch
 
-    cuda = torch.version.cuda
-    if cuda is None:
-        return None
-    return {"12": "cu128", "13": "cu130"}.get(cuda.split(".")[0])
+    return "cu128" if torch.version.cuda else None
 
 
-def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool):
+def _unsupported(what: str) -> str:
+    return (
+        f"No elastix-IMPACT {GITHUB_TAG} build for {what}: set KONFAI_ELASTIX_DIR to an elastix-IMPACT built for "
+        "this machine (https://github.com/vboussot/ImpactElastix). The ConvexAdam and FireANTs presets do not need "
+        "elastix and run here (FireANTs on Linux and macOS)."
+    )
+
+
+def _links_this_torch(install_path: Path, flavor: str) -> bool:
+    """Whether the staged binary runs against the environment's pip torch: same major.minor as the LibTorch
+    the asset was built against, and a probe that passes (a CPU torch has no libtorch_cuda for cu128)."""
+    import torch
+
+    if torch.__version__.split("+")[0].split(".")[:2] != ASSET_LIBTORCH[flavor].split(".")[:2]:
+        return False
+    try:
+        try_elastix(install_path)
+    except RuntimeError:
+        return False
+    return True
+
+
+def _install_libtorch(install_path: Path, os_name: str, flavor: str) -> None:
+    """The LibTorch the asset was built against, its shared libraries only, under ``libtorch/lib``."""
+    archive = install_path / "libtorch.zip"
+    download_file(libtorch_url(os_name, flavor), archive)
+    extract_archive(
+        archive,
+        install_path,
+        keep=lambda name: name.startswith("libtorch/lib/") and (".so" in name or name.endswith((".dll", ".dylib"))),
+    )
+    lib = install_path / "libtorch" / "lib"
+    cudart = next(lib.glob("libcudart-*.so.12"), None)
+    if cudart is not None:
+        # The Linux CUDA binary needs libcudart.so.12; LibTorch carries it under a hashed name.
+        (lib / "libcudart.so.12").symlink_to(cudart.name)
+
+
+def _swap(staged: Path, install_path: Path) -> None:
+    """Put ``staged`` where ``install_path`` is, by renames: the install in place is only retired once its
+    replacement runs, and comes back if the replacement cannot be moved in."""
+    retired = staged.with_name(staged.name + ".retired")
+    if install_path.exists():
+        install_path.rename(retired)
+    try:
+        staged.rename(install_path)
+    except OSError:
+        if retired.exists() and not install_path.exists():
+            retired.rename(install_path)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
+
+
+def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool) -> None:
+    """Install the elastix-IMPACT asset of this machine at ``install_path``, with the LibTorch it was built
+    against when the environment's torch is another one.
+
+    The install is built in a directory beside ``install_path`` and replaces it only once ``elastix -h`` runs
+    from there: a failed download or a binary that cannot load never costs the install in place.
+    """
     os_name = platform.system()
     arch = normalize_arch(platform.machine())
     has_nvidia, drv = detect_nvidia_driver()
 
-    if os_name not in ("Linux", "Windows", "Darwin"):
-        raise NameError(f"Unsupported OS: {os_name}")
-
-    if arch not in ("x86_64", "arm64"):
-        raise NameError(f"Unsupported arch: {arch} (expected x86_64, arm64)")
-
-    # The asset the environment's torch can load at all, then whether the driver is recent enough for
-    # the CUDA that asset links -- a CUDA 13 binary needs a newer driver than a CUDA 12 one.
     wanted = torch_cuda_flavor()
     flavor = "cpu"
     if force_cuda:
-        if wanted is None:
-            raise NameError(_NO_CUDA_ASSET)
-        if not has_nvidia or not driver_ok_for_cuda(os_name, drv, wanted):
-            raise NameError(
-                f"CUDA forced but NVIDIA driver/GPU not suitable for {wanted}. Detected: "
+        if not has_nvidia or not driver_ok_for_cuda(os_name, drv, "cu128"):
+            raise RuntimeError(
+                f"CUDA forced but NVIDIA driver/GPU not suitable for cu128. Detected: "
                 f"has_nvidia={has_nvidia}, driver={drv}"
             )
-        flavor = wanted
-    elif not force_cpu and has_nvidia:
-        if wanted is None:
-            print(f"{_NO_CUDA_ASSET} Installing the CPU asset.", flush=True)
-        elif not driver_ok_for_cuda(os_name, drv, wanted):
+        flavor = "cu128"
+    elif not force_cpu and has_nvidia and wanted is not None:
+        if driver_ok_for_cuda(os_name, drv, wanted):
+            flavor = wanted
+        else:
             print(
-                f"The NVIDIA driver {drv} is older than the {CUDA_MIN_DRIVER[wanted][os_name]} the "
+                f"The NVIDIA driver {drv} is older than the {CUDA_MIN_DRIVER[wanted].get(os_name)} the "
                 f"{wanted} asset needs. Installing the CPU asset.",
                 flush=True,
             )
-        else:
-            flavor = wanted
 
     print(f"System: {os_name} {arch}", flush=True)
     print(f"NVIDIA: {has_nvidia}, driver={drv}", flush=True)
@@ -232,68 +302,100 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
 
     key = (os_name, arch, flavor)
     if key not in ELX_ASSET_TEMPLATE:
-        raise NameError(f"No elastix asset configured for {key}")
+        raise RuntimeError(_unsupported(f"{os_name}/{arch} ({flavor})"))
 
     install_path = install_path.resolve()
-    install_path.mkdir(parents=True, exist_ok=True)
-
-    elx_asset = ELX_ASSET_TEMPLATE[key]
-    elx_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{GITHUB_TAG}/{elx_asset}"
-    elx_archive = install_path / elx_asset
+    install_path.parent.mkdir(parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(prefix=f"{install_path.name}.", dir=install_path.parent))
     try:
-        download_file(elx_url, elx_archive)
-    except Exception as failure:
-        # A CUDA flavor this release does not carry yet: the CPU asset still registers, and a run says
-        # what it would take to use the card. Forced CUDA has no fallback to fall back to.
-        if flavor == "cpu" or force_cuda:
-            raise
-        print(f"{GITHUB_TAG} carries no {elx_asset} ({failure}). Installing the CPU asset.", flush=True)
-        flavor = "cpu"
-        elx_asset = ELX_ASSET_TEMPLATE[(os_name, arch, "cpu")]
+        elx_asset = ELX_ASSET_TEMPLATE[key]
         elx_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{GITHUB_TAG}/{elx_asset}"
-        elx_archive = install_path / elx_asset
-        download_file(elx_url, elx_archive)
-    # Extracting over a previous install keeps whatever the new asset does not overwrite. An older asset
-    # bundled its own LibTorch under lib/, which then shadowed the environment's torch on the loader
-    # path: a CUDA build ran CPU-only, and a build of another torch failed to link at all.
-    for stale in ("bin", "lib", "third_party"):
-        shutil.rmtree(install_path / stale, ignore_errors=True)
-    extract_archive(elx_archive, install_path)
+        download_file(elx_url, staged / elx_asset)
+        with (staged / elx_asset).open("rb") as archive:
+            digest = hashlib.file_digest(archive, "sha256").hexdigest()
+        if elx_asset in ASSET_SHA256 and digest != ASSET_SHA256[elx_asset]:
+            raise RuntimeError(
+                f"{elx_url} does not match the sha256 of the {GITHUB_TAG} release ({digest}, expected "
+                f"{ASSET_SHA256[elx_asset]}): refusing to install it."
+            )
+        extract_archive(staged / elx_asset, staged)
 
-    # -------------------------------------------------------------------------
-    # ZIP archives may drop executable permissions.
-    # Ensure elastix and transformix are executable on Unix platforms.
-    # -------------------------------------------------------------------------
-    if os_name in ("Linux", "Darwin"):
-        for exe in ("elastix", "transformix"):
-            p = install_path / "bin" / exe
-            if p.exists():
-                p.chmod(p.stat().st_mode | stat.S_IEXEC)
+        # ZIP archives may drop executable permissions.
+        if os_name in ("Linux", "Darwin"):
+            for exe in ("elastix", "transformix"):
+                p = staged / "bin" / exe
+                if p.exists():
+                    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+        (staged / FLAVOR_FILE).write_text(flavor, encoding="utf-8")
 
-    # LibTorch comes from the environment's pip ``torch`` at runtime (elastix_engine.py adds torch's lib/ dir
-    # to the loader path): the same LibTorch the elastix asset is built against in CI, so elastix and the
-    # rest of the stack stay on one torch. The elastix asset is the only download here.
+        if not _links_this_torch(staged, flavor):
+            print(
+                f"The {elx_asset} binary needs LibTorch {ASSET_LIBTORCH[flavor]}, this environment has torch "
+                "of another version: installing that LibTorch beside it.",
+                flush=True,
+            )
+            _install_libtorch(staged, os_name, flavor)
+            try_elastix(staged)
+        _swap(staged, install_path)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+#: Where an install records the asset it holds: a CPU build answers ``-h`` as a CUDA one does.
+FLAVOR_FILE = "FLAVOR"
+
+
+def installed_flavor(install_path: Path) -> str | None:
+    """The flavor the install at ``install_path`` recorded, None when it recorded none."""
+    try:
+        return (install_path / FLAVOR_FILE).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def cuda_upgrade_available(install_path: Path) -> bool:
+    """Whether the release carries the CUDA build this environment can use, while the install holds the CPU one.
+
+    A CPU install passes ``try_elastix``. Only a CUDA torch, a driver recent enough for that asset and an install
+    recorded as another flavor lead to the check, one HEAD request; offline, the install in place is kept. An install
+    that recorded nothing is left as it is: it may already be the CUDA build.
+    """
+    wanted = torch_cuda_flavor()
+    if wanted is None or installed_flavor(install_path) in (None, wanted):
+        return False
+    os_name, arch = platform.system(), normalize_arch(platform.machine())
+    asset = ELX_ASSET_TEMPLATE.get((os_name, arch, wanted))
+    has_nvidia, drv = detect_nvidia_driver()
+    if asset is None or not has_nvidia or not driver_ok_for_cuda(os_name, drv, wanted):
+        return False
+    url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/download/{GITHUB_TAG}/{asset}"
+    try:
+        return requests.head(url, allow_redirects=True, timeout=10).status_code == 200
+    except requests.RequestException:
+        return False
 
 
 def get_elastix_bin(install_path: Path) -> Path:
     return install_path / ("elastix.exe" if platform.system() == "Windows" else (Path("bin") / "elastix"))
 
 
-#: What a child answers when the loader cannot find a library it needs: 127 on POSIX, Windows
-#: STATUS_DLL_NOT_FOUND either way round, since Python reports it unsigned or signed by platform.
-_LOADER_FAILURE_CODES = (127, 0xC0000135, -1073741515)
+#: What a child answers when the loader cannot find a library or a symbol it needs: 127 on POSIX, Windows
+#: STATUS_DLL_NOT_FOUND and STATUS_ENTRYPOINT_NOT_FOUND, each unsigned or signed as Python reports it.
+_LOADER_FAILURE_CODES = (127, 0xC0000135, -1073741515, 0xC0000139, -1073741511)
 
 
 def loader_env(install_path: Path) -> dict[str, str]:
     """The environment the elastix binary needs to link its shared libraries.
 
-    LibTorch comes from the environment's pip ``torch`` (the LibTorch the asset is built against in
-    CI), beside the install's own ``lib/`` and anything ``KONFAI_ELASTIX_EXTRA_LIB`` names. The
-    Windows asset keeps its DLLs next to the executable, so the install root is searched too.
+    The LibTorch the installer put under ``libtorch/lib`` comes first, when the environment's pip ``torch``
+    is not the version the asset was built against; then the install's own ``lib/``, the pip torch's LibTorch
+    and anything ``KONFAI_ELASTIX_EXTRA_LIB`` names. The Windows asset keeps its DLLs next to the executable,
+    so the install root is searched too.
     """
     import torch
 
     searched = [
+        str(install_path / "libtorch" / "lib"),
         str(install_path / "lib"),
         str(install_path),
         str(Path(torch.__file__).resolve().parent / "lib"),
@@ -307,14 +409,15 @@ def loader_env(install_path: Path) -> dict[str, str]:
 
 def try_elastix(install_path: Path) -> None:
     """Run the install once, under the loader path a registration uses, so a binary that cannot link
-    fails here instead of mid-case."""
+    fails here instead of mid-case. Every symbol is bound at load, so a LibTorch missing one function fails here."""
+    env = {**loader_env(install_path), "LD_BIND_NOW": "1", "DYLD_BIND_AT_LAUNCH": "1"}
     try:
         subprocess.run(
             [str(get_elastix_bin(install_path)), "-h"],
             capture_output=True,
             text=True,
             check=True,
-            env=loader_env(install_path),
+            env=env,
         )  # nosec B603
     except subprocess.CalledProcessError as e:
         msg = "Elastix execution failed.\n\n"
@@ -325,14 +428,14 @@ def try_elastix(install_path: Path) -> None:
         if e.returncode in _LOADER_FAILURE_CODES:
             # A library the loader cannot find aborts a child that did exec: never OSError.
             msg += (
-                "A shared library could not be found. The binary links LibTorch from the "
-                "environment's pip `torch`, so either no torch is installed or its version is not "
-                "the one elastix was built against.\n\n"
+                "A shared library could not be found or lacks a symbol. The binary links the LibTorch it was "
+                "built against: the installer's own under libtorch/lib, the environment's pip `torch` when it "
+                "is that version, or what KONFAI_ELASTIX_EXTRA_LIB names for a build of your own.\n\n"
             )
         if e.stderr:
             msg += "Error output:\n"
             msg += e.stderr.strip()
-        raise NameError(msg) from e
+        raise RuntimeError(msg) from e
 
     except OSError as e:
         msg = (
@@ -341,7 +444,7 @@ def try_elastix(install_path: Path) -> None:
             f"System error:\n{e!s}"
         )
 
-        raise NameError(msg) from e
+        raise RuntimeError(msg) from e
 
 
 def main() -> None:

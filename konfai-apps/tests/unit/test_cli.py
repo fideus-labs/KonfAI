@@ -209,3 +209,79 @@ def test_konfai_debug_keeps_the_refusal_traceback(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(AppRepositoryError, match="No app directory at"):
         apps_cli_module.main_apps()
+
+def test_python_m_konfai_apps_runs_the_cli(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    import runpy
+
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "--help"])
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_module("konfai_apps", run_name="__main__")
+    assert exit_info.value.code == 0 and "konfai-apps" in capsys.readouterr().out
+
+
+def test_list_and_show_read_an_app_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from konfai_apps.errors import AppRepositoryError
+
+    for name, task in (("B_app", "segmentation"), ("A_app", "registration"), ("Other", "evaluation")):
+        (tmp_path / name).mkdir()
+        manifest = {"display_name": name.upper(), "short_description": "Does.", "description": "Does it."}
+        (tmp_path / name / "app.json").write_text(json.dumps({**manifest, "task": task, "tta": 0, "mc_dropout": 0}))
+    (tmp_path / "not_an_app").mkdir()
+    assert apps_cli_module.app_id(str(tmp_path), "A_app") == str(tmp_path / "A_app")
+    assert apps_cli_module.app_id("org/repo@v1", "A_app") == "org/repo@v1:A_app"
+    assert [name for name, _ in apps_cli_module.list_apps(str(tmp_path), "registration")] == ["A_app"]
+
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "list", str(tmp_path)])
+    apps_cli_module.main_apps()
+    assert capsys.readouterr().out.splitlines()[:3] == ["A_app  A_APP", "       Does.", "B_app  B_APP"]
+
+    config = "Predictor:\n  Model:\n    classpath: torch.nn:Identity\n    Identity:\n      iterations: 3\n"
+    (tmp_path / "A_app" / "Prediction.yml").write_text(config)
+    manifest = json.loads((tmp_path / "A_app" / "app.json").read_text())
+    manifest["model_files"] = [{"repo_id": "org/models", "revision": "0" * 40, "filename": "net.pt"}]
+    (tmp_path / "A_app" / "app.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "show", str(tmp_path / "A_app")])
+    apps_cli_module.main_apps()
+    out = capsys.readouterr().out
+    assert out.startswith("A_app: A_APP\n\nDoes it.") and "torch.nn:Identity" in out and "  iterations = 3" in out
+    assert "org/models:net.pt (not cached yet" in out and "model_files" not in out
+    with pytest.raises(AppRepositoryError, match="Did you mean 'A_app'"):
+        apps_cli_module.describe_app(str(tmp_path), "A_ap")
+
+
+def test_check_overrides_refuses_what_the_run_would_and_leaves_the_config_alone() -> None:
+    from konfai_apps.app_repository import check_overrides
+    from konfai_apps.errors import AppRepositoryError
+
+    config = {"Predictor": {"Model": {"classpath": "torch.nn:Identity", "Identity": {"iterations": 3}}}}
+    check_overrides(config, ["iterations=5"])
+    assert config["Predictor"]["Model"]["Identity"]["iterations"] == 3
+    with pytest.raises(AppRepositoryError, match="Did you mean 'iterations'"):
+        check_overrides(config, ["iteration=5"])
+
+
+def test_the_shared_options_refuse_a_uri_and_a_negative_gpu() -> None:
+    import argparse
+
+    from konfai_apps.options import add_device, local_path
+
+    parser = argparse.ArgumentParser()
+    add_device(parser)
+    assert parser.parse_args(["--gpu", "0", "--force-update"]).force_update
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--gpu", "-1"])
+    with pytest.raises(argparse.ArgumentTypeError, match="URI"):
+        local_path("s3://bucket/image.nii.gz")
+
+
+def test_an_out_of_memory_run_exits_with_its_own_code() -> None:
+    """IMPACT-Reg runs a preset as a child and retries smaller on EXIT_OUT_OF_MEMORY: an out-of-memory error must end
+    the process with it, not with a traceback and exit code 1."""
+    import torch
+    from konfai.utils.errors import EXIT_OUT_OF_MEMORY
+
+    with pytest.raises(SystemExit) as stopped, apps_cli_module._exit_on_refusal():
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 4.35 GiB")
+    assert stopped.value.code == EXIT_OUT_OF_MEMORY

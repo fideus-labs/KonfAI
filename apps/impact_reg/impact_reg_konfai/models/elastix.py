@@ -17,10 +17,10 @@
 """Registration as a KonfAI model: the config -> elastix parameter-map mapping + the ``add_module`` graph.
 
 ``RegistrationNet`` wires ``ElastixRegistration`` (fixed = branch 0, moving = branch 1, fixed/moving masks =
-2/3) and emits its ``DisplacementField`` on the fixed grid. This module owns
-the MAPPING: the per-resolution model matrix (``resolutions``) turned into IMPACT parameter-map lines, and
-the config schema (``ModelSpec`` / ``ResolutionSpec``). The elastix RUNTIME (binary install, model download,
-subprocess, progress) lives in ``elastix_engine.py`` and is imported only when the graph is built.
+2/3) and emits its ``DisplacementField`` on the fixed grid. This module owns the MAPPING: the IMPACT models
+(``models``, or ``levels`` one per resolution, the schema every engine shares, see ``impact_loss``) turned into
+IMPACT parameter-map lines. The elastix RUNTIME (binary install, model download, subprocess, progress) lives in
+``elastix_engine.py`` and is imported only when the graph is built.
 
 A UI reads the tuning knobs straight from the TYPES below: ``Literal`` (a fixed set),
 ``Annotated[.., Range]`` (numeric bounds), ``Annotated[str, Choices(...)]`` (a resolver the app owns).
@@ -29,34 +29,43 @@ NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine 
 (``get_origin``); PEP 563 stringized annotations break arg resolution.
 """
 
-import json
-import os
+import math
 import re
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Annotated, Literal
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Annotated
 
 import torch
-from huggingface_hub import hf_hub_download
+from konfai.metric.measure.impact import ImpactFeatureModel
 from konfai.network import network
-from konfai.utils.config import Choices, Range
+from konfai.utils.config import Range
+
+from .impact_loss import (
+    FeatureMapUpdateInterval,
+    MixedPrecision,
+    Mode,
+    ModelSpec,
+    Normalize,
+    check_models,
+    layer_weights,
+    level_models,
+    per_kept_layer,
+    sorted_specs,
+)
 
 # IMPACT field docs: https://github.com/vboussot/ImpactLoss/tree/main/ParameterMaps
-# A model's FIXED props (dimension / channels / FOV formula) come from the registry (models.json on
-# VBoussot/impact-torchscript-models); the config carries the FREE knobs (models per resolution, voxel size,
-# iterations, per-model weights/mask/subset/pca/distance) and the global ``mode``.
-_IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
+# A model's FIXED props (dimension / channels / receptive field) come from KonfAI's feature model (the registry,
+# models.json on VBoussot/impact-torchscript-models); the config carries the model knobs (``ModelSpec``).
 
-# The receptive field plateaus: a segmenter stops downsampling, so its layers 7-8 reach no further than
-# layer 6 (counted from 1). Deeper configs should run Static anyway; in Jacobian we clamp ``l`` here.
-_FOV_RAMP_MAX_LAYER = 6
+# elastix-IMPACT clamps ImpactSubsetFeatures to [1, channels]: "all" is written as a count no layer reaches.
+_ALL_CHANNELS = 100000
 
+# elastix's own default when a map does not say how many resolutions it runs.
+_ELASTIX_DEFAULT_RESOLUTIONS = 3
 
-def registry_choices() -> list[str]:
-    """The ``ref`` picker's values: model refs (``repo:path``) from the registry the engine already fetches
-    (offline-first). A user may still point ``ref`` at a local model."""
-    repo = _IMPACT_MODELS_REGISTRY.split(":", 1)[0]
-    return [f"{repo}:{key}" for key in load_models_registry()]
+_PYRAMID_SCHEDULES = tuple(
+    f"{image}ImagePyramid{kind}Schedule" for image in ("Fixed", "Moving") for kind in ("", "Rescale", "Smoothing")
+)
 
 
 def _num(x: object) -> str:
@@ -65,191 +74,173 @@ def _num(x: object) -> str:
 
 
 @dataclass
-class ModelSpec:
-    """One feature model at one resolution (several may share a resolution). ``ref`` picks the model; the
-    rest are its per-(resolution, model) knobs. Dimension / channels / FOV are intrinsic (from the registry
-    (``models.json``) keyed by ``ref``), never tuned."""
-
-    ref: Annotated[
-        str,
-        Choices(registry_choices),
-        "IMPACT feature model compared at this resolution (TorchScript 'repo:file' on Hugging Face); different "
-        "models capture different anatomy/contrast. Suggested priors (from the IMPACT study, not forced): "
-        "TotalSegmentator (TS/M730) is the general default; a model trained on the target structure (e.g. lung "
-        "or vessels) sharpens local alignment there; add MIND for MR/CT to recover intra-organ detail; SAM2.1 "
-        "for fast 2D exploration.",
-    ]
-    voxel_size: Annotated[
-        list[float], "Working resolution (mm) this model is evaluated at (empty = the resolution level's default)."
-    ] = field(default_factory=list)
-    layers_weight: Annotated[
-        list[float], "Per-layer weights of this feature model's selected layers in the metric."
-    ] = field(default_factory=lambda: [1.0])
-    subset_features: Annotated[
-        int, Range(0, 1000), "Number of this model's feature channels to keep (0 = all); trims cost."
-    ] = 0
-    pca: Annotated[
-        int,
-        Range(0, 100),
-        "Number of PCA components this model's feature channels are reduced to before matching (0 = keep all).",
-    ] = 0
-    distance: Annotated[
-        Literal["L1", "L2", "Dice", "Cosine", "NCC"],
-        "Similarity measure compared on this model's features. Suggested prior (not forced): when the task is "
-        "scored on Dice, choosing 'Dice' aligns the loss with the metric.",
-    ] = "L1"
-    layers_mask: Annotated[
-        str,
-        "Per-layer on/off bitmask over the model's layers ('1' = use, '0' = skip); also sets the Jacobian FOV "
-        "(the deepest selected layer's receptive field). Suggested priors (not forced): CT/CBCT favours EARLY "
-        "layers (they denoise and enhance structures across modalities, robust to artifacts) with 'Jacobian' "
-        "mode; MR/CT favours HIGH-LEVEL layers (contour/segmentation-driven) with 'Static' mode.",
-    ] = ""
-
-
-@dataclass
-class ResolutionSpec:
-    """One elastix resolution level: its iteration budget and the (self-configured) models compared there."""
+class ElastixLevelSpec:
+    """One elastix resolution: its iteration budget and the models compared there, in place of ``models``."""
 
     max_iterations: Annotated[int, Range(1, 100000), "Optimiser iterations spent at this resolution level."]
     models: dict[str, ModelSpec]
 
 
-def _sorted_specs(mapping: dict) -> list:
-    """dict keyed by string indices ('0','1',...) -> values in numeric order."""
-    return [mapping[k] for k in sorted(mapping, key=lambda key: int(key))]
-
-
-def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
-    """Load models.json (the fixed params per model) from the model repo on Hugging Face.
-
-    The registry is NOT bundled with the preset. ``KONFAI_IMPACT_MODELS_REGISTRY`` (a local path) wins for
-    dev/offline; otherwise ``ref`` must be a ``repo:file`` Hugging Face reference.
-    """
-    local = os.environ.get("KONFAI_IMPACT_MODELS_REGISTRY", "")
-    if local:
-        path = Path(local)
-    elif ":" in ref:
-        repo, filename = ref.split(":", 1)
-        path = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
-    else:
-        raise ValueError(
-            f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference (the registry is fetched "
-            f"from HF, not bundled): or set KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
-        )
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _is_local_ref(ref: str) -> bool:
-    """A model ref without a ``:`` is a local file, and so is a Windows drive-letter path
-    (``C:/models/m.pt``), whose ``:`` is not the ``repo:filename`` separator."""
-    return ":" not in ref or bool(re.match(r"^[A-Za-z]:[\\/]", ref))
-
-
-def _model_key(ref: str) -> str:
-    """Registry key / staged relative path = the model file within the repo (strip a 'repo:' prefix);
-    a local ref is its own key."""
-    return ref if _is_local_ref(ref) else ref.split(":", 1)[1]
-
-
-def _deepest_active_layer(layers_mask: str) -> int:
-    """Deepest (largest-FOV) layer selected by ``layers_mask``, as a 0-based index.
-
-    A model returns its layers shallow->deep; ``layers_mask`` has one char per returned layer, position ``i``
-    == ``layer_i``, ``'1'`` = selected. In Jacobian the patch must cover the DEEPEST selected layer's
-    receptive field, so the FOV is governed by the rightmost ``'1'``.
-    """
-    mask = layers_mask.strip().strip('"')
-    active = [i for i, char in enumerate(mask) if char == "1"]
-    if not active:
-        raise ValueError(f"LayersMask '{layers_mask}' selects no layer; cannot derive the model FOV.")
-    return max(active)
-
-
-def _fov_value(fov: dict, layers_mask: str) -> int:
-    """Evaluate a model's field-of-view (in voxels) from its registry ``fov`` spec.
-
-    Formulas (model repo, https://huggingface.co/VBoussot/impact-torchscript-models):
-      ``2*r*d+1``  MIND, from radius ``r`` / dilation ``d`` (R1D2 -> 5);
-      ``2^l+3``    TotalSegmentator / MRSegmentator, ``l`` = deepest layer picked by ``layers_mask``, clamped
-                   to the receptive-field plateau ``_FOV_RAMP_MAX_LAYER`` (layers 7-8 -> layer 6). The model
-                   repository writes this as ``2^l+3``, which holds for the first layer and understates the
-                   rest: each stage of these encoders doubles the reach and adds a convolution, so the
-                   receptive field is ``3*2^l-1``. Measured on TS/M730 (the input sensitivity of one output
-                   voxel, above 1 % of its peak): 5, 11, 19, 43 voxels for layers 1 to 4, against 5, 7, 11,
-                   19 from the written form. 11 for a 2-layer mask is also what the study's own
-                   ParameterMap_Recommended.txt sets.;
-      a bare int   a fixed FOV (SAM2.1 -> 29, DINOv2 -> 14);
-      ``Global``   Anatomix: whole-image only (Static); no finite Jacobian patch -> error.
-    An explicit ``value`` in the spec is honoured as a precomputed shortcut.
-    """
-    formula = str(fov.get("formula", "")).strip()
-    key = re.sub(r"\s+", "", formula).lower()
-    if key.isdigit():
-        return int(key)
-    if key == "2*r*d+1":
-        return 2 * int(fov["r"]) * int(fov["d"]) + 1
-    if key == "2^l+3":
-        layer = min(_deepest_active_layer(layers_mask) + 1, _FOV_RAMP_MAX_LAYER)
-        return 3 * 2**layer - 1
-    if "global" in key:
-        raise ValueError(f"model FOV '{formula}' is whole-image only (Static); it has no Jacobian patch size.")
-    if fov.get("value") is not None:
-        return int(fov["value"])
-    raise ValueError(f"cannot evaluate model FOV formula '{formula}'.")
-
-
-def _patch_size(mode: str, entry: dict, layers_mask: str) -> str:
-    """PatchSize from the model FOV, one token per model axis (2D -> 2 tokens, 3D -> 3): Static -> whole
-    image (all zeros); Jacobian -> the evaluated FOV per axis. A 2D+3D mix at a resolution concatenates,
-    e.g. ``29 29 11 11 11`` (SAM 2D + TS 3D), matching IMPACT."""
-    dim = int(entry.get("dimension", 3))
+def _patch_size(mode: str, model: ImpactFeatureModel) -> str:
+    """PatchSize, one token per model axis (2D -> 2 tokens, 3D -> 3): Static -> whole image (all zeros); Jacobian ->
+    the receptive field of the model's deepest kept layer. A 2D+3D mix at a resolution concatenates, e.g.
+    ``29 29 11 11 11`` (SAM 2D + TS 3D), matching IMPACT."""
     if mode.strip().strip('"').lower() != "jacobian":
-        return " ".join(["0"] * dim)
-    fov = _fov_value(entry.get("fov", {}), layers_mask)
-    return " ".join([str(fov)] * dim)
+        return " ".join(["0"] * model.dim)
+    return " ".join([str(model.receptive_field)] * model.dim)
 
 
-def generate_impact_parameter_map(template_text: str, resolutions: dict, registry: dict, mode: str = "Static") -> str:
-    """Rewrite the resolution-dependent lines of ``template_text`` from the model matrix ``resolutions``.
+def _voxel_size(
+    spec: ModelSpec, model: ImpactFeatureModel, mode: str, native: Sequence[float], where: str
+) -> list[float]:
+    """The grid (mm) ``spec``'s model sees the image on: its voxel_size, or the fixed image's own spacing without one.
+    Static resamples the image on its own axes, Jacobian feeds the model patches of its own dimension."""
+    axes = model.dim if mode.lower() == "jacobian" else 3
+    size = [float(v) for v in spec.voxel_size] if spec.voxel_size is not None else list(native)[:axes]
+    if len(size) != axes:
+        raise ValueError(f"{where}: voxel_size needs {axes} values (mm) in {mode} mode, got {spec.voxel_size}.")
+    return size
 
-    Regenerated: MaximumNumberOfIterations, NumberOfResolutions, Fixed/MovingImagePyramidRescaleSchedule,
-    ImpactMode, and the whole ImpactXxxK block; every other line is kept verbatim. N (number of resolutions)
-    is deduced from the config. ``mode`` drives PatchSize: Static -> ``0 0 0``; Jacobian -> the per-model FOV
-    from the registry formula and the cell's ``layers_mask``.
+
+# The samplers that draw points at random, whose NumberOfSpatialSamples voxel_sampling sets.
+_RANDOM_SAMPLERS = ("Random", "RandomCoordinate", "RandomSparseMask", "MultiInputRandomCoordinate")
+
+
+def _entry(text: str, key: str) -> list[str] | None:
+    """The values of a map's ``(key ...)`` entry, unquoted, or None when the map has none."""
+    match = re.search(rf"^\s*\({key}\s+([^)]*)\)", text, re.MULTILINE)
+    return [token.strip('"') for token in match.group(1).split()] if match else None
+
+
+def sampled_spatial_samples(text: str, fraction: float, voxels: int, dim: int = 3) -> str:
+    """The map's NumberOfSpatialSamples set to ``fraction`` of the fixed image's voxels at each level (``voxels`` at
+    full resolution, those of the mask when there is one): voxel_sampling, until elastix reads a proportion itself.
+
+    A level holds the voxels the map's pyramid leaves it: a recursive or shrinking pyramid divides them by its shrink
+    factors, the generic one by its rescale schedule, a smoothing-only one keeps them all. The fraction replaces any
+    count the map or an override wrote.
     """
-    res = _sorted_specs(resolutions)
-    n = len(res)
+    sampler = (_entry(text, "ImageSampler") or [""])[0]
+    if sampler not in _RANDOM_SAMPLERS:
+        raise ValueError(
+            f"voxel_sampling sets how many points elastix's sampler draws, and this map samples with "
+            f"'{sampler or 'its default'}': name a random one ({', '.join(_RANDOM_SAMPLERS)}) or leave voxel_sampling "
+            "at 1."
+        )
+    levels = int((_entry(text, "NumberOfResolutions") or [_ELASTIX_DEFAULT_RESOLUTIONS])[0])
+    pyramid = (_entry(text, "FixedImagePyramid") or ["FixedSmoothingImagePyramid"])[0]
+    default = [2 ** (levels - 1 - level) for level in range(levels) for _ in range(dim)]
+    if "Smoothing" in pyramid:
+        schedule: list = [1] * (levels * dim)
+    elif "Generic" in pyramid:
+        schedule = (
+            _entry(text, "FixedImagePyramidRescaleSchedule") or _entry(text, "FixedImagePyramidSchedule") or default
+        )
+    else:
+        schedule = _entry(text, "FixedImagePyramidSchedule") or default
+    shrink = [
+        math.prod(float(factor) for factor in schedule[level * dim : (level + 1) * dim]) for level in range(levels)
+    ]
+    line = "(NumberOfSpatialSamples " + " ".join(str(max(1, round(fraction * voxels / s))) for s in shrink) + ")"
+    if _entry(text, "NumberOfSpatialSamples") is None:
+        return text + "\n" + line
+    return re.sub(r"^\s*\(NumberOfSpatialSamples\s+[^)]*\).*$", line, text, count=1, flags=re.MULTILINE)
+
+
+def has_impact_block(text: str) -> bool:
+    """Whether a parameter map carries an IMPACT block (``(ImpactModelsPath0 ...)`` and its siblings)."""
+    return re.search(r"^\s*\(Impact[A-Za-z]+\d+\s", text, re.MULTILINE) is not None
+
+
+def generate_impact_parameter_map(
+    template_text: str,
+    models: dict[str, ModelSpec],
+    levels: dict[str, ElastixLevelSpec],
+    feature_models: dict[tuple[str, str], ImpactFeatureModel],
+    native_voxel_size: Sequence[float],
+    mode: str = "Static",
+    normalize: bool = True,
+    feature_map_update_interval: int = -1,
+    mixed_precision: bool = False,
+) -> str:
+    """Rewrite the IMPACT lines of ``template_text`` from ``models`` (every resolution) or ``levels`` (one each).
+
+    Regenerated: the whole ImpactXxxK block, ImpactMode and the loss settings (ImpactNormalizeLosses,
+    ImpactFeaturesMapUpdateInterval, ImpactUseMixedPrecision), and with ``levels`` MaximumNumberOfIterations and
+    NumberOfResolutions; every other line is kept verbatim, and a regenerated line the template lacks is added.
+    Without ``levels`` the map's own resolutions and iterations stand. ``mode`` drives PatchSize: Static ->
+    ``0 0 0``; Jacobian -> the receptive field of the deepest layer of the model's ``layers_mask``.
+
+    IMPACT reads the original images and resamples them to each model's voxel_size itself, so the map's pyramid
+    only reaches its other metrics (a Mattes MI beside IMPACT) and the samplers: it is kept, unless a schedule no
+    longer holds one entry per axis and resolution, when elastix's default pyramid replaces it. A model without a
+    voxel_size sees the image at ``native_voxel_size``, the fixed image's spacing.
+
+    A map without an IMPACT block is returned as it is: the models describe the IMPACT metric's levels, and an
+    intensity stage run before it (a rigid Mattes MI alignment) keeps its own pyramid and iterations.
+
+    ``feature_models`` holds each model's KonfAI feature model by ``(ref, layers_mask)``: its file (the
+    ``ImpactModelsPath``), dimension, channels and receptive field.
+    """
+    if not has_impact_block(template_text):
+        return template_text
+    if not models and not levels:
+        raise ValueError(
+            "The parameter map has an IMPACT block, but the preset declares no 'models' (nor 'levels') to write into "
+            "it: elastix would read the map's own ImpactModelsPath entries, which name no file. Declare the models "
+            "under the preset's RegistrationNet."
+        )
     mode_clean = mode.strip().strip('"') or "Static"
+    counted = re.search(r"^\s*\(NumberOfResolutions\s+(\d+)", template_text, re.MULTILINE)
+    n = len(levels) if levels else int(counted.group(1)) if counted else _ELASTIX_DEFAULT_RESOLUTIONS
 
     impact: list[str] = []
-    for k, r in enumerate(res):
-        models = _sorted_specs(r.models)
-        entries = [registry[_model_key(m.ref)] for m in models]
+    for k, specs in enumerate(level_models(models, levels, n, "elastix")):
+        where = f"elastix level {k}"
+        check_models(specs, where, dense=False)
+        loaded = [feature_models[(m.ref, m.layers_mask)] for m in specs]
+        voxels = [
+            _voxel_size(m, e, mode_clean, native_voxel_size, f"{where} model '{m.ref}'")
+            for m, e in zip(specs, loaded, strict=True)
+        ]
 
         def row(stem: str, values: list[str], k: int = k) -> None:
             impact.append(f"(Impact{stem}{k} " + " ".join(values) + ")")
 
-        # From the registry ONLY the 3 truly model-fixed props (Dimension, NumberOfChannels, PatchSize = the
-        # model FOV); everything else is a per-model knob taken straight from the cell.
-        row("ModelsPath", [f'"{_model_key(m.ref)}"' for m in models])
-        row("Dimension", [e["dimension"] for e in entries])
-        row("NumberOfChannels", [e["numberofchannels"] for e in entries])
-        row("PatchSize", [_patch_size(mode_clean, e, m.layers_mask) for e, m in zip(entries, models, strict=True)])
-        row("VoxelSize", [" ".join(_num(v) for v in m.voxel_size) for m in models])
-        row("LayersMask", [f'"{m.layers_mask}"' for m in models])
-        row("SubsetFeatures", [str(m.subset_features) for m in models])
-        row("PCA", [str(m.pca) for m in models])
-        row("Distance", [f'"{m.distance}"' for m in models])
-        row("LayersWeight", [" ".join(_num(w) for w in m.layers_weight) for m in models])
+        # From the model ONLY its fixed props (file, Dimension, NumberOfChannels, PatchSize = its receptive field);
+        # everything else is a per-model knob taken straight from the spec. SubsetFeatures, PCA, Distance and
+        # LayersWeight hold one entry per kept layer, flat across the level's models. The file keeps the platform's
+        # own separators: elastix's parameter parser cuts a line at '//', quotes or not.
+        row("ModelsPath", [f'"{e.model_path}"' for e in loaded])
+        row("Dimension", [str(e.dim) for e in loaded])
+        row("NumberOfChannels", [str(e.in_channels) for e in loaded])
+        row("PatchSize", [_patch_size(mode_clean, e) for e in loaded])
+        row("VoxelSize", [" ".join(_num(v) for v in voxel) for voxel in voxels])
+        row("LayersMask", [f'"{m.layers_mask}"' for m in specs])
+        row("FeatureNormalization", [f'"{m.feature_normalization}"' for m in specs])
+        row("SubsetFeatures", [str(c or _ALL_CHANNELS) for c in per_kept_layer(specs, lambda m: m.subset_features)])
+        row("PCA", [str(pca) for pca in per_kept_layer(specs, lambda m: m.pca)])
+        row("Distance", [f'"{d}"' for d in per_kept_layer(specs, lambda m: m.distance)])
+        row("LayersWeight", [_num(w) for w in layer_weights(specs)])
         impact.append("")  # blank line between resolutions, mirroring the reference maps
 
     # The per-resolution block is the contiguous span from the first to the last ``Impact<name><k>`` line
     # (inner blanks fall inside it). Replace the whole span at its first line so reference blanks aren't kept.
     lines = template_text.splitlines()
-    indexed = [(re.match(r"^\s*\((\S+?)\s+(.*?)\)\s*$", ln), ln) for ln in lines]
+    # An entry may be followed by a '// comment'.
+    indexed = [(re.match(r"^\s*\((\S+?)\s+(.*?)\)\s*(?://.*)?$", ln), ln) for ln in lines]
     block_rows = [i for i, (m, _) in enumerate(indexed) if m and re.match(r"^Impact[A-Za-z]+\d+$", m.group(1))]
     block_lo, block_hi = (block_rows[0], block_rows[-1]) if block_rows else (-1, -2)
+    regenerated = {
+        "ImpactMode": f'(ImpactMode "{mode_clean}")',
+        "ImpactNormalizeLosses": f'(ImpactNormalizeLosses "{str(normalize).lower()}")',
+        "ImpactFeaturesMapUpdateInterval": f"(ImpactFeaturesMapUpdateInterval {int(feature_map_update_interval)})",
+        "ImpactUseMixedPrecision": f'(ImpactUseMixedPrecision "{str(mixed_precision).lower()}")',
+    }
+    if levels:
+        iterations = " ".join(_num(level.max_iterations) for level in sorted_specs(levels))
+        regenerated["MaximumNumberOfIterations"] = f"(MaximumNumberOfIterations {iterations})"
+        regenerated["NumberOfResolutions"] = f"(NumberOfResolutions {n})"
 
     out: list[str] = []
     for i, (m, line) in enumerate(indexed):
@@ -257,29 +248,17 @@ def generate_impact_parameter_map(template_text: str, resolutions: dict, registr
         if block_lo <= i <= block_hi:
             if i == block_lo:  # replace the whole span at its first line, drop the rest (incl. inner blanks)
                 out.extend(impact[:-1])
-        elif key == "MaximumNumberOfIterations":
-            out.append("(MaximumNumberOfIterations " + " ".join(_num(r.max_iterations) for r in res) + ")")
-        elif key == "NumberOfResolutions":
-            out.append(f"(NumberOfResolutions {n})")
-        elif key in ("FixedImagePyramidRescaleSchedule", "MovingImagePyramidRescaleSchedule"):
-            out.append(f"({key} " + " ".join(["1"] * 3 * n) + ")")
-        elif key == "ImpactMode":
-            out.append(f'(ImpactMode "{mode_clean}")')
+            elif key is not None and i not in block_rows:
+                out.append(line)  # another entry written inside the span is the template's, not the block's
+        elif key in regenerated:
+            out.append(regenerated[key])
+        elif key in _PYRAMID_SCHEDULES and len(m.group(2).split()) != 3 * n:
+            continue  # written for another number of resolutions: elastix's default pyramid instead
         else:
             out.append(line)
+    keys = {m.group(1) for m, _ in indexed if m}
+    out += [line for key, line in regenerated.items() if key not in keys]
     return "\n".join(out)
-
-
-class ChannelSelect(torch.nn.Module):
-    """Select a channel slice ``[start:stop]`` (splits the registration output into moved / DVF)."""
-
-    def __init__(self, start: int, stop: int) -> None:
-        super().__init__()
-        self._start = start
-        self._stop = stop
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor[:, self._start : self._stop]
 
 
 class RegistrationNet(network.Network):
@@ -290,6 +269,9 @@ class RegistrationNet(network.Network):
     (the dim-component displacement field, mm). Output geometry is attached by the predictor via
     ``same_as_group: Volume_0:Fixed``.
     """
+
+    #: Its output is a displacement field in world units: KonfAI blends it in float32, not float16.
+    full_precision_outputs = True
 
     def __init__(
         self,
@@ -304,8 +286,7 @@ class RegistrationNet(network.Network):
         parameter_maps: Annotated[
             list[str],
             "elastix parameter-map preset template(s) run in sequence (e.g. rigid then bspline); at least one "
-            "is required: 'resolutions' regenerates a template's resolution-dependent lines; it does not "
-            "replace it.",
+            "is required: 'models' and 'levels' regenerate a template's IMPACT lines; they do not replace it.",
         ] = [],
         max_iterations: Annotated[
             int,
@@ -318,9 +299,6 @@ class RegistrationNet(network.Network):
             "Final B-spline control-point spacing (mm) of the deformable map; smaller = a more flexible "
             "deformation, 0 = keep the map's default.",
         ] = 0.0,
-        subset_features: Annotated[
-            int, Range(0, 1000), "Number of IMPACT feature channels to keep across models (0 = all); trims cost."
-        ] = 0,
         spatial_samples: Annotated[
             int,
             Range(0, 100000),
@@ -332,21 +310,36 @@ class RegistrationNet(network.Network):
             "Raw elastix parameter overrides as 'Key=value' strings, applied on top of the generated map "
             "(advanced escape hatch).",
         ] = [],
-        resolutions: dict[str, ResolutionSpec] = {},
-        mode: Annotated[
-            Literal["Static", "Jacobian"],
-            "IMPACT feature-extraction mode: 'Static' (whole-image features, computed once per resolution: "
-            "fast, inference-only) or 'Jacobian' (patch-wise, differentiable, precise, slower). Suggested "
-            "priors (not forced): early/downsampling layers -> 'Jacobian'; high-level layers -> 'Static'. "
-            "Avoid 'Static' for large-stride/transformer models (SAM, DINOv2): frozen features lose local "
-            "alignment.",
-        ] = "Static",
+        models: dict[str, ModelSpec] = {},
+        levels: Annotated[
+            dict[str, ElastixLevelSpec],
+            "The IMPACT map's resolutions ('0', '1', ...), each with its iterations and its models in place of "
+            "'models'; empty = the map's own resolutions and iterations, 'models' at every one.",
+        ] = {},
+        mode: Mode = "Static",
+        normalize: Normalize = True,
+        feature_map_update_interval: FeatureMapUpdateInterval = -1,
+        mixed_precision: MixedPrecision = False,
+        voxel_sampling: Annotated[
+            float,
+            Range(0.00001, 1.0),
+            "Share of the fixed image's voxels the IMPACT map's sampler draws at each iteration, at each level "
+            "(1 = the map's own NumberOfSpatialSamples); written as NumberOfSpatialSamples from the image and its "
+            "mask at run time, and preferred to spatial_samples. The other engines read the same share. Experimental.",
+        ] = 1.0,
+        seed: Annotated[
+            int,
+            "Seed of what elastix draws at random, written as RandomSeed in every parameter map: the points of the "
+            "RandomCoordinate and RandomSparseMask samplers, the stochastic optimisers' perturbations, and the IMPACT "
+            "metric's channels (subset_features), patches and 2D planes, which 0 leaves to the clock. The 'Random' "
+            "sampler does not read it.",
+        ] = 42,
     ) -> None:
-        # The registration is fully described by ``resolutions`` (config = source of truth): each resolution
-        # lists its self-configured models; the download list is derived from the cells. Global knobs override
-        # the generated map (final_grid_spacing -> FinalGridSpacingInPhysicalUnits mm, spatial_samples ->
-        # NumberOfSpatialSamples, parameter_overrides 'Key=value'). Empty ``resolutions`` = an intensity-only
-        # preset (fixed maps + overrides). The elastix runtime is imported here (heavy: torch/sitk/subprocess).
+        # The IMPACT metric is described by ``models`` / ``levels`` (config = source of truth); the download list
+        # is derived from them. Global knobs override the generated map (final_grid_spacing ->
+        # FinalGridSpacingInPhysicalUnits mm, spatial_samples -> NumberOfSpatialSamples, parameter_overrides
+        # 'Key=value'). No models = an intensity-only preset (fixed maps + overrides). The elastix runtime is
+        # imported here (heavy: torch/sitk/subprocess).
         from .elastix_engine import ElastixRegistration
 
         super().__init__(
@@ -363,13 +356,19 @@ class RegistrationNet(network.Network):
                 parameter_maps,
                 max_iterations,
                 final_grid_spacing,
-                subset_features,
                 spatial_samples,
                 parameter_overrides,
-                resolutions,
+                models,
+                levels,
                 mode,
+                normalize,
+                feature_map_update_interval,
+                mixed_precision,
+                voxel_sampling,
+                seed,
             ),
             in_branch=[0, 1, 2, 3],
             out_branch=["registration"],
         )
-        self.add_module("DisplacementField", ChannelSelect(0, 3), in_branch=["registration"], out_branch=["dvf"])
+        # The output module the presets name.
+        self.add_module("DisplacementField", torch.nn.Identity(), in_branch=["registration"], out_branch=["dvf"])

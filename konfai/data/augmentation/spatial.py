@@ -483,6 +483,7 @@ class Flip(DataAugmentation):
         self.f_prob = f_prob
         self.vector_field = vector_field
         self.flip: dict[int, list[list[int]]] = {}
+        self.directions: dict[int, list[np.ndarray]] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         rank = len(shapes[0])
@@ -501,17 +502,38 @@ class Flip(DataAugmentation):
             self.flip[index] = [mirrors[copy % len(mirrors)] if mirrors else [] for copy in range(len(shapes))]
             return shapes
         prob = torch.rand((len(shapes), len(self.f_prob))) < torch.tensor(self.f_prob)
-        self.flip[index] = [torch.tensor(dims)[mask].tolist() for mask in prob]
+        dims = torch.tensor([1, 2, 3][: len(self.f_prob)])
+        self.flip[index] = [dims[mask].tolist() for mask in prob]
+        self.directions[index] = [
+            Flip._direction(attribute, len(shape)) for attribute, shape in zip(caches_attribute, shapes, strict=True)
+        ]
         return shapes
 
-    def _flip(self, tensor: torch.Tensor, dims: list[int]) -> torch.Tensor:
+    @staticmethod
+    def _direction(attribute: Attribute, dim: int) -> np.ndarray:
+        """The grid's direction matrix, whose column ``j`` is voxel axis ``j``'s world direction; the
+        identity for a tensor that carries no geometry of its own rank."""
+        if "Direction" in attribute:
+            direction = attribute.get_np_array("Direction")
+            if direction.size == dim * dim:
+                return direction.reshape(dim, dim)
+        return np.eye(dim)
+
+    def _flip(self, tensor: torch.Tensor, index: int, a: int) -> torch.Tensor:
+        dims = self.flip[index][a]
         result = torch.flip(tensor, dims=dims)
-        # Flipping a spatial axis also negates its component channel (channel = tensor.dim() - 1 -
-        # dim, channels being in (x, y, z) order). Enable ``vector_field`` only where the tensors are
-        # single-channel or genuine vector fields.
+        # With the header kept, mirroring voxel axis j mirrors the world about the plane normal to that
+        # axis's direction, so a vector (channels in world x, y, z order) is reflected by I - 2 u u^T, u
+        # the direction's column j (j = tensor.dim() - 1 - dim, tensor axes being reversed). Negating
+        # component j is that reflection only for an identity direction. Enable ``vector_field`` only
+        # where the tensors are single-channel or genuine vector fields.
         if self.vector_field and tensor.shape[0] == tensor.dim() - 1:
             for dim in dims:
-                result[tensor.dim() - 1 - dim] = -result[tensor.dim() - 1 - dim]
+                axis = self.directions[index][a][:, tensor.dim() - 1 - dim]
+                projection = sum(float(u) * result[c] for c, u in enumerate(axis) if u)
+                for c, u in enumerate(axis):
+                    if u:
+                        result[c] -= 2 * float(u) * projection
         return result
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
@@ -532,10 +554,10 @@ class Flip(DataAugmentation):
         return remap_region(target_slices, source_spatial_shape, remap)
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        return self._flip(tensor, self.flip[index][a])
+        return self._flip(tensor, index, a)
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        return self._flip(tensor, self.flip[index][a])
+        return self._flip(tensor, index, a)
 
 
 class Permute(DataAugmentation):

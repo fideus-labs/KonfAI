@@ -1343,3 +1343,114 @@ def test_studios_catalogue_reads_each_hf_repository_once_and_no_checkpoint(
     hub.calls.clear()
     assert _summaries(service.list_apps(include_summary=True)) == _summaries(listing)
     assert sorted(call[0] for call in hub.calls) == ["info"] * len(_HF_CATALOGUE)
+
+def _registration_app(tmp_path: Path) -> Path:
+    """A local registration preset as VBoussot/ImpactReg ships them: four inputs, the field as its only output."""
+    presets = tmp_path / "presets"
+    app_dir = presets / "TinyRigid"
+    app_dir.mkdir(parents=True, exist_ok=True)
+    slot = {"volume_type": "VOLUME", "required": True}
+    (app_dir / "app.json").write_text(
+        json.dumps(
+            {
+                "display_name": "Tiny rigid",
+                "description": "registration preset used for routing checks",
+                "short_description": "tiny rigid",
+                "task": "registration",
+                "tta": 0,
+                "mc_dropout": 0,
+                "models": [],
+                "inputs": {
+                    "Fixed": {"display_name": "Fixed image", **slot},
+                    "Moving": {"display_name": "Moving image", **slot},
+                    "FixedMask": {"display_name": "Fixed mask", "volume_type": "SEGMENTATION", "required": False},
+                    "MovingMask": {"display_name": "Moving mask", "volume_type": "SEGMENTATION", "required": False},
+                },
+                "outputs": {"DisplacementField": {"display_name": "Displacement field", **slot}},
+                "inputs_evaluations": {
+                    "Segmentation": {
+                        "Evaluation_with_seg.yml": {
+                            "FixedSeg": {"display_name": "Fixed segmentation", **slot},
+                            "MovingSeg": {"display_name": "Moving segmentation", **slot},
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return app_dir
+
+
+def test_a_registration_app_runs_through_impact_reg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The preset writes its field only: impact-reg-konfai derives the moved image, so the app runs through it,
+    the repository being the folder that holds the preset, the groups read as fixed, moving, then the masks."""
+    app_dir = _registration_app(tmp_path)
+    fixed, moving, mask = (_touch(tmp_path / "data" / f"{name}.mha") for name in ("fixed", "moving", "mask"))
+    service = _service(tmp_path)
+
+    spec = service.prepare_infer(ref=str(app_dir), inputs=[[fixed], [moving], [mask]], allow_untrusted_code=True)
+    assert spec["target"] == "konfai_mcp.runner:run_registration_api"
+    kwargs = spec["kwargs"]
+    assert (kwargs["repo"], kwargs["preset"]) == (str(app_dir.parent), "TinyRigid")
+    assert (kwargs["fixed"], kwargs["moving"]) == ([fixed], [moving])
+    assert (kwargs["fixed_masks"], kwargs["moving_masks"]) == ([mask], [])
+
+    # The runner against the real register(): a stand-in taking **kwargs let through an argument it does not have.
+    from contextlib import nullcontext
+    from unittest.mock import patch
+
+    from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp
+
+    from konfai_mcp import runner
+
+    monkeypatch.setenv("KONFAI_IMPACTREG_REPO", "unused")  # the runner points it at the repository
+    with (
+        patch.object(runner, "_runtime_context", side_effect=lambda **_: nullcontext()),
+        patch.object(runner, "_ensure_local_imports"),
+        patch.object(ImpactRegKonfAIApp, "__init__", return_value=None),
+        patch.object(ImpactRegKonfAIApp, "register", autospec=True) as register,
+    ):
+        runner.run_registration_api(**kwargs)
+    register.assert_called_once()
+
+    with pytest.raises(ValueError, match="2 to 4 input groups"):
+        service.prepare_infer(ref=str(app_dir), inputs=[[fixed]], allow_untrusted_code=True)
+    with pytest.raises(ValueError, match="no checkpoints to ensemble"):
+        service.prepare_infer(ref=str(app_dir), inputs=[[fixed], [moving]], allow_untrusted_code=True, ensemble=2)
+    # An app that is not a registration keeps the plain konfai-apps path.
+    plain = service.prepare_infer(ref=_local_app(tmp_path), inputs=[[fixed]], allow_untrusted_code=True)
+    assert plain["target"] == "konfai_mcp.runner:run_app_api"
+
+
+def test_a_registration_app_is_scored_through_its_transform(tmp_path: Path) -> None:
+    """Its bundled evaluation configs read the moving data without the transform: the pair before registration.
+    They are refused, and describe_app routes to run_registration_evaluate instead."""
+    app_dir = _registration_app(tmp_path)
+    seg = [[_touch(tmp_path / "data" / "fixed_labels.mha")]]
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="run_registration_evaluate"):
+        service.prepare_evaluate(
+            ref=str(app_dir), inputs=seg, gt=seg, evaluation_file="Evaluation_with_seg.yml", allow_untrusted_code=True
+        )
+    actions = service.describe_app(str(app_dir))["next_actions"]
+    assert "run_registration_evaluate" in actions and "run_app_evaluate" not in actions
+
+
+def test_prepare_registration_evaluate_pairs_what_it_scores(tmp_path: Path) -> None:
+    fixed, moving, transform = (_touch(tmp_path / "data" / name) for name in ("f.mha", "m.mha", "Transform.h5"))
+    service = _service(tmp_path)
+
+    with pytest.raises(ValueError, match="at least one fixed/moving pair"):
+        service.prepare_registration_evaluate(transforms=[transform])
+    with pytest.raises(ValueError, match="fixed and the moving segmentations together"):
+        service.prepare_registration_evaluate(fixed_seg=[fixed])
+
+    spec = service.prepare_registration_evaluate(transforms=[transform], fixed_seg=[fixed], moving_seg=[moving])
+    assert spec["target"] == "konfai_mcp.runner:run_registration_evaluate_api"
+    assert spec["kind"] == "evaluate"
+    assert spec["kwargs"]["transforms"] == [transform] and spec["kwargs"]["fixed_images"] == []
+    # No transform scores the pair as it is: the misalignment a registration starts from.
+    before = service.prepare_registration_evaluate(fixed_seg=[fixed], moving_seg=[moving])
+    assert before["kwargs"]["transforms"] == []

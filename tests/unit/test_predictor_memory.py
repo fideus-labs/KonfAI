@@ -118,6 +118,39 @@ def test_model_composite_hands_over_a_lone_model_output_and_folds_an_ensemble_in
     assert torch.equal(folded, (outputs[0] + outputs[1] + outputs[2]) / 3)
 
 
+@pytest.mark.parametrize(
+    ("dtype", "keeps", "accumulated"),
+    [
+        (torch.float32, False, torch.float16),  # a probability or an intensity: half the memory
+        (torch.float32, True, torch.float32),  # a displacement field in world units keeps its precision
+        (torch.float64, False, torch.float16),  # never float64: read as float32, then as priced
+        (torch.float64, True, torch.float32),
+        (torch.float16, False, torch.float16),
+    ],
+)
+def test_model_composite_halves_float32_outputs_unless_the_model_keeps_them(dtype, keeps, accumulated) -> None:
+    class FieldNetwork(DummyPredictNetwork):
+        full_precision_outputs = keeps
+
+        def forward(self, batch_sample, output_layers=[]):  # type: ignore[override]
+            return [("out", torch.full((1, 3, 2, 2), 100.01, dtype=dtype))]
+
+    composite = ModelComposite(FieldNetwork(), Mean())
+    composite.load([])
+    batch_sample = {
+        "input": BatchDataItem(
+            name=["CASE_000"],
+            tensor=torch.ones(1, 1, 2, 2),
+            attribute=[Attribute()],
+            x=[0],
+            a=[0],
+            p=[0],
+            is_input=True,
+        )
+    }
+    assert composite(batch_sample, ["out"])[0][2].dtype == accumulated
+
+
 def test_model_composite_runs_a_weightless_model_without_a_checkpoint() -> None:
     """A model with no trainable weights (0 parameters) runs once, as constructed, with no state sources: a
     classical/optimisation engine (e.g. registration) needs no checkpoint."""

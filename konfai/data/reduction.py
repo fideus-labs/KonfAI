@@ -128,6 +128,18 @@ class Mean(Reduction):
         return result
 
 
+class Sum(Mean):
+    """Add the cases element-wise: ``Mean`` without the division, so it streams and folds the same way (a displacement
+    and another read at its end, composed)."""
+
+    def finalize(self) -> torch.Tensor:
+        if self._total is None:
+            raise ReductionError("Sum.finalize() with no case accumulated.", "Accumulate at least one case.")
+        result = self._total.to(self._dtype) if self._dtype.is_floating_point else self._total
+        self._total, self._count = None, 0
+        return result
+
+
 class Std(Reduction):
     """The element-wise standard deviation across cases: the ensemble-spread map.
 

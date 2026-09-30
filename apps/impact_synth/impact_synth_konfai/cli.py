@@ -46,6 +46,7 @@ main = build_app_cli(
     "impact-synth-konfai",
     "ImpactSynth (KonfAI app wrapper): whole-body synthetic CT from MR/CBCT.",
     resolve_app=lambda args: f"{IMPACT_SYNTH_KONFAI_REPO}:{args.model}",
+    repo=IMPACT_SYNTH_KONFAI_REPO,
     add_selection=_add_selection,
     add_infer_knobs=_add_infer_knobs,
     resolve_infer=lambda args: {"ensemble": args.ensemble, "ensemble_models": [], "tta": args.tta, "mc": args.mc},

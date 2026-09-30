@@ -59,12 +59,20 @@ def make_reg_pair(tmp_path: Path) -> Callable[..., tuple[Path, Path, float]]:
     """Build a fixed/moving pair where moving = fixed warped by a KNOWN smooth low-frequency field.
 
     Returns ``(fixed_path, moving_path, baseline_ncc)``; a correct registration must raise the NCC above
-    ``baseline_ncc``. Structured content + a smooth (not piecewise) warp make the recovered field seamless,
-    so it doubles as the patch-tiling + overlap-blending witness.
+    ``baseline_ncc``, the moving's own on the fixed grid. Structured content + a smooth (not piecewise) warp
+    make the recovered field seamless, so it doubles as the patch-tiling + overlap-blending witness.
+
+    ``moving_spacing`` and ``moving_origin`` resample the moving onto a grid of its own, as real pairs come:
+    a pair on one grid cannot show a patch of the moving registered against another region of the fixed.
     """
     from scipy.ndimage import map_coordinates
 
-    def build(side: int = 96, amplitude: float = 4.0) -> tuple[Path, Path, float]:
+    def build(
+        side: int = 96,
+        amplitude: float = 4.0,
+        moving_spacing: float = 1.0,
+        moving_origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    ) -> tuple[Path, Path, float]:
         shape = (side, side, side)
         fixed = _structured_volume(shape)
         z, y, x = np.mgrid[0:side, 0:side, 0:side].astype(np.float32)
@@ -73,19 +81,23 @@ def make_reg_pair(tmp_path: Path) -> Callable[..., tuple[Path, Path, float]]:
         dx = amplitude * np.cos(x / 14.0) * np.sin(z / 19.0)
         moving = map_coordinates(fixed, [z + dz, y + dy, x + dx], order=1, mode="nearest").astype(np.float32)
 
+        fixed_image, moving_image = sitk.GetImageFromArray(fixed), sitk.GetImageFromArray(moving)
+        if moving_spacing != 1.0 or any(moving_origin):
+            size = [round(side / moving_spacing)] * 3
+            moving_image = sitk.Resample(
+                moving_image, size, sitk.Transform(), sitk.sitkLinear, moving_origin, [moving_spacing] * 3
+            )
         paths = []
-        for name, arr in [("fixed", fixed), ("moving", moving)]:
-            img = sitk.GetImageFromArray(arr)
-            img.SetSpacing((1.0, 1.0, 1.0))
+        for name, image in [("fixed", fixed_image), ("moving", moving_image)]:
             path = tmp_path / f"{name}.mha"
-            sitk.WriteImage(img, str(path))
+            sitk.WriteImage(image, str(path))
             paths.append(path)
 
         def ncc(a: np.ndarray, b: np.ndarray) -> float:
             a, b = a - a.mean(), b - b.mean()
             return float((a * b).sum() / (np.sqrt((a**2).sum() * (b**2).sum()) + 1e-8))
 
-        return paths[0], paths[1], ncc(moving, fixed)
+        return paths[0], paths[1], ncc(sitk.GetArrayFromImage(sitk.Resample(moving_image, fixed_image)), fixed)
 
     return build
 

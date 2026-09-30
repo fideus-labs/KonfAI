@@ -15,14 +15,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""Region writes into an entry being published: the contract and the raw-block streams (MetaImage, NIfTI)."""
+"""Region writes into an entry being published: the contract, the raw-block streams (MetaImage, NIfTI, NRRD) and the
+sequential gzipped NIfTI."""
 
 from __future__ import annotations
 
 import contextlib
+import gzip
 import itertools
 import mmap
 import os
+import shutil
 import struct
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
@@ -32,6 +35,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from konfai.utils.dataset.staging import _retire_dead_debris
+from konfai.utils.errors import DatasetManagerError
 
 if TYPE_CHECKING:
     from konfai.utils.dataset.attribute import Attribute
@@ -193,47 +197,117 @@ _NIFTI_DATATYPES = {
 }
 
 
+def _nifti_header(shape: list[int], dtype: np.dtype, attributes: Attribute) -> tuple[bytes, np.dtype]:
+    """A NIfTI-1 header for a ``[C, (Z), Y, X]`` volume and the little-endian dtype of its block: a hand-written
+    348-byte header, then the empty-extension flag. The sform carries the geometry, and NIfTI speaks RAS where the
+    pipeline speaks LPS: the affine's first two rows are negated on the way out."""
+    channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
+    # The header is written little-endian, so the block must be too.
+    block_dtype = np.dtype(dtype).newbyteorder("<")
+    rank = len(spatial)  # 2 or 3: a 2-D image is a NIfTI of two dims, its third axis a 1
+    size_xyz = [*spatial[::-1], *[1] * (3 - rank)]
+    spacing = np.ones(3)
+    spacing[:rank] = attributes.get_np_array("Spacing").astype(np.float64)
+    origin = np.zeros(3)
+    origin[:rank] = attributes.get_np_array("Origin").astype(np.float64)
+    direction = np.eye(3)
+    direction[:rank, :rank] = attributes.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
+    affine = np.concatenate([direction * spacing[np.newaxis, :], origin[:, np.newaxis]], axis=1)
+    affine[:2] *= -1.0  # LPS -> RAS
+    header = bytearray(348)
+    struct.pack_into("<i", header, 0, 348)
+    struct.pack_into("<8h", header, 40, rank if channels == 1 else 5, *size_xyz, 1, channels, 1, 1)
+    if channels > 1:
+        struct.pack_into("<h", header, 68, 1007)  # NIFTI_INTENT_VECTOR
+    struct.pack_into("<h", header, 70, _NIFTI_DATATYPES[block_dtype.name])
+    struct.pack_into("<h", header, 72, 8 * block_dtype.itemsize)
+    struct.pack_into("<8f", header, 76, 1.0, *(float(part) for part in spacing), 1.0, 1.0, 1.0, 1.0)
+    struct.pack_into("<f", header, 108, 352.0)  # vox_offset: the header plus the empty-extension flag
+    struct.pack_into("<2f", header, 112, 1.0, 0.0)  # scl_slope / scl_inter: identity
+    header[123] = 2  # xyzt_units: millimetres
+    struct.pack_into("<2h", header, 252, 0, 1)  # qform unused; the sform carries the geometry
+    struct.pack_into("<4f", header, 280, *(float(part) for part in affine[0]))
+    struct.pack_into("<4f", header, 296, *(float(part) for part in affine[1]))
+    struct.pack_into("<4f", header, 312, *(float(part) for part in affine[2]))
+    header[344:348] = b"n+1\x00"
+    return bytes(header) + b"\x00\x00\x00\x00", block_dtype
+
+
 class _NiftiDataStream(_RawBlockStream):
-    """Uncompressed NIfTI-1 written region by region: a hand-written 348-byte header, then the raw
-    block. NIfTI's data order is x fastest with the vector dimension SLOWEST, which is exactly the
-    channel-first ``[C, Z, Y, X]`` layout in C order: the block is the region index itself.
-    The sform carries the geometry, and NIfTI speaks RAS where the pipeline speaks LPS: the
-    affine's first two rows are negated on the way out, the one convention this class owns."""
+    """Uncompressed NIfTI-1 written region by region: the header (:func:`_nifti_header`), then the raw block.
+    NIfTI's data order is x fastest with the vector dimension SLOWEST, which is exactly the channel-first
+    ``[C, Z, Y, X]`` layout in C order: the block is the region index itself."""
 
     def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
-        channels, spatial = int(shape[0]), [int(extent) for extent in shape[1:]]
-        # The header is written little-endian, so the block must be too.
-        block_dtype = np.dtype(dtype).newbyteorder("<")
-        rank = len(spatial)  # 2 or 3: a 2-D image is a NIfTI of two dims, its third axis a 1
-        size_xyz = [*spatial[::-1], *[1] * (3 - rank)]
-        spacing = np.ones(3)
-        spacing[:rank] = attributes.get_np_array("Spacing").astype(np.float64)
-        origin = np.zeros(3)
-        origin[:rank] = attributes.get_np_array("Origin").astype(np.float64)
-        direction = np.eye(3)
-        direction[:rank, :rank] = attributes.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
-        affine = np.concatenate([direction * spacing[np.newaxis, :], origin[:, np.newaxis]], axis=1)
-        affine[:2] *= -1.0  # LPS -> RAS
-        header = bytearray(348)
-        struct.pack_into("<i", header, 0, 348)
-        struct.pack_into("<8h", header, 40, rank if channels == 1 else 5, *size_xyz, 1, channels, 1, 1)
-        if channels > 1:
-            struct.pack_into("<h", header, 68, 1007)  # NIFTI_INTENT_VECTOR
-        struct.pack_into("<h", header, 70, _NIFTI_DATATYPES[block_dtype.name])
-        struct.pack_into("<h", header, 72, 8 * block_dtype.itemsize)
-        struct.pack_into("<8f", header, 76, 1.0, *(float(part) for part in spacing), 1.0, 1.0, 1.0, 1.0)
-        struct.pack_into("<f", header, 108, 352.0)  # vox_offset: the header plus the empty-extension flag
-        struct.pack_into("<2f", header, 112, 1.0, 0.0)  # scl_slope / scl_inter: identity
-        header[123] = 2  # xyzt_units: millimetres
-        struct.pack_into("<2h", header, 252, 0, 1)  # qform unused; the sform carries the geometry
-        struct.pack_into("<4f", header, 280, *(float(part) for part in affine[0]))
-        struct.pack_into("<4f", header, 296, *(float(part) for part in affine[1]))
-        struct.pack_into("<4f", header, 312, *(float(part) for part in affine[2]))
-        header[344:348] = b"n+1\x00"
-        super().__init__(path, bytes(header) + b"\x00\x00\x00\x00", block_dtype, (channels, *spatial))
+        header, block_dtype = _nifti_header(shape, dtype, attributes)
+        super().__init__(path, header, block_dtype, [int(extent) for extent in shape])
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._write_block(slices, data)
+
+
+class _NiftiGzipStream(DataStream):
+    """Gzipped NIfTI-1 written as it is swept: a gzip stream cannot seek, so each channel's volume, whole in NIfTI's
+    order, is compressed plane after plane into a member of its own, and the members are joined at the close (a
+    reader decompresses concatenated members as one stream). The regions must come in first-axis order, which is
+    how KonfAI's sweeps write them, band after band; the blocks of the band being written wait until its first
+    planes are whole."""
+
+    def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
+        header, self._dtype = _nifti_header(shape, dtype, attributes)
+        self.path, self.published_path = path, Path(path)
+        self._shape = [int(extent) for extent in shape]
+        self._plane = int(np.prod(self._shape[2:], dtype=np.int64))
+        temporary = f"{path}.{self.temporary_suffix()}"
+        self._parts = [temporary, *(f"{temporary}.{channel}" for channel in range(1, self._shape[0]))]
+        self._members = [gzip.open(part, "wb", compresslevel=6) for part in self._parts]
+        self._members[0].write(header)
+        self._next = 0  # the first plane not written yet
+        self._pending = np.zeros([self._shape[0], 0, *self._shape[2:]], self._dtype)
+        self._filled = np.zeros(0, np.int64)  # voxels landed in each pending plane
+
+    def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
+        planes = slices[1]
+        if slices[0].indices(self._shape[0]) != (0, self._shape[0], 1) or planes.start < self._next:
+            raise DatasetManagerError(
+                f"'{self.path}' is a gzip stream: it takes every channel at once, in first-axis order, and was"
+                f" handed {slices} past plane {self._next}.",
+                "Write it as .nii, .mha, .nrrd or OME-Zarr, which take their regions in any order.",
+            )
+        depth = planes.stop - self._next
+        if depth > self._pending.shape[1]:
+            grown = np.zeros([self._shape[0], depth - self._pending.shape[1], *self._shape[2:]], self._dtype)
+            self._pending = np.concatenate([self._pending, grown], axis=1)
+            self._filled = np.concatenate([self._filled, np.zeros(grown.shape[1], np.int64)])
+        local = slice(planes.start - self._next, depth)
+        self._pending[(slice(None), local, *slices[2:])] = data
+        self._filled[local] += data[0, 0].size
+        whole = int(np.argmin(np.append(self._filled, 0) == self._plane))
+        if whole:
+            for member, channel in zip(self._members, self._pending, strict=True):
+                member.write(np.ascontiguousarray(channel[:whole]).tobytes())
+            self._pending, self._filled, self._next = self._pending[:, whole:], self._filled[whole:], self._next + whole
+
+    def _close(self, success: bool) -> None:
+        for member in self._members:
+            member.close()
+        whole = self._next == self._shape[1]
+        if success and whole:
+            with open(self._parts[0], "ab") as joined:
+                for part in self._parts[1:]:
+                    with open(part, "rb") as channel:
+                        shutil.copyfileobj(channel, joined)
+                    os.remove(part)
+            os.replace(self._parts[0], self.path)
+            return
+        for part in self._parts:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(part)
+        if success:
+            raise DatasetManagerError(
+                f"'{self.path}' was closed with {self._next} of its {self._shape[1]} planes written.",
+                "Every region of the volume must be written before the stream closes.",
+            )
 
 
 # MetaImage ElementType for each NumPy dtype a streamed .mha can hold.
@@ -287,3 +361,51 @@ class _MhaDataStream(_RawBlockStream):
 
     def write_slice(self, slices: tuple[slice, ...], data: np.ndarray) -> None:
         self._write_block((*slices[1:], slices[0]), np.moveaxis(data, 0, -1))
+
+
+# NRRD type for each NumPy dtype a streamed .nrrd can hold.
+_NRRD_TYPES = {
+    "int8": "int8",
+    "uint8": "uint8",
+    "int16": "int16",
+    "uint16": "uint16",
+    "int32": "int32",
+    "uint32": "uint32",
+    "int64": "int64",
+    "uint64": "uint64",
+    "float32": "float",
+    "float64": "double",
+}
+
+
+class _NrrdDataStream(_MhaDataStream):
+    """Raw NRRD written region by region: a hand-written header, then the flat raw block, a pixel's components
+    together as MetaIO keeps them. Each axis's space direction is its direction column times its spacing, in LPS."""
+
+    def __init__(self, path: str, shape: list[int], dtype: np.dtype, attributes: Attribute) -> None:
+        spatial = list(shape[1:])
+        rank = len(spatial)
+        block_dtype = np.dtype(dtype).newbyteorder("<")
+        spacing = attributes.get_np_array("Spacing").astype(np.float64)
+        direction = attributes.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
+        vector = shape[0] > 1
+
+        def point(values: np.ndarray) -> str:
+            return "(" + ",".join(repr(float(value)) for value in values) + ")"
+
+        fields = [
+            ("type", _NRRD_TYPES[block_dtype.name]),
+            ("dimension", str(rank + vector)),
+            ("space", "left-posterior-superior") if rank == 3 else ("space dimension", str(rank)),
+            ("sizes", " ".join(str(extent) for extent in ([shape[0]] if vector else []) + spatial[::-1])),
+            (
+                "space directions",
+                " ".join(["none"] * vector + [point(direction[:, axis] * spacing[axis]) for axis in range(rank)]),
+            ),
+            ("kinds", " ".join(["vector"] * vector + ["domain"] * rank)),
+            ("endian", "little"),
+            ("encoding", "raw"),
+            ("space origin", point(attributes.get_np_array("Origin"))),
+        ]
+        header = "NRRD0004\n" + "".join(f"{key}: {value}\n" for key, value in fields) + "\n"
+        _RawBlockStream.__init__(self, path, header.encode("ascii"), block_dtype, (*spatial, shape[0]))

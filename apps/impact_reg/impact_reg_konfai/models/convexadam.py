@@ -22,175 +22,126 @@ so the orchestrator / app.json / ensemble / uncertainty are unchanged. The engin
 the native, in-memory itk-impact ConvexAdam pipeline (``pip install itk-impact``) instead of
 the elastix binary:
 
-    (optional) moments + affine Mattes-MI          [ITKv4 linear pre-align]
+    (optional) affine Mattes-MI                    [ITKv4 linear pre-align, seeded by the foreground centres]
       -> ImpactCoarseRegistration                   [coupled-convex init, IMPACT features]
       -> ImpactFineRegistration                     [Adam instance optimisation, IMPACT features]
 
 The IMPACT feature models (e.g. MIND) are TorchScript ``.pt`` files fetched from Hugging Face
-and wrapped as ``itk.ModelConfiguration``: the same models the elastix presets use.
+and wrapped as ``itk.ImpactModelConfiguration``: the same models the elastix and FireANTs presets use, compared by
+the IMPACT loss every engine shares (``impact_loss.py``: models, distances, normalization, Static and Jacobian),
+which needs itk-impact 0.1.6 or later.
 
 NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine relies on
 runtime-evaluated annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
-import contextlib
-import json
-import os
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 import itk
 import numpy as np
 import SimpleITK as sitk
 import torch
 import tqdm
-from huggingface_hub import hf_hub_download
 from konfai.network import network
-from konfai.utils.config import Choices, Range
-from konfai.utils.dataset import Attribute, data_to_image, image_to_data
+from konfai.utils.config import Range
+from konfai.utils.dataset import image_to_data
+from konfai.utils.errors import MeasureError
 
-from .elastix import _is_local_ref
-from .engine_errors import out_of_memory_as_torch
+from .impact_loss import (
+    FeatureMapUpdateInterval,
+    LevelSpec,
+    LNCCKernel,
+    MixedPrecision,
+    Mode,
+    ModelSpec,
+    Normalize,
+    check_models,
+    feature_model,
+    layer_weights,
+    level_models,
+    per_kept_layer,
+)
+from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .orientation import world_aligned_pair
 
 DIM = 3
-# The feature model's input channel count is an intrinsic property of the pretrained model (grayscale
-# medical images), not a tunable, so it's fixed here, never a config/signature parameter.
-NUM_CHANNELS = 1
-
 # A UI reads the tuning knobs straight from the TYPES on ``RegistrationNet.__init__`` and ``ModelSpec``:
 # ``Annotated[.., Range]`` gives numeric spin bounds; ``Literal`` / ``Annotated[str, Choices]`` a dropdown.
 # ``models`` is a dict-of-objects (one ``ModelSpec`` per feature model): the same shape as the elastix presets,
 # so SlicerKonfAI renders each model as a repeatable block with a ``ref`` / ``distance`` combo box.
 _IMAGE_F = itk.Image[itk.F, DIM]
 
-_IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
-
-
-def registry_choices() -> list[str]:
-    """The per-model ``ref`` picker's values: model refs (``repo:path``) from the feature-model registry the
-    engine already fetches (offline-first). A user may still point ``ref`` at a local model path."""
-    repo = _IMPACT_MODELS_REGISTRY.split(":", 1)[0]
-    return [f"{repo}:{key}" for key in load_models_registry()]
-
-
-def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
-    """Load ``models.json`` (the available feature models) from the model repo on Hugging Face. The registry is
-    NOT bundled: ``KONFAI_IMPACT_MODELS_REGISTRY`` (a local path) wins for dev/offline; otherwise ``ref`` must be
-    a ``repo:file`` Hugging Face reference."""
-    local = os.environ.get("KONFAI_IMPACT_MODELS_REGISTRY", "")
-    if local:
-        path = Path(local)
-    elif ":" in ref:
-        repo, filename = ref.split(":", 1)
-        path = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
-    else:
-        raise ValueError(
-            f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference (fetched from HF, not "
-            "bundled): or set KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
-        )
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _sorted_specs(mapping: dict) -> list:
-    """A dict keyed by string indices ('0','1',...) -> its values in numeric order."""
-    return [mapping[k] for k in sorted(mapping, key=lambda key: int(key))]
-
-
-@dataclass
-class ModelSpec:
-    """One feature model in the ConvexAdam multi-feature fusion. ``ref`` picks the model; the rest are its
-    per-model knobs (all models are compared jointly by the IMPACT metric). Same idea as the elastix ``ModelSpec``."""
-
-    ref: Annotated[
-        str,
-        Choices(registry_choices),
-        "IMPACT feature model that drives the similarity (TorchScript 'repo:file' on Hugging Face); different "
-        "models capture different anatomy/contrast. Suggested priors (from the IMPACT study, not forced): "
-        "TotalSegmentator (TS/M730) is the general default; a model trained on the target structure (e.g. lung "
-        "or vessels) sharpens local alignment there; add MIND for MR/CT to recover intra-organ detail.",
-    ]
-    voxel_size: Annotated[
-        list[float],
-        "Working resolution (mm) the pair is resampled to before feature extraction; larger = coarser and "
-        "faster, smaller = finer and slower.",
-    ] = field(default_factory=lambda: [3.0, 3.0, 3.0])
-    layers_mask: Annotated[
-        str,
-        "Per-layer on/off bitmask over the feature model's layers ('1' = use, '0' = skip), one char per layer; "
-        "selects which feature depths drive the metric. Suggested priors (not forced): CT/CBCT favours EARLY "
-        "layers (they denoise and enhance anatomical structures across modalities, robust to artifacts); MR/CT "
-        "favours HIGH-LEVEL layers (contour/segmentation-driven alignment).",
-    ] = "1"
-    layers_weight: Annotated[
-        float, "Relative weight of this feature model in the multi-model fusion (all models are compared jointly)."
-    ] = 1.0
-    pca: Annotated[
-        int,
-        Range(0, 100),
-        "Number of PCA components the feature channels are reduced to before matching (0 = keep all); "
-        "trims redundant/noisy channels and cost.",
-    ] = 0
-    distance: Annotated[
-        Literal["L1", "L2", "Dice", "Cosine", "NCC"],
-        "Similarity measure compared on the extracted features between fixed and moving. Suggested prior (not "
-        "forced): when the task is scored on Dice, choosing 'Dice' aligns the loss with the metric.",
-    ] = "L1"
-
-
-@contextlib.contextmanager
-def _no_texpr_fuser():
-    """Disable ONLY torch's TensorExpr (NNC) fuser for the block. The TS feature-model graphs have a direction/
-    orientation branch whose shape ops (aten::dim / aten::size) crash the fuser's alias analysis under itk-impact
-    ("INTERNAL ASSERT ... We don't have an op for aten::size" in FuseTensorExprs). It cannot be fixed model-side:
-    itk-impact passes an *undefined* direction, so guarding it needs a shape op: the very fuser trigger. The
-    modern profiling executor stays on (NOT the legacy executor); measured cost ~1% of a registration (the fuser
-    only touches the few feature forwards, not the C++ optimisation loop). The caller's setting is restored."""
-    prev = torch._C._jit_texpr_fuser_enabled()
-    torch._C._jit_set_texpr_fuser_enabled(False)
-    try:
-        yield
-    finally:
-        torch._C._jit_set_texpr_fuser_enabled(prev)
-
 
 def _coarse_registration_type():
-    """The coupled-convex initializer, tolerant to the two names the wrapping has shipped under."""
-    cls = getattr(itk, "ImpactCoarseRegistration", None) or getattr(itk, "ImpactConvexAdamInitializer", None)
-    if cls is None:
-        raise RuntimeError(
-            "itk-impact does not expose ImpactCoarseRegistration / ImpactConvexAdamInitializer; "
-            "install a build with the ConvexAdam registration filters."
-        )
-    return cls[_IMAGE_F, _IMAGE_F]
+    """The coupled-convex initializer (itk-impact's ImpactCoarseRegistration)."""
+    return itk.ImpactCoarseRegistration[_IMAGE_F, _IMAGE_F]
 
 
 def _fine_registration_type():
-    """The Adam instance-optimisation stage, tolerant to the two names the wrapping has shipped under."""
-    cls = getattr(itk, "ImpactFineRegistration", None) or getattr(itk, "ImpactTorchAdamRegistration", None)
-    if cls is None:
-        raise RuntimeError(
-            "itk-impact does not expose ImpactFineRegistration / ImpactTorchAdamRegistration; "
-            "install a build with the ConvexAdam registration filters."
-        )
-    return cls[_IMAGE_F, _IMAGE_F]
+    """The Adam instance-optimisation stage (itk-impact's ImpactFineRegistration)."""
+    return itk.ImpactFineRegistration[_IMAGE_F, _IMAGE_F]
 
 
-def _sitk_to_itk(image: sitk.Image) -> "itk.Image":
-    """Copy a scalar SimpleITK image (with its geometry) into an ``itk.Image[F, 3]``."""
-    itk_image = itk.image_from_array(sitk.GetArrayFromImage(image).astype(np.float32))
+def _sitk_to_itk(image: sitk.Image, pixel: type = np.float32) -> "itk.Image":
+    """Copy a scalar SimpleITK image (with its geometry) into an ``itk.Image[F, 3]`` (``itk.Image[UC, 3]`` for
+    ``np.uint8``)."""
+    itk_image = itk.image_from_array(sitk.GetArrayFromImage(image).astype(pixel))
     itk_image.SetOrigin([float(v) for v in image.GetOrigin()])
     itk_image.SetSpacing([float(v) for v in image.GetSpacing()])
     itk_image.SetDirection(itk.matrix_from_array(np.asarray(image.GetDirection(), dtype=float).reshape(DIM, DIM)))
     return itk_image
 
 
+def _binary_mask(mask: sitk.Image, image: sitk.Image) -> sitk.Image:
+    """``mask`` as 0/1 (in where not 0) on ``image``'s grid. A mask on that grid can differ from it by float rounding
+    once it has crossed KonfAI's Attribute round-trip, and itk-impact would then resample it: it takes the image's
+    header, so that every change of grid moves it as it moves the image. A mask on another grid is resampled onto it
+    by nearest neighbour, as elastix reads a mask in physical space."""
+    binary = mask != 0
+    if binary.GetSize() == image.GetSize() and all(
+        np.allclose(getattr(binary, query)(), getattr(image, query)(), atol=1e-4)
+        for query in ("GetOrigin", "GetSpacing", "GetDirection")
+    ):
+        binary.CopyInformation(image)
+        return binary
+    return sitk.Resample(binary, image, sitk.Transform(), sitk.sitkNearestNeighbor, 0)
+
+
+def _resampled(image: "itk.Image", reference: "itk.Image", transform: "itk.Transform", interpolator) -> "itk.Image":
+    """``image`` resampled on ``reference``'s grid through ``transform`` (fixed -> moving points), 0 outside it."""
+    image_type = type(image)
+    resampler = itk.ResampleImageFilter[image_type, image_type].New(
+        Input=image, ReferenceImage=reference, Transform=transform
+    )
+    resampler.UseReferenceImageOn()
+    resampler.SetInterpolator(interpolator[image_type, itk.D].New())
+    resampler.Update()
+    return resampler.GetOutput()
+
+
 def _itk_field_to_sitk_transform(field: "itk.Image", reference: sitk.Image) -> sitk.Transform:
-    """Wrap an itk displacement field (on the fixed grid) as a SimpleITK ``DisplacementFieldTransform``."""
-    array = itk.array_from_image(field).astype(np.float64)  # [Z, Y, X, 3]
-    sitk_field = sitk.GetImageFromArray(array, isVector=True)
+    """Wrap an itk displacement field (on the fixed grid) as a SimpleITK ``DisplacementFieldTransform``, which
+    only takes a float64 field."""
+    sitk_field = sitk.GetImageFromArray(itk.array_view_from_image(field).astype(np.float64), isVector=True)
     sitk_field.CopyInformation(reference)
-    return sitk.DisplacementFieldTransform(sitk.Cast(sitk_field, sitk.sitkVectorFloat64))
+    return sitk.DisplacementFieldTransform(sitk_field)
+
+
+def _foreground_centre(image: sitk.Image, mask: sitk.Image | None) -> tuple[float, ...]:
+    """Physical centre of ``image``'s foreground (Otsu threshold, unweighted), inside ``mask`` (0/1, on its grid) if
+    there is one: where the linear stage seeds from.
+
+    Intensity moments divide by the total intensity, which is negative or near zero for a CT in HU or a z-scored
+    MR, and clipping the negatives first weights a CT by its bone. An unweighted foreground holds for any intensity
+    range; an image with no foreground (a constant one) gives its grid's centre.
+    """
+    foreground = sitk.OtsuThreshold(image, 0, 1)
+    stats = sitk.LabelShapeStatisticsImageFilter()
+    stats.SetComputePerimeter(False)
+    stats.Execute(foreground if mask is None else sitk.Mask(foreground, mask))
+    if stats.HasLabel(1):
+        return stats.GetCentroid(1)
+    return image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()])
 
 
 def _itk_affine_to_sitk(affine: "itk.AffineTransform") -> sitk.AffineTransform:
@@ -205,17 +156,15 @@ def _itk_affine_to_sitk(affine: "itk.AffineTransform") -> sitk.AffineTransform:
 class ConvexAdamEngine:
     """Register a fixed/moving pair with the itk-impact ConvexAdam pipeline; return the displacement field on the fixed grid.
 
-    The IMPACT feature models are downloaded once (``repo:filename`` on Hugging Face) and reused across cases.
-    Masks are accepted for signature compatibility with the elastix engine but ignored: the ConvexAdam
-    filters optimise over the whole image (no mask API is exposed by the coarse/fine stages).
+    The IMPACT feature models are fetched and probed once, by KonfAI (``repo:filename`` on Hugging Face), and reused
+    across cases.
+    Masks restrict every stage's similarity to where they are not 0, the linear stage and its seed included, as in the
+    FireANTs engine; a fixed mask with no voxel in it (a tile the tissue does not reach) gives a zero field.
     """
 
     def __init__(
         self,
-        models: list[str],
-        voxel_sizes: list[list[float]],
-        overlap: int,
-        layers_masks: list[list[bool]],
+        stage_models: dict[str, list[ModelSpec]],
         mixed_precision: bool,
         grid_spacing: int,
         displacement_half_width: int,
@@ -224,23 +173,87 @@ class ConvexAdamEngine:
         regularization_weight: float,
         grid_shrink: int,
         control_grid_smoothing: int,
-        distance: list[str],
-        layers_weight: list[float],
-        subset_features: list[int],
-        pca: list[int],
         stages: list[str],
         linear: bool,
         linear_iterations: int,
         seed: int,
+        linear_sampling: float = 1.0,
+        mode: str = "Static",
+        normalize: bool = True,
+        feature_map_update_interval: int = -1,
+        lncc_kernel: int = 5,
+        voxel_sampling: float = 1.0,
+        balance_coarse_layers: bool = False,
     ) -> None:
+        # Checked here, before any download: past this point a bad value fails at the first case, or not at all.
+        if any(stage not in ("coarse", "fine") for stage in stages) or "coarse" in stages[1:]:
+            # The coarse stage starts from scratch: after a 'fine' it would throw the refinement away.
+            raise ValueError(
+                f"stages {stages} is not a ConvexAdam chain: 'coarse' (first, once) then 'fine', e.g. "
+                "['coarse', 'fine']."
+            )
+        if not stages and not linear:
+            raise ValueError("stages=[] with linear=False leaves nothing to register.")
+        for stage in stages:
+            # Without a model both itk-impact filters compare raw intensities (SSD, then MSE), a different method
+            # from the one the preset describes.
+            check_models(stage_models.get(stage, []), f"ConvexAdam {stage} stage", dense=True)
+            for spec in stage_models[stage]:
+                if spec.voxel_size is not None and len(spec.voxel_size) != DIM:
+                    raise ValueError(
+                        f"ConvexAdam: model '{spec.ref}' has voxel_size {spec.voxel_size}; give {DIM} "
+                        "values, or leave it out for the image as it is."
+                    )
+        for name, value, low in (
+            ("grid_spacing", grid_spacing, 1),
+            ("displacement_half_width", displacement_half_width, 1),
+            ("grid_shrink", grid_shrink, 1),
+            ("iterations", iterations, 0),
+            ("control_grid_smoothing", control_grid_smoothing, 0),
+            ("linear_iterations", linear_iterations, 0),
+        ):
+            if value < low:
+                # itk-impact takes these unsigned and divides by the spacing and the shrink factor.
+                raise ValueError(f"{name} must be at least {low}, got {value}.")
+        if not 0 < linear_sampling <= 1:
+            raise ValueError(f"linear_sampling is a share of the voxels, in (0, 1]: got {linear_sampling}.")
+        if not 0 < voxel_sampling <= 1:
+            raise ValueError(f"voxel_sampling is a share of the voxels, in (0, 1]: got {voxel_sampling}.")
+        if voxel_sampling < 1 and "fine" in stages:
+            # itk-impact refuses it too, but only once the case has been read and the models loaded.
+            lncc = [spec.ref for spec in stage_models["fine"] if spec.distance == "LNCC"]
+            if lncc:
+                raise ValueError(f"voxel_sampling draws points, and LNCC ({lncc}) correlates windows of whole maps.")
+        if mode not in ("Static", "Jacobian"):
+            raise ValueError(f"mode must be 'Static' or 'Jacobian', got '{mode}'.")
+        if lncc_kernel < 1 or lncc_kernel % 2 == 0:
+            raise ValueError(f"lncc_kernel must be odd, got {lncc_kernel}: an even window has no centre voxel.")
         self._stages = stages
-        self._model_paths = self._download_models(models)
-        # Built lazily and cached: constructing an itk.ModelConfiguration loads the TorchScript model
-        # from disk in C++, so build the list once and reuse it across both stages and every case.
-        self._configurations: list[itk.ModelConfiguration] | None = None
-        self._voxel_sizes = voxel_sizes
-        self._overlap = overlap
-        self._layers_masks = layers_masks
+        self._stage_models = {stage: stage_models[stage] for stage in stages}
+        # Each model fetched and shaped by the registry. The fine stage in Jacobian mode differentiates the metric
+        # through its networks: probed at the first run, so a layer without a gradient is refused there.
+        self._feature_models = {
+            stage: [feature_model(spec) for spec in specs] for stage, specs in self._stage_models.items()
+        }
+        self._unchecked = self._feature_models["fine"] if mode == "Jacobian" and "fine" in stages else []
+        # The patch each model runs on: the whole image (0), or, sampled in Jacobian mode, the receptive field around
+        # every drawn point, as elastix's metric does (itk-impact's PatchSize).
+        self._patches = {stage: [0] * len(specs) for stage, specs in self._stage_models.items()}
+        if mode == "Jacobian" and voxel_sampling < 1 and "fine" in stages:
+            for index, (spec, model) in enumerate(
+                zip(self._stage_models["fine"], self._feature_models["fine"], strict=True)
+            ):
+                try:
+                    self._patches["fine"][index] = model.receptive_field
+                except MeasureError as error:
+                    raise ValueError(
+                        f"voxel_sampling in Jacobian mode runs '{spec.ref}' on the patch of its receptive field "
+                        f"around each drawn point, which cannot be sized: {error.args[0]} Use mode Static, or "
+                        "voxel_sampling 1."
+                    ) from error
+        # Built lazily and cached per stage: constructing a model configuration loads the TorchScript model from disk
+        # in C++, so each stage's list is built once and reused for every case.
+        self._configurations: dict[str, list] = {}
         self._mixed_precision = mixed_precision
         self._grid_spacing = grid_spacing
         self._displacement_half_width = displacement_half_width
@@ -249,73 +262,96 @@ class ConvexAdamEngine:
         self._regularization_weight = regularization_weight
         self._grid_shrink = grid_shrink
         self._control_grid_smoothing = control_grid_smoothing
-        self._distance = distance
-        self._layers_weight = layers_weight
-        self._subset_features = subset_features
-        self._pca = pca
         self._linear = linear
         self._linear_iterations = linear_iterations
+        self._linear_sampling = linear_sampling
+        self._voxel_sampling = voxel_sampling
         self._seed = seed
+        self._mode = mode
+        self._normalize = normalize
+        self._feature_map_update_interval = feature_map_update_interval
+        self._lncc_kernel = lncc_kernel
+        self._balance_coarse_layers = balance_coarse_layers
 
-    @staticmethod
-    def _download_models(models: list[str]) -> list[str]:
-        """Fetch the TorchScript feature models (``repo:filename``, or a local file); return their paths.
-        A missing local file fails here, at build, not as an itk load error mid-registration."""
-        paths = []
-        for ref in models:
-            if _is_local_ref(ref):
-                local = Path(ref).expanduser().resolve()
-                if not local.is_file():
-                    raise ValueError(f"local model ref '{ref}' does not exist (resolved to '{local}').")
-                paths.append(str(local))
-            else:
-                repo, filename = ref.split(":", 1)
-                paths.append(str(hf_hub_download(repo_id=repo, filename=filename, repo_type="model")))  # nosec B615
-        return paths
+    def _model_configurations(self, stage: str) -> list:
+        """One model configuration per feature model of ``stage``, built once and reused across cases.
 
-    def _model_configurations(self) -> list["itk.ModelConfiguration"]:
-        """Build one ``ModelConfiguration`` per feature model once, then reuse it across stages and cases.
-
-        Constructing an ``itk.ModelConfiguration`` loads the TorchScript module from disk on the C++ side, so
-        it is built lazily and cached. The coarse/fine filters copy each configuration by value in
-        ``AddModelConfiguration`` and the copy shares the loaded module through the configuration's internal
-        ``shared_ptr``: so a single build is reused everywhere without any reload.
+        Constructing one loads the TorchScript module from disk on the C++ side; the coarse and fine filters copy
+        each configuration by value in ``AddModelConfiguration``, the copy sharing the loaded module. A model
+        without voxel_size gets 0 there, which itk-impact reads as the image as it is. Its patch is the whole image
+        (0), or, in the sampled Jacobian mode of the fine stage, its receptive field.
         """
-        if self._configurations is None:
-            self._configurations = [
-                itk.ModelConfiguration(
-                    path,
-                    DIM,
-                    NUM_CHANNELS,
-                    [0, 0, 0],
-                    [float(v) for v in voxel_size],
-                    self._overlap,
-                    list(layers_mask),
+        if stage not in self._configurations:
+            configurations = []
+            for spec, model, patch in zip(
+                self._stage_models[stage], self._feature_models[stage], self._patches[stage], strict=True
+            ):
+                # Patch size 0 is the whole image in one piece: the overlap only places and blends patches.
+                voxel = ([float(v) for v in spec.voxel_size] if spec.voxel_size is not None else None) or [0.0] * DIM
+                configuration = itk.ImpactModelConfiguration(
+                    model.model_path,
+                    model.dim,
+                    model.in_channels,
+                    [patch] * model.dim,
+                    voxel,
+                    [0] * model.dim,
+                    [bit == "1" for bit in spec.layers_mask],
                     self._mixed_precision,
                 )
-                for path, voxel_size, layers_mask in zip(
-                    self._model_paths, self._voxel_sizes, self._layers_masks, strict=True
-                )
-            ]
-        return self._configurations
+                configuration.SetFeatureNormalization(spec.feature_normalization)
+                configurations.append(configuration)
+            self._configurations[stage] = configurations
+        return self._configurations[stage]
 
-    def _linear_align(self, fixed: "itk.Image", moving: "itk.Image") -> "itk.AffineTransform":
-        """Moments-initialised rigid + affine (Mattes MI), mapping fixed -> moving physical points."""
-        rigid = itk.VersorRigid3DTransform[itk.D].New()
-        initializer = itk.CenteredTransformInitializer[itk.VersorRigid3DTransform[itk.D], _IMAGE_F, _IMAGE_F].New(
-            Transform=rigid, FixedImage=fixed, MovingImage=moving
-        )
-        initializer.MomentsOn()
-        initializer.InitializeTransform()
-
-        affine = itk.AffineTransform[itk.D, DIM].New()
-        affine.SetCenter(rigid.GetCenter())
-        affine.SetMatrix(rigid.GetMatrix())
-        affine.SetOffset(rigid.GetOffset())
+    def _linear_align(
+        self,
+        fixed: "itk.Image",
+        moving: "itk.Image",
+        fixed_mask: "itk.Image | None",
+        moving_mask: "itk.Image | None",
+        fixed_centre: tuple[float, ...],
+        moving_centre: tuple[float, ...],
+    ) -> "itk.AffineTransform":
+        """Affine (Mattes MI) mapping fixed -> moving physical points, seeded by the translation between the
+        foreground centres (``_foreground_centre``) or by none, whichever matches better, and centred on the fixed
+        one; the metric counts only the points the masks hold, when there are masks."""
+        # The scales estimator samples the image at random through ITK's global Mersenne Twister, which ITK seeds from
+        # the clock in every process: seeded, two runs give the same affine.
+        itk.MersenneTwisterRandomVariateGenerator.GetInstance().SetSeed(self._seed)
         levels = 3
         metric_type = itk.MattesMutualInformationImageToImageMetricv4[_IMAGE_F, _IMAGE_F]
-        metric = metric_type.New()
-        metric.SetNumberOfHistogramBins(32)
+
+        def new_metric():
+            metric = metric_type.New()
+            metric.SetNumberOfHistogramBins(32)
+            # The registration method reads the metric's masks, for the points it samples too.
+            if fixed_mask is not None:
+                metric.SetFixedImageMask(itk.ImageMaskSpatialObject[DIM].New(Image=fixed_mask))
+            if moving_mask is not None:
+                metric.SetMovingImageMask(itk.ImageMaskSpatialObject[DIM].New(Image=moving_mask))
+            return metric
+
+        def cost(translation: list[float]) -> float:
+            metric = new_metric()
+            shift = itk.TranslationTransform[itk.D, DIM].New()
+            shift.SetOffset(translation)
+            metric.SetFixedImage(fixed)
+            metric.SetMovingImage(moving)
+            metric.SetMovingTransform(shift)
+            try:
+                metric.Initialize()
+                return float(metric.GetValue())
+            except RuntimeError:  # too few points overlap the moving image
+                return float("inf")
+
+        # The centres' translation is only a guess: two scans that cover different lengths of the body have their
+        # foreground centres apart where the anatomy is not. The seed is the one of it and the images' own placement
+        # that matches better.
+        seed = min(([float(m - f) for m, f in zip(moving_centre, fixed_centre, strict=True)], [0.0] * DIM), key=cost)
+        affine = itk.AffineTransform[itk.D, DIM].New()
+        affine.SetCenter([float(v) for v in fixed_centre])
+        affine.SetTranslation(seed)
+        metric = new_metric()
         optimizer = itk.RegularStepGradientDescentOptimizerv4[itk.D].New()
         optimizer.SetNumberOfIterations(self._linear_iterations)
         optimizer.SetLearningRate(1.0)
@@ -330,17 +366,50 @@ class ConvexAdamEngine:
         registration.SetNumberOfLevels(levels)
         registration.SetShrinkFactorsPerLevel([2 ** (levels - 1 - i) for i in range(levels)])
         registration.SetSmoothingSigmasPerLevel([float(levels - 1 - i) for i in range(levels)])
+        if self._linear_sampling < 1:
+            # Every voxel at every iteration is most of a large pair's linear stage.
+            registration.SetMetricSamplingStrategy(itk.ImageRegistrationMethodv4Enums.MetricSamplingStrategy_RANDOM)
+            registration.SetMetricSamplingPercentage(self._linear_sampling)
+            registration.MetricSamplingReinitializeSeed(self._seed)
         registration.InPlaceOn()
         registration.Update()
         return affine
 
-    def _coarse(self, fixed: "itk.Image", moving: "itk.Image", device: str) -> "itk.Image":
+    @staticmethod
+    def _restrict(stage, fixed_mask: "itk.Image | None", moving_mask: "itk.Image | None") -> None:
+        """Hand ``stage`` the masks there are, each on its image's grid: without one, the filter runs unmasked."""
+        if fixed_mask is not None:
+            stage.SetFixedMask(fixed_mask)
+        if moving_mask is not None:
+            stage.SetMovingMask(moving_mask)
+
+    def _coarse(
+        self,
+        fixed: "itk.Image",
+        moving: "itk.Image",
+        fixed_mask: "itk.Image | None",
+        moving_mask: "itk.Image | None",
+        device: str,
+    ) -> "itk.Image":
         """ConvexAdam coarse coupled-convex initializer -> robust low-resolution field on the fixed grid."""
         coarse = _coarse_registration_type().New()
         coarse.SetFixedImage(fixed)
         coarse.SetMovingImage(moving)
-        for configuration in self._model_configurations():
+        self._restrict(coarse, fixed_mask, moving_mask)
+        specs = self._stage_models["coarse"]
+        for configuration in self._model_configurations("coarse"):
             coarse.AddModelConfiguration(configuration)
+        # Each layer's distance, the weights, the PCA and the channel subset reach it as they reach the fine stage; the
+        # coarse stage takes a distance over each cell's window (NCC and LNCC alike, lncc_kernel being the fine stage's).
+        coarse.SetDistance(per_kept_layer(specs, lambda spec: spec.distance))
+        coarse.SetLayersWeight(layer_weights(specs))
+        coarse.SetPCA(per_kept_layer(specs, lambda spec: int(spec.pca)))
+        coarse.SetSubsetFeatures(per_kept_layer(specs, lambda spec: int(spec.subset_features)))
+        # The coarse cost is never divided by its value at zero displacement: the coupling schedule's coefficients are
+        # absolute. It stays raw, its layers weighed by layers_weight, or, with balance_coarse_layers, by their spread
+        # over the candidates, their total spread the raw one; `normalize` is the fine stage's.
+        coarse.SetNormalizeLosses(False)
+        coarse.SetBalanceLosses(self._balance_coarse_layers)
         coarse.SetGridSpacing(self._grid_spacing)
         coarse.SetDisplacementHalfWidth(self._displacement_half_width)
         coarse.SetDevice(device)
@@ -351,19 +420,32 @@ class ConvexAdamEngine:
         return field
 
     def _fine(
-        self, fixed: "itk.Image", moving: "itk.Image", initial_field: "itk.Image | None", device: str
+        self,
+        fixed: "itk.Image",
+        moving: "itk.Image",
+        fixed_mask: "itk.Image | None",
+        moving_mask: "itk.Image | None",
+        initial_field: "itk.Image | None",
+        device: str,
     ) -> "itk.Image":
         """Adam instance-optimisation refinement, warm-started from ``initial_field`` (zero if none)."""
         fine = _fine_registration_type().New()
         fine.SetFixedImage(fixed)
         fine.SetMovingImage(moving)
+        self._restrict(fine, fixed_mask, moving_mask)
         fine.SetInitialDisplacementField(initial_field if initial_field is not None else self._zero_field(fixed))
-        for configuration in self._model_configurations():
+        specs = self._stage_models["fine"]
+        for configuration in self._model_configurations("fine"):
             fine.AddModelConfiguration(configuration)
-        fine.SetDistance(list(self._distance))
-        fine.SetLayersWeight([float(v) for v in self._layers_weight])
-        fine.SetSubsetFeatures([int(v) for v in self._subset_features])
-        fine.SetPCA([int(v) for v in self._pca])
+        fine.SetDistance(per_kept_layer(specs, lambda spec: spec.distance))
+        fine.SetLayersWeight(layer_weights(specs))
+        fine.SetSubsetFeatures(per_kept_layer(specs, lambda spec: int(spec.subset_features)))
+        fine.SetPCA(per_kept_layer(specs, lambda spec: int(spec.pca)))
+        fine.SetNormalizeLosses(self._normalize)
+        fine.SetMode(self._mode)
+        fine.SetFeatureMapUpdateInterval(self._feature_map_update_interval)
+        fine.SetLNCCKernel(self._lncc_kernel)
+        fine.SetSamplingPercentage(self._voxel_sampling)
         fine.SetNumberOfIterations(self._iterations)
         fine.SetLearningRate(self._learning_rate)
         fine.SetRegularizationWeight(self._regularization_weight)
@@ -393,7 +475,7 @@ class ConvexAdamEngine:
             fine.Update()
         finally:
             # The observer's closure holds ``fine`` and ``fine`` holds the observer: a cycle through C++ that
-            # Python's collector cannot see, so every call kept its filter and the filter's fields alive.
+            # Python's collector cannot see.
             fine.RemoveAllObservers()
         progress.n = progress.total or self._iterations  # show completion even if no IterationEvent fired
         progress.refresh()
@@ -414,7 +496,14 @@ class ConvexAdamEngine:
         field.FillBuffer(zero)
         return field
 
-    def _run_stages(self, fixed: "itk.Image", moving: "itk.Image", device: str) -> "itk.Image | None":
+    def _run_stages(
+        self,
+        fixed: "itk.Image",
+        moving: "itk.Image",
+        fixed_mask: "itk.Image | None",
+        moving_mask: "itk.Image | None",
+        device: str,
+    ) -> "itk.Image | None":
         """Run the configured coarse/fine chain; each fine warm-starts from the running field.
 
         ``coarse`` produces a field from scratch; ``fine`` refines the running field. So ``['coarse']`` is a
@@ -423,12 +512,11 @@ class ConvexAdamEngine:
         """
         field: itk.Image | None = None
         for stage in self._stages:
-            if stage == "coarse":
-                field = self._coarse(fixed, moving, device)
-            elif stage == "fine":
-                field = self._fine(fixed, moving, field, device)
-            else:
-                raise ValueError(f"Unknown registration stage '{stage}' (expected 'coarse' or 'fine').")
+            field = (
+                self._coarse(fixed, moving, fixed_mask, moving_mask, device)
+                if stage == "coarse"
+                else self._fine(fixed, moving, fixed_mask, moving_mask, field, device)
+            )
         return field
 
     def register(
@@ -439,22 +527,80 @@ class ConvexAdamEngine:
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
     ) -> np.ndarray:
-        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid."""
+        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid.
+
+        ``fixed_mask`` and ``moving_mask`` (each on its image's grid, or resampled onto it by nearest neighbour)
+        restrict every stage's similarity to where they are not 0, the linear stage and its seed included."""
+        if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
+            # A fixed mask with no voxel in it leaves nothing to register: a zero field, as the elastix engine
+            # returns (in a tiled run, every tile the tissue does not reach).
+            return np.zeros((DIM, *fixed.GetSize()[::-1]), dtype=np.float32)
+        # Only a mask that restricts (some voxels in, some out) reaches the filters, decided on the mask as given:
+        # konfai-apps writes an all-ones default on the FIXED grid for both sides.
+        fixed_mask = _binary_mask(fixed_mask, fixed) if is_partial_mask(fixed_mask) else None
+        moving_mask = _binary_mask(moving_mask, moving) if is_partial_mask(moving_mask) else None
+        if fixed_mask is not None and moving_mask is None:
+            # As FireANTs gives the side without a mask a whole-image one: warped with the moving image, it drops the
+            # fixed voxels the field sends out of it, as elastix does too.
+            moving_mask = sitk.Image(moving.GetSize(), sitk.sitkUInt8) + 1
+            moving_mask.CopyInformation(moving)
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
+        for model in self._unchecked:  # before any compute, as the other engines refuse it
+            model.check(gradient=True)
+        self._unchecked = []
+        # Feature networks compute their channels along the voxel axes they are given: both images go in with their
+        # voxel axes in LPS order, as in the elastix and FireANTs engines, each mask with its image. Nothing is
+        # resampled, so the physical space and every transform stay the same, and the field is sampled on the fixed
+        # image as it came.
+        grid = fixed
+        fixed, moving, fixed_mask, moving_mask = world_aligned_pair(fixed, moving, fixed_mask, moving_mask)
+        reoriented = fixed is not grid
+        # KonfAI sizes SimpleITK's thread pool to this rank's share of the cores (apply_cpu_thread_budget); ITK
+        # Python keeps a pool of its own, which would take every core in every rank.
+        itk.MultiThreaderBase.SetGlobalDefaultNumberOfThreads(sitk.ProcessObject.GetGlobalDefaultNumberOfThreads())
+        # Every stage reads the images winsorised: the linear stage's mutual information and Otsu seed bin the image's
+        # range, and MIND, the presets' feature model, divides by it (minimum to maximum, its variance floored at 1e-6).
+        fixed, moving = winsorized(fixed), winsorized(moving)
         fixed_itk = _sitk_to_itk(fixed)
         moving_itk = _sitk_to_itk(moving)
+        fixed_mask_itk = None if fixed_mask is None else _sitk_to_itk(fixed_mask, np.uint8)
+        moving_mask_itk = None if moving_mask is None else _sitk_to_itk(moving_mask, np.uint8)
+        if not self._linear:
+            # The coarse and fine filters bring the moving image and its mask onto the fixed grid themselves when the
+            # grids differ (the identity resample this did too), and their field is the answer: nothing to compose it
+            # with.
+            field = self._run_stages(fixed_itk, moving_itk, fixed_mask_itk, moving_mask_itk, device)
+            if not reoriented:
+                return np.array(np.moveaxis(itk.array_view_from_image(field), -1, 0), order="C")
+            aligned = _itk_field_to_sitk_transform(field, fixed)
+            return image_to_data(
+                sitk.TransformToDisplacementField(
+                    aligned,
+                    sitk.sitkVectorFloat32,
+                    grid.GetSize(),
+                    grid.GetOrigin(),
+                    grid.GetSpacing(),
+                    grid.GetDirection(),
+                )
+            )[0]
 
-        # Optional linear pre-align: resample the moving onto the fixed grid so the deformable stage starts close.
-        affine = self._linear_align(fixed_itk, moving_itk) if self._linear else itk.AffineTransform[itk.D, DIM].New()
-        resampler = itk.ResampleImageFilter[_IMAGE_F, _IMAGE_F].New(
-            Input=moving_itk, ReferenceImage=fixed_itk, Transform=affine
+        # Linear pre-align, masked as the deformable stages: resample the moving onto the fixed grid so the deformable
+        # stage starts close, and its mask with it, by nearest neighbour.
+        affine = self._linear_align(
+            fixed_itk,
+            moving_itk,
+            fixed_mask_itk,
+            moving_mask_itk,
+            _foreground_centre(fixed, fixed_mask),
+            _foreground_centre(moving, moving_mask),
         )
-        resampler.UseReferenceImageOn()
-        resampler.SetInterpolator(itk.LinearInterpolateImageFunction[_IMAGE_F, itk.D].New())
-        resampler.Update()
-        moving_linear = resampler.GetOutput()
+        moving_linear = _resampled(moving_itk, fixed_itk, affine, itk.LinearInterpolateImageFunction)
+        if moving_mask_itk is not None:
+            moving_mask_itk = _resampled(
+                moving_mask_itk, fixed_itk, affine, itk.NearestNeighborInterpolateImageFunction
+            )
 
-        field = self._run_stages(fixed_itk, moving_linear, device)
+        field = self._run_stages(fixed_itk, moving_linear, fixed_mask_itk, moving_mask_itk, device)
 
         # One transform on the fixed grid = affine then deformable, so the returned DVF/transform warps the
         # ORIGINAL moving. SimpleITK applies the last-added transform first, so [affine, deformable] gives
@@ -465,76 +611,35 @@ class ConvexAdamEngine:
         composite = sitk.CompositeTransform(chain)
         dvf = sitk.TransformToDisplacementField(
             composite,
-            sitk.sitkVectorFloat64,
-            fixed.GetSize(),
-            fixed.GetOrigin(),
-            fixed.GetSpacing(),
-            fixed.GetDirection(),
+            sitk.sitkVectorFloat32,
+            grid.GetSize(),
+            grid.GetOrigin(),
+            grid.GetSpacing(),
+            grid.GetDirection(),
         )
         dvf_np, _ = image_to_data(dvf)
         return dvf_np
 
 
-class ConvexAdamRegistration(torch.nn.Module):
-    """Graph module: (fixed, moving) tensors + their geometry -> moved image + DVF on the fixed grid.
-
-    ``accepts_attributes = True`` opts this module into receiving the per-branch ``Attribute`` list alongside
-    the tensors (same convention as ``CriterionWithAttribute``); registration needs the physical geometry.
-    """
-
-    accepts_attributes = True
-
-    def __init__(self, engine: ConvexAdamEngine) -> None:
-        super().__init__()
-        self._engine = engine
-
-    def forward(
-        self,
-        fixed: torch.Tensor,
-        moving: torch.Tensor,
-        fixed_mask: torch.Tensor,
-        moving_mask: torch.Tensor,
-        attributes: list[list[Attribute]],
-    ) -> torch.Tensor:
-        # attributes = [fixed, moving, fixed_mask, moving_mask] branch attrs; each a list[Attribute] over the batch.
-        # Returns, per sample, the moved image (1 channel) channel-stacked with the displacement field (DIM
-        # channels); downstream ChannelSelect modules split them. Masks are ignored by the ConvexAdam engine.
-        fixed_attrs, moving_attrs, _, _ = attributes
-        device_index = fixed.device.index if fixed.device.type == "cuda" else -1
-        combined = []
-        # ConvexAdam runs a gradient-based instance optimisation (Adam over the field) inside itk-impact's
-        # .Update(); the predictor calls forward under torch.inference_mode(), which forbids autograd. The
-        # image tensors have already crossed to numpy/ITK here, so re-enable grad for the optimisation.
-        with torch.inference_mode(False), torch.enable_grad(), _no_texpr_fuser():
-            for b in range(fixed.shape[0]):
-                fixed_img = data_to_image(fixed[b].detach().cpu().numpy(), fixed_attrs[b])
-                moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
-                with out_of_memory_as_torch(device_index >= 0):
-                    dvf_np = self._engine.register(fixed_img, moving_img, device_index)
-                combined.append(torch.from_numpy(dvf_np))
-        return torch.stack(combined, dim=0).to(fixed.device)
-
-
-class ChannelSelect(torch.nn.Module):
-    """Select a channel slice ``[start:stop]`` (splits the registration output into moved / DVF)."""
-
-    def __init__(self, start: int, stop: int) -> None:
-        super().__init__()
-        self._start = start
-        self._stop = stop
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor[:, self._start : self._stop]
-
-
 class RegistrationNet(network.Network):
-    """Pairwise ConvexAdam registration as an ``add_module`` graph (fixed = branch 0, moving = branch 1;
-    the mask branches 2/3 are accepted but unused by this engine).
+    """Pairwise ConvexAdam registration as an ``add_module`` graph (fixed = branch 0, moving = branch 1, fixed mask = 2,
+    moving mask = 3; masks restrict every stage's similarity, whole-image = no restriction).
 
     Output on the fixed grid: ``DisplacementField`` (the
     DIM-component displacement field, in mm). Geometry is attached by the predictor via
     ``same_as_group: Volume_0:Fixed``.
+
+    ConvexAdam registers on the fixed image's own grid. Its sizes are counted in voxels of the fixed image's finest
+    axis, s_min, and derived per axis, so that they are (nearly) isotropic in millimetres: grid_spacing,
+    displacement_half_width, grid_shrink, the step learning_rate sets and the gradient regularization_weight
+    penalises, and lncc_kernel (along each compared map's finest axis, the nearest odd count of the same length along
+    the others). The coarse stage's cost smoothing and its NCC/LNCC window are counted in its cells,
+    control_grid_smoothing in control cells. On an isotropic image s_min is its voxel: the presets' +/- 24 s_min are 24 mm at 1 mm, and at 0.8 x 0.8 x 3 mm 19.2 mm in-plane and 24 mm along z,
+    whole cells rounding the range up.
     """
+
+    #: Its output is a displacement field in world units: KonfAI blends it in float32, not float16.
+    full_precision_outputs = True
 
     def __init__(
         self,
@@ -544,75 +649,116 @@ class RegistrationNet(network.Network):
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         models: dict[str, ModelSpec] = {},
+        levels: Annotated[
+            dict[str, LevelSpec],
+            "The models of each stage ('0', '1', ...) in 'stages' order (coarse, then fine), in place of 'models' "
+            "there; empty = 'models' in every stage.",
+        ] = {},
+        mode: Mode = "Static",
+        normalize: Normalize = True,
+        feature_map_update_interval: FeatureMapUpdateInterval = -1,
+        lncc_kernel: LNCCKernel = 5,
         overlap: Annotated[
-            int,
-            Range(1, 128),
-            "Patch overlap of the coarse coupled-convex block matching; higher = denser sampling and a "
-            "smoother initialisation, slower.",
-        ] = 2,
-        mixed_precision: Annotated[
-            bool,
-            "Run the optimisation in mixed precision (fp16); faster and lighter on VRAM, marginally less precise.",
-        ] = False,
+            int | None,
+            "Has no effect: the feature model runs on the whole image in one piece, with no patch to overlap. "
+            "Accepted so that a configuration setting it still loads.",
+        ] = None,
+        mixed_precision: MixedPrecision = False,
         grid_spacing: Annotated[
             int,
             Range(1, 512),
-            "Control-point spacing (voxels) of the displacement grid; smaller = a more flexible deformation, "
-            "slower and less regular.",
-        ] = 4,
+            "Coarse stage: the cell size of the grid its discrete search runs on (one displacement per cell, then "
+            "upsampled), in voxels of the fixed image's finest axis (s_min): along each axis a cell spans the whole "
+            "number of voxels nearest grid_spacing x s_min mm. Smaller = a finer coarse field and far more memory: "
+            "(2 x half-width + 1)^3 / grid_spacing^3 floats per voxel on an isotropic image, more along a thick axis, "
+            "where a cell spans fewer voxels (3x at 0.8 x 0.8 x 3 mm).",
+        ] = 6,
         displacement_half_width: Annotated[
             int,
             Range(1, 512),
-            "Half-width (voxels) of the discrete displacement search in the coarse stage; raise it to capture "
-            "large motion (e.g. deep breathing), at more cost.",
-        ] = 6,
+            "Coarse stage: half-width of the discrete search in cells of the finest axis, so it captures at least "
+            "displacement_half_width x grid_spacing x s_min mm each way, rounded up to whole cells along each axis "
+            "(24 mm with the presets' 4 x 6 at 1 mm). Raise it for larger motion; memory grows as "
+            "(2 x half-width + 1)^3.",
+        ] = 4,
+        balance_coarse_layers: Annotated[
+            bool,
+            "Coarse stage: divide each layer by its spread over the candidate displacements (the mean over the cells "
+            "of its cost's range, measured on the first cost volume), times layers_weight, so that every layer moves "
+            "the search alike, their total spread staying the raw one the coupling is calibrated on; a layer that "
+            "does not vary weighs 0 (off = the raw costs, weighed by layers_weight alone). Experimental.",
+        ] = False,
         iterations: Annotated[
             int,
             Range(0, 100000),
-            "Adam instance-optimisation steps of the fine stage; higher = more converged and accurate, slower.",
-        ] = 150,
+            "Fine stage: Adam steps; higher = more converged, slower.",
+        ] = 80,
         learning_rate: Annotated[
             float,
             Range(0.0, 100.0),
-            "Adam step size of the fine stage; higher converges faster but can oscillate or diverge.",
-        ] = 0.2,
+            "Fine stage: Adam step size, in s_min (the fixed image's finest voxel side) per step along every axis (the "
+            "control grid holds full-resolution displacements: ConvexAdam's step 1 on its half-resolution grid is 2 "
+            "here). Higher converges faster but can oscillate.",
+        ] = 2.0,
         regularization_weight: Annotated[
             float,
             Range(0.0, 1000.0),
-            "Weight of the smoothness (diffusion) regulariser on the displacement field; higher = smoother, "
-            "more regular Jacobian, lower = more flexible but risks folding.",
-        ] = 1.0,
+            "Fine stage: weight of the diffusion regulariser, the squared gradient of the smoothed control grid in mm "
+            "per mm (voxels per voxel on an isotropic image, as ConvexAdam's lambda); higher = smoother, lower = more "
+            "flexible but risks folding.",
+        ] = 1.25,
         grid_shrink: Annotated[
             int,
             Range(1, 128),
-            "Downsampling factor of the coarse optimisation grid; higher = a coarser, faster initialisation, "
-            "lower = finer. ConvexAdam optimises on a grid half the image ('grid_sp_adam' 2).",
-        ] = 4,
+            "Fine stage: the spacing of the Adam control grid, in voxels of the fixed image's finest axis (s_min): "
+            "along each axis, the whole number of voxels nearest grid_shrink x s_min mm (ConvexAdam's grid_sp_adam, "
+            "2); higher = a coarser, smoother, faster refinement.",
+        ] = 2,
         control_grid_smoothing: Annotated[
             int,
             Range(0, 8),
-            "3x3x3 average-pool passes over the control grid at every Adam iteration, which is what keeps the "
-            "field smooth while it moves: ConvexAdam applies three, and the same smoothing shapes the "
-            "regulariser. 0 optimises the grid unsmoothed.",
+            "Fine stage: 3x3x3 average-pool passes over the control grid at every Adam iteration, in control cells, "
+            "which is what keeps the field smooth while it moves: ConvexAdam applies three, and the same smoothing "
+            "shapes the regulariser. 0 optimises the grid unsmoothed.",
         ] = 3,
-        subset_features: Annotated[
-            list[int],
-            "Feature-channel indices to keep (empty = all); a hand-picked subset of channels, NOT a count.",
-        ] = [],
         stages: Annotated[
             list[str],
-            "Stages to run: 'coarse' (coupled-convex initialisation) then 'fine' (Adam optimisation); drop "
-            "'fine' for a fast low-resolution field.",
+            "Stages to run: 'coarse' (discrete coupled-convex search, from scratch) then 'fine' (Adam "
+            "refinement of the running field, or of zero when it runs alone); drop 'fine' for a fast coarse "
+            "field. A 'coarse' after a 'fine' is refused: it would throw the refinement away.",
         ] = ["coarse", "fine"],
         linear: Annotated[
             bool,
-            "Run a moments+affine linear pre-alignment before the deformable stages (recommended for large "
-            "global offsets).",
+            "Run an affine pre-alignment (Mattes MI on the CPU, seeded by the foreground centres) before the "
+            "deformable stages, which then refine the pair it brings onto the fixed grid; recommended unless the "
+            "pair already overlaps well.",
         ] = True,
         linear_iterations: Annotated[
-            int, Range(0, 100000), "Iterations of the linear pre-alignment; higher = a better global affine fit."
+            int,
+            Range(0, 100000),
+            "Most iterations of the affine pre-alignment at each of its three resolution levels.",
         ] = 200,
-        seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
+        linear_sampling: Annotated[
+            float,
+            Range(0.01, 1.0),
+            "Share of the voxels the affine pre-alignment's mutual information reads at each iteration, drawn at "
+            "random with 'seed' (1 = every voxel): the pre-alignment reads the whole image otherwise, the most of "
+            "the registration's time on a large CT.",
+        ] = 1.0,
+        voxel_sampling: Annotated[
+            float,
+            Range(0.001, 1.0),
+            "Fine stage: share of the voxels the similarity reads at each Adam iteration, drawn anew at random with "
+            "'seed' (1 = every voxel). Static compares the features at those points only; Jacobian runs each network on "
+            "the patch of its receptive field around each of them, as elastix does. Point-wise distances only (not "
+            "LNCC). Experimental.",
+        ] = 1.0,
+        seed: Annotated[
+            int,
+            "Seed of torch's generator inside itk-impact and of ITK's, which the affine pre-alignment draws its "
+            "samples from. A GPU run is not bit-reproducible whatever the seed (grid_sample's backward accumulates "
+            "in any order).",
+        ] = 42,
     ) -> None:
         super().__init__(
             in_channels=1,
@@ -621,12 +767,9 @@ class RegistrationNet(network.Network):
             outputs_criterions=outputs_criterions,
             dim=3,
         )
-        specs = _sorted_specs(models)
+        per_stage = level_models(models, levels, len(stages), "ConvexAdam")
         engine = ConvexAdamEngine(
-            [spec.ref for spec in specs],
-            [list(spec.voxel_size) for spec in specs],
-            overlap,
-            [[c == "1" for c in spec.layers_mask] for spec in specs],
+            dict(zip(stages, per_stage, strict=True)),
             mixed_precision,
             grid_spacing,
             displacement_half_width,
@@ -635,16 +778,23 @@ class RegistrationNet(network.Network):
             regularization_weight,
             grid_shrink,
             control_grid_smoothing,
-            [spec.distance for spec in specs],
-            [float(spec.layers_weight) for spec in specs],
-            subset_features,
-            [int(spec.pca) for spec in specs],
             stages,
             linear,
             linear_iterations,
             seed,
+            linear_sampling,
+            mode,
+            normalize,
+            feature_map_update_interval,
+            lncc_kernel,
+            voxel_sampling,
+            balance_coarse_layers,
         )
         self.add_module(
-            "Registration", ConvexAdamRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]
+            "Registration",
+            EngineRegistration(engine, fuse_texpr=False),
+            in_branch=[0, 1, 2, 3],
+            out_branch=["registration"],
         )
-        self.add_module("DisplacementField", ChannelSelect(0, 3), in_branch=["registration"], out_branch=["dvf"])
+        # The output module the presets name.
+        self.add_module("DisplacementField", torch.nn.Identity(), in_branch=["registration"], out_branch=["dvf"])

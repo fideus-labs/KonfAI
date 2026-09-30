@@ -21,6 +21,11 @@ class KonfAIWarning(UserWarning):
     """A warning KonfAI raises: the console capture spells it as KonfAI's own, whichever frame it names."""
 
 
+#: The exit code of a run that ran out of GPU memory (sysexits' EX_TEMPFAIL): a caller running KonfAI as a child
+#: process, like IMPACT-Reg, retries in smaller pieces on it instead of failing.
+EXIT_OUT_OF_MEMORY = 75
+
+
 class KonfAIError(Exception):
     """Base class for user-facing KonfAI exceptions."""
 

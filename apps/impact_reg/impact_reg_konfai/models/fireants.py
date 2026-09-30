@@ -26,7 +26,7 @@ Same idiomatic ``add_module`` graph and the same output contract as the ConvexAd
 orchestrator / app.json / ensemble / uncertainty are unchanged. The engine chains FireANTs' own
 composable stages (GPU, Riemannian Adam), each seeding the next like ANTs' ``-t`` stages:
 
-    Rigid (MI, centre-of-mass init) -> Affine (MI, seeded by the rigid) -> deformable
+    Rigid (MI, seeded by 'moments_init') -> Affine (MI, seeded by the rigid) -> deformable
 
 Two mirrored knobs specialise this shared module into the different presets (as ConvexAdam's shared
 module is specialised by ``stages``). ``deformable_method`` picks the deformable stage:
@@ -62,26 +62,55 @@ NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine 
 runtime-evaluated annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
-import contextlib
 import gc
-import json
+import math
 import os
 import tempfile
-from dataclasses import dataclass
+from collections.abc import Callable
 from functools import reduce
-from pathlib import Path
 from typing import Annotated, Literal, cast
 
 import numpy as np
 import SimpleITK as sitk
 import torch
-from konfai.data.patching import Accumulator, Cosinus, ModelPatch, blend_axes, blend_overlap
-from konfai.metric.measure import ImpactFeatureModel, IMPACTReg
+import torch.utils.checkpoint
+from konfai.metric.measure import ImpactFeatureModel
+from konfai.metric.measure.impact import (
+    MIN_TILE,
+    _patch_views,
+    _statistics,
+    channel_subset,
+    distance,
+    draw_centres,
+    grid_size,
+    no_texpr_fuser,
+    normalized_features,
+    onto_image_grid,
+    pca_project,
+    resampled,
+    swept_order,
+)
 from konfai.network import network
 from konfai.utils.config import Choices, Range
-from konfai.utils.dataset import Attribute, data_to_image, image_to_data
+from konfai.utils.dataset import image_to_data
+from konfai.utils.errors import MeasureError
+from konfai.utils.vram import halve_on_oom, out_of_memory_as_torch
 
-from .elastix import _is_local_ref
+from .impact_loss import (
+    FeatureMapUpdateInterval,
+    LevelSpec,
+    LNCCKernel,
+    MixedPrecision,
+    Mode,
+    ModelSpec,
+    Normalize,
+    VoxelSampling,
+    check_models,
+    layer_weights,
+    level_models,
+)
+from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .orientation import world_aligned_pair
 
 DIM = 3
 
@@ -89,539 +118,501 @@ DIM = 3
 #: ``Literal`` annotation, which only binds a config-driven call and not a direct Python one.
 _LINEAR_METHODS = ("rigid_affine", "rigid", "none")
 
-# Feature-model registry (models.json): the available IMPACT feature models, fetched from HF (NOT bundled).
-# Only consulted by the "impact" deformable metric; ``KONFAI_IMPACT_MODELS_REGISTRY`` (a local path) wins
-# for dev/offline. Mirrors the ConvexAdam preset so the same 30-model catalogue and picker are shared.
-_IMPACT_MODELS_REGISTRY = "VBoussot/impact-torchscript-models:models.json"
 
-# Feature distances, mirroring the itk-impact C++ metric (ITKIMPACT ImpactLoss.h) so FireANTs offers the same
-# set as the ConvexAdam / elastix presets. The channel axis is dim 1 (features are [B, C, *spatial]). itk-impact
-# computes gradients analytically; FireANTs optimises by autograd, so each loss is the plain differentiable
-# value, for Dice this means the SOFT overlap (the C++ rounds activations to {0, 1} and cannot be autograd'd).
-_EPS = 1e-6
+def _on_model_grid(
+    moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, size: tuple[int, ...]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """The pair resampled on a model's grid (``resampled``), its mask by nearest neighbour."""
+    return resampled(moved, size), resampled(fixed, size), None if mask is None else resampled(mask, size, "nearest")
 
 
-class _CosineDistance(torch.nn.Module):
-    """Per-voxel cosine distance over channels: minimise ``-cos`` (itk-impact ``Cosine``)."""
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        cosine = (x * y).sum(1) / (x.norm(2, 1) * y.norm(2, 1) + _EPS)
-        return -cosine.mean()
-
-
-class _SoftDiceDistance(torch.nn.Module):
-    """Soft (differentiable) Dice over channels: ``1 - dice`` on clamped activations (itk-impact ``Dice`` rounds
-    to {0, 1} and uses an explicit gradient; autograd needs the round dropped)."""
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        x = x.clamp(min=0.0)
-        y = y.clamp(min=0.0)
-        intersection = (x * y).sum(1)
-        union = (x + y).sum(1)
-        return 1.0 - ((2 * intersection + _EPS) / (union + _EPS)).mean()
-
-
-class _NCCDistance(torch.nn.Module):
-    """Per-channel normalised cross-correlation across all voxels: minimise ``-NCC`` (itk-impact ``NCC``)."""
-
-    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        channels = x.shape[1]
-        xf = x.transpose(0, 1).reshape(channels, -1)
-        yf = y.transpose(0, 1).reshape(channels, -1)
-        xf = xf - xf.mean(1, keepdim=True)
-        yf = yf - yf.mean(1, keepdim=True)
-        ncc = (xf * yf).sum(1) / (torch.sqrt(xf.pow(2).sum(1) * yf.pow(2).sum(1)) + _EPS)
-        return -ncc.mean()
-
-
-_DISTANCES: dict[str, type[torch.nn.Module]] = {
-    "L1": torch.nn.L1Loss,
-    "L2": torch.nn.MSELoss,
-    "Dice": _SoftDiceDistance,
-    "Cosine": _CosineDistance,
-    "NCC": _NCCDistance,
-}
-
-
-def _fireants_git_ref() -> str:
-    """Best-effort FireANTs git ref whose ``fused_ops`` matches the installed ``fireants``.
-
-    Overridable with ``FIREANTS_FUSED_OPS_REF``; falls back to ``main`` if the version is unknown.
-    """
-    try:
-        import importlib.metadata
-
-        version = importlib.metadata.version("fireants").strip()
-        if version:
-            return version if version.startswith("v") else f"v{version}"
-    except Exception:
-        pass
-    return "main"
-
-
-def ensure_fireants_runtime(build_kernels: bool = True) -> None:
-    """Make the ``fireants`` runtime importable before a preset uses it: best-effort, never fatal.
-
-    A plain ``pip install fireants`` fails inside a host like 3D Slicer for two reasons, both handled
-    here with a clear one-line status at each step:
-
-    1. **fireants won't install.** It pins ``simpleitk==2.2.1`` (no wheel on modern Python), while the
-       host already ships a newer SimpleITK. We install it with ``--no-deps`` so that pin is ignored
-       and the host's SimpleITK/torch are reused; its light deps ship in ``requirements.txt``.
-    2. **The fused CUDA kernels** (``fireants_fused_ops``) that make registration fast and
-       memory-light are OPTIONAL. Without them fireants runs in pure PyTorch (correct, only slower).
-       We enable them only when a CUDA compiler (``nvcc``) is present, compiling from the upstream
-       FireANTs source at install time: nothing is vendored into this app. No compiler, or a failed
-       build, simply falls back to pure PyTorch.
-    """
+def _require_fireants() -> None:
+    """Fail before any compute when FireANTs' deformable registrations do not import. ``import fireants`` proves
+    nothing (the package is empty): scipy, and ``fcntl``, which Windows lacks, are reached by the SyN and greedy
+    modules only, which a registration would otherwise first import after minutes of linear stages."""
     import importlib
-    import shutil
-    import subprocess
-    import sys
 
-    def _log(message: str) -> None:
-        print(f"[FireANTs] {message}", flush=True)
-
-    # 1) fireants itself: install --no-deps to sidestep its unsatisfiable ``simpleitk==2.2.1`` pin.
     try:
-        importlib.import_module("fireants")
-    except Exception:
-        _log("installing fireants (--no-deps, reusing the host's SimpleITK/torch)...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "fireants"])
-            importlib.invalidate_caches()
-            importlib.import_module("fireants")
-            _log("fireants installed.")
-        except Exception as exc:
+        for module in ("fireants.registration.syn", "fireants.registration.greedy"):
+            importlib.import_module(module)
+    except ModuleNotFoundError as error:
+        if error.name == "fcntl":
             raise RuntimeError(
-                "Could not install 'fireants'. Install it manually with:\n"
-                f"    {sys.executable} -m pip install --no-deps fireants\n"
-                "(its hydra-core/nibabel/pandas dependencies ship in this app's requirements.txt).\n"
-                f"Original error: {exc}"
-            ) from exc
-
-    if not build_kernels or os.environ.get("FIREANTS_SKIP_FUSED_OPS", "").strip().lower() in {"1", "true", "yes"}:
-        _log("skipping the fused CUDA kernels -> pure PyTorch (correct, slower and more memory).")
-        return
-
-    # 2) fused CUDA kernels: optional accelerator.
-    try:
-        importlib.import_module("fireants_fused_ops")
-        _log("fused CUDA kernels already available.")
-        return
-    except Exception:
-        pass
-
-    # 2a) a prebuilt wheel matching this torch's CUDA build, if one is ever published.
-    cuda_tag = ""
-    try:
-        cuda_tag = (torch.version.cuda or "").replace(".", "")
-    except Exception:
-        pass
-    if cuda_tag:
-        wheel = f"fireants-fused-ops-cu{cuda_tag}"
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", wheel])
-            importlib.invalidate_caches()
-            importlib.import_module("fireants_fused_ops")
-            _log(f"installed prebuilt CUDA kernels ({wheel}).")
-            return
-        except Exception:
-            pass  # no matching wheel -> try a local build
-
-    # 2b) local build is OPT-IN: compiling CUDA kernels is heavy and can exhaust RAM on the user's
-    # machine, so it NEVER runs by default. Set FIREANTS_BUILD_KERNELS=1 to enable it (devs with a
-    # CUDA toolkit); it then builds ONE file at a time (MAX_JOBS=1) to keep memory bounded. The clean
-    # path for end users is a prebuilt wheel (2a): a local compile also needs Python dev headers
-    # (absent from some embedded Pythons, e.g. Slicer) and a CUDA-compatible host compiler.
-    if os.environ.get("FIREANTS_BUILD_KERNELS", "").strip().lower() not in ("1", "true", "yes"):
-        _log(
-            "no prebuilt kernels for this platform -> running FireANTs in pure PyTorch (correct, slower "
-            "and heavier). Set FIREANTS_BUILD_KERNELS=1 to compile them locally (needs a CUDA toolkit)."
-        )
-        return
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    nvcc = shutil.which("nvcc") or (os.path.join(cuda_home, "bin", "nvcc") if cuda_home else None)
-    if not nvcc or not os.path.exists(nvcc) or shutil.which("git") is None:
-        _log("FIREANTS_BUILD_KERNELS set but no CUDA toolkit (nvcc) / git found -> pure PyTorch.")
-        return
-
-    ref = os.environ.get("FIREANTS_FUSED_OPS_REF") or _fireants_git_ref()
-    _log(f"nvcc found ({nvcc}); compiling the FireANTs CUDA kernels one file at a time (ref '{ref}')...")
-    import tempfile
-
-    env = os.environ.copy()
-    env["MAX_JOBS"] = "1"  # one compile at a time -> bounded RAM (prevents OOM on large hosts)
-    env.setdefault("NVCC_APPEND_FLAGS", "-allow-unsupported-compiler")  # tolerate a newer host compiler
-    tmp = tempfile.mkdtemp(prefix="fireants_fused_ops_")
-    try:
-        # Shallow clone WITHOUT --recursive: FireANTs' submodules (an SSH-only 'cookbook') are unrelated
-        # to fused_ops and would otherwise abort the build with a public-key/permission error.
-        subprocess.check_call(
-            ["git", "clone", "--depth", "1", "--branch", ref, "https://github.com/rohitrango/FireANTs.git", tmp]
-        )
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q", "--no-build-isolation", os.path.join(tmp, "fused_ops")],
-            env=env,
-        )
-        importlib.invalidate_caches()
-        importlib.import_module("fireants_fused_ops")
-        _log("compiled and installed the fast CUDA kernels.")
-    except Exception as exc:
-        _log(
-            "kernel build failed -> running in pure PyTorch (correct, only speed/memory affected). Set "
-            "FIREANTS_FUSED_OPS_REF to a compatible FireANTs tag, or install a prebuilt fireants-fused-ops "
-            f"wheel, to enable them. Details: {exc}"
-        )
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+                "FireANTs imports fcntl, which only Linux and macOS have: the FireANTs presets cannot run on this "
+                "system. The elastix and ConvexAdam presets can."
+            ) from error
+        raise RuntimeError(
+            f"FireANTs cannot be imported ({error}). Its preset installs it through konfai-apps (app.json "
+            "requirements_no_deps); with KONFAI_APPS_INSTALL_REQUIREMENTS=0, install 'fireants' with pip --no-deps and "
+            "the preset's requirements.txt yourself."
+        ) from error
 
 
-def registry_choices() -> list[str]:
-    """The per-model ``ref`` picker's values: model refs (``repo:path``) from the feature-model registry."""
-    repo = _IMPACT_MODELS_REGISTRY.split(":", 1)[0]
-    return [f"{repo}:{key}" for key in load_models_registry()]
+def _patch_distances(
+    model: torch.nn.Module,
+    moved: torch.Tensor,
+    fixed: torch.Tensor,
+    mask: torch.Tensor | None,
+    moved_rest: list[torch.Tensor],
+    fixed_rest: list[torch.Tensor],
+    kept: list[int],
+    terms: list[tuple[str, int]],
+    normalization: str,
+    project: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None,
+    seed: int,
+    kernel: int,
+) -> torch.Tensor:
+    """Each kept layer's distance on one patch, stacked: the network run on both images, each layer normalised, reduced
+    by PCA, cut to its channel subset and compared, in itk-impact's order."""
+    moved_layers, fixed_layers = model(moved, *moved_rest), model(fixed, *fixed_rest)
+    values = []
+    for index, (layer, (name, subset)) in enumerate(zip(kept, terms, strict=True)):
+        moved_features = normalized_features(moved_layers[layer].float(), normalization)
+        fixed_features = normalized_features(fixed_layers[layer].float(), normalization)
+        if project is not None:
+            moved_features, fixed_features = project(moved_features, fixed_features)
+        moved_features, fixed_features = channel_subset(moved_features, fixed_features, subset, seed + index)
+        layer_mask = None
+        if mask is not None:
+            layer_mask = torch.nn.functional.interpolate(mask.float(), size=moved_features.shape[2:], mode="nearest")
+        values.append(distance(name, moved_features, fixed_features, layer_mask, kernel, 0))
+    return torch.stack(values)
 
 
-def load_models_registry(ref: str = _IMPACT_MODELS_REGISTRY) -> dict:
-    """Load ``models.json`` (available feature models). ``KONFAI_IMPACT_MODELS_REGISTRY`` (local path) wins
-    for dev/offline; otherwise ``ref`` is a ``repo:file`` Hugging Face reference (fetched, not bundled)."""
-    from huggingface_hub import hf_hub_download
+class _ImpactCore(torch.nn.Module):
+    """One IMPACT feature model: its network (KonfAI's ``ImpactFeatureModel``, which prepares the inputs as itk-impact
+    does) and its kept layers' distances between two images, for Jacobian mode, or its feature volumes, for Static.
+    Each layer is normalised and weighed on its own, as in the other engines."""
 
-    local = os.environ.get("KONFAI_IMPACT_MODELS_REGISTRY", "")
-    if local:
-        path = Path(local)
-    elif ":" in ref:
-        repo, filename = ref.split(":", 1)
-        path = Path(hf_hub_download(repo_id=repo, filename=filename, repo_type="model"))  # nosec B615
-    else:
-        raise ValueError(
-            f"models_registry '{ref}' must be a 'repo:file' Hugging Face reference: or set "
-            "KONFAI_IMPACT_MODELS_REGISTRY to a local file for offline use."
-        )
-    return json.loads(path.read_text(encoding="utf-8"))
+    def __init__(self, spec: "ModelSpec", mixed_precision: bool, gradient: bool = False) -> None:
+        super().__init__()
+        self.extent: list[float] | None = None  # the fixed image's size in mm along (L, P, S), for the model grids
+        self.pca = int(spec.pca)
+        self.normalization = spec.feature_normalization
+        weights = [1.0 if char == "1" else 0.0 for char in spec.layers_mask]
+        # Fetched, shaped by the registry and probed once on the CPU; the whole (downsampled) tensor is scored. The
+        # engine hands it copies with their voxel axes in LPS order (``world_aligned``): their direction is the
+        # identity, from which a TotalSegmentator model reorients them as it was trained.
+        self.model = ImpactFeatureModel.from_ref(spec.ref, weights)
+        self.model.check(gradient)
+        self.model.direction = torch.eye(DIM, dtype=torch.int16)
+        self.model.half = mixed_precision
+        self.dimension = self.model.dim  # 2 for a network swept slice by slice
+        self.kept = self.model.kept
+        # The tile each pyramid level is scored in once its whole image has run out of the card's memory.
+        self._tiles: dict[tuple[int, ...], list[int]] = {}
+        self._last_shape: tuple[int, ...] | None = None  # the level scored last, for narrow()
 
+    def _pca_project(
+        self, output_feature: torch.Tensor, target_feature: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return pca_project(output_feature, target_feature, self.pca, self.dimension)
 
-def _sorted_specs(mapping: dict) -> list:
-    """A dict keyed by string indices ('0','1',...) -> its values in numeric order."""
-    return [mapping[k] for k in sorted(mapping, key=lambda key: int(key))]
-
-
-@dataclass
-class ModelSpec:
-    """One IMPACT feature model in the deformable metric (several are fused). ``ref`` picks the model; the
-    rest are its per-model knobs: the same as the ConvexAdam / elastix ``ModelSpec`` except ``voxel_size``
-    (an itk-impact resampling knob) has no meaning for FireANTs' geometry-free torch ``custom_loss`` and is
-    intentionally absent."""
-
-    ref: Annotated[
-        str,
-        Choices(registry_choices),
-        "IMPACT feature model driving the 'impact' deformable metric (TorchScript 'repo:file' on Hugging Face); "
-        "different models capture different anatomy/contrast. Suggested priors (from the IMPACT study, not "
-        "forced): TotalSegmentator (TS/M730) is the general default; a model trained on the target structure "
-        "(e.g. lung or vessels) sharpens local alignment there; add MIND for MR/CT to recover intra-organ detail.",
-    ]
-    layers_mask: Annotated[
-        str,
-        "Per-layer on/off bitmask over the feature model's layers ('1' = use, '0' = skip), one char per layer; "
-        "selects which feature depths drive the metric. Suggested priors (not forced): CT/CBCT favours EARLY "
-        "layers (they denoise and enhance anatomical structures across modalities, robust to artifacts); MR/CT "
-        "favours HIGH-LEVEL layers (contour/segmentation-driven alignment).",
-    ] = "01"
-    layers_weight: Annotated[
-        float, "Relative weight of this feature model in the multi-model fusion (all models are compared jointly)."
-    ] = 1.0
-    pca: Annotated[
-        int,
-        Range(0, 100),
-        "Number of PCA components the feature channels are reduced to before matching (0 = keep all); "
-        "trims redundant/noisy channels and cost.",
-    ] = 0
-    distance: Annotated[
-        Literal["L1", "L2", "Dice", "Cosine", "NCC"],
-        "Per-feature distance combined into the IMPACT similarity (Dice is the differentiable soft-Dice). "
-        "Suggested prior (not forced): when the task is scored on Dice, choosing 'Dice' aligns the loss with "
-        "the metric.",
-    ] = "L1"
-
-
-@contextlib.contextmanager
-def _no_texpr_fuser():
-    """Disable the TensorExpr JIT fuser while IMPACT's TorchScript feature model runs under autograd.
-
-    The IMPACT feature models are TorchScript; run under FireANTs' gradient optimisation the TensorExpr
-    fuser trips on shape ops (``aten::size`` INTERNAL ASSERT). Scoped and restored so no other torch/JIT
-    user is affected; the modern profiling executor stays on (this is NOT the legacy executor).
-    """
-    prev = torch._C._jit_texpr_fuser_enabled()
-    torch._C._jit_set_texpr_fuser_enabled(False)
-    try:
-        yield
-    finally:
-        torch._C._jit_set_texpr_fuser_enabled(prev)
-
-
-class _ImpactCore(IMPACTReg):
-    """One IMPACT feature model, exposed as a FireANTs ``forward(moved, fixed)``.
-
-    Reuses KonfAI's ``ImpactFeatureModel`` verbatim (the stats-normalised feature extraction (the model
-    wants per-image ``[min, mean, max, std]``) and the per-layer weighted distance) and ``IMPACTReg``'s
-    PCA reduction, so the metric is exactly KonfAI's, not a re-derivation. Only KonfAI's config-binding
-    ``__init__`` and its ``Attribute``-based geometry are replaced: FireANTs passes raw tensors at the
-    current pyramid scale, so the intensity statistics are computed from those tensors directly.
-    """
-
-    def __init__(self, ref: str, in_channels: int, weights: list[float], distance: str, pca: int) -> None:
-        from huggingface_hub import hf_hub_download
-
-        torch.nn.Module.__init__(self)  # bypass IMPACTReg.__init__ (KONFAI_CONFIG_PATH / apply_config binding)
-        self.name = "Reg"
-        self.loss = _DISTANCES[distance]()
-        self.pca = int(pca)
-        if _is_local_ref(ref):  # otherwise a "repo:path" HF reference
-            model_path = ref
-        else:
-            repo, filename = ref.split(":", 1)
-            model_path = hf_hub_download(repo, filename, repo_type="model")  # nosec B615
-        # shape=None: the whole (downsampled) tensor is scored, no ModelPatch tiling.
-        self.model = ImpactFeatureModel(model_path, int(in_channels), [float(w) for w in weights], None, DIM)
-
-    def pca_project(self, output: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """IMPACTReg's own PCA reduction, for Static mode: the basis is fitted on ``target``."""
-        return self._pca_project(output, target)
-
-    @staticmethod
-    def _stats(tensor: torch.Tensor) -> dict:
-        detached = tensor.detach()
-        return {
-            "ImageMin": float(detached.min()),
-            "ImageMean": float(detached.mean()),
-            "ImageMax": float(detached.max()),
-            "ImageStd": float(detached.std()),
-        }
-
-    def forward(  # type: ignore[override]
-        self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None = None
+    def _scored(
+        self,
+        moved: torch.Tensor,
+        fixed: torch.Tensor,
+        mask: torch.Tensor | None,
+        statistics: tuple[dict, dict],
+        terms: list[tuple[str, int]],
+        seed: int,
+        kernel: int,
     ) -> torch.Tensor:
-        with _no_texpr_fuser():
-            losses, counts = zip(
-                *self.model.slice_losses(
-                    moved,
-                    [self._stats(moved)],
-                    fixed,
-                    [self._stats(fixed)],
-                    mask,
-                    self.loss,
-                    project=self._pca_project if self.pca > 0 else None,
-                ),
-                strict=True,
+        """Each kept layer's distance, averaged over the patches the mask reaches (the whole image when untiled)."""
+        network = self.model.network(moved.device)
+        moved_inputs, fixed_inputs = self.model.inputs(moved, statistics[0]), self.model.inputs(fixed, statistics[1])
+        project = self._pca_project if self.pca > 0 else None
+        total: torch.Tensor | None = None
+        count = 0
+        for moved_patch, fixed_patch, mask_patch in _patch_views(
+            moved_inputs[0], fixed_inputs[0], mask, self.model.shape
+        ):
+            if mask_patch is not None and not torch.any(mask_patch == 1):
+                continue
+            args = (network, moved_patch, fixed_patch, mask_patch, moved_inputs[1:], fixed_inputs[1:], self.kept, terms)
+            args += (self.normalization, project, seed, kernel)
+            if self.model.checkpoint:
+                values = torch.utils.checkpoint.checkpoint(_patch_distances, *args, use_reentrant=False)
+            else:
+                values = _patch_distances(*args)
+            total = values if total is None else total + values
+            count += 1
+        if total is None:  # a mask no patch reaches: nothing to score
+            return torch.zeros(len(self.kept), device=moved.device)
+        return total / count
+
+    def distances(
+        self,
+        moved: torch.Tensor,
+        fixed: torch.Tensor,
+        mask: torch.Tensor | None,
+        terms: list[tuple[str, int]],
+        seed: int,
+        kernel: int,
+    ) -> torch.Tensor:
+        """Each kept layer's distance over the whole image, or over tiles once the whole image has run out of memory.
+
+        A level that runs out is scored again in tiles half as wide, and in tiles half as wide again if it
+        still does not fit; the tile is kept for that level, so the retry happens once per registration.
+        This keeps the registration one global registration, where cutting the volume would estimate its
+        rigid and affine stages patch by patch.
+        """
+        voxel_size = self.model.voxel_size
+        if voxel_size is not None and self.dimension == DIM:
+            moved, fixed, mask = _on_model_grid(
+                moved, fixed, mask, grid_size(self.extent, voxel_size, tuple(moved.shape[2:]))
             )
-        return reduce(torch.add, losses) / max(sum(counts), 1)
+        if self.dimension < DIM:
+            # Swept along an axis drawn at each evaluation (``swept_order``).
+            order = swept_order(seed)
+            if voxel_size is not None:
+                # The two values are the slices' own: the swept axis keeps this level's, the other two the model's.
+                sides = list(reversed(self.extent)) if self.extent is not None else [float(n) for n in moved.shape[2:]]
+                size = [0, 0, 0]
+                size[order[2] - 2] = moved.shape[order[2]]
+                for axis, step in zip(order[3:], voxel_size, strict=True):
+                    size[axis - 2] = max(1, int(sides[axis - 2] / step + 0.5))
+                moved, fixed, mask = _on_model_grid(moved, fixed, mask, tuple(size))
+            moved, fixed, mask = (
+                moved.permute(order),
+                fixed.permute(order),
+                None if mask is None else mask.permute(order),
+            )
+        shape = self._last_shape = tuple(moved.shape[2:])
+        statistics = (_statistics(moved)[0], _statistics(fixed)[0])
+
+        def run() -> torch.Tensor:
+            tile = self._tiles.get(shape)
+            # Each tile under a checkpoint: the optimiser differentiates through the network for BOTH warped images
+            # (SyN warps the fixed one too), so a whole-image pass keeps two networks' activations until the backward.
+            # The intensity statistics stay the whole image's, so every tile is normalised alike.
+            self.model.shape, self.model.checkpoint = tile, tile is not None
+            return self._scored(moved, fixed, mask, statistics, terms, seed, kernel)
+
+        with no_texpr_fuser():
+            return halve_on_oom(run, self._narrow_tile, moved.is_cuda)
+
+    def sampled_distances(
+        self,
+        moved: torch.Tensor,
+        fixed: torch.Tensor,
+        centres: torch.Tensor,
+        patch: int,
+        terms: list[tuple[str, int]],
+        seed: int,
+        kernel: int,
+    ) -> torch.Tensor:
+        """Each kept layer's distance at ``centres`` [N, 3], between the centre features of the ``patch`` around each
+        point (``ImpactFeatureModel.sampled``, elastix's Jacobian scheme)."""
+        layers = self.model.sampled(moved, fixed, centres, patch, self.normalization, self.extent, seed)
+        values = []
+        for index, ((moved_features, fixed_features), (name, subset)) in enumerate(zip(layers, terms, strict=True)):
+            if self.pca > 0:
+                moved_features, fixed_features = self._pca_project(moved_features, fixed_features)
+            moved_features, fixed_features = channel_subset(moved_features, fixed_features, subset, seed + index)
+            values.append(distance(name, moved_features, fixed_features, None, kernel, 0))
+        return torch.stack(values)
+
+    def _narrow_tile(self) -> bool:
+        """The level scored last in tiles half as wide; False once they are ``MIN_TILE`` a side."""
+        assert self._last_shape is not None
+        tile = self._tiles.get(self._last_shape)
+        if tile is not None and max(tile) <= MIN_TILE:
+            return False
+        self._tiles[self._last_shape] = [max(MIN_TILE, (size + 1) // 2) for size in (tile or self._last_shape)]
+        return True
+
+    def narrow(self) -> bool:
+        """Smaller pieces for the evaluation scored last (tiles, or patches a batch when sampled), once it has run out
+        of memory where ``distances`` cannot retry it: in the backward, which FireANTs runs itself. False once they go
+        no smaller."""
+        if self.model.batch:
+            return self.model.narrow_batch()
+        return self._last_shape is not None and self._narrow_tile()
 
 
 class ImpactFeatureLoss(torch.nn.Module):
-    """FireANTs ``custom_loss`` = the KonfAI IMPACT metric fused over several feature models.
+    """FireANTs ``custom_loss``: the IMPACT loss of the other engines, layer by layer.
 
-    ``forward(moved, fixed)`` sums each model's ``layers_weight * IMPACT(model)``. A model's per-layer
-    weights come from its ``layers_mask`` bitmask; its input channel count is read from the registry
-    (``models.json`` ``numberofchannels``) so it never has to be configured by hand.
+    Each kept layer of each model is compared with its model's ``distance``; with ``normalize`` it is divided by its
+    value at the first evaluation of every FireANTs scale (FireANTs announces each through
+    ``set_current_scale_and_iterations``), so every layer starts the scale at 1; the layers are summed weighed by
+    ``layers_weight``. ``levels`` gives each scale its own models.
 
-    ``masked`` mirrors the engine's own decision to run FireANTs' masked mode: the images then carry
-    the mask as one extra trailing channel (``apply_mask_to_image``), which nothing about the tensors
-    themselves announces. The feature models want the image alone, so the channel is split off once
-    and handed to KonfAI's masked feature loss (nearest-resampled onto every feature layer): the
-    metric is evaluated inside the fixed mask, which is what an elastix/ITK mask means too.
+    Jacobian mode runs each network on both warped images at every step. Static mode extracts every model's layers
+    once per image (``extract``), FireANTs then warps those feature volumes, and this compares their channels layer by
+    layer.
+
+    ``voxel_sampling`` below 1 reads that share of the voxels at each evaluation, drawn anew: Static compares the
+    warped volumes there only; Jacobian runs each network on the patch of its receptive field around every drawn
+    point instead of on the whole images, and compares the patches' centre voxels, as elastix does.
+
+    ``masked`` mirrors the engine's own decision to run FireANTs' masked mode: the images then carry the mask as one
+    extra trailing channel (``apply_mask_to_image``), which nothing about the tensors themselves announces; the
+    distances are then averaged where the fixed mask and the warped moving mask both hold.
     """
 
-    def __init__(self, specs: list["ModelSpec"], masked: bool = False) -> None:
+    def __init__(
+        self,
+        levels: list[list["ModelSpec"]],
+        mode: str,
+        normalize: bool,
+        lncc_kernel: int,
+        chunk: int,
+        seed: int,
+        mixed_precision: bool,
+        masked: bool = False,
+        voxel_sampling: float = 1.0,
+    ) -> None:
         super().__init__()
-        registry = load_models_registry()
+        self._specs: list[ModelSpec] = []  # each distinct model once, whatever the levels it serves
+        for spec in (spec for specs in levels for spec in specs):
+            if spec not in self._specs:
+                self._specs.append(spec)
+        self._levels = [[self._specs.index(spec) for spec in specs] for specs in levels]
         self._cores = torch.nn.ModuleList()
-        self._model_weights: list[float] = []
+        for spec in self._specs:
+            core = _ImpactCore(spec, mixed_precision, gradient=mode == "Jacobian")
+            if mode == "Jacobian":
+                # Loaded here once, on the CPU, and kept: the registration moves it to its device.
+                core.model.model = torch.jit.load(core.model.model_path, map_location="cpu").eval()  # nosec B614
+            if spec.voxel_size is not None:
+                # As elastix reads it: the image's three axes, but a 2D network's own two in Jacobian mode (its slices
+                # or planes), where the swept axis keeps the level's resolution.
+                axes = 2 if core.dimension < DIM and mode == "Jacobian" else DIM
+                if len(spec.voxel_size) != axes:
+                    raise ValueError(
+                        f"voxel_size of '{spec.ref}' has {len(spec.voxel_size)} values, expected {axes} "
+                        f"({'the 2D network slices in Jacobian mode' if axes == 2 else 'x y z in mm'})."
+                    )
+                core.model.voxel_size = [float(v) for v in spec.voxel_size]
+            self._cores.append(core)
+        # Sampled Jacobian: each model's patch, its receptive field, as elastix's PatchSize.
+        self._patch: list[int] = []
+        if voxel_sampling < 1 and mode == "Jacobian":
+            for spec, core in zip(self._specs, self.cores, strict=True):
+                try:
+                    self._patch.append(core.model.receptive_field)
+                except MeasureError as error:
+                    raise ValueError(
+                        f"voxel_sampling in Jacobian mode runs '{spec.ref}' on the patch of its receptive field around "
+                        f"each drawn point, which cannot be sized: {error.args[0]} Use mode Static, or voxel_sampling 1."
+                    ) from error
+        self._sampling = float(voxel_sampling)
+        self._mode = mode
+        self._normalize = normalize
+        self._kernel = int(lncc_kernel)
+        self._chunk = max(0, int(chunk))  # the LNCC's channels a pass in Static mode, 0 for all
+        self._seed = int(seed)
+        # The draws of one registration: reset() seeds it again, so a case draws the same channels and points
+        # whatever registrations this cached loss ran before it, and a restarted stage replays its own.
+        self._generator = torch.Generator().manual_seed(self._seed)
         self._masked = masked
-        for spec in specs:
-            in_channels = int(registry.get(spec.ref.split(":", 1)[-1], {}).get("numberofchannels", 1))
-            weights = [1.0 if char == "1" else 0.0 for char in spec.layers_mask]
-            self._cores.append(_ImpactCore(spec.ref, in_channels, weights, spec.distance, spec.pca))
-            self._model_weights.append(float(spec.layers_weight))
+        self._channels: list[list[int]] = []  # Static: each model's kept layers' channels in the volumes
+        self._level = -1  # the FireANTs scale running, advanced by set_current_scale_and_iterations
+        self._factors: list[float] | None = None  # each layer's normalization at this level
 
     @property
-    def cores(self) -> list["_ImpactCore"]:
-        """The per-model feature cores, for Static mode, which extracts instead of scoring."""
+    def cores(self) -> list[_ImpactCore]:
         return [cast("_ImpactCore", core) for core in self._cores]
 
-    @property
-    def model_weights(self) -> list[float]:
-        """Each model's weight in the fusion, applied to its features in Static mode."""
-        return self._model_weights
+    def reset(self) -> None:
+        """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
+        the draws start again from the seed."""
+        self._level, self._factors = -1, None
+        self._generator.manual_seed(self._seed)
+
+    def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
+        """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
+        self._level, self._factors = self._level + 1, None
+
+    def start_at(self, level: int) -> None:
+        """A run of a refreshed Static stage (``FireANTsEngine._refreshed_stage``) registers FireANTs scale ``level``
+        alone: the next scale FireANTs announces is that level, whose layers start at 1 again."""
+        self._level, self._factors = level - 1, None
+
+    def release(self) -> None:
+        """Move the feature models off the card: Static mode is done with them once the volumes are extracted."""
+        for core in self.cores:
+            if core.model.model is not None:
+                core.model.model.cpu()
+
+    def narrow(self) -> bool:
+        """Smaller pieces, once the backward has run out of memory: tiles for every network (Jacobian), half as many
+        channels a LNCC pass (Static). False when none can go smaller."""
+        if self._mode == "Jacobian":
+            narrowed = [core.narrow() for core in self.cores]  # every one, not up to the first that can
+            return any(narrowed)
+        if not any(spec.distance == "LNCC" for spec in self._specs):
+            return False  # the chunk splits LNCC's pass only: the other distances need no less memory in pieces
+        widest = max((c for layers in self._channels for c in layers), default=1)
+        chunk = self._chunk if 0 < self._chunk < widest else widest
+        if chunk <= 1:
+            return False
+        self._chunk = (chunk + 1) // 2
+        return True
+
+    def extract(
+        self,
+        fixed: torch.Tensor,
+        moving: torch.Tensor,
+        patch: int,
+        overlap: float,
+        extents: tuple[list[float] | None, list[float] | None] = (None, None),
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Static mode: the fixed and moving volumes of every model's kept layers, concatenated along the channels.
+
+        A model with a ``voxel_size`` extracts on the image resampled at that resolution (``extents``: each image's
+        size in mm along L, P, S) and its features are brought back onto the image's grid, as elastix interpolates
+        its feature maps at its points: FireANTs registers them at the image's resolution."""
+        fixed_sides, moving_sides, self._channels = [], [], []
+        for core in self.cores:
+            images = {"fixed": fixed, "moving": moving}
+            if core.model.voxel_size is not None:
+                images = {
+                    side: resampled(image, grid_size(extent, core.model.voxel_size, tuple(image.shape[2:])))
+                    for (side, image), extent in zip(images.items(), extents, strict=True)
+                }
+            # Both images through the same tile, the larger first: two volumes assembled alike (a model that sees the
+            # whole image, as anatomix does, gives other features in tiles).
+            layers, tile = {}, patch
+            for side, image in sorted(images.items(), key=lambda item: -item[1].numel()):
+                layers[side], tile = core.model.volume(image, core.normalization, tile, overlap)
+            if tile != patch:
+                print(
+                    f"[FireANTs] feature extraction did not fit whole: extracted in tiles of {tile} voxels.", flush=True
+                )
+            fixed_layers, moving_layers = layers["fixed"], layers["moving"]
+            if core.pca > 0:  # onto the fixed image's basis, as the other engines fit it on the reference side
+                for index, (fixed_layer, moving_layer) in enumerate(zip(fixed_layers, moving_layers, strict=True)):
+                    moving_layers[index], fixed_layers[index] = core._pca_project(moving_layer, fixed_layer)
+            # Normalised and reduced on its own grid, each layer is read at the image's voxels as elastix reads it.
+            fixed_layers = [onto_image_grid(layer, tuple(images["fixed"].shape[2:])) for layer in fixed_layers]
+            moving_layers = [onto_image_grid(layer, tuple(images["moving"].shape[2:])) for layer in moving_layers]
+            if core.model.voxel_size is not None:
+                fixed_layers = [resampled(layer, tuple(fixed.shape[2:]), padding="border") for layer in fixed_layers]
+                moving_layers = [resampled(layer, tuple(moving.shape[2:]), padding="border") for layer in moving_layers]
+            del images
+            self._channels.append([layer.shape[1] for layer in fixed_layers])
+            fixed_sides += fixed_layers
+            moving_sides += moving_layers
+        # A single layer is returned as it is: concatenating it would copy the whole volume.
+        return tuple(sides[0] if len(sides) == 1 else torch.cat(sides, dim=1) for sides in (fixed_sides, moving_sides))
+
+    def _reach(self, index: int, shape: tuple[int, ...]) -> int:
+        """The cube, in voxels of this level, that model ``index``'s sampled patch spans: its receptive field, wider when
+        its voxel_size is coarser than the level's voxels (odd, so it has a centre)."""
+        core, patch = self.cores[index], self._patch[index]
+        if core.model.voxel_size is None:
+            return patch
+        extent = core.extent if core.extent is not None else [float(size) for size in reversed(shape)]
+        finest = min(side / size for side, size in zip(extent, reversed(shape), strict=True))
+        return math.ceil(patch * max(core.model.voxel_size) / finest) | 1
+
+    def _terms(self, index: int) -> list[tuple[str, int]]:
+        """Each kept layer of model ``index``: its distance and the channels it draws (0 = all)."""
+        spec = self._specs[index]
+        return [(spec.distance, int(spec.subset_features))] * len(self.cores[index].kept)
+
+    def _static_distances(
+        self, level: list[int], moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, seed: int
+    ) -> list[torch.Tensor]:
+        """Each kept layer's distance between the warped feature volumes, read off their channels."""
+        values = []
+        for index in level:
+            start = sum(sum(layers) for layers in self._channels[:index])
+            for layer, (channels, (name, subset)) in enumerate(
+                zip(self._channels[index], self._terms(index), strict=True)
+            ):
+                moved_layer, fixed_layer = channel_subset(
+                    moved[:, start : start + channels],
+                    fixed[:, start : start + channels],
+                    subset,
+                    seed + 1000 * index + layer,
+                )
+                values.append(distance(name, moved_layer, fixed_layer, mask, self._kernel, self._chunk))
+                start += channels
+        return values
 
     def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
         mask: torch.Tensor | None = None
         if self._masked:
-            mask = (fixed[:, -1:] > 0.5).to(torch.uint8)
+            # A voxel counts where the fixed mask and the warped moving mask both hold it, as in FireANTs' own
+            # masked metrics.
+            mask = (fixed[:, -1:] * moved[:, -1:] >= 0.5).to(moved.dtype)
             moved, fixed = moved[:, :-1], fixed[:, :-1]
-        total: torch.Tensor | None = None
-        for weight, core in zip(self._model_weights, self._cores, strict=True):
-            term = weight * core(moved, fixed, mask)
-            total = term if total is None else total + term
-        return total
-
-
-class _FeatureCC(torch.nn.Module):
-    """Local cross-correlation over feature channels, a few channels at a time.
-
-    Static mode hands FireANTs volumes of features, and comparing all their channels at once is what
-    sets the peak: the windowed sums of a 28-channel pair at full resolution are several times the volume
-    itself. This evaluates ``chunk`` channels per pass and re-runs each pass during the backward instead
-    of keeping its intermediates, so the peak follows ``chunk`` rather than the channel count, for the
-    same objective and the same gradient.
-
-    The correlation itself is the usual windowed one, ``cov(a, b)^2 / (var(a) var(b))`` over a cube of
-    ``kernel`` voxels, averaged over channels and voxels and negated, since FireANTs minimises.
-    """
-
-    def __init__(self, kernel: int, chunk: int, masked: bool = False) -> None:
-        super().__init__()
-        self._kernel = int(kernel)
-        self._chunk = max(1, int(chunk))
-        self._masked = masked
-
-    def _windowed(self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-        kernel, padding = self._kernel, self._kernel // 2
-        mean = lambda t: torch.nn.functional.avg_pool3d(t, kernel, stride=1, padding=padding, count_include_pad=False)  # noqa: E731
-        moved_mean, fixed_mean = mean(moved), mean(fixed)
-        covariance = mean(moved * fixed) - moved_mean * fixed_mean
-        moved_var = (mean(moved * moved) - moved_mean * moved_mean).clamp_min(1e-5)
-        fixed_var = (mean(fixed * fixed) - fixed_mean * fixed_mean).clamp_min(1e-5)
-        correlation = covariance * covariance / (moved_var * fixed_var)
-        if mask is not None:
-            return -(correlation * mask).sum() / mask.sum().clamp_min(1.0) / correlation.shape[1]
-        return -correlation.mean()
-
-    def forward(self, moved: torch.Tensor, fixed: torch.Tensor) -> torch.Tensor:
-        mask: torch.Tensor | None = None
-        if self._masked:
-            mask = (fixed[:, -1:] > 0.5).to(moved.dtype)
-            moved, fixed = moved[:, :-1], fixed[:, :-1]
-        channels = moved.shape[1]
-        total: torch.Tensor | None = None
-        for start in range(0, channels, self._chunk):
-            stop = min(start + self._chunk, channels)
-            piece = torch.utils.checkpoint.checkpoint(
-                self._windowed, moved[:, start:stop], fixed[:, start:stop], mask, use_reentrant=False
+        level = self._levels[min(max(self._level, 0), len(self._levels) - 1)]
+        # One draw per evaluation, the same channels in every patch and in the checkpoints' second pass.
+        seed = int(torch.randint(2**31 - 1, (1,), generator=self._generator))
+        weights = [weight for index in level for weight in layer_weights([self._specs[index]])]
+        if self._mode == "Jacobian" and self._sampling < 1:
+            values = []
+            for index in level:
+                core, terms = self.cores[index], self._terms(index)
+                centres = draw_centres(
+                    tuple(moved.shape[2:]),
+                    mask,
+                    self._reach(index, tuple(moved.shape[2:])),
+                    self._sampling,
+                    self._generator,
+                    moved.device,
+                )
+                if centres is None:  # a mask that keeps no point: nothing to score
+                    values += [moved.sum() * 0.0] * len(terms)
+                    continue
+                values += list(
+                    core.sampled_distances(
+                        moved, fixed, centres, self._patch[index], terms, seed + 1000 * index, self._kernel
+                    )
+                )
+        elif self._mode == "Jacobian":
+            values = [
+                value
+                for index in level
+                for value in self.cores[index].distances(
+                    moved, fixed, mask, self._terms(index), seed + 1000 * index, self._kernel
+                )
+            ]
+        else:
+            if self._sampling < 1:
+                # The same voxels for every layer, compared as [1, C, N]: the mask is already in the draw.
+                # A mask that keeps no voxel stays on the whole maps, where the masked mean is 0.
+                centres = draw_centres(tuple(moved.shape[2:]), mask, 1, self._sampling, self._generator, moved.device)
+                if centres is not None:
+                    _, height, width = moved.shape[2:]
+                    voxels = (centres[:, 0] * height + centres[:, 1]) * width + centres[:, 2]
+                    moved, fixed, mask = moved.flatten(2)[:, :, voxels], fixed.flatten(2)[:, :, voxels], None
+            # Half as many channels a LNCC pass when it does not fit, kept for the registration.
+            values = halve_on_oom(
+                lambda: self._static_distances(level, moved, fixed, mask, seed), self.narrow, moved.is_cuda
             )
-            weighted = piece * (stop - start) / channels
-            total = weighted if total is None else total + weighted
-        if total is None:
-            raise RuntimeError("the feature volumes carry no channel to correlate")
-        return total
+        if self._normalize:
+            if self._factors is None:
+                # Latched once a level, at the transform the scale starts from; a layer already at 0 keeps 1.
+                starts = [float(value.detach()) for value in values]
+                self._factors = [1.0 / start if start > 0 and np.isfinite(start) else 1.0 for start in starts]
+            values = [value * factor for value, factor in zip(values, self._factors, strict=True)]
+        return reduce(torch.add, [weight * value for weight, value in zip(weights, values, strict=True)])
 
 
-def _feature_grid(shape: tuple[int, ...], patch: int, overlap: float, multiple: int) -> ModelPatch:
-    """The grid one extraction runs on: KonfAI's own, configured from ``feature_patch``.
+#: The top of the range ``_unit_range`` rescales to: under 1, so that no interpolated value reaches past 1.
+_UNIT_TOP = 0.999
 
-    ``patch`` 0 leaves every axis free, which is one patch over the whole image. Otherwise the volume
-    is cut exactly as the predictor cuts a network's input -- same border padding, same raised-cosine
-    window tapering over the overlap alone, so the tiles sum to one everywhere.
 
-    ``multiple`` is the free axes' rounding, KonfAI's ``free_axis_multiple``: an encoder-decoder that
-    halves its input a few times only accepts a size its skip connections divide, and anatomix is one
-    (a multiple of 16). The padding is cropped back off at blend time.
+def _unit_range(image: sitk.Image) -> sitk.Image:
+    """``image`` winsorised to its 0.5-99.5 percentiles and rescaled to [0, 0.999], for FireANTs' mutual information.
+
+    That MI divides both images by their shared maximum and clamps below 0 before binning: each image on its own
+    range, winsorised as ANTs' antsRegistrationSyN does, spreads both over the bins. Not quite 1: past 1, which the
+    moved image's interpolation of the top plateau can reach, FireANTs divides both images by the moved image's
+    maximum, which carries a gradient and pulls the fixed image's Parzen windowing into the backward graph.
     """
-    size = [int(patch)] * len(shape)
-    grid = ModelPatch(size, round(patch * overlap) if patch > 0 else 0)
-    if multiple > 1:
-        grid.free_axis_multiple = [int(multiple)] * len(shape)
-    grid.patch_combine = Cosinus()
-    kept = blend_axes(grid.patch_size)
-    grid.patch_combine.set_patch_config(kept, blend_overlap(cast(int, grid.overlap), kept))
-    grid.load(list(shape))
-    return grid
+    return sitk.RescaleIntensity(winsorized(sitk.Cast(image, sitk.sitkFloat32), 0.5, 99.5), 0.0, _UNIT_TOP)
 
 
-@torch.no_grad()
-def _one_volume(
-    core: "_ImpactCore",
-    weight: float,
-    image: torch.Tensor,
-    patch: int,
-    overlap: float,
-    normalization: str,
-    multiple: int = 0,
-) -> torch.Tensor:
-    """One model's selected feature layers for one image, tiled and blended.
-
-    The intensity statistics come from the WHOLE image, never from a tile, so every tile is normalised
-    identically -- a per-tile normalisation would make the same anatomy score differently on either side
-    of a seam. The tiling, the cosine window and the weighted accumulation are KonfAI's, the same ones
-    the predictor assembles a network's output with.
-    """
-    model = core.model
-    if model.model is None:
-        model.model = torch.jit.load(model.model_path, map_location="cpu").eval()  # nosec B614
-    model.model.to(image.device)
-    statistics = Attribute(core._stats(image))
-
-    grid = _feature_grid(tuple(image.shape[2:]), patch, overlap, multiple)
-    accumulator = Accumulator(grid.get_patch_slices(), grid.patch_size, grid.patch_combine)
-    for index, (tile,) in enumerate(grid.disassemble(image)):
-        # The model's own input triple: the channel replication and the [min, max, mean, std] order
-        # itk-impact reads are the metric's business, not this engine's.
-        inputs = model.inputs(tile, statistics)
-        # A segmentation network hands back coarser deeper layers (M730 returns 64, 32 and 16 voxels
-        # for a 64-voxel tile) and they have to share one grid to be concatenated and blended. The
-        # online metric never faces this: it scores each layer against its own counterpart.
-        layers = [
-            layer
-            if layer.shape[2:] == tile.shape[2:]
-            else torch.nn.functional.interpolate(layer, size=tile.shape[2:], mode="trilinear", align_corners=False)
-            for layer_weight, layer in zip(model.weights, model.model(*inputs), strict=False)
-            if layer_weight != 0
-        ]
-        features = torch.cat(layers, dim=1)
-        if normalization == "l2":
-            features = torch.nn.functional.normalize(features, dim=1)
-        elif normalization == "standardized":
-            features = (features - features.mean(dim=1, keepdim=True)) / features.std(dim=1, keepdim=True).clamp_min(
-                1e-6
-            )
-        accumulator.add_layer(index, weight * features)
-        del features, layers
-    return accumulator.assemble()
-
-
-@torch.no_grad()
-def _feature_volumes(
-    loss: "ImpactFeatureLoss",
-    fixed: torch.Tensor,
-    moving: torch.Tensor,
-    patch: int,
-    overlap: float,
-    normalization: str,
-    multiple: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """The fixed and moving feature volumes of every model, concatenated along the channel axis.
-
-    This is Static mode: each network runs once per image here, instead of once per optimiser step
-    inside the loss, and the registration then works on the feature volumes themselves. It is what makes
-    a large pair affordable -- no autograd graph through an extractor is kept -- and what a whole-image
-    model needs, since the features are never differentiated with respect to the warp.
-
-    A model asking for ``pca`` has both its volumes projected onto the basis of the FIXED one, exactly as
-    the online metric fits its basis on the reference side. The channel count is what the comparison then
-    costs, so this is also the lever when a pair of models does not fit.
-    """
-    fixed_sides: list[torch.Tensor] = []
-    moving_sides: list[torch.Tensor] = []
-    for weight, core in zip(loss.model_weights, loss.cores, strict=True):
-        fixed_features = _one_volume(core, weight, fixed, patch, overlap, normalization, multiple)
-        moving_features = _one_volume(core, weight, moving, patch, overlap, normalization, multiple)
-        if core.pca > 0:
-            moving_features, fixed_features = core.pca_project(moving_features, fixed_features)
-        fixed_sides.append(fixed_features)
-        moving_sides.append(moving_features)
-    return torch.cat(fixed_sides, dim=1), torch.cat(moving_sides, dim=1)
+def _extent(image: "sitk.Image") -> list[float]:
+    """``image``'s size in mm along its voxel axes (L, P, S once world-aligned)."""
+    return [size * step for size, step in zip(image.GetSize(), image.GetSpacing(), strict=True)]
 
 
 def _mask_on_grid(mask: "sitk.Image", image: "sitk.Image", device: str):
@@ -665,25 +656,26 @@ class FireANTsEngine:
         deformable_method: str,
         deformable_metric: str,
         deformable_lr: float,
-        integrator_n: int,
         smooth_warp_sigma: float,
         smooth_grad_sigma: float,
         seed: int,
-        impact_specs: list["ModelSpec"],
-        mode: str = "Jacobian",
+        impact_levels: list[list["ModelSpec"]],
+        mode: str = "Static",
         feature_patch: int = 0,
         feature_chunk: int = 0,
         feature_overlap: float = 0.25,
-        feature_multiple: int = 0,
-        feature_normalization: str = "l2",
-        feature_metric: str = "cc",
         deformable_masked: bool = True,
+        normalize: bool = True,
+        feature_map_update_interval: int = -1,
+        lncc_kernel: int = 5,
+        mixed_precision: bool = False,
+        voxel_sampling: float = 1.0,
     ) -> None:
         """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
 
         The settings that name a choice rather than a number -- the linear and deformable methods, the
-        mode, the feature normalisation and metric -- are checked here rather than at the first run, so a
-        typo in a preset stops before a card is taken.
+        mode, the models -- are checked here rather than at the first run, so a typo in a preset stops before a
+        card is taken.
         """
         self._scales = [int(s) for s in scales]
         self._affine_iterations = [int(i) for i in affine_iterations]
@@ -694,51 +686,51 @@ class FireANTsEngine:
         self._moments_init = moments_init
         self._linear_method = linear_method
         self._deformable_method = deformable_method
-        # Both checks are at BUILD time, as the missing-feature-model one above is: the stages they
-        # guard run for minutes, and a run that reaches them has already paid for the read.
+        # Checked at BUILD time: the stages they guard run for minutes.
         if linear_method not in _LINEAR_METHODS:
-            # Named, not silently ignored. Every unrecognised value would otherwise fall through to
-            # the rigid-then-affine branch, so a typo ("affine", say) would register with a stage
-            # the caller did not ask for and produce a perfectly plausible result.
+            # An unrecognised value would otherwise fall through to the rigid-then-affine branch.
             raise ValueError(
                 f"Unknown linear_method '{linear_method}' (expected {', '.join(map(repr, _LINEAR_METHODS))})."
             )
         if cc_kernel % 2 == 0:
-            # FireANTs' own cross-correlation refuses an even window ("kernel_size must be odd"), and
-            # an even one has no centre voxel: the correlation would sit half a voxel off the point it
-            # is attributed to. Raised here so both the library metric and the chunked one below fail
-            # the same way, at build time rather than minutes into a registration.
+            # FireANTs' own cross-correlation refuses an even window, which has no centre voxel.
             raise ValueError(f"cc_kernel must be odd, got {cc_kernel}: an even window has no centre voxel.")
         if linear_method == "none" and deformable_method == "none":
-            # Left to run this optimises nothing and returns the identity: a Moved equal to the moving
-            # image and a zero field, which no downstream check tells apart from a pair that needed no
-            # moving.
+            # It would optimise nothing and return an identity no downstream check tells from a result.
             raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
-        self._integrator_n = int(integrator_n)
         self._smooth_warp_sigma = float(smooth_warp_sigma)
         self._smooth_grad_sigma = float(smooth_grad_sigma)
         self._seed = int(seed)
-        # IMPACT deformable metric (only used when deformable_metric == "impact"): KonfAI IMPACT feature
-        # models drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
-        self._impact_specs = impact_specs
+        # IMPACT deformable metric (only used when deformable_metric == "impact"): the IMPACT feature models of
+        # each scale drive the SyN/greedy stage instead of the analytic CC/MI/MSE.
+        self._impact_levels = impact_levels
+        self._feature_loss: ImpactFeatureLoss | None = None  # built at the first registration, see _impact_loss
         self._deformable_masked = bool(deformable_masked)
         self._mode = mode
         self._feature_patch = int(feature_patch)
         self._feature_chunk = int(feature_chunk)
         self._feature_overlap = float(feature_overlap)
-        self._feature_multiple = int(feature_multiple)
-        self._feature_normalization = feature_normalization
-        self._feature_metric = feature_metric
-        if feature_normalization not in ("l2", "standardized", "none"):
-            raise ValueError(
-                f"Unknown feature_normalization '{feature_normalization}' (expected 'l2', 'standardized' or 'none')."
-            )
-        if feature_metric not in ("cc", "mi", "mse"):
-            raise ValueError(f"Unknown feature_metric '{feature_metric}' (expected 'cc', 'mi' or 'mse').")
+        self._normalize = bool(normalize)
+        self._lncc_kernel = int(lncc_kernel)
+        self._mixed_precision = bool(mixed_precision)
+        self._voxel_sampling = float(voxel_sampling)
+        if not 0 < voxel_sampling <= 1:
+            raise ValueError(f"voxel_sampling is a share of the voxels, in (0, 1]: got {voxel_sampling}.")
         if mode not in ("Static", "Jacobian"):
             raise ValueError(f"Unknown mode '{mode}' (expected 'Static' or 'Jacobian').")
+        if lncc_kernel % 2 == 0:
+            raise ValueError(f"lncc_kernel must be odd, got {lncc_kernel}: an even window has no centre voxel.")
+        for specs in impact_levels:
+            # Sampled, the loss reads points: no window for an LNCC.
+            check_models(specs, "FireANTs", dense=voxel_sampling >= 1)
+        if feature_map_update_interval > 0 and mode != "Static":
+            raise ValueError(
+                "FireANTs: feature_map_update_interval refreshes the features Static mode extracts once; Jacobian mode "
+                "extracts them at every step already. Leave it at -1, or set mode: Static."
+            )
+        self._update_interval = int(feature_map_update_interval)
 
     @staticmethod
     def _center_of_mass_translation(
@@ -750,28 +742,26 @@ class FireANTsEngine:
     ) -> torch.Tensor:
         """Seed translation ``com_moving - com_fixed`` from intensity-weighted centres of mass.
 
-        Computed here rather than through FireANTs' ``MomentsRegistration``: on anisotropic-spacing
-        volumes that class mis-estimates the centre of mass (measured ~18-25 voxels off in Y/Z on
-        ExaSPIM light-sheet data), and the wrong seed pushes the affine into an anisotropic minimum
-        that looks like a metric failure and is not one.
+        Computed here rather than through FireANTs' ``MomentsRegistration``, which mis-estimates the centre of
+        mass on anisotropic-spacing volumes.
 
         Each subject's centre is taken in its OWN physical space (mask-restricted when a real mask is
-        given), so origin/spacing/direction differences between the two frames are handled exactly.
-        Only the centroid is used: second-order moments (rotation/scale) were tried and hurt, because a
-        near-symmetric subject has ambiguous principal axes.
+        given), so origin/spacing/direction differences between the two frames are handled exactly, and on
+        its intensities winsorised and rescaled to [0, 1] (``_unit_range``): raw CT clipped at 0 weighs bone
+        tens of times over soft tissue and a stray bright voxel over whole organs.
+        Only the centroid is used: a near-symmetric subject has ambiguous principal axes.
 
         Returns the ``[1, 3]`` physical-space translation ``RigidRegistration(init_translation=...)``
         expects.
         """
 
         def com_phys(img: sitk.Image, mask: "sitk.Image | None") -> np.ndarray:
-            array = sitk.GetArrayFromImage(img).astype(np.float64)  # (z, y, x)
-            array = np.clip(array, 0, None)
+            array = sitk.GetArrayFromImage(_unit_range(img)).astype(np.float64)  # (z, y, x), in [0, 1]
             if mask is not None:
                 array = array * (sitk.GetArrayFromImage(mask).astype(np.float64) > 0.5)
             positive = array > 0
             if not positive.any():
-                # An all-zero (or all-negative) subject has no centre of mass to speak of; the frame
+                # A constant subject (all 0 once rescaled) has no centre of mass to speak of; the frame
                 # centre is the only defensible answer and matches what "cof" would have done.
                 size = img.GetSize()
                 return np.asarray(img.TransformContinuousIndexToPhysicalPoint([(extent - 1) / 2.0 for extent in size]))
@@ -787,15 +777,21 @@ class FireANTsEngine:
         translation = com_phys(moving, moving_mask) - com_phys(fixed, fixed_mask)
         return torch.tensor(translation, device=device, dtype=torch.float32).reshape(1, 3)
 
-    @staticmethod
-    def _is_partial_mask(mask: "sitk.Image | None") -> bool:
-        """True only for a mask that actually restricts the region: some voxels in, some out. An absent
-        optional mask arrives as a whole-image (all-ones) default and an all-zero mask is degenerate; both
-        are treated as no mask so the plain (non-masked) metric path is used."""
-        if mask is None:
-            return False
-        arr = sitk.GetArrayViewFromImage(mask)
-        return bool((arr > 0).any()) and bool((arr == 0).any())
+    def _impact_loss(self) -> ImpactFeatureLoss:
+        """The IMPACT feature models, fetched, probed and loaded by the first registration and kept: register runs
+        for every case and every native tile of a run, all in one process."""
+        if self._feature_loss is None:
+            self._feature_loss = ImpactFeatureLoss(
+                self._impact_levels,
+                self._mode,
+                self._normalize,
+                self._lncc_kernel,
+                self._feature_chunk,
+                self._seed,
+                self._mixed_precision,
+                voxel_sampling=self._voxel_sampling,
+            )
+        return self._feature_loss
 
     @staticmethod
     def _affine_to_sitk(affine_matrix: "torch.Tensor") -> sitk.AffineTransform:
@@ -807,18 +803,115 @@ class FireANTsEngine:
         affine.SetTranslation(matrix[:DIM, DIM].astype(np.float64))
         return affine
 
-    def _total_field_transform(self, reg) -> sitk.Transform:
-        """Optimise a deformable stage and return its TOTAL displacement (affine baked in) as a
-        SimpleITK ``DisplacementFieldTransform`` on the fixed grid.
+    @staticmethod
+    def _field_on(transform: sitk.Transform, grid: sitk.Image) -> sitk.Image:
+        """``transform`` as a float32 displacement field sampled on ``grid``."""
+        return sitk.TransformToDisplacementField(
+            transform, sitk.sitkVectorFloat32, grid.GetSize(), grid.GetOrigin(), grid.GetSpacing(), grid.GetDirection()
+        )
+
+    def _refreshed_stage(
+        self,
+        deformable: type,
+        fixed: sitk.Image,
+        moving: sitk.Image,
+        fixed_mask: "sitk.Image | None",
+        moving_mask: "sitk.Image | None",
+        masked: bool,
+        affine_matrix: "torch.Tensor | None",
+        device: str,
+    ) -> sitk.Image:
+        """Static mode with ``feature_map_update_interval``: the deformable stage in runs of that many iterations, the
+        moving features extracted again between two runs from the moving image warped by the transform so far; the
+        total field on the fixed grid.
+
+        elastix and ConvexAdam extract the moving features again under the current transform every N iterations of one
+        optimisation. FireANTs' loop hands the loss neither its warp nor its images, so the stage is cut instead: each
+        run starts a new SyN (or greedy) from the identity at one scale, on the moving image
+        resampled through everything before it, and the fields are composed, the new run's first. Adam's state and SyN's
+        midpoint start again at each run, and the layers are normalised again at the first evaluation of each run."""
+        from fireants.io import BatchedImages, Image
+        from fireants.io.imagemask import apply_mask_to_image, generate_image_mask_allones
+
+        loss = self._impact_loss()
+        loss._masked = masked
+        loss.reset()  # this registration's draws; each run then goes on from the last one's
+        runs = [
+            (level, scale, min(self._update_interval, iterations - done))
+            for level, (scale, iterations) in enumerate(zip(self._scales, self._deformable_iterations, strict=True))
+            for done in range(0, iterations, self._update_interval)
+        ]
+        total: sitk.Transform | None = None
+        for level, scale, iterations in runs:
+            warped, warped_mask, init = moving, moving_mask, affine_matrix
+            if total is not None:
+                warped = sitk.Resample(moving, fixed, total, sitk.sitkLinear, 0.0, moving.GetPixelID())
+                if moving_mask is not None:
+                    warped_mask = sitk.Resample(moving_mask, fixed, total, sitk.sitkNearestNeighbor, 0)
+                init = None
+            pair = []
+            for image, mask in ((fixed, fixed_mask), (warped, warped_mask)):
+                stage_image = Image(image, device=device)
+                if masked:
+                    region = _mask_on_grid(mask, image, device) if mask is not None else None
+                    if region is None:
+                        region = generate_image_mask_allones(stage_image)
+                    stage_image = apply_mask_to_image(stage_image, region)
+                pair.append(stage_image)
+            volumes = loss.extract(
+                pair[0].array[:, :1],
+                pair[1].array[:, :1],
+                self._feature_patch,
+                self._feature_overlap,
+                (_extent(fixed), _extent(warped)),
+            )
+            for stage_image, features in zip(pair, volumes, strict=True):
+                if masked:
+                    features = torch.cat([features, stage_image.array[:, -1:]], dim=1)
+                stage_image.array = features
+                stage_image.channels = features.shape[1]
+            del volumes
+            loss.release()
+            loss.start_at(level)
+            reg = deformable(
+                scales=[scale],
+                iterations=[iterations],
+                fixed_images=BatchedImages([pair[0]]),
+                moving_images=BatchedImages([pair[1]]),
+                loss_type="custom",
+                custom_loss=loss,
+                cc_kernel_size=self._cc_kernel,
+                deformation_type="compositive",
+                smooth_warp_sigma=self._smooth_warp_sigma,
+                smooth_grad_sigma=self._smooth_grad_sigma,
+                optimizer="Adam",
+                optimizer_lr=self._deformable_lr,
+                init_affine=init,
+            )
+            with out_of_memory_as_torch(device != "cpu"):
+                step = sitk.DisplacementFieldTransform(sitk.Cast(self._total_field(reg), sitk.sitkVectorFloat64))
+            del reg, pair
+            gc.collect()
+            if total is None:
+                total = step
+            else:  # one dense field again, so that the next resampling does not walk a growing chain
+                chain = sitk.CompositeTransform([total, step])
+                total = sitk.DisplacementFieldTransform(sitk.Cast(self._field_on(chain, fixed), sitk.sitkVectorFloat64))
+        assert total is not None
+        return self._field_on(total, fixed)
+
+    def _total_field(self, reg) -> sitk.Image:
+        """Optimise a deformable stage and return its TOTAL displacement field (affine baked in), float32, on
+        the fixed image FireANTs registered.
 
         FireANTs serialises the total field (ANTs convention, fixed grid) only to a file, so it is
         round-tripped through a temporary NIfTI: its public API, no internals reimplemented."""
         reg.optimize()
         with tempfile.TemporaryDirectory() as tmp:
-            warp_path = os.path.join(tmp, "total_warp.nii.gz")
+            # Uncompressed: the file is read back at once.
+            warp_path = os.path.join(tmp, "total_warp.nii")
             reg.save_as_ants_transforms(warp_path)
-            total_field = sitk.ReadImage(warp_path, sitk.sitkVectorFloat64)
-        return sitk.DisplacementFieldTransform(total_field)  # consumes total_field
+            return sitk.ReadImage(warp_path, sitk.sitkVectorFloat32)
 
     def register(
         self,
@@ -828,8 +921,51 @@ class FireANTsEngine:
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
     ) -> np.ndarray:
-        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first, on the fixed grid."""
-        ensure_fireants_runtime()
+        """Register ``moving`` onto ``fixed``; return the displacement field, channel-first float32, on the fixed
+        grid."""
+        # A mask is a region whatever values it holds: a label map (SlicerImpactReg exports segments as labels
+        # 1..N) would otherwise weight FireANTs' masked cc/mse by the product of label values, and the stages
+        # below threshold it at 0, 0.5 or >= 0.5, which only agree on a 0/1 image.
+        fixed_mask = None if fixed_mask is None else fixed_mask > 0
+        moving_mask = None if moving_mask is None else moving_mask > 0
+        if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
+            # A fixed mask with no voxel in it leaves nothing to register: a zero field, as the elastix engine
+            # returns (in a tiled run, a tile the tissue does not reach). With a linear stage it is no such tile,
+            # but a wrong mask, and said so.
+            if self._linear_method != "none":
+                print("[FireANTs] the fixed mask is empty: nothing registered, the field is zero.", flush=True)
+            return np.zeros((DIM, *fixed.GetSize()[::-1]), dtype=np.float32)
+        # Only a mask that restricts (some voxels in, some out) is one, decided on the mask as given: konfai-apps
+        # writes an all-ones default on the FIXED grid for both sides, which would sit on another grid than the moving
+        # image.
+        fixed_mask = fixed_mask if is_partial_mask(fixed_mask) else None
+        moving_mask = moving_mask if is_partial_mask(moving_mask) else None
+        grid = fixed  # the field is sampled on the fixed image as it came
+        if self._deformable_metric == "impact":
+            # Feature networks compute their channels along the voxel axes they are given: both images go in with
+            # their voxel axes in one order, so the fixed and moving features compare the same descriptors.
+            fixed, moving, fixed_mask, moving_mask = world_aligned_pair(fixed, moving, fixed_mask, moving_mask)
+        _require_fireants()
+        from fireants.utils.globals import MIN_IMG_SIZE
+
+        # FireANTs sizes its warp no smaller than MIN_IMG_SIZE a side: greedy then scores that warp against a
+        # fixed image with a thinner axis, and SyN cannot invert a warp larger than the image on every axis.
+        # Both fail only once the optimisation is over, so the sizes are checked before it starts.
+        thin = [extent < MIN_IMG_SIZE for extent in fixed.GetSize()]
+        if self._deformable_method == "greedy" and any(thin):
+            raise ValueError(
+                f"FireANTs' greedy registration needs every axis of the fixed image to span at least {MIN_IMG_SIZE} "
+                f"voxels, got {fixed.GetSize()}: use deformable_method 'syn', which takes a thin axis."
+            )
+        if self._deformable_method == "syn" and all(thin):
+            raise ValueError(
+                f"FireANTs' SyN needs one axis of the fixed image to span at least {MIN_IMG_SIZE} voxels, got "
+                f"{fixed.GetSize()}: register the whole image, or tiles of at least {MIN_IMG_SIZE} a side."
+            )
+        if self._deformable_metric == "impact" and self._deformable_method != "none":
+            loss = self._impact_loss()  # before any compute: a model that cannot be had or probed fails here
+            for core in loss.cores:  # the model grids and the sampled patches are laid out in mm
+                core.extent = _extent(fixed)
         from fireants.io import BatchedImages, Image
         from fireants.io.imagemask import apply_mask_to_image, generate_image_mask_allones
         from fireants.registration.affine import AffineRegistration
@@ -837,31 +973,31 @@ class FireANTsEngine:
 
         torch.manual_seed(self._seed)
         device = f"cuda:{device_index}" if device_index >= 0 else "cpu"
-        # FireANTs' Image ctor accepts a SimpleITK image directly, so the fixed/moving cross into
-        # FireANTs in-memory (no file load) with their geometry preserved.
-        fixed_img = Image(fixed, device=device)
-        moving_img = Image(moving, device=device)
-
-        # Masked metric only when a mask genuinely restricts the region. FireANTs' masked mode wants the
-        # mask as the last channel of BOTH images (all-ones where one side has none) and a ``masked_``
-        # metric prefix; the plain path is untouched when no real mask is present.
-        use_fixed_mask = self._is_partial_mask(fixed_mask)
-        use_moving_mask = self._is_partial_mask(moving_mask)
+        # Masked metric only when a mask genuinely restricts the region; the plain path is untouched when no
+        # real mask is present.
+        use_fixed_mask = fixed_mask is not None
+        use_moving_mask = moving_mask is not None
         masked = use_fixed_mask or use_moving_mask
-        if masked:
-            fmask = (
-                _mask_on_grid(fixed_mask, fixed, device) if use_fixed_mask else generate_image_mask_allones(fixed_img)
-            )
-            mmask = (
-                _mask_on_grid(moving_mask, moving, device)
-                if use_moving_mask
-                else generate_image_mask_allones(moving_img)
-            )
-            fixed_img = apply_mask_to_image(fixed_img, fmask)
-            moving_img = apply_mask_to_image(moving_img, mmask)
 
-        bf = BatchedImages([fixed_img])
-        bm = BatchedImages([moving_img])
+        def images(metric: str, with_masks: bool) -> tuple["Image", "Image"]:
+            """The fixed and moving FireANTs images of a stage scoring ``metric``: rescaled for MI (see
+            ``_unit_range``), as they are for the others. FireANTs' Image takes a SimpleITK image directly, so
+            they cross in memory with their geometry. Masked mode wants the mask as the last channel of BOTH
+            images (all ones where one side has none) and a ``masked_`` metric prefix."""
+            pair = []
+            for image, mask, partial in ((fixed, fixed_mask, use_fixed_mask), (moving, moving_mask, use_moving_mask)):
+                stage_image = Image(_unit_range(image) if metric == "mi" else image, device=device)
+                if with_masks:
+                    region = _mask_on_grid(mask, image, device) if partial else generate_image_mask_allones(stage_image)
+                    stage_image = apply_mask_to_image(stage_image, region)
+                pair.append(stage_image)
+            return pair[0], pair[1]
+
+        # The linear stages' images, for them alone: a tile (linear_method "none") goes straight to the deformable
+        # stage, which builds its own.
+        if self._linear_method != "none":
+            fixed_img, moving_img = images(self._affine_metric, masked)
+            bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
         affine_loss = f"masked_{self._affine_metric}" if masked else self._affine_metric
 
         # Linear: Rigid(MI) -> Affine(MI, seeded by the rigid), mirroring ANTs. The affine seeds the
@@ -904,6 +1040,7 @@ class FireANTsEngine:
             )
             rigid.optimize()
             rigid_matrix = rigid.get_rigid_matrix().detach()
+            del rigid  # and its images, once the deformable stage has built its own
 
             if self._linear_method == "rigid":
                 # The rigid (rotation and translation, no scale or shear) IS the linear transform.
@@ -924,11 +1061,22 @@ class FireANTsEngine:
                 )
                 affine.optimize()
                 affine_matrix = affine.get_affine_matrix().detach()
+                del affine
+            # What the linear stages found, where a stage capped by its step size shows as a short shift and a
+            # determinant away from 1 (rotation and shear standing in for the translation it could not reach).
+            matrix = affine_matrix.double().cpu().numpy()[0]
+            centre = np.asarray(fixed.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in fixed.GetSize()]))
+            shift = matrix[:DIM, :DIM] @ centre + matrix[:DIM, DIM] - centre
+            print(
+                f"[FireANTs] linear stage: {np.round(shift, 2).tolist()} mm at the fixed image centre, "
+                f"determinant {np.linalg.det(matrix[:DIM, :DIM]):.3f}.",
+                flush=True,
+            )
 
         # Deformable stage (or none). SyN and Greedy share the same constructor surface; both warm-start
         # from the affine so their TOTAL transform already bakes in the linear pre-align.
         if self._deformable_method == "none":
-            transform: sitk.Transform = self._affine_to_sitk(affine_matrix)
+            field = self._field_on(self._affine_to_sitk(affine_matrix), grid)
         else:
             if self._deformable_method == "syn":
                 from fireants.registration.syn import SyNRegistration as Deformable
@@ -938,151 +1086,105 @@ class FireANTsEngine:
                 raise ValueError(
                     f"Unknown deformable_method '{self._deformable_method}' (expected 'syn', 'greedy' or 'none')."
                 )
+            # The linear stage's images go before this stage builds its own: FireANTs keeps its tensors in
+            # reference cycles, which only the cyclic collector frees.
+            if self._linear_method != "none":
+                del bf, bm, fixed_img, moving_img
+                gc.collect()
             # "impact" swaps the analytic metric for a KonfAI IMPACT feature loss on the deformable stage
             # (the linear pre-align keeps its own affine_metric); the fixed mask restricts it too.
             loss_type: str
             # The masks drive the deformable stage only when the caller asks: a tight mask hides the
             # outline the stage needs to pull an end into place.
             deformable_masked = masked and self._deformable_masked
-            custom_loss: torch.nn.Module | None = None
-            if self._deformable_metric == "impact" and self._mode == "Static":
-                # Static: extract once, then register the feature volumes. The
-                # images are re-read unmasked because the masked pair carries the mask as a channel, and
-                # the mask is concatenated back afterwards so ``masked_`` still means what it says.
-                extractor = ImpactFeatureLoss(self._impact_specs).to(device)
-                volumes = _feature_volumes(
-                    extractor,
-                    Image(fixed, device=device).array,
-                    Image(moving, device=device).array,
-                    self._feature_patch,
-                    self._feature_overlap,
-                    self._feature_normalization,
-                    self._feature_multiple,
+            if self._update_interval > 0 and self._deformable_metric == "impact":
+                field = self._refreshed_stage(
+                    Deformable, fixed, moving, fixed_mask, moving_mask, deformable_masked, affine_matrix, device
                 )
-                for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
-                    if deformable_masked:
-                        features = torch.cat([features, image.array[:, -1:]], dim=1)
-                    image.array = features
-                    image.channels = features.shape[1]
-                del extractor
-                gc.collect()
-                bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
-                # The channels ARE the features now, so a local cross-correlation compares them
-                # (``cc_kernel`` sets its window): "impact" names where the channels came from, not a
-                # metric FireANTs knows. With ``feature_chunk`` the correlation runs a few channels at a
-                # time, which is what lets two feature models share one card.
-                metric = self._feature_metric
-                if self._feature_chunk > 0 and metric == "cc":
-                    loss_type = "custom"
-                    custom_loss = _FeatureCC(self._cc_kernel, self._feature_chunk, masked=deformable_masked)
-                else:
-                    loss_type = f"masked_{metric}" if deformable_masked else metric
             else:
-                if masked and not deformable_masked:
-                    # Fresh images: the masked ones carry the mask as a channel, and concatenate may have
-                    # reused their storage.
-                    bf = BatchedImages([Image(fixed, device=device)])
-                    bm = BatchedImages([Image(moving, device=device)])
-                if self._deformable_metric == "impact":
+                custom_loss: ImpactFeatureLoss | None = None
+                if self._deformable_metric == "impact" and self._mode == "Static":
+                    # Static: extract once from the images' intensity channel, then register the feature volumes,
+                    # with the mask channel concatenated back so ``masked_`` still means what it says. The loss then
+                    # compares the volumes layer by layer, as Jacobian mode compares the networks' outputs.
+                    custom_loss = self._impact_loss()
+                    fixed_img, moving_img = images("impact", deformable_masked)
+                    volumes = custom_loss.extract(
+                        fixed_img.array[:, :1],
+                        moving_img.array[:, :1],
+                        self._feature_patch,
+                        self._feature_overlap,
+                        tuple(_extent(image) for image in (fixed, moving)),
+                    )
+                    for image, features in ((fixed_img, volumes[0]), (moving_img, volumes[1])):
+                        if deformable_masked:
+                            features = torch.cat([features, image.array[:, -1:]], dim=1)
+                        image.array = features
+                        image.channels = features.shape[1]
+                    del volumes, features  # the unmasked volumes, a copy each once the mask channel was appended
+                    custom_loss.release()
+                    custom_loss._masked = deformable_masked  # this registration's masks, not the last one's
+                    bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
                     loss_type = "custom"
-                    custom_loss = ImpactFeatureLoss(self._impact_specs, masked=deformable_masked)
                 else:
-                    loss_type = f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
-            reg = Deformable(
-                scales=self._scales,
-                iterations=self._deformable_iterations,
-                fixed_images=bf,
-                moving_images=bm,
-                loss_type=loss_type,
-                custom_loss=custom_loss,
-                cc_kernel_size=self._cc_kernel,
-                deformation_type="compositive",
-                integrator_n=self._integrator_n,
-                smooth_warp_sigma=self._smooth_warp_sigma,
-                smooth_grad_sigma=self._smooth_grad_sigma,
-                optimizer="Adam",
-                optimizer_lr=self._deformable_lr,
-                init_affine=affine_matrix,
-            )
-            transform = self._total_field_transform(reg)
+                    # Its own images: the metric may want other intensities than the linear stage's, and the masks
+                    # may be the linear stage's alone.
+                    fixed_img, moving_img = images(self._deformable_metric, deformable_masked)
+                    bf, bm = BatchedImages([fixed_img]), BatchedImages([moving_img])
+                    if self._deformable_metric == "impact":
+                        loss_type = "custom"
+                        feature_loss = self._impact_loss()
+                        feature_loss._masked = deformable_masked  # this registration's masks, not the last one's
+                        custom_loss = feature_loss
+                    else:
+                        loss_type = (
+                            f"masked_{self._deformable_metric}" if deformable_masked else self._deformable_metric
+                        )
+                restarts = 0
+
+                def run() -> sitk.Image:
+                    if custom_loss is not None:
+                        custom_loss.reset()  # the stage starts from its first scale, a restart included
+                    reg = Deformable(
+                        scales=self._scales,
+                        iterations=self._deformable_iterations,
+                        fixed_images=bf,
+                        moving_images=bm,
+                        loss_type=loss_type,
+                        custom_loss=custom_loss,
+                        cc_kernel_size=self._cc_kernel,
+                        deformation_type="compositive",
+                        smooth_warp_sigma=self._smooth_warp_sigma,
+                        smooth_grad_sigma=self._smooth_grad_sigma,
+                        optimizer="Adam",
+                        optimizer_lr=self._deformable_lr,
+                        init_affine=affine_matrix,
+                    )
+                    return self._total_field(reg)
+
+                def narrow() -> bool:
+                    # Our losses retry a forward that runs out of memory; the backward runs in FireANTs' own loop, out
+                    # of their reach. The stage starts over with smaller pieces rather than leaving konfai to cut the
+                    # registration into patches, each with its own linear stages. Twice at most: an out of memory the
+                    # loss does not cause (SyN's inversion, the warp) would otherwise rerun the whole stage until the
+                    # loss's pieces are 16 voxels.
+                    nonlocal restarts
+                    if custom_loss is None or restarts == 2 or not custom_loss.narrow():
+                        return False
+                    restarts += 1
+                    print("[FireANTs] out of memory in the deformable stage: starting it over in smaller pieces.")
+                    return True
+
+                field = halve_on_oom(run, narrow, device != "cpu")
+            if fixed is not grid:
+                # FireANTs registered a reordered copy (the IMPACT metric): the field is sampled back on the
+                # fixed image as it came. Otherwise it is already on it, and taken as it is, in float32.
+                field = self._field_on(sitk.DisplacementFieldTransform(sitk.Cast(field, sitk.sitkVectorFloat64)), grid)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-
-        # The DVF is rebuilt from the single transform on the fixed grid: the ConvexAdam output path,
-        # so every FireANTs preset emits identical-shaped results.
-        dvf = sitk.TransformToDisplacementField(
-            transform,
-            sitk.sitkVectorFloat64,
-            fixed.GetSize(),
-            fixed.GetOrigin(),
-            fixed.GetSpacing(),
-            fixed.GetDirection(),
-        )
-        dvf_np, _ = image_to_data(dvf)
+        dvf_np, _ = image_to_data(field)
         return dvf_np
-
-
-class FireANTsRegistration(torch.nn.Module):
-    """Graph module: (fixed, moving) tensors + their geometry -> moved image + DVF on the fixed grid.
-
-    ``accepts_attributes = True`` opts this module into receiving the per-branch ``Attribute`` list
-    alongside the tensors (same convention as the ConvexAdam / elastix engines); registration needs the
-    physical geometry, and the mask branches restrict the metric.
-    """
-
-    accepts_attributes = True
-
-    def __init__(self, engine: FireANTsEngine) -> None:
-        super().__init__()
-        self._engine = engine
-
-    def forward(
-        self,
-        fixed: torch.Tensor,
-        moving: torch.Tensor,
-        fixed_mask: torch.Tensor,
-        moving_mask: torch.Tensor,
-        attributes: list[list[Attribute]],
-    ) -> torch.Tensor:
-        # attributes = [fixed, moving, fixed_mask, moving_mask] branch attrs; each a list[Attribute] over
-        # the batch. Returns, per sample, the moved image (1 channel) channel-stacked with the
-        # displacement field (DIM channels); downstream ChannelSelect modules split them. A whole-image
-        # mask (the default when none is supplied) restricts nothing.
-        fixed_attrs, moving_attrs, fmask_attrs, mmask_attrs = attributes
-        device_index = fixed.device.index if fixed.device.type == "cuda" else -1
-        combined = []
-        # FireANTs runs a gradient-based instance optimisation (Riemannian Adam over the warp); the
-        # predictor calls forward under torch.inference_mode(), which forbids autograd. The image tensors
-        # have already crossed to numpy/SimpleITK here, so re-enable grad for the optimisation.
-        with torch.inference_mode(False), torch.enable_grad():
-            for b in range(fixed.shape[0]):
-                fixed_img = data_to_image(fixed[b].detach().cpu().numpy(), fixed_attrs[b])
-                moving_img = data_to_image(moving[b].detach().cpu().numpy(), moving_attrs[b])
-                fixed_mask_img = data_to_image(fixed_mask[b].detach().cpu().numpy(), fmask_attrs[b])
-                moving_mask_img = data_to_image(moving_mask[b].detach().cpu().numpy(), mmask_attrs[b])
-                try:
-                    dvf_np = self._engine.register(fixed_img, moving_img, device_index, fixed_mask_img, moving_mask_img)
-                finally:
-                    # FireANTs' registration objects keep their CUDA tensors in reference cycles that only the cyclic
-                    # collector frees; it runs on Python allocation counts, not device memory, so without a collection
-                    # per call several tiles' worth of fields stay allocated and a tiled run runs out of the card. A
-                    # failed call collects too: an OOM restart retries with a smaller patch on the same card.
-                    gc.collect()
-                combined.append(torch.from_numpy(dvf_np))
-        return torch.stack(combined, dim=0).to(fixed.device)
-
-
-class ChannelSelect(torch.nn.Module):
-    """Select a channel slice ``[start:stop]`` (splits the registration output into moved / DVF)."""
-
-    def __init__(self, start: int, stop: int) -> None:
-        super().__init__()
-        self._start = start
-        self._stop = stop
-
-    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor[:, self._start : self._stop]
 
 
 class RegistrationNet(network.Network):
@@ -1095,6 +1197,9 @@ class RegistrationNet(network.Network):
     UI: ``Annotated[.., Range]`` gives numeric spin bounds; ``Literal`` a dropdown. ``deformable_method``
     is the knob that specialises this shared model into each FireANTs preset.
     """
+
+    #: Its output is a displacement field in world units: KonfAI blends it in float32, not float16.
+    full_precision_outputs = True
 
     def __init__(
         self,
@@ -1109,25 +1214,29 @@ class RegistrationNet(network.Network):
             "affine/deformable iteration lists are indexed by these levels.",
         ] = [4, 2, 1],
         affine_iterations: Annotated[
-            list[int], "Affine-stage iterations per pyramid level (one entry per 'scales' level)."
+            list[int],
+            "Iterations per pyramid level (one entry per 'scales' level) of the rigid stage, and again of the "
+            "affine stage.",
         ] = [200, 100, 50],
         deformable_iterations: Annotated[
             list[int], "Deformable-stage iterations per pyramid level (one entry per 'scales' level)."
         ] = [200, 100, 50],
         cc_kernel: Annotated[
             int,
-            Range(1, 21),
-            "Radius (voxels) of the local cross-correlation window when a 'cc' metric is used; larger = more "
+            Choices(list(range(1, 22, 2))),
+            "Side (voxels, odd) of the local cross-correlation window when a 'cc' metric is used; larger = more "
             "spatial context, slower.",
         ] = 5,
         affine_metric: Annotated[
-            Literal["mi", "cc", "mse"], "Similarity metric optimised during the affine (global) stage."
+            Literal["mi", "cc", "mse"], "Similarity metric optimised by the rigid and affine (global) stages."
         ] = "mi",
         affine_lr: Annotated[
             float,
             Range(0.0, 10.0),
-            "Gradient step size of the affine optimisation; higher converges faster but risks overshoot.",
-        ] = 0.003,
+            "Adam's step per iteration in the rigid and affine stages: millimetres for the translation (the image's "
+            "physical unit), unitless for the rotation and the matrix. Each stage moves the translation at most about "
+            "affine_lr x sum(affine_iterations): 10 mm at 0.03 over 350 iterations, 1 mm at 0.003.",
+        ] = 0.03,
         moments_init: Annotated[
             Literal["cof", "com", "none"],
             "Initial translation seeding the rigid stage, mirroring ANTs' -r [fixed,moving,N]: 'cof' = centre "
@@ -1155,12 +1264,6 @@ class RegistrationNet(network.Network):
             "Similarity metric for the deformable stage; 'impact' uses the IMPACT feature models under 'models'.",
         ] = "cc",
         deformable_lr: Annotated[float, Range(0.0, 10.0), "Gradient step size of the deformable optimisation."] = 0.25,
-        integrator_n: Annotated[
-            int,
-            Range(1, 100),
-            "Velocity-field integration steps for the diffeomorphic (SyN) update; higher = more accurate "
-            "integration and invertibility, slower.",
-        ] = 10,
         smooth_warp_sigma: Annotated[
             float,
             Range(0.0, 100.0),
@@ -1173,28 +1276,27 @@ class RegistrationNet(network.Network):
             "Gaussian sigma (voxels) smoothing the update gradient each step; higher = more stable but slower "
             "convergence.",
         ] = 1.0,
-        seed: Annotated[int, "Random seed for the optimisation, for reproducible runs."] = 42,
-        mode: Annotated[
-            Literal["Static", "Jacobian"],
-            "How the IMPACT deformable metric reads its features, as the elastix engine means it. 'Jacobian' "
-            "extracts them inside the loss at every optimiser step, so the warp is differentiated through the "
-            "network. 'Static' extracts them once per image and registers the feature volumes themselves: far "
-            "less device memory, no network in the optimisation loop, and the only path a whole-image feature "
-            "model can take.",
-        ] = "Jacobian",
+        seed: Annotated[
+            int,
+            "Seed of what the IMPACT loss draws: the channels of subset_features, the voxels of voxel_sampling, a 2D "
+            "network's swept axis (dense Jacobian) or planes (sampled Jacobian). FireANTs' own registrations draw "
+            "nothing at random.",
+        ] = 42,
+        mode: Mode = "Static",
         feature_patch: Annotated[
             int,
             "Static only: the cube of voxels each feature extraction pass sees, 0 for the whole image "
             "at once. Tiles share the 'feature_overlap' share of their width and are blended by a cosine "
-            "window, so a volume "
-            "larger than the card still goes through.",
+            "window, so a volume larger than the card still goes through; a pass that runs out of memory is "
+            "retried in tiles half as wide (256 voxels after a whole image).",
             Range(0, 1024),
         ] = 0,
         feature_chunk: Annotated[
             int,
-            "Static only: how many feature channels the local cross-correlation compares at a time, 0 "
+            "Static only: how many channels of a layer the LNCC distance compares at a time, 0 "
             "for all of them at once. A smaller chunk trades a little time for a peak that follows the chunk "
-            "instead of the channel count, which is what lets several feature models share one card.",
+            "instead of the channel count, which is what lets several feature models share one card; a pass "
+            "that runs out of memory is retried with half as many channels.",
             Range(0, 64),
         ] = 0,
         feature_overlap: Annotated[
@@ -1204,26 +1306,6 @@ class RegistrationNet(network.Network):
             "through in one pass.",
             Range(0.0, 0.9),
         ] = 0.25,
-        feature_multiple: Annotated[
-            int,
-            "Static only: the voxel multiple every feature model needs its input rounded up to, 0 or 1 for "
-            "none. An encoder-decoder that halves its input a few times only accepts a size its skip "
-            "connections divide: anatomix wants a multiple of 16, while the TotalSegmentator models and MIND "
-            "take any size. Set the largest of the models in use; the padding never reaches the result.",
-            Range(0, 64),
-        ] = 0,
-        feature_normalization: Annotated[
-            Literal["l2", "standardized", "none"],
-            "Static only: how each voxel's feature vector is scaled before the two volumes are compared. "
-            "'l2' gives every voxel a unit vector, so only the direction counts; 'standardized' centres and "
-            "scales it; 'none' compares the raw activations, where a few loud channels dominate.",
-        ] = "l2",
-        feature_metric: Annotated[
-            Literal["cc", "mi", "mse"],
-            "Static only: what compares the feature volumes once they are extracted. 'cc' is a local "
-            "cross-correlation over a cube of 'cc_kernel' voxels, and the only one 'feature_chunk' can "
-            "split by channel.",
-        ] = "cc",
         deformable_masked: Annotated[
             bool,
             "Restrict the deformable metric to the masks as well. False keeps them for the centre of mass, rigid "
@@ -1231,6 +1313,16 @@ class RegistrationNet(network.Network):
             "cannot pull into place an end it does not see.",
         ] = True,
         models: dict[str, ModelSpec] = {},
+        levels: Annotated[
+            dict[str, LevelSpec],
+            "The IMPACT models of each 'scales' level ('0', '1', ...), in place of 'models' there; empty = 'models' "
+            "at every level.",
+        ] = {},
+        normalize: Normalize = True,
+        feature_map_update_interval: FeatureMapUpdateInterval = -1,
+        lncc_kernel: LNCCKernel = 5,
+        mixed_precision: MixedPrecision = False,
+        voxel_sampling: VoxelSampling = 1.0,
     ) -> None:
         """Build the graph a FireANTs preset runs: registration, then the moved image and the field.
 
@@ -1246,7 +1338,8 @@ class RegistrationNet(network.Network):
         # Fail at build time: with no feature model the IMPACT loss would surface as a None-loss crash
         # deep in the deformable stage, minutes after the rigid/affine stages already ran. With
         # deformable_method 'none' the metric is never consumed, so a stale 'impact' stays harmless.
-        if deformable_method != "none" and deformable_metric == "impact" and not models:
+        impact = deformable_method != "none" and deformable_metric == "impact"
+        if impact and not models and not levels:
             raise ValueError("deformable_metric='impact' requires at least one feature model under 'models'.")
         engine = FireANTsEngine(
             scales,
@@ -1260,21 +1353,21 @@ class RegistrationNet(network.Network):
             deformable_method,
             deformable_metric,
             deformable_lr,
-            integrator_n,
             smooth_warp_sigma,
             smooth_grad_sigma,
             seed,
-            _sorted_specs(models),
+            level_models(models, levels, len(scales), "FireANTs") if impact else [],
             mode,
             feature_patch,
             feature_chunk,
             feature_overlap,
-            feature_multiple,
-            feature_normalization,
-            feature_metric,
             deformable_masked,
+            normalize,
+            feature_map_update_interval,
+            lncc_kernel,
+            mixed_precision,
+            voxel_sampling,
         )
-        self.add_module(
-            "Registration", FireANTsRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"]
-        )
-        self.add_module("DisplacementField", ChannelSelect(0, 3), in_branch=["registration"], out_branch=["dvf"])
+        self.add_module("Registration", EngineRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"])
+        # The output module the presets name.
+        self.add_module("DisplacementField", torch.nn.Identity(), in_branch=["registration"], out_branch=["dvf"])

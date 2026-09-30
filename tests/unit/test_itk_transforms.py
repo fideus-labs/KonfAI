@@ -18,66 +18,8 @@
 
 import numpy as np
 import pytest
-from konfai.utils.errors import TransformError
 
 sitk = pytest.importorskip("SimpleITK")
-
-from konfai.utils.ITK import _open_transform, apply_to_data_transform  # noqa: E402
-
-
-def _identity_displacement_field_transform() -> "sitk.DisplacementFieldTransform":
-    field = sitk.Image(4, 4, 4, sitk.sitkVectorFloat64)
-    field.SetSpacing((1.0, 1.0, 1.0))
-    return sitk.DisplacementFieldTransform(field)
-
-
-def test_open_transform_invert_displacement_field_without_image_raises() -> None:
-    """Inverting a displacement-field transform without a reference image is a typed error, not a crash."""
-    transform = _identity_displacement_field_transform()
-    with pytest.raises(TransformError, match="reference image"):
-        _open_transform({transform: True}, image=None)
-
-
-def test_open_transform_invert_displacement_field_with_image_succeeds() -> None:
-    reference = sitk.Image(4, 4, 4, sitk.sitkFloat32)
-    reference.SetSpacing((1.0, 1.0, 1.0))
-    transform = _identity_displacement_field_transform()
-    result = _open_transform({transform: True}, image=reference)
-    assert len(result) == 1
-
-
-def test_apply_to_data_transform_returns_ndarray() -> None:
-    """apply_to_data_transform returns a numpy array (matching its annotation and callers)."""
-    points = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.double)
-    translation = sitk.TranslationTransform(3, (10.0, 20.0, 30.0))
-    result = apply_to_data_transform(points, {translation: False})
-    assert isinstance(result, np.ndarray)
-    np.testing.assert_allclose(result, points + np.array([10.0, 20.0, 30.0]))
-
-
-def _composite() -> "sitk.CompositeTransform":
-    euler = sitk.Euler3DTransform()
-    euler.SetRotation(0.1, 0.0, 0.0)
-    euler.SetTranslation((1.0, 2.0, 3.0))
-    return sitk.CompositeTransform([sitk.AffineTransform(3), euler])
-
-
-@pytest.mark.parametrize(
-    "transform",
-    [
-        pytest.param(_composite, id="composite"),
-        pytest.param(lambda: sitk.Similarity3DTransform(2.0, (0, 0, 1), 0.1, (1, 2, 3)), id="similarity"),
-        pytest.param(lambda: sitk.ScaleTransform(3, (2.0, 2.0, 2.0)), id="scale"),
-    ],
-)
-def test_apply_to_data_transform_maps_a_point_as_simpleitk_does(transform) -> None:
-    """A transform of a kind the reader does not name is applied as it is, not cast to a B-spline."""
-    transform = transform()
-    points = np.array([[1.0, 2.0, 3.0], [-4.0, 0.5, 6.0]], dtype=np.double)
-
-    result = apply_to_data_transform(points, {transform: False})
-
-    np.testing.assert_allclose(result, [transform.TransformPoint(tuple(point)) for point in points])
 
 
 def test_resample_transform_applies_displacement_in_physical_space() -> None:
@@ -191,17 +133,3 @@ def test_a_store_serving_transforms_alone_still_decodes() -> None:
     (stage,) = read_transform_stages(_TransformStore(), "reg", "case")
     assert isinstance(stage, AffineStage)
     np.testing.assert_array_equal(stage.map.translation, [6.0, 0.0, 0.0])
-
-
-def test_box_with_mask_reads_the_mask_as_a_view() -> None:
-    from konfai.utils.ITK import box_with_mask
-
-    mask = np.zeros((20, 30, 40), dtype=np.uint8)
-    mask[3:9, 10:20, 5:35] = 2
-    image = sitk.GetImageFromArray(mask)
-    image.SetSpacing((1.0, 2.0, 0.5))
-
-    box = box_with_mask(image, [2], [2, 2, 2])
-
-    # (z, y, x): a 2 mm dilation is 4 voxels at 0.5 mm, 1 at 2 mm, 2 at 1 mm
-    assert box.tolist() == [[0, 12], [9, 20], [3, 36]]

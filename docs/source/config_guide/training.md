@@ -167,6 +167,8 @@ An output can carry several criteria: `examples/Segmentation` puts a cross entro
 | `overlap` | `null` | Overlap between patches: voxels, a fraction, `"20%"`, or one per axis. `null`: 20%. |
 | `pad_value` | `null` | Padding past the volume. `null`: the data's minimum. |
 | `extend_slice` | `0` | 2.5-D: neighbouring slices added as channels (with `patch_size[0] == 1`). |
+| `max_voxels` | `null` | The voxels a patch (`tile`) or a case's coarse grid (`resample`) holds. `null`: sized from the two costs below. |
+| `vram_bytes_per_voxel`, `ram_bytes_per_voxel` | `null` | What a voxel costs the pass on the GPU and in RAM. With `max_voxels` unset, KonfAI holds the tighter of the free GPU memory and the rank's RAM budget. |
 
 With a `0` in `patch_size`, KonfAI starts from the whole axis and, on a GPU out-of-memory at the first step,
 restarts with the fewest equal patches that fit. A size without `0` is never changed.

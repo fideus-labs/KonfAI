@@ -1463,3 +1463,30 @@ def test_tensorboard_binds_loopback_unless_an_address_is_asked_for(
         pass
     assert commands == [["/opt/bin/tensorboard", "--logdir", str(tmp_path / "RUN"), "--port", "6123", "--host", bound]]
     assert capsys.readouterr().out == f"[KonfAI] Tensorboard : http://{shown}:6123/\n"
+
+
+def test_a_temporary_directory_too_long_for_a_socket_is_reached_through_a_short_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A socket path past the AF_UNIX limit made torch's shared-memory manager fail and the DataLoader hang: the run
+    sees a short TMPDIR, and what it writes there lands in the long one. The link was removed as the run ended, under
+    the temporary directory multiprocessing still had to remove: a FileNotFoundError at exit."""
+    import socket
+    import tempfile
+
+    from konfai.utils.runtime.distributed import SOCKET_TMPDIR_MAX, short_socket_tmpdir
+
+    long_dir = tmp_path / ("d" * 100)
+    long_dir.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_dir))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    with short_socket_tmpdir():
+        short = os.environ["TMPDIR"]
+        assert len(short) <= SOCKET_TMPDIR_MAX and tempfile.gettempdir() == short
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(os.path.join(tempfile.mkdtemp(prefix="pymp-"), "listener-12345678"))
+        assert any(long_dir.iterdir())
+    # The link outlives the run: multiprocessing names its temporary directory through it for the whole process.
+    assert os.environ["TMPDIR"] == str(long_dir) and os.path.exists(short)
+    with short_socket_tmpdir():
+        assert os.environ["TMPDIR"] == short
