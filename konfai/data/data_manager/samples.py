@@ -235,6 +235,7 @@ class DatasetIter(data.Dataset):
         self._index_cache: list[int] = []
         self._statistics_warmed = False
         self._index_cache_lookup: set[int] = set()
+        self._fits_whole: dict[int, bool] = {}
         self.inline_augmentations = inline_augmentations
         self.has_augmented_samples = self.apply_augmentations and any(a > 0 for _, a, _ in mapping)
         self.read_order = PatchReadOrder(mapping, batch_size)
@@ -391,7 +392,7 @@ class DatasetIter(data.Dataset):
 
     def load_data(self, group_src: str, group_dest: str, index: int, augmentation_index: int | None = None) -> bool:
         item = self.data[group_dest][index]
-        if augmentation_index is not None and item.can_stream_patch(augmentation_index, self.apply_augmentations):
+        if augmentation_index is not None and not self._loads_whole(group_dest, index, augmentation_index):
             return False
         try:
             item.load(
@@ -411,6 +412,32 @@ class DatasetIter(data.Dataset):
                 f"{type(e).__name__}: {e}"
             ) from e
         return True
+
+    def _loads_whole(self, group_dest: str, index: int, a: int) -> bool:
+        """Whether copy ``a`` of the case is loaded whole rather than read patch by patch: its chain cannot
+        serve a region, or a one-pass reader with TTA copies holds its whole-volume pass within the budget.
+        Loaded, the chain runs once for every copy, where a sweep replays it for each; without copies the
+        sweep hides behind the forward and loading would only cost memory."""
+        if not self.data[group_dest][index].can_stream_patch(a, self.apply_augmentations):
+            return True
+        if index not in self._fits_whole:
+            budget = per_rank_budget_bytes()
+            self._fits_whole[index] = (
+                self.single_pass
+                and self.has_augmented_samples
+                and budget is not None
+                and self.buffer_size * self._whole_case_bytes(index) <= budget
+            )
+        return self._fits_whole[index]
+
+    def _whole_case_bytes(self, index: int) -> float:
+        """What a loaded case holds at its peak: each group's whole-volume pass, and every TTA copy it keeps."""
+        copies = sum(augmentations.nb for augmentations in self.data_augmentations_list)
+        total = 0.0
+        for _group_src, group_dest, _chain in _chains(self.groups_src):
+            engine = CaseMaterializer(self.data[group_dest][index])
+            total += engine.fallback_working_set_bytes() + copies * engine.peak_case_bytes()
+        return total
 
     def _unload_data(self, index: int) -> None:
         if index in self._index_cache_lookup:
@@ -537,12 +564,11 @@ class DatasetIter(data.Dataset):
     def _sample(self, index: int, x: int, a: int, p: int) -> Sample:
         sample: Sample = {}
         needs_full_load = any(
-            not self.data[group_dest][x].can_stream_patch(a, self.apply_augmentations)
-            for _group_src, group_dest, _chain in _chains(self.groups_src)
+            self._loads_whole(group_dest, x, a) for _group_src, group_dest, _chain in _chains(self.groups_src)
         )
         if needs_full_load and not _said_why_a_case_is_materialized:
             self._say_why_a_case_is_materialized(x, a)
-        elif not needs_full_load and not _said_what_streaming_reads:
+        elif not needs_full_load and not self.single_pass and not _said_what_streaming_reads:
             self._say_what_streaming_reads(x, a)
         if x not in self._index_cache_lookup and needs_full_load:
             if len(self._index_cache) >= self.buffer_size and not self.use_cache:
