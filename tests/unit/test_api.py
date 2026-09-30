@@ -34,6 +34,7 @@ from konfai.data.augmentation import Flip  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
 from konfai.data.transform import Clip, Crop, Expand, Magnitude, Resample, Save, Write  # noqa: E402
 from konfai.metric.measure import MAE, Dice  # noqa: E402
+from konfai.predictor import OutputDataset  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
 # --------------------------------------------------------------------------- recording and trees
@@ -1069,6 +1070,51 @@ def _wrapped_model_training(tmp_path: Path, model: dict) -> dict:
         "validation": 0.5,
     }
     return {"Trainer": {"train_name": "WRAPPED", "manual_seed": 1, "epochs": 1, "Model": model, "Dataset": dataset}}
+
+
+@pytest.mark.parametrize(("patch", "overlap"), [([16, 16, 16], None), ([8, 8, 8], 0)], ids=["whole", "patches"])
+def test_a_layer_at_half_resolution_is_written_on_its_own_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch: list[int], overlap: int | None
+) -> None:
+    """OutputLayerDataset writes an output tied to no input group: a stride-2 layer comes out on a grid half the
+    size, its first voxel on the input's first. A layer that does not fit the memory budget is refused."""
+    monkeypatch.chdir(tmp_path)
+    image = sitk.GetImageFromArray(np.random.default_rng(0).random((16, 16, 16), dtype=np.float32))
+    image.SetSpacing((1.0, 1.0, 2.0))
+    image.SetOrigin((5.0, 5.0, 5.0))
+    (tmp_path / "Dataset" / "CASE_0").mkdir(parents=True)
+    sitk.WriteImage(image, str(tmp_path / "Dataset" / "CASE_0" / "CT.mha"))
+    copy_config = api._config_copy
+
+    def as_layer(tree: dict) -> Path:
+        output = tree["Predictor"]["outputs_dataset"]["Model"]["OutputDataset"]
+        output["name_class"] = "OutputLayerDataset"
+        del output["same_as_group"]
+        return copy_config(tree)
+
+    monkeypatch.setattr(api, "_config_copy", as_layer)
+    torch.manual_seed(0)
+    model = torch.nn.Conv3d(1, 4, 3, stride=2, padding=1)
+
+    api.predict_model(
+        model, "./Dataset:mha", inputs="CT", patch=patch, overlap=overlap, output="./Pred:mha", quiet=True
+    )
+
+    written = sitk.ReadImage(str(next(tmp_path.glob("**/Pred/CASE_0/PRED.mha"))))
+    assert written.GetSize() == (8, 8, 8) and written.GetNumberOfComponentsPerPixel() == 4
+    assert written.GetSpacing() == (2.0, 2.0, 4.0) and written.GetOrigin() == (5.0, 5.0, 5.0)
+    if patch == [16, 16, 16]:
+        with torch.no_grad():
+            expected = model(torch.from_numpy(sitk.GetArrayFromImage(image))[None, None])[0].numpy()
+        # The prediction combines in float16.
+        np.testing.assert_allclose(np.moveaxis(sitk.GetArrayFromImage(written), -1, 0), expected, atol=1e-3)
+
+    # The 8x8x8 grid of four float32 channels, with its weight, is 10 kB; one of its patches is 1.3 kB.
+    monkeypatch.setattr(OutputDataset, "_budget_bytes", lambda self: 5000.0)
+    with pytest.raises(KonfAIError, match="memory budget"):
+        api.predict_model(
+            model, "./Dataset:mha", inputs="CT", patch=patch, overlap=overlap, output="./Big:mha", quiet=True
+        )
 
 
 def test_the_adoption_page_s_monai_model_block_trains_one_epoch(

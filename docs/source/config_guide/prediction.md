@@ -147,6 +147,26 @@ The key is the model output to save ({doc}`../reference/components/models`).
 | `attributes` | Header values to set, as `key=value` (`key=` removes one). |
 | `patch_combine` | How overlapping patches are blended: `Trim` (default), `Mean`, `Cosinus`, `Gaussian`. Label maps take only `Trim`. |
 
+### Writing a layer as it is
+
+`OutputDataset` writes an output on the grid of an input group (`same_as_group`) and undoes that group's
+transforms. To write an output that lives on a grid of its own, such as an intermediate layer or features
+at a lower resolution, use `OutputLayerDataset`:
+
+```yaml
+outputs_dataset:
+  UNetBlock_0:UNetBlock_1:DownConvBlock:Activation_1:   # features after the first pooling, half size
+    OutputDataset:
+      name_class: OutputLayerDataset
+      group: Features
+```
+
+It takes the same keys except `same_as_group`. The layer is written as it comes out, with the case's origin
+and its spacing scaled to the layer's size: a layer half the input's size gets twice the spacing, its first
+voxel on the input's first, as a strided convolution places it (a pooling layer is half a voxel off). No input
+transform is undone. With several patches, their positions must scale to whole voxels. The layer is assembled
+whole: one over `memory_budget` is refused.
+
 The output is written slab by slab as patches complete, so a large output never sits whole in memory.
 There is no key for it: it happens whenever the output allows it ({doc}`../usage/large-images`).
 
