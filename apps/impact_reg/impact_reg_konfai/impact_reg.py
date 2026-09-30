@@ -794,8 +794,9 @@ class ImpactRegKonfAIApp:
         # The --set overrides each preset run took, by its workspace (``label``): ``applied`` in register.json.
         self._applied: dict[str, list[str]] = {}
         # Per preset, the voxels it registers whole and those a tile holds, KonfAI's ``max_voxels``: ``plans`` in
-        # register.json. KonfAI's own re-plans after an out-of-memory are in the preset's log.
+        # register.json. What each run finished on, after any out-of-memory re-plan: KonfAI's Plan.json, ``ran``.
         self._plans: dict[str, dict[str, int | None]] = {}
+        self._ran: dict[str, dict] = {}
 
     # ------------------------------------------------------------------ register
 
@@ -898,6 +899,8 @@ class ImpactRegKonfAIApp:
         # be computed from it: the moved image above all: is this layer's job. Looking for a Moved
         # here would make every preset carry an output it does not owe, and a tiled one blend it across
         # every patch seam for a caller that has the field.
+        if plan := next((out / "predictions").glob("*/Plan.json"), None):
+            self._ran[label or preset] = json.loads(plan.read_text(encoding="utf-8"))
         group = _find_output_group(out / "predictions")
         return group, _find_outputs(out / "predictions", group)
 
@@ -963,7 +966,7 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
-        self._applied, self._plans = {}, {}
+        self._applied, self._plans, self._ran = {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
         try:
@@ -1096,6 +1099,7 @@ class ImpactRegKonfAIApp:
             # What each preset run took of them: a tile pass keeps the stages its config sets (see _preset_overrides).
             "applied": self._applied,
             "plans": self._plans,
+            "ran": self._ran,
             "tta": tta,
             "device": f"cuda:{','.join(map(str, gpu))}" if gpu else f"cpu ({cpu or 1} worker(s))",
             "versions": {package: _version(package) for package in ("impact-reg-konfai", "konfai", "konfai-apps")},

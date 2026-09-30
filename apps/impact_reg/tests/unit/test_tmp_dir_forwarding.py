@@ -23,6 +23,7 @@ the traffic the option was added to move. These tests pin the forwarding for eac
 a new one cannot be added without it.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -47,12 +48,15 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     output group is discovered, and a second directory of directories there is a second group.
     """
     captured: list[list[str]] = []
+    plan = {"mode": "resample", "resample_voxels": 500, "patch_size": None, "batch": 1, "out_of_memory_restarts": 1}
 
     def fake_run(command, **kwargs):
         captured.append(list(command))
         # Stand in for the preset run: konfai-apps leaves one dataset per output group under -o,
         # laid out <run>/<group>/<case>: the shape _find_output_group discovers the group from.
         write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
+        # with the plan KonfAI finished on, here after one out-of-memory re-plan
+        (Path(command[command.index("-o") + 1]) / "reg" / "Plan.json").write_text(json.dumps(plan))
         # and the bundle's files in its workspace, a folder of assets included
         (Path(_tmp_dir_value(command)) / "assets" / "models").mkdir(parents=True)
         return None
@@ -69,6 +73,7 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     assert len(captured) == 1
     assert work / "FireANTs_SyN" in Path(_tmp_dir_value(captured[0])).parents
     assert group == "DVF" and list(fields) == ["P000"]
+    assert app._ran == {"FireANTs_SyN": plan}  # what register.json records as ``ran``
 
 
 def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_preset_output) -> None:

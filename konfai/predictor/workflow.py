@@ -18,6 +18,7 @@
 """The configured prediction workflow and its Python entrypoints."""
 
 import itertools
+import json
 import math
 import os
 import shutil
@@ -362,6 +363,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             dataloader = self._rank_dataloader(world_size, global_rank)
         measure_batch_on = device if self.dataset.measures_batch else None
         batch_cap: int | None = None
+        restarts = 0
         while True:
             predictor = _Predictor(
                 world_size,
@@ -379,8 +381,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             try:
                 with predictor:
                     predictor.run()
+                self._record_plan(global_rank, predictor.batch, restarts)
                 return
             except torch.cuda.OutOfMemoryError:
+                restarts += 1
                 # The restart loop IS the sizing iteration: the run that just OOMed already measured the
                 # step's transient. Read it BEFORE the reset, free the in-flight state (open streamed sinks
                 # abort and remove their partial entries), then read the honest free VRAM.
@@ -418,6 +422,20 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 )
                 self._adopt_patch_candidate(candidate)
                 dataloader = self._rank_dataloader(world_size, global_rank)
+
+    def _record_plan(self, rank: int, batch: int, restarts: int) -> None:
+        """``Plan.json`` beside ``Prediction.yml`` (``Plan_<rank>.json`` past rank 0): the plan this rank finished on,
+        which an out-of-memory restart may have coarsened, cut smaller or given a smaller batch."""
+        patch = self.dataset.patch
+        plan = {
+            "mode": patch.mode if patch is not None else None,
+            "resample_voxels": self._resample_voxels,
+            "patch_size": list(self._vram_patch_candidate) if self._vram_patch_candidate is not None else None,
+            "batch": batch,
+            "out_of_memory_restarts": restarts,
+        }
+        name = "Plan.json" if rank == 0 else f"Plan_{rank}.json"
+        (self.predict_path / name).write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
 
     def _rank_dataloader(self, world_size: int, global_rank: int) -> DataLoader:
         """This rank's loader over the re-planned grids, the already-written cases dropped again
