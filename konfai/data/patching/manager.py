@@ -846,7 +846,8 @@ class DatasetManager:
                 else None
             )
             out = self._stage_out_shape(stage, shape, Attribute(evolved))
-            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull)
+            folds_ahead = run_pull is None or not getattr(stage, "measures_from_data", True)
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull, folds_ahead)
         stage.write_stream_cache_attribute(evolved, list(shape), self.name)
         return plan
 
@@ -1377,7 +1378,7 @@ class DatasetManager:
         # Reading ahead means the reading thread must touch no stage of the chain, so the pull maps
         # are folded on this thread, a few regions ahead of the reader. A stage that sizes its window
         # from the data it reads (a displacement field) cannot be folded ahead.
-        folds_ahead = not any(plan.run_pull is not None for plan in source.stage_plans)
+        folds_ahead = all(plan.folds_ahead for plan in source.stage_plans)
         ahead = depth if folds_ahead else 0
         sweeps = {member.key: member.sweep for member in members}
         headers: dict[Any, Attribute] = {}

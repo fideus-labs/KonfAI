@@ -340,6 +340,10 @@ transforms:
 Inverting a BSpline or a displacement field needs the whole volume: store the inverse to keep the case
 streamed.
 
+A streamed case reads, for each region, the part of the image the region's faces map to. A registration
+result that does not fold is read exactly; one that folds can reach past its faces, and those voxels come out
+wrong.
+
 **Label maps.** Without `interpolation`, `uint8`, `int64` and `bool` volumes take the nearest voxel and the
 rest are interpolated. A label map stored in another type must say `interpolation: nearest`, or labels are
 blended into values that are no label.

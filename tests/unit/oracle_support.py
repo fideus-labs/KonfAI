@@ -186,9 +186,6 @@ def _rotation(rank: int, angles: tuple[float, ...]) -> np.ndarray:
 #: sampler and never the boundary, which is the half that differs between the two paths. The field
 #: is COARSER than either, which is how one is actually solved: it is in world units, so it is read
 #: where it is asked rather than resampled to match anything first.
-#: World units the coarse field displaces by, reversing sign between adjacent nodes.
-_COARSE_FIELD_BOUND = 9.0
-
 FIXED_GEOMETRY = Geometry(
     extents=(9, 10, 11),
     spacing=(1.5, 1.5, 2.0),
@@ -360,22 +357,20 @@ def _field(geometry: Geometry) -> np.ndarray:
 
 
 def _coarse_field(geometry: Geometry) -> np.ndarray:
-    """A displacement field whose sign REVERSES from one node to the next, at several world units.
+    """A displacement field whose sign REVERSES from one node to the next.
 
-    The steepest thing a lattice can carry: the interpolated displacement swings the full amplitude
-    across one cell, so a region's face cuts through the middle of that swing. A field read over a
-    region's own box bounds every displacement INSIDE it, which is what
-    ``Resample.measured_region_source`` relies on; this asks whether the bound still holds at the
-    faces, where the interpolator blends nodes from outside the box.
+    The steepest thing a lattice can carry without folding: the displacement swings across one cell
+    by a quarter of the cell, so no point overtakes its neighbour. A region's source window is
+    walked along its faces (``Resample.measured_region_source``), which bounds the region only for
+    a map that does not fold; this asks whether it holds where the swing peaks inside a region.
     """
     extents = geometry.coarse_field_extents
+    bound = min(geometry.coarse_field_spacing) / 8.0
     parity = (-1.0) ** sum(
         np.arange(extent).reshape([-1 if axis == index else 1 for axis in range(geometry.rank)])
         for index, extent in enumerate(extents)
     )
-    return np.stack([weight * _COARSE_FIELD_BOUND * parity for weight in (1.0, -0.7, 0.4)[: geometry.rank]]).astype(
-        np.float32
-    )
+    return np.stack([weight * bound * parity for weight in (1.0, -0.7, 0.4)[: geometry.rank]]).astype(np.float32)
 
 
 def manager(
@@ -567,10 +562,8 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
                 Resample(reference=CASE_NAME, reference_group="Reference", field_group="Field"),
                 atol=REGRID_ATOL,
             ),
-            # The same stage against a field that is COARSE and STEEP. A region sizes its source
-            # window from the field values inside its own box, which bounds every displacement the
-            # box contains; at the box's FACES the interpolator blends nodes from outside it, and a
-            # field that reverses sign between adjacent nodes is what makes the two differ.
+            # The same stage against a field that is COARSE and STEEP: a region sizes its source
+            # window by walking its faces, and the swing between nodes peaks inside the region.
             StageCase(
                 Resample(reference=CASE_NAME, reference_group="Reference", field_group="CoarseField"),
                 atol=REGRID_ATOL,

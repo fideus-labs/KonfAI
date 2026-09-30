@@ -44,7 +44,7 @@ from konfai.data.geometry import (
     remap_shape,
     signed_permutation,
 )
-from konfai.data.sampling import _apply, _displacement_at, _to_index, nearest_index, window_index
+from konfai.data.sampling import _apply, _displacement_at, _to_index, nearest_index, walked_window, window_index
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.data.transform.shape import _has_geometry, _record_remap_geometry
 from konfai.utils.dataset import Attribute
@@ -629,6 +629,7 @@ class Elastix(DataAugmentation):
 
     # REGRID rather than HALO keeps the pull exactly the mapped box.
     locality = LocalityKind.REGRID
+    measures_at_run = True
 
     def __init__(self, grid_spacing: int = 16, max_displacement: int = 16) -> None:
         super().__init__()
@@ -685,6 +686,19 @@ class Elastix(DataAugmentation):
             stop = min(extent, part.stop + reach)
             pull.append(slice(start, max(stop, start + 1)))
         return pull
+
+    def _measured_region_source(
+        self,
+        index: int,
+        a: int,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+    ) -> list[slice]:
+        # The draw's lattice walked along the region's faces: a smooth draw does not fold, so they
+        # bound the region (konfai.data.sampling.walked_window).
+        del source_spatial_shape
+        stage, grid = self.draws[index][a]
+        return list(walked_window(grid.sub_grid(tuple(target_slices)), grid, (stage,)))
 
     def _sampling_grid(
         self,

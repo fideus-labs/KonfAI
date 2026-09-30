@@ -249,6 +249,18 @@ class Grid:
         low, high = self._index_box(region_zyx)
         return WorldBox(low, high).image_under(self.index_to_world)
 
+    def centres_box(self) -> WorldBox:
+        """The axis-aligned world hull of the grid's voxel centres, the points a sampler evaluates."""
+        low, high = self._index_box(None)
+        return WorldBox(low + 0.5, high - 0.5).image_under(self.index_to_world)
+
+    def node_window(self, box: WorldBox) -> tuple[slice, ...]:
+        """The nodes linear interpolation reads for the points of ``box``: ``floor(c)`` to
+        ``floor(c) + 1``. A point within a billionth of a node reads that node alone, so a box on this
+        very lattice is its own window."""
+        low, high = self.continuous_box(box)
+        return self.continuous_window(np.floor(low + 1e-9), np.floor(high - 1e-9) + 1, 0)
+
     def continuous_box(self, box: WorldBox) -> tuple[np.ndarray, np.ndarray]:
         """A world box as a continuous-index box ``(low_xyz, high_xyz)`` on this grid."""
         image = box.image_under(self.world_to_index)
@@ -258,7 +270,11 @@ class Grid:
         """The clamped array-order window a world box needs, grown by ``margin`` whole voxels:
         ``floor``/``ceil`` on the continuous-index box plus the margin the interpolation taps reach,
         clamped to a non-empty window exactly as ``Resample._offset_window`` clamps."""
-        low, high = self.continuous_box(box)
+        return self.continuous_window(*self.continuous_box(box), margin)
+
+    def continuous_window(self, low: np.ndarray, high: np.ndarray, margin: int) -> tuple[slice, ...]:
+        """The clamped array-order window a continuous-index box ``(x, y, z)`` needs, as
+        :meth:`index_window` reads one."""
         window: list[slice] = []
         for axis in range(self.rank - 1, -1, -1):
             start = int(np.floor(low[axis])) - margin
@@ -501,7 +517,7 @@ class DisplacementStage:
     One shape for the two non-linear things a stored transform can be: a BSpline is order-3
     coefficients on a coarse control grid, a dense field order-1 samples on its own grid. Both
     kernels are non-negative and sum to one, so ``sup |values|`` per component bounds the
-    displacement at every point, which is what replaces walking a region's boundary.
+    displacement at every point: the bound the plan prices a map with before any region is walked.
 
     ``values`` is ``(rank, Z, Y, X)`` float64, components in physical ``(x, y, z)`` order, world
     units. ITK applies no direction matrix to them. Outside the grid's reach the displacement is zero.
@@ -572,6 +588,13 @@ class DisplacementStage:
         # region past the field's edge still needs its identity-mapped samples.
         low, high = self.range_xyz
         return TransformBound.interval(np.minimum(low, 0.0), np.maximum(high, 0.0))
+
+    def over(self, box: WorldBox) -> DisplacementStage:
+        """This stage on the lattice window ``box`` reaches, every tap included: the same
+        displacement at each point of ``box``, from a copy of that window alone."""
+        window = self.grid.index_window(box, 2)
+        values = np.ascontiguousarray(self.values[(slice(None), *window)])
+        return DisplacementStage(self.grid.sub_grid(window), values, self.order)
 
 
 #: A decoded stored transform: stages in APPLICATION order (first applied first). SimpleITK's

@@ -51,6 +51,8 @@ from konfai.data.sampling import (
     source_index_rows,
     source_window,
     walk_rows,
+    walked_box,
+    walked_window,
 )
 from konfai.data.transform.base import (
     LocalityKind,
@@ -588,10 +590,13 @@ class _DisplacementSource:
             data, _attributes = root.read_data(group, name)
         else:
             data, _attributes = root.read_data_slice(group, name, (slice(None), *region))
-        # The walk's dtype, handed down by the owner. float64 is the bit-exact contract: a .float()
-        # here would quantise a float64-stored field before the exact arithmetic saw it. float32 is
-        # what a `precision: fast` walk takes the values in regardless.
-        field = torch.from_numpy(np.ascontiguousarray(data)).to(torch.float32 if dtype is np.float32 else torch.float64)
+        # ``dtype`` is a CEILING, as for a stored field (konfai.utils.ITK._displacement_stage): a
+        # float32 field stays float32 under float64, which widens nothing and lets the region take
+        # sitk.Warp; a float64 field narrows only under `precision: fast`.
+        data = np.asarray(data)
+        ceiling = np.dtype(dtype)
+        held = data.dtype if data.dtype.kind == "f" and 4 <= data.dtype.itemsize <= ceiling.itemsize else ceiling
+        field = torch.from_numpy(np.ascontiguousarray(data, dtype=held))
         if field.shape[0] != channels:
             raise TransformError(
                 f"The field for case '{name}' has {field.shape[0]} component(s) where the case has"
@@ -599,6 +604,14 @@ class _DisplacementSource:
                 "A displacement field carries one component per spatial axis, component-first.",
             )
         return field
+
+
+def _reached(region: Grid, stages: SpatialStages) -> WorldBox:
+    """Where ``stages`` send ``region``'s voxels: walked along its faces once a displacement is among
+    them (:func:`~konfai.data.sampling.walked_box`), exact through an affine alone."""
+    if any(isinstance(stage, DisplacementStage) for stage in stages):
+        return walked_box(region, stages)
+    return bound_of(stages, region.rank).map_box(region.centres_box())
 
 
 class Resample(TransformInverse):
@@ -900,19 +913,19 @@ class Resample(TransformInverse):
 
     # ------------------------------------------------------------------ the map
 
-    def _stored_stages(self, name: str, box: WorldBox | None = None) -> SpatialStages:
+    def _stored_stages(self, name: str, region: Grid, before: SpatialStages = ()) -> SpatialStages:
         """This case's stored transforms, decoded and composed, in application order.
 
         The last cases' stages are held, most recent last, within ``stored_stage_bytes``.
 
-        KEYED ON THE BOX: a field read for one region answers for that region and no other, so a
+        KEYED ON THE REGION: a field read for one region answers for that region and no other, so a
         second region asking with the same case name would sample outside the first one's window and
-        take the border value silently.
+        take the border value silently. ``before`` is what runs ahead of them, the region's own.
         """
-        key = (name, None if box is None else (tuple(box.low_xyz), tuple(box.high_xyz)))
+        key = (name, tuple(region.size_zyx), tuple(np.ravel(region.origin_xyz)))
         stages = self._stored.pop(key, None)
         if stages is None:
-            stages = self._decode_stored(name, box)
+            stages = self._decode_stored(name, region, before)
         self._stored[key] = stages
         held = sum(_stages_bytes(kept) for kept in self._stored.values())
         while len(self._stored) > 1 and (held > self.stored_stage_bytes or len(self._stored) > self.stored_stage_slots):
@@ -961,14 +974,16 @@ class Resample(TransformInverse):
                 break
         return fields
 
-    def _decode_stored(self, name: str, box: WorldBox | None = None, headers_only: bool = False) -> SpatialStages:
+    def _decode_stored(
+        self, name: str, region: Grid | None = None, before: SpatialStages = (), headers_only: bool = False
+    ) -> SpatialStages:
         """This case's stored transforms read and decoded, application order, nothing kept.
 
-        ``box`` is the world box the map will be evaluated over, folded through the members already
-        decoded, so each one is read on the box IT sees: a field applied second is evaluated where
-        the first sent the points. Without a box the whole entry is read, which is the whole-volume
-        route's answer. ``headers_only`` is the plan's read: a dense field member decodes to no
-        stage, the identity, and its values are never touched.
+        ``region`` is the target region the map will be evaluated over, sent through ``before`` and
+        the members already decoded, so each one is read on the box IT sees: a field applied second
+        is evaluated where the first sent the points. Without a region the whole entry is read.
+        ``headers_only`` is the plan's read: a dense field member decodes to no stage, the identity,
+        and its values are never touched.
         """
         from konfai.utils.ITK import invert_stages, read_transform_stages
 
@@ -986,6 +1001,9 @@ class Resample(TransformInverse):
                     "Every case needs an entry in every group named under 'transforms:'. Check the"
                     " group name, or drop the cases that have no transform with 'subset'.",
                 )
+            # A dense field is read where the EFFECTIVE stages so far, after any inversion, send the
+            # region; asked only of such a member, since nothing else reads by region.
+            box = None if region is None else functools.partial(_reached, region, (*before, *stages))
             decoded = read_transform_stages(dataset, group, name, box, headers_only, self._field_dtype)
             if invert:
                 inverted = invert_stages(decoded, rank)
@@ -998,12 +1016,6 @@ class Resample(TransformInverse):
                         " invert it where it is written.",
                     )
                 decoded = inverted
-            if box is not None:
-                # The box the NEXT member is read on, which is where this one sends the points it
-                # was read for: the EFFECTIVE stages, after any inversion. An affine moves it
-                # exactly; a field grows it by the range of the values just read (TransformBound is
-                # an interval, not a radius).
-                box = bound_of(decoded, rank).map_box(box)
             stages.extend(decoded)
         return tuple(stages)
 
@@ -1023,7 +1035,7 @@ class Resample(TransformInverse):
         shape, attribute = source.infos(name)
         spatial = [int(extent) for extent in shape[1:]]
         grid = Grid.of(spatial, attribute, f"the field for case '{name}'")
-        window = grid.index_window(region.world_box(), margin=1)
+        window = grid.node_window(region.centres_box())
         values = source.read(name, window, len(spatial), self._field_dtype)
         stage = DisplacementStage(grid.sub_grid(window), values.numpy(), order=1)
         self._field_window = (name, key, stage)
@@ -1040,13 +1052,10 @@ class Resample(TransformInverse):
         """The whole map over one target region, in application order, each stage read on the box
         the stages before it send that region to."""
         stages: list[AffineStage | DisplacementStage] = []
-        box = region.world_box()
         if self.displacement is not None:
-            field = self._field_stage(name, region)
-            stages.append(field)
-            box = bound_of((field,), self._source_grid(name).rank).map_box(box)
+            stages.append(self._field_stage(name, region))
         if self.transforms is not None:
-            stages.extend(self._stored_stages(name, box))
+            stages.extend(self._stored_stages(name, region, tuple(stages)))
         return tuple(stages)
 
     def _pricing_bound(self, name: str) -> TransformBound:
@@ -1247,16 +1256,15 @@ class Resample(TransformInverse):
     def measured_region_source(
         self, name: str, target_slices: tuple[slice, ...], source_spatial_shape: list[int], cache_attribute: Attribute
     ) -> list[slice]:
-        """The region's source window, sized from the field itself: the read that samples also bounds.
+        """The region's source window, walked through the map along the region's faces.
 
-        The field window a region needs is its own box, read for sampling regardless; the sup of the
-        values just read bounds every interpolated displacement in the region (a convex combination
-        cannot exceed the lattice values it blends), so the window is exact per region.
+        The field a region needs is read over its own box for sampling regardless, so the walk costs
+        no read. See :func:`~konfai.data.sampling.walked_window` for what the faces bound.
         """
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
         region = target.sub_grid(tuple(target_slices))
-        return list(source_window(region, source, bound_of(self._stages(name, region), source.rank), self._tap_margin))
+        return list(walked_window(region, source, self._stages(name, region), self._tap_margin))
 
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute

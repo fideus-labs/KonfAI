@@ -150,6 +150,23 @@ class AugmentedStage:
         del name
         return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
 
+    @property
+    def measures_at_run(self) -> bool:
+        return self.augmentation.measures_at_run
+
+    #: A draw's run pull is computed from the draw alone, never from the data: it folds ahead.
+    measures_from_data = False
+
+    def measured_region_source(
+        self,
+        name: str,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        del name, cache_attribute
+        return self.augmentation.measured_region_source(self.index, self.a, target_slices, source_spatial_shape)
+
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
@@ -218,13 +235,15 @@ class _ReadStagePlan:
     of its input it is computed from, bound to the case state the stages before it left.
 
     ``run_pull``, when set, is the pull the RUN walks instead; ``pull`` stays headers-only for the
-    plan's pricing: the estimator must never read a voxel."""
+    plan's pricing: the estimator must never read a voxel. ``folds_ahead`` says whether the run pull
+    may be folded ahead of the reader, which one that reads data (a field) may not."""
 
     kind: LocalityKind
     in_shape: tuple[int, ...]
     out_shape: tuple[int, ...]
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
     run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
+    folds_ahead: bool = True
     #: The statistics this stage is seeded with: what a whole-volume pass measured on its own input, or
     #: the store's when they still describe it.
     measured: tuple[tuple[str, str], ...] = ()
