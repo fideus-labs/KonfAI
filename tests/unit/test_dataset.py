@@ -1330,21 +1330,39 @@ def test_image_to_data_owns_the_vector_image_bytes_whatever_its_size() -> None:
     np.testing.assert_array_equal(data.reshape(-1), [1.0, 2.0, 3.0])
 
 
-def test_a_metaimage_entry_keeps_its_pixels_through_a_write_and_its_transfers(tmp_path: Path) -> None:
-    """A .mhd keeps its pixels in the .raw its header names: a transfer under another name must bring it, renamed,
-    or two outputs of one folder share one pixel file."""
+def test_a_metaimage_entry_keeps_its_pixels_through_its_transfers_and_an_interrupted_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A .mhd keeps its pixels in the .raw its header names: a transfer brings them under a name of their own, so two
+    outputs of one folder never share one, and a replacement cut short before its header leaves the old header
+    reading its own pixels."""
     sitk = pytest.importorskip("SimpleITK")
-    from konfai.utils.dataset import entry_files, transfer_entry
+    from konfai.utils.dataset import entry_files, staged_entry, transfer_entry
+    from konfai.utils.dataset import staging as staging_module
 
-    attributes = Attribute()
-    attributes["Origin"], attributes["Spacing"], attributes["Direction"] = [0.0] * 3, [1.0] * 3, np.eye(3).flatten()
-    volume = np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4)
-    Dataset(str(tmp_path / "out"), "mhd").write("Moved", "P000", volume, attributes)
-    written = tmp_path / "out" / "P000" / "Moved.mhd"
-    _, pixels = entry_files(written)
+    def pair(value: float, spacing: float, name: str) -> Path:
+        image = sitk.GetImageFromArray(np.full((2, 3, 4), value, np.float32))
+        image.SetSpacing([spacing] * 3)
+        sitk.WriteImage(image, str(tmp_path / "src" / name))
+        return tmp_path / "src" / name
 
-    for name in ("a.mhd", "b.mhd"):  # two outputs of one directory, as apply writes them
-        transfer_entry(written, tmp_path / name)
-    pixels.unlink()
+    (tmp_path / "src").mkdir()
+    old, new = pair(1.0, 1.0, "old.mhd"), pair(9.0, 2.0, "new.mhd")
+    for name in ("a.mhd", "b.mhd"):  # two outputs of one folder, as apply writes them
+        with staged_entry(tmp_path / name) as staged:
+            transfer_entry(old, staged)
+    publish = staging_module.publish
+
+    def header_fails(staged: Path, final: Path) -> None:
+        if final.suffix == ".mhd":
+            raise OSError("the disk filled up")
+        publish(staged, final)
+
+    monkeypatch.setattr(staging_module, "publish", header_fails)
+    with pytest.raises(OSError), staged_entry(tmp_path / "a.mhd") as staged:
+        transfer_entry(new, staged)
+    for part in entry_files(old):
+        part.unlink()
     for name in ("a.mhd", "b.mhd"):
-        np.testing.assert_array_equal(sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / name))), volume[0])
+        image = sitk.ReadImage(str(tmp_path / name))
+        assert image.GetSpacing() == (1.0, 1.0, 1.0) and sitk.GetArrayFromImage(image).max() == 1.0
