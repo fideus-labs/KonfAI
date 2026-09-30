@@ -879,12 +879,15 @@ class Data(DataSources):
         grouped = list(managers.items())
         if len(grouped) < 2:
             return
+        # An evaluation pairs the same voxels whole or in patches and warns of another geometry itself.
+        placed = os.environ.get("KONFAI_STATE") != str(State.EVALUATION)
         reference_group, reference_managers = grouped[0]
         for group, group_managers in grouped[1:]:
             for reference, manager in zip(reference_managers, group_managers, strict=True):
                 for a in range(nb_augmentation):
                     if reference.get_size(a) == manager.get_size(a):
-                        misplaced = _patch_misplacement(reference, manager, a) if reference.get_size(a) > 1 else None
+                        patched = placed and reference.get_size(a) > 1
+                        misplaced = _patch_misplacement(reference, manager, a) if patched else None
                         if misplaced is None:
                             continue
                         raise DatasetManagerError(
