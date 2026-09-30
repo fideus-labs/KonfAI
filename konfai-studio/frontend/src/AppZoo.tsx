@@ -57,6 +57,8 @@ const THEME_ORDER = ["Synthesis", "Registration", "Segmentation", "Other"];
 export default function AppZoo({
   apps,
   loading,
+  error,
+  onRetry,
   onUse,
   onAdd,
   onRemove,
@@ -65,6 +67,8 @@ export default function AppZoo({
 }: {
   apps: StudioApp[];
   loading?: boolean;
+  error?: string;
+  onRetry: () => void;
   onUse: (ref: string) => void;
   onAdd: (ref: string) => void;
   onRemove: (ref: string) => void;
@@ -110,7 +114,14 @@ export default function AppZoo({
               <span className="zoo-spin" /> Loading apps…
             </div>
           )}
-          {!loading && matches.length === 0 && (
+          {!loading && error && (
+            <div className="zoo-empty" role="alert">
+              {apps.length ? "Showing the last catalogue read: " : "Could not read the app sources: "}
+              {error}{" "}
+              <button onClick={onRetry}>Retry</button>
+            </div>
+          )}
+          {!loading && !(error && apps.length === 0) && matches.length === 0 && (
             <div className="zoo-empty">
               {apps.length === 0 ? "No app sources yet. Add one to browse published models." : `No apps match “${q}”.`}
             </div>

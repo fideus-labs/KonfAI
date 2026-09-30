@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import FolderBrowser from "./FolderBrowser";
-import { getJson, postJson } from "./api";
+import { failure, getJson, postJson } from "./api";
 import { readSSE } from "./sse";
 
 type Part =
@@ -391,10 +391,14 @@ export default function Chat({
         body: JSON.stringify({ message: text, session }),
         signal: ctrl.signal,
       });
+      // A refusal (401, 422...) is not a stream: its reason is shown and the message comes back to resend.
+      if (!resp.ok) throw await failure(resp);
       for await (const ev of readSSE(resp)) handleEvent(aid, ev);
     } catch (e) {
-      if (!(e instanceof DOMException && e.name === "AbortError"))
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
         patchAssistant(aid, (p) => [...p, { kind: "error", text: String(e) }]);
+        setInput((v) => v || text);
+      }
     } finally {
       busyRef.current = false;
       setBusy(false);

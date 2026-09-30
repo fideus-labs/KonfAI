@@ -237,6 +237,7 @@ function Studio({ remote }: { remote: boolean }) {
   const [appPick, setAppPick] = useState<string | null>(null); // app ref awaiting its dataset before launch
   const [apps, setApps] = useState<StudioApp[]>([]);
   const [appsLoading, setAppsLoading] = useState(true);
+  const [appsError, setAppsError] = useState(""); // a failed read of the catalogue, not an empty one
   const [zooOpen, setZooOpen] = useState(false);
   const [deployApp, setDeployApp] = useState<StudioApp | null>(null);
   const [terminalRequested, setTerminalRequested] = useState(false);
@@ -244,8 +245,11 @@ function Studio({ remote }: { remote: boolean }) {
   function refreshApps() {
     setAppsLoading(true);
     getJson("/api/apps?session=apps")
-      .then((d) => setApps(d.apps ?? []))
-      .catch(() => {})
+      .then((d) => {
+        setApps(d.apps ?? []);
+        setAppsError("");
+      })
+      .catch((e) => setAppsError(String(e?.message ?? e)))
       .finally(() => setAppsLoading(false));
   }
 
@@ -390,39 +394,55 @@ function Studio({ remote }: { remote: boolean }) {
     return () => clearInterval(id);
   }, []);
 
+  // A setting shows what the server kept: its answer, never the request. Only the latest request for
+  // the same setting applies, and a refusal is said.
+  const settingSeq = useRef<Record<string, number>>({});
+  function saveSetting<T>(key: string, request: Promise<T>, apply: (d: T) => void, undo?: () => void) {
+    const seq = (settingSeq.current[key] = (settingSeq.current[key] ?? 0) + 1);
+    const latest = () => seq === settingSeq.current[key];
+    request
+      .then((d) => latest() && apply(d))
+      .catch((e) => {
+        if (latest()) undo?.();
+        setToast(`Not saved: ${e?.message ?? e}`);
+      });
+  }
+
   function chooseBrain(id: string) {
-    setBrain(id); // optimistic; applies to each task on its next message
-    postJson("/api/llm", { brain: id })
-      .then((d) => {
-        setBrains(d.options ?? []);
-        setBrain(d.current ?? id);
-        // A model pinned for another backend doesn't carry over: fall back to that backend's default.
-        const models = (d.options ?? []).find((b: Brain) => b.id === (d.current ?? id))?.models ?? [];
-        if (models.length && !models.some((m: { id: string }) => m.id === d.model)) chooseModel("");
-      })
-      .catch(() => {});
+    // Applies to each task on its next message.
+    saveSetting("brain", postJson("/api/llm", { brain: id }), (d) => {
+      setBrains(d.options ?? []);
+      setBrain(d.current ?? id);
+      // A model pinned for another backend doesn't carry over: fall back to that backend's default.
+      const models = (d.options ?? []).find((b: Brain) => b.id === (d.current ?? id))?.models ?? [];
+      if (models.length && !models.some((m: { id: string }) => m.id === d.model)) chooseModel("");
+    });
   }
 
   function chooseModel(id: string) {
-    setModel(id);
-    setModelText(id);
-    postJson("/api/llm", { model: id })
-      .then((d) => {
+    setModelText(id); // what was typed stays in the box until the server answers
+    saveSetting(
+      "model",
+      postJson("/api/llm", { model: id }),
+      (d) => {
         setModel(d.model ?? id);
         setModelText(d.model ?? id);
-      })
-      .catch(() => {});
+      },
+      () => setModelText(model),
+    );
   }
 
   const deviceOf = (session: string) => ui[session]?.device ?? defaultDevice;
 
   function chooseDevice(session: string, val: string) {
-    setUi((u) => patchSession(u, session, { device: val }));
     if (session === NEW) {
+      setUi((u) => patchSession(u, session, { device: val }));
       setDefaultDevice(val); // a draft's choice becomes the default the new experiment inherits
       return;
     }
-    postJson("/api/device", { session, device: val }).catch(() => {});
+    saveSetting(`device:${session}`, postJson("/api/device", { session, device: val }), (d) =>
+      setUi((u) => patchSession(u, session, { device: d.device ?? val })),
+    );
   }
 
   // A machine with a GPU should train on it: default a fresh experiment to GPU 0 once, so jobs don't
@@ -498,15 +518,21 @@ function Studio({ remote }: { remote: boolean }) {
     if (creating.current) return;
     creating.current = true;
     postJson("/api/sessions", {})
-      .then((d) => {
+      .then(async (d) => {
         const id = d.current as string;
         clearChat(id); // a reused id (a deleted experiment-1 frees it) must not inherit the old chat
         clearChat(NEW); // the draft's turn is replayed into the new experiment via inject, not localStorage
         setSessions(d.sessions);
         setUi((u) => replaceSessionField(u, "title", d.titles ?? {}));
         if (dataset) recordDataset(id, dataset);
-        const draftDevice = deviceOf(NEW);
-        if (draftDevice !== defaultDevice) chooseDevice(id, draftDevice); // carry the draft's device over
+        // The draft's device reaches the server before the first message, which the agent runs it on.
+        const device = await postJson("/api/device", { session: id, device: deviceOf(NEW) })
+          .then((r) => r.device as string)
+          .catch((e) => {
+            setToast(`Device not saved: ${e?.message ?? e}`);
+            return undefined;
+          });
+        if (device !== undefined) setUi((u) => patchSession(u, id, { device }));
         setActive(id);
         setUi((u) => patchSession(u, id, { inject: { text, nonce: (u[id]?.inject?.nonce ?? 0) + 1 } }));
       })
@@ -955,6 +981,8 @@ function Studio({ remote }: { remote: boolean }) {
         <AppZoo
           apps={apps}
           loading={appsLoading}
+          error={appsError}
+          onRetry={refreshApps}
           onUse={(ref) => {
             setZooOpen(false);
             setAppPick(ref); // choose the dataset first, then launch the app on it

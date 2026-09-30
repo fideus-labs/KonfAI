@@ -549,6 +549,9 @@ function ExperimentView({
   const [doc, setDoc] = useState<{ name: string; content: string; editable: boolean } | null>(null);
   const [draft, setDraft] = useState("");
   const [dirty, setDirty] = useState(false);
+  // The file the editor holds and its text now: a read or a save answers for the one it was sent for.
+  const editing = useRef({ rel: "", draft: "" });
+  editing.current.draft = draft;
   const [stale, setStale] = useState(false); // the open file changed on disk; saving over it was refused
   const [note, setNote] = useState("");
   const [treeKey, setTreeKey] = useState(0);
@@ -680,9 +683,11 @@ function ExperimentView({
   function load(rel: string) {
     setNote("");
     setStale(false);
+    editing.current.rel = rel;
     fetch(`/api/experiment/file?session=${encodeURIComponent(session)}&path=${encodeURIComponent(rel)}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error("unreadable file"))))
       .then((d) => {
+        if (editing.current.rel !== rel) return; // another file was opened meanwhile
         setDoc(d);
         setDraft(d.content);
         setDirty(false);
@@ -711,15 +716,20 @@ function ExperimentView({
   async function save() {
     if (!doc) return;
     setNote("saving…");
+    const { rel } = editing.current;
+    const sent = draft;
     const r = await fetch("/api/config/save", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, name: doc.name, content: draft, base: doc.content }),
+      body: JSON.stringify({ session, name: doc.name, content: sent, base: doc.content }),
     }).catch(() => null);
+    if (editing.current.rel !== rel) return; // another file was opened meanwhile
     if (r?.ok) {
-      setDoc((d) => (d ? { ...d, content: draft } : d));
-      setDirty(false);
-      setNote("saved ✓");
+      // Only the text sent is saved: an edit typed meanwhile stays unsaved.
+      const clean = editing.current.draft === sent;
+      setDoc((d) => (d ? { ...d, content: sent } : d));
+      setDirty(!clean);
+      setNote(clean ? "saved ✓" : "saved; newer edits are not");
       return;
     }
     const detail = r ? await r.json().then((e) => e.detail).catch(() => "") : "";
