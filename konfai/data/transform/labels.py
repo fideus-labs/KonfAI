@@ -192,8 +192,8 @@ class Dilate(Transform):
 def _forget_model_channel_counts(cache_attribute: Attribute) -> None:
     """Take ``number_of_channels_per_model`` off a case's state, as folding the model axis does.
 
-    A later ``Sum`` or ``MergeLabels`` reading it off the written store would take the ensemble
-    branch on a one-channel map, and a streamed region pops it from a scope that is thrown away.
+    A later ``MergeLabels`` reading it off the written store would merge a one-channel map as an
+    ensemble, and a streamed region pops it from a scope that is thrown away.
     """
     if "number_of_channels_per_model" in cache_attribute:
         cache_attribute.pop_tensor("number_of_channels_per_model")
@@ -210,8 +210,6 @@ class Sum(Transform):
         return _axis_reduction_locality(self.dim)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
-        if "number_of_channels_per_model" in cache_attribute:
-            return shape
         return _reduced_shape(shape, self.dim, keep=False)
 
     def write_stream_cache_attribute(
@@ -221,15 +219,12 @@ class Sum(Transform):
         _forget_model_channel_counts(cache_attribute)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if "number_of_channels_per_model" in cache_attribute:
-            number_of_channels = cache_attribute.pop_tensor("number_of_channels_per_model")
-            result = tensor[0]
-            for i, t in enumerate(tensor[1:]):
-                t[t != 0] += int(number_of_channels[i]) - 1
-                result += t
-            return result
-        else:
-            return torch.sum(tensor, dim=self.dim).to(tensor.dtype)
+        # The stack a Concat left is summed like any other: merging an ensemble's label maps is
+        # MergeLabels' job. An integer sum is taken in its own dtype (the result is cast back to it
+        # either way), not in the int64 torch promotes it to.
+        _forget_model_channel_counts(cache_attribute)
+        integral = not (tensor.is_floating_point() or tensor.is_complex() or tensor.dtype == torch.bool)
+        return torch.sum(tensor, dim=self.dim, dtype=tensor.dtype if integral else None).to(tensor.dtype)
 
 
 class MergeLabels(Transform):

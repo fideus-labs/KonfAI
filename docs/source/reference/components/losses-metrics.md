@@ -118,7 +118,7 @@ every `mask` in KonfAI (`Clip`, `Standardize`, `Mask`).
 
 | Name | Role | Purpose | Key args (defaults) |
 | --- | --- | --- | --- |
-| `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). A one-channel output is read as a label map: a float one with non-integer values (a sigmoid probability) is refused, so give it two channels or threshold it first. | `labels=None` (None → all present labels) |
+| `Dice` | `(Tensor, dict)` dual-use | Soft Dice per label; loss `= 1 − mean(dice)`, per-label dict logged. Resamples target to output (nearest). A one-channel output is read as a label map: a float one with non-integer values (a sigmoid probability) is refused, so give it two channels or threshold it first. A multi-channel output is read as probabilities: one outside [0, 1] (logits, before a Softmax) is refused on the first call. | `labels=None` (None → all present labels) |
 | `CrossEntropyLoss` | `Tensor` loss | Wraps `nn.CrossEntropyLoss` (squeezes the target channel). | `weight=None, reduction="mean"` |
 | `FocalLoss` | `Tensor` loss | Multi-class focal loss. `alpha` is an optional per-label weight list indexed by label id; `None` weights every class equally, and a list shorter than the class count is refused. | `gamma=2.0, alpha=None, reduction="mean"` |
 | `Accuracy` | `Tensor` metric | This batch's classification accuracy. It keeps no state: the logging window averages it over the batches and resets between train and validation, so one figure never blends epochs or splits. |: |

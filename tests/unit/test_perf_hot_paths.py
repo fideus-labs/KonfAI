@@ -277,3 +277,20 @@ def test_clip_float32_nan_dynamic_bound_does_not_corrupt_volume():
     assert not bool(got.isnan().all()), "must not become all-NaN"
     assert got[0] == 1.0 and got[1] == 2.0 and got[3] == 3.0
     assert bool(got[2].isnan())
+
+
+def test_a_python_scalar_prints_as_the_general_path_prints_it() -> None:
+    """A Python int, float or bool skips numpy's printer: the text is bit for bit the one the
+    general path gives (the shortest exact form), which the stack's readers parse back."""
+    import sys
+
+    import numpy as np
+    from konfai.utils.dataset.attribute import _attribute_text
+
+    rng = np.random.default_rng(0)
+    values = [0, -7, 2**63, True, False, 0.1, -0.0, 1e-300, 1.7976931348623157e308, float("nan"), float("inf")]
+    values += [float(v) for v in rng.standard_normal(200) * 10.0 ** rng.integers(-30, 30, 200)]
+    for value in values:
+        with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
+            general = str(value).replace("\n", "")
+        assert _attribute_text(value) == general, value

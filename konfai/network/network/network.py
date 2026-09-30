@@ -302,6 +302,46 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             and not (not training and self._training == NetState.TRAIN)
         )
 
+    def _resolve_reads(
+        self,
+        name: str,
+        module: torch.nn.Module | None,
+        branchs: dict[str, torch.Tensor],
+        inputs: tuple[torch.Tensor, ...],
+    ) -> list[str]:
+        """The branches module ``name`` reads, each one in ``branchs`` once this returns.
+
+        A named branch nobody produced is refused. A numeric one falls back to the first input inside
+        a block (extra indices are legitimate scratch wiring, an attention gate), but at a network's
+        own level it is a missing input: refused, unless the module is itself a network and the
+        missing inputs are its last ones, which it is then called without (its own graph applies this
+        same rule to what it reads)."""
+        reads = list(self._modulesArgs[name].in_branch)
+        missing = [ib for ib in reads if ib not in branchs]
+        for ib in missing:
+            if not ib.lstrip("-").isdigit():
+                raise ConfigError(
+                    f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
+                    f"Known branches here: {sorted(branchs)}. A named branch must be written "
+                    "(out_branch) by a module that runs earlier; check the label for a typo "
+                    "and the producer's training gate.",
+                )
+        absent = [ib for ib in missing if isinstance(self, Network) and int(ib) >= len(inputs)]
+        if absent:
+            trailing = reads[len(reads) - len(absent) :] == absent
+            if not (isinstance(module, Network) and trailing and len(absent) < len(reads)):
+                raise ConfigError(
+                    f"Module '{name}' of '{type(self).__name__}' reads input {absent[0]}, and the network was"
+                    f" given {len(inputs)} input(s).",
+                    "Give the network every input its graph reads (one group per input in the config), or"
+                    " gate the module to the state that has it (training).",
+                )
+            reads = reads[: len(reads) - len(absent)]
+        for ib in missing:
+            if ib not in absent:
+                branchs[ib] = inputs[0]
+        return reads
+
     def named_forward(
         self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
     ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -327,18 +367,8 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     if requires_grad is not None and module:
                         module.requires_grad_(requires_grad)
                     target_gpu = self._modulesArgs[name].gpu
-                    for ib in self._modulesArgs[name].in_branch:
-                        if ib not in branchs:
-                            # Numeric branches fall back to the network input (branch '0' = input; extra
-                            # indices are legitimate scratch wiring). A NAMED branch nobody produced is refused.
-                            if not ib.lstrip("-").isdigit():
-                                raise ConfigError(
-                                    f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
-                                    f"Known branches here: {sorted(branchs)}. A named branch must be written "
-                                    "(out_branch) by a module that runs earlier; check the label for a typo "
-                                    "and the producer's training gate.",
-                                )
-                            branchs[ib] = inputs[0]
+                    reads = self._resolve_reads(name, module, branchs, inputs)
+                    for ib in reads:
                         if target_gpu != "cpu" and str(branchs[ib].device) != f"cuda:{target_gpu}":
                             branchs[ib] = branchs[ib].to(
                                 int(target_gpu),
@@ -350,7 +380,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                             torch.Tensor,
                             checkpoint(
                                 module,
-                                *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                *[branchs[i] for i in reads],
                                 use_reentrant=False,
                             ),
                         )
@@ -360,9 +390,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     else:
                         if isinstance(module, ModuleArgsDict):
                             for k, out in module.named_forward(
-                                *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                *[branchs[i] for i in reads],
                                 attributes=(
-                                    [attribute_branchs.get(i, [Attribute()]) for i in self._modulesArgs[name].in_branch]
+                                    [attribute_branchs.get(i, [Attribute()]) for i in reads]
                                     if attribute_branchs
                                     else None
                                 ),
@@ -378,14 +408,11 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         elif isinstance(module, torch.nn.Module):
                             if getattr(module, "accepts_attributes", False):
                                 out = module(
-                                    *[branchs[i] for i in self._modulesArgs[name].in_branch],
-                                    attributes=[
-                                        attribute_branchs.get(i, [Attribute()])
-                                        for i in self._modulesArgs[name].in_branch
-                                    ],
+                                    *[branchs[i] for i in reads],
+                                    attributes=[attribute_branchs.get(i, [Attribute()]) for i in reads],
                                 )
                             else:
-                                out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])
+                                out = module(*[branchs[i] for i in reads])
                             for ob in self._modulesArgs[name].out_branch:
                                 branchs[ob] = out
                             yield name, out

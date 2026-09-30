@@ -274,6 +274,22 @@ class Dice(Criterion):
         super().__init__()
         self._labels = labels
         self.loss = partial(Dice._loss, labels)
+        self._probabilities_checked = False
+
+    def _check_probabilities(self, output: torch.Tensor) -> None:
+        """Refuse, on the first call, a multi-channel output outside [0, 1]: Dice reads it as
+        probabilities, and logits (a Conv head with no Softmax) would score outside [0, 1] without a
+        word. One synchronisation, then none."""
+        if self._probabilities_checked or output.shape[1] < 2 or not output.is_floating_point():
+            return
+        low, high = torch.stack(torch.aminmax(output.detach())).tolist()
+        if not -1e-3 <= low <= high <= 1 + 1e-3:  # NaN fails every comparison
+            raise MeasureError(
+                f"Dice reads a {output.shape[1]}-channel output as probabilities, and this one spans"
+                f" [{low:.3g}, {high:.3g}].",
+                "Attach Dice to the output of a Softmax (or Sigmoid), not to the logits before it.",
+            )
+        self._probabilities_checked = True
 
     @staticmethod
     def _masked(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -286,9 +302,11 @@ class Dice(Criterion):
         return output * mask, targets[0] * mask
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        self._check_probabilities(output)
         return self.loss(*self._masked(output, targets))
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
+        self._check_probabilities(output)
         output, target = self._masked(output, targets)
         if tuple(target.shape[2:]) != tuple(output.shape[2:]):
             raise MeasureError(
@@ -339,6 +357,7 @@ class DiceSaveMap(Dice):
         return self._map(*self._masked(output, targets))
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        self._check_probabilities(output)
         output, target = self._masked(output, targets)
         loss, true_loss = self.loss(output, target)
         return loss, true_loss, self._map(output, target)

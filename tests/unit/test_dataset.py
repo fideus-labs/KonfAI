@@ -1594,6 +1594,44 @@ dataset.write("CT", "c2", np.ones((1, 2, 3, 4), np.float32), attributes)
     np.testing.assert_array_equal(data, np.zeros((1, 2, 3, 4), np.float32))
 
 
+def test_a_metaimage_write_interrupted_before_its_header_leaves_the_old_pair(tmp_path: Path, monkeypatch) -> None:
+    """A .mhd header names its pixels: the new pixels land beside the old ones and the header swaps to them in
+    one replace, so a write that fails before that replace leaves the old pair whole, and one that succeeds
+    leaves no old pixels behind."""
+    attributes = Attribute()
+    attributes["Origin"] = np.zeros(3)
+    attributes["Direction"] = np.eye(3).flatten()
+    dataset = Dataset(tmp_path, "mhd")
+    attributes["Spacing"] = np.ones(3)
+    dataset.write("CT", "c1", np.ones((1, 4, 4, 4), np.float32), attributes)
+    replace = os.replace
+
+    def failing(source: str, target: str) -> None:
+        if str(target).endswith(".mhd"):
+            raise OSError("interrupted")
+        replace(source, target)
+
+    monkeypatch.setattr(os, "replace", failing)
+    attributes["Spacing"] = np.full(3, 2.0)
+    with pytest.raises(OSError, match="interrupted"):
+        dataset.write("CT", "c1", np.full((1, 4, 4, 4), 9, np.float32), attributes)
+    data, read = Dataset(tmp_path, "mhd").read_data("CT", "c1")
+    assert (data == 1).all() and list(read.get_np_array("Spacing")) == [1.0, 1.0, 1.0]
+
+    monkeypatch.setattr(os, "replace", replace)
+    dataset.write("CT", "c1", np.full((1, 4, 4, 4), 9, np.float32), attributes)
+    data, _ = Dataset(tmp_path, "mhd").read_data("CT", "c1")
+    assert (data == 9).all() and len(list((tmp_path / "c1").glob("CT*.raw"))) == 1
+
+    # A header naming pixels that are not the entry's own (shared, or elsewhere): a rewrite leaves them.
+    header = next((tmp_path / "c1").glob("CT.mhd"))
+    shared = tmp_path / "c1" / "shared.raw"
+    shared.write_bytes(next((tmp_path / "c1").glob("CT.*.raw")).read_bytes())
+    header.write_text(header.read_text().replace(next((tmp_path / "c1").glob("CT.*.raw")).name, "shared.raw"))
+    dataset.write("CT", "c1", np.ones((1, 4, 4, 4), np.float32), attributes)
+    assert shared.exists()
+
+
 def test_an_h5_sidecar_is_read_once_per_pooled_handle_and_dropped_with_it(tmp_path: Path, monkeypatch) -> None:
     """A patch read costs one hyperslab: the entry's attributes are read off the handle on its first
     read and copied after, and a write of the entry (which drops the handle) brings the new ones."""
@@ -1770,3 +1808,45 @@ def test_image_to_data_owns_the_vector_image_bytes_whatever_its_size() -> None:
 
     assert data.flags.owndata and data.shape == (3, 1, 1, 1)
     np.testing.assert_array_equal(data.reshape(-1), [1.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize("file_format", ["nii", "nii.gz", "mha"])
+def test_a_write_the_disk_cut_short_is_refused_and_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_format: str
+) -> None:
+    """ITK's NIfTI writer does not check its writes: on a full disk it leaves a short file and no
+    error. MetaImage raises. Either way nothing is published and no staging file is left behind."""
+    sitk = pytest.importorskip("SimpleITK")
+    write_image = sitk.WriteImage
+
+    def full_disk(image, path, *args, **kwargs):
+        write_image(image, path, *args, **kwargs)
+        with open(path, "r+b") as file:
+            file.truncate(os.path.getsize(path) // 2)
+        if file_format == "mha":
+            raise RuntimeError("ITK ERROR: MetaImageIO: File cannot be written")
+
+    monkeypatch.setattr(sitk, "WriteImage", full_disk)
+    image = sitk.GetImageFromArray(np.random.default_rng(0).random((8, 16, 16)).astype(np.float32))
+    with pytest.raises((DatasetManagerError, RuntimeError), match=r"stopped short|cannot be written"):
+        Dataset(tmp_path / "Dataset", file_format).write("CT", "case", image)
+    assert [name for _, _, names in os.walk(tmp_path) for name in names] == []
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nrrd", "omezarr"])
+def test_the_geometry_stack_reads_back_as_it_was_written(tmp_path: Path, file_format: str) -> None:
+    """A header carries the geometry stack it was written with: read back, the stack is the one
+    written, where it grew by one Origin, Spacing and Direction a cycle."""
+    if file_format == "omezarr":
+        pytest.importorskip("ngff_zarr")
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([1.0, 2.0, 3.0])
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 2.0])
+    attributes["Direction"] = np.eye(3).flatten()
+    data = np.zeros((1, 4, 5, 6), np.float32)
+    for cycle in range(4):
+        Dataset(tmp_path / str(cycle), file_format).write("CT", "case", data, attributes)
+        data, attributes = Dataset(tmp_path / str(cycle), file_format).read_data("CT", "case")
+    keys = [key for key in dict.keys(attributes) if key.split("_")[0] in ("Origin", "Spacing", "Direction")]
+    assert sorted(keys) == ["Direction_0", "Origin_0", "Spacing_0"]
+    assert attributes.get_np_array("Origin").tolist() == [1.0, 2.0, 3.0]

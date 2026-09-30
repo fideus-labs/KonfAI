@@ -17,10 +17,12 @@
 
 """The IMPACT feature criteria over TorchScript extractors."""
 
+import importlib.metadata
 import os
 from collections.abc import Callable, Iterable, Iterator
 from functools import reduce
 from itertools import chain
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -39,6 +41,37 @@ def _hf_hub_download(criterion: str):
     """The ``hf_hub_download`` callable, imported at the call site: huggingface_hub is only needed
     by the IMPACT criteria, never by the rest of the metric package."""
     return _require_optional("huggingface_hub", criterion=criterion, extra="all").hf_hub_download
+
+
+def _release_tag() -> str | None:
+    """``v<konfai version>`` for a released konfai, the tag its models are published under; ``None``
+    for a development build, which follows ``main``."""
+    try:
+        version = importlib.metadata.version("konfai")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    return None if ".dev" in version or "+" in version else f"v{version}"
+
+
+def _download_model(criterion: str, repo_id: str, filename: str) -> str:
+    """``filename`` of the Hugging Face ``repo_id`` at the tag of this konfai release when the
+    repository carries it, else at ``main``. The commit resolved is printed, so a run says which
+    weights it scored with."""
+    download = _hf_hub_download(criterion)
+    errors = _require_optional("huggingface_hub", criterion=criterion, extra="all").errors
+    tag = _release_tag()
+    path = None
+    if tag is not None:
+        try:
+            path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=tag)  # nosec B615
+        except (errors.RevisionNotFoundError, errors.LocalEntryNotFoundError):
+            tag = None  # not published under this release (or not downloaded, offline): main
+    if path is None:
+        path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+    parts = Path(path).parts
+    commit = parts[parts.index("snapshots") + 1] if "snapshots" in parts else "unknown"
+    print(f"[KonfAI] {criterion}: {repo_id}/{filename} at {tag or 'main'}, commit {commit}.", flush=True)
+    return path
 
 
 def _check_feature_model(model_path: str, in_channels: int, shape: list[int], nb_layer: int) -> None:
@@ -193,8 +226,7 @@ class ImpactFeatureModel:
     ) -> "ImpactFeatureModel":
         """The model ``filename`` of the HuggingFace ``repo_id``, probed once on the CPU. ``shape`` is the
         tile, its length the dimension; an entry ``<= 0`` scores the whole tensor instead."""
-        download = _hf_hub_download("IMPACT")
-        model_path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        model_path = _download_model("IMPACT", repo_id, filename)
         tile = shape if all(s > 0 for s in shape) else None
         _check_feature_model(model_path, in_channels, tile or [224] * len(shape), len(weights))
         return cls(model_path, in_channels, weights, tile, len(shape), denormalize)
@@ -402,8 +434,7 @@ class SAM_Perceptual(CriterionWithAttribute):
             repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
         else:
             repo_id, filename = "VBoussot/ImpactSynth", model_name
-        download = _hf_hub_download("SAM_Perceptual")
-        model_path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        model_path = _download_model("SAM_Perceptual", repo_id, filename)
         self.model = ImpactFeatureModel(model_path, 3, [1.0] * 4 if weights is None else weights, [512, 512], 2)
 
     def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract

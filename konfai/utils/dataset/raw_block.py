@@ -31,7 +31,7 @@ try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
-from konfai.utils.dataset.attribute import Attribute, _attribute_text, region_geometry
+from konfai.utils.dataset.attribute import Attribute, _attribute_text, push_geometry, region_geometry
 from konfai.utils.dataset.stream import _MHA_ELEMENT_TYPES, _NIFTI_DATATYPES
 
 #: NumPy dtype of each element type the raw-block route reads (the inverses of the writers' tables).
@@ -264,12 +264,12 @@ def _pixel_block_attributes(block: _PixelBlock, spatial_slices: tuple[slice, ...
     attributes = Attribute(block.metadata)
     stepped = spatial_slices is not None and any(item.step != 1 for item in spatial_slices)
     if spatial_slices is None or stepped:
-        attributes["Origin"] = block.geometry_text["Origin"]
+        push_geometry(attributes, "Origin", block.geometry_text["Origin"])
     else:
         index_xyz = [item.start for item in reversed(spatial_slices)]
-        attributes["Origin"] = np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz))
-    attributes["Spacing"] = block.geometry_text["Spacing"]
-    attributes["Direction"] = block.geometry_text["Direction"]
+        push_geometry(attributes, "Origin", np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz)))
+    push_geometry(attributes, "Spacing", block.geometry_text["Spacing"])
+    push_geometry(attributes, "Direction", block.geometry_text["Direction"])
     if spatial_slices is not None:
         origin, spacing = region_geometry(block.origin, block.spacing, block.direction, spatial_slices)
         attributes["Origin"] = origin
