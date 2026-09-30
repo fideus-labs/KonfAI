@@ -1508,6 +1508,26 @@ def test_the_compiled_walk_hands_get_layers_what_the_eager_walk_does(monkeypatch
     assert all(torch.equal(a, b) for (_, a), (_, b) in zip(walked, eager, strict=True))
 
 
+def test_a_compilation_that_fails_runs_the_model_uncompiled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No Triton, an operation the backend lacks: torch_compile then costs a warning, not the run."""
+    from konfai.utils.errors import KonfAIWarning
+    from torch._dynamo.exc import TorchDynamoException
+
+    def uncompilable(function):
+        def fail(*args):
+            raise TorchDynamoException("Cannot find a working triton installation")
+
+        return fail
+
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    monkeypatch.setattr(torch, "compile", uncompilable)
+    net = _WalkNet()
+    net.compile_walk()
+    with pytest.warns(KonfAIWarning, match="runs uncompiled"):
+        walked = [name for name, _, _ in net.get_layers([torch.ones(1, 1, 2)], ["B", "A"])]
+    assert walked == ["A", "B"] and net._walk is None
+
+
 def test_a_graph_the_compiled_walk_cannot_serve_stays_eager_and_says_why() -> None:
     class _ReadsAttributes(torch.nn.Module):
         accepts_attributes = True

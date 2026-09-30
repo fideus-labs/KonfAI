@@ -20,6 +20,7 @@
 import inspect
 import logging
 import os
+import warnings
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -45,7 +46,7 @@ from konfai.network.network.loaders import LRSchedulersLoader, OptimizerLoader, 
 from konfai.network.network.measure import Measure
 from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 from konfai.utils.runtime import State, get_device, get_gpu_memory
 from konfai.utils.utils import env_flag
 
@@ -1033,6 +1034,22 @@ class Network(ModuleArgsDict, ABC):
                     break
         return found
 
+    def _compiled_walk(self, inputs: list[torch.Tensor], wanted: tuple[str, ...]) -> list[tuple[str, torch.Tensor]]:
+        """The compiled walk, or the eager one from the first compilation that fails (no Triton, an operation
+        the backend lacks): the run goes on as without ``torch_compile``, and says so once."""
+        from torch._dynamo.exc import TorchDynamoException
+
+        try:
+            return cast(Callable, self._walk)(inputs, wanted)
+        except TorchDynamoException as error:
+            warnings.warn(
+                f"torch_compile could not compile the model ({type(error).__name__}): it runs uncompiled.",
+                KonfAIWarning,
+                stacklevel=2,
+            )
+            self._walk = None
+            return self._requested_outputs(inputs, wanted)
+
     def get_layers(
         self,
         inputs: list[torch.Tensor],
@@ -1045,7 +1062,7 @@ class Network(ModuleArgsDict, ABC):
         it = 0
         debug = env_flag("KONFAI_DEBUG", False)
         walk = (
-            self._walk(inputs, tuple(layers_name))
+            self._compiled_walk(inputs, tuple(layers_name))
             if self._walk is not None and not debug
             else self.named_forward(*inputs, attributes=attributes)
         )
