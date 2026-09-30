@@ -608,14 +608,11 @@ def _leave(work: Path, error: BaseException | None) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _copy_output(src: Path, dest_dir: Path, stem: str, move: bool = False) -> Path:
-    """Copy an output beside the results, keeping the form the preset produced (file or store).
-
-    ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a
-    full-resolution grid is tens of gigabytes, and a copy wrote it a second time beside the first.
-    """
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / (stem + _form(src))
+def _publish_output(src: Path, dest: Path, move: bool = False) -> Path:
+    """Put the output ``src`` (a file or a store) at ``dest``, staged beside it and published once complete, so a
+    failed copy or move leaves the previous ``dest`` standing. ``move`` moves it instead, for a source in a workspace
+    that is deleted next: a transform on a full-resolution grid is tens of gigabytes, and a copy wrote it twice."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(DataStream.staging_path(str(dest)))
     try:
         if move:
@@ -626,13 +623,20 @@ def _copy_output(src: Path, dest_dir: Path, stem: str, move: bool = False) -> Pa
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True) if staging.is_dir() else staging.unlink(missing_ok=True)
         raise
-    _drop_other_forms(dest_dir, stem, _form(src))
     if dest.is_dir():
         # A store put at a path already read is invisible to the reader's path-keyed memo, which
         # would otherwise pair the copy's voxels with the replaced store's axes and geometry.
         from konfai.utils.ome_zarr import clear_ome_zarr_cache
 
         clear_ome_zarr_cache()
+    return dest
+
+
+def _copy_output(src: Path, dest_dir: Path, stem: str, move: bool = False) -> Path:
+    """An output beside the results as ``<stem><its form>`` (``_publish_output``), the other forms of ``stem`` retired
+    once it stands."""
+    dest = _publish_output(src, dest_dir / (stem + _form(src)), move)
+    _drop_other_forms(dest_dir, stem, _form(src))
     return dest
 
 
@@ -1773,12 +1777,7 @@ class ImpactRegKonfAIApp:
                 moved = self._warp_onto_fixed(
                     work / f"{index:03d}", kind, fixed, image, transform, gpu, cpu, quiet, keep_form=True
                 )
-                dest = output / image.name
-                output.mkdir(parents=True, exist_ok=True)
-                if dest.is_dir():  # an earlier store or series of this name; a file is replaced by the move
-                    shutil.rmtree(dest)
-                shutil.move(moved, dest)
-                written.append(dest)
+                written.append(_publish_output(moved, output / image.name, move=True))
         except BaseException as error:
             _leave(work, error)
             raise
