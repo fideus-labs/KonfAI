@@ -32,18 +32,12 @@ Transformer:
               Write:    {dataset: ./Out:omezarr}
 ```
 
-That writes `./Out/<case>/CT_iso.ome.zarr/` per case, one slab at a time. The
-store is chunked the way it was written, `[C, slab_rows, <=128, <=128]`, and
-`slab_rows` follows the memory budget, so the chunk layout depends on the
-machine that wrote it (the values do not); a training reader of `32^3` patches
-decompresses those chunks. {doc}`../config_guide/transform` has the rule.
+That writes `./Out/<case>/CT_iso.ome.zarr/` for each case, one slab at a time.
 
 ## Fold a cohort into one volume
 
-A chain becomes N-to-1 the moment it carries a `Reduce`. Everything before it
-runs per case, the fold happens at fixed voxel, everything after runs once on the
-result. The engine walks the output's regions and, within a region, the cases, so
-the peak is a few regions rather than N volumes.
+A `Reduce` combines the cases voxel by voxel into one volume. Stages before it run per case, stages after it
+once on the result, and memory stays at a few regions whatever the cohort's size.
 
 ```yaml
 transforms:
@@ -52,11 +46,9 @@ transforms:
   Write:    {dataset: ./Template:mha}
 ```
 
-`Resample` puts the members on one grid, and `transforms:` carries each one
-through the registration already solved for it, so the fold averages anatomy that
-corresponds rather than anatomy that merely overlaps. `grid: strict` checks the
-geometry; nothing can check the anatomy, which is why the registration belongs in
-the chain.
+`Resample` puts every case on one grid, through the registration already solved for it (`transforms:`), so
+the fold combines corresponding anatomy. `grid: strict` checks the grids; only the registration makes the
+anatomy correspond.
 
 <ul class="kf-example-grid kf-example-grid--compact" aria-label="Four registered pelvis CT cases folded into one volume">
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/gallery/capabilities/fold-source.png"><img src="../_static/gallery/capabilities/fold-source.png" alt="One of the four pelvis CT cases of the cohort." width="460" height="460" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">IN</span><strong>One of four cases</strong><span>Each carried onto the reference by its own registration.</span></figcaption></figure></li>
@@ -77,8 +69,7 @@ a label from the input, `Mean` widens to float32 and invents the rest.
 
 ## Turn one case into many
 
-`Expand` is the mirror, 1-to-N. Stages before it run once per case, stages after
-it run once per copy, and draws interleave with transforms freely:
+`Expand` does the opposite, 1 to N: stages before it run once per case, stages after it once per copy.
 
 ```{mermaid}
 flowchart LR
@@ -147,18 +138,16 @@ flowchart TB
     B -- yes --> RED([REDUCE]):::fold
     B -- no --> C{every stage<br/>streamable?}
     C -- no --> WV([WHOLE-VOLUME]):::load
-    C -- yes --> D{re-reads the source<br/>more than 1.5x?}
-    D -- yes --> LOAD([LOAD]):::load
-    D -- no --> STR([STREAM]):::stream
+    C -- yes --> D{the format reads regions,<br/>or the case exceeds the budget?}
+    D -- no --> LOAD([LOAD]):::load
+    D -- yes --> STR([STREAM]):::stream
 
 ```
 
-`SKIP` means the output already exists, so the run resumes, `REDUCE` folds the
-cohort, `WHOLE-VOLUME` names the stage that refused to stream, `STREAM` reads
-region by region.
-`LOAD` is a cost decision, not a failure: past a threshold, reading the case once
-beats reading regions of it many times. A run's log opens with its plan, next to an
-`outputs.json` declaring each configured `Write` destination.
+`SKIP`: already written, so the run resumes. `REDUCE`: the cohort is folded. `WHOLE-VOLUME`: a stage needs the
+whole volume, and the plan names it. `STREAM`: read and written region by region. `LOAD`: the format cannot
+read regions (NRRD) and the case fits the budget, so it is read once. The run's log in `./Transforms/<name>/`
+holds the full plan.
 
 ## In Python
 

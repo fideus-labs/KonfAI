@@ -1,6 +1,6 @@
 # Training configuration
 
-Training configuration lives under the `Trainer` root object.
+Training is configured under the `Trainer` root, in `Config.yml`.
 
 ```yaml
 Trainer:
@@ -11,139 +11,82 @@ Trainer:
   Dataset:
     ...
   train_name: SEG_BASELINE
-  epochs: 100          # examples/Segmentation ships 5, sized so a first run finishes
+  epochs: 100          # examples/Segmentation ships 5, so a first run finishes quickly
 ```
 
 ## Running it
-
-From the directory that contains `Config.yml`:
 
 ```bash
 konfai TRAIN -y --gpu 0 --config Config.yml
 ```
 
-If you do not have a GPU available, use `--cpu 1` instead of `--gpu 0`.
+Use `--cpu 1` instead of `--gpu 0` without a GPU. Add `-tb` to start TensorBoard; KonfAI prints the address
+to open. TensorBoard listens on `127.0.0.1` only, because it has no authentication: from a remote machine,
+forward the port with `ssh -N -L <port>:127.0.0.1:<port> user@server`, or set `KONFAI_TENSORBOARD_HOST`.
+Without the `tensorboard` extra, training runs normally and only the curves are lost.
 
-Add `-tb` to enable TensorBoard: KonfAI allocates a free port and prints the
-address to open, `http://127.0.0.1:<port>/`:
+Checkpoints go to `Checkpoints/<train_name>/`, curves and the resolved config to `Statistics/<train_name>/`
+(`--checkpoints-dir` and `--statistics-dir` move them).
 
-```bash
-konfai TRAIN -y --gpu 0 --config Config.yml -tb
-```
-
-TensorBoard binds `127.0.0.1` only: it has no authentication, and whoever
-reaches the port sees the curves and the `data_log` images. To follow a run on
-a remote machine, forward the port over SSH from your own computer, then open
-the same address there:
+### Resuming
 
 ```bash
-ssh -N -L <port>:127.0.0.1:<port> user@server
+konfai RESUME -y --config Config.yml --model Checkpoints/SEG_BASELINE/resume_latest.pt
 ```
 
-`KONFAI_TENSORBOARD_HOST` names another address to bind:
-`KONFAI_TENSORBOARD_HOST=0.0.0.0` serves every interface, and KonfAI prints the
-machine's network address instead.
+- `resume_latest.pt` is the latest checkpoint saved at the end of an epoch. Resuming from it continues
+  exactly where training stopped: optimizer, schedulers, EMA, early stopping and random generators included.
+- A checkpoint saved in the middle of an epoch holds weights for prediction and cannot be resumed.
+- `epochs` counts from the start of training: to train longer, raise it.
+- An early stop is decided again with the configured `patience`, so a larger one trains on.
+- A save after a crash is named `crash_<date>.pt`; it is never pruned, and yours to delete.
 
-TensorBoard is optional: without the `tensorboard` extra the run trains
-normally with a no-op writer and one warning naming
-`pip install konfai[tensorboard]`; only the scalar logs are lost.
+The resumed run is bit for bit the same on the CPU with `num_workers: 0` and no augmentation; otherwise it
+continues at the next epoch and says the replay is not exact.
 
-Resume from an existing checkpoint with `RESUME`. Checkpoints are named after the
-moment they were written, so substitute the one training produced: `--model`
-takes exactly one:
+### Seeds and the validation split
 
-```bash
-konfai RESUME -y --config Config.yml \
-  --model Checkpoints/SEG_BASELINE/2026_08_03_02_36_00.pt
-```
+Without `manual_seed`, training draws a seed and records it in `Statistics/<train_name>/Seed.txt`. `RESUME`
+reads it back, and setting `manual_seed` to it replays the run.
 
-A run records its seed: without `manual_seed`, TRAIN draws one and every draw
-of the run comes from it (the model's construction, the train/validation split,
-the batch order), as from a configured one. It is recorded in
-`Statistics/<train_name>/Seed.txt`: RESUME of an unseeded run reads it back, so
-resuming on the same cases draws the same split, and `manual_seed` set to it
-replays the run. Set `manual_seed` only to pick the seed yourself. The split is drawn on the cases found at each
-launch: a case added, removed or renamed since moves others between training
-and validation. RESUME of a training that continues compares its split with the
-latest `Train_<it>.txt` and `Validation_<it>.txt` of the run and warns, naming
-the cases that changed side, appeared or went; the run goes on with the new
-split. To change a cohort on purpose, give `validation` by case names: a named
-case keeps its side. A save on an exceptional exit is named `crash_<date>.pt` and
-sits outside the `save_checkpoint_mode` pruning: never a contender for best,
-and yours to delete.
-
-A checkpoint written at the end of an epoch whose optimizer windows are all
-closed carries a continuation cursor: RESUME from it starts the next epoch with
-the optimizer, schedulers, scaler, EMA, early-stopping state, the metric
-windows and each rank's Python, NumPy, torch and CUDA generators restored, and
-runs no initial validation. The latest such checkpoint is also kept as
-`resume_latest.pt` in both `BEST` and `ALL` modes (in `BEST` it shares its
-storage with the dated file when they are the same epoch):
-
-```bash
-konfai RESUME -y --config Config.yml \
-  --model Checkpoints/SEG_BASELINE/resume_latest.pt
-```
-
-An early stop the `patience` made is decided again under the configured
-`patience`, so a RESUME with a larger one trains on. A stop because the learning
-rate reached zero or no loss stayed finite stands.
-
-`epochs` counts from the start of the run, not from the RESUME. A RESUME from a
-checkpoint that already completed `epochs` epochs trains nothing and ends
-normally; raise `epochs` to continue.
-
-A checkpoint saved mid-epoch, or at an epoch end that left an accumulation
-window open (`nb_batch_per_step` not dividing the batch count), holds weights
-for PREDICTION and is refused by RESUME. Continuation is bit for bit on CPU
-with `num_workers: 0` and no augmented copies, with the same rank count and
-batch count; DataLoader worker state and augmentation draws are not saved, so
-those runs continue at the next epoch with a warning that the replay is not
-exact. A checkpoint from before this format resumes at its stored `epoch`.
-
-You can also change the output directories:
-
-```bash
-konfai TRAIN -y --config Config.yml \
-  --checkpoints-dir ./Checkpoints \
-  --statistics-dir ./Statistics
-```
+The train/validation split is drawn on the cases found at each launch. If cases were added, removed or
+renamed, `RESUME` warns and names the cases that changed side. To keep a split fixed, give `validation` as a
+list of case names.
 
 ## Top-level fields
 
-| Field | Type | Default in code | Required | Effect |
-| --- | --- | --- | --- | --- |
-| `Model` | mapping | `ModelLoader()` | Yes | Selects and configures the model graph. |
-| `Dataset` | mapping | `DataTrain()` | Yes | Defines training data loading, transforms, augmentation, and patching. |
-| `train_name` | string | `TRAIN_01` | No | Names the run and its output folders. |
-| `manual_seed` | int or null | `None` | No | Seeds the model's construction, training generators and preparation. The batch order it draws is the same whether the workers persist or not, and whatever `num_workers` unless a `shuffle_window` deals the cases to the workers. With `None`, TRAIN draws a seed, seeds the same draws with it and records it in `Statistics/<train_name>/Seed.txt`: RESUME reads it back, and `manual_seed` set to it replays the run. cuDNN stays non-deterministic without a configured seed (see `cudnn_benchmark`). |
-| `epochs` | int | `100` | No | Number of training epochs. |
-| `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
-| `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations, counted in batches: with `nb_batch_per_step: k`, `it_lr_update: 1` steps the scheduler k times per optimizer step. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |
-| `autocast` | bool | `false` | No | Enables AMP during training. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases, one RTX PRO 5000) an epoch runs 11.7 s against 27.0 s in fp32. The shipped Segmentation example trains with it on, with `channels_last`: 17.0 ms per step against 38.2 in fp32 (`benchmarks/perf/bench_train_step.py`). On a small 3D toy (64 cubed, batch 4, 1.4 M parameters) autocast alone was 49 % slower than fp32 and the pair 14 % faster; on SynthRAD 2025's UNet++ (2.5D, five slices of 320 squared, batch 32, 26 M parameters) a step goes 852 ms in fp32, 521 with autocast alone, 741 with `channels_last` alone and 387 with both (2.2x); on CURVAS's ResidualEncoderUNet (3D, nnU-Net style, 102 M parameters, batch 2 of 128x160x160) autocast alone is 2.0x (1244 to 617 ms, 17.6 to 9.6 GB) and `channels_last` costs 20 to 26 % with or without it (1532 ms alone, 779 with both). Turn `autocast` on; `channels_last` depends on the model, so measure it on yours with `benchmarks/perf/bench_train_step.py --model-classpath`. |
-| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). cuDNN picks its kernels by layout: with `autocast` the shipped Segmentation example predicts 1.25x faster and the 3D UNet above trains an epoch in 10.0 s against 11.7 s, while CURVAS's ResidualEncoderUNet trains 26 % slower with it (see `autocast`), so measure before turning it on; the kernels chosen differ, so labels can move at boundaries (3199 of 58.4 million voxels in fp32 on that example). |
-| `cudnn_benchmark` | bool | `false` | No | Lets cuDNN benchmark its convolution kernels even when `manual_seed` is set. A seed otherwise makes cuDNN deterministic, so the run replays bit for bit; benchmarking trades that replay for the fastest kernel per shape. On a 2D UNet (5 input slices, 41 classes, 16 × 288 × 288 batches, with `autocast` and `channels_last`): 47.1 ms to 44.0 ms a step, for 780 MiB more GPU memory. Without a seed cuDNN benchmarks either way. |
-| `torch_compile` | bool | `false` | No | Compiles the network's graph walk with `torch.compile`; the criteria, the clocks and a `ModelPatch`'s assembly stay eager. The first run pays the compilation and inductor keeps it cached for the next. On a 2D UNet with batch normalization (5 slices, 41 classes, 16 × 288 × 288 batches, 512 steps an epoch, with `autocast` and `channels_last`): 38.5 s to 34.5 s an epoch, 17 s more on the first run. The values move within floating-point noise, not bit for bit. A graph with a `ModelPatch` or a module reading attributes stays eager, and the run says so. |
-| `gradient_checkpoints` | list or null | `None` | No | Activates gradient checkpointing on selected modules. |
-| `gpu_checkpoints` | list or null | `None` | No | Pins selected modules to dedicated GPUs. |
-| `ema_decay` | float | `0` | No | Enables exponential moving average tracking when greater than zero. |
-| `data_log` | list or null | `None` | No | TensorBoard logging directives for dataset groups or model outputs. |
-| `EarlyStopping` | mapping or null | `None` | No | Configures early stopping: see [`EarlyStopping`](#earlystopping). |
-| `save_checkpoint_mode` | string | `BEST` | No | `BEST` keeps the checkpoint whose validation losses sum lowest (a Dice loss counts one minus its coefficient; a `ReduceLROnPlateau` schedule steps on the same sum), `ALL` keeps every save. |
+| Field | Default | Effect |
+| --- | --- | --- |
+| `Model` | | The model (below). |
+| `Dataset` | | The data (below). |
+| `train_name` | `TRAIN_01` | Names the run and its output folders. |
+| `manual_seed` | `null` | Seeds the model, the split and the batch order. `null` draws one and records it. |
+| `epochs` | `100` | Number of epochs. |
+| `it_validation` | `null` | Validate and save every N iterations. `null`: once per epoch. |
+| `it_lr_update` | `null` | Step the schedulers every N batches. `null`: once per epoch. |
+| `autocast` | `false` | Mixed precision. About twice as fast on most GPU models; measure it on a small one. |
+| `channels_last` | `false` | Channels-last memory layout. Faster on some models and slower on others: measure it with `benchmarks/perf/bench_train_step.py`. |
+| `cudnn_benchmark` | `false` | Let cuDNN pick the fastest kernels even with a seed, at the cost of an exact replay. |
+| `torch_compile` | `false` | Compile the network with `torch.compile`: about 10% faster per epoch after a first, slower run. |
+| `gradient_checkpoints` | `null` | Modules to run with gradient checkpointing (less memory, more compute). |
+| `gpu_checkpoints` | `null` | Modules to place on other GPUs. |
+| `ema_decay` | `0` | Keep an exponential moving average of the weights when above 0. |
+| `data_log` | `null` | Groups or outputs to log as images in TensorBoard. |
+| `EarlyStopping` | `null` | Stop when the score stops improving (below). |
+| `save_checkpoint_mode` | `BEST` | `BEST` keeps the checkpoint with the lowest validation loss, `ALL` keeps every save. |
 
 ### `EarlyStopping`
 
-| Field | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `monitor` | list[str] or null | `null` | The logged losses or metrics summed into the score; a name the run does not log is refused with the names it does. `null` sums the losses. |
-| `patience` | int | `10` | Checks without improvement before the run stops. |
-| `min_delta` | float | `0.0` | The smallest change that counts as an improvement. |
-| `mode` | string | `min` | `min` or `max`: the direction the score improves in. `BEST` checkpoint retention reads it too. |
+| Field | Default | Effect |
+| --- | --- | --- |
+| `monitor` | `null` | The logged losses or metrics summed into the score. `null`: the losses. |
+| `patience` | `10` | Validations without improvement before stopping. |
+| `min_delta` | `0.0` | The smallest change that counts as an improvement. |
+| `mode` | `min` | `min` or `max`: the direction that improves. |
 
 ## `Trainer.Model`
 
-`Trainer.Model` always starts with a `classpath`, then a section named after the
-selected class.
+A `classpath` selects the model; its arguments go in a section named after the class:
 
 ```yaml
 Model:
@@ -154,38 +97,22 @@ Model:
       lr: 0.001
 ```
 
-Common nested fields used by built-in and local models:
+| Field | Effect |
+| --- | --- |
+| `classpath` | The model: a catalog `.yml`, a Python class, or `default\|<Name>.yml` ({doc}`../reference/components/models`). |
+| `optimizer` | `name` is a `torch.optim` class; the other keys are its arguments. |
+| `schedulers` | Learning-rate schedulers, by name. |
+| `outputs_criterions` | The losses and metrics, by model output (below). |
+| `ModelPatch` | A second level of patching inside the network ({doc}`../usage/large-images`). |
+| `dim` | 2 or 3. |
+| `allow_head_resize` | Let a checkpoint with a different number of classes initialise the part that matches. |
+| `pretrained_from` | Start from another framework's weights ({doc}`../reference/components/models`). |
 
-| Field | Type | Required | Effect |
-| --- | --- | --- | --- |
-| `classpath` | string | Yes | Selects the model class to import. |
-| `<SelectedClass>` | mapping | Yes | Constructor arguments for the chosen class. |
-| `optimizer` | mapping | Usually | Optimizer configuration passed through `OptimizerLoader`. |
-| `schedulers` | mapping | Optional | Learning-rate schedulers keyed by classpath. |
-| `outputs_criterions` | mapping | Usually | Declares losses and metrics attached to specific model outputs. |
-| `ModelPatch` | mapping or null | Optional | Enables a second, model-level patch inside the network (a config key named `ModelPatch`, distinct from `Dataset.Patch`). |
-| `dim` | int | Model-dependent | Declares whether the network operates in 2D or 3D. |
-| `allow_head_resize` | bool | Optional | `true` lets a checkpoint whose tensor shapes differ warm-start the overlapping slice of each one (a new label count); the default refuses the mismatch. See {doc}`../reference/components/models`. |
-| `pretrained_from` | mapping or null | Optional | Seeds a fresh TRAIN from another framework's weights (`checkpoint`, `builder`, `args`, `input_shape`). See {doc}`../reference/components/models`. |
-
-### `optimizer`
-
-`name` selects a class from `torch.optim`; the rest of the section is that
-class's own signature, so a resolved config carries every one of its keys.
-
-`fused` and `foreach` both left at `None` ask for the widest batched step the
-optimizer implements: fused where torch has one, foreach otherwise. The run
-decides, not the parameters: a run that places the graph on a GPU takes the
-batched step, a CPU run keeps torch's own default. On the Segmentation example
-(1.93 M parameters in 40 tensors, one RTX PRO 5000) an AdamW step costs
-0.059 ms of host time fused against 0.188 ms foreach, in two kernels against
-eight. A fused step sums in another order, so its parameters drift from the
-foreach ones: 3.7e-05 after 100 steps, 8.3e-06 of their own scale. Write
-`fused: false` to pin the foreach step.
+On a GPU the optimizer uses its fused step when torch has one; `fused: false` keeps the default one.
 
 ### `outputs_criterions`
 
-This is the most important training structure after the dataset definition.
+Losses and metrics are attached to named outputs of the model:
 
 ```yaml
 outputs_criterions:
@@ -201,174 +128,79 @@ outputs_criterions:
                 value: 1
 ```
 
-Several criteria can share one output, and several outputs can each carry their own: `examples/Segmentation` pairs the cross entropy above with a `Dice` loss on
-`UNetBlock_0:Head:Softmax`, because the two want different forms of the same head.
+- The key is a path in the model's graph (`UNetBlock_0:Head:Conv`).
+- `targets_criterions` names the target: a dataset group, or another output by its path.
+- `criterions_loader` lists the criteria. Each takes `is_loss`, `group` (criteria of one group are summed),
+  `start` and `stop` (the iterations it is active), `accumulation`, `schedulers` (its weight over time), and
+  its own arguments.
+- Without `is_loss`, a criterion takes its own role: a loss, except `PSNR` and `SSIM`, which are metrics.
 
-Structure:
-
-- output key → model output or module path
-- `targets_criterions` → one or more target groups, or other model outputs by their `:` path
-- `criterions_loader` → one or more criteria for that target
-- each criterion can define `is_loss`, `group`, `start`, `stop`, `accumulation`, and scheduler weights;
-  `is_loss` left out takes the criterion's own role (a loss, except `PSNR` and `SSIM`, which are metrics)
-
-TRAIN and RESUME refuse a model on which no criterion has `is_loss: true`, on the
-root network or a nested one: without a loss no weight would change.
+An output can carry several criteria: `examples/Segmentation` puts a cross entropy on
+`UNetBlock_0:Head:Conv` and a Dice loss on `UNetBlock_0:Head:Softmax`. A model with no loss is refused.
 
 ## `Trainer.Dataset`
 
-Training datasets are instantiated through `DataTrain`.
-
-Common fields:
-
-| Field | Type | Default in code | Effect |
-| --- | --- | --- | --- |
-| `dataset_filenames` | list[str] | `["default\|./Dataset:mha"]` | Dataset sources and selection mode. |
-| `groups_src` | mapping | `{Labels: Group()}` | Maps on-disk groups to loaded tensors. The default binds a single group named `Labels`, which is almost never what you want: treat it as required. |
-| `augmentations` | mapping or null | `null` | Data augmentations sampled during training. None when absent. |
-| `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
-| `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
-| `memory_budget` | number / string / null | `null` = `auto` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. An absent key (`null`) means `auto`: 80% of the detected memory decides. |
-| `subset` | string / list / null | `null` | Restricts which cases are used: a flat selector (a case-list file, a list of names, or a `start:end` slice), not a nested object. `shuffle` and `shuffle_window` are sibling `Dataset` keys. |
-| `batch_size` | int | `1` | Batch size. |
-| `num_workers` | int or null | `None` | Number of DataLoader workers. `None` resolves to `0` on the cache regime, and to `max(1, min(cpu_count, 4))` on the stream/buffer regime. A stage that declares `single_process = True` (`KonfAIInference` does) in any group forces `0` whatever the value. |
-| `pin_memory` | bool | `false` | Enables pinned host memory for DataLoader batches. |
-| `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
-| `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. Each epoch then starts its workers anew: on macOS and Windows every worker is a fresh interpreter that imports KonfAI and receives the dataset again. |
-| `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. A float holds out the last cases of the run order at the case boundary closest to that share of the entries (a tie goes to validation, which keeps at least one case). |
-| `validation_augmentations` | bool | `false` | Whether validation also iterates over augmented variants. Set `true` to validate on every augmented copy as well as the base samples. |
-| `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
-| `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Safe under DDP. |
+| Field | Default | Effect |
+| --- | --- | --- |
+| `dataset_filenames` | `["default\|./Dataset:mha"]` | Where the cases are ({doc}`index`). |
+| `groups_src` | | The groups to load and their transforms (below). Required in practice. |
+| `augmentations` | `null` | Augmentations ({doc}`../reference/components/transforms`). |
+| `inline_augmentations` | `false` | Build augmented copies when they are needed, drawing them again each epoch. |
+| `Patch` | | Patch extraction (below). |
+| `memory_budget` | `auto` | Memory for the data: the dataset stays in RAM if it fits, otherwise it streams (below). |
+| `subset` | `null` | Which cases to use: a case-list file, a list of names, or a `start:end` slice. |
+| `batch_size` | `1` | Batch size. |
+| `num_workers` | `null` | DataLoader workers. `null`: 0 when the dataset is in RAM, up to 4 when it streams. |
+| `pin_memory` | `false` | Pinned host memory for faster copies to the GPU. |
+| `prefetch_factor` | `null` | Batches prepared ahead per worker (2 by default). |
+| `persistent_workers` | `null` | Keep workers between epochs (yes by default; off with inline augmentations). |
+| `validation` | `0.2` | A share of the cases, or a list or file of case names. |
+| `validation_augmentations` | `false` | Also validate on augmented copies. |
+| `shuffle` | `true` | Shuffle the training order. |
+| `shuffle_window` | `null` | Keep only this many cases in play at a time (below). |
 
 ### `Patch`
 
-| Field | Type | Default | Effect |
-| --- | --- | --- | --- |
-| `patch_size` | list[int] | `[128, 128, 128]` | The patch the model is fed; a `0` is a free axis the framework sizes (below). |
-| `overlap` | int / float / string / list / null | `null` | Overlap between neighbouring patches: a voxel count, a fraction in `[0, 1[`, a percent string (`"20%"`) or a per-axis list of those. `null` takes 20 % of the patch. |
-| `pad_value` | float or null | `null` | Value that pads a patch reaching past the volume. `null` pads with the data's minimum; a `uint8` volume always pads with `0`. |
-| `extend_slice` | int | `0` | 2.5D context: the number of neighbouring slices read around a slice patch of an input group and stacked as channels. Only with `patch_size[0] == 1`. |
+| Field | Default | Effect |
+| --- | --- | --- |
+| `patch_size` | `[128, 128, 128]` | The patch the model sees. A `0` lets KonfAI size that axis. |
+| `overlap` | `null` | Overlap between patches: voxels, a fraction, `"20%"`, or one per axis. `null`: 20%. |
+| `pad_value` | `null` | Padding past the volume. `null`: the data's minimum. |
+| `extend_slice` | `0` | 2.5-D: neighbouring slices added as channels (with `patch_size[0] == 1`). |
 
-### Cache, stream, and buffer
+With a `0` in `patch_size`, KonfAI starts from the whole axis and, on a GPU out-of-memory at the first step,
+restarts with the fewest equal patches that fit. A size without `0` is never changed.
 
-The loading regime picks how a loader turns a case into patches. It applies to
-the training and validation subsets alike. Training defaults to the cache;
-`memory_budget` switches the regime from the dataset's measured size.
+### Loading: in RAM or streamed
 
-- **Cache** (the training default). Every case is loaded, preprocessed,
-  and held in RAM before the first epoch; patches are cut from the resident
-  volume. RAM follows the dataset. `num_workers` defaults to `0` here.
-- **Stream** (budget exceeded, patch-compatible preprocessing). Each patch is
-  read from its own region of the source file. No volume is materialized.
-- **Buffer** (budget exceeded, preprocessing that needs the whole volume).
-  The case is loaded whole into a FIFO of `batch_size + 1` cases (`max(batch_size + 1, shuffle_window)` when a window is set) evicting the
-  oldest.
+KonfAI estimates the dataset's size from the image headers:
 
-Nothing in YAML selects streaming. KonfAI derives it from the declared transforms
-and augmentations, per case and per augmented copy, so stream and buffer coexist
-in one run: a group that needs its whole volume loads that case, while the others
-still stream.
+- if it fits `memory_budget`, every case is loaded and preprocessed once and kept in RAM (the default for
+  most datasets);
+- otherwise each patch is read from its region of the file (**stream**), or, for a case whose transforms
+  need the whole volume, the case is loaded into a small buffer.
 
-A cached case is resident, so its patches are cut from RAM even when its chain
-would stream.
+The decision and the numbers behind it are printed at startup. A budget below the dataset's size forces
+streaming.
 
-`benchmarks/perf/bench_train_stream.py` measures both regimes on synthetic
-cases, one storage backend at a time: the peak RSS of the process tree and the
-time the loop waits on data, with the whole dataset cached against every patch
-read from the store.
-
-### `memory_budget`
-
-`memory_budget` derives the loading regime from a RAM budget. KonfAI estimates
-the dataset size from image headers alone (no voxel read), caches when the
-per-rank share fits the budget, and takes the streaming/buffer path otherwise: a budget below the dataset's size therefore forces streaming. The decision
-is made once on the launcher, before any rank is spawned, and the estimate, the
-budget, its source, and the chosen regime are printed. `null` (the default)
-means `auto`: the detected memory decides -- a dataset that fits caches exactly
-as before, one that does not streams instead of overrunning the node.
-
-| Value | Read as |
+| `memory_budget` | Read as |
 | --- | --- |
-| `24`, `"24"` | 24 GiB: a bare number is GiB |
-| `"24GB"`, `"512MB"` | decimal, 10^n |
-| `"32GiB"`, `"512MiB"` | binary, 2^n |
+| `24` | 24 GiB |
+| `"24GB"`, `"512MB"` | powers of 10 |
+| `"32GiB"`, `"512MiB"` | powers of 2 |
 | `"1024b"` | bytes |
-| `"auto"` | 80% of the detected RAM |
+| `auto` (default) | 80% of the memory (or of the container's limit), split between the processes on the machine |
 
-Case is folded and the space before the unit is optional: `"32 gib"` and
-`"32GiB"` name the same budget.
+The budget is per process. The estimate counts 4 bytes per voxel and one copy per augmentation: leave some
+headroom.
 
-A bare number above `1048576` (1 PiB per rank) is refused: read in GiB it is a
-byte count missing its unit. Give bytes with the `b` suffix (`"8000000000b"`).
-
-An explicit budget is **per rank**: the comparison is
-`dataset_size / world_size <= budget`, because cases are sharded across ranks.
-`"auto"` divides the detected memory by the ranks sharing **one node**
-(`KONFAI_LOCAL_RANKS`), not by `world_size`. On a single node the two coincide, the
-ranks cancel, and it reduces to "does the whole dataset fit 80% of the detected
-memory"; across nodes the numerator still uses `world_size`, so they do not cancel. `"auto"`
-takes whichever is tighter of the **cgroup limit** (set under a container or
-SLURM), and the host's available RAM; the log names which one won.
-
-The dataset size is an estimate, not a guarantee. It reads no voxel: for every
-case of every source group it takes the shape the transform chain lands the case
-on, computed from the header (a resample-down or a crop shrinks it, a pad or a
-one-hot grows it), times 4 bytes. It models a float32 cached tensor, so a `uint8`
-source is over-counted and a `float64` one under-counted. Each case counts once
-per copy the cache holds: the base tensor plus one per augmentation draw, and for
-the validation cases the draws count only under `validation_augmentations: true`.
-When the chain changes the size by more than a tenth, the printed line also gives
-the size as stored. `inline_augmentations: true` defers the augmented copies
-rather than dropping them: they are built on demand and released once per epoch,
-so the peak is the same. Caching also peaks above its steady state while it
-runs. Leave headroom.
-
-### `shuffle_window`
-
-Each non-streamable case is loaded into the FIFO buffer, so a global patch shuffle
-reloads a volume once per patch that lands after an eviction. A window keeps
-`shuffle_window` cases in play at a time (their patches shuffled together, all
-emitted before advancing), which reads each volume about once per epoch. `1` is
-perfect locality and no decorrelation; larger windows trade one back for the other.
-
-The window applies to the training loader only. Validation is scored over the whole
-subset whatever the order, so it follows `shuffle` without a window.
-
-The window resolves back to a plain global shuffle (byte for byte), when it is
-`null` (the default), when it is `>=` the number of cases, or when `num_workers`
-exceeds the number of cases. Under a window, cases are partitioned across workers
-and the per-worker batches interleaved, so every volume is read by exactly one
-worker. The buffer is sized to hold the window, so a non-streamable run holds
-`max(batch_size + 1, shuffle_window)` volumes per worker.
-
-`shuffle_window` works under DDP: the sampler's length is the mapping's length, so
-the window reorders without changing the count, and each training shard is padded to
-the longest one. Ranks stay in step.
-
-The validation shards are not padded that way: each patch is scored once, on one
-rank, and a rank a batch short runs one more batch that it does not score. For a
-criterion that averages its patches (`batch_mean`, see
-{doc}`../reference/components/losses-metrics`), the value logged, the checkpoint
-score and early stopping read the mean over every patch of every rank, as one rank
-computes it.
-
-### Free patch axes: sizing by measurement
-
-`Patch.patch_size` accepts the same free-axis convention as prediction: `0`
-entries are sized by the framework, starting at the full extent and taking
-more patches only on a CUDA out-of-memory, the fewest that fit, each axis cut
-into equal parts: the failed step (forward, backward and optimizer) already
-measured its cost, so the split lands near the target and the run restarts on
-the re-planned grid. Training runs out of memory at the first step
-when it does at all (its memory is maximal from step one), so a restart loses no
-meaningful work. Under DDP the failing ranks agree on the per-axis minimum
-before restarting, so every rank trains the same grid; a single rank failing
-alone dies at the collective timeout, exactly as an unhandled OOM does. A
-`patch_size` without a `0` is never resized: the OOM propagates.
+`shuffle_window` helps a streamed dataset whose cases must be loaded whole: instead of shuffling all patches
+(which reloads a case for almost every patch), it keeps `shuffle_window` cases in play and shuffles their
+patches together, so each case is read about once per epoch. It works with several GPUs.
 
 ### `groups_src`
 
-Each source group contains one or more destination groups:
+Each source group on disk gives one or more tensors:
 
 ```yaml
 groups_src:
@@ -386,28 +218,13 @@ groups_src:
         is_input: true
 ```
 
-Use this section to define:
-
-- what exists on disk
-- preprocessing transforms
-- patch-specific transforms
-- whether the tensor is a model input
-
-An absent `transforms` or `patch_transforms` is no chain: the group reaches the
-model as stored.
+`transforms` runs once per case, `patch_transforms` once per patch, and `is_input` marks the model's inputs
+(the others are targets). No `transforms` means the group reaches the model as stored.
 
 ## Examples
-
-The most practical examples in the repository are:
 
 - `examples/Segmentation/Config.yml`
 - `examples/Synthesis/Config.yml`
 - `examples/Synthesis/Config_GAN.yml`
 
-## Next steps
-
-- {doc}`index`: the shared `dataset_filenames`, `groups_src`,
-  `subset`, and `validation` conventions used above.
-- {doc}`../reference/components/models`: how module names become the output paths
-  used in `outputs_criterions`.
-- {doc}`prediction`: to configure inference with the trained model.
+Next: {doc}`prediction`, to predict with the trained model.

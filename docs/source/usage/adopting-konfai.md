@@ -1,9 +1,7 @@
 # Adopt KonfAI from PyTorch, MONAI, or nnU-Net
 
-KonfAI is not a replacement for every neighbouring tool. Use it when the
-missing piece in your project is a single, inspectable medical-imaging workflow
-from on-disk datasets through training, prediction, evaluation, and reusable
-application delivery.
+KonfAI does not replace every neighbouring tool. Use it when what you miss is one inspectable workflow,
+from the data on disk to training, prediction, evaluation and a reusable app.
 
 ## Which tool fits which job?
 
@@ -14,17 +12,14 @@ application delivery.
 | A mature general-purpose training-loop abstraction | PyTorch Lightning | Keep Lightning when generic training orchestration is the problem; use KonfAI when medical data, geometry, regional I/O, prediction datasets, and Apps are central. |
 | A declarative end-to-end medical-imaging execution path | KonfAI | Configure train/predict/evaluate together, then package the same workflow for local, remote, Slicer, or agent-driven use. |
 
-These choices are composable. KonfAI classpaths can instantiate installed
-PyTorch and MONAI classes; gradual adoption does not require rewriting a proven
-network or loss.
+They combine: KonfAI can use installed PyTorch and MONAI classes, so adopting it does not mean rewriting a
+network or a loss.
 
 ## Lowest-friction adoption: import the component
 
-Use `module:Class` in YAML for any importable class. A model class that is not
-a KonfAI `Network` is wrapped: its constructor arguments sit directly under the
-class name, beside `optimizer` and `outputs_criterions`, and its output is the
-module `Model`, the key a loss attaches to (and the `outputs_dataset` key at
-prediction). A MONAI UNet (`pip install "konfai[monai]"`):
+Name any installed class with `module:Class`. A model that is not a KonfAI `Network` is wrapped: its
+arguments go under its class name, and its output is called `Model` (the key losses attach to). A MONAI UNet
+(`pip install "konfai[monai]"`):
 
 ```yaml
 Model:
@@ -63,14 +58,12 @@ criterions_loader:
     reduction: mean
 ```
 
-A wrapped model exposes its final output only. Choose this route first when the
-existing forward is all you need.
+A wrapped model exposes only its final output. Start here when that is all you need.
 
 ## Bring your model: ten lines, no YAML
 
-A model you already built in Python trains and predicts on a KonfAI dataset
-through two calls, with the patching, the overlap blending, the streamed
-writes and the run record of every other run:
+A model built in Python trains and predicts on a KonfAI dataset in two calls, with KonfAI's patching,
+blending and run record:
 
 ```python
 import konfai, torch
@@ -88,23 +81,15 @@ if __name__ == "__main__":
                          final_transforms=[Argmax(), TensorCast(dtype="uint8")])
 ```
 
-`inputs` and `targets` are the dataset's groups; `patch` is what the model is
-fed, its non-unit axes deciding whether the model is 2D or 3D; `transforms`
-and `augmentations` take the same objects the YAML would name. The model's
-output is written as it comes out, one channel per logit, unless
-`final_transforms` turns it into something else: here a `uint8` label map.
-`train_model` returns the run's checkpoint directory; `[0-9]*.pt` matches the
-one dated checkpoint the run keeps, its best, where `resume_latest.pt` beside
-it is the last epoch, kept to resume. The workspace
-keeps the resolved config as every run does, with the model named by a token
-(`konfai.api:live_model`): the object lives in this process, so such a run
-stays on one rank and cannot be resumed from another process. A relative
-`output` lands under the run's workspace (`Predictions/<name>/`), an absolute
-one where it says. Left without
-`checkpoints`, `predict_model` writes the weights the module holds in memory
-as a checkpoint for the run, so a model loaded any other way (a library's
-pretrained weights, a foreign checkpoint) predicts as it stands. For several
-GPUs, or to resume, spell the model as a classpath and use the YAML route.
+- `inputs` and `targets` are the dataset's groups; `patch` is what the model sees (its non-1 axes make the
+  model 2-D or 3-D).
+- The output is written as the model produces it, unless `final_transforms` changes it (here, a `uint8`
+  label map).
+- `train_model` returns the checkpoint folder; `[0-9]*.pt` is the best checkpoint.
+- Without `checkpoints`, `predict_model` uses the weights the model holds, so a model loaded any other way
+  predicts as it is.
+- The model lives in your process, so this route runs on one GPU and cannot be resumed from another process.
+  For several GPUs or to resume, name the model by classpath and use YAML.
 
 ## MONAI Bundles, both ways
 
@@ -136,45 +121,18 @@ Both need the `monai` extra (`pip install konfai[monai]`).
 
 ## When you need named internal outputs
 
-KonfAI `Network` objects are routed graphs. Names supplied to `add_module()`
-become stable paths that can receive losses, metrics, deep supervision, or
-export rules. You have two options:
-
-- wrap your architecture as a Python `Network` when it has custom control flow;
-- use a registry-constrained YAML model when it is a feed-forward graph and you
-  want the architecture itself to be diffable.
-
-The YAML catalog includes architectures validated at documented equivalence
-levels against MONAI, torchvision, nnU-Net's
-`dynamic_network_architectures`, and segmentation-models-pytorch. Consult
-{doc}`../reference/components/models` before assuming checkpoint compatibility:
-some entries are weight-exact, while others are only structurally validated.
+A KonfAI `Network` names its modules, so losses, metrics and saved outputs can attach to any of them. Write
+your architecture as a Python `Network` when it has custom control flow, or as a YAML model when it is a
+feed-forward graph. The YAML catalog lists, for each model, whether its weights match MONAI, torchvision,
+nnU-Net or segmentation-models-pytorch exactly ({doc}`../reference/components/models`).
 
 ## Loading existing weights
 
-For a weight-exact pair,
-`konfai.utils.pretrained.transfer_weights_by_execution_order` pairs weighted
-leaf modules in forward-execution order and checks every local state shape. It
-is useful when graph names differ but execution structure and parameters match.
-The config entry point is `Model.pretrained_from` (checkpoint + reference
-builder classpath + its args), so a fresh TRAIN seeds from another framework's
-checkpoint without any Python: see the
-["Start from MONAI, torchvision or nnU-Net weights" section](../reference/components/models.md).
-
-This bridge is strict, not universal. It raises `ConfigError` on a different leaf
-count, a per-leaf key or shape mismatch, a target tensor no traced leaf owns, and a
-tensor the target ties across two leaves, and it fills every target tensor or
-raises, never reporting a partial load as success. What it cannot detect is
-**ordering**: two identically-shaped leaves swapped would pair silently, since the
-pairing is execution order itself. `Model.pretrained_from` covers it: after the
-transfer it runs the reference and the seeded model on the same input and raises
-`ConfigError` when no named output of the model reproduces what the reference
-returns (except under a ModelPatch with an axis of 1, which it cannot run whole).
-A direct call of the function does not, so compare the outputs yourself
-there. Unreached *source* branches (an nnU-Net
-deep-supervision head) are ignored on purpose. Preserve
-the reference preprocessing, class order, normalization, and output convention
-when validating a transferred checkpoint.
+`Model.pretrained_from` starts a training from another framework's checkpoint, and checks that the KonfAI
+model reproduces the original's outputs ({doc}`../reference/components/models`). From Python,
+`konfai.utils.pretrained.transfer_weights_by_execution_order` copies the weights layer by layer and refuses
+any mismatch, but does not compare outputs: check them yourself. Keep the original preprocessing, class
+order and normalisation when you validate a transferred model.
 
 ## A gradual migration path
 
@@ -191,35 +149,20 @@ when validating a transferred checkpoint.
 At each step, keep a reference case and test numerical outputs before changing
 the next layer.
 
-## What KonfAI adds
+## What KonfAI adds, and what it does not
 
-- named medical dataset groups and physical geometry carried through output writing;
-- a resolved configuration snapshot for the complete workflow;
-- dataset-level and model-level patching;
-- conservative regional reads with bounded-memory fallback;
-- prediction-time batching, TTA, ensembles, reductions, reconstruction, and medical-image export;
-- a common workspace for training, prediction, and evaluation;
-- Apps for local/Hugging Face/HTTP use and an external 3D Slicer client;
-- MCP tools that drive the same builders and artifacts as human-operated runs.
+KonfAI adds: named dataset groups with their geometry kept through to the written output; one resolved
+config for the whole workflow; patching at the dataset and model levels; streamed reads and writes;
+ensembles and test-time augmentation; apps usable locally, from Hugging Face, over HTTP, from Slicer, and
+by agents through MCP.
 
-## What it does not add
-
-- nnU-Net's automatic dataset fingerprinting and segmentation plan selection;
-- MONAI's component breadth;
-- Lightning's ecosystem and maturity for arbitrary training-loop patterns;
-- a general spatial dependency compiler for every custom transform;
-- proof of universal speedups over these tools: the tracked harness
-  ({doc}`large-images`) reproduces the bounded-memory claim and pins the app
-  tables' protocol, but the comparisons are per app and per case, not a
-  general claim.
+It does not add nnU-Net's automatic planning, MONAI's breadth of components, or Lightning's ecosystem for
+arbitrary training loops.
 
 ## Trust boundary
 
-Python classpaths and KonfAI Apps import code. Resolving an App can also install
-its `requirements.txt` by default. Treat local modules and remote app
-repositories as executable code; use only trusted sources. Declarative YAML
-model files have a narrower boundary: their node types come from curated
-registries and do not evaluate arbitrary imports.
+Python classpaths and apps run code, and an app installs its `requirements.txt` by default: use trusted
+sources only. YAML models are safer: they can only use registered module types.
 
 ## Next steps
 

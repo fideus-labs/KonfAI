@@ -157,7 +157,7 @@ pip install konfai                # core only (bring your own data reader)
 ```
 
 `[imaging]` pulls SimpleITK / h5py / pydicom / zarr, needed to read `.mha`,
-`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`smp`, `ssim`, `lpips`,
+`.nii.gz`, DICOM, and OME-Zarr. For the full extras matrix (`smp`, `lpips`,
 `export`, `cluster`, …) and a reproducible Pixi setup, see the
 [installation guide](https://konfai.readthedocs.io/en/latest/getting-started/installation.html).
 
