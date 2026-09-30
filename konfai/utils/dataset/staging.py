@@ -96,26 +96,31 @@ def staged_entry(final: Path) -> Iterator[Path]:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def _mhd_data_file(path: Path) -> str | None:
-    """The ``ElementDataFile`` a MetaImage header names, ``None`` when its pixels follow the header (``LOCAL``)."""
-    with open(path, encoding="latin-1") as header:
-        for line in header:
-            key, _, value = line.partition("=")
-            if key.strip() == "ElementDataFile":
-                return None if value.strip() == "LOCAL" else value.strip()
+def _pixel_reference(path: Path) -> Path | None:
+    """Where the detached header ``path`` reads its pixels, as it names them: Analyze's ``.img`` beside it under its
+    name, a MetaImage's ``ElementDataFile`` (relative to the header, or absolute); ``None`` for any other entry and
+    for pixels that follow the header (``LOCAL``)."""
+    name = path.name.lower()
+    if name.endswith(".hdr"):
+        return Path(path.with_suffix(".img").name)
+    if name.endswith(".mhd"):
+        with open(path, encoding="latin-1") as header:
+            for line in header:
+                key, _, value = line.partition("=")
+                if key.strip() == "ElementDataFile":
+                    return None if value.strip() == "LOCAL" else Path(value.strip())
     return None
 
 
 def entry_links(src: Path, dest: Path) -> list[tuple[Path, Path]]:
     """Each file of the image entry ``src`` and where it must lie for its header, left as it is, to read it as
     ``dest``: the header at ``dest``, Analyze's pixels beside it under its name, a MetaImage's where its
-    ``ElementDataFile`` points from ``dest`` (an absolute one is read where it lies)."""
+    ``ElementDataFile`` points from ``dest``. An absolute one is read where it lies, so a link leaves it there."""
     links = [(src, dest)]
-    name = src.name.lower()
-    if name.endswith(".hdr"):
-        links.append((src.with_suffix(".img"), dest.with_suffix(".img")))
-    elif name.endswith(".mhd") and (data := _mhd_data_file(src)) is not None and not Path(data).is_absolute():
-        links.append((src.parent / data, dest.parent / data))
+    pixels = _pixel_reference(src)
+    if pixels is not None and not pixels.is_absolute():
+        read = dest.with_suffix(".img") if src.name.lower().endswith(".hdr") else dest.parent / pixels
+        links.append((src.parent / pixels, read))
     return links
 
 
@@ -125,15 +130,16 @@ def entry_files(path: Path) -> list[Path]:
 
 
 def transfer_entry(src: Path, dest: Path, move: bool = False) -> None:
-    """Copy (``move``: move) the image entry ``src`` to ``dest``: a file, a store, or a detached header and its pixels.
-    A MetaImage's pixels take a name of their own, which the header written at ``dest`` gives (``staged_entry``
-    publishes them before it); Analyze's follow ``dest``'s name."""
-    transfer = shutil.move if move else shutil.copy2
-    links = entry_links(src, dest)
-    if len(links) == 1:
+    """Copy (``move``: move) the image entry ``src`` to ``dest``: a file, a store, or a detached header and its pixels,
+    wherever the header points, so the result stands without the source. A MetaImage's pixels take a name of their
+    own, which the header written at ``dest`` gives (``staged_entry`` publishes them before it); Analyze's follow
+    ``dest``'s name."""
+    reference = _pixel_reference(src)
+    if reference is None:
         (shutil.move if move else shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
         return
-    (_, _), (pixels, _) = links
+    transfer = shutil.move if move else shutil.copy2
+    pixels = src.parent / reference
     if not src.name.lower().endswith(".mhd"):
         transfer(pixels, dest.with_suffix(".img"))
         transfer(src, dest)
