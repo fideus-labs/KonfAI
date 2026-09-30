@@ -315,7 +315,7 @@ def test_masked_tta_compiler_reads_the_config():
                             "MASK": {
                                 "is_input": False,
                                 "transforms": {
-                                    "KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
+                                    "konfai_apps.transforms:KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
                                     "Resample": {"spacing": [1, 1, 3]},
                                     "Dilate": {"dilate": 5},
                                     "Save": {"dataset": "x"},

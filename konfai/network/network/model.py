@@ -132,17 +132,6 @@ class ModelLoader:
             return self._apply_options(model)
 
         classpath = self.classpath
-        # The pre-1.6.0 absolute path konfai.models.<kind>.<file>:<Class> is refused by name rather than
-        # left to ModuleNotFoundError, which says only that a module is missing.
-        if classpath.startswith("konfai.models.") and not classpath.startswith(
-            ("konfai.models.python.", "konfai.models.yaml.")
-        ):
-            absolute = classpath.replace("konfai.models.", "konfai.models.python.", 1)
-            relative = classpath.split("konfai.models.", 1)[1]
-            raise ConfigError(
-                f"Model classpath '{classpath}' uses the package layout of KonfAI before 1.6.0.",
-                f"Write '{absolute}', or the relative form the built-in models take: '{relative}'.",
-            )
         module, name = get_module(classpath, "konfai.models.python")
         cls = module_attribute(module, name)
         if not hasattr(cls, "_key"):

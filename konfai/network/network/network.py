@@ -830,11 +830,8 @@ class Network(ModuleArgsDict, ABC):
             yield name if occurrence == 1 else f"{name}#{occurrence}", scheduler
 
     def schedule_states(self) -> dict[str, Any]:
-        """This network's scheduler/scaler state, with a distinct identity for each occurrence. Version 1
-        keyed every scheduler by class alone: its single-class entries remain readable, ambiguous repeated
-        ones fall back to the update count with a warning."""
+        """This network's scheduler/scaler state, with a distinct identity for each occurrence."""
         states: dict[str, Any] = {
-            "version": 2,
             "schedulers": {name: scheduler.state_dict() for name, scheduler in self._named_schedulers()},
         }
         scaler = getattr(self, "scaler", None)
@@ -852,11 +849,7 @@ class Network(ModuleArgsDict, ABC):
             return restored
         saved = states.get("schedulers", {})
         named = list(self._named_schedulers())
-        ambiguous = {type(scheduler).__name__ for name, scheduler in named if "#" in name}
-        legacy = states.get("version", 1) < 2
         for name, scheduler in named:
-            if legacy and type(scheduler).__name__ in ambiguous:
-                continue  # the old entry cannot identify which occurrence's state survived
             state = saved.get(name)
             if state is not None:
                 scheduler.load_state_dict(state)
@@ -864,7 +857,7 @@ class Network(ModuleArgsDict, ABC):
         missing = [name for name, scheduler in named if scheduler not in restored]
         if missing:
             _log.warning(
-                "Checkpoint '%s' holds no unambiguous state for scheduler(s) %s: resumed from the update count, "
+                "Checkpoint '%s' holds no state for scheduler(s) %s: resumed from the update count, "
                 "which places a step schedule but not a plateau's history.",
                 state_key,
                 missing,

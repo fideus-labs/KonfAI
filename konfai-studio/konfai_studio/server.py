@@ -82,10 +82,6 @@ class ChatRequest(BaseModel):
     session: str = "default"
 
 
-class NewSession(BaseModel):
-    name: str = ""
-
-
 class DatasetPath(BaseModel):
     path: str
 
@@ -333,10 +329,10 @@ async def set_session_dataset(req: SessionDataset) -> dict[str, Any]:
 
 
 @app.post("/api/sessions")
-async def create_session(req: NewSession) -> dict[str, Any]:
-    """Start a new experiment. With no name, allocate a fresh id the LLM titles later; a supplied
-    name is honoured (legacy). The agent spins up lazily on the first message."""
-    name = _sane_session(req.name) if req.name.strip() else _reg.new_experiment()
+async def create_session() -> dict[str, Any]:
+    """Start a new experiment under a fresh id the LLM titles later. The agent spins up lazily on the
+    first message."""
+    name = _reg.new_experiment()
     _reg.register(name)
     return {"sessions": _reg.names(), "current": name, "titles": _reg.titles()}
 

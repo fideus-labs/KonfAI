@@ -91,7 +91,7 @@ These work on a stack of ensemble members (prediction post-processing).
 | `Reduce` | Combine every case into one volume (TRANSFORM only). | `operator="Median", output, grid="strict", grid_tolerance=1e-6` |
 | `Expand` | Turn each case into `nb` copies (TRANSFORM only). | `nb=2, pattern="{name}_{a:02d}", seed=None` |
 | `Statistics` | Record the volume's min, max, mean and std for the criteria that read them (`IMPACTS`, `IMPACTSynth`, `IMPACTReg`, `SAM_Perceptual`). | |
-| `KonfAIInference` | Run a packaged app on the case (needs `konfai-apps`). It loads the model for every case: for a cohort, use `PREDICTION`. | |
+| `konfai_apps.transforms:KonfAIInference` | Run a packaged app on the case (needs `konfai-apps`). It loads the model for every case: for a cohort, use `PREDICTION`. | |
 
 `scale_factors` writes an OME-Zarr pyramid; label dtypes are downsampled by majority, others by mean
 ([OME-Zarr](storage-backends.md#multiscale-levels)). `Reduce` and `Expand` are described in the

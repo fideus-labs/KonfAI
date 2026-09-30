@@ -607,10 +607,6 @@ def _runtime_capabilities() -> dict[str, Any]:
     devices, vram_warnings = _gpu_devices(devices_index, devices_name)
     warnings.extend(vram_warnings)
 
-    # Aggregate VRAM (kept for backward compatibility) derived from the per-device breakdown.
-    totals = [device["vram_total_gb"] for device in devices if device["vram_total_gb"] is not None]
-    useds = [device["vram_used_gb"] for device in devices if device["vram_used_gb"] is not None]
-
     return {
         "konfai_version": KONFAI_VERSION,
         "gpu": {
@@ -618,10 +614,6 @@ def _runtime_capabilities() -> dict[str, Any]:
             "visible_indices": devices_index,
             "visible_names": devices_name,
             "count": len(devices_index),
-            "vram_gb": {
-                "used": _round_gb(sum(useds)) if useds else None,
-                "total": _round_gb(sum(totals)) if totals else None,
-            },
             "devices": devices,
         },
         "ram_gb": {"used": _round_gb(ram_used_gb), "total": _round_gb(ram_total_gb)},

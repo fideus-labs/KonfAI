@@ -49,7 +49,7 @@ A run that swept for more than a second ends with one line saying where the time
 reads, the writes). The longest of the three is the one to work on.
 
 ```{note}
-`KonfAIInference` lets a chain call a packaged model as one stage. It loads the model for every case and
+`konfai_apps.transforms:KonfAIInference` lets a chain call a packaged model as one stage. It loads the model for every case and
 its memory is outside `memory_budget`. To run a model over a cohort, use `PREDICTION`, which loads it once.
 ```
 

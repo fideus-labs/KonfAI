@@ -47,19 +47,6 @@ def test_default_catalog_name_cannot_escape_the_shipped_directory(name: str) -> 
         ModelLoader(classpath=name)._yaml_path()
 
 
-def test_the_pre_1_6_absolute_model_classpath_is_refused_by_name(monkeypatch) -> None:
-    # The path is gone, and ModuleNotFoundError would say only that a module is missing: the refusal
-    # names both spellings that work, since a config written before 1.6.0 is what reaches this.
-    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
-    old = "konfai.models.segmentation.UNet:UNet"
-
-    with pytest.raises(ConfigError, match=r"before 1\.6\.0") as refusal:
-        ModelLoader(classpath=old).get_model()
-
-    assert "konfai.models.python.segmentation.UNet:UNet" in str(refusal.value)
-    assert "segmentation.UNet:UNet" in str(refusal.value)
-
-
 def test_every_catalog_entry_builds() -> None:
     entries = sorted(CATALOG.glob("*.yml"))
     assert entries, "the shipped catalog must not be empty"

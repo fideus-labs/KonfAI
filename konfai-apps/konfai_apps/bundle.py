@@ -283,7 +283,8 @@ def _base(name: str) -> str:
     classpath = re.sub(r"#\d+$", "", name).split("/", 1)[0]
     module, _, cls_name = classpath.rpartition(":")
     module = module.replace(":", ".")
-    return cls_name if module == "konfai.data.transform" or module.startswith("konfai.data.transform.") else classpath
+    stage_modules = ("konfai.data.transform", "konfai_apps.transforms")
+    return cls_name if module in stage_modules or module.startswith("konfai.data.transform.") else classpath
 
 
 def _find_transforms(node: Any, key: str) -> dict[str, Any] | None:

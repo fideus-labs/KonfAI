@@ -15,11 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""A KonfAI app run as a chain stage.
-
-Published configs spell the stage by its bare name (``KonfAIInference:``); core's transform package
-resolves that name to this class when ``konfai-apps`` is installed.
-"""
+"""A KonfAI app run as a chain stage, spelled ``konfai_apps.transforms:KonfAIInference`` in a chain."""
 
 import os
 import tempfile

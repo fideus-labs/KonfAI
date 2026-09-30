@@ -875,44 +875,12 @@ def test_repeated_scheduler_states_survive_a_serialized_checkpoint(tmp_path: Pat
     assert resumed_leaf.optimizer.param_groups[0]["lr"] == leaf.optimizer.param_groups[0]["lr"]
 
 
-def test_legacy_single_scheduler_state_still_restores_its_history() -> None:
-    source, scheduler = _plateau_net()
-    scheduler.step(1.0)
-    scheduler.step(2.0)
-    legacy = {
-        f"{source.get_name()}_schedulers_state_dict": {"schedulers": {"ReduceLROnPlateau": scheduler.state_dict()}}
-    }
-    resumed, restored = _plateau_net()
-    resumed.load(legacy, init=False)
-    restored.step(3.0)
-    assert resumed.optimizer.param_groups[0]["lr"] == pytest.approx(_CONFIG_LR * 0.1)
-
-
-def test_legacy_repeated_scheduler_state_warns_without_overwriting_the_chain(caplog) -> None:
-    net = _LeafNet()
-    net.optimizer = _fresh_optimizer()
-    first = torch.optim.lr_scheduler.StepLR(net.optimizer, step_size=2, gamma=0.5)
-    second = torch.optim.lr_scheduler.StepLR(net.optimizer, step_size=7, gamma=0.8)
-    net.schedulers = {first: 3, second: 5}
-    legacy = {
-        f"{net.get_name()}_nb_lr_update": 4,
-        f"{net.get_name()}_schedulers_state_dict": {"schedulers": {"StepLR": second.state_dict()}},
-    }
-    with caplog.at_level("WARNING"):
-        net.load(legacy, init=False)
-    assert [(scheduler.step_size, scheduler.gamma, scheduler.last_epoch) for scheduler in net.schedulers] == [
-        (2, 0.5, 4),
-        (7, 0.8, 4),
-    ]
-    assert any("unambiguous" in record.getMessage() and "StepLR#2" in record.getMessage() for record in caplog.records)
-
-
 def test_a_checkpoint_without_scheduler_state_falls_back_to_the_update_count(caplog) -> None:
     net, scheduler, ctx = _make_net(lambda opt: torch.optim.lr_scheduler.StepLR(opt, step_size=1, gamma=_GAMMA))
     with caplog.at_level("WARNING"):
         net.load(ctx["state_dict"], init=False, ema=False)
     assert scheduler.last_epoch == _NB_LR_UPDATE
-    assert not caplog.records  # a legacy checkpoint holds no scheduler entry at all: nothing to warn about
+    assert not caplog.records  # a checkpoint with no scheduler entry at all: nothing to warn about
 
     partial = dict(ctx["state_dict"])
     partial[f"{net.get_name()}_schedulers_state_dict"] = {"schedulers": {}}
