@@ -409,15 +409,17 @@ def test_inference_stack_folds_copies_one_at_a_time_as_their_concatenation(
     np.testing.assert_array_equal(read[1], read[0])
 
 
-def test_interleaved_case_entries_order_copies_by_slab_start() -> None:
-    patch = DatasetPatch(patch_size=list(PATCH_SIZE), overlap=OVERLAP)
-    patch.load(list(SHAPE), 0)
-    patch.load(list(SHAPE), 1)
+@pytest.mark.parametrize(("shape", "patch_size"), [(SHAPE, PATCH_SIZE), ([3, 4, 6], [3, 4, 2])], ids=["z", "x"])
+def test_interleaved_case_entries_order_copies_by_slab_start(shape: list[int], patch_size: list[int]) -> None:
+    """The copies advance together along the axis the grid sweeps, the one the input streams its slabs on."""
+    patch = DatasetPatch(patch_size=list(patch_size), overlap=OVERLAP)
+    patch.load(list(shape), 0)
+    patch.load(list(shape), 1)
     entries = [(a, p) for a in range(2) for p in range(patch.get_size(0))]
     ordered = _interleaved_case_entries([patch, patch], entries)
     assert sorted(ordered) == sorted(entries), "the interleave must be a permutation of the case"
-    starts = [patch.get_patch_slices(a)[p][0].start for a, p in ordered]
-    assert starts == sorted(starts), "arrival must be non-decreasing along the slab axis"
+    starts = [patch.get_patch_slices(a)[p][patch.get_sweep_axis(a)].start for a, p in ordered]
+    assert starts == sorted(starts), "arrival must be non-decreasing along the sweep axis"
     for a in range(2):
         within_copy = [p for entry_a, p in ordered if entry_a == a]
         assert within_copy == sorted(within_copy), "within a copy the patch order must be untouched"
