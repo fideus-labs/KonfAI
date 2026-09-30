@@ -17,6 +17,7 @@
 
 """The prediction sink: patches blended per case and copy, reduced, written whole or streamed by slabs."""
 
+import copy
 import os
 import queue
 import threading
@@ -24,6 +25,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from fractions import Fraction
 from types import EllipsisType
 from typing import cast
 
@@ -54,7 +56,7 @@ from konfai.data.transform import (
     TransformInverse,
     TransformLoader,
 )
-from konfai.utils.budget import node_local_ranks, resolve_memory_budget
+from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
@@ -297,7 +299,7 @@ class OutputDataset(Dataset, NeedDevice):
         self._aligners: dict[int, SlabAligner] = {}
 
     def set_memory_budget(self, budget_bytes: float | None) -> None:
-        """The per-rank budget the streamed-vs-assembled route is priced against."""
+        """This output's share of the per-rank budget, which its routes and guards are priced against."""
         self._per_rank_budget_bytes = budget_bytes
 
     def _torch_device(self) -> torch.device:
@@ -468,7 +470,7 @@ class OutputDataset(Dataset, NeedDevice):
                 index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
             )
             attributes = self.attributes[index_dataset][index_augmentation]
-            for transform in self._patch_inverses(dataset):
+            for transform in self._inverses(dataset, patch=True):
                 layer = transform.inverse(self.names[index_dataset], layer, attributes[index_patch])
             accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
             slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
@@ -502,7 +504,8 @@ class OutputDataset(Dataset, NeedDevice):
         # The declared attributes are applied over the inherited ones; an empty value drops a key.
         for key, value in self._attributes.items():
             if value == "":
-                source_attribute.pop(key, None)
+                while key in source_attribute:  # the whole stack: an earlier entry must not resurface
+                    source_attribute.pop(key)
             else:
                 source_attribute[key] = value
         if index_dataset not in self.output_layer_accumulator:
@@ -537,7 +540,7 @@ class OutputDataset(Dataset, NeedDevice):
         # Everything past this point reads the header at index 0; a patch-level inverse reads one copy
         # per patch, taken before any inverse ran.
         attributes = self.attributes[index_dataset][index_augmentation] = {0: source_attribute}
-        if self._patch_inverses(dataset):
+        if self._inverses(dataset, patch=True):
             for i in range(1, len(input_dataset.patch.get_patch_slices(index_augmentation))):
                 attributes[i] = Attribute(source_attribute)
 
@@ -550,11 +553,13 @@ class OutputDataset(Dataset, NeedDevice):
             sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
         )
 
-    def _patch_inverses(self, dataset: DatasetIter) -> list[TransformInverse]:
-        """The patch-level transforms of the mirrored group each patch is passed back through, last first."""
+    def _inverses(self, dataset: DatasetIter, patch: bool) -> list[TransformInverse]:
+        """The transforms of the mirrored group the output is passed back through, last first: its patch
+        transforms for each patch, its case transforms for the reduced volume."""
+        group = dataset.groups_src[self.group_src][self.group_dest]
         return [
             transform
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms)
+            for transform in reversed(group.patch_transforms if patch else group.transforms)
             if isinstance(transform, TransformInverse) and transform.apply_inverse
         ]
 
@@ -656,11 +661,13 @@ class OutputDataset(Dataset, NeedDevice):
                 stacklevel=2,
             )
             fraction = _STREAM_WORTH_MIN_FRACTION
-        # The config's budget, never the machine's free memory.
-        budget = self._per_rank_budget_bytes
-        if budget is None:
-            budget = resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
-        return assembled >= fraction * budget
+        return assembled >= fraction * self._budget_bytes()
+
+    def _budget_bytes(self) -> float:
+        """This rank's memory budget: the config's, never the machine's free memory."""
+        if self._per_rank_budget_bytes is not None:
+            return self._per_rank_budget_bytes
+        return resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
 
     def _stream_refusal(
         self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None
@@ -1295,14 +1302,128 @@ class OutputDataset(Dataset, NeedDevice):
         for transform in self.after_reduction_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
-        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
-            if isinstance(transform, TransformInverse) and transform.apply_inverse:
-                result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
+        for transform in self._inverses(dataset, patch=False):
+            result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
 
         for transform in self.final_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
         return result.cpu() if result.device.type != "cpu" else result
+
+
+class OutputLayerDataset(OutputDataset):
+    """Writes a model output as it comes out, on its own grid: an intermediate layer at another resolution than
+    the input (features, a bottleneck) included. It is tied to no input group: no input transform is inverted.
+    The output keeps the case's origin, its first voxel on the input's first as a strided convolution places it,
+    with the spacing scaled to the layer's size. Overlapping patches are blended by ``patch_combine``, rescaled
+    to the layer's grid. The layer is assembled whole, within the memory budget."""
+
+    def __init__(
+        self,
+        dataset_filename: str = "default|./Dataset:mha",
+        group: str = "default",
+        before_reduction_transforms: dict[str, TransformLoader] | None = None,
+        after_reduction_transforms: dict[str, TransformLoader] | None = None,
+        final_transforms: dict[str, TransformLoader] | None = None,
+        patch_combine: str | None = None,
+        reduction: str = "Mean",
+        attributes: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            dataset_filename=dataset_filename,
+            group=group,
+            before_reduction_transforms=before_reduction_transforms,
+            after_reduction_transforms=after_reduction_transforms,
+            final_transforms=final_transforms,
+            patch_combine=patch_combine,
+            reduction=reduction,
+            attributes=attributes,
+        )
+        self._streaming_enabled = False
+
+    def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
+        # The case's name and geometry come from the first input group; nothing else is read from it.
+        self.group_src = next(iter(groups))
+        self.group_dest = groups[self.group_src][0]
+        super().setup(datasets, groups)
+
+    def _inverses(self, dataset: DatasetIter, patch: bool) -> list[TransformInverse]:
+        return []
+
+    def _ensure_case_state(
+        self,
+        index_dataset: int,
+        index_augmentation: int,
+        layer: torch.Tensor,
+        dataset: DatasetIter,
+        attribute: Attribute | None,
+        number_of_channels_per_model: list[int] | None,
+    ) -> None:
+        if index_augmentation in self.output_layer_accumulator.get(index_dataset, {}):
+            return
+        input_dataset = dataset.get_dataset_from_index(self.group_dest, index_dataset)
+        slots = input_dataset.patch.get_patch_slices(index_augmentation)
+        extent = [s.stop - s.start for s in slots[0]]
+        ratio = [Fraction(int(size), int(source)) for size, source in zip(layer.shape[1:], extent, strict=True)]
+        try:
+            scaled = [tuple(_scaled(s, r) for s, r in zip(slot, ratio, strict=True)) for slot in slots]
+        except ValueError as error:
+            raise PredictorError(
+                f"Output '{self.group}' of case '{input_dataset.name}' is {list(layer.shape[1:])} for a patch of"
+                f" {extent}: {error}.",
+                "A layer at another resolution needs patches whose positions scale to whole voxels: use one"
+                " patch per case (patch_size of 0), or patch sizes and overlaps divisible by the scale.",
+            ) from None
+        header = Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
+        _scale_geometry(header, ratio)
+        for key, value in self._attributes.items():
+            if value == "":
+                while key in header:  # the whole stack: the case's own spacing must not resurface
+                    header.pop(key)
+            else:
+                header[key] = value
+        if index_dataset not in self.output_layer_accumulator:
+            # Every copy's accumulator is held until the case is written: its result and weight, per copy.
+            voxels = int(np.prod([max(slot[axis].stop for slot in scaled) for axis in range(len(scaled[0]))]))
+            held = (layer.shape[0] + 1) * voxels * layer.element_size() * max(1, self.nb_data_augmentation)
+            if held > self._budget_bytes():
+                raise PredictorError(
+                    f"Output '{self.group}' of case '{input_dataset.name}' needs {format_bytes(held)} to assemble,"
+                    f" over the memory budget of {format_bytes(self._budget_bytes())}.",
+                    "A layer is assembled whole: write a coarser layer or fewer channels, or raise memory_budget.",
+                )
+        self.output_layer_accumulator.setdefault(index_dataset, {})
+        self.attributes.setdefault(index_dataset, {})[index_augmentation] = {0: header}
+        self.names[index_dataset] = input_dataset.name
+        self._stream_plans[index_dataset] = None
+        window = self.patch_combine
+        if window is not None and any(r != 1 for r in ratio):
+            window = copy.deepcopy(window)
+            window.set_patch_config(
+                [int(len(axis) * r) if len(axis) > 1 else 1 for axis, r in zip(window.windows_1d, ratio, strict=True)],
+                [int(overlap * r) for overlap, r in zip(window.overlaps, ratio, strict=True)],
+            )
+        self.output_layer_accumulator[index_dataset][index_augmentation] = Accumulator(
+            scaled, [int(size) for size in layer.shape[1:]], window, batch=False
+        )
+
+
+def _scaled(window: slice, ratio: Fraction) -> slice:
+    """``window`` of the input grid on a grid ``ratio`` times as large; refused unless it lands on whole voxels."""
+    start, stop = window.start * ratio, window.stop * ratio
+    if start.denominator != 1 or stop.denominator != 1:
+        raise ValueError(f"the patch at {window.start}:{window.stop} lands at {float(start)}:{float(stop)}")
+    return slice(int(start), int(stop))
+
+
+def _scale_geometry(header: Attribute, ratio: list[Fraction]) -> None:
+    """Rescale the case's spacing by ``ratio`` (array order); the origin stays, the layer's first voxel on the
+    input's first."""
+    if "Spacing" not in header:
+        return
+    spacing = header.get_np_array("Spacing")
+    if len(spacing) == len(ratio) and any(r != 1 for r in ratio):
+        header["Spacing"] = spacing / np.array([float(r) for r in reversed(ratio)])
 
 
 @config("OutputDataset")

@@ -137,8 +137,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         per_rank_budget = self.dataset.resolved_budget().per_rank_bytes(node_local_ranks())
         set_per_rank_budget(per_rank_budget)
         bound_chunk_cache()
+        # The outputs hold their cases at once: each is priced against its share of the rank's budget.
+        output_budget = per_rank_budget / max(1, len(self.outputs_dataset))
         for output_dataset in self.outputs_dataset.values():
-            output_dataset.set_memory_budget(per_rank_budget)
+            output_dataset.set_memory_budget(output_budget)
             self.datasets_filename.append(output_dataset.filename)
             # Rebase under the run directory, re-deriving is_directory from the path, not from a trailing "/".
             output_dataset.rebase(self.predict_path)
