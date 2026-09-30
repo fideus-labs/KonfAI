@@ -216,10 +216,6 @@ class Transform(NeedDevice, ABC):
         """
         return float(self.working_multiple)
 
-    #: Whether the stage changes the values it is handed. A stage that returns its input untouched
-    #: (Statistics, Save) declares False: the PREDICTION chain check ignores it.
-    alters_values: bool = True
-
     #: Whether the stage must run in the main process. A stage that spawns processes of its own
     #: (``KonfAIInference``) cannot run inside a daemonic DataLoader worker, so a bound stage that
     #: declares True turns the loader's workers off.

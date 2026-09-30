@@ -21,7 +21,7 @@ import multiprocessing
 import os
 import shutil
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from multiprocessing.sharedctypes import SynchronizedArray
 from pathlib import Path
 from typing import Any
@@ -41,11 +41,10 @@ from konfai.predictor.loop import _Predictor
 from konfai.predictor.output import OutputDatasetLoader
 from konfai.utils import vram
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
-from konfai.utils.chain_diff import dataset_tree, input_chain_differences, training_dataset_tree
 from konfai.utils.clock import startup_clock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import refuse_shared_single_file
-from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning, PredictorError
+from konfai.utils.errors import ConfigError, KonfAIWarning, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
 from konfai.utils.runtime import (
     DataLog,
@@ -95,7 +94,6 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         torch_compile: bool = False,
         outputs_dataset: dict[str, OutputDatasetLoader] | None = {"default|Default": OutputDatasetLoader()},
         data_log: list[str] | None = None,
-        check_training_transforms: bool = True,
         checkpoint_cache_gib: float = 1.0,
     ) -> None:
         if os.environ["KONFAI_CONFIG_MODE"] != "Done":
@@ -121,7 +119,6 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.channels_last = channels_last
         self.cudnn_benchmark = cudnn_benchmark
         self.torch_compile = torch_compile
-        self.check_training_transforms = check_training_transforms
         self.checkpoint_cache_gib = checkpoint_cache_gib
         with startup_clock().phase("model"):
             self.model = model.get_model(train=False)
@@ -247,11 +244,6 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             )
         with startup_clock().phase("checkpoint"):
             self.model_composite.load(self._load())
-        try:
-            self._report_chain_drift()
-        except (OSError, KonfAIError, ValueError, TypeError) as error:
-            # A diagnostic reading someone else's config file never fails the prediction it reports on.
-            print(f"[KonfAI] the training-chain check did not run: {type(error).__name__}: {error}")
 
         self._drop_done_cases()
         self.dataloader, _, _ = self.dataset.get_data(world_size // self.size)
@@ -267,52 +259,6 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.dataset._prepared_mapping = [
             entry for entry in self.dataset._prepared_mapping if entry[0] not in self._done_case_indices
         ]
-
-    def _report_chain_drift(self) -> None:
-        """Warn when the chain applied to a model input is not the one its checkpoint trained on.
-
-        Same checkpoint, different preprocessing is silent: the run succeeds and only the values are
-        wrong. A legitimate difference exists, so this warns and never refuses, and
-        ``check_training_transforms: false`` silences it. Compared against the resolved config the
-        training run left in its ``Statistics`` directory, read without writing it back.
-        """
-        if not self.check_training_transforms:
-            return
-        applied = dataset_tree(config_file(), konfai_root())
-        runs: list[tuple[Mapping[str, Any], list[str]]] = []
-        unchecked: list[Path] = []
-        for path_to_model in self.path_to_models:
-            checkpoint = Path(path_to_model)
-            trained = training_dataset_tree(checkpoint) if checkpoint.is_file() else None
-            if trained is None:
-                unchecked.append(checkpoint)
-                continue
-            # Folds of one experiment spell the same chains: compare each distinct one once.
-            for known, names in runs:
-                if known == trained:
-                    names.append(checkpoint.parent.name)
-                    break
-            else:
-                runs.append((trained, [checkpoint.parent.name]))
-        if unchecked:
-            print(
-                f"[KonfAI] the training-chain check did not run for {len(unchecked)} checkpoint(s):"
-                f" no resolved training config beside '{unchecked[0]}'"
-                " (a TRAIN run keeps one in Statistics/<train_name>/)."
-            )
-        for trained, names in runs:
-            differences = input_chain_differences(trained, applied)
-            if not differences:
-                continue
-            # One warning, spelled line by line as the run's log prints it.
-            lines = [
-                f"this run preprocesses a model input differently from {', '.join(names)}:",
-                *(f"[KonfAI]   {difference}" for difference in differences),
-                "[KonfAI] The same checkpoint on differently preprocessed inputs predicts wrong values"
-                " without failing. Set 'check_training_transforms: false' under Predictor once the"
-                " difference is deliberate.",
-            ]
-            warnings.warn("\n".join(lines), KonfAIWarning, stacklevel=2)
 
     def set_models(self, path_to_models: list[Path | str]) -> None:
         self.path_to_models = path_to_models

@@ -239,7 +239,6 @@ def _tta_draws(
     for name in ("CASE_000", "CASE_001", "CASE_002"):
         source.write("CT", name, np.ones((1, 2, 4, 4), dtype=np.float32), Attribute())
     predictor_tree: dict[str, object] = {
-        "check_training_transforms": False,
         "Model": {"classpath": "test_predictor:TTANet"},
         "Dataset": {
             "dataset_filenames": ["./Dataset:a:mha"],
@@ -286,7 +285,6 @@ def test_an_output_key_that_names_no_module_is_refused_under_its_own_block(
     monkeypatch.chdir(tmp_path)
     Dataset(str(tmp_path / "Dataset"), "mha").write("CT", "CASE_000", np.ones((1, 2, 4, 4), np.float32), Attribute())
     tree = {
-        "check_training_transforms": False,
         "Model": {"classpath": "test_predictor:TTANet"},
         "Dataset": {
             "dataset_filenames": ["./Dataset:a:mha"],
@@ -336,7 +334,6 @@ def _tiny_synthesis(root: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
                 }
             },
             "train_name": "RERUN",
-            "check_training_transforms": False,
         }
     }
 
