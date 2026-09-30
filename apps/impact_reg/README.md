@@ -38,8 +38,8 @@ A registration run combines:
 - ⚡ **Fast registration** powered by [KonfAI](https://github.com/fideus-labs/KonfAI)
 - 🤗 **Automatic preset, parameter-map, and model download** from Hugging Face
 - 🧩 **Multi-preset ensembling** (transforms averaged into a single displacement field)
-- 📏 **Any image size, at native resolution**: a pair too large for the GPU is registered in tiles, after one global
-  registration of the whole pair
+- 📏 **Large images**: a pair too large for the memory is registered whole on a grid sized to fit, then refined on
+  native tiles by the presets that declare a tile pass; the outputs are on the native fixed grid
 - 🧠 **Semantic IMPACT metric** on deep features from pretrained segmentation / foundation models
 - 📐 **Evaluation workflows** against image, segmentation, and landmark references
 - 🧾 **Multi-format compatibility:** every format ITK reads, DICOM series, and **OME-Zarr** stores (the moved image
@@ -219,9 +219,9 @@ impact-reg-konfai register --help
 
 ## 📏 Large images
 
-A pair of any size is registered at native resolution, with no option to set. Each preset declares what a voxel costs
-it on the GPU and in RAM, and KonfAI sizes the run from the memory free when it starts. A pair that fits is registered
-in one piece. A larger one runs in two passes:
+A pair of any size is registered with no option to set. Each preset declares what a voxel costs it on the GPU and in
+RAM, and KonfAI sizes the run from the GPU memory free when it starts and from the RAM budget, whichever holds fewer
+voxels. A pair that fits is registered in one piece, at native resolution. A larger one runs in two passes:
 
 1. **Global pass:** the whole preset runs on the pair resampled onto a grid coarse enough to fit, and its field comes
    back onto the native fixed grid.

@@ -1,7 +1,8 @@
 # Large images
 
-IMPACT-Reg registers a pair of any size at its native resolution, with nothing to set. The same command works for a
-brain MRI and for a light-sheet volume of a billion voxels:
+IMPACT-Reg registers a pair of any size with nothing to set: the whole pair on a grid sized to the memory, then, for
+the presets that declare it, a refinement on native tiles. The outputs are on the native fixed grid. The same command
+works for a brain MRI and for a light-sheet volume of a billion voxels:
 
 ```bash
 impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o Output --gpu 0
@@ -13,7 +14,8 @@ Each preset declares what one voxel of the pair costs it at its peak, on the GPU
 (`vram_bytes_per_voxel` and `ram_bytes_per_voxel` in its `app.json`, which `show NAME` prints). Before a preset runs,
 KonfAI turns that cost into the number of voxels it can register in one piece:
 
-- **on a GPU**, from the memory free on the card when the run starts, keeping a 20 % margin;
+- **on a GPU**, from the memory free on the card when the run starts, keeping a 20 % margin, and from the RAM as on
+  the CPU below, whichever holds fewer voxels;
 - **on the CPU**, from the RAM available to the run (the machine's, or its cgroup or SLURM limit), keeping a 20 %
   margin.
 
@@ -54,7 +56,7 @@ is sized from the RAM before it starts.
 | `--fields-only` | write the transform only, skip the moved image |
 
 The plan follows the memory free when the run starts, so a busy GPU can change it, and with it the result, slightly.
-For runs that must be reproducible, pin `--max-voxels`. `register.json` records the plan every preset ran with.
+For runs that must be reproducible, pin `--max-voxels`. `register.json` records the plan every preset started with.
 
 ## Disk and RAM
 
