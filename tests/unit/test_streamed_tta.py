@@ -23,6 +23,7 @@ per-copy head and reduction call as the whole-volume ``get_output``: which is wh
 output must equal the assembled one bit for bit, for every reduction (Mean, Median, Concat), blend,
 and dtype. A draw that moves the slab axis (a z-flip) must refuse and fall back, transparently."""
 
+from pathlib import Path
 from typing import ClassVar, cast
 
 import numpy as np
@@ -383,6 +384,29 @@ def test_streamed_inference_stack_aborts_its_sink_when_the_case_dies(monkeypatch
     stack._stack_buffers["CASE_000"] = [np.zeros((1, 1, 1, 1), dtype=np.float32)]
     stack.stream_abort("CASE_000")
     assert not stack._stack_buffers
+
+
+@pytest.mark.parametrize("streamed", [True, False], ids=["region sink", "buffered"])
+@pytest.mark.parametrize("mode", ["Seg", "mean"])
+def test_inference_stack_folds_copies_one_at_a_time_as_their_concatenation(
+    tmp_path: Path, mode: str, streamed: bool
+) -> None:
+    """Folding the TTA copies as they come writes the stack and returns the mean the call over their
+    concatenation does, through a region sink or, where the destination has none, a buffer."""
+    copies = [torch.randn(1, 3 if mode == "Seg" else 1, 4, 5) for _ in range(4)]
+    whole = InferenceStack(f"{tmp_path}/whole.h5:h5", "stack", mode=mode)
+    folded = InferenceStack(f"{tmp_path}/folded.h5:h5", "stack", mode=mode)
+    if not streamed:
+        folded.dataset.open_data_stream = lambda *args, **kwargs: None  # type: ignore[union-attr,method-assign]
+
+    expected = whole("CASE", torch.cat(copies), Attribute())
+    got = folded.fold_copies("CASE", iter(copies), len(copies), Attribute())
+
+    torch.testing.assert_close(got, expected)
+    read = [
+        Dataset(f"{tmp_path}/{name}.h5", "h5").read_data("InferenceStack", "CASE")[0] for name in ("whole", "folded")
+    ]
+    np.testing.assert_array_equal(read[1], read[0])
 
 
 def test_interleaved_case_entries_order_copies_by_slab_start() -> None:

@@ -17,7 +17,7 @@
 
 """Folds over a stacked member axis: spread, disagreement, magnitudes, inference stacks."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 import torch
@@ -176,7 +176,7 @@ class InferenceStack(Transform):
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         if self.mode == "Seg":
-            _tensors = torch.argmax(torch.softmax(tensors, dim=1), dim=1).to(torch.uint8)
+            _tensors = torch.argmax(tensors, dim=1).to(torch.uint8)  # a softmax keeps the order it is taken of
         else:
             _tensors = tensors.squeeze(1)
         return _tensors.float().cpu().numpy()
@@ -196,6 +196,47 @@ class InferenceStack(Transform):
         dataset = self.dataset if self.dataset else self.datasets[-1]
         dataset.write("InferenceStack", name, self._stack(tensors), cache_attribute)
         return self._reduce(tensors)
+
+    @property
+    def folds_copies(self) -> bool:
+        """Whether :meth:`fold_copies` can stand for the call: a median needs every member at once."""
+        return self.mode != "median"
+
+    def fold_copies(
+        self, name: str, copies: Iterable[torch.Tensor], count: int, cache_attribute: Attribute
+    ) -> torch.Tensor:
+        """The call over the concatenation of ``count`` copies (``[members, C, ...]`` each), one copy at a time:
+        each copy's stack rows are written as they come, where the destination serves region writes, and its
+        members are added to a running total."""
+        dataset = self.dataset if self.dataset else self.datasets[-1]
+        total, dtype, sink = torch.empty(0), torch.float32, None
+        rows: list[np.ndarray] = []
+        written = 0
+        try:
+            for members in copies:
+                stack = self._stack(members)
+                if written == 0:
+                    total, dtype = members.float().sum(0), members.dtype
+                    if count * len(stack) > 1:
+                        shape = [count * len(stack), *stack.shape[1:]]
+                        sink = dataset.open_data_stream("InferenceStack", name, shape, stack.dtype, cache_attribute)
+                else:
+                    total.add_(members.float().sum(0))
+                if sink is None:
+                    rows.append(stack)
+                else:
+                    region = (slice(written, written + len(stack)), *(slice(0, extent) for extent in stack.shape[1:]))
+                    sink.write_slice(region, stack)
+                written += len(stack)
+        except BaseException:
+            if sink is not None:
+                sink.abort()  # abort, not close: finalizing would publish a partial stack
+            raise
+        if sink is not None:
+            sink.close()
+        elif written > 1:
+            dataset.write("InferenceStack", name, np.concatenate(rows), cache_attribute)
+        return total.div_(written).to(dtype)
 
     def stream_slab(
         self,
