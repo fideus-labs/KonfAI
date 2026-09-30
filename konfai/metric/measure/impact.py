@@ -121,7 +121,7 @@ MODELS_REPO = "VBoussot/impact-torchscript-models"
 
 #: The models and their registry are read at this revision of ``MODELS_REPO``, so a re-export on the Hub cannot change
 #: a result silently. A ref names another revision with ``repo@revision:path``.
-MODELS_REVISION = "0e736faa86c4e8ffe526ec6e119d3a4b40b0f78a"
+MODELS_REVISION = "47ffad660e67cebbac8d74aecf0fa181c5dac042"
 
 
 def _is_local_ref(ref: str) -> bool:
