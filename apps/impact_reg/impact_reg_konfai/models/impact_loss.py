@@ -18,8 +18,9 @@
 
 The three engines (elastix, ConvexAdam, FireANTs) read these with the same names and the same meaning:
 
-- each kept layer of each model is compared with its model's ``distance``, 0 at a perfect match (Dice only on
-  activations in [0, 1]: raw features take it below 0), and weighed by ``layers_weight``;
+- each kept layer of each model is compared with its model's ``distance``, 0 at a perfect match but for Dice,
+  which is 0 there only on binary maps (one-hot labels): two identical soft maps of 0.5 score 0.5, and raw features
+  can take it below 0; each layer is weighed by ``layers_weight``;
 - ``normalize`` divides every layer by its value when a level starts, so each starts at 1 (a layer that starts at
   0 or below keeps its raw value);
 - ``mode`` is Static (the features extracted once, then the moving ones warped) or Jacobian (the network inside
@@ -78,10 +79,10 @@ class ModelSpec:
 
     distance: Annotated[
         Distance,
-        "How this model's features are compared, each 0 at a perfect match: L1, L2, Dice (1 - soft Dice, meant for "
-        "activations in [0, 1] such as probabilities: raw features take it below 0), Cosine, "
-        "L1Cosine and NCC (1 - their similarity), LNCC (1 - the squared local correlation over 'lncc_kernel' "
-        "voxels, on dense maps only: elastix, which draws points, refuses it).",
+        "How this model's features are compared: L1, L2, and Cosine, L1Cosine and NCC (1 - their similarity), each "
+        "0 at a perfect match; Dice (1 - soft Dice), 0 at a match only on binary maps such as one-hot labels "
+        "(identical soft maps keep 1 - sum(p^2)/sum(p), raw features can take it below 0); LNCC (1 - the squared "
+        "local correlation over 'lncc_kernel' voxels, on dense maps only: elastix, which draws points, refuses it).",
     ] = "L2"
     pca: Annotated[
         int,
