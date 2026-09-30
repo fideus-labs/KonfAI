@@ -170,6 +170,18 @@ def _flip_all_axes(vector_field: bool) -> Flip:
     return flip
 
 
+def test_test_time_flips_take_the_distinct_mirrors_in_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In prediction the copies are the distinct mirrors the axes allow, none twice and none the identity."""
+    from konfai.utils.runtime import State
+
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    flip = Flip(f_prob=[0.5, 0.5, 0.5])
+    flip._state_init(0, [[4, 4, 4]] * 7, [Attribute()] * 7)
+    assert sorted(map(tuple, flip.flip[0])) == sorted(
+        combination for size in (1, 2, 3) for combination in itertools.combinations((1, 2, 3), size)
+    )
+
+
 def test_flip_vector_field_round_trip_is_identity() -> None:
     # TTA un-flips the model output with ``_inverse``: on a displacement field the compose of
     # ``_compute`` and ``_inverse`` must be the identity, component signs included.

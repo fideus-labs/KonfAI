@@ -74,7 +74,7 @@ not the optimizer's. `0` turns the cache off.
 | --- | --- |
 | `dataset_filenames` | Where the inputs are ({doc}`index`). |
 | `groups_src` | The input groups and their transforms. |
-| `augmentations` | Test-time augmentation. |
+| `augmentations` | Test-time augmentation. A `Flip` gives the copies the distinct mirrors its `f_prob` allows, in turn (7 copies: all seven), rather than drawing them. |
 | `Patch` | How the volume is cut (below). |
 | `subset` | Which cases to predict. |
 | `batch_size` | Patches per batch. `0` measures the largest batch that fits on the GPU. |

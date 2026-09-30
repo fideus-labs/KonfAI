@@ -18,6 +18,7 @@
 """Draws that move the grid: translation, rotation, scale, flips, permutations, elastic fields."""
 
 import itertools
+import os
 
 import numpy as np
 import torch
@@ -48,6 +49,7 @@ from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.data.transform.shape import _has_geometry, _record_remap_geometry
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import AugmentationError
+from konfai.utils.runtime import State
 
 
 def _carry_spacing(attribute: Attribute, remap: AxisRemap) -> None:
@@ -490,9 +492,16 @@ class Flip(DataAugmentation):
                 f"'Flip' draws on {len(self.f_prob)} axes (f_prob={self.f_prob}), and the case has {rank}.",
                 f"Give one probability per axis: f_prob: {[0.33] * rank}.",
             )
+        dims = [1, 2, 3][: len(self.f_prob)]
+        if os.environ.get("KONFAI_STATE") == str(State.PREDICTION):
+            # Test-time copies take the distinct mirrors in turn, from the axes f_prob allows: none is drawn
+            # twice before all have come, and none is the identity.
+            axes = [dim for dim, prob in zip(dims, self.f_prob, strict=True) if prob > 0]
+            mirrors = [list(c) for size in range(1, len(axes) + 1) for c in itertools.combinations(axes, size)]
+            self.flip[index] = [mirrors[copy % len(mirrors)] if mirrors else [] for copy in range(len(shapes))]
+            return shapes
         prob = torch.rand((len(shapes), len(self.f_prob))) < torch.tensor(self.f_prob)
-        dims = torch.tensor([1, 2, 3][: len(self.f_prob)])
-        self.flip[index] = [dims[mask].tolist() for mask in prob]
+        self.flip[index] = [torch.tensor(dims)[mask].tolist() for mask in prob]
         return shapes
 
     def _flip(self, tensor: torch.Tensor, dims: list[int]) -> torch.Tensor:
