@@ -234,7 +234,8 @@ on the whole pair resampled to fit, then its deformable stage on native tiles of
 ```
 
 Everything around the presets is streamed, outputs included (`.mha`, `.nii`, `.nii.gz`, `.nrrd`, OME-Zarr). Pin
-`--max-voxels` for reproducible runs. Details, disk and RAM: [Large images](docs/large-images.md).
+`--max-voxels` for reproducible runs. SlicerImpactReg is not streamed: it loads the moved image and, for uncertainty,
+every preset's field whole. Details, disk and RAM: [Large images](docs/large-images.md).
 
 ---
 

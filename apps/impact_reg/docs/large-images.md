@@ -71,3 +71,7 @@ DICOM output is written whole, since its rescale slope and intercept depend on t
 all-ones masks a DICOM pair gets when you leave its masks out: within the memory budget only, past it the run is
 refused, so give the masks yourself or convert the pair. A moved OME-Zarr store comes with a pyramid, halved down to
 about 256 voxels along its longest axis.
+
+**3D Slicer.** SlicerImpactReg holds what it shows in memory: the moved image, and for uncertainty every preset's field
+as a dense vector volume. A pair the CLI registers out of core may not fit there; run it from the CLI and load a
+coarser level (an OME-Zarr pyramid) to look at it.
