@@ -393,7 +393,7 @@ def grid_size(extent: list[float] | None, voxel_size: list[float], shape: tuple[
 def resampled(
     tensor: torch.Tensor, size: tuple[int, ...], mode: str = "bilinear", padding: str = "zeros"
 ) -> torch.Tensor:
-    """``tensor`` [B, C, *spatial] on a grid of ``size`` over the same extent, as itk-impact resamples an image for a
+    """``tensor`` ``[B, C, *spatial]`` on a grid of ``size`` over the same extent, as itk-impact resamples an image for a
     model (ImageToTensorFilter): new voxel i of an axis at old continuous index i * old / new, the first voxels aligned,
     linearly interpolated and not smoothed; differentiable. The same mapping brings a model's features back onto the
     image (``padding`` "border" there, past the last feature voxel)."""
@@ -915,7 +915,7 @@ class ImpactFeatureModel:
     def volume(
         self, image: torch.Tensor, normalization: str = "none", patch: int = 0, overlap: float = 0.25
     ) -> tuple[list[torch.Tensor], int]:
-        """Each weighted layer's features over ``image`` [1, C, *spatial], normalised (``normalized_features``) on the
+        """Each weighted layer's features over ``image`` ``[1, C, *spatial]``, normalised (``normalized_features``) on the
         layer's own grid (``onto_image_grid`` brings it onto the image's), and the tile they took: ``patch`` a side (0: the whole image), tiles sharing ``overlap`` of their
         width blended by a cosine window. A pass that does not fit the card runs again in tiles of
         ``FIRST_FEATURE_TILE`` (or its largest halving shorter than the image), then half as wide each time."""
