@@ -49,13 +49,13 @@ def publish(staging: Path, final: Path) -> None:
     replaced = final.exists()
     if replaced:
         shutil.rmtree(backup, ignore_errors=True)
-        os.rename(final, backup)
+        final.rename(backup)
     try:
-        os.rename(staging, final)
+        staging.rename(final)
     except OSError:
         if not final.exists():
             if replaced:
-                os.rename(backup, final)
+                backup.rename(final)
             raise
         shutil.rmtree(staging, ignore_errors=True)
     if replaced:
