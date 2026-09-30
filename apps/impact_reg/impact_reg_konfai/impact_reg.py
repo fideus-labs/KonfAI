@@ -47,7 +47,7 @@ import SimpleITK as sitk
 from konfai.utils.dataset import Attribute, Dataset, DataStream, is_staging_entry, read_landmarks, write_landmarks
 from konfai.utils.dataset.staging import publish
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
-from konfai.utils.ITK import apply_to_data_transform, displace_points, field_reach, jacobian_statistics
+from konfai.utils.ITK import displace_points, field_reach, jacobian_statistics
 from konfai.utils.utils import format_token, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
@@ -151,7 +151,8 @@ def _displace(points: np.ndarray, path: Path, work: Path) -> np.ndarray:
     """``points`` (``[N, 3]``, LPS) moved by the stored registration, fixed -> moving, whatever its form: a field
     read around the points alone (KonfAI's ``displace_points``), any other transform read and applied whole."""
     if not _is_field(path):
-        return apply_to_data_transform(points, {sitk.ReadTransform(str(path)): False})
+        transform = sitk.ReadTransform(str(path))
+        return np.array([transform.TransformPoint(point) for point in points.astype(np.float64).tolist()])
     return displace_points(points, *_field(path, work))
 
 

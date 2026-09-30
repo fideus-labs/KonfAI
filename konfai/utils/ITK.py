@@ -75,77 +75,6 @@ def read_displacement_field(path: str | Path) -> sitk.Image:
     return sitk.Cast(field, sitk.sitkVectorFloat64)
 
 
-def _invert_via_displacement_field(
-    transform: sitk.Transform, image: sitk.Image | None
-) -> sitk.DisplacementFieldTransform:
-    if image is None:
-        raise TransformError(
-            "Inverting a non-linear transform requires a reference image to sample the displacement field, "
-            "but none was provided."
-        )
-    displacement_field_filter = sitk.TransformToDisplacementFieldFilter()
-    displacement_field_filter.SetReferenceImage(image)
-    displacement_field = displacement_field_filter.Execute(transform)
-    iterative_inverse = sitk.IterativeInverseDisplacementFieldImageFilter()
-    iterative_inverse.SetNumberOfIterations(20)
-    return sitk.DisplacementFieldTransform(iterative_inverse.Execute(displacement_field))
-
-
-def _copy_transform(transform_cls: type[sitk.Transform], transform: sitk.Transform, invert: bool) -> sitk.Transform:
-    transform = transform_cls(transform)
-    if invert:
-        transform = transform_cls(transform.GetInverse())
-    return transform
-
-
-def _open_transform(
-    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image | None = None
-) -> list[sitk.Transform]:
-    _require_simpleitk()
-    transforms: list[sitk.Transform] = []
-
-    for transform_file, invert in transform_files.items():
-        if isinstance(transform_file, str):
-            transform = sitk.ReadTransform(transform_file + ".itk.txt")
-        else:
-            transform = transform_file
-        if transform.GetName() == "TranslationTransform":
-            transform = _copy_transform(sitk.TranslationTransform, transform, invert)
-        elif transform.GetName() == "Euler3DTransform":
-            transform = _copy_transform(sitk.Euler3DTransform, transform, invert)
-        elif transform.GetName() == "VersorRigid3DTransform":
-            transform = _copy_transform(sitk.VersorRigid3DTransform, transform, invert)
-        elif transform.GetName() == "AffineTransform":
-            transform = _copy_transform(sitk.AffineTransform, transform, invert)
-        elif transform.GetName() == "DisplacementFieldTransform":
-            if invert:
-                transform = _invert_via_displacement_field(transform, image)
-        else:
-            transform = sitk.BSplineTransform(transform)
-            if invert:
-                transform = _invert_via_displacement_field(transform, image)
-        transforms.append(transform)
-    if len(transforms) == 0:
-        transforms.append(sitk.Euler3DTransform())
-    return transforms
-
-
-def compose_transform(
-    transform_files: dict[str | sitk.Transform, bool], image: sitk.Image | None = None
-) -> sitk.CompositeTransform:
-    transforms = _open_transform(transform_files, image)
-    result = sitk.CompositeTransform(transforms)
-    return result
-
-
-def apply_to_data_transform(data: np.ndarray, transform_files: dict[str | sitk.Transform, bool]) -> np.ndarray:
-    transforms = compose_transform(transform_files)
-    result = np.copy(data)
-    for i in range(data.shape[0]):
-        result[i, :] = transforms.TransformPoint(np.asarray(data[i, :], dtype=np.double))
-    return result
-
-
 #: The voxels of one slab a streamed field statistic reads: with its derivatives and determinants, ~200 B each.
 FIELD_SLAB_VOXELS = 2**21
 
@@ -250,19 +179,6 @@ def displace_points(points: np.ndarray, dataset: Dataset, group: str, name: str)
         local.SetOrigin((origin + direction @ (spacing * start)).tolist())
         point[:] = sitk.DisplacementFieldTransform(local).TransformPoint(point.tolist())
     return moved
-
-
-def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) -> np.ndarray:
-    _require_simpleitk()
-
-    dilatations = [int(np.ceil(d / s)) for d, s in zip(dilatations, reversed(mask.GetSpacing()), strict=False)]
-
-    data = sitk.GetArrayViewFromImage(mask)  # a view: the mask is read for its shape and its labels, not held
-    border = np.where(np.isin(data, label))
-    box: list[list[Any]] = []
-    for w, dilatation, s in zip(border, dilatations, data.shape, strict=False):
-        box.append([max(np.min(w) - dilatation, 0), min(np.max(w) + dilatation, s)])
-    return np.asarray(box)
 
 
 def _linear_map(transform: sitk.Transform) -> AffineMap:

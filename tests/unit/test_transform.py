@@ -246,8 +246,7 @@ def test_crop_finds_its_box_without_holding_the_volume(tmp_path: Path, monkeypat
     """The box is the SimpleITK one (bounding box of the voxels above the 5th percentile, every
     channel voting), found by bounded passes over the store: no read_data of the volume, and one
     computation per volume however many chains crop it."""
-    from konfai.utils.dataset import Dataset, data_to_image
-    from konfai.utils.ITK import box_with_mask
+    from konfai.utils.dataset import Dataset
 
     pytest.importorskip("SimpleITK")
     rng = np.random.default_rng(2)
@@ -255,7 +254,7 @@ def test_crop_finds_its_box_without_holding_the_volume(tmp_path: Path, monkeypat
     dataset = Dataset(tmp_path / "source", file_format)
     dataset.write("CT", "CASE", volume, _geometry())
     threshold = np.percentile(volume, 5)
-    expected = box_with_mask(data_to_image((volume > threshold).astype(np.uint8), _geometry()), [1], [0, 0, 0])[:3]
+    expected = np.array([[axis.min(), axis.max()] for axis in np.nonzero((volume > threshold).any(axis=0))])
 
     reads: list[str] = []
     monkeypatch.setattr(Dataset, "read_data", lambda self, group, name: reads.append(name) or (volume, _geometry()))
