@@ -196,7 +196,7 @@ def test_an_out_of_memory_past_the_forward_restarts_the_stage_in_tiles(
 
     monkeypatch.setattr(fireants.FireANTsEngine, "_total_field", backward_out_of_memory_once)
     engine = fireants.FireANTsEngine(
-        [1], [1], [1], 3, "mse", 0.01, "none", "none", "syn", "impact", 0.1, 1, 0.5, 1.0, 0,
+        [1], [1], [1], 3, "mse", 0.01, "none", "none", "syn", "impact", 0.1, 0.5, 1.0, 0,
         [[fireants.ModelSpec(ref=str(path))]], mode="Jacobian",
     )  # fmt: skip
     image = sitk.GetImageFromArray(np.random.default_rng(0).random((32, 32, 32)).astype(np.float32))
@@ -227,7 +227,7 @@ def test_an_out_of_memory_that_recurs_reaches_konfai_after_two_restarts(
 
     monkeypatch.setattr(fireants.FireANTsEngine, "_total_field", always_out_of_memory)
     engine = fireants.FireANTsEngine(
-        [1], [1], [1], 3, "mse", 0.01, "none", "none", "syn", "impact", 0.1, 1, 0.5, 1.0, 0,
+        [1], [1], [1], 3, "mse", 0.01, "none", "none", "syn", "impact", 0.1, 0.5, 1.0, 0,
         [[fireants.ModelSpec(ref=str(path))]], mode="Jacobian",
     )  # fmt: skip
     image = sitk.GetImageFromArray(np.random.default_rng(0).random((32, 32, 32)).astype(np.float32))

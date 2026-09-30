@@ -51,7 +51,6 @@ def _engine(**overrides) -> fireants.FireANTsEngine:
         "deformable_method": "none",
         "deformable_metric": "cc",
         "deformable_lr": 0.1,
-        "integrator_n": 1,
         "smooth_warp_sigma": 0.5,
         "smooth_grad_sigma": 1.0,
         "seed": 0,

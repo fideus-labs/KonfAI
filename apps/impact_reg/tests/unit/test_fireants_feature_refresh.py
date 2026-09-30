@@ -45,7 +45,7 @@ def _engine(tmp_path: Path, **overrides) -> fireants.FireANTsEngine:
     torch.jit.script(_Echo()).save(str(path))
     settings = {"mode": "Static", "feature_map_update_interval": 2, **overrides}
     return fireants.FireANTsEngine(
-        [2, 1], [1, 1], [3, 2], 3, "mse", 0.01, "none", "none", "syn", "impact", 0.1, 1, 0.5, 1.0, 0,
+        [2, 1], [1, 1], [3, 2], 3, "mse", 0.01, "none", "none", "syn", "impact", 0.1, 0.5, 1.0, 0,
         [[fireants.ModelSpec(ref=str(path))], [fireants.ModelSpec(ref=str(path))]], **settings,
     )  # fmt: skip
 

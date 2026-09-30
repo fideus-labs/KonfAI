@@ -656,7 +656,6 @@ class FireANTsEngine:
         deformable_method: str,
         deformable_metric: str,
         deformable_lr: float,
-        integrator_n: int,
         smooth_warp_sigma: float,
         smooth_grad_sigma: float,
         seed: int,
@@ -701,7 +700,6 @@ class FireANTsEngine:
             raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
-        self._integrator_n = int(integrator_n)
         self._smooth_warp_sigma = float(smooth_warp_sigma)
         self._smooth_grad_sigma = float(smooth_grad_sigma)
         self._seed = int(seed)
@@ -884,7 +882,6 @@ class FireANTsEngine:
                 custom_loss=loss,
                 cc_kernel_size=self._cc_kernel,
                 deformation_type="compositive",
-                integrator_n=self._integrator_n,
                 smooth_warp_sigma=self._smooth_warp_sigma,
                 smooth_grad_sigma=self._smooth_grad_sigma,
                 optimizer="Adam",
@@ -1157,7 +1154,6 @@ class FireANTsEngine:
                         custom_loss=custom_loss,
                         cc_kernel_size=self._cc_kernel,
                         deformation_type="compositive",
-                        integrator_n=self._integrator_n,
                         smooth_warp_sigma=self._smooth_warp_sigma,
                         smooth_grad_sigma=self._smooth_grad_sigma,
                         optimizer="Adam",
@@ -1268,12 +1264,6 @@ class RegistrationNet(network.Network):
             "Similarity metric for the deformable stage; 'impact' uses the IMPACT feature models under 'models'.",
         ] = "cc",
         deformable_lr: Annotated[float, Range(0.0, 10.0), "Gradient step size of the deformable optimisation."] = 0.25,
-        integrator_n: Annotated[
-            int,
-            Range(1, 100),
-            "No effect: FireANTs integrates a velocity field only for its geodesic deformation, and this engine "
-            "runs the compositive one. Accepted so the presets that set it still load.",
-        ] = 10,
         smooth_warp_sigma: Annotated[
             float,
             Range(0.0, 100.0),
@@ -1363,7 +1353,6 @@ class RegistrationNet(network.Network):
             deformable_method,
             deformable_metric,
             deformable_lr,
-            integrator_n,
             smooth_warp_sigma,
             smooth_grad_sigma,
             seed,
