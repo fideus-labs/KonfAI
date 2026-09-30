@@ -1532,7 +1532,8 @@ article.yue .kf-ecosystem-map > figcaption strong {
  *   names the site (the title is kept for the tab/sidebar).
  * ------------------------------------------------------------------ */
 .sy-page:has(.kf-landing) #rside,
-.sy-page:has(.kf-landing) .rside-overlay {
+.sy-page:has(.kf-landing) .rside-overlay,
+.sy-page:has(.kf-landing) [aria-controls="rside"] {
     display: none;
 }
 
@@ -1730,4 +1731,81 @@ html.dark .mermaid > svg { filter: none !important; }
     stroke: var(--kf-hair) !important;
     stroke-dasharray: 4 4 !important;
     stroke-width: 1px !important;
+}
+
+/* Task-first documentation home; reuse the site's cards and theme tokens. */
+.kf-start-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+    gap: 2rem;
+    align-items: center;
+    padding: 0.6rem 0 1.5rem;
+}
+
+article.yue .kf-start .kf-start-title {
+    margin: 0.8rem 0 0;
+    color: var(--kf-ink);
+    font-size: clamp(2rem, 3.6vw, 3.1rem);
+    font-weight: 750;
+    line-height: 1.12;
+    letter-spacing: -0.035em;
+}
+
+.kf-start-title em { color: var(--kf-accent); font-style: normal; }
+.kf-start .kf-lede { max-width: 40ch; font-size: 1rem; margin-top: 1rem; }
+.kf-start .kf-cta { margin-top: 1.3rem; }
+article.yue .kf-start-preview { margin: 0; min-width: 0; }
+.kf-start-preview > a { border: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.4rem; }
+.kf-start-preview > a > span { position: relative; display: block; background: #0b0d0e; border-radius: 0.65rem; overflow: hidden; }
+.kf-start-preview img { display: block; width: 100%; height: auto; margin: 0; }
+.kf-start-preview b {
+    position: absolute;
+    left: 0.6rem;
+    bottom: 0.6rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.3rem;
+    background: #10201c;
+    color: #ffffff;
+    font-family: var(--kf-mono);
+    font-size: 0.68rem;
+    font-weight: 500;
+}
+
+.kf-start-preview figcaption { margin-top: 0.7rem; font-size: 0.8rem; color: var(--kf-ink-2); line-height: 1.5; }
+.kf-start-preview figcaption a { white-space: nowrap; }
+article.yue .kf-start h2 { margin: 1rem 0; border: 0; padding: 0; font-size: 1.35rem; }
+article.yue .kf-start .kf-nextgrid { padding: 0; margin: 0; list-style: none; }
+article.yue .kf-start .kf-nextgrid > li { margin: 0; padding: 0; min-width: 0; }
+.kf-start a.kf-nextcard { height: 100%; gap: 0.5rem; border-color: var(--kf-hair); border-top: 2px solid var(--kf-hue-line); background: var(--kf-surface); }
+.kf-start a.kf-nextcard:hover { border-color: var(--kf-hue); }
+.kf-start a.kf-btn-primary { border-color: var(--kf-accent); box-shadow: none; }
+.kf-start a.kf-btn-ghost { border-color: var(--kf-hair); }
+article.yue .kf-start .kf-nextcard h3 { margin: 0; font-size: 1.05rem; line-height: 1.4; }
+article.yue .kf-start .kf-nextcard p { margin: 0; color: var(--kf-ink-2); }
+.kf-start .kf-nextcard .intent { font-size: 0.65rem; letter-spacing: 0.07em; }
+.kf-start .kf-nextcard .go { padding-top: 0.6rem; }
+article.yue .kf-start-agent { margin: 1rem 0 0; font-size: 0.88rem; color: var(--kf-ink-2); }
+.kf-start .kf-docindex { margin-top: 1.7rem; background: var(--kf-surface-2); }
+article.yue .kf-start .kf-docindex h2 { margin: 0; font-size: 1.1rem; }
+.kf-start .kf-docindex .dhead { margin-bottom: 0.5rem; }
+.kf-start .kf-doclinks { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.kf-start a:focus-visible { outline: 3px solid var(--kf-accent); outline-offset: 4px; }
+
+@media (max-width: 1050px) {
+    .kf-start-hero { grid-template-columns: 1fr; }
+    .kf-start .kf-lede { max-width: 60ch; }
+    .kf-start-preview { max-width: 28rem; }
+    .kf-start .kf-nextgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+    .kf-start-hero { gap: 1.4rem; padding-bottom: 1rem; }
+    .kf-start-preview { max-width: 22rem; }
+    .kf-start .kf-nextgrid, .kf-start .kf-doclinks { grid-template-columns: 1fr; }
+    .kf-start .kf-nextcard { padding: 1rem 1.1rem; }
+    .kf-start .kf-cta { gap: 0.6rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .kf-start .kf-nextcard:hover { transform: none; }
 }

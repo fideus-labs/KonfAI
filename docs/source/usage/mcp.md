@@ -1,33 +1,11 @@
 # Agent workflows (MCP server)
 
-Give an LLM agent a folder of scans and a request in plain language (*"segment these CT volumes"*, *"train
-an MR-to-CT model"*, *"register these two scans"*), and it carries it out: it reads the data, writes and
-validates the config, runs the workflows, and returns the metrics with a record you can reproduce.
+Connect an LLM agent to KonfAI so it can inspect datasets, write configurations,
+launch jobs and read their results. If you want a ready-made chat interface, use
+{doc}`studio`.
 
-`konfai-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives the agent
-KonfAI as tools. The agent writes the same YAML you would, every run keeps its resolved config, command,
-versions, logs and metrics, and configs are validated before a long job starts.
-
-## One request, three ways
-
-Training is only one option. The agent takes the cheapest one that fits:
-
-1. **Use a published app**: `list_apps`, `describe_app`, then `run_app` (`infer`, or `pipeline` to also
-   score it). `list_app_parameters` and `set_parameters` tune a run; `import_app` copies an app into the
-   session when it must be modified.
-2. **Fine-tune an app** on the user's data: `fine_tune_app`.
-3. **Train from scratch**: write a config and train.
-
-Both training paths end with an app (`package_app_from_session`), which can be run again with `run_app` or
-saved with `export_app`. Apps come from a local folder, Hugging Face or a remote server, listed in a
-catalogue the user extends with `register_app_source` or `KONFAI_MCP_APP_CATALOG`.
-
-```{admonition} Trust model
-:class: warning
-Running a local or Hugging Face app runs its Python code and installs its requirements, so these tools need
-`allow_untrusted_code=True`. A remote app runs on its own server and needs no such flag. Only use apps you
-trust.
-```
+`konfai-mcp` implements the Model Context Protocol. The agent operates the same YAML
+workflows as the CLI, and each run keeps its configuration, logs and metrics.
 
 ## Running the server
 
@@ -57,7 +35,23 @@ KONFAI_MCP_WORKSPACES_ROOT = "/path/to/workspaces"
 KONFAI_MCP_APP_CATALOG = "/path/to/my_apps.json"   # optional: your own app sources
 ```
 
-### Remote and stateless deployments
+## Try a first request
+
+Ask the connected agent to inspect a dataset before running a job:
+
+> Inspect /path/to/my/data and list its cases and image groups. Find a published
+> segmentation app that fits these inputs, then explain how to run and check it.
+
+The agent can run a published app, fine-tune it or train from a configuration.
+Check the completed job status and written outputs before interpreting its metrics;
+configuration validation alone does not execute a training step.
+
+Local and Hugging Face apps run Python code and install requirements, so app tools
+require `allow_untrusted_code=True`. Only select sources you trust. The catalogue can
+list remote app servers, but `run_app` executes **local and Hugging Face apps only**.
+Use the {doc}`Apps CLI <apps>` to execute an app on a remote app server.
+
+## Host the MCP server remotely
 
 Over the network, use the streamable HTTP transport with a token:
 

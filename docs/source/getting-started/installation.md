@@ -27,6 +27,25 @@ cd KonfAI
 python -m pip install ".[imaging]"
 ```
 
+## GPU
+
+KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
+drivers and CUDA version. If your PyTorch already matches your machine, there is
+nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
+first, then KonfAI. For containers, see [Docker](#docker) below.
+
+## Platforms
+
+KonfAI runs on Linux, macOS and Windows. Two things differ outside Linux:
+
+- **GPUs are CUDA devices.** KonfAI does not use Apple's Metal (MPS) backend, so
+  on macOS every workflow runs on the CPU: leave `--gpu` out and choose the
+  number of processes with `--cpu N`.
+- **Windows opens no process group.** TRAIN, RESUME and EVALUATION run there on
+  one process (`--cpu 1` or a single `--gpu`) and refuse more. PREDICTION and
+  TRANSFORM, whose processes never talk to each other, can use several. See
+  [How a run is launched](../reference/cli.md#how-a-run-is-launched).
+
 ## The extras
 
 Take one when you need a specific reader, metric or tool. `[all]` takes
@@ -91,7 +110,7 @@ From a checkout:
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 pixi install           # every environment, locked
-pixi run test-fast     # the iteration loop, about 25 s
+pixi run test-fast     # the iteration loop
 pixi run lint          # ruff over the source tree
 pixi run check         # lint + format + tests, before pushing
 ```
@@ -109,25 +128,6 @@ cd KonfAI
 python -m pip install -e ".[imaging,dev]"
 pytest tests/
 ```
-
-## GPU
-
-KonfAI declares `torch` as a dependency but cannot pick the right wheel for your
-drivers and CUDA version. If your PyTorch already matches your machine, there is
-nothing to do. If you need a specific CUDA or a CPU-only build, install PyTorch
-first, then KonfAI. For containers, see [Docker](#docker) below.
-
-## Platforms
-
-KonfAI runs on Linux, macOS and Windows. Two things differ outside Linux:
-
-- **GPUs are CUDA devices.** KonfAI does not use Apple's Metal (MPS) backend, so
-  on macOS every workflow runs on the CPU: leave `--gpu` out and choose the
-  number of processes with `--cpu N`.
-- **Windows opens no process group.** TRAIN, RESUME and EVALUATION run there on
-  one process (`--cpu 1` or a single `--gpu`) and refuse more. PREDICTION and
-  TRANSFORM, whose processes never talk to each other, can use several. See
-  [How a run is launched](../reference/cli.md#how-a-run-is-launched).
 
 ## If something is missing
 

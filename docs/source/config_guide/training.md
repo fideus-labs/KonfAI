@@ -64,10 +64,10 @@ list of case names.
 | `epochs` | `100` | Number of epochs. |
 | `it_validation` | `null` | Validate and save every N iterations. `null`: once per epoch. |
 | `it_lr_update` | `null` | Step the schedulers every N batches. `null`: once per epoch. |
-| `autocast` | `false` | Mixed precision. About twice as fast on most GPU models; measure it on a small one. |
+| `autocast` | `false` | Mixed precision. Measure speed and numerical differences on your model and hardware. |
 | `channels_last` | `false` | Channels-last memory layout. Faster on some models and slower on others: measure it with `benchmarks/perf/bench_train_step.py`. |
 | `cudnn_benchmark` | `false` | Let cuDNN pick the fastest kernels even with a seed, at the cost of an exact replay. |
-| `torch_compile` | `false` | Compile the network with `torch.compile`: about 10% faster per epoch after a first, slower run. |
+| `torch_compile` | `false` | Compile the network with `torch.compile`. Compilation adds startup cost; speed depends on the model and hardware. |
 | `gradient_checkpoints` | `null` | Modules to run with gradient checkpointing (less memory, more compute). |
 | `gpu_checkpoints` | `null` | Modules to place on other GPUs. |
 | `ema_decay` | `0` | Keep an exponential moving average of the weights when above 0. |
@@ -218,7 +218,7 @@ groups_src:
         is_input: true
 ```
 
-`transforms` runs once per case, `patch_transforms` once per patch, and `is_input` marks the model's inputs
+`transforms` defines case preprocessing, replayed on regions when streaming; `patch_transforms` runs on each patch, and `is_input` marks the model's inputs
 (the others are targets). No `transforms` means the group reaches the model as stored.
 
 ## Examples

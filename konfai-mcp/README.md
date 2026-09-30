@@ -226,7 +226,7 @@ Training from scratch is only one of three ways to satisfy a request. Many tasks
 are already solved by a **published KonfAI app** (a config + code + weights bundle
 on a local path, a HuggingFace repo, or a remote server). The MCP exposes the whole
 *use / adapt / package* half of the lifecycle, so an agent can pick the cheapest
-path that actually fits, **without ever training when a model already exists.**
+path that fits the request and available data.
 
 The `solve_task` prompt frames the entry decision as a three-way fork:
 
@@ -266,8 +266,9 @@ let a user pin their own HuggingFace repo or local app. A bare HuggingFace
 
 > ⚠️ **Trust.** Resolving a **local or HuggingFace** app imports its Python code and
 > pip-installs its requirements, so every execution / fine-tune / parameter-read tool
-> is gated behind an explicit `allow_untrusted_code=True`. A **remote** app runs on the
-> user's own server (its inputs are uploaded there) and needs no code gate.
+> is gated behind an explicit `allow_untrusted_code=True`. Remote app servers may be
+> listed in the catalogue, but MCP execution tools refuse them. Use `konfai-apps`
+> directly to run a remote app.
 
 ## Typical Agent Workflow
 
