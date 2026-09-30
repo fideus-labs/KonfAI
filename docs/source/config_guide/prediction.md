@@ -61,7 +61,6 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.p
 | `torch_compile` | `false` | Compile the model once for all the members. Helps only models bound by their kernels. |
 | `gpu_checkpoints` | `null` | Modules to place on other GPUs. |
 | `data_log` | `null` | Outputs to log in TensorBoard. |
-| `check_training_transforms` | `true` | Warn when an input is preprocessed differently from training (below). |
 
 ### Checkpoint memory
 
@@ -101,24 +100,12 @@ A `0` axis starts at the whole extent. If the GPU runs out of memory, KonfAI mea
 needed and cuts the axis into the fewest equal patches that fit, usually in one retry. It also keeps room to
 blend the result on the GPU. A patch size without `0` is never changed.
 
-### The training-chain check
+### Preprocessing must match training
 
 A checkpoint does not record how its inputs were preprocessed. A `Prediction.yml` that prepares an input
 differently from the `Config.yml` it was trained with runs, and gives wrong results: the Synthesis example
 once used a different `Standardize` mask in prediction, and its error went from 98 to 409 HU with the same
-weights.
-
-So prediction compares the input transforms with the training config it finds in
-`Statistics/<train_name>/`, and warns about each difference:
-
-```text
-[KonfAI] WARNING: this run preprocesses a model input differently from TRAIN_01:
-[KonfAI]   'MR:MR' transforms[1] Standardize: mask: 'None' in training, 'MASK' here
-```
-
-It only warns, since a difference can be intended. Stages that do not change values (`Statistics`, `Save`)
-and output transforms are ignored. Without the training config at hand (an app, a copied `.pt`), it says it
-could not check. `check_training_transforms: false` turns it off.
+weights. Keep the input transforms of the two files identical.
 
 ## `outputs_dataset`
 

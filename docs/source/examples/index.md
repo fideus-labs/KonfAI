@@ -93,9 +93,8 @@ configuration model:
 ```{warning}
 The preprocessing in `Prediction.yml` must mirror `Config.yml` exactly. Standardizing a group
 differently in the two files feeds the network a scale it never trained on, and the run still
-succeeds: on this example that single mismatch cost 4x on MAE. PREDICTION warns about it only for
-a checkpoint whose training run's resolved config is still in `Statistics/<train_name>/` (see
-[the training-chain check](../config_guide/prediction.md#the-training-chain-check)).
+succeeds: on this example that single mismatch cost 4x on MAE (see
+[preprocessing must match training](../config_guide/prediction.md#preprocessing-must-match-training)).
 ```
 
 Pick **Registration** when you want to learn the two-input spatial

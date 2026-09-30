@@ -323,7 +323,6 @@ def test_checkpoint_cache_budget_binds_from_real_prediction_config_and_reaches_c
     config_path.write_text(
         "Predictor:\n"
         "  checkpoint_cache_gib: 0.125\n"
-        "  check_training_transforms: false\n"
         "  Model:\n"
         "    classpath: test_predictor_checkpoint_cache:CacheNet\n"
         "  Dataset:\n"
