@@ -191,11 +191,11 @@ A new training can start from a checkpoint trained in another framework:
 ```yaml
 Trainer:
   Model:
-    classpath: default|PlainConvUNet.yml
+    classpath: default|SegResNet.yml
     pretrained_from:
-      checkpoint: ./nnunet_fold0.pt        # a state_dict (or an https:// URL)
-      builder: monai.networks.nets:UNet    # the class the checkpoint belongs to
-      args: {spatial_dims: 3, in_channels: 1, out_channels: 2, channels: [32, 64], strides: [2]}
+      checkpoint: ./segresnet_pretrained.pt   # a matching MONAI SegResNet state_dict
+      builder: monai.networks.nets:SegResNet
+      args: {spatial_dims: 3, init_filters: 8, in_channels: 1, out_channels: 2}
       input_shape: [96, 96, 96]            # optional
 ```
 
@@ -208,6 +208,9 @@ patch axis).
 From Python, `konfai.utils.pretrained.transfer_weights_by_execution_order` does the same copy:
 
 ```python
+from importlib.resources import files
+
+import torch
 from monai.networks.nets import SegResNet
 from konfai.utils.model_builder import build_model_from_yaml
 from konfai.utils.pretrained import transfer_weights_by_execution_order
@@ -216,7 +219,7 @@ reference = SegResNet(spatial_dims=3, init_filters=8, in_channels=1, out_channel
                       blocks_down=(1, 2, 2, 4), blocks_up=(1, 1, 1))
 reference.load_state_dict(torch.load("segresnet_pretrained.pt"))
 
-net = build_model_from_yaml(yaml_path="konfai/models/yaml/SegResNet.yml",
+net = build_model_from_yaml(yaml_path=str(files("konfai").joinpath("models/yaml/SegResNet.yml")),
                             parameters={"dim": 3, "upsample_mode": "trilinear", "nb_class": 2})
 example = torch.randn(1, 1, 16, 16, 16)
 transfer_weights_by_execution_order(

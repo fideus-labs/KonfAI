@@ -43,8 +43,9 @@ Each workflow maps to one file with one mandatory root key:
 a dataset: resampling a cohort onto one grid, folding it into a template (`Reduce`, N→1), expanding
 each case into drawn copies (`Expand`, 1→N). A chain may still embed a `KonfAIInference` stage
 (whole-volume, one spawned process per case; a cohort inference is PREDICTION). It takes no `-tb`,
-and `--plan` prints what a run would do and stops without writing anything: it probes each
-destination with a real region-write it then removes, and takes back a store it created.
+and `--plan` prints what a run would do without producing the transformed dataset. It still
+writes resolved defaults into the config and probes destinations with temporary region writes,
+then removes the probe entries and stores it created.
 
 **Don't write configs from scratch: copy a runnable template from `examples/`** (Segmentation,
 Synthesis, Registration or Transform) and adapt it. Then:
@@ -96,7 +97,7 @@ Segmentation, Synthesis and Registration recipes, and
 When a workflow is stable, it can be shipped as an **app** and run without touching YAML:
 
 ```bash
-konfai-apps infer VBoussot/ImpactSynth:sCT -i patient/mr.nii.gz -o ./Output --gpu 0
+konfai-apps infer VBoussot/ImpactSynth:MR -i patient/mr.nii.gz -o ./Output --gpu 0
 ```
 
 `konfai-apps` also does `eval`, `uncertainty`, `pipeline`, `fine-tune`, `bundle`, and

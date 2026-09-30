@@ -1,12 +1,15 @@
 # KonfAI Studio
 
-![KonfAI Studio: the agent authors an MR→CT synthesis run (write_workflow_config → validate → run_train) while the live training feed, multi-run loss curves, and model-output samples stream beside the chat, all local, offline, nothing leaves the machine.](docs/screenshot.png)
+![KonfAI Studio: the agent authors an MR→CT synthesis run (write_workflow_config → validate → run_train) while the live training feed, multi-run loss curves, and model-output samples stream beside the chat, with the selected language-model backend.](docs/screenshot.png)
 
 A single **chatbot** (à la ChatGPT / Claude, specialized for medical imaging) that drives
 `konfai-mcp` end to end. A clinician-researcher points it at their own dataset and, from the
 conversation alone, onboards data, authors/reuses a model, trains, infers, visualizes results,
 compares, keeps & reproduces experiments, then deploys the frozen model privately (on-prem or
-100% in the browser). The compute stays on the user's site; nothing is uploaded to a third party.
+100% in the browser). KonfAI jobs run on the machine hosting Studio. Chat messages and tool results are sent to the
+selected language-model endpoint. Use a local endpoint when those exchanges must stay local;
+app and model downloads may still need network access. See the
+[Studio guide](https://konfai.readthedocs.io/en/latest/usage/studio.html) for setup and data handling.
 
 **This is a product surface, not a new engine.** Every capability maps 1:1 onto an existing
 `konfai-mcp` tool. The build is the web UI + a thin bridge (BFF), plus the ONNX export.
