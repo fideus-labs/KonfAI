@@ -403,7 +403,10 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._normalize = normalize
         self._kernel = int(lncc_kernel)
         self._chunk = max(0, int(chunk))  # the LNCC's channels a pass in Static mode, 0 for all
-        self._generator = torch.Generator().manual_seed(int(seed))
+        self._seed = int(seed)
+        # The draws of one registration: reset() seeds it again, so a case draws the same channels and points
+        # whatever registrations this cached loss ran before it, and a restarted stage replays its own.
+        self._generator = torch.Generator().manual_seed(self._seed)
         self._masked = masked
         self._channels: list[list[int]] = []  # Static: each model's kept layers' channels in the volumes
         self._level = -1  # the FireANTs scale running, advanced by set_current_scale_and_iterations
@@ -414,8 +417,10 @@ class ImpactFeatureLoss(torch.nn.Module):
         return [cast("_ImpactCore", core) for core in self._cores]
 
     def reset(self) -> None:
-        """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level."""
+        """A registration (or a restarted stage) begins: the next scale FireANTs announces is the first level, and
+        the draws start again from the seed."""
         self._level, self._factors = -1, None
+        self._generator.manual_seed(self._seed)
 
     def set_current_scale_and_iterations(self, scale: int, iterations: int) -> None:
         """FireANTs' hook at the start of every scale: the next level, whose layers start at 1 again."""
@@ -832,6 +837,7 @@ class FireANTsEngine:
 
         loss = self._impact_loss()
         loss._masked = masked
+        loss.reset()  # this registration's draws; each run then goes on from the last one's
         runs = [
             (level, scale, min(self._update_interval, iterations - done))
             for level, (scale, iterations) in enumerate(zip(self._scales, self._deformable_iterations, strict=True))
