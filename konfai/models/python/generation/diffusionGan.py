@@ -303,25 +303,7 @@ class GeneratorV1(network.Network):
 
     GeneratorHead = gan.Generator.GeneratorHead
 
-    class GeneratorDownSample(network.ModuleArgsDict):
-        def __init__(self, in_channels: int, out_channels: int, dim: int) -> None:
-            super().__init__()
-            self.add_module(
-                "ConvBlock",
-                blocks.ConvBlock(
-                    in_channels,
-                    out_channels,
-                    block_configs=[
-                        blocks.BlockConfig(
-                            stride=2,
-                            bias=False,
-                            activation="ReLU",
-                            norm_mode="SYNCBATCH",
-                        )
-                    ],
-                    dim=dim,
-                ),
-            )
+    GeneratorDownSample = gan.Generator.GeneratorDownSample
 
     GeneratorUpSample = gan.Generator.GeneratorUpSample
 
@@ -584,6 +566,35 @@ class GeneratorV3(network.Network):
         )
 
 
+def _wire_adversarial(gan: network.Network, generator: network.Network, discriminator: network.Network) -> None:
+    """The generator from A, and one discriminator on the real B, on the generated B detached and on it."""
+    gan.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
+    gan.add_module(
+        "Discriminator_B",
+        discriminator,
+        in_branch=[1],
+        out_branch=[-1],
+        requires_grad=True,
+        training=True,  # the real B is a training input
+    )
+    gan.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
+    gan.add_module(
+        "Discriminator_pB_detach",
+        discriminator,
+        in_branch=["pB_detach"],
+        out_branch=[-1],
+        training=True,
+    )
+    gan.add_module(
+        "Discriminator_pB",
+        discriminator,
+        in_branch=["pB"],
+        out_branch=[-1],
+        requires_grad=False,
+        training=True,
+    )
+
+
 class DiffusionGan(network.Network):
     def __init__(
         self,
@@ -591,31 +602,7 @@ class DiffusionGan(network.Network):
         discriminator: DiscriminatorADA = DiscriminatorADA(),
     ) -> None:
         super().__init__()
-        self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
-        self.add_module(
-            "Discriminator_B",
-            discriminator,
-            in_branch=[1],
-            out_branch=[-1],
-            requires_grad=True,
-            training=True,  # the real B is a training input
-        )
-        self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
-        self.add_module(
-            "Discriminator_pB_detach",
-            discriminator,
-            in_branch=["pB_detach"],
-            out_branch=[-1],
-            training=True,
-        )
-        self.add_module(
-            "Discriminator_pB",
-            discriminator,
-            in_branch=["pB"],
-            out_branch=[-1],
-            requires_grad=False,
-            training=True,
-        )
+        _wire_adversarial(self, generator, discriminator)
 
 
 class DiffusionGanV2(network.Network):
@@ -625,31 +612,7 @@ class DiffusionGanV2(network.Network):
         discriminator: Discriminator = Discriminator(),
     ) -> None:
         super().__init__()
-        self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
-        self.add_module(
-            "Discriminator_B",
-            discriminator,
-            in_branch=[1],
-            out_branch=[-1],
-            requires_grad=True,
-            training=True,  # the real B is a training input
-        )
-        self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
-        self.add_module(
-            "Discriminator_pB_detach",
-            discriminator,
-            in_branch=["pB_detach"],
-            out_branch=[-1],
-            training=True,
-        )
-        self.add_module(
-            "Discriminator_pB",
-            discriminator,
-            in_branch=["pB"],
-            out_branch=[-1],
-            requires_grad=False,
-            training=True,
-        )
+        _wire_adversarial(self, generator, discriminator)
 
 
 class CycleGanDiscriminator(network.Network):
