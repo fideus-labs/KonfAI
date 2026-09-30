@@ -163,8 +163,9 @@ def model_key(ref: str) -> str:
     return ref if _is_local_ref(ref) else ref.split(":", 1)[1]
 
 
-#: The IMPACT distances, as itk-impact defines them: every one positive and 0 at a perfect match, on feature maps
-#: ``[B, C, *spatial]`` (channel axis 1), averaged over the voxels a mask ``[B, 1, *spatial]`` weighs (all without one).
+#: The IMPACT distances, as itk-impact defines them, on feature maps ``[B, C, *spatial]`` (channel axis 1), averaged
+#: over the voxels a mask ``[B, 1, *spatial]`` weighs (all without one). Each is 0 at a perfect match but Dice, which is
+#: 0 there only on binary maps: identical soft maps of 0.5 score 0.5, and raw features can take it below 0.
 DISTANCES = ("L1", "L2", "Dice", "Cosine", "L1Cosine", "NCC", "LNCC")
 _EPS = 1e-6
 #: itk-impact's L1Cosine: the cosine damped by exp(-lambda |f - m|) per channel.
