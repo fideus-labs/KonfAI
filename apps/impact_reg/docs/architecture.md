@@ -40,7 +40,7 @@ models/<engine>.py        the preset's model class (Prediction.yml names it): Re
   parameter maps), its cost in `app.json` (`vram_bytes_per_voxel`, `ram_bytes_per_voxel`, `tiling`). A preset's
   `requirements.txt` names the package versions it needs, and `requirements_no_deps` in `app.json` those installed
   without their dependencies (FireANTs); konfai-apps never replaces an installed core package to satisfy them.
-- **SlicerImpactReg drives the CLI** (`register`, `eval --preset`, `uncertainty --preset`, the output layout above):
+- **SlicerImpactReg drives the CLI** (`register --keep-fields`, `eval`, `uncertainty`, the output layout above):
   keep those arguments and files stable.
 - **KonfAI Studio drives it through konfai-mcp**: `run_app_infer` on an app whose `app.json` says `task:
   registration` calls `ImpactRegKonfAIApp.register` in a job (the presets repository taken from the app reference), and

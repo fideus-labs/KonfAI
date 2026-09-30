@@ -78,7 +78,7 @@ def _metrics(output: Path) -> dict[str, float]:
 
 
 def test_eval_needs_no_preset(tmp_path: Path, toy: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
-    """The evaluation configs ship with the package: eval without --preset lists no preset (no network) and
+    """The evaluation configs ship with the package: eval lists no preset (no network) and
     resolves none (no requirement install), and still writes the metrics."""
 
     def no_listing(*args, **kwargs):
@@ -137,7 +137,7 @@ def test_uncertainty_is_the_spread_of_the_vectors(
         for index, member in enumerate(members)
     ]
     out = tmp_path / "Uncertainty"
-    code = _main(monkeypatch, ["uncertainty", "--preset", "X", "--dvf", *map(str, fields), "-o", str(out), "-q"])
+    code = _main(monkeypatch, ["uncertainty", "--dvf", *map(str, fields), "-o", str(out), "-q"])
 
     assert code == 0
     spread = sitk.ReadImage(str(out / "uncertainty" / "Uncertainty.mha"))
@@ -264,7 +264,7 @@ def test_eval_refuses_groups_that_do_not_pair(
     (tmp_path / "Output" / "P000").mkdir(parents=True)  # what register leaves: the moved image beside the transform
     _identity_transform(tmp_path / "Output" / "P000" / "Transform.h5")
     _write(np.zeros(_SHAPE, np.float32), tmp_path / "Output" / "P000" / "Moved.mha")
-    (tmp_path / "Fields" / "P000" / "Ensemble").mkdir(parents=True)  # register --fields-only --uncertainty
+    (tmp_path / "Fields" / "P000" / "Ensemble").mkdir(parents=True)  # register --fields-only --keep-fields
     for name in ("Transform.h5", "Ensemble/A.h5", "Ensemble/B.h5"):
         _identity_transform(tmp_path / "Fields" / "P000" / name)
     code = _main(monkeypatch, ["eval", *map(str, argv(toy, tmp_path)), "-o", str(tmp_path / "Evaluation"), "-q"])

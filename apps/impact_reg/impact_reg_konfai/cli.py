@@ -172,12 +172,11 @@ convention): resampling the moving image through it gives Moved.""",
     )
     reg.add_argument(
         "--keep-fields",
-        "--uncertainty",
         dest="keep_fields",
         action="store_true",
         help="Keep each preset's displacement field as <output>/<case>/Ensemble/<preset>.<ext>, for 'uncertainty "
         "--dvf' to measure the spread afterwards; runs into the same --output add their members beside the earlier "
-        "ones. --uncertainty is its former name: it computes no uncertainty itself.",
+        "ones.",
     )
     reg.add_argument(
         "--set",
@@ -235,11 +234,6 @@ Jacobian determinant statistics (folded fraction, minimum, SD of its log). The m
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ev.add_argument(
-        "--preset",
-        default=None,
-        help="Accepted and ignored: the evaluation configs ship with impact-reg-konfai, the same for every preset.",
-    )
-    ev.add_argument(
         "-f", "--fixed-images", type=local_path, nargs="+", default=[], help="Fixed image(s) [image modality]."
     )
     ev.add_argument(
@@ -290,8 +284,6 @@ distance of the members' displacement vectors to their mean (sample, N-1). Write
         epilog="example:\n  impact-reg-konfai uncertainty --dvf Output/P000/Ensemble/*.h5 -o Output/P000",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # Measuring a spread needs no preset: --preset is still accepted, from the callers that pass one, and ignored.
-    unc.add_argument("--preset", default=None, help=argparse.SUPPRESS)
     unc.add_argument(
         "--dvf",
         type=local_path,
@@ -453,7 +445,6 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
             )
         gpu = [] if args.cpu is not None else args.gpu
         app.evaluate(
-            preset=args.preset,
             fixed_images=args.fixed_images,
             moving_images=args.moving_images,
             transforms=args.transform,
@@ -487,7 +478,6 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
     elif args.command == "uncertainty":
         gpu = [] if args.cpu is not None else args.gpu
         app.uncertainty(
-            preset=args.preset or "",
             dvfs=args.dvf,
             output=args.output,
             gpu=gpu,

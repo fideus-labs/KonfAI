@@ -63,7 +63,6 @@ def test_evaluate_warps_fixed_fiducials_onto_moving(tmp_path: Path, monkeypatch:
 
     app = impact_reg_module.ImpactRegKonfAIApp()
     app.evaluate(
-        preset="dummy",
         transforms=[transform_path],
         gt_fixed_fid=[fixed_fid],
         gt_moving_fid=[moving_fid],

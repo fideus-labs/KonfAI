@@ -805,7 +805,6 @@ class ImpactRegKonfAIApp:
         moving_images: list[Path],
         fixed_masks: list[Path],
         moving_masks: list[Path],
-        n_cases: int,
         work: Path,
         gpu: list[int],
         cpu: int | None,
@@ -1010,7 +1009,6 @@ class ImpactRegKonfAIApp:
                 fields_by_preset[preset] = self._infer_preset(
                     preset,
                     *(pair[0].get(group, []) for group in ("Fixed", "Moving", "FixedMask", "MovingMask")),
-                    len(moving_units),
                     work,
                     gpu,
                     cpu,
@@ -1280,8 +1278,7 @@ class ImpactRegKonfAIApp:
 
         An out-of-memory in either pass is KonfAI's to answer: it coarsens or cuts further and runs again.
         """
-        n_cases = len(inputs["Fixed"])
-        cases = [f"P{index:03d}" for index in range(n_cases)]
+        cases = [f"P{index:03d}" for index in range(len(inputs["Fixed"]))]
         fixed = dict(zip(cases, inputs["Fixed"], strict=True))
         if not quiet:
             shape = max((case["Fixed"][0][-3:] for case in headers), key=math.prod)
@@ -1301,7 +1298,6 @@ class ImpactRegKonfAIApp:
             _, global_fields = self._infer_preset(
                 preset,
                 *(inputs.get(group, []) for group in ("Fixed", "Moving", "FixedMask", "MovingMask")),
-                n_cases,
                 work,
                 gpu,
                 cpu,
@@ -1344,7 +1340,6 @@ class ImpactRegKonfAIApp:
         group, tile_fields = self._infer_preset(
             preset,
             *(tiled.get(group, []) for group in ("Fixed", "Moving", "FixedMask", "MovingMask")),
-            n_cases,
             work,
             gpu,
             cpu,
@@ -1463,7 +1458,6 @@ class ImpactRegKonfAIApp:
 
     def evaluate(
         self,
-        preset: str | None = None,
         fixed_images: list[Path] = [],
         moving_images: list[Path] = [],
         transforms: list[Path] = [],
@@ -1489,16 +1483,15 @@ class ImpactRegKonfAIApp:
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
         three, and resolving one only to read them pip-installed its requirements (itk-impact for the
-        default preset) and needed the network. ``preset`` is accepted for compatibility and unused.
+        default preset) and needed the network.
         """
-        del preset
         app = KonfAIApp(str(_EVALUATION_APP), False, False)
         # Every group is expanded the same way ``register`` expands its inputs, so a directory of
         # volumes evaluates case by case instead of collapsing to its first entry. Transforms and
         # landmark files expand too: .h5, .fcsv and .itk.txt are all supported extensions. A transform
         # FILE is taken as it is: ITK's text .tfm is not an extension konfai's listing knows. register's
         # output folder is not a list of transforms: beside each case's transform it holds the moved image
-        # and, with --uncertainty, every preset's field under Ensemble/, each of which would be scored as
+        # and, with --keep-fields, every preset's field under Ensemble/, each of which would be scored as
         # a case of its own. An ensemble member named itself, or through its Ensemble folder, is a transform.
         expanded = [(path, unit) for path in transforms for unit in ([path] if path.is_file() else _units([path]))]
         strays = [
@@ -1680,7 +1673,6 @@ class ImpactRegKonfAIApp:
 
     def uncertainty(
         self,
-        preset: str,
         dvfs: list[Path],
         output: Path = Path("./Output").resolve(),
         gpu: list[int] = [],
@@ -1697,10 +1689,8 @@ class ImpactRegKonfAIApp:
 
         The order is the point: the standard deviation of the magnitudes would read two members that agree in
         length but not in direction as certain. ``Reduce(Std)`` folds with running moments and ``Magnitude`` is pointwise on its result, so no member is ever
-        whole in RAM whatever the size of the ensemble. ``preset`` is accepted for CLI compatibility and
-        unused: measuring a spread needs no preset app. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
+        whole in RAM whatever the size of the ensemble. Writes ``<output>/uncertainty/Uncertainty.<ext>``.
         """
-        del preset
         if len(dvfs) < 2:
             raise ValueError("Uncertainty needs at least two ensemble displacement fields.")
         work = _work_dir(tmp_dir, output, "impact_reg_unc_")

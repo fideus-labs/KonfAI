@@ -63,7 +63,7 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     work.mkdir()
     app = ImpactRegKonfAIApp()
     group, fields = app._infer_preset(
-        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1, work, [], None, True
+        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], work, [], None, True
     )
 
     assert len(captured) == 1
@@ -80,7 +80,6 @@ def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_pre
     staging = tmp_path / "staging"
 
     ImpactRegKonfAIApp().uncertainty(
-        preset="FireANTs_SyN",
         dvfs=[first, second],
         output=tmp_path / "out",
         quiet=True,

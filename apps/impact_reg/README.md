@@ -169,7 +169,7 @@ impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
 | `--fixed-mask`, `--moving-mask` | Optional masks restricting the metric region | *unset* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--tta` | Test-time-augmentation draws per preset | `0` |
-| `--keep-fields` | Keep each preset's field under `Ensemble/` for a later `uncertainty` run (`--uncertainty` is its former name) | `False` |
+| `--keep-fields` | Keep each preset's field under `Ensemble/` for a later `uncertainty` run | `False` |
 | `--fields-only` | Write the transforms and stop; skip deriving the moved images | `False` |
 | `--max-voxels` | Register whole a pair of at most this many voxels; a larger one runs in two passes (see *Large images*) | what the device holds at the preset's declared cost |
 | `--set [PRESET:]NAME=VALUE` | Tune a preset parameter (repeatable); `PRESET:` limits it to one preset of an ensemble; checked before anything runs | *unset* |

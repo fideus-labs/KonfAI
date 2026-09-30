@@ -67,7 +67,7 @@ def _mask_groups(tmp_path: Path, monkeypatch, fixed: Path, fixed_masks, moving_m
     work = tmp_path / "work"
     work.mkdir(exist_ok=True)
     moving = [tmp_path / "moving.mha"]
-    reg.ImpactRegKonfAIApp()._infer_preset("P", [fixed], moving, fixed_masks, moving_masks, 1, work, [], None, True)
+    reg.ImpactRegKonfAIApp()._infer_preset("P", [fixed], moving, fixed_masks, moving_masks, work, [], None, True)
     command, groups = captured[0], []
     for index, token in enumerate(command):
         if token == "-i":
@@ -155,7 +155,7 @@ def _stub_infer(app: reg.ImpactRegKonfAIApp, moving_image: Path, dvf_by_preset: 
     reported under group ``DVF`` as the real one reports the group it discovered."""
     reference = sitk.ReadImage(str(moving_image))
 
-    def fake(preset, fixed, moving, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def fake(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", dvf_by_preset[preset], reference)
@@ -219,7 +219,7 @@ def test_register_derives_moved_when_the_preset_emits_only_a_field(tmp_path: Pat
     reference = sitk.ReadImage(str(moving))
     app = reg.ImpactRegKonfAIApp()
 
-    def field_only(preset, fixed, moving, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def field_only(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
@@ -274,7 +274,7 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
     reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))  # the moving's grid
     app = reg.ImpactRegKonfAIApp()
 
-    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
@@ -306,7 +306,7 @@ def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
     reference = sitk.ReadImage(str(moving))
     app = reg.ImpactRegKonfAIApp()
 
-    def named_transform(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def named_transform(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "Transform.mha", (2.0, 0.0, 0.0), reference)
@@ -364,7 +364,7 @@ def test_register_reads_a_dicom_series_as_the_moving(tmp_path: Path) -> None:
     reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
     app = reg.ImpactRegKonfAIApp()
 
-    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
@@ -390,7 +390,7 @@ def test_register_reads_a_moving_whose_stem_carries_a_dot(tmp_path: Path) -> Non
     reference = sitk.ReadImage(str(moving))
     app = reg.ImpactRegKonfAIApp()
 
-    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
@@ -420,7 +420,7 @@ def test_register_refuses_presets_that_name_their_output_differently(tmp_path: P
     app = reg.ImpactRegKonfAIApp()
     group_by_preset = {"A": "DVF", "B": "Transform"}
 
-    def mixed(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def mixed(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         group = group_by_preset[preset]
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
@@ -506,7 +506,7 @@ def test_register_refuses_a_preset_output_named_moved(tmp_path: Path) -> None:
     reference = sitk.ReadImage(str(moving))
     app = reg.ImpactRegKonfAIApp()
 
-    def named_moved(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def named_moved(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         _write_dvf(out / "Moved.mha", (2.0, 0.0, 0.0), reference)
@@ -572,7 +572,7 @@ def test_infer_preset_runs_this_interpreters_konfai_apps(
 
     monkeypatch.setattr(reg.subprocess, "run", fake_run)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "system"))
-    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1)
+    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
     app._infer_preset(
         "A", *arguments, tmp_path, [], None, True, tta=2, config_overrides=["seed=1", "cc_kernel=7"], max_voxels=1000
     )
@@ -607,7 +607,7 @@ def test_the_preset_command_is_one_konfai_apps_accepts(
             or write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
         ),
     )
-    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1)
+    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
     app._infer_preset("A", *arguments, tmp_path, [0], None, True, tta=2, config_overrides=["seed=1"], max_voxels=1000)
 
     received: dict = {}
@@ -669,7 +669,7 @@ def test_register_stages_beside_its_output_and_hands_the_presets_its_units(
         sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(path))
     output, seen = moving_dir / "Output", {}
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         seen.update(work=Path(work), moving=list(moving_images))
         out = Path(work) / name / "P000"
         out.mkdir(parents=True)
@@ -894,9 +894,9 @@ def test_register_records_which_input_became_which_case_and_sums_up(
         sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(path))
     reference = sitk.ReadImage(str(fixed[0]))
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         fields = {}
-        for index in range(n_cases):
+        for index in range(len(moving_images)):
             case = Path(work) / name / f"P{index:03d}"
             case.mkdir(parents=True)
             fields[case.name] = _write_dvf(case / "DVF.mha", (0.0, 0.0, 0.0), reference)
@@ -969,7 +969,7 @@ def test_a_pair_too_large_runs_its_global_stages_resampled_then_native_tiles_and
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": tiling})
     seen: dict = {}
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         grid = sitk.ReadImage(str(fixed_images[0]))
         out = Path(work) / kwargs["label"] / "P000"
         out.mkdir(parents=True, exist_ok=True)
@@ -1019,7 +1019,7 @@ def test_the_tiles_get_a_fixed_mask_on_the_fixed_grid(tmp_path: Path, monkeypatc
     )
     seen: dict = {}
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         if kwargs["prediction_file"] == "Prediction_tile.yml":
             seen["mask"] = sitk.ReadImage(str(fixed_masks[0]))
         out = Path(work) / kwargs["label"] / "P000"
@@ -1048,7 +1048,7 @@ def test_a_preset_that_declares_no_tiling_registers_whole(tmp_path: Path, monkey
     monkeypatch.setattr(reg, "_manifest", lambda preset: {})
     calls: list = []
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         calls.append(kwargs.get("prediction_file"))
         out = Path(work) / name / "P000"
         out.mkdir(parents=True, exist_ok=True)
@@ -1091,7 +1091,7 @@ def test_a_pair_on_two_grids_is_patched_or_flipped_only_on_the_fixed_grid(
     monkeypatch.setattr(reg, "_manifest", lambda preset: manifest)
     seen: list = []
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         seen.append((kwargs.get("prediction_file"), sitk.ReadImage(str(moving_images[0]))))
         grid = sitk.ReadImage(str(fixed_images[0]))
         out = Path(work) / (kwargs.get("label") or name) / "P000"
@@ -1199,7 +1199,7 @@ def test_register_derives_the_moved_image_from_a_transform_file(tmp_path: Path) 
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
     app = reg.ImpactRegKonfAIApp()
 
-    def transform(preset, fixed_i, moving_i, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def transform(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
         out = Path(work) / preset / "P000"
         out.mkdir(parents=True, exist_ok=True)
         return "Transform", {"P000": _x_field(out / "Transform.h5", 8, 1.0, lambda x: np.full_like(x, 2.0))}
@@ -1228,7 +1228,7 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
     )
     calls: list = []
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         calls.append(kwargs.get("prediction_file"))
         if kwargs.get("prediction_file") == "Prediction_tile.yml":
             raise reg._OutOfMemory("ImpactReg", "out of GPU memory")
@@ -1255,7 +1255,7 @@ def test_a_pair_that_fits_is_registered_whole_under_its_budget(tmp_path: Path, m
     )
     calls: list = []
 
-    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, n_cases, work, *args, **kwargs):
+    def preset(name, fixed_images, moving_images, fixed_masks, moving_masks, work, *args, **kwargs):
         calls.append((kwargs.get("prediction_file"), kwargs.get("max_voxels")))
         out = Path(work) / name / "P000"
         out.mkdir(parents=True, exist_ok=True)
@@ -1275,6 +1275,6 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
         raise subprocess.CalledProcessError(EXIT_OUT_OF_MEMORY, command)
 
     monkeypatch.setattr(reg.subprocess, "run", out_of_memory)
-    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1)
+    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
     with pytest.raises(reg._OutOfMemory):
         app._infer_preset("A", *arguments, tmp_path, [], None, True)

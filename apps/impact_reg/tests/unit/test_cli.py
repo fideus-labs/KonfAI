@@ -16,8 +16,8 @@
 
 """Tests of the ``impact-reg-konfai`` command line: which subcommands exist, how the presets are passed, and
 what a failure or a signal does. These lock the CLI contract the README and SlicerImpactReg depend on:
-``register`` takes the preset(s) as a **positional** argument (or ``-p/--preset``), while ``eval`` /
-``uncertainty`` take ``--preset``. No app is resolved: the app is a stub, or the invocation stops at ``--help``
+``register`` takes the preset(s) as a **positional** argument (or ``-p/--preset``); ``eval`` and ``uncertainty``
+take none. No app is resolved: the app is a stub, or the invocation stops at ``--help``
 or an argument error."""
 
 import os
@@ -83,28 +83,6 @@ def test_register_says_where_a_trailing_preset_went(monkeypatch: pytest.MonkeyPa
     # A name after -m is one more moving image; the error must say so, not that 'presets' is missing.
     assert _run(monkeypatch, ["register", "-f", "a.mha", "-m", "b.mha", "FireANTs_SyN"]) == 2
     assert "first or with -p/--preset" in capsys.readouterr().err
-
-
-def test_eval_forwards_preset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    # --preset must be parsed and forwarded to app.evaluate. Stub the app so nothing is resolved; a valid
-    # dispatch (rather than an "unrecognized arguments" argparse error) proves the flag is really wired.
-    calls: dict[str, dict] = {}
-    monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
-    monkeypatch.setattr(
-        sys, "argv", ["impact-reg-konfai", "eval", "--preset", "FireANTs_SyN", "-f", "a.mha", "-m", "b.mha"]
-    )
-    cli.main()  # no SystemExit: argparse accepted --preset and dispatch reached the stub
-    assert calls["evaluate"]["preset"] == "FireANTs_SyN"
-
-
-def test_uncertainty_forwards_preset_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: dict[str, dict] = {}
-    monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
-    monkeypatch.setattr(
-        sys, "argv", ["impact-reg-konfai", "uncertainty", "--preset", "FireANTs_SyN", "--dvf", "a.mha", "b.mha"]
-    )
-    cli.main()
-    assert calls["uncertainty"]["preset"] == "FireANTs_SyN"
 
 
 def test_unknown_subcommand_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -298,8 +276,8 @@ def test_sigterm_stops_the_preset_child_and_runs_the_cleanup(tmp_path) -> None:
 
 
 def test_uncertainty_needs_no_preset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
-    # The spread of an ensemble needs no preset: omitting --preset must not list the presets (a network call that
-    # fails offline), and a single field is refused before anything runs.
+    # The spread of an ensemble needs no preset: it must not list the presets (a network call that fails offline),
+    # and a single field is refused before anything runs.
     def no_listing(*_: object, **__: object) -> list[str]:
         raise AssertionError("uncertainty listed the presets")
 
@@ -335,7 +313,7 @@ def test_a_remote_uri_is_refused_by_the_parser(monkeypatch: pytest.MonkeyPatch, 
 
 def test_keep_fields_names_what_the_ensemble_holds(tmp_path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     # Members accumulate across runs into one --output; the stale one must be named, since `uncertainty --dvf
-    # Ensemble/*` takes it too. --uncertainty stays the flag's former name.
+    # Ensemble/*` takes it too.
     ensemble = tmp_path / "P000" / "Ensemble"
     ensemble.mkdir(parents=True)
     for member in ("FireANTs_SyN.h5", "Generic_Rigid.h5", "ConvexAdam_Coarse.h5"):
@@ -343,7 +321,7 @@ def test_keep_fields_names_what_the_ensemble_holds(tmp_path, monkeypatch: pytest
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
     argv = ["register", "FireANTs_SyN", "Generic_Rigid", "-f", "a.mha", "-m", "b.mha", "-o", str(tmp_path)]
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--uncertainty"])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--keep-fields"])
     cli.main()
 
     assert calls["register"]["keep_dvf"] is True
