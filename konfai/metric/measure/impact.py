@@ -440,8 +440,8 @@ def pca_project(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Both feature maps reduced to their top ``components`` principal components, fitted on the TARGET for every batch
     sample (a batch mixes unrelated cases): a channel-covariance eigendecomposition, as itk-impact's per-image
-    ``pca_fit``. A 3-D model's basis is fitted on the whole map; a 2-D model's volume on ``PCA_SLICES`` slices spread
-    along its first spatial axis, each image centred by its own mean over those slices."""
+    ``pca_fit``. A 3-D model's basis is fitted on the whole map; a 2-D model's on ``PCA_SLICES`` slices spread along
+    the first spatial axis of the target, and each image is centred by its own mean over as many slices of its own."""
     channels = target_feature.shape[1]
     k = min(components, channels)
     if dimension == 3 or target_feature.dim() < 5:  # sampled points: every point, as itk-impact
@@ -457,12 +457,15 @@ def pca_project(
             projected_output.append(_pca_transform(output_feature[b : b + 1], basis))
             projected_target.append(_pca_transform(target_feature[b : b + 1], basis))
         return torch.cat(projected_output), torch.cat(projected_target)
-    depth = target_feature.shape[2]
-    index = torch.linspace(0, depth - 1, min(depth, PCA_SLICES)).round().long().to(target_feature.device)
+
+    def spread(feature: torch.Tensor) -> torch.Tensor:  # its PCA_SLICES slices, read along its own depth
+        depth = feature.shape[1]
+        index = torch.linspace(0, depth - 1, min(depth, PCA_SLICES)).round().long().to(feature.device)
+        return feature.detach().index_select(1, index).reshape(channels, -1).float()
+
     projected: tuple[list[torch.Tensor], list[torch.Tensor]] = ([], [])
     for b in range(target_feature.shape[0]):
-        fixed_sample = target_feature[b].detach().index_select(1, index).reshape(channels, -1).float()
-        moving_sample = output_feature[b].detach().index_select(1, index).reshape(channels, -1).float()
+        fixed_sample, moving_sample = spread(target_feature[b]), spread(output_feature[b])
         centred = fixed_sample - fixed_sample.mean(dim=1, keepdim=True)
         covariance = centred @ centred.t() / max(centred.shape[1] - 1, 1)
         del centred
