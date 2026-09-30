@@ -29,10 +29,11 @@ import konfai as konfai_module
 import konfai.utils.runtime.distributed as rt_dist
 import konfai.utils.runtime.logging as rt_logg
 import pytest
+import torch
 from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.errors import ConfigError, KonfAIWarning
+from konfai.utils.errors import EXIT_OUT_OF_MEMORY, ConfigError, KonfAIWarning
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -1118,8 +1119,44 @@ def test_run_distributed_app_refuses_a_kwarg_the_entrypoint_does_not_declare() -
         build(command="PREDICTION")
 
 
+def test_run_distributed_app_ends_an_out_of_memory_run_with_its_own_exit_code() -> None:
+    """IMPACT-Reg runs KonfAI as a child and retries smaller on EXIT_OUT_OF_MEMORY: an out-of-memory error must end the
+    process with it, not with a traceback and exit code 1."""
+
+    @rt_dist.run_distributed_app
+    def build(gpu: list[int] | None = None, cpu: int | None = None) -> None:
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 4.35 GiB")
+
+    with pytest.raises(SystemExit) as stopped:
+        build()
+    assert stopped.value.code == EXIT_OUT_OF_MEMORY
+
+
 def test_a_seed_makes_cudnn_deterministic_unless_the_run_benchmarks() -> None:
     assert rt_dist.cudnn_flags(None, False) == (True, False)
     assert rt_dist.cudnn_flags(7, False) == (False, True)
     assert rt_dist.cudnn_flags(7, True) == (True, False)
     assert rt_dist.cudnn_flags(None, True) == (True, False)
+
+
+def test_a_temporary_directory_too_long_for_a_socket_is_reached_through_a_short_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A socket path past the AF_UNIX limit made torch's shared-memory manager fail and the DataLoader hang: the run
+    sees a short TMPDIR, and what it writes there lands in the long one."""
+    import socket
+    import tempfile
+
+    from konfai.utils.runtime.distributed import SOCKET_TMPDIR_MAX, short_socket_tmpdir
+
+    long_dir = tmp_path / ("d" * 100)
+    long_dir.mkdir()
+    monkeypatch.setenv("TMPDIR", str(long_dir))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    with short_socket_tmpdir():
+        short = os.environ["TMPDIR"]
+        assert len(short) <= SOCKET_TMPDIR_MAX and tempfile.gettempdir() == short
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(os.path.join(tempfile.mkdtemp(prefix="pymp-"), "listener-12345678"))
+        assert any(long_dir.iterdir())
+    assert os.environ["TMPDIR"] == str(long_dir) and not os.path.exists(short)

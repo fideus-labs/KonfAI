@@ -33,9 +33,9 @@ repos:
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
-        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/|tests/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/|apps/|tests/)
       - id: ruff-format
-        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/|tests/)
+        files: ^(konfai/|konfai-apps/konfai_apps/|konfai-mcp/konfai_mcp/|konfai-studio/konfai_studio/|apps/|tests/)
 
   # mypy runs in the dev environment, where torch and the imaging stack are installed: the mirrors-mypy
   # hook type-checks in an environment of its own, without them, and reads every torch attribute as

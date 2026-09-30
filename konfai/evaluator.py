@@ -233,6 +233,8 @@ class Statistics:
         if directions:
             result["directions"] = directions
 
+        # The summary first: a reader that stops early (an agent's bounded read, a head) still gets it.
+        result = {"aggregates": result.pop("aggregates"), **result}
         with open(self.filename, "w") as f:
             f.write(json.dumps(Statistics._to_serializable(result), indent=4, allow_nan=False))
 

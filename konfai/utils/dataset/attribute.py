@@ -358,10 +358,17 @@ def _transform_codec() -> list[tuple[type, str, Any]]:
 def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> list[np.ndarray]:
     """Serialize a (possibly composite) transform: record each leaf's type tag and fixed parameters
     into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the per-leaf
-    parameter arrays, in application order."""
+    parameter arrays, in application order. A 3-D linear leaf the codec has no tag for (a translation, a versor,
+    a similarity) is stored as the affine map it is, exactly."""
+    from konfai.utils.ITK import _linear_map
+
     datas: list[np.ndarray] = []
     for i, leaf in enumerate(_flatten_transforms(transform)):
         type_tag = next((tag for sitk_class, tag, _ in _transform_codec() if isinstance(leaf, sitk_class)), None)
+        if type_tag is None and leaf.IsLinear() and leaf.GetDimension() == 3:
+            linear = _linear_map(leaf)
+            leaf = sitk.AffineTransform(linear.matrix.ravel().tolist(), linear.translation.tolist())
+            type_tag = "AffineTransform_double_3_3"
         if type_tag is None:
             raise DatasetManagerError(f"Unsupported transform type '{type(leaf).__name__}' for entry '{name}'.")
         attributes[f"{i}:Transform"] = type_tag

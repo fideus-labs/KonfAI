@@ -377,6 +377,25 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
 
 
+def test_apply_config_refuses_a_fraction_for_an_integer(write_config) -> None:
+    # int(300.7) == 300: a fractional value given to an integer knob (iterations, a grid spacing)
+    # was silently truncated. A whole float still binds, as YAML writes 300.0 for 300.
+    class Root:
+        def __init__(self, iterations: int = 0, scales: list[int] | None = None) -> None:
+            self.iterations = iterations
+            self.scales = scales
+
+    write_config("Root:\n  iterations: 300.0\n  scales: [4.0, 2, 1]\n")
+    root = apply_config("Root")(Root)()
+    assert root.iterations == 300 and isinstance(root.iterations, int)
+    assert root.scales == [4, 2, 1]
+
+    for bad in ("  iterations: 300.7\n", "  scales: [4.5, 2, 1]\n"):
+        write_config("Root:\n" + bad)
+        with pytest.raises(ConfigError):
+            apply_config("Root")(Root)()
+
+
 def test_apply_config_binds_a_bare_tensor_parameter_as_a_value(write_config) -> None:
     # A bare (or Optional) ``torch.Tensor`` annotation is a value, not a nested config object:
     # without the tensor dispatch it fell through to _bind_config_object, which dropped the

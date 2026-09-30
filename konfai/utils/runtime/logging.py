@@ -25,6 +25,7 @@ import socket
 import subprocess  # nosec B404
 import sys
 import time
+import traceback
 import warnings
 from datetime import datetime
 from enum import Enum
@@ -334,6 +335,10 @@ class Log(MinimalLog):
         if self.outer is not None:
             return
         super().__exit__(exc_type, exc_val, exc_tb)
+        if exc_type is not None and not (exc_type is SystemExit and exc_val.code in (0, None)):
+            # The interpreter prints an uncaught exception only once this block has put the real streams back: without
+            # this, the run's log ends on its last progress frame and never says what stopped it.
+            self.file.write("".join(traceback.format_exception(exc_type, exc_val, exc_tb)))
         self.file.__exit__(exc_type, exc_val, exc_tb)
 
     def write(self, msg: str):

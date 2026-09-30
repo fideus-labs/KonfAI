@@ -112,9 +112,13 @@ class DicomFile(AbstractFile):
         direction = attributes.get_np_array("Direction") if "Direction" in attributes else np.eye(3).flatten()
         metadata = {
             key: attributes[key]
-            for key in ("PatientName", "PatientID", "Modality", "StudyInstanceUID", "SeriesInstanceUID")
+            for key in ("PatientName", "PatientID", "Modality", "StudyInstanceUID")
             if key in attributes
         }
+        # A written series is a new series: reusing the source's SeriesInstanceUID (which the reader
+        # carries) put two series under one UID in a PACS or Slicer's DICOM database. It is recorded.
+        if "SeriesInstanceUID" in attributes:
+            metadata["DerivationDescription"] = f"KonfAI output derived from series {attributes['SeriesInstanceUID']}"
         write_dicom_series(
             self._path(name),
             data,

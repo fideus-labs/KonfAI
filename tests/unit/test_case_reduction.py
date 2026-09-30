@@ -1231,3 +1231,10 @@ def test_a_region_the_device_cannot_fold_is_folded_again_at_half_the_height(tmp_
     host._fold = lambda region: (_ for _ in ()).throw(torch.cuda.OutOfMemoryError("simulated"))  # type: ignore[method-assign]
     with pytest.raises(torch.cuda.OutOfMemoryError):
         list(host._folds([100, 10, 6]))
+
+
+def test_sum_adds_the_members() -> None:
+    from konfai.data.reduction import Sum
+
+    first, second = torch.full((1, 3, 2, 2, 2), 1.5), torch.full((1, 3, 2, 2, 2), 2.0)
+    torch.testing.assert_close(Sum()([first, second]), torch.full((1, 3, 2, 2, 2), 3.5))

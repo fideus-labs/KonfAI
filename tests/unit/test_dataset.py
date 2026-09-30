@@ -290,16 +290,32 @@ def test_sitk_file_to_data_missing_entry_raises_nameerror(tmp_path: Path) -> Non
 
 def test_h5_write_unknown_transform_type_raises(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Transforms", "h5")
-    composite = sitk.CompositeTransform([sitk.TranslationTransform(3, (1.0, 2.0, 3.0))])
+    composite = sitk.CompositeTransform([sitk.TranslationTransform(2, (1.0, 2.0))])
     with pytest.raises(DatasetManagerError, match="Unsupported transform type"):
         dataset.write("T", "CASE_000", composite, Attribute())
 
 
 def test_sitk_read_unknown_transform_type_raises(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
-    dataset.write("Transf", "CASE_000", sitk.TranslationTransform(3, (1.0, 2.0, 3.0)), Attribute())
+    dataset.write("Transf", "CASE_000", sitk.TranslationTransform(2, (1.0, 2.0)), Attribute())
     with pytest.raises(DatasetManagerError, match="Unsupported transform type"):
         dataset.read_transform("Transf", "CASE_000")
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5"])
+def test_a_linear_leaf_without_a_tag_is_stored_as_the_affine_it_is(tmp_path: Path, file_format: str) -> None:
+    """A translation, a versor or a similarity (what elastix and SimpleITK write for a rigid stage) maps every
+    point where it did, read back as an affine."""
+    versor = sitk.VersorRigid3DTransform()
+    versor.SetRotation((0.3, -0.5, 0.8), 0.4)
+    versor.SetTranslation((4.0, -1.0, 2.5))
+    versor.SetCenter((10.0, 20.0, 30.0))
+    composite = sitk.CompositeTransform([sitk.TranslationTransform(3, (1.0, 2.0, 3.0)), versor])
+    dataset = Dataset(tmp_path / "Dataset", file_format)
+    dataset.write("Transf", "CASE_000", composite, Attribute())
+    stored = dataset.read_transform("Transf", "CASE_000")
+    for point in [(0.0, 0.0, 0.0), (12.5, -3.0, 40.0)]:
+        np.testing.assert_allclose(stored.TransformPoint(point), composite.TransformPoint(point), atol=1e-9)
 
 
 def test_read_transform_unknown_type_attribute_raises(tmp_path: Path) -> None:

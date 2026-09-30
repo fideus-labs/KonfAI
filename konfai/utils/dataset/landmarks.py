@@ -22,17 +22,36 @@ from pathlib import Path
 
 import numpy as np
 
+from konfai.utils.errors import DatasetManagerError
 
-def read_landmarks(filename: Path) -> np.ndarray | None:
-    """Read Slicer-style fiducial landmarks from disk."""
-    data = None
-    with open(filename, newline="") as csvfile:
-        reader = csv.reader(filter(lambda row: row[0] != "#", csvfile))
-        lines = list(reader)
-        data = np.zeros((len(list(lines)), 3), dtype=np.double)
-        for i, row in enumerate(lines):
-            data[i] = np.array(row[1:4], dtype=np.double)
-        csvfile.close()
+
+def read_landmarks(filename: Path) -> np.ndarray:
+    """The points of a Slicer fiducial CSV (``.fcsv``) as an ``[N, 3]`` array in LPS, ITK's physical space.
+
+    The ``# CoordinateSystem`` header decides: ``LPS`` or ``1`` (Slicer >= 4.11) is read as it is, ``RAS``
+    or ``0`` (Slicer <= 4.10, or a file saved as RAS) has x and y negated. Read as LPS, a RAS file was a
+    reflection of its points: the TRE without a transform (distances survive a reflection) looked right
+    and the TRE through one came out 7 to 21 mm off a perfect registration. No header is read as LPS,
+    ITK's physical space; :func:`write_landmarks` declares LPS. Voxel indices (``IJK`` or ``2``) cannot be
+    placed without their image and are refused. Blank lines are skipped: a trailing one used to fail the
+    whole read.
+    """
+    with open(filename, newline="") as file:
+        lines = file.readlines()
+    header = {
+        key.strip(): value.strip()
+        for key, _, value in (line[1:].partition("=") for line in lines if line.startswith("#"))
+    }
+    rows = csv.reader(line for line in lines if line.strip() and not line.startswith("#"))
+    data = np.array([row[1:4] for row in rows], dtype=np.double).reshape(-1, 3)
+    system = header.get("CoordinateSystem", "LPS").upper()
+    if system in ("RAS", "0"):
+        data[:, :2] *= -1
+    elif system not in ("LPS", "1"):
+        raise DatasetManagerError(
+            f"'{filename}' holds its landmarks in the coordinate system '{system}'.",
+            "Save the markups in LPS or RAS (world coordinates), not in voxel indices.",
+        )
     return data
 
 

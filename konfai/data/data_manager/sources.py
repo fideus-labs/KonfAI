@@ -57,9 +57,46 @@ from konfai.utils.budget import (
 from konfai.utils.clock import startup_clock
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset.attribute import is_an_image, region_geometry
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
 from konfai.utils.utils import SUPPORTED_FORMATS, resolve_patch, split_path_spec
+
+
+def _patch_misplacement(reference: DatasetManager, manager: DatasetManager, a: int) -> str | None:
+    """Why the patches of copy ``a`` of ``manager`` do not cover what those of ``reference`` cover, or None.
+
+    Patch k is read at the same index from every group, each cut from voxel 0 of its own grid, and handed on with its
+    case's geometry. It covers one place only when it starts at the same voxel in both groups (their sweep axes may
+    order the patches differently) and both grids put its corners at the same physical points, within a tenth of a
+    voxel: header noise passes, a resampling does not. A group without a geometry is taken at its voxels.
+    """
+    slots = [group.patch.get_patch_slices(a) for group in (reference, manager)]
+    for index, (first, second) in enumerate(zip(*slots, strict=True)):
+        if [axis.start for axis in first] != [axis.start for axis in second]:
+            return (
+                f"patch {index} starts at voxel {[int(axis.start) for axis in first]} of one and"
+                f" {[int(axis.start) for axis in second]} of the other"
+            )
+    geometries = [group.landed_geometry for group in (reference, manager)]
+    if not all(is_an_image(geometry) for geometry in geometries):
+        return None
+    grids = [[geometry.get_np_array(key) for key in ("Origin", "Spacing", "Direction")] for geometry in geometries]
+    if len(grids[0][1]) != len(grids[1][1]) or len(grids[0][1]) != len(slots[0][0]):
+        return None
+    for index, slot in enumerate(slots[0]):
+        for corner in ([int(axis.start) for axis in slot], [int(axis.stop) - 1 for axis in slot]):
+            voxel = tuple(slice(at, at + 1, 1) for at in corner)
+            here, there = (
+                region_geometry(origin, spacing, direction, voxel)[0] for origin, spacing, direction in grids
+            )
+            if np.linalg.norm(here - there) > 0.1 * float(grids[0][1].min()):
+                return (
+                    f"voxel {corner} of patch {index} lies at {np.round(here, 3).tolist()} in one and"
+                    f" {np.round(there, 3).tolist()} in the other (origin {grids[0][0].tolist()} vs"
+                    f" {grids[1][0].tolist()}, spacing {grids[0][1].tolist()} vs {grids[1][1].tolist()})"
+                )
+    return None
 
 
 class DataSources(ABC):
@@ -243,7 +280,8 @@ class DataSources(ABC):
             {} if subset_requires_infos else None
         )
         empty_infos: dict[str, tuple[list[int], Attribute]] = {}
-        if requested is None:
+        if requested is None and os.environ.get("KONFAI_VERBOSE", "True") == "True":
+            # Printed while the workflow is built, before the run's log captures (and quiets) the console.
             roots = sorted({filename for entries in datasets.values() for filename, _ in entries})
             print(f"[KonfAI] listing every case of {', '.join(sorted(datasets))} under {', '.join(roots)}")
         cohort: dict[str, set[str]] = {}
@@ -788,7 +826,11 @@ class Data(DataSources):
     def _check_cross_group_patch_counts(managers: dict[str, list[DatasetManager]], nb_augmentation: int) -> None:
         """Refuse destination groups whose grids disagree, before a single patch is read. The mapping
         is counted on ONE group (``_patch_counts``) and every group is then read with the same patch
-        index: a group with more patches never has its tail enumerated, one with fewer raises."""
+        index: a group with more patches never has its tail enumerated, one with fewer raises.
+
+        A case cut in more than one patch must also agree on WHERE each patch is (``_patch_misplacement``):
+        a registration pair on two grids passed the count and came out silently wrong, each moving patch
+        registered against another region of the fixed and placed at the case's origin."""
         grouped = list(managers.items())
         if len(grouped) < 2:
             return
@@ -797,7 +839,19 @@ class Data(DataSources):
             for reference, manager in zip(reference_managers, group_managers, strict=True):
                 for a in range(nb_augmentation):
                     if reference.get_size(a) == manager.get_size(a):
-                        continue
+                        misplaced = _patch_misplacement(reference, manager, a) if reference.get_size(a) > 1 else None
+                        if misplaced is None:
+                            continue
+                        raise DatasetManagerError(
+                            f"Case '{reference.name}': destination groups '{reference_group}' and '{group}' are cut"
+                            f" into {reference.get_size(a)} patches that do not cover the same place: {misplaced}.",
+                            "Each group is cut from voxel 0 of its own grid and every patch is handed on with its"
+                            " case's geometry, so patched groups must share one voxel grid (spacing, direction,"
+                            " origin); on two grids each patch of one is paired with another region of the other.",
+                            f"Resample '{group}' onto the grid of '{reference_group}' (a Resample with"
+                            f" reference_group: {reference_group} in its chain, or on disk), or run the case whole:"
+                            " no patch_size, and memory enough that no out-of-memory re-plan cuts it.",
+                        )
                     chains = {
                         name: ", ".join(type(stage).__name__ for stage in m.transforms) or "no transforms"
                         for name, m in ((reference_group, reference), (group, manager))

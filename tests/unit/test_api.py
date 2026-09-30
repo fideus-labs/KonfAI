@@ -177,6 +177,17 @@ def test_the_environment_is_left_as_found(cohort: Path, monkeypatch: pytest.Monk
     assert [key for key in os.environ if key.startswith("KONFAI")] == []
 
 
+def test_a_quiet_run_prints_nothing(
+    cohort: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The build lists the cohort before the run's log captures the console: a quiet run printed that line."""
+    monkeypatch.chdir(cohort)
+    api.transform(
+        "QUIET", "./Raw:mha", {"CT": {"CT": [Write(dataset="./OutQ:mha")]}}, transforms_dir=cohort / "T", quiet=True
+    )
+    assert capsys.readouterr().out == ""
+
+
 def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A run's pooled h5 read handles are released when the call returns: HDF5 refuses to open for
     writing a file this process still holds for reading, so a notebook could not append to the
@@ -234,7 +245,7 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
 
 @pytest.mark.parametrize(
     ("stored", "written", "verdict"),
-    [("nii.gz", "nii.gz", "WHOLE-VOLUME"), ("nii.gz", "mha", "LOAD"), ("mha", "mha", "STREAM")],
+    [("mhd", "mhd", "WHOLE-VOLUME"), ("nii.gz", "mha", "LOAD"), ("nii.gz", "nii.gz", "LOAD"), ("mha", "mha", "STREAM")],
 )
 def test_a_crop_writes_the_region_of_interest_header_on_every_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stored: str, written: str, verdict: str

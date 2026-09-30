@@ -149,6 +149,12 @@ _DISPLACEMENT_AXIS_TYPE = "displacement"
 _PHYSICAL_CS = "physical"
 _FIELD_COMPONENTS_KEY = "field_components"
 _FIELD_COMPONENTS = "output-axes"
+# A field's vectors are lengths, stated in the unit its spatial axes declare, like its grid: KonfAI's
+# millimetres are converted at this same boundary, component by component. The marker tells such a
+# store from one written before (KonfAI 1.8.6 up to this fix), whose vectors stayed in millimetres
+# whatever the axes declared, and which is therefore read at its numbers.
+_FIELD_VALUES_KEY = "field_values"
+_FIELD_VALUES = "axis-units"
 
 _RFC5_VERSION = "0.6"
 _DEFAULT_VERSION = "0.5"
@@ -309,6 +315,18 @@ def _component_flip(store_path: str) -> bool:
             "Rewrite it from its source transform with KonfAI >= 1.9, or read it with the release that wrote it.",
         )
     return False
+
+
+def _field_value_factors(store_path: str, image: Any) -> np.ndarray | None:
+    """Millimetres per stored unit of each ITK-ordered component (dx, dy[, dz]) of a field whose
+    vectors are in its axes' unit, ``None`` when nothing is to be converted."""
+    root = (_multiscales(store_path).root_attributes or {}).get(_KONFAI_ATTR_KEY) or {}
+    if root.get(_FIELD_VALUES_KEY) != _FIELD_VALUES:
+        return None
+    units = _axis_units(image)
+    dims = [str(axis).lower() for axis in image.dims]
+    factors = np.asarray([millimetres_per_unit(units.get(axis)) or 1.0 for axis in ("x", "y", "z") if axis in dims])
+    return None if np.all(factors == 1.0) else factors
 
 
 def _canonical_shape(dims: Sequence[str], shape: Sequence[int]) -> list[int]:
@@ -780,6 +798,7 @@ def read_ome_zarr_data_slice(
     flipped = _component_flip(str(store_path))
     if flipped:
         start, stop, step = slices[0].indices(canonical_shape[0])
+        components = (start, stop)  # ITK-side, (dx, dy, dz)
         if step != 1:
             raise DatasetManagerError("A displacement store's component axis takes unit-step selections.")
         slices = (slice(canonical_shape[0] - stop, canonical_shape[0] - start), *slices[1:])
@@ -793,6 +812,11 @@ def read_ome_zarr_data_slice(
     elif flipped:
         # Contiguous, not a reversed view: torch.from_numpy refuses a negative stride.
         patch = np.ascontiguousarray(patch[::-1])
+        factors = _field_value_factors(str(store_path), image)
+        if factors is not None:
+            # Into KonfAI's millimetres, as ome_zarr_attributes does for the grid.
+            start, stop = components
+            patch = (patch * factors[start:stop].reshape(-1, *[1] * (patch.ndim - 1))).astype(patch.dtype, copy=False)
 
     metadata = {
         "axes": dims,
@@ -894,13 +918,14 @@ def write_ome_zarr(
     attributes: dict[str, Any] | None = None,
     chunks: Sequence[int] | None = None,
     displacement_field: bool = False,
-    scale_factors: Sequence[int] | None = None,
+    scale_factors: Sequence[int] | str | None = None,
     downsample_method: str | None = None,
 ) -> None:
     """Write one channel-first KonfAI array as an OME-NGFF store, single-level or a pyramid.
 
     ``scale_factors`` makes it a pyramid, each factor shrinking the level above it: ``[4]`` writes
-    level 0 plus level 0 shrunk 4x per spatial axis, ``[4, 4]`` adds a third at 16x. Consumers index
+    level 0 plus level 0 shrunk 4x per spatial axis, ``[4, 4]`` adds a third at 16x; ``"auto"`` halves it down
+    to about :data:`PYRAMID_TOP_EXTENT`. Consumers index
     a pyramid BY POSITION, so the order is the contract: 0 finest. Each level carries its OWN scale
     and translation, with the coarse origin shifted by half the spacing delta, the centre-of-voxel
     convention these stores use. ``downsample_method`` selects how (see :func:`_downsample_method`).
@@ -915,6 +940,10 @@ def write_ome_zarr(
     what NGFF cannot express: the ``Direction`` matrix first. A sidecar without a ``Direction`` key
     reads back as the identity, axis-aligned whatever grid its array came from, and a registration
     run on such a pair returns its field in that axis-aligned frame.
+
+    Units and order, which a direct zarr reader sees differently: ``spacing``, ``origin`` and a field's values are
+    in millimetres, KonfAI's unit, converted to the unit the store declares. A displacement field is handed in ITK's
+    component order (dx, dy, dz) and stored in RFC-5's, the axes' (dz, dy, dx); KonfAI reads it back in ITK's order.
     """
     if scale_factors and uri.is_uri(store_path):
         raise DatasetManagerError(
@@ -983,16 +1012,19 @@ def _grid_is_axis_aligned(attributes: dict[str, Any] | None) -> bool:
     return side * side == len(flat) and bool(np.allclose(flat.reshape(side, side), np.eye(side)))
 
 
-def _declare_displacements_transform(multiscales: Any) -> None:
+def _declare_displacements_transform(multiscales: Any, units: dict[str, str]) -> None:
     """Mark the store as an RFC-5 ``displacements`` transformation, in place.
 
     A spatial ``physical`` coordinate system, and a ``displacements`` entry mapping it onto itself
-    through the level-0 array. The components must then follow the output axes' order.
+    through the level-0 array. The components must then follow the output axes' order, and are
+    lengths in that system's units: the grid's, stated here too.
     """
     from ngff_zarr.v06.zarr_metadata import Axis, CoordinateSystem, CoordinateSystemIdentifier, Displacements
 
     spatial: list[SupportedDims] = [dim for dim in multiscales.images[0].dims if dim in _SPATIAL]
-    physical = CoordinateSystem(name=_PHYSICAL_CS, axes=[Axis(name=name, type="space", unit=None) for name in spatial])
+    physical = CoordinateSystem(
+        name=_PHYSICAL_CS, axes=[Axis(name=name, type="space", unit=cast(Any, units.get(name))) for name in spatial]
+    )
     reference = CoordinateSystemIdentifier(name=_PHYSICAL_CS)
     entry = Displacements(
         input=reference, output=reference, path=multiscales.metadata.datasets[0].path, interpolation="linear"
@@ -1012,9 +1044,11 @@ class _ComponentFlippedWriter:
     identity and broadcasts as it stands.
     """
 
-    def __init__(self, array: Any) -> None:
+    def __init__(self, array: Any, factors: Sequence[float]) -> None:
         self._array = array
         self._channels = int(array.shape[0])
+        # Millimetres per stored unit of each stored component, (dz, dy, dx): KonfAI hands millimetres.
+        self._factors = np.asarray(factors, dtype=np.float64)
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -1040,14 +1074,23 @@ class _ComponentFlippedWriter:
             raise DatasetManagerError("A displacement store's component axis takes unit-step selections.")
         return (slice(self._channels - stop, self._channels - start), *rest), True
 
+    def _stored_factors(self, target: Any) -> np.ndarray:
+        """The factors of the stored components ``target`` selects, in store order, shaped to
+        broadcast over the spatial axes (a scalar for one component)."""
+        first = target[0] if isinstance(target, tuple) else slice(None)
+        factors = self._factors[first]
+        return factors if factors.ndim == 0 else factors.reshape(-1, *[1] * (self._array.ndim - 1))
+
     def __setitem__(self, key: Any, value: Any) -> None:
         target, flip = self._remap(key)
         data = np.asarray(value)
-        self._array[target] = np.flip(data, axis=0) if flip and data.ndim == self._array.ndim else data
+        data = np.flip(data, axis=0) if flip and data.ndim == self._array.ndim else data
+        self._array[target] = data / self._stored_factors(target)
 
     def __getitem__(self, key: Any) -> np.ndarray:
         source, flip = self._remap(key)
         data = np.asarray(self._array[source])
+        data = (data * self._stored_factors(source)).astype(data.dtype, copy=False)
         return np.ascontiguousarray(np.flip(data, axis=0)) if flip else data
 
 
@@ -1110,9 +1153,13 @@ def create_ome_zarr_store(
     if displacement_field:
         # One layout for every field: components in the spec's order, marked so nothing guesses.
         if _grid_is_axis_aligned(attributes):
-            _declare_displacements_transform(multiscales)
+            _declare_displacements_transform(multiscales, units)
         multiscales.root_attributes = {
-            _KONFAI_ATTR_KEY: {"attributes": dict(attributes or {}), _FIELD_COMPONENTS_KEY: _FIELD_COMPONENTS}
+            _KONFAI_ATTR_KEY: {
+                "attributes": dict(attributes or {}),
+                _FIELD_COMPONENTS_KEY: _FIELD_COMPONENTS,
+                _FIELD_VALUES_KEY: _FIELD_VALUES,
+            }
         }
     elif attributes:
         multiscales.root_attributes = {_KONFAI_ATTR_KEY: {"attributes": dict(attributes)}}
@@ -1121,16 +1168,30 @@ def create_ome_zarr_store(
 
     # The level-0 key comes from the metadata: ngff-zarr builds it from the image name.
     array = zarr.open_group(str(store_path), mode="r+")[multiscales.metadata.datasets[0].path]
-    return _ComponentFlippedWriter(array) if displacement_field else array
+    return _ComponentFlippedWriter(array, per_axis) if displacement_field else array
+
+
+#: The extent a pyramid's coarsest level comes down to under ``scale_factors: auto``: what a viewer opens first.
+PYRAMID_TOP_EXTENT = 256
+
+
+def auto_scale_factors(spatial: Sequence[int]) -> list[int]:
+    """The factors ``scale_factors: auto`` takes for a grid of ``spatial`` extents: 2 per level while the longest axis
+    passes :data:`PYRAMID_TOP_EXTENT` and the shortest survives the halving."""
+    factors: list[int] = []
+    while max(spatial) > PYRAMID_TOP_EXTENT * 2 ** len(factors) and min(spatial) >= 2 ** (len(factors) + 1):
+        factors.append(2)
+    return factors
 
 
 def append_ome_zarr_levels(
     store_path: str | Path,
-    scale_factors: Sequence[int],
+    scale_factors: Sequence[int] | str,
     *,
     downsample_method: str | None = None,
 ) -> None:
-    """Add coarser levels to a store that already holds its level 0.
+    """Add coarser levels to a store that already holds its level 0; ``"auto"`` sizes them from its grid
+    (:func:`auto_scale_factors`).
 
     A store written region by region cannot be given ``scale_factors`` up front, since no level
     exists until the last region lands. This derives the pyramid from what is on disk and grafts it
@@ -1151,7 +1212,13 @@ def append_ome_zarr_levels(
     clear_ome_zarr_cache(store)
     multiscales = _from_ngff_zarr(store)
     base = multiscales.images[0]
-    factors = _level_zero_scale_factors(scale_factors)
+    if scale_factors == "auto":
+        scale_factors = auto_scale_factors(
+            [int(extent) for dim, extent in zip(base.dims, base.data.shape, strict=True) if dim in _SPATIAL]
+        )
+        if not scale_factors:
+            return
+    factors = _level_zero_scale_factors(cast("Sequence[int]", scale_factors))
     _refuse_factors_outgrowing_an_axis(base, factors)
     derived = ngff_zarr.to_multiscales(
         base,

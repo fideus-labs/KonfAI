@@ -55,7 +55,7 @@ def _skip_unavailable(file_format: str) -> None:
         pytest.importorskip("h5py")
 
 
-FORMATS = ["mha", "nii", "h5", "omezarr"]
+FORMATS = ["mha", "nii", "nii.gz", "nrrd", "h5", "omezarr"]
 
 
 @pytest.mark.parametrize("file_format", FORMATS)
@@ -124,7 +124,7 @@ def test_stream_removes_partial_entry_on_error(tmp_path: Path, file_format: str)
 
 def test_unstreamable_formats_and_inputs_return_none(tmp_path: Path) -> None:
     geometry = _image_attributes()
-    assert Dataset(tmp_path / "a", "nii.gz").open_data_stream("CT", "C", [1, 4, 4, 4], np.float32, geometry) is None
+    assert Dataset(tmp_path / "a", "gipl").open_data_stream("CT", "C", [1, 4, 4, 4], np.float32, geometry) is None
     assert Dataset(tmp_path / "b", "mha").open_data_stream("CT", "C", [1, 4, 4, 4], np.float32, Attribute()) is None
     assert Dataset(tmp_path / "c", "mha").open_data_stream("CT", "C", [1, 4, 4, 4], np.bool_, geometry) is None
 
@@ -335,11 +335,33 @@ def test_abort_after_close_is_a_noop(tmp_path: Path, file_format: str) -> None:
     np.testing.assert_array_equal(result, volume)
 
 
+def test_a_gzipped_nifti_takes_a_band_of_blocks_and_refuses_to_go_back(tmp_path: Path) -> None:
+    """gzip cannot seek: the blocks of a band wait until its first planes are whole, and a region behind the planes
+    already compressed is refused, where it would have been written in the wrong place."""
+    from konfai.utils.errors import DatasetManagerError
+
+    volume = _volume(channels=3)
+    dataset = Dataset(tmp_path / "streamed", "nii.gz")
+    with dataset.open_data_stream("CT", "CASE_001", list(volume.shape), volume.dtype, _image_attributes()) as stream:
+        for band in (slice(0, 3), slice(3, 6)):
+            for rows in (slice(0, 2), slice(2, 5)):
+                stream.write_slice((slice(0, 3), band, rows, slice(0, 4)), volume[:, band, rows])
+    np.testing.assert_array_equal(dataset.read_data("CT", "CASE_001")[0], volume)
+
+    stream = dataset.open_data_stream("CT", "CASE_002", list(volume.shape), volume.dtype, _image_attributes())
+    stream.write_slice((slice(0, 3), slice(0, 4), slice(0, 5), slice(0, 4)), volume[:, 0:4])
+    with pytest.raises(DatasetManagerError, match="first-axis order"):
+        stream.write_slice((slice(0, 3), slice(2, 6), slice(0, 5), slice(0, 4)), volume[:, 2:6])
+    stream.abort()
+    assert not any((tmp_path / "streamed" / "CASE_002").iterdir())
+
+
 def test_can_stream_data_matches_open_support(tmp_path: Path) -> None:
     geometry = _image_attributes()
     assert Dataset(tmp_path / "a", "mha").can_stream_data(geometry)
     assert not Dataset(tmp_path / "a", "mha").can_stream_data(Attribute())
-    assert not Dataset(tmp_path / "b", "nii.gz").can_stream_data(geometry)
+    assert Dataset(tmp_path / "b", "nii.gz").can_stream_data(geometry)
+    assert not Dataset(tmp_path / "b", "gipl").can_stream_data(geometry)
     assert Dataset(tmp_path / "c", "h5").can_stream_data(Attribute())
     assert Dataset(tmp_path / "d", "omezarr").can_stream_data(Attribute())
 
@@ -389,7 +411,7 @@ def test_nii_stream_multi_channel_reads_back_as_vector_image(tmp_path: Path) -> 
     np.testing.assert_array_equal(np.asarray(back), volume)
 
 
-@pytest.mark.parametrize("file_format", ["mha", "nii", "nii.gz", "h5", "omezarr", "itktransform"])
+@pytest.mark.parametrize("file_format", ["mha", "nii", "nii.gz", "nrrd", "h5", "omezarr", "itktransform"])
 def test_a_crashed_writer_leaves_debris_and_no_case(tmp_path: Path, file_format: str, monkeypatch) -> None:
     """Every backend's staging entry (a stream's temporary, or the hidden file a whole-volume write
     publishes from) is recognised as staging and invisible to the listing and to the membership probe:
@@ -410,10 +432,7 @@ def test_a_crashed_writer_leaves_debris_and_no_case(tmp_path: Path, file_format:
     else:
         monkeypatch.setattr(os, "replace", crash)
     with pytest.raises(OSError, match="killed"):
-        if file_format == "nii.gz":  # no stream: the whole-volume write stages and publishes by rename
-            dataset.write("CT", "CASE_001", volume, _image_attributes())
-        else:
-            _write_by_slabs(dataset, volume, _image_attributes())
+        _write_by_slabs(dataset, volume, _image_attributes())
     monkeypatch.undo()
 
     if file_format == "h5":
@@ -489,8 +508,9 @@ def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp
         live.wait()
 
 
+@pytest.mark.parametrize("file_format", ["nii", "nii.gz", "nrrd"])
 @pytest.mark.parametrize("channels", [1, 3])
-def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels):
+def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels, file_format):
     """A 2-D image is a NIfTI of two dims: the streamed header says so (its third axis a 1, the
     2x2 cosines embedded in the sform) and reads back as the whole write does, voxels and geometry."""
     rng = np.random.default_rng(0)
@@ -503,9 +523,9 @@ def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels
             "Direction": np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]).ravel(),
         }
     )
-    whole = Dataset(tmp_path / "whole", "nii")
+    whole = Dataset(tmp_path / "whole", file_format)
     whole.write("G", "c", volume, attributes)
-    streamed = Dataset(tmp_path / "streamed", "nii")
+    streamed = Dataset(tmp_path / "streamed", file_format)
     stream = streamed.open_data_stream("G", "c", list(volume.shape), volume.dtype, attributes)
     assert stream is not None
     with stream:

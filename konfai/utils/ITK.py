@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -32,6 +33,7 @@ from konfai.utils.errors import TransformError
 
 if TYPE_CHECKING:
     from konfai.data.geometry import AffineMap, AffineStage, DisplacementStage, Grid, SpatialStages, WorldBox
+    from konfai.utils.dataset import Dataset
 
 
 def _require_simpleitk() -> None:
@@ -142,6 +144,112 @@ def apply_to_data_transform(data: np.ndarray, transform_files: dict[str | sitk.T
     for i in range(data.shape[0]):
         result[i, :] = transforms.TransformPoint(np.asarray(data[i, :], dtype=np.double))
     return result
+
+
+#: The voxels of one slab a streamed field statistic reads: with its derivatives and determinants, ~200 B each.
+FIELD_SLAB_VOXELS = 2**21
+
+
+def open_field(
+    dataset: Dataset, group: str, name: str
+) -> tuple[Callable[[tuple[slice, ...]], np.ndarray], list[int], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """A stored displacement field opened for region reads: a reader of ``[c, z, y, x]`` regions (float64),
+    its shape, origin, direction (3x3), spacing, and the matrix taking a world offset to grid indices.
+
+    A region is read off the store alone where the store serves bounded reads. A compressed MetaImage, a
+    gzipped NIfTI or an NRRD decodes the whole volume for every region asked of it, so such a field is read
+    whole once and the regions are sliced from it: the declared whole-volume route ``Dataset.iter_data_blocks``
+    takes for the same stores.
+    """
+    shape, attributes = dataset.get_infos(group, name)
+    if dataset.bounded_region_reads(group, name):
+
+        def read(region: tuple[slice, ...]) -> np.ndarray:
+            return np.asarray(dataset.read_data_slice(group, name, region)[0], dtype=np.float64)
+
+    else:
+        whole = dataset.read_data(group, name)[0]
+
+        def read(region: tuple[slice, ...]) -> np.ndarray:
+            return np.asarray(whole[region], dtype=np.float64)
+
+    origin, spacing = attributes.get_np_array("Origin"), attributes.get_np_array("Spacing")
+    direction = attributes.get_np_array("Direction").reshape(3, 3)
+    return read, shape, origin, direction, spacing, np.linalg.inv(direction @ np.diag(spacing))
+
+
+def _slab_planes(shape: list[int]) -> int:
+    return max(1, FIELD_SLAB_VOXELS // (shape[2] * shape[3]))
+
+
+def field_reach(dataset: Dataset, group: str, name: str) -> float:
+    """The longest displacement a stored field holds, in world units, read in slabs of ``FIELD_SLAB_VOXELS``."""
+    read, shape, *_ = open_field(dataset, group, name)
+    planes, longest = _slab_planes(shape), 0.0
+    for first in range(0, shape[1], planes):
+        block = read((slice(None), slice(first, min(first + planes, shape[1])), slice(None), slice(None)))
+        longest = max(longest, float(np.sqrt((block**2).sum(axis=0)).max(initial=0.0)))
+    return longest
+
+
+def jacobian_statistics(dataset: Dataset, group: str, name: str) -> dict[str, float]:
+    """How regular the map a stored displacement field stores is, over the field's grid: from the determinant of
+    its Jacobian ``J = I + du/dx``, the fraction of voxels where it folds (``det <= 0``), its minimum, and the
+    standard deviation of its log (the determinant clipped to ``[1e-9, 1e9]`` first, so a fold counts as a
+    vanishing volume rather than being left out).
+
+    ``du/dx`` is in world axes: central differences along the grid's axes (one-sided at its faces, as
+    ``np.gradient`` takes them) mapped through the inverse of the grid's direction times its spacing, so an
+    oblique grid reads the same map as an axis-aligned one. The field is read in slabs of planes with one plane
+    of halo on each side: every derivative is the whole field's.
+    """
+    read, shape, _, _, _, to_index = open_field(dataset, group, name)
+    planes = _slab_planes(shape)
+    count = folded = 0
+    lowest, log_sum, log_squares = float("inf"), 0.0, 0.0
+    for first in range(0, shape[1], planes):
+        last = min(first + planes, shape[1])
+        low, high = max(first - 1, 0), min(last + 1, shape[1])
+        block = read((slice(None), slice(low, high), slice(None), slice(None)))
+        # du_c / d(index) along x, y, z (the block is [c, z, y, x]), then to world axes.
+        by_index = np.stack(
+            [np.gradient(block, axis=axis) if block.shape[axis] > 1 else np.zeros_like(block) for axis in (3, 2, 1)],
+            axis=-1,
+        )[:, first - low : last - low]
+        jacobian = np.moveaxis(by_index, 0, -2) @ to_index + np.eye(3)
+        determinant = np.linalg.det(jacobian).ravel()
+        logs = np.log(np.clip(determinant, 1e-9, 1e9))
+        count, folded = count + determinant.size, folded + int((determinant <= 0).sum())
+        lowest = min(lowest, float(determinant.min()))
+        log_sum, log_squares = log_sum + float(logs.sum()), log_squares + float((logs**2).sum())
+    return {
+        "folded_fraction": folded / count,
+        "min": lowest,
+        "sd_log": float(np.sqrt(max(log_squares / count - (log_sum / count) ** 2, 0.0))),
+    }
+
+
+def displace_points(points: np.ndarray, dataset: Dataset, group: str, name: str) -> np.ndarray:
+    """``points`` (``[N, 3]``, LPS) moved by a stored displacement field, read at the voxels around each point
+    alone: a 2x2x2 block that SimpleITK interpolates where it sits in the field, with the same voxels, weights and
+    outside-the-field rule as ``DisplacementFieldTransform`` on the whole field, so a few points never hold the
+    whole field in memory."""
+    _require_simpleitk()
+    read, shape, origin, direction, spacing, to_index = open_field(dataset, group, name)
+    size = np.array(shape[:0:-1])  # (x, y, z)
+    moved = np.array(points, dtype=np.double)
+    for point in moved:
+        # The voxel below the point and the next one, pulled inside the field at its faces, where ITK clamps
+        # to the face voxel and returns no displacement beyond it.
+        start = np.clip(np.floor(to_index @ (point - origin)).astype(int), 0, np.maximum(size - 2, 0))
+        stop = np.minimum(start + 2, size)
+        block = read((slice(None), *map(slice, start[::-1], stop[::-1])))
+        local = sitk.GetImageFromArray(np.moveaxis(block, 0, -1), isVector=True)
+        local.SetSpacing(spacing.tolist())
+        local.SetDirection(direction.ravel().tolist())
+        local.SetOrigin((origin + direction @ (spacing * start)).tolist())
+        point[:] = sitk.DisplacementFieldTransform(local).TransformPoint(point.tolist())
+    return moved
 
 
 def box_with_mask(mask: sitk.Image, label: list[int], dilatations: list[int]) -> np.ndarray:

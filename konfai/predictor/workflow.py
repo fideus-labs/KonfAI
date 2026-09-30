@@ -17,6 +17,8 @@
 
 """The configured prediction workflow and its Python entrypoints."""
 
+import itertools
+import math
 import os
 import shutil
 from collections.abc import Mapping
@@ -31,7 +33,9 @@ from konfai import config_file, cuda_visible_devices, konfai_root, predictions_d
 from konfai.data.data_manager import (
     DataPrediction,
 )
+from konfai.data.geometry import Grid
 from konfai.data.reduction import Concat
+from konfai.data.transform.resample import CoarseLabelDilate, Resample, coarse_spacing
 from konfai.network.network import Model, ModelLoader, Network
 from konfai.predictor.ensemble import ModelComposite
 from konfai.predictor.loop import _Predictor
@@ -51,6 +55,9 @@ from konfai.utils.runtime import (
     run_distributed_app,
 )
 from konfai.utils.utils import concretize_patch_size, get_module
+
+#: The fewest voxels a case runs on in ``mode: resample``: an out-of-memory under it ends the run (exit 75).
+RESAMPLE_FLOOR_VOXELS = 32**3
 
 
 @config()
@@ -96,6 +103,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.manual_seed = manual_seed
         self.dataset = dataset
         self._capture_vram_patch_template(dataset.patch)
+        #: The voxel budget every case is coarsened to in ``mode: resample``, None while none is.
+        self._resample_voxels: int | None = None
+        #: Per OME-Zarr root, the pyramid level its config reads, before ``mode: resample`` read a coarser one.
+        self._declared_levels: dict[str, int] = {}
         #: Cases whose every configured output already existed when the run started: frozen at
         #: ``setup`` on the launcher, so every rank (restarts included) shards the same work list.
         self._done_case_indices: set[int] = set()
@@ -346,7 +357,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         dataloader = dataloaders[0]
         # A whole-axis extent still too large for VRAM OOMs into the shrink loop below, which keeps the
         # size valid too.
-        if self._vram_patch_candidate is None and self._presize_free_axes():
+        gpu = None if device is None else cuda_visible_devices()[device]
+        if self._vram_patch_candidate is None and self._resample_voxels is None and self._presize_patch(gpu):
             dataloader = self._rank_dataloader(world_size, global_rank)
         measure_batch_on = device if self.dataset.measures_batch else None
         batch_cap: int | None = None
@@ -384,6 +396,18 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                     continue
                 if self._vram_patch_template is None:
                     raise  # no free axis declared: not auto-patched
+                if self.dataset.patch.mode == "resample":
+                    voxels = self._coarser_voxels(measured, vram.usable_after_oom(device))
+                    if voxels < RESAMPLE_FLOOR_VOXELS:
+                        raise
+                    vram.reset_peak(device)
+                    print(
+                        f"[KonfAI] VRAM: rank {global_rank} ran out of memory -> "
+                        f"resampling each case to at most {voxels:,} voxels and restarting this rank's cases."
+                    )
+                    self._coarsen(voxels)
+                    dataloader = self._rank_dataloader(world_size, global_rank)
+                    continue
                 candidate = self._shrunken_patch(measured, vram.usable_after_oom(device))
                 if candidate is None:
                     raise
@@ -400,6 +424,114 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         (a re-plan rebuilds the mapping from scratch)."""
         self._drop_done_cases()
         return self.dataset.get_data(world_size)[0][global_rank][0]
+
+    def _presize_patch(self, gpu: int | None) -> bool:
+        """Size the free patch axes before the first step: to the patch's voxel budget on ``gpu`` (None: the CPU)
+        when the worst case holds more (cut into patches in ``tile`` mode, every case coarsened in ``resample`` mode),
+        then rounded up to the model's valid input multiple (``_presize_free_axes``). True when the grids were re-cut."""
+        patch, worst = self.dataset.patch, self.dataset.worst_case_shape()
+        budget = patch.voxel_budget(gpu) if patch is not None else None
+        if self._vram_patch_template is None or worst is None or not budget or math.prod(worst) <= budget:
+            return self._presize_free_axes()
+        if patch.mode == "resample":
+            self._coarsen(budget)
+            return True
+        candidate = concretize_patch_size(self._vram_patch_template, worst, self._downsampling_factor)
+        shrunk = vram.next_patch_candidate(
+            candidate,
+            self._vram_patch_template,
+            worst,
+            math.prod(candidate),
+            budget,
+            self._downsampling_factor,
+            self._vram_patch_overlap,
+        )
+        if shrunk is None:
+            return self._presize_free_axes()
+        self._adopt_patch_candidate(shrunk)
+        return True
+
+    def _coarser_voxels(self, measured: int | None, usable: float) -> int:
+        """The voxel budget a ``resample`` run takes after running out of memory: at most half the worst case it ran
+        at, less when the measured step says the card holds less."""
+        worst = self.dataset.worst_case_shape()
+        current = math.prod(worst) if worst is not None else 0
+        voxels = current // 2
+        if measured and usable > 0:
+            voxels = min(voxels, int(current * usable / measured))
+        return voxels
+
+    def _coarsen(self, voxels: int) -> None:
+        """Run every case whole on its grid coarsened to at most ``voxels`` (``mode: resample``): a coarsening
+        resample heads every group's chain, replacing an earlier one, and the outputs, mirrored on a group, go back
+        onto the case's own grid through its inverse. The free axes are then sized on the coarse cases."""
+        self._resample_voxels = voxels
+        natives = self._read_coarse_levels(voxels)
+        for group_src, dests in self.dataset.groups_src.items():
+            for chain in dests.values():
+                transforms = chain.transforms
+                while transforms and (
+                    isinstance(transforms[0], CoarseLabelDilate)
+                    or (isinstance(transforms[0], Resample) and transforms[0].coarsening is not None)
+                ):
+                    transforms.pop(0)
+                stage = Resample.coarsened(voxels)
+                stage._native = {name: grid for (group, name), grid in natives.items() if group == group_src}
+                transforms[0:0] = [CoarseLabelDilate(voxels), stage]
+        self._vram_patch_candidate = None
+        self.dataset.replan_patch(list(self._vram_patch_template or ()))
+        self._presize_free_axes()
+
+    def _read_coarse_levels(self, voxels: int) -> dict[tuple[str, str], Grid]:
+        """Point every OME-Zarr root read at level 0 to its coarsest pyramid level still at least as fine as the
+        coarse grid of each of its cases, so that ``mode: resample`` reads a fraction of the voxels (a whole-brain
+        light-sheet store is hundreds of gigabytes at level 0). Returns the level-0 grid of each ``(group, case)``
+        read from a coarser level: the grid its outputs go back onto. A root whose config names a level keeps it.
+        """
+        natives: dict[tuple[str, str], Grid] = {}
+        for filename, dataset in self.dataset.datasets.items():
+            if dataset.file_format != "omezarr" or self._declared_levels.setdefault(filename, dataset.level):
+                continue
+            dataset.level = 0
+            dataset._infos_cache.clear()
+            headers: dict[tuple[str, str], Grid] = {}
+            for group in self.dataset.groups_src:
+                try:
+                    names = dataset.get_names(group)
+                except Exception:  # nosec B112 - a group this root does not hold
+                    continue
+                for name in names:
+                    shape, attribute = dataset.get_infos(group, name)
+                    rank = len(attribute.get_np_array("Spacing"))
+                    headers[(group, name)] = Grid.of([int(extent) for extent in shape[-rank:]], attribute, name)
+            goals = {
+                key: coarse_spacing(list(grid.size_zyx), [float(step) for step in grid.spacing_xyz], voxels)
+                for key, grid in headers.items()
+            }
+            if not headers or any(goal is None for goal in goals.values()):
+                continue  # a case that fits is read whole, at level 0
+            chosen = 0
+            for level in itertools.count(1):
+                dataset.level = level
+                dataset._infos_cache.clear()
+                try:
+                    fine_enough = all(
+                        step <= goal * (1 + 1e-6)
+                        for (group, name), coarse in goals.items()
+                        for step, goal in zip(
+                            dataset.get_infos(group, name)[1].get_np_array("Spacing"), coarse or [], strict=True
+                        )
+                    )
+                except Exception:  # nosec B112 - past the store's last level
+                    break
+                if not fine_enough:
+                    break
+                chosen = level
+            dataset.level = chosen
+            dataset._infos_cache.clear()
+            if chosen:
+                natives.update(headers)
+        return natives
 
     def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
         """The shared shrink step, with the blend kept on the GPU when it fits: the accumulation
@@ -428,7 +560,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         be read off the model trace.
         """
         trace = {name: args.out_channels for name, _, args in self.model.named_module_args_dict()}
-        elem = 2  # ModelComposite casts float32 outputs to float16 before accumulation
+        # ModelComposite accumulates float32 outputs in float16, unless the model keeps them (ModelComposite._accumulated)
+        elem = 4 if getattr(self.model, "full_precision_outputs", False) else 2
         reserve = 0.0
         for name, writer in self.outputs_dataset.items():
             out_channels = trace.get(name.replace(";accu;", ""))

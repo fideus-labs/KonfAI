@@ -891,6 +891,57 @@ def test_destination_groups_with_disagreeing_grids_are_refused_at_prepare(tmp_pa
         dataset.prepare()
 
 
+def _patched_pair(root: Path, fixed_shape, moving_shape, moving_geometry, patch_size, moving_chain=()):
+    """A fixed image at the origin on a unit grid and a moving one, each case's managers cut in ``patch_size``."""
+    store = Dataset(root / "Dataset", "mha")
+    for group, shape, attributes in (
+        ("Fixed", fixed_shape, geometry([0.0, 0.0], [1.0, 1.0])),
+        ("Moving", moving_shape, moving_geometry),
+    ):
+        store.write(group, "CASE_000", np.zeros((1, *shape), np.float32), attributes)
+    chains = {"Fixed": [], "Moving": list(moving_chain)}
+    return {
+        group: [DatasetManager(0, group, group, "CASE_000", store, DatasetPatch(patch_size, overlap=None), chain, [])]
+        for group, chain in chains.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("fixed_shape", "moving_shape", "moving_geometry", "refused"),
+    [
+        ((8, 8), (8, 8), geometry([0.0, 0.0], [1.25, 1.25]), "lies at"),  # another spacing: patch 1 is 1 mm off
+        ((8, 8), (8, 8), geometry([3.0, 0.0], [1.0, 1.0]), "lies at"),  # another origin: another region everywhere
+        ((8, 8), (8, 8), geometry([0.0, 0.0], [1.0, 1.0], [1, 0, 0, -1]), "lies at"),  # patches grow the other way
+        ((8, 12), (12, 8), geometry([0.0, 0.0], [1.0, 1.0]), "starts at voxel"),  # 6 patches each, other sweeps
+        ((8, 8), (8, 7), geometry([0.0, 0.0], [1.0, 1.0]), "starts at voxel"),  # the last patch pulled back
+        ((8, 8), (8, 8), geometry([1e-4, 0.0], [1.0, 1.0]), None),  # header noise
+    ],
+)
+def test_patched_groups_must_cover_the_same_place(tmp_path: Path, fixed_shape, moving_shape, moving_geometry, refused):
+    """Patch k is read from every group at the same voxel index and handed on with the case's geometry: a
+    registration pair on two grids passed the patch count and came out wrong by ~10 mm a patch index."""
+    pytest.importorskip("SimpleITK")
+    managers = _patched_pair(tmp_path, fixed_shape, moving_shape, moving_geometry, [4, 4])
+    if refused is None:
+        Data._check_cross_group_patch_counts(managers, 1)
+        return
+    with pytest.raises(DatasetManagerError, match="do not cover the same place") as refusal:
+        Data._check_cross_group_patch_counts(managers, 1)
+    assert refused in str(refusal.value) and "Resample 'Moving' onto the grid of 'Fixed'" in str(refusal.value)
+
+
+def test_a_moving_resampled_onto_the_fixed_grid_or_left_whole_is_not_refused(tmp_path: Path) -> None:
+    """The check reads the grid the chain LANDS on, and only a case cut in more than one patch."""
+    pytest.importorskip("SimpleITK")
+    reference = f"{tmp_path / 'a' / 'Dataset'}:mha"
+    onto_fixed = Resample(reference="{case}", reference_group="Fixed", reference_dataset=reference)
+    moving = geometry([0.0, 0.0], [1.25, 1.25])
+    resampled = _patched_pair(tmp_path / "a", (8, 8), (8, 8), moving, [4, 4], [onto_fixed])
+    Data._check_cross_group_patch_counts(resampled, 1)
+    whole = _patched_pair(tmp_path / "b", (8, 8), (8, 8), moving, [8, 8])
+    Data._check_cross_group_patch_counts(whole, 1)
+
+
 def test_a_one_pass_source_holds_two_cases_whatever_its_batch_size(tmp_path: Path) -> None:
     """Prediction serves a case's patches in order and never reads it again: a FIFO sized on the
     batch kept batch_size + 1 whole cases loaded, and a cohort's RAM grew by a case per case."""

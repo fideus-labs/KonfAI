@@ -30,9 +30,12 @@ A prediction's batch is measured the same way (``batch_size: 0``): its first for
 its second two, and :func:`measured_batch` extrapolates the batch the rest run at.
 """
 
+import contextlib
+import gc
 import math
 from bisect import bisect_left
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
 
 import torch
 
@@ -50,12 +53,71 @@ from konfai.utils.utils import (
 VRAM_BUDGET_SAFETY_FRACTION = 0.8
 
 
+_T = TypeVar("_T")
+
+
+def device_out_of_memory(line: str) -> bool:
+    """Whether ``line`` reports a device allocation that failed: a device (CUDA, cuBLAS, cuDNN) and ``out of memory``
+    or cuBLAS's and cuDNN's ``ALLOC_FAILED``, as itk-impact's ``IsDeviceOutOfMemory`` reads it."""
+    lower = line.lower()
+    device = any(name in lower for name in ("cuda", "cublas", "cudnn"))
+    return device and ("out of memory" in lower or "alloc_failed" in lower)
+
+
+@contextlib.contextmanager
+def out_of_memory_as_torch(on_cuda: bool) -> Iterator[None]:
+    """Re-raise a CUDA out-of-memory reported as a plain ``RuntimeError`` (a TorchScript model, libtorch outside
+    PyTorch, a subprocess) as ``torch.cuda.OutOfMemoryError``, the class KonfAI shrinks its work on. Only on CUDA, and
+    only a line naming both the device and the failed allocation: a host allocation that fails is no reason to shrink."""
+    try:
+        yield
+    except torch.cuda.OutOfMemoryError:
+        raise
+    except RuntimeError as error:
+        lines = (line.strip() for line in str(error).splitlines())
+        line = next((line for line in lines if device_out_of_memory(line)), None)
+        if not on_cuda or line is None:
+            raise
+        raise torch.cuda.OutOfMemoryError(line) from error
+
+
+def halve_on_oom(run: Callable[[], _T], narrow: Callable[[], bool], on_cuda: bool) -> _T:
+    """``run()``, run again after each ``narrow()`` when it runs out of CUDA memory, until it fits; the error propagates
+    once ``narrow`` says the work can go no smaller."""
+    while True:
+        try:
+            with out_of_memory_as_torch(on_cuda):
+                return run()
+        except torch.cuda.OutOfMemoryError:
+            if not narrow():
+                raise
+        # Out of the handler, the traceback and the tensors its frames held are released.
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = VRAM_BUDGET_SAFETY_FRACTION) -> float:
     """The VRAM a step's transient may claim: free memory under the safety margin, minus what must
     stay resident alongside the step (accumulators and the streamed assembly window for prediction;
     nothing extra for training, whose resident set is already allocated when ``free_bytes`` is read).
     """
     return free_bytes * margin - resident_bytes
+
+
+def max_voxels(bytes_per_voxel: float, gpu: int | None) -> int:
+    """The voxels a pass whose peak costs ``bytes_per_voxel`` may hold where it runs: the free VRAM of GPU ``gpu``
+    (the id ``--gpu`` names, read through NVML so no CUDA context is opened) under :func:`usable_vram`'s margin, or
+    on the CPU (``gpu`` None) the automatic memory budget of :func:`~konfai.utils.budget.resolve_memory_budget`."""
+    if gpu is None:
+        from konfai.utils.budget import resolve_memory_budget
+
+        free = resolve_memory_budget(None).total_bytes
+    else:
+        from konfai import get_vram
+
+        used, total = get_vram([gpu])
+        free = usable_vram((total - used) * 2**30)
+    return max(1, int(free / bytes_per_voxel))
 
 
 #: The share of the usable VRAM a measured batch's forward may claim. The rest stays free for the convolution

@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from konfai.data.patching.blend import PathCombine, blend_axes, blend_overlap
 from konfai.data.patching.stage import PatchReadPlan, _HaloPull
 from konfai.utils.config import apply_config, config
+from konfai.utils.errors import ConfigError
 from konfai.utils.utils import (
     OverlapSpec,
     best_sweep_axis,
@@ -234,7 +235,16 @@ class Patch(ABC):
 
 @config("Patch")
 class DatasetPatch(Patch):
-    """Patch definition applied when sampling data from datasets."""
+    """Patch definition applied when sampling data from datasets.
+
+    ``mode`` says what a prediction does with a case too large for memory along its free (``0``) axes: ``tile``
+    cuts them into patches; ``resample`` never cuts, and runs the case whole on a grid coarsened just enough, its
+    outputs resampled back onto the case's grid (linear, nearest for a label dtype; a displacement field keeps its
+    values). ``max_voxels`` is the most voxels a patch (``tile``) or a case's coarse grid (``resample``) holds,
+    sized before the run. Left unset, it is what the device holds at the peak cost per voxel the prediction declares,
+    ``vram_bytes_per_voxel`` on a GPU and ``ram_bytes_per_voxel`` on the CPU (``konfai.utils.vram.max_voxels``); with
+    neither, only an out-of-memory makes either happen.
+    """
 
     def __init__(
         self,
@@ -242,8 +252,34 @@ class DatasetPatch(Patch):
         overlap: OverlapSpec = None,
         pad_value: float | None = None,
         extend_slice: int = 0,
+        mode: str = "tile",
+        max_voxels: int | None = None,
+        vram_bytes_per_voxel: float | None = None,
+        ram_bytes_per_voxel: float | None = None,
     ) -> None:
         super().__init__(patch_size, overlap, pad_value, extend_slice)
+        if mode not in ("tile", "resample"):
+            raise ConfigError(
+                f"Patch has an unknown mode '{mode}'.",
+                "Use 'tile' to cut a case too large for memory into patches, or 'resample' to run it whole on a"
+                " coarser grid.",
+            )
+        if max_voxels is not None and max_voxels <= 0:
+            raise ConfigError(f"Patch max_voxels must be positive, not {max_voxels}.", "Leave it unset for no cap.")
+        self.mode = mode
+        self.max_voxels = max_voxels
+        self.vram_bytes_per_voxel = vram_bytes_per_voxel
+        self.ram_bytes_per_voxel = ram_bytes_per_voxel
+
+    def voxel_budget(self, gpu: int | None) -> int | None:
+        """``max_voxels``, or what GPU ``gpu`` (None: the CPU) holds at the declared cost per voxel; None when
+        neither is known."""
+        cost = self.vram_bytes_per_voxel if gpu is not None else self.ram_bytes_per_voxel
+        if self.max_voxels or not cost:
+            return self.max_voxels
+        from konfai.utils.vram import max_voxels
+
+        return max_voxels(cost, gpu)
 
     def init(self, key: str = ""):
         pass

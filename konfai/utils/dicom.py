@@ -578,6 +578,8 @@ def write_dicom_series(
         dataset.SeriesNumber = int(metadata.get("SeriesNumber", 1))
         dataset.InstanceNumber = index + 1
         dataset.ImageType = ["DERIVED", "PRIMARY", "AXIAL"]
+        if "DerivationDescription" in metadata:
+            dataset.DerivationDescription = str(metadata["DerivationDescription"])
         dataset.Rows = int(pixels.shape[0])
         dataset.Columns = int(pixels.shape[1])
         dataset.SamplesPerPixel = 1

@@ -25,6 +25,7 @@ import shutil
 import socket
 import subprocess  # nosec B404
 import sys
+import tempfile
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
@@ -50,7 +51,7 @@ from konfai import (
 )
 from konfai.utils.budget import available_cpus, node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import StartupClock, restart_startup_clock, startup_clock
-from konfai.utils.errors import ConfigError, KonfAIError
+from konfai.utils.errors import EXIT_OUT_OF_MEMORY, ConfigError, KonfAIError
 from konfai.utils.runtime.environment import ClusterKwargs
 from konfai.utils.runtime.logging import Log, TensorBoard
 from konfai.utils.utils import env_flag
@@ -82,6 +83,40 @@ def preserved_rng() -> Iterator[None]:
         torch.set_rng_state(states[2])
         if cuda_states is not None:
             torch.cuda.set_rng_state_all(cuda_states)
+
+
+#: The longest temporary directory the run's sockets fit under: an AF_UNIX path holds 107 bytes, and Python's
+#: forkserver (the DataLoader workers') and torch's shared-memory manager put theirs about 40 bytes below it.
+SOCKET_TMPDIR_MAX = 64
+
+
+@contextmanager
+def short_socket_tmpdir() -> Iterator[None]:
+    """``TMPDIR`` for the run, a short link to the temporary directory when that one is too long for a socket path
+    (:data:`SOCKET_TMPDIR_MAX`): the DataLoader workers and torch's shared-memory manager open their sockets under
+    it, and a path past the AF_UNIX limit made the loader hang. The files still land in the directory it links to."""
+    target = tempfile.gettempdir()
+    if len(target) <= SOCKET_TMPDIR_MAX or os.name != "posix":
+        yield
+        return
+    try:
+        home = tempfile.mkdtemp(prefix="konfai-", dir="/tmp")  # nosec B108 - a private directory, for its short path
+    except OSError:  # no writable /tmp: the long path stays
+        yield
+        return
+    link = os.path.join(home, "t")
+    os.symlink(target, link)
+    previous = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"], tempfile.tempdir = link, None
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous
+        tempfile.tempdir = None
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def seed_all(seed: int) -> None:
@@ -294,6 +329,11 @@ def run_distributed_app(
                 raise
             print(str(error).strip(), file=sys.stderr)
             sys.exit(1)
+        except torch.cuda.OutOfMemoryError as error:
+            # Not a designed refusal but one a caller can act on: IMPACT-Reg re-plans smaller on this exit code. The
+            # traceback is already in the run's log.
+            print(f"[KonfAI] out of GPU memory: {(str(error).splitlines() or ['CUDA'])[0]}", file=sys.stderr)
+            sys.exit(EXIT_OUT_OF_MEMORY)
         finally:
             if previous_local_ranks is None:
                 os.environ.pop("KONFAI_LOCAL_RANKS", None)
@@ -359,7 +399,7 @@ def execute_distributed_object(
     # The run seeds the process-wide RNGs and sets the cudnn flags; inline, that process is the caller's.
     previous_cudnn = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
 
-    with preserved_rng():
+    with preserved_rng(), short_socket_tmpdir():
         try:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
             os.environ["KONFAI_OVERWRITE"] = str(overwrite)

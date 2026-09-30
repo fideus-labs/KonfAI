@@ -97,7 +97,7 @@ class _OmeZarrDataStream(DataStream):
         array: Any,
         store_path: Path,
         final_path: Path,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         self._array = array
@@ -167,13 +167,13 @@ class OmeZarrFile(AbstractFile):
         filename: str,
         read: bool,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         self.filename = filename if filename.endswith("/") else f"{filename}/"
         self.read = read
         self.level = level
-        self.scale_factors = list(scale_factors) if scale_factors else None
+        self.scale_factors = scale_factors or None
         self.downsample_method = downsample_method
 
     def __enter__(self):
@@ -362,7 +362,7 @@ class OmeZarrFile(AbstractFile):
         read: bool,
         file_format: str,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> OmeZarrFile:
         del file_format

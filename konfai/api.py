@@ -121,6 +121,9 @@ def _launch(
     from konfai.utils.runtime import execute_distributed_object
 
     with _workflow_scope(ranks):
+        # The build lists the cohort before the run's log captures the console, so it reads quiet here too;
+        # the lock restores the variable on the way out.
+        os.environ["KONFAI_VERBOSE"] = str(not quiet)
         with restart_startup_clock().phase("build"):  # this call's own clock, not the previous workflow's
             workflow = build()
         execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)

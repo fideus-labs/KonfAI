@@ -630,12 +630,14 @@ def _parse_bool(value: object) -> bool:
 
 def _coerce_scalar(value: object, target: type) -> object:
     """``value`` as the scalar type ``target``, the one coercion every binding path uses: a quoted
-    ``"false"`` reads False wherever a bool is expected. Raises ValueError/TypeError when the value is
-    not that type's."""
+    ``"false"`` reads False wherever a bool is expected, and ``4.5`` is refused where an int is (never
+    truncated to 4). Raises ValueError/TypeError when the value is not that type's."""
     if target is bool:
         return _parse_bool(value)
     if isinstance(value, bool) and target in (int, float):
         raise TypeError("a boolean is not a number")
+    if target is int and isinstance(value, float) and not value.is_integer():
+        raise ValueError("a fractional number is not an integer")  # int() would drop the fraction
     return target(value)
 
 

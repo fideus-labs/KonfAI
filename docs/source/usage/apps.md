@@ -29,10 +29,10 @@ not comparable to each other, since the tasks, inputs and ensemble sizes differ.
 | `MRSegmentator-KonfAI:MRSegmentator` | MRI → 40 labels, five-fold ensemble | 27 s and 22 GB VRAM. Head to head on 533 × 390 × 177: **25 s / 7.5 GB RAM** against 65 s / 14.6 GB |
 | `ImpactSeg:body` | one CT/MR/CBCT model → 11 structures | 7 s, 10 GB VRAM, 1.6 GB RAM |
 | `ImpactSynth` | three MR/CBCT→sCT variants, five models each | 24 s and 16 GB VRAM for one inference, 82 s for the full ensemble, 2 GB RAM |
-| `ImpactReg:ConvexAdam_Composite` | fixed + moving → moved image and displacement field on the fixed grid | 5.1 s and 2.1 GB VRAM on a real abdominal MR→CT pair |
+| `ImpactReg:ConvexAdam_Composite` | fixed + moving → displacement field on the fixed grid (the CLI derives the moved image) | 5.1 s and 2.1 GB VRAM on a real abdominal MR→CT pair |
 
 Between them: four TotalSegmentator tasks, a five-fold MRSegmentator, one
-modality-agnostic ImpactSeg model, three ImpactSynth variants and thirteen
+modality-agnostic ImpactSeg model, three ImpactSynth variants and nine
 IMPACT-Reg presets. Each ships as a runnable notebook that fetches a demo case
 and plots the result, which is the fastest way to see what one produces: see
 {doc}`../examples/index`.
@@ -101,24 +101,30 @@ operations are available from Python through `konfai_apps.KonfAIApp`.
 
 ### Registration
 
-IMPACT-Reg packages thirteen presets: rigid, rigid plus B-spline,
-modality-specific MR/CT and CBCT/CT semantic presets, native ConvexAdam stages
-and FireANTs presets. A preset writes `Moved.mha` and `DVF.mha`, the moved image and
-the displacement field, on the fixed grid (the groups are named `MovedImage` and
-`DisplacementField`). The orchestrator can ensemble several presets, write a
-reusable transform, evaluate against images, labels or landmarks, and derive a
-voxel-wise spread map from the ensemble.
+IMPACT-Reg packages nine presets over three engines: elastix (rigid, rigid plus
+B-spline, and two IMPACT presets for MR/CT and CBCT/CT), ConvexAdam on MIND features,
+and FireANTs (SyN, SyN on IMPACT features, SyN on anatomix and MIND features);
+`impact-reg-konfai list` lists them and `show NAME` says what one runs and tunes.
+A preset writes one output, the displacement field on the fixed grid, as an ITK
+transform (`Transform.h5`); the orchestrator derives the moved image from it,
+averages the fields of several presets, evaluates against images, labels or
+landmarks, warps further images through the transform (`apply`) and maps the spread
+of an ensemble (`uncertainty`). A pair too large for the GPU is registered at native
+resolution in tiles, after one global pass on a coarse copy.
 
 ```bash
-impact-reg-konfai register MR_CT_MRSeg MR_CT_TS \
+impact-reg-konfai register ConvexAdam_Composite Elastix_IMPACT_Static \
   -f fixed_ct.mha -m moving_mr.mha \
-  --uncertainty -o ./Registration --gpu 0
+  --keep-fields -o ./Registration --gpu 0
 ```
+
+See `apps/impact_reg/README.md` and its `docs/` for the conventions, the presets,
+large images and evaluation.
 
 <ul class="kf-example-grid kf-example-grid--registration" aria-label="Completed real-data IMPACT-Reg stages">
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moving-before.png" aria-label="Open the real moving MR before registration"><img src="../_static/apps/impact-reg/moving-before.png" alt="Real moving abdominal MR before registration, with fixed CT contours showing the controlled spatial offset." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · MOVING INPUT</span><strong>Moving MR: before</strong><span>Fixed-CT contours expose the controlled metadata-only offset.</span><span class="kf-example-stats">NCC 0.129 · MAE 106.11</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/fixed-ct.png" aria-label="Open the real fixed CT target"><img src="../_static/apps/impact-reg/fixed-ct.png" alt="Real fixed abdominal CT defining the registration target and output geometry." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">02 · FIXED REFERENCE</span><strong>Fixed CT target</strong><span>The reference image defines the physical output grid.</span><span class="kf-example-stats">222 × 226 × 124 · 2 MM GRID</span></figcaption></figure></li>
-  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · MOVED OUTPUT</span><strong>Moved MR: after</strong><span><code>ConvexAdam_Composite</code> writes the result on the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
+  <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/moved-after.png" aria-label="Open the real moved MR after registration"><img src="../_static/apps/impact-reg/moved-after.png" alt="Real moved abdominal MR after ConvexAdam Composite registration on the fixed CT grid." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">03 · MOVED OUTPUT</span><strong>Moved MR: after</strong><span><code>ConvexAdam_Composite</code>'s field, the MR resampled onto the fixed grid.</span><span class="kf-example-stats">NCC 0.937 · MAE 21.09</span></figcaption></figure></li>
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-reg/displacement-field.png" aria-label="Open the real physical displacement field"><img src="../_static/apps/impact-reg/displacement-field.png" alt="Real three-component displacement field visualized with physical magnitude and sampled in-plane vectors." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">04 · PHYSICAL FIELD</span><strong>Displacement field</strong><span>Three physical components in millimetres, with sampled vectors.</span><span class="kf-example-stats">MEAN 23.06 MM · P95 25.55 MM</span></figcaption></figure></li>
 </ul>
 

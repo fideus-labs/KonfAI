@@ -100,7 +100,7 @@ class Dataset:
         self,
         filename: str | Path,
         file_format: str,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         base_format, self.level = split_format_level(file_format)
@@ -126,7 +126,7 @@ class Dataset:
                 f"A pyramid was asked of a '{self.file_format}' destination, which has no levels.",
                 "Only ':omezarr' stores levels. Drop scale_factors, or write to ':omezarr'.",
             )
-        self.scale_factors = list(scale_factors) if scale_factors else None
+        self.scale_factors = scale_factors or None
         self.downsample_method = downsample_method
         self._names_cache: dict[str, list[str]] = {}
         self._infos_cache: dict[tuple[str, str], tuple[list[int], Attribute]] = {}

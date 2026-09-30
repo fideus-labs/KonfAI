@@ -192,6 +192,47 @@ def test_flip_vector_field_negates_flipped_components() -> None:
     assert torch.equal(augmented, -layout_only)
 
 
+def test_flip_undoes_a_registration_of_the_mirrored_pair_on_an_oblique_grid() -> None:
+    # Registration TTA mirrors the fixed and moving voxels with their headers kept, so the pair seen
+    # is the world mirrored by M, M(y) = W(R(W^-1(y))) with W the grid's index-to-world map and R the
+    # index mirror. A perfect registration of that pair returns D'(x) = M(M(x) + D(M(x))) - x, where D
+    # is the unmirrored pair's field; the inverse flip must give D back, whatever the direction.
+    c, s = np.cos(np.radians(20)), np.sin(np.radians(20))
+    direction = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]]) @ np.array(
+        [[1, 0, 0], [0, np.cos(0.2), -np.sin(0.2)], [0, np.sin(0.2), np.cos(0.2)]]
+    )
+    spacing, origin, size = np.array([1.5, 1.0, 2.0]), np.array([-10.0, 5.0, 3.0]), np.array([6, 5, 4])
+    flip = Flip(f_prob=[1.0, 0.0, 1.0], vector_field=True)  # tensor dims 1 and 3: voxel axes z and x
+    flip._state_init(
+        0, [[4, 5, 6]], [Attribute({"Origin": origin, "Spacing": spacing, "Direction": direction.flatten()})]
+    )
+
+    def world(index: np.ndarray) -> np.ndarray:  # (x, y, z) index rows -> world rows
+        return origin + (index * spacing) @ direction.T
+
+    def mirror(point: np.ndarray) -> np.ndarray:
+        index = np.linalg.solve(direction, (point - origin).T).T / spacing
+        index[:, [0, 2]] = (size - 1)[[0, 2]] - index[:, [0, 2]]
+        return world(index)
+
+    z, y, x = np.meshgrid(np.arange(4), np.arange(5), np.arange(6), indexing="ij")
+    points = world(np.stack([x.ravel(), y.ravel(), z.ravel()], axis=1).astype(float))
+    rng = np.random.default_rng(0)
+    affine, shift = rng.normal(scale=0.05, size=(3, 3)), np.array([3.0, -2.0, 1.5])
+    field = points @ affine.T + shift
+    mirrored = mirror(points)
+    field_of_mirrored_pair = mirror(mirrored + mirrored @ affine.T + shift) - points
+
+    def as_tensor(rows: np.ndarray) -> torch.Tensor:  # world (x, y, z) rows -> channel-first [3, Z, Y, X]
+        return torch.from_numpy(rows.T.reshape(3, 4, 5, 6).copy())
+
+    assert torch.allclose(flip._inverse(0, 0, as_tensor(field_of_mirrored_pair)), as_tensor(field), atol=1e-9)
+    # Negating the x and z components, the identity-direction answer, is off on this grid.
+    naive = torch.flip(as_tensor(field_of_mirrored_pair), dims=[1, 3])
+    naive[[0, 2]] *= -1
+    assert not torch.allclose(naive, as_tensor(field), atol=0.1)
+
+
 def test_flip_scalar_data_is_layout_only() -> None:
     # Single-channel data (images, masks) is mirror-invariant: even with ``vector_field`` enabled the
     # shared Flip instance must not negate intensities.
