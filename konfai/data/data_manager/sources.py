@@ -17,6 +17,7 @@
 
 """The data sources of each workflow: training, prediction, evaluation, dataset preparation."""
 
+import itertools
 import math
 import os
 import random
@@ -68,8 +69,9 @@ def _patch_misplacement(reference: DatasetManager, manager: DatasetManager, a: i
 
     Patch k is read at the same index from every group, each cut from voxel 0 of its own grid, and handed on with its
     case's geometry. It covers one place only when it starts at the same voxel in both groups (their sweep axes may
-    order the patches differently) and both grids put its corners at the same physical points, within a tenth of a
-    voxel: header noise passes, a resampling does not. A group without a geometry is taken at its voxels.
+    order the patches differently) and both grids put every corner of it at the same physical point, within a tenth
+    of a voxel: header noise passes, a resampling or a swap of axes does not. Two affine grids drift apart most at a
+    corner, so the corners cover the patch. A group without a geometry is taken at its voxels.
     """
     slots = [group.patch.get_patch_slices(a) for group in (reference, manager)]
     for index, (first, second) in enumerate(zip(*slots, strict=True)):
@@ -85,14 +87,14 @@ def _patch_misplacement(reference: DatasetManager, manager: DatasetManager, a: i
     if len(grids[0][1]) != len(grids[1][1]) or len(grids[0][1]) != len(slots[0][0]):
         return None
     for index, slot in enumerate(slots[0]):
-        for corner in ([int(axis.start) for axis in slot], [int(axis.stop) - 1 for axis in slot]):
+        for corner in itertools.product(*((int(axis.start), int(axis.stop) - 1) for axis in slot)):
             voxel = tuple(slice(at, at + 1, 1) for at in corner)
             here, there = (
                 region_geometry(origin, spacing, direction, voxel)[0] for origin, spacing, direction in grids
             )
             if np.linalg.norm(here - there) > 0.1 * float(grids[0][1].min()):
                 return (
-                    f"voxel {corner} of patch {index} lies at {np.round(here, 3).tolist()} in one and"
+                    f"voxel {list(corner)} of patch {index} lies at {np.round(here, 3).tolist()} in one and"
                     f" {np.round(there, 3).tolist()} in the other (origin {grids[0][0].tolist()} vs"
                     f" {grids[1][0].tolist()}, spacing {grids[0][1].tolist()} vs {grids[1][1].tolist()})"
                 )
