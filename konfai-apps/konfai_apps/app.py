@@ -1142,13 +1142,26 @@ class KonfAIApp(AbstractKonfAIApp):
         """Case ``name`` of ``group`` as ``shape`` uint8 voxels all at ``value``, placed by ``attributes``.
 
         Written slab by slab along the first spatial axis, about 16 MiB a slab, so a default mask never holds its
-        volume; a format that takes no region write gets it whole.
+        volume. A format that takes no region write gets it whole, within the rank's memory budget only.
         """
         shape = [int(extent) for extent in shape]
         plane = int(np.prod([shape[0], *shape[2:]]))
         region = [shape[0], max(1, min(shape[1], (1 << 24) // plane)), *shape[2:]]
         stream = dataset.open_data_stream(group, name, shape, np.dtype(np.uint8), attributes, region_shape=region)
         if stream is None:
+            from konfai.utils.budget import format_bytes
+            from konfai.utils.errors import DatasetManagerError
+            from konfai.utils.vram import max_voxels
+
+            voxels, budget = int(np.prod(shape)), max_voxels(None, 1, None)  # uint8: a byte a voxel
+            if budget is not None and voxels > budget:
+                raise DatasetManagerError(
+                    f"'{group}' of '{name}' would be written whole ({format_bytes(voxels)}): the "
+                    f"{dataset.file_format} format writes no region, and that is past this run's memory budget"
+                    f" ({format_bytes(budget)}).",
+                    "Give that input yourself, or pass the images as mha, nii, nii.gz, nrrd, OME-Zarr or h5,"
+                    " which write by regions.",
+                )
             dataset.write(group, name, np.full(shape, value, dtype=np.uint8), attributes)
             return
         block = np.full(region, value, dtype=np.uint8)

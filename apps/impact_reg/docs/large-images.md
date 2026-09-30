@@ -67,5 +67,7 @@ voxel, 29 GB for the 1.2 billion voxels of a 40 µm mouse brain. `register` chec
 
 **RAM.** Resampling, warping, composing and averaging are streamed: they read and write regions, never the whole
 volume. Outputs are streamed too, in every format except DICOM: `.mha`, `.nii`, `.nii.gz`, `.nrrd` and OME-Zarr. A
-DICOM output is written whole, since its rescale slope and intercept depend on the whole volume. A moved OME-Zarr store
-comes with a pyramid, halved down to about 256 voxels along its longest axis.
+DICOM output is written whole, since its rescale slope and intercept depend on the whole volume, and so are the
+all-ones masks a DICOM pair gets when you leave its masks out: within the memory budget only, past it the run is
+refused, so give the masks yourself or convert the pair. A moved OME-Zarr store comes with a pyramid, halved down to
+about 256 voxels along its longest axis.
