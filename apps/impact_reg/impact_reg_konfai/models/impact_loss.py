@@ -18,9 +18,10 @@
 
 The three engines (elastix, ConvexAdam, FireANTs) read these with the same names and the same meaning:
 
-- each kept layer of each model is compared with its model's ``distance``, all of them positive and 0 at a
-  perfect match, and weighed by ``layers_weight``;
-- ``normalize`` divides every layer by its value when a level starts, so each starts at 1;
+- each kept layer of each model is compared with its model's ``distance``, 0 at a perfect match (Dice only on
+  activations in [0, 1]: raw features take it below 0), and weighed by ``layers_weight``;
+- ``normalize`` divides every layer by its value when a level starts, so each starts at 1 (a layer that starts at
+  0 or below keeps its raw value);
 - ``mode`` is Static (the features extracted once, then the moving ones warped) or Jacobian (the network inside
   the loss, the warp differentiated through it);
 - ``models`` applies to every level, and ``levels`` replaces it level by level.
@@ -77,7 +78,8 @@ class ModelSpec:
 
     distance: Annotated[
         Distance,
-        "How this model's features are compared, each 0 at a perfect match: L1, L2, Dice (1 - soft Dice), Cosine, "
+        "How this model's features are compared, each 0 at a perfect match: L1, L2, Dice (1 - soft Dice, meant for "
+        "activations in [0, 1] such as probabilities: raw features take it below 0), Cosine, "
         "L1Cosine and NCC (1 - their similarity), LNCC (1 - the squared local correlation over 'lncc_kernel' "
         "voxels, on dense maps only: elastix, which draws points, refuses it).",
     ] = "L2"
@@ -126,8 +128,8 @@ Mode = Annotated[
 Normalize = Annotated[
     bool,
     "Divide each layer's loss by its value when a level starts, so every layer starts at 1 and layers_weight "
-    "weighs comparable quantities (MIND and a segmentation decoder answer on ranges an order of magnitude apart). "
-    "ConvexAdam's coarse search keeps its raw cost, its coupling schedule being absolute: balance_coarse_layers "
+    "weighs comparable quantities (MIND and a segmentation decoder answer on ranges an order of magnitude apart); "
+    "a layer that starts at 0 or below keeps its raw value. ConvexAdam's coarse search keeps its raw cost, its coupling schedule being absolute: balance_coarse_layers "
     "weighs its layers there.",
 ]
 FeatureMapUpdateInterval = Annotated[
