@@ -426,6 +426,25 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self._drop_done_cases()
         return self.dataset.get_data(world_size)[0][global_rank][0]
 
+    def _presize_free_axes(self) -> bool:
+        """The shared pre-sizing, and where the batch is measured, every free axis pinned to the largest extent
+        among the cases: the patches then share one shape, a smaller case padded up to it, and the batch grows
+        over all of them. Measured on a GPU only; one patch per batch needs no common shape."""
+        if super()._presize_free_axes():
+            return True
+        if (
+            self._vram_patch_template is None
+            or not self.dataset.measures_batch
+            or not cuda_visible_devices()
+            or self.dataset.patches_stack()
+        ):
+            return False
+        worst = self.dataset.worst_case_shape()
+        if worst is None:
+            return False
+        self._adopt_patch_candidate(concretize_patch_size(self._vram_patch_template, worst, self._downsampling_factor))
+        return True
+
     def _shrunken_patch(self, measured: int | None, usable: float) -> list[int] | None:
         """The shared shrink step, with the blend kept on the GPU when it fits: the accumulation
         footprint is RESERVED beside the forward, so the sized patch passes the accumulation gate.

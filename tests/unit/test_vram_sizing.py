@@ -242,6 +242,33 @@ class TestPresizeFreeAxes:
         assert sizer._presize_free_axes() is False
 
 
+@pytest.mark.parametrize(("visible", "pinned"), [(["0"], [100, 120, 90]), ([], None)], ids=["gpu", "cpu"])
+def test_a_measured_batch_pins_each_free_axis_to_the_largest_case(monkeypatch, visible, pinned):
+    """Where the batch is measured, free axes the cases fill to different extents take the largest, so every
+    patch has one shape and several stack, a smaller case padded up to it. Off a GPU one patch runs per
+    batch, and each case keeps its own extent."""
+
+    class Dataset:
+        measures_batch = True
+        replanned = None
+
+        def worst_case_shape(self):
+            return [100, 120, 90]
+
+        def patches_stack(self):
+            return False
+
+        def replan_patch(self, patch_size):
+            self.replanned = patch_size
+
+    monkeypatch.setattr("konfai.predictor.workflow.cuda_visible_devices", lambda: visible)
+    predictor = _predictor(1, nb_augmentation=1, reduction=Mean())
+    predictor.dataset = Dataset()
+
+    assert predictor._presize_free_axes() is (pinned is not None)
+    assert predictor.dataset.replanned == pinned
+
+
 def test_a_measured_batch_is_the_largest_power_of_two_whose_forward_fits_half_the_memory():
     # A forward holding 300 bytes whatever its batch and 100 per patch: 400 for one, 500 for two.
     # Half of 2200 usable bytes is 1100: eight patches fit (1100 bytes), so eight.
