@@ -67,6 +67,16 @@ def test_parse_memory_budget_bytes_rejects_garbage(value: str) -> None:
         parse_memory_budget_bytes(value)
 
 
+@pytest.mark.parametrize("value", [8_000_000_000, 8e9, "8000000000", " 8000000000 ", 2**20 + 1])
+def test_a_bare_number_above_one_pib_is_refused(value: str | float) -> None:
+    """A bare number is GiB, so a byte count written without its unit would bind a multi-PiB budget."""
+    with pytest.raises(ConfigError, match="bare number is in GiB") as refusal:
+        parse_memory_budget_bytes(value)
+    spelling = f"{int(float(value))}b"
+    assert f"'{spelling}'" in str(refusal.value)
+    assert parse_memory_budget_bytes(spelling) == int(float(value))
+
+
 # --------------------------------------------------------------------------------------
 # THE CGROUP TRAP: "auto" must see the cgroup ceiling, not the host's RAM
 # --------------------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from konfai.data.augmentation import (
     Elastix,
     Flip,
     Noise,
+    Permute,
     PlacedMask,
     Rotate,
     Translate,
@@ -388,6 +389,78 @@ def test_a_regrid_draw_pulls_the_hull_of_its_mapped_corners() -> None:
         draw.matrix[0] = [matrix.unsqueeze(0)]
         target = tuple(slice(int(start), int(start) + 4) for start in torch.randint(0, 4, (3,)))
         assert draw._stream_region_source(0, 0, target, list(full)) == corner_hull(draw.matrix[0][0], target, full)
+
+
+@pytest.mark.parametrize(
+    "spatial, spacing, angle",
+    [
+        ((64, 128), None, 45.0),
+        ((24, 32, 48), None, 30.0),
+        ((64, 64), None, 45.0),
+        ((32, 32, 32), None, 30.0),
+        ((16, 32, 32), (2.5, 0.8, 0.8), 30.0),
+        ((64, 64), (2.0, 1.0), 45.0),
+        ((21, 41, 41), (2.0, 1.0, 1.0), 30.0),
+    ],
+    ids=["2d", "3d", "2d-square", "3d-cubic", "3d-thick-slices", "2d-anisotropic", "3d-cubic-world"],
+)
+def test_a_free_rotate_turns_the_world_about_its_centre(
+    spatial: tuple[int, ...], spacing: tuple[float, ...] | None, angle: float
+) -> None:
+    """A free angle turns the copy about its centre in world units, the header's spacing (a case
+    without one counts voxels): SimpleITK's resample through the drawn rotation. ``affine_grid`` spans
+    [-1, 1] over each extent, so the same matrix applied there shears wherever the world extents
+    differ."""
+    sitk = pytest.importorskip("SimpleITK")
+    rank = len(spatial)
+    steps = (1.0,) * rank if spacing is None else spacing  # array order
+    volume = np.random.default_rng(0).standard_normal(spatial).astype(np.float32)
+    header = Attribute()
+    if spacing is not None:
+        header["Spacing"] = np.array(spacing[::-1])
+    rotate = Rotate(a_min=angle, a_max=angle)
+    rotate._state_init(0, [list(spatial)], [header])
+
+    out = rotate._compute("case", 0, 0, torch.from_numpy(volume)[None])[0].numpy()
+
+    image = sitk.GetImageFromArray(volume)
+    image.SetSpacing(steps[::-1])
+    half = [step * (extent - 1) / 2 for step, extent in zip(steps, spatial, strict=True)]
+    turn = sitk.AffineTransform(rank)
+    turn.SetMatrix(rotate.matrix[0][0][0, :rank, :rank].double().flatten().tolist())
+    turn.SetCenter(half[::-1])
+    expected = sitk.GetArrayFromImage(sitk.Resample(image, image, turn, sitk.sitkLinear, 0.0))
+    # Compared on the inscribed ball, which a turn about the centre keeps inside the grid: neither
+    # side reads past the border, where each pads its own way.
+    offsets = np.meshgrid(
+        *[(np.arange(extent) - (extent - 1) / 2) * step for extent, step in zip(spatial, steps, strict=True)],
+        indexing="ij",
+    )
+    ball = sum(offset**2 for offset in offsets) <= (min(half) - max(steps)) ** 2
+    np.testing.assert_allclose(out[ball], expected[ball], rtol=0, atol=1e-3)
+    if len(set(half)) == 1:  # equal world half extents: the drawn matrix is already the turn, bit for bit
+        assert torch.equal(rotate._grid_matrix(0, 0, list(spatial)), rotate.matrix[0][0])
+
+
+@pytest.mark.parametrize(
+    "draw",
+    [lambda: Permute(prob_permute=[1.0, 1.0]), lambda: Rotate(is_quarter=True)],
+    ids=["Permute", "Rotate-quarter"],
+)
+def test_a_draw_that_swaps_axes_hands_on_the_spacing_along_them(draw) -> None:
+    """The draws after a swap read the spacing of the grid they are handed: each extent keeps the
+    spacing it had, wherever the draw moved it."""
+    torch.manual_seed(0)
+    shape, spacing = [10, 20, 30], np.array([0.8, 1.5, 2.5])  # array order (z, y, x), spacing (x, y, z)
+    headers = [Attribute() for _ in range(8)]
+    for header in headers:
+        header["Spacing"] = spacing
+    augmentation = draw()
+    drawn = augmentation._state_init(0, [list(shape) for _ in headers], headers)
+    assert any(copy != shape for copy in drawn), "no copy swapped an axis"
+    for copy, header in zip(drawn, headers, strict=True):
+        handed = header.get_np_array("Spacing")[::-1]
+        assert sorted(zip(copy, handed, strict=True)) == sorted(zip(shape, spacing[::-1], strict=True))
 
 
 # --------------------------------------------------------------------------------------

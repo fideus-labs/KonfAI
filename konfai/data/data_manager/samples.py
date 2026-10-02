@@ -36,6 +36,7 @@ from konfai.data.materialize import CaseMaterializer
 from konfai.data.patching import DatasetManager
 from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import KonfAIError
 from konfai.utils.runtime import get_cpu_info, get_memory, get_memory_info, memory_forecast, return_freed_heap
 from konfai.utils.utils import OverlapSpec
 
@@ -214,6 +215,9 @@ class DatasetIter(data.Dataset):
         self.inline_augmentations = inline_augmentations
         self.has_augmented_samples = self.apply_augmentations and any(a > 0 for _, a, _ in mapping)
         self.read_order = PatchReadOrder(mapping, batch_size)
+        # The case whose slabs a one-pass reader holds: a streamed case never enters the FIFO, so
+        # leaving it is what frees them.
+        self._slab_case: int | None = None
 
     def _fill_case_bytes(self) -> float:
         """What one filling thread holds at its peak: a whole-volume pass over the case, priced the way
@@ -318,6 +322,8 @@ class DatasetIter(data.Dataset):
             for fut in as_completed(futures):
                 try:
                     fut.result()
+                except KonfAIError:
+                    raise
                 except Exception as e:
                     raise RuntimeError(
                         f"Error while {what}\n{type(e).__name__}: {e}\n\nTraceback (worker):\n{traceback.format_exc()}"
@@ -350,6 +356,10 @@ class DatasetIter(data.Dataset):
                 self.data_augmentations_list,
                 load_augmentations=self.apply_augmentations and not self.inline_augmentations,
             )
+        except KonfAIError as e:
+            # A designed refusal keeps its class, as on the streamed route: the caller catches KonfAIError.
+            e.add_note(f"While loading case '{item.name}' (group_src={group_src}, group_dest={group_dest}).")
+            raise
         except Exception as e:
             raise RuntimeError(
                 f"Error while loading data "
@@ -433,6 +443,11 @@ class DatasetIter(data.Dataset):
     def __getitem__(self, index: int) -> Sample:
         sample: Sample = {}
         x, a, p = self.mapping[index]
+        if self.single_pass and x != self._slab_case:
+            if self._slab_case is not None:
+                for _group_src, group_dest, _chain in _chains(self.groups_src):
+                    self.data[group_dest][self._slab_case].release_slabs()
+            self._slab_case = x
         needs_full_load = any(
             not self.data[group_dest][x].can_stream_patch(a, self.apply_augmentations)
             for _group_src, group_dest, _chain in _chains(self.groups_src)

@@ -343,7 +343,9 @@ stage runs on the region, so the `Origin`, `Spacing` or `Direction` its `__call_
 records describe that region rather than the case; those writes land on a throwaway
 `Attribute` and are dropped. `write_stream_cache_attribute` is called once per
 case, on the persistent attribute, with the full source spatial shape: write the
-case-level geometry there. Omitting it is **refused**, not silent: a region stage that records geometry on the
+case-level geometry there. It is also called on each region's scope, so the stages
+after it read that geometry as they would on the whole volume: it only records.
+Omitting it is **refused**, not silent: a region stage that records geometry on the
 throwaway scope and implements no `write_stream_cache_attribute()` raises a
 `PatchError` naming the keys it recorded. `Canonical` is an `ORIENTATION`
 transform and implements it: its new origin is the corner the volume mirrors onto,

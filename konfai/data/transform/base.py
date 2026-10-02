@@ -330,7 +330,8 @@ class Transform(NeedDevice, ABC):
 
         Called once per case, on the persistent attribute, for the stage that owns a streamed
         region: a geometry rewrite that depends on the volume's extent cannot be computed from a
-        patch. The patch-local answer ``__call__`` wrote is dropped. The base is a no-op.
+        patch. The patch-local answer ``__call__`` wrote is dropped. Also called on each region's
+        scope, which the stages after it read, so it only records. The base is a no-op.
 
         ``name`` is the case the fold walks, for a per-case answer (a ``Resample`` whose reference
         follows the case).

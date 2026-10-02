@@ -20,12 +20,16 @@ Same checkpoint, different preprocessing is silent: the run succeeds and only th
 The comparison is on the config trees as written, so it needs neither config to be bound.
 """
 
+import inspect
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from konfai.utils.config import _load_tree, _parse_bool
+from konfai.utils.config import Config, _load_tree, _parse_bool, _recordable
+
+if TYPE_CHECKING:
+    from konfai.data.transform import Transform
 
 #: Everything from this stage on runs once per COPY (a TTA draw), not on the case the model reads.
 _COPY_MARKER = "Expand"
@@ -83,8 +87,10 @@ def input_chain_differences(trained: Mapping[str, Any], applied: Mapping[str, An
     """Every difference between the chains two ``Dataset`` trees apply to the model's input groups.
 
     Only what reaches the model is compared: a stage that alters no value, everything from an
-    ``Expand`` marker on, and the ``inverse`` argument are not differences. A group ``applied``
-    declares as an input and ``trained`` does not have is compared against an empty chain.
+    ``Expand`` marker on, and the ``inverse`` argument are not differences. An argument one side does
+    not spell (a config written before the stage had it) reads as the default the binder records for
+    it. A group ``applied`` declares as an input and ``trained`` does not have is compared against an
+    empty chain.
     """
     trained_groups = _groups(trained)
     differences: list[ChainDifference] = []
@@ -149,21 +155,38 @@ def _groups(dataset: Mapping[str, Any]) -> dict[tuple[str, str], Mapping[str, An
     return groups
 
 
-def _alters_values(classpath: str) -> bool:
-    """Whether the stage changes the values it is handed, as :attr:`Transform.alters_values` declares.
-
-    Read off KonfAI's own stage namespace, which the workflow has already imported. A class KonfAI
-    does not own is taken to alter values: importing a foreign module to ask would run its code here.
-    """
+def _konfai_stage(classpath: str) -> "type[Transform] | None":
+    """The KonfAI transform a chain key names, read off the stage namespace the workflow has already
+    imported. ``None`` for a class KonfAI does not own: importing a foreign module to ask would run
+    its code here."""
     from konfai.data import transform
 
     module, _, name = _stage_identity(classpath).rpartition(":")
     if module != transform.__name__:
-        return True
+        return None
     stage = getattr(transform, name, None)
-    if not isinstance(stage, type) or not issubclass(stage, transform.Transform):
-        return True
-    return stage.alters_values
+    return stage if isinstance(stage, type) and issubclass(stage, transform.Transform) else None
+
+
+def _alters_values(classpath: str) -> bool:
+    """Whether the stage changes the values it is handed, as :attr:`Transform.alters_values` declares.
+    A class KonfAI does not own is taken to."""
+    stage = _konfai_stage(classpath)
+    return True if stage is None else stage.alters_values
+
+
+def _default(classpath: str, key: str) -> Any:
+    """What the binder writes for ``key`` when a config omits it (:meth:`Config.get_value`), or
+    ``(unset)`` when that is not known: a class KonfAI does not own, no default, one that is not a
+    scalar."""
+    stage = _konfai_stage(classpath)
+    parameter = inspect.signature(stage).parameters.get(key) if stage is not None else None
+    if parameter is None or parameter.default is inspect.Parameter.empty:
+        return _UNSET
+    value = _recordable(Config._default_value(parameter.default))
+    if value is None:
+        return "None"
+    return value if isinstance(value, bool | int | float | str) else _UNSET
 
 
 @dataclass(frozen=True)
@@ -216,7 +239,8 @@ def _stage_differences(
             continue
         details = []
         for key in sorted(trained_stage.arguments.keys() | applied_stage.arguments.keys()):
-            before, after = trained_stage.arguments.get(key, _UNSET), applied_stage.arguments.get(key, _UNSET)
+            default = _default(applied_stage.identity, key)
+            before, after = trained_stage.arguments.get(key, default), applied_stage.arguments.get(key, default)
             if before != after:
                 details.append(f"{key}: {before!r} in training, {after!r} here")
         if details:

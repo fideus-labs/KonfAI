@@ -45,7 +45,33 @@ from konfai.data.geometry import (
 )
 from konfai.data.sampling import _apply, _displacement_at, _to_index, nearest_index, window_index
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
+from konfai.data.transform.shape import _has_geometry, _record_remap_geometry
 from konfai.utils.dataset import Attribute
+
+
+def _carry_spacing(attribute: Attribute, remap: AxisRemap) -> None:
+    """Carry the spacing along the axes a draw reorders, for the draws after it: output axis ``k``
+    takes the spacing of the axis it reads. A spacing of another rank is left as it is."""
+    if "Spacing" not in attribute:
+        return
+    spacing = attribute.get_np_array("Spacing")[::-1]  # array order
+    if spacing.size != len(remap):
+        return
+    carried = spacing[[source for source, _mirrored in remap]]
+    if not np.array_equal(carried, spacing):
+        attribute["Spacing"] = carried[::-1]
+
+
+def _restate_swapped_header(attribute: Attribute, remap: AxisRemap, source_spatial_shape: list[int]) -> None:
+    """The header of a copy an ``Expand`` writes, after a draw that swaps axes: every voxel keeps its
+    world point, as the Permute transform records it, or the spacing alone follows the axes when the
+    case has no full header of that rank. A draw that swaps no axis keeps the header."""
+    if all(source == axis for axis, (source, _mirrored) in enumerate(remap)):
+        return
+    if _has_geometry(attribute, len(remap)):
+        _record_remap_geometry(attribute, remap, source_spatial_shape)
+    else:
+        _carry_spacing(attribute, remap)
 
 
 class EulerTransform(DataAugmentation):
@@ -300,7 +326,9 @@ class Translate(EulerTransform):
 
 
 class Rotate(EulerTransform):
-    """Rotate a copy of the case about its centre.
+    """Rotate a copy of the case about its centre, in world units: the spacing of the grid it is
+    handed, voxels without one. A spacing that does not describe the grid turns as drawn, in
+    normalised coordinates.
 
     A quarter draw is a signed permutation of the axes, an exact index remap that transposes the
     extents it swaps, so the copy is cut on its own grid. A free angle resamples as a REGRID.
@@ -315,6 +343,8 @@ class Rotate(EulerTransform):
         #: Per case index and copy, the exact index remap the draw is: settled with the draw, because
         #: every window of a streamed copy asks and the permutation test costs three allclose.
         self._remaps: dict[int, list[AxisRemap | None]] = {}
+        #: Per case index and copy, the grid's half extents about its centre in world units, (x, y, z).
+        self._half_extents: dict[int, list[torch.Tensor]] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
         dim = len(shapes[0])
@@ -336,8 +366,47 @@ class Rotate(EulerTransform):
             angles = torch.cat((torch.zeros((len(shapes), 2)), angles[:, 2:]), dim=1)
         self.matrix[index] = [torch.unsqueeze(func(value), dim=0) for value in angles]
         self._remaps[index] = [Rotate._index_remap(matrix) for matrix in self.matrix[index]]
+        self._half_extents[index] = [
+            Rotate._world_half_extents(shape, attribute)
+            for shape, attribute in zip(shapes, caches_attribute, strict=True)
+        ]
+        for remap, attribute in zip(self._remaps[index], caches_attribute, strict=True):
+            if remap is not None:
+                _carry_spacing(attribute, remap)
         # A quarter turn transposes the extents it swaps; a sampled draw keeps its grid.
         return [Rotate._draw_shape(remap, shape) for remap, shape in zip(self._remaps[index], shapes, strict=True)]
+
+    @staticmethod
+    def _world_half_extents(shape: list[int], attribute: Attribute) -> torch.Tensor:
+        """``spacing * (extent - 1) / 2`` per axis in (x, y, z): the header's spacing, one without it.
+        A spacing that does not describe this grid (another rank, as a Squeeze leaves it, or a step
+        that is not positive) gives equal half extents: the turn as drawn, in normalised coordinates."""
+        spacing = np.ones(len(shape))
+        if "Spacing" in attribute:
+            spacing = attribute.get_np_array("Spacing")
+            if spacing.size != len(shape) or not np.all(spacing > 0):
+                return torch.ones(len(shape), dtype=torch.float64)
+        return torch.tensor(
+            [step * max(extent - 1, 1) / 2 for step, extent in zip(spacing, reversed(shape), strict=True)],
+            dtype=torch.float64,
+        )
+
+    def _grid_matrix(self, index: int, a: int, shape: list[int]) -> torch.Tensor:
+        # A quarter turn is its index remap, read off the drawn matrix itself. A sampled angle turns
+        # the world about the centre, and ``affine_grid`` spans [-1, 1] over each extent, so the turn
+        # is conjugated by the world half extents the draw was made on, ``S^-1 R S``: where they
+        # differ, the matrix as drawn would shear. Equal half extents give a ratio of exactly 1.
+        del shape
+        matrix = self.matrix[index][a]
+        if self._remaps[index][a] is not None:
+            return matrix
+        half = self._half_extents[index][a]
+        turned = matrix.clone()
+        turned[0, :-1, :-1] *= (half[None, :] / half[:, None]).to(matrix.dtype)
+        return turned
+
+    def _axis_remap(self, index: int, a: int) -> AxisRemap | None:
+        return self._remaps[index][a]
 
     @classmethod
     def _index_remap(cls, matrix: torch.Tensor) -> AxisRemap | None:
@@ -354,7 +423,8 @@ class Rotate(EulerTransform):
         return remap_shape(shape, remap)
 
     def _reorient(self, index: int, a: int, matrix: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
-        remap = Rotate._index_remap(matrix)
+        # A sampled draw stays sampled: its conjugated matrix is no quarter turn, even where rounding says so.
+        remap = Rotate._index_remap(matrix) if self._remaps[index][a] is not None else None
         if remap is None:
             return self._sample(matrix, tensor)
         # apply_remap materialises, so the copy never aliases the tensor it was drawn from.
@@ -480,7 +550,8 @@ class Permute(DataAugmentation):
                     raise ValueError("The number of augmentation images must be equal to 2")
                 self.permute[index] = torch.eye(2, dtype=torch.bool)
             for i in range(len(shapes)):
-                shapes[i] = remap_shape(shapes[i], self._remap(index, i))
+                shapes[i] = remap_shape(shapes[i], self._axis_remap(index, i))
+                _carry_spacing(caches_attribute[i], self._axis_remap(index, i))
         return shapes
 
     def _source_axes(self, index: int, a: int) -> list[int]:
@@ -493,12 +564,12 @@ class Permute(DataAugmentation):
     # Reordering axes moves every voxel and touches none: a bijection, which ORIENTATION promises.
     locality = LocalityKind.ORIENTATION
 
-    def _remap(self, index: int, a: int) -> AxisRemap:
+    def _axis_remap(self, index: int, a: int) -> AxisRemap:
         # Output axis k is source axis ``_source_axes()[k]``, never mirrored.
         return [(axis, False) for axis in self._source_axes(index, a)]
 
     def _stream_shape(self, index: int, a: int, shape: list[int]) -> list[int]:
-        return remap_shape(shape, self._remap(index, a))
+        return remap_shape(shape, self._axis_remap(index, a))
 
     def _stream_region_source(
         self,
@@ -507,7 +578,7 @@ class Permute(DataAugmentation):
         target_slices: tuple[slice, ...],
         source_spatial_shape: list[int],
     ) -> list[slice]:
-        return remap_region(target_slices, source_spatial_shape, self._remap(index, a))
+        return remap_region(target_slices, source_spatial_shape, self._axis_remap(index, a))
 
     def _compute(self, name: str, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
         for permute in self._permute_dims[self.permute[index][a]]:

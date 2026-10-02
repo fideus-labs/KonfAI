@@ -65,7 +65,7 @@ missing cases. `-y`/`--overwrite` recomputes everything.
 | `combine` | string | `Mean` | No | Reduces outputs across multiple checkpoints. |
 | `checkpoint_cache_gib` | float | `1.0` | No | Maximum retained checkpoint payload per prediction process, in GiB. `0` disables caching of reloadable sources. See [Checkpoint memory](#checkpoint-memory). |
 | `train_name` | string | `"name"` | Yes in practice | Names the prediction run and output folder. |
-| `manual_seed` | int or null | `None` | No | Optional seed. |
+| `manual_seed` | int or null | `None` | No | Seeds the run. The test-time augmentation copies are drawn from this seed (`0` when absent) and the case name, so a case's copies do not depend on the subset, the case order or the number of processes. |
 | `gpu_checkpoints` | list or null | `None` | No | Module placement optimization. |
 | `autocast` | bool | `false` | No | Enables AMP during inference. On the shipped Segmentation example: 4.2 s to 2.7 s, 11110 of 58.4 million label voxels change, at boundaries. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases): 4.8 s to 2.9 s. |
 | `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). With `autocast`, 2.7 s to 2.2 s on the same example and no further voxel changes, and 2.9 s to 2.4 s on the 3D UNet above; alone, no gain and 3199 voxels moved by the kernels cuDNN then picks. |
@@ -124,7 +124,7 @@ Key fields:
 | --- | --- | --- |
 | `dataset_filenames` | list[str] | Input dataset sources. |
 | `groups_src` | mapping | Input groups and preprocessing transforms. |
-| `augmentations` | mapping | Test-time augmentation definitions. None when absent. |
+| `augmentations` | mapping | Test-time augmentation definitions, drawn per case from `manual_seed` and the case name. None when absent. |
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
 | `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `batch_size` | int | Number of patches per inference batch. `0` measures it on the GPU: a forward of one patch, then of two, then the largest power of two whose forward fits half of the usable VRAM (80 % of the free memory once the case's accumulation is reserved); the other half is headroom for the convolution workspace. Halved if it still runs out. On CPU, `0` runs one patch at a time. |
@@ -193,7 +193,9 @@ compared is what reaches the model, so none of these is a finding: a stage that
 alters no value (`Statistics`, `Save`), everything from an `Expand` marker on
 (the copies' draws), the `inverse` argument (an output-path setting), a group
 the live config does not declare as a model input, and anything an
-`outputs_dataset` applies afterwards. A checkpoint that keeps no resolved config
+`outputs_dataset` applies afterwards. An argument one config does not spell,
+because the stage gained it after the training run, is compared at the default
+KonfAI binds for it (for KonfAI's own stages). A checkpoint that keeps no resolved config
 within reach (an app bundle, a hand-copied `.pt`, a run whose `--statistics-dir`
 was elsewhere) prints one line saying the check could not run. The training
 config is only read, never bound, so the run's record stays byte-identical.
@@ -227,7 +229,7 @@ Important nested fields:
 | `after_reduction_transforms` | Applied after reduction. None when absent. |
 | `final_transforms` | Final transforms applied before writing. None when absent. |
 | `reduction` | Combines multiple predictions, usually `Mean` or `Median`. |
-| `patch_combine` | Optional patch reassembly strategy. |
+| `patch_combine` | Optional patch reassembly strategy. `Trim` when absent. A weighting one (`Mean`, `Cosinus`, `Gaussian`) is refused on an integer output such as an `Argmax` head: blend the `Softmax` it is taken from instead, or keep `Trim`. |
 
 One `Prediction.yml` can be shared between different checkpoints as long as
 the exported output name stays consistent.

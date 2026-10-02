@@ -245,6 +245,9 @@ as before, one that does not streams instead of overrunning the node.
 Case is folded and the space before the unit is optional: `"32 gib"` and
 `"32GiB"` name the same budget.
 
+A bare number above `1048576` (1 PiB per rank) is refused: read in GiB it is a
+byte count missing its unit. Give bytes with the `b` suffix (`"8000000000b"`).
+
 An explicit budget is **per rank**: the comparison is
 `dataset_size / world_size <= budget`, because cases are sharded across ranks.
 `"auto"` divides the detected memory by the ranks sharing **one node**

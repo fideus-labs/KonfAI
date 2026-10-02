@@ -494,9 +494,9 @@ class Transformer(DistributedObject):
         return dtype
 
     def _probe_write_destinations(
-        self, engine: CaseMaterializer, probed: set[tuple[str, str]], a: int = 0
+        self, engine: CaseMaterializer, probed: set[tuple[str, str]], a: int = 0, overwrite: bool = False
     ) -> str | None:
-        """Open a real region-write stream on each Save/Write destination, then remove it.
+        """Open a real region-write stream on each Save/Write destination the run writes, then remove it.
 
         The refusals that matter (rank, dtype, geometry) live in ``open_data_stream``, which the
         engine only reaches at the first computed slab, so the plan opens it here: one entry creation
@@ -513,7 +513,7 @@ class Transformer(DistributedObject):
             return None
         channels = int(manager.base_shape[0])
         dtype = self._dtype_hypothesis(manager)
-        for transform, spatial, attributes in engine.write_targets(a):
+        for transform, spatial, attributes in engine.write_targets(a, rewrite=overwrite):
             key = key_of(transform)
             if key in probed:
                 continue
@@ -627,7 +627,7 @@ class Transformer(DistributedObject):
             return Verdict.SKIP, None
         if not manager.can_stream_patch(copy_index, apply_augmentations=augmented):
             return Verdict.WHOLE_VOLUME, manager.stream_refusal(copy_index, apply_augmentations=augmented)
-        probe_failure = self._probe_write_destinations(item.engine, probed, copy_index)
+        probe_failure = self._probe_write_destinations(item.engine, probed, copy_index, overwrite)
         if probe_failure is not None:
             # The run would fail the sweep at its first slab and fall back: say so now.
             return Verdict.WHOLE_VOLUME, probe_failure
