@@ -20,6 +20,10 @@ Repository = "https://github.com/fideus-labs/KonfAI"
 Issues = "https://github.com/fideus-labs/KonfAI/issues"
 License = "https://www.apache.org/licenses/LICENSE-2.0"
 
+[project.optional-dependencies]
+# The HTTP job server (konfai-apps-server). Running an app, locally or against a server, needs none of it.
+server = ["fastapi", "uvicorn", "python-multipart"]
+
 [project.scripts]
 konfai-apps = "konfai_apps:main_apps"
 konfai-apps-server = "konfai_apps:main_apps_server"

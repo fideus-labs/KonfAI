@@ -1148,32 +1148,20 @@ class TestFocalLossAlpha:
         assert "alpha" in dict(focal.named_buffers())
 
 
-class TestImpactMaskSniffing:
-    def test_a_non_binary_uint8_target_is_refused(self):
-        from konfai.metric.measure.impact import _sniffed_mask
+@pytest.mark.parametrize("criterion", [MAE(), MSE(), Dice(labels=[1])], ids=["MAE", "MSE", "Dice"])
+def test_a_mask_counts_every_voxel_that_is_not_zero(criterion) -> None:
+    """A mask stored 0/255, as an 8-bit export writes it, once selected nothing: MAE nan, Dice empty,
+    exit 0. Any value but 0 is inside, so it scores as its 0/1 twin, and two masks combine as an AND
+    (their uint8 product wrapped: 16 x 16 is 0)."""
+    torch.manual_seed(3)
+    labels = isinstance(criterion, Dice)
+    output = (torch.rand(1, 1, 8, 8) > 0.5).long() if labels else torch.rand(1, 1, 8, 8)
+    target = (torch.rand(1, 1, 8, 8) > 0.5).long() if labels else torch.rand(1, 1, 8, 8)
+    mask = (torch.rand(1, 1, 8, 8) > 0.5).to(torch.uint8)
 
-        image = torch.rand(1, 1, 4, 4)
-        eight_bit = (torch.rand(1, 1, 4, 4) * 255).to(torch.uint8)
-
-        with pytest.raises(MeasureError, match="values above 1"):
-            _sniffed_mask((image, eight_bit), eight_bit)
-
-    def test_a_binary_uint8_target_is_the_mask(self):
-        from konfai.metric.measure.impact import _sniffed_mask
-
-        image = torch.rand(1, 1, 4, 4)
-        mask = (torch.rand(1, 1, 4, 4) > 0.5).to(torch.uint8)
-
-        assert _sniffed_mask((image, mask), mask) is mask
-        assert _sniffed_mask((image, image), image) is None  # not uint8: no mask
-
-    def test_the_scored_target_itself_cannot_be_the_mask(self):
-        from konfai.metric.measure.impact import _sniffed_mask
-
-        only = (torch.rand(1, 1, 4, 4) > 0.5).to(torch.uint8)
-
-        with pytest.raises(MeasureError, match="both the scored target and its mask"):
-            _sniffed_mask((only,), only)
+    expected = _scores(criterion, output, target, mask)
+    assert _scores(criterion, output, target, mask * 255) == expected
+    assert _scores(criterion, output, target, mask * 16, torch.full_like(mask, 16)) == expected
 
 
 def test_impact_stats_are_what_the_torchscript_models_read() -> None:

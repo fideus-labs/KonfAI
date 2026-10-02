@@ -88,11 +88,11 @@ WORKFLOW_SPECS: dict[str, WorkflowSpec] = {
 
 # konfai-apps job kinds (no session YAML of their own) -> the tool that relaunches them.
 APP_JOB_RETRY_TOOLS: dict[str, str] = {
-    "infer": "run_app_infer",
+    "infer": "run_app",
     "finetune": "fine_tune_app",
-    "evaluate": "run_app_evaluate",
-    "uncertainty": "run_app_uncertainty",
-    "pipeline": "run_app_pipeline",
+    "evaluate": "run_app",
+    "uncertainty": "run_app",
+    "pipeline": "run_app",
 }
 APP_JOB_KINDS: tuple[str, ...] = tuple(APP_JOB_RETRY_TOOLS)
 JOB_RETRY_TOOLS: dict[str, str] = {

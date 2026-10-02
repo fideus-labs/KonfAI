@@ -182,7 +182,7 @@ Common fields:
 | --- | --- | --- | --- |
 | `dataset_filenames` | list[str] | `["default\|./Dataset:mha"]` | Dataset sources and selection mode. |
 | `groups_src` | mapping | `{Labels: Group()}` | Maps on-disk groups to loaded tensors. The default binds a single group named `Labels`, which is almost never what you want: treat it as required. |
-| `augmentations` | mapping or null | one default augmentation list | Data augmentations sampled during training. |
+| `augmentations` | mapping or null | `null` | Data augmentations sampled during training. None when absent. |
 | `inline_augmentations` | bool | `false` | Keeps base samples cached and generates augmentation tensors only when an augmented sample is requested; augmentation states are re-sampled on each epoch. |
 | `Patch` | mapping or null | `DatasetPatch()` | Dataset-level patch extraction. |
 | `memory_budget` | number / string / null | `null` = `auto` | RAM budget the loading regime is derived from: the dataset caches when its per-rank share fits, streams otherwise. An absent key (`null`) means `auto`: 80% of the detected memory decides. |
@@ -193,7 +193,7 @@ Common fields:
 | `prefetch_factor` | int or null | `None` | Prefetched batches per worker. Applies only when workers are enabled, where `None` resolves to `2`. |
 | `persistent_workers` | bool or null | `None` | Keep workers alive across epochs. Applies only when workers are enabled, where `None` resolves to `true`. **Forced to `false`**: an explicit `true` included, when `inline_augmentations` is on with any augmentation declared, because persistent workers freeze the per-epoch redraw. |
 | `validation` | float / string / list / null | `0.2` | Validation split or explicit validation set. |
-| `validation_augmentations` | bool | `true` | Whether validation also iterates over augmented variants. Set `false` to validate only on base (non-augmented) samples. |
+| `validation_augmentations` | bool | `false` | Whether validation also iterates over augmented variants. Set `true` to validate on every augmented copy as well as the base samples. |
 | `shuffle` | bool | `true` through subset | Shuffles the training sampler. |
 | `shuffle_window` | int or null | `null` through subset | Locality-aware training order: shuffles cases, then keeps this many cases in play at a time with their patches shuffled together. Safe under DDP. |
 
@@ -327,6 +327,9 @@ Use this section to define:
 - preprocessing transforms
 - patch-specific transforms
 - whether the tensor is a model input
+
+An absent `transforms` or `patch_transforms` is no chain: the group reaches the
+model as stored.
 
 ## Examples
 

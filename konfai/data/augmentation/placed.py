@@ -215,7 +215,7 @@ class PlacedMask(DataAugmentation):
             else torch.tensor(self.value).to(tensor.device)
         )
         return torch.where(
-            mask.to(tensor.device) == 1,
+            mask.to(tensor.device) != 0,
             torch.nn.functional.pad(tensor, tuple(padding), mode="constant", value=value.item())[tuple(slices)],
             value,
         )

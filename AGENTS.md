@@ -124,9 +124,9 @@ pixi run check                                                    # lint + forma
 pixi run test                                                     # core unit + integration (tests/), ~6 min (pytest-xdist), not an iteration loop
 pixi run test-fast                                                # dev loop (~1m40): skips slow oracle + integration tests
 pixi run --environment dev typecheck                              # mypy konfai
-pip install -e ./konfai-apps && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate)
-pip install -e ./konfai-mcp  && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
-pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or every test skips)
+pixi run --environment dev python -m pip install -e "./konfai-apps[server]" && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate; [server] for the job-server tests)
+pixi run --environment dev python -m pip install -e ./konfai-mcp && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
+pixi run --environment dev python -m pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or every test skips)
 ```
 
 The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it every test skips and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).

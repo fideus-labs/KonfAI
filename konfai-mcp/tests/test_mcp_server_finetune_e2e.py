@@ -100,7 +100,7 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
 
     app_dir = tmp_path / "TinySynthApp"
     dataset_dir = tmp_path / "dataset"
-    output_dir = tmp_path / "FTBundle"
+    written: dict[str, Path] = {}
     _write_finetunable_app(app_dir)
     create_synthesis_dataset(dataset_dir)
 
@@ -117,7 +117,7 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
                 {
                     "ref": str(app_dir),
                     "dataset": str(dataset_dir),
-                    "output": str(output_dir),
+                    "output": "FTBundle",  # inside the session workspace, like every app job
                     "name": "FT",
                     "epochs": 1,
                     "it_validation": 1,
@@ -127,7 +127,8 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
             )
             payload = job.structured_content
             assert payload["kind"] == "finetune"
-            assert payload["output"] == str(output_dir)
+            written["bundle"] = Path(payload["output"])
+            assert written["bundle"].name == "FTBundle"
 
             done = await client.call_tool(
                 "wait_for_job", {"job_id": payload["job_id"], "timeout_s": 300.0, "poll_interval_s": 0.5}
@@ -135,9 +136,10 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
             if done.structured_content["status"] != "done":
                 log = await client.read_resource(f"job://{payload['job_id']}/log")
                 raise AssertionError(f"fine_tune_app failed: {done.structured_content}\n{resource_to_text(log)}")
-            assert "run_app_infer" in done.structured_content["next_actions"]
+            assert "run_app" in done.structured_content["next_actions"]
 
     asyncio.run(scenario())
+    output_dir = written["bundle"]
 
     # The produced bundle is a resolvable app: manifest + train config + code + fine-tuned checkpoint.
     metadata = json.loads((output_dir / "app.json").read_text(encoding="utf-8"))

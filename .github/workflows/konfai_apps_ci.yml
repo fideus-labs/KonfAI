@@ -86,7 +86,7 @@ jobs:
 
       - name: Install standalone apps package
         run: |
-          pip install -e ./konfai-apps
+          pip install -e "./konfai-apps[server]"
 
       - name: Run apps tests
         run: |

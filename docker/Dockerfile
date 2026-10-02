@@ -29,7 +29,8 @@ RUN chmod +x /usr/local/bin/konfai-entrypoint \
     # Resolved through a variable because the shell would read the `[...]` of a glob as a character
     # class. `konfai-*` cannot match a sibling: a wheel spells `konfai-apps` as `konfai_apps`.
     && konfai_wheel="$(ls /tmp/dist/konfai-*.whl)" \
-    && pip install "${konfai_wheel}[${KONFAI_EXTRAS}]" /tmp/dist/konfai_apps-*.whl \
+    && apps_wheel="$(ls /tmp/dist/konfai_apps-*.whl)" \
+    && pip install "${konfai_wheel}[${KONFAI_EXTRAS}]" "${apps_wheel}[server]" \
     && rm -rf /tmp/dist
 
 WORKDIR /workspace

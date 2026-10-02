@@ -230,11 +230,12 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
 
 1. **Use an app as-is**, no training. Discover with `list_apps`, read each
    candidate's manifest with `describe_app` (judge fit from the app's own
-   description and its declared inputs/outputs), then run it **as published**:
-   - `run_app_infer`: inference on the user's data
-   - `run_app_evaluate`: score predictions with the app's own metrics
-   - `run_app_uncertainty`: uncertainty maps
-   - `run_app_pipeline`: infer → evaluate → uncertainty in one call
+   description and its declared inputs/outputs), then run it **as published**
+   with `run_app`, whose `action` picks what runs:
+   - `infer`: inference on the user's data
+   - `evaluate`: score predictions with the app's own metrics
+   - `uncertainty`: uncertainty maps
+   - `pipeline`: infer → evaluate → uncertainty in one job
    - `list_app_parameters` / `set_parameters`: read tunable parameters (with
      their constraints) and override them per run
    - `import_app`: only when the app must be **modified** first. It copies the
@@ -248,7 +249,7 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
    `package_app_from_session` turns the trained model into a bundle too.
 
 Both training paths therefore **end at the same reusable artifact, a bundle**,
-which `describe_app` / `run_app_infer` can then consume, and `export_app` can
+which `describe_app` / `run_app` can then consume, and `export_app` can
 snapshot (with tuned parameters baked in) as the reproducibility record a
 challenge submission wants. (A remote `host:port:name` app keeps its code on the
 user's own server; it is not runnable from the MCP server. Drive it with

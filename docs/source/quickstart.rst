@@ -111,9 +111,6 @@ structure to ``1`` and background to ``0``. Then change:
   divides intensities by 300; choose normalization appropriate for your data.
 * Model parameters in **both** configs. A different class count also requires
   matching training/evaluation ``Dice.labels``.
-* ``patch_transforms: None`` on every group and the two
-  ``*_reduction_transforms: None`` on the output: an absent key defaults to a
-  ``Normalize`` to ``[-1, 1]``.
 
 The verifier knows these four cases; for your dataset, give it your case
 names. :doc:`examples/segmentation` describes the larger

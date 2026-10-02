@@ -147,7 +147,7 @@ class Clip(Transform):
                 f" {list(tensor.shape)}: it cannot be indexed against a region.",
                 "A masked bound needs the whole volume here; report this if the chain was planned.",
             )
-        return tensor[mask == 1]
+        return tensor[mask != 0]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         seeded_masked = self.mask is not None and "StatisticsSeeded" in cache_attribute
@@ -382,7 +382,7 @@ class Standardize(TransformInverse):
                 f" {list(tensor.shape)}: it cannot be indexed against a region.",
                 "A masked statistic needs the whole volume here; report this if the chain was planned.",
             )
-        return tensor[mask == 1]
+        return tensor[mask != 0]
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.mask is not None and (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute:

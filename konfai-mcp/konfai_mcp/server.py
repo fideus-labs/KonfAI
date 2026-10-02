@@ -1372,7 +1372,7 @@ def import_app(
     )
 
 
-# Parameter descriptions shared by the app-execution tools below (one wording, five tools).
+# Parameter descriptions shared by the app-execution tools below (one wording, two tools).
 _APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
@@ -1389,190 +1389,135 @@ _APP_SET_PARAMETERS_DESC = "Model tuning NAME->VALUE overrides (e.g. {'iteration
 _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_infer"]))
-def run_app_infer(
+# What each run_app action reads beyond ref, inputs, output and the device and trust parameters.
+_APP_ACTION_PARAMETERS: dict[str, set[str]] = {
+    "infer": {"tta", "ensemble", "ensemble_models", "patch_size", "batch_size", "set_parameters", "uncertainty"},
+    "evaluate": {"gt", "mask", "evaluation_file"},
+    "uncertainty": {"uncertainty_file"},
+    "pipeline": {
+        "gt",
+        "mask",
+        "tta",
+        "ensemble",
+        "ensemble_models",
+        "patch_size",
+        "batch_size",
+        "set_parameters",
+        "uncertainty",
+    },
+}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app"]))
+def run_app(
     ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    action: Annotated[
+        Literal["infer", "evaluate", "uncertainty", "pipeline"],
+        Field(
+            description="infer: predictions; evaluate: score the inputs against gt with the app's evaluation config; "
+            "uncertainty: maps from multi-channel inference stacks; pipeline: infer, then evaluate when gt is given, "
+            "then uncertainty."
+        ),
+    ],
     inputs: Annotated[
         list[list[str]],
         Field(
-            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
+            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory "
+            "paths, paired by order across groups (evaluate: the predictions; uncertainty: the inference stacks)."
         ),
     ],
     output: Annotated[
         str | None,
         Field(
-            description="Output directory for the reassembled predictions (default: a unique dir under the session workspace AppOutputs/)."
+            description="Output directory inside the session workspace (default: a unique directory under "
+            "AppOutputs/, AppEvaluations/, AppUncertainties/ or AppPipelines/)."
         ),
     ] = None,
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    tta: Annotated[int, Field(description=_APP_TTA_DESC)] = 0,
-    ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
-    ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
-    patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
-    batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
-    set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
-    uncertainty: Annotated[
-        bool,
-        Field(description="Keep the multi-channel inference stacks that run_app_uncertainty consumes (default False)."),
-    ] = False,
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Run a published KonfAI app on the user's data as a tracked inference job (local / HuggingFace)."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_infer(
-            ref=ref,
-            inputs=inputs,
-            output=output,
-            gpu=gpu,
-            cpu=cpu,
-            tta=tta,
-            ensemble=ensemble,
-            ensemble_models=ensemble_models,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            uncertainty=uncertainty,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_evaluate"]))
-def run_app_evaluate(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Prediction volumes as GROUPS (one inner list per group, each a list of file/dir paths, paired by order)."
-        ),
-    ],
-    gt: Annotated[list[list[str]], Field(description="Ground-truth volumes as GROUPS, paired with inputs by order.")],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the metric JSON (default: a unique dir under the session workspace AppEvaluations/)."
-        ),
-    ] = None,
-    mask: Annotated[list[list[str]] | None, Field(description=_APP_MASK_DESC)] = None,
-    evaluation_file: Annotated[
-        str, Field(description="Which evaluation config of the app to run (default 'Evaluation.yml').")
-    ] = "Evaluation.yml",
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Score predictions vs ground truth with a published app's own evaluation config, as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_evaluate(
-            ref=ref,
-            inputs=inputs,
-            gt=gt,
-            output=output,
-            mask=mask,
-            evaluation_file=evaluation_file,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_uncertainty"]))
-def run_app_uncertainty(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Multi-channel inference stacks as GROUPS (typically produced by run_app_infer with uncertainty=True)."
-        ),
-    ],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the uncertainty maps (default: a unique dir under the session workspace AppUncertainties/)."
-        ),
-    ] = None,
-    uncertainty_file: Annotated[
-        str, Field(description="Which uncertainty config of the app to run (default 'Uncertainty.yml').")
-    ] = "Uncertainty.yml",
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Run a published app's uncertainty estimation on inference stacks, as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_uncertainty(
-            ref=ref,
-            inputs=inputs,
-            output=output,
-            uncertainty_file=uncertainty_file,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_pipeline"]))
-def run_app_pipeline(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
-        ),
-    ],
     gt: Annotated[
         list[list[str]] | None,
-        Field(description="Ground-truth volumes as GROUPS; providing them enables the evaluation stage."),
+        Field(description="evaluate, pipeline: ground-truth volumes as GROUPS, paired with inputs by order."),
     ] = None,
-    output: Annotated[
-        str | None,
+    mask: Annotated[list[list[str]] | None, Field(description="evaluate, pipeline: " + _APP_MASK_DESC)] = None,
+    tta: Annotated[int | None, Field(description="infer, pipeline: " + _APP_TTA_DESC)] = None,
+    ensemble: Annotated[int | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_DESC)] = None,
+    ensemble_models: Annotated[
+        list[str] | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_MODELS_DESC)
+    ] = None,
+    patch_size: Annotated[list[int] | None, Field(description="infer, pipeline: " + _APP_PATCH_SIZE_DESC)] = None,
+    batch_size: Annotated[int | None, Field(description="infer, pipeline: " + _APP_BATCH_SIZE_DESC)] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None, Field(description="infer, pipeline: " + _APP_SET_PARAMETERS_DESC)
+    ] = None,
+    uncertainty: Annotated[
+        bool | None,
         Field(
-            description="Output directory for the Predictions/Evaluations/Uncertainties subdirs (default: a unique dir under the session workspace AppPipelines/)."
+            description="infer: keep the multi-channel inference stacks an uncertainty action consumes (default "
+            "False); pipeline: run the uncertainty stage (default True)."
         ),
     ] = None,
-    mask: Annotated[list[list[str]] | None, Field(description=_APP_MASK_DESC)] = None,
-    tta: Annotated[int, Field(description=_APP_TTA_DESC)] = 0,
-    ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
-    ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
-    patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
-    batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
-    set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
-    uncertainty: Annotated[bool, Field(description="Run the uncertainty stage (default True).")] = True,
+    evaluation_file: Annotated[
+        str | None, Field(description="evaluate: which evaluation config of the app to run (default 'Evaluation.yml').")
+    ] = None,
+    uncertainty_file: Annotated[
+        str | None,
+        Field(description="uncertainty: which uncertainty config of the app to run (default 'Uncertainty.yml')."),
+    ] = None,
     gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
     cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
     allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
     force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
 ) -> dict[str, Any]:
-    """Run a published app's full infer -> evaluate -> uncertainty pipeline as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_pipeline(
-            ref=ref,
-            inputs=inputs,
-            gt=gt,
-            output=output,
-            mask=mask,
-            tta=tta,
-            ensemble=ensemble,
-            ensemble_models=ensemble_models,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            uncertainty=uncertainty,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
+    """Run a published KonfAI app on the user's data, as published, as a tracked job (local / HuggingFace)."""
+    given = {
+        "gt": gt,
+        "mask": mask,
+        "tta": tta,
+        "ensemble": ensemble,
+        "ensemble_models": ensemble_models,
+        "patch_size": patch_size,
+        "batch_size": batch_size,
+        "set_parameters": set_parameters,
+        "uncertainty": uncertainty,
+        "evaluation_file": evaluation_file,
+        "uncertainty_file": uncertainty_file,
+    }
+    stray = {name for name, value in given.items() if value is not None} - _APP_ACTION_PARAMETERS[action]
+    if stray:
+        raise ValueError(
+            f"run_app action '{action}' does not read {', '.join(sorted(stray))}; it reads "
+            f"{', '.join(sorted(_APP_ACTION_PARAMETERS[action]))}."
         )
-    )
+    common: dict[str, Any] = {
+        "ref": ref,
+        "inputs": inputs,
+        "output": output,
+        "gpu": gpu,
+        "cpu": cpu,
+        "allow_untrusted_code": allow_untrusted_code,
+        "force_update": force_update,
+    }
+    if action == "evaluate":
+        spec = APP_SERVICE.prepare_evaluate(
+            **common, gt=gt or [], mask=mask, evaluation_file=evaluation_file or "Evaluation.yml"
+        )
+    elif action == "uncertainty":
+        spec = APP_SERVICE.prepare_uncertainty(**common, uncertainty_file=uncertainty_file or "Uncertainty.yml")
+    else:
+        model: dict[str, Any] = {
+            "tta": tta or 0,
+            "ensemble": ensemble or 0,
+            "ensemble_models": ensemble_models,
+            "patch_size": patch_size,
+            "batch_size": batch_size,
+            "config_overrides": _config_overrides(set_parameters),
+        }
+        if action == "infer":
+            spec = APP_SERVICE.prepare_infer(**common, **model, uncertainty=bool(uncertainty))
+        else:
+            spec = APP_SERVICE.prepare_pipeline(
+                **common, **model, gt=gt, mask=mask, uncertainty=uncertainty is not False
+            )
+    return _launch_app_job(spec)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))

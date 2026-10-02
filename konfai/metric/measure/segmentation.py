@@ -270,12 +270,11 @@ class Dice(Criterion):
     @staticmethod
     def _masked(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
         """The pair with every voxel outside the mask sent to the background, when a mask is given.
-        A bool mask multiplies in each tensor's own dtype: ``torch.where(mask == 1, 1, 0)`` was
-        8 B/voxel of int64 for the same product."""
+        The bool mask multiplies in each tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel
+        for the same product."""
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return output, targets[0]
-        mask = mask == 1
         return output * mask, targets[0] * mask
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:

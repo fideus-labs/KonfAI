@@ -85,10 +85,9 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     # The bundle ships a Config.yml, so it is finetunable and offers fine_tune_app.
     assert payload["finetunable"] is True
     # An inference-capable app routes forward to the run/tune tools instead of dead-ending.
-    assert payload["next_actions"][0] == "run_app_infer"
+    assert payload["next_actions"][0] == "run_app"
     assert "fine_tune_app" in payload["next_actions"]
     assert "import_app" in payload["next_actions"]  # the modify-then-run path stays offered
-    assert "run_app_evaluate" not in payload["next_actions"]
 
 
 def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
@@ -114,7 +113,7 @@ def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
 
     payload = _service(tmp_path).describe_app(str(app_dir))
     assert payload["capabilities"]["inference"] is False
-    assert "run_app_infer" not in payload["next_actions"]
+    assert "run_app" not in payload["next_actions"]
     assert "import_app" not in payload["next_actions"]
     assert "design_config_strategy" in payload["next_actions"]
 
@@ -360,7 +359,7 @@ def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) ->
     assert (bundle / "model.pt").exists()
     assert not (bundle / "resume_latest.pt").exists()
     assert result["checkpoints"] == ["model.pt"]
-    assert result["next_actions"] == ["describe_app", "run_app_infer", "import_app"]
+    assert result["next_actions"] == ["describe_app", "run_app", "import_app"]
     meta = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
     assert meta["display_name"] == "My App"
     assert meta["short_description"] == "My App"
@@ -492,10 +491,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             "import_app",
             "register_app_source",
             "unregister_app_source",
-            "run_app_infer",
-            "run_app_evaluate",
-            "run_app_uncertainty",
-            "run_app_pipeline",
+            "run_app",
             "fine_tune_app",
             "package_app_from_session",
         )
@@ -515,7 +511,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert "solve_task" in index["prompts"]
         solve = server.prompt_solve_task("segment the liver", "one CT group")
         content = solve[0]["content"]
-        for tool in ("run_app_infer", "fine_tune_app", "import_app", "design_config_strategy"):
+        for tool in ("run_app", "fine_tune_app", "import_app", "design_config_strategy"):
             assert tool in content
 
         app_dir = _write_local_app(tmp_path)
@@ -584,7 +580,7 @@ def test_describe_app_inference_only_is_not_finetunable(tmp_path: Path) -> None:
     assert payload["finetunable"] is False
     assert "fine_tune_app" not in payload["next_actions"]
     # Inference routing is unaffected.
-    assert payload["next_actions"][0] == "run_app_infer"
+    assert payload["next_actions"][0] == "run_app"
 
 
 def test_prepare_infer_gates_local_app(tmp_path: Path) -> None:
@@ -804,8 +800,9 @@ def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.M
 
         monkeypatch.setattr(server.JOB_REGISTRY, "launch", fake_launch)
 
-        payload = server.run_app_infer(
+        payload = server.run_app(
             ref=str(app_dir),
+            action="infer",
             inputs=_dummy_inputs(tmp_path),
             allow_untrusted_code=True,
             cpu=2,
@@ -832,6 +829,39 @@ def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.M
         assert captured["target"] == "konfai_mcp.runner:run_finetune_api"
         assert captured["kwargs"]["epochs"] == 2  # type: ignore[index]
         assert tuned["kind"] == "finetune"
+
+        # One tool, four actions, each on its runner; a parameter the action does not read is refused.
+        truth = _dummy_inputs(tmp_path / "gt")
+        for action, extra, kind in (
+            ("evaluate", {"gt": truth}, "evaluate"),
+            ("uncertainty", {}, "uncertainty"),
+            ("pipeline", {"gt": truth, "tta": 2}, "pipeline"),
+        ):
+            server.run_app(
+                ref=str(app_dir), action=action, inputs=_dummy_inputs(tmp_path), allow_untrusted_code=True, **extra
+            )
+            assert captured["kind"] == kind
+            assert captured["target"] == "konfai_mcp.runner:run_app_action_api"
+        with pytest.raises(ValueError, match="does not read tta"):
+            server.run_app(ref=str(app_dir), action="evaluate", inputs=_dummy_inputs(tmp_path), gt=truth, tta=2)
+
+        # Every app job writes inside the session workspace: an output elsewhere is refused.
+        with pytest.raises(ValueError, match="escapes the session workspace"):
+            server.run_app(
+                ref=str(app_dir),
+                action="infer",
+                inputs=_dummy_inputs(tmp_path),
+                output=str(tmp_path / "elsewhere"),
+                allow_untrusted_code=True,
+            )
+        with pytest.raises(ValueError, match="escapes the session workspace"):
+            server.fine_tune_app(
+                ref=str(app_dir), dataset=str(dataset), output=str(tmp_path / "elsewhere"), allow_untrusted_code=True
+            )
+        inside = server.run_app(
+            ref=str(app_dir), action="infer", inputs=_dummy_inputs(tmp_path), output="Mine", allow_untrusted_code=True
+        )
+        assert inside["output"] == str(server.WORKSPACE_LAYOUT.workspace_dir().resolve() / "Mine")
     finally:
         sys.modules.pop("konfai_mcp.server", None)
 
@@ -841,7 +871,7 @@ def test_app_execution_tool_schemas_reach_the_client(
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    """The five app-execution tools were exercised at function level only; a broken Annotated/Field on
+    """The two app-execution tools were exercised at function level only; a broken Annotated/Field on
     any of them would surface as a client-side schema hole, invisible to those tests."""
     import fastmcp
 
@@ -854,10 +884,7 @@ def test_app_execution_tool_schemas_reach_the_client(
 
     schemas = asyncio.run(scenario())
     expected = {
-        "run_app_infer": {"ref", "inputs", "output"},
-        "run_app_evaluate": {"ref", "inputs", "gt"},
-        "run_app_uncertainty": {"ref", "inputs"},
-        "run_app_pipeline": {"ref", "inputs", "gt"},
+        "run_app": {"ref", "action", "inputs", "output", "gt", "uncertainty_file"},
         "fine_tune_app": {"ref", "dataset", "output"},
     }
     for name, required_params in expected.items():

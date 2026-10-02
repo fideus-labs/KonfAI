@@ -285,9 +285,9 @@ class AppService:
         inference, evaluation, uncertainty = info.has_capabilities()
         finetunable = info.is_finetunable()
 
-        # Route by what the app can actually do instead of dead-ending on describe/design. The run_app_*
-        # tools run the app AS PUBLISHED; import_app is offered beside them for the case where the app has
-        # to be modified first. fine_tune_app is only offered when the app ships a train config to
+        # Route by what the app can actually do instead of dead-ending on describe/design. run_app runs the
+        # app AS PUBLISHED; import_app is offered beside it for the case where the app has to be modified
+        # first. fine_tune_app is only offered when the app ships a train config to
         # warm-start from, so an inference-only bundle never routes the agent to a tool it cannot use.
         source = _source_of(info)
         next_actions: list[str] = []
@@ -298,11 +298,7 @@ class AppService:
             # it, so route to discovery rather than to tools that would refuse the reference.
             next_actions.append("list_apps")
         else:
-            next_actions.extend(["run_app_infer", "list_app_parameters", "run_app_pipeline", "import_app"])
-            if evaluation:
-                next_actions.append("run_app_evaluate")
-            if uncertainty:
-                next_actions.append("run_app_uncertainty")
+            next_actions.extend(["run_app", "list_app_parameters", "import_app"])
             if finetunable:
                 next_actions.append("fine_tune_app")
 
@@ -387,7 +383,7 @@ class AppService:
             "source": payload.get("source", "local"),
             "values": payload.get("values", {}),
             "constraints": payload.get("constraints", {}),
-            "next_actions": ["run_app_infer", "run_app_pipeline", "import_app", "export_app"],
+            "next_actions": ["run_app", "import_app", "export_app"],
         }
 
     def export_app(
@@ -415,7 +411,7 @@ class AppService:
         return {
             "ref": ref,
             "exported_to": str(target),
-            "next_actions": ["describe_app", "run_app_infer", "import_app", "register_app_source"],
+            "next_actions": ["describe_app", "run_app", "import_app", "register_app_source"],
         }
 
     def import_app(
@@ -544,6 +540,12 @@ class AppService:
         # Unique suffix so re-running the same app does not silently overwrite a previous run.
         return str(self.workspace_layout.workspace_dir() / subdir / f"{label}-{uuid.uuid4().hex[:8]}")
 
+    def _output_in_session(self, output: str) -> str:
+        """An app job writes inside the session workspace, like every other tool: the jail refuses the rest.
+        The job creates that workspace at launch anyway, so it exists before the output is resolved in it."""
+        self.workspace_layout.ensure_session_workspace()
+        return str(self.workspace_layout.resolve_workspace_relative_path(output))
+
     @staticmethod
     def _param_label_suffix(config_overrides: list[str] | None) -> str:
         """A short signature of the applied ``--set`` overrides, appended to a tuned trial's output label so
@@ -600,9 +602,7 @@ class AppService:
         label = self.workspace_layout.sanitize_name(
             f"app_{self._app_label(ref)}{self._param_label_suffix(config_overrides)}"
         )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppOutputs", label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output("AppOutputs", label)
 
         kwargs: dict[str, Any] = {
             "ref": ref,
@@ -674,9 +674,7 @@ class AppService:
         label = self.workspace_layout.sanitize_name(
             f"{label_prefix}_{self._app_label(ref)}{self._param_label_suffix(merged_extra.get('config_overrides'))}"
         )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output(output_subdir, label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output(output_subdir, label)
         kwargs: dict[str, Any] = {
             "ref": ref,
             "action": action,
@@ -845,9 +843,7 @@ class AppService:
         label = self.workspace_layout.sanitize_name(
             f"finetune_{self._app_label(ref)}{self._param_label_suffix(labelled_params)}"
         )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppBundles", label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output("AppBundles", label)
 
         kwargs: dict[str, Any] = {
             "ref": ref,
@@ -898,7 +894,7 @@ class AppService:
 
         Gathers checkpoints and a config from the current session workspace (or explicit paths),
         synthesizes an ``app.json`` from the given metadata, and writes a bundle (app.json + config +
-        checkpoint + optional Model.py/requirements) that ``describe_app`` / ``run_app_infer`` can then
+        checkpoint + optional Model.py/requirements) that ``describe_app`` / ``run_app`` can then
         consume. This closes the train-from-scratch branch onto the same bundle endpoint as fine-tuning.
         """
         from konfai_apps import bundle
@@ -931,7 +927,7 @@ class AppService:
         }
         # Derive inputs/outputs from the config so the bundle is actually runnable: describe_app reports
         # capabilities.inference from len(get_inputs()) > 0, so without these the packaged app reads as
-        # non-runnable and routes the agent back to design_config_strategy instead of run_app_infer.
+        # non-runnable and routes the agent back to design_config_strategy instead of run_app.
         inputs, outputs = self._derive_app_io(resolved_configs)
         if inputs:
             metadata["inputs"] = inputs
@@ -965,7 +961,7 @@ class AppService:
             "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
-            "next_actions": ["describe_app", "run_app_infer", "import_app"],
+            "next_actions": ["describe_app", "run_app", "import_app"],
         }
         if any(Path(path).name == "Config.yml" for path in resolved_configs):
             result["warnings"] = [
