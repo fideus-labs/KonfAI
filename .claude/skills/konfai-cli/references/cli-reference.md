@@ -24,7 +24,7 @@ EVALUATION to `konfai.evaluator.evaluate`, TRANSFORM to `konfai.transformer.tran
 | `--gpu ID [ID ...]` | GPU device ids, constrained to the visible devices, e.g. `--gpu 0` or `--gpu 0 1 2`. Omit to run on CPU. |
 | `--cpu N` | Run on CPU with `N` (>0) worker processes. **Mutually exclusive with `--gpu`.** |
 | `-q`, `--quiet` | Suppress console output. |
-| `-tb`, `--tensorboard` | Launch TensorBoard (needs the `tensorboard` extra). Not accepted by `EVALUATION` or `TRANSFORM`. |
+| `-tb`, `--tensorboard` | Launch TensorBoard on `127.0.0.1` (needs the `tensorboard` extra; remote: `ssh -N -L <port>:127.0.0.1:<port>`, or `KONFAI_TENSORBOARD_HOST=0.0.0.0` to serve every interface). Not accepted by `EVALUATION` or `TRANSFORM`. |
 | `--init` | Create the config file if missing, resolve every default into it, and exit without running. |
 
 `--gpu` and `--cpu` are a mutually-exclusive group. With neither, execution falls back to CPU.

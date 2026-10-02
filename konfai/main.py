@@ -82,7 +82,12 @@ def _add_common_args(parser: argparse.ArgumentParser, command: State, tensorboar
     )
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress console output for a quieter execution")
     if tensorboard:
-        parser.add_argument("-tb", "--tensorboard", action="store_true", help="Launch TensorBoard.")
+        parser.add_argument(
+            "-tb",
+            "--tensorboard",
+            action="store_true",
+            help="Launch TensorBoard on 127.0.0.1 (KONFAI_TENSORBOARD_HOST names another address).",
+        )
     parser.add_argument(
         "--init",
         action="store_true",

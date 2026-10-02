@@ -24,12 +24,25 @@ konfai TRAIN -y --gpu 0 --config Config.yml
 
 If you do not have a GPU available, use `--cpu 1` instead of `--gpu 0`.
 
-Add `-tb` to enable TensorBoard: KonfAI allocates a free local port
-automatically:
+Add `-tb` to enable TensorBoard: KonfAI allocates a free port and prints the
+address to open, `http://127.0.0.1:<port>/`:
 
 ```bash
 konfai TRAIN -y --gpu 0 --config Config.yml -tb
 ```
+
+TensorBoard binds `127.0.0.1` only: it has no authentication, and whoever
+reaches the port sees the curves and the `data_log` images. To follow a run on
+a remote machine, forward the port over SSH from your own computer, then open
+the same address there:
+
+```bash
+ssh -N -L <port>:127.0.0.1:<port> user@server
+```
+
+`KONFAI_TENSORBOARD_HOST` names another address to bind:
+`KONFAI_TENSORBOARD_HOST=0.0.0.0` serves every interface, and KonfAI prints the
+machine's network address instead.
 
 TensorBoard is optional: without the `tensorboard` extra the run trains
 normally with a no-op writer and one warning naming
@@ -258,10 +271,10 @@ still stream.
 A cached case is resident, so its patches are cut from RAM even when its chain
 would stream.
 
-A 16 GiB uncompressed `.mha` at patch 64³, batch 2, 2 workers on the streaming
-regime, run under an 8 GiB memory cap, streamed at a peak anonymous
-RSS of 0.46 GiB, flat across epochs, with one batch (2 MiB) resident on the GPU
-(measured for aa69df3a, 2026-07-15).
+`benchmarks/perf/bench_train_stream.py` measures both regimes on synthetic
+cases, one storage backend at a time: the peak RSS of the process tree and the
+time the loop waits on data, with the whole dataset cached against every patch
+read from the store.
 
 ### `memory_budget`
 

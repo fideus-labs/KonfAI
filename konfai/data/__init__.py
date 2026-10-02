@@ -58,8 +58,8 @@ from konfai.data.transform import (
 )
 from konfai.utils.dataset import Attribute, Dataset
 
-# The OME-Zarr helpers are part of this surface but resolved on first use: their module pulls dask,
-# zarr and ngff-zarr, half a second of every process start, for a job that may never touch a store.
+# The OME-Zarr helpers are part of this surface but resolved on first use: their module pulls
+# zarr, and ngff-zarr and dask once a store is read, for a job that may never touch one.
 _OME_ZARR = (
     "append_ome_zarr_levels",
     "create_ome_zarr_store",

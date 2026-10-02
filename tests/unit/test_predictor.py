@@ -522,14 +522,15 @@ def test_a_checkpoint_path_that_does_not_exist_is_refused_before_the_build(
 
     monkeypatch.chdir(tmp_path)
     config = tmp_path / "Prediction.yml"
-    config.write_text("Predictor:\n  train_name: MISSING_CHECKPOINT\n", encoding="utf-8")
+    YAML().dump(_tiny_synthesis(tmp_path, monkeypatch), config)
+    written = config.read_bytes()
 
     with pytest.raises(PredictorError) as refused:
         predict(models=["nope.pt"], quiet=True, prediction_file=config, predictions_dir=tmp_path / "Predictions")
 
     message = str(refused.value)
     assert "[Predictor] Checkpoint 'nope.pt' does not exist" in message and str(tmp_path / "nope.pt") in message
-    assert config.read_text(encoding="utf-8") == "Predictor:\n  train_name: MISSING_CHECKPOINT\n"
+    assert config.read_bytes() == written
     assert not (tmp_path / "Predictions").exists()
 
 

@@ -182,6 +182,16 @@ def _total(values: list[float], patches: list[int]) -> tuple[float, int]:
     return float(np.sum(np.where(kept, value, 0.0) * weight)), int(np.sum(np.where(kept, weight, 0)))
 
 
+def _summed(losses: Iterable[torch.Tensor]) -> torch.Tensor:
+    """Zero plus each loss in turn, the running sum moving to each one's device. The zero is made on the
+    first loss's device: one made on the host costs an upload, and on CUDA a stream synchronization."""
+    total: torch.Tensor | None = None
+    for loss in losses:
+        start = torch.zeros(1, device=loss.device, requires_grad=True) if total is None else total.to(loss.device)
+        total = start + loss
+    return torch.zeros(1, requires_grad=True) if total is None else total
+
+
 def _ratio(total: tuple[float, int]) -> float:
     return total[0] / total[1] if total[1] else float("nan")
 
@@ -454,25 +464,17 @@ class Measure:
                             if record.accumulation and record.is_loss
                         ]
                         if len({len(record) for record in accumulated}) == 1:
-                            loss = torch.zeros(1, requires_grad=True)
-                            for record in accumulated:
-                                loss_value = record.get_last_loss()
-                                loss = loss.to(loss_value.device) + loss_value
-                            loss = loss / nb_patch
+                            loss = _summed(record.get_last_loss() for record in accumulated) / nb_patch
                             if self.scaler is not None:
                                 self.scaler.scale(loss).backward()
                             else:
                                 loss.backward()
 
     def get_loss(self) -> list[torch.Tensor]:
-        loss: dict[int, torch.Tensor] = {}
-        for group in self._loss.keys():
-            loss[group] = torch.zeros(1, requires_grad=True)
-            for v in self._loss[group].values():
-                if v.is_loss and not v.accumulation:
-                    loss_value = v.get_loss()
-                    loss[v.group] = loss[v.group].to(loss_value.device) + loss_value
-        return list(loss.values())
+        return [
+            _summed(v.get_loss() for v in group.values() if v.is_loss and not v.accumulation)
+            for group in self._loss.values()
+        ]
 
     def reset_loss(self) -> None:
         for group in self._loss.keys():

@@ -194,12 +194,10 @@ compare.
 every stage streams: each patch's source region is read straight from the file,
 and the result is written slab by slab as it completes. Neither the input nor the
 output is ever held whole. A stage that cannot stream takes the whole-volume
-path described below. A 16 GiB
-uncompressed volume trained at a peak of **0.46 GiB of host RAM**, stable across
-epochs, with VRAM equal to one batch (patch 64³, batch 2, under an 8 GiB cap;
-measured for aa69df3a, 2026-07-15). For `TRANSFORM` the bound is reproducible
-with one command, `python benchmarks/bench_streaming.py --gib 16 --budget 1`,
-which transforms a 16 GiB volume under a 1 GiB budget: see
+path described below. Under `TRANSFORM`, peak host memory follows the declared
+`memory_budget`, not the volume:
+`python benchmarks/bench_streaming.py --gib 16 --budget 1` reports the peak of a
+16 GiB volume under a 1 GiB budget, see
 [Reproducing the numbers](#reproducing-the-numbers).
 
 That is not only a memory story. Running published models through KonfAI, on the
@@ -499,15 +497,23 @@ the same footing.
 
 ### Protocol
 
-- Wall time is the median of 3 runs after 1 warmup, on an otherwise idle
-  machine.
-- Host memory is the peak resident set of the whole process tree (`psutil`),
-  sampled at 50 ms, so DataLoader workers and spawned ranks count.
-- Device memory is `torch.cuda.max_memory_allocated()`, with the NVML
-  per-process figure reported beside it when available; the two overlap and are
-  never summed.
-- Every report line carries the konfai/torch/SimpleITK versions, CPU model,
-  GPU model, and the input's shape, dtype and checksum.
+The harness under `benchmarks/perf/` enforces it (its README has the details):
+
+- A bench refuses to time a machine that is not quiet (load average, power
+  profile, a GPU or a core in use by another process); `--force` records the
+  numbers with the warnings.
+- Every result carries a fingerprint: the commit and its dirty flag, the
+  versions, CPU, GPU and driver, the power profile, the load average and the
+  thread pin.
+- Wall time is the median of three runs after a warm-up (`bench_apps.py`: one
+  run per case and tool, after a warm-up).
+- Host memory is the peak resident set of the whole process tree, sampled at
+  50 ms, so DataLoader workers and spawned ranks count; device memory is what
+  the run adds to the GPU's used memory.
+
+`benchmarks/bench_streaming.py` sits outside that harness: it times one run and
+prints the peak resident set of the process tree, the wall time and the
+versions of konfai, numpy and Python.
 
 ### The streaming claim
 
@@ -527,10 +533,6 @@ over it under a declared `--budget` GiB, and reports the whole-process-tree
 peak RSS beside both figures. Smaller sizes (`--gib 4`, the default) tell the
 same story faster.
 
-`benchmarks/bench_hotpaths.py` covers the framework-side hot paths (the
-residual `Add` fold, the one-pass collate view, the deferred criterion
-readout): micro-costs the docs assert are held rather than headline claims.
-
 ### The app comparison tables
 
 The published tables (KonfAI-MRSegmentator and KonfAI-TotalSegmentator against
@@ -538,10 +540,12 @@ the original tools, same weights, same card) live with the apps:
 [MRSegmentator](https://github.com/fideus-labs/KonfAI/tree/main/apps/mrsegmentator)
 and
 [TotalSegmentator](https://github.com/fideus-labs/KonfAI/tree/main/apps/totalsegmentator).
-Each bundle README states its case sizes, ensemble and hardware conditions and
-is produced under the protocol above; re-running them needs the published
-weights and a licensed case, which is why they are app-level entries rather
-than a synthetic one-command script.
+Each bundle README states its case sizes, ensemble, hardware and date.
+`benchmarks/perf/bench_apps.py` produces them from a manifest that names each
+app's command, the original tool's command and the S/M/L cases
+(`apps_manifest.example.json` shows its shape); re-running them needs the
+published weights, the original tools in an environment of their own and the
+cases, none of which is in the repository.
 
 Those tables are per-app measurements, not a claim of universal speedups:
 compare on your own cases before drawing conclusions for your workload.

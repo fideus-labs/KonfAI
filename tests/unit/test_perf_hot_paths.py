@@ -96,6 +96,7 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
     ds._names_cache = {}
     ds._infos_cache = {}
     ds._case_paths = {}
+    ds._entry_paths = {}
     ds._root_seen = False
     ds.case_facts = {}
     ds.scale_factors = None

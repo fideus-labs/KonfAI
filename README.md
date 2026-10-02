@@ -283,14 +283,12 @@ streamability from the transforms you declared:
 
 A chain streams when every step declares the region it needs: the exact patch
 (`OneHot`), a halo (`Dilate`), a remap (`Flip`), a resample (`Resample`),
-or a whole-volume statistic read once from disk (`Normalize`). On the stream
-path, a 16 GiB uncompressed `.mha` trained at patch 64³ under an 8 GiB memory cap
-with a peak resident set of 0.46 GiB (measured for aa69df3a, 2026-07-15).
-`python benchmarks/bench_streaming.py --gib 16 --budget 1` reproduces the bound
-for `TRANSFORM`: it transforms a 16 GiB volume under a 1 GiB `memory_budget` and
-prints the peak resident set beside both (the tracked
-[`benchmarks/`](https://github.com/fideus-labs/KonfAI/tree/main/benchmarks)
-harness pins the protocol).
+or a whole-volume statistic read once from disk (`Normalize`). Under
+`TRANSFORM`, peak host memory follows the declared `memory_budget`, not the
+volume: `python benchmarks/bench_streaming.py --gib 16 --budget 1` runs a
+TRANSFORM chain over a 16 GiB volume under a 1 GiB budget and reports the peak
+resident set of the whole process tree (protocol:
+[**Reproducing the numbers**](https://konfai.readthedocs.io/en/latest/usage/large-images.html#reproducing-the-numbers)).
 
 `konfai TRANSFORM` decides that per case *before* it writes a byte: STREAM or
 LOAD, WHOLE-VOLUME naming the stage that refused to stream, REDUCE or REFUSED

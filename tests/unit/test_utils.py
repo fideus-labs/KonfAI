@@ -26,7 +26,7 @@ import pytest
 
 
 def test_import_konfai_does_not_load_the_imaging_optional_deps() -> None:
-    """``konfai.utils.dicom`` and ``ome_zarr`` import pydicom and dask/zarr at module level; the
+    """``konfai.utils.dicom`` and ``ome_zarr`` import pydicom and zarr at module level; the
     package must not pull them in for ``import konfai`` (or for the torch-free ``State``)."""
     script = """
 import sys
@@ -34,6 +34,34 @@ import konfai
 from konfai.utils import State
 heavy = ("torch", "pydicom", "dask", "zarr", "ngff_zarr", "konfai.utils.dicom", "konfai.utils.ome_zarr")
 loaded = sorted(name for name in heavy if name in sys.modules)
+assert not loaded, loaded
+"""
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("workflow", ["konfai.transformer", "konfai.evaluator", "konfai.predictor.workflow"])
+def test_a_workflow_that_reads_no_store_does_not_load_ngff_zarr(workflow: str) -> None:
+    """Every rank bounds the decoded-chunk cache; dask and ngff-zarr, some 700 modules and 50 MB, are
+    imported where a store is described or written, not with the cache."""
+    script = f"""
+import sys
+import {workflow}
+from konfai.utils.ome_zarr import bound_chunk_cache
+bound_chunk_cache()
+loaded = sorted(name for name in ("dask", "ngff_zarr") if name in sys.modules)
+assert not loaded, loaded
+"""
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("workflow", ["konfai.transformer", "konfai.evaluator"])
+def test_a_workflow_that_writes_no_curve_does_not_load_tensorboard(workflow: str) -> None:
+    """TensorBoard, with protobuf, absl and botocore, is imported by the workflows that write curves
+    (TRAIN, PREDICTION), not by the runtime every workflow imports."""
+    script = f"""
+import sys
+import {workflow}
+loaded = sorted(name for name in ("torch.utils.tensorboard", "tensorboard") if name in sys.modules)
 assert not loaded, loaded
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)

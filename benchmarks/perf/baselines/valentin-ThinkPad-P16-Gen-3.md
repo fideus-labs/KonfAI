@@ -1,6 +1,6 @@
 # benchmarks/perf on valentin-ThinkPad-P16-Gen-3 at 2026-09-09T17:08:33+0200
 
-commit v1.8.3-4-gd1c6961b, NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU, profile performance, load [0.39, 1.01, 11.01], OMP_NUM_THREADS=None
+commit v1.8.3-4-gd1c6961b (transform and tests: 760f23ed, as their files and fingerprints say), NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU, profile performance, load [0.39, 1.01, 11.01], OMP_NUM_THREADS=None
 
 | bench | headline | file |
 |---|---|---|
