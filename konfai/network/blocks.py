@@ -32,7 +32,7 @@ from konfai.utils.config import config
 class NormMode(Enum):
     """Enumeration of normalization layers supported by KonfAI blocks."""
 
-    NONE = (0,)
+    NONE = 0
     BATCH = 1
     INSTANCE = 2
     GROUP = 3
@@ -59,13 +59,13 @@ def get_norm(norm_mode: Enum, channels: int, dim: int) -> torch.nn.Module | None
 
 
 class UpsampleMode(Enum):
-    CONV_TRANSPOSE = (0,)
-    UPSAMPLE = (1,)
+    CONV_TRANSPOSE = 0
+    UPSAMPLE = 1
 
 
 class DownsampleMode(Enum):
-    MAXPOOL = (0,)
-    AVGPOOL = (1,)
+    MAXPOOL = 0
+    AVGPOOL = 1
     CONV_STRIDE = 2
 
 
@@ -237,11 +237,7 @@ class ResidualBlockD(network.ModuleArgsDict):
         has_stride = any(value != 1 for value in stride_list)
         requires_projection = in_channels != out_channels
         norm = NormMode[norm_mode] if isinstance(norm_mode, str) else norm_mode
-        padding = (
-            [(value - 1) // 2 for value in kernel_size]
-            if isinstance(kernel_size, (list, tuple))
-            else (kernel_size - 1) // 2
-        )
+        padding = same_padding(kernel_size)
 
         # ----- Skip path (evaluated first, ResNet-D style) --------------------------------- #
         if has_stride:
@@ -357,8 +353,9 @@ class ResNetBasicBlock(network.ModuleArgsDict):
         self.add_module("Nonlin2", torch.nn.ReLU(inplace=False), in_branch=[0], out_branch=[0])
 
 
-def _same_padding(kernel_size: int | list[int]) -> int | list[int]:
-    """Same-padding for an odd kernel: ``(k - 1) // 2`` per axis (isotropic int or per-axis list)."""
+def same_padding(kernel_size: int | list[int]) -> int | list[int]:
+    """Same-padding for an odd kernel, ``(k - 1) // 2`` per axis (isotropic int or per-axis list), as
+    nnU-Net pads every kernel."""
     if isinstance(kernel_size, (list, tuple)):
         return [(value - 1) // 2 for value in kernel_size]
     return (kernel_size - 1) // 2
@@ -447,7 +444,7 @@ class DecoderStage(network.ModuleArgsDict):
         # Conv block: 2 * skip_channels -> skip_channels, then skip_channels -> skip_channels; the
         # ``kernel_size``/``padding`` pass through as Any so a per-axis list is accepted.
         kernel_value: Any = kernel_size
-        padding_value: Any = _same_padding(kernel_size)
+        padding_value: Any = same_padding(kernel_size)
         conv_config = BlockConfig(
             kernel_size=kernel_value,
             stride=1,
@@ -552,7 +549,7 @@ class UNetPlusPlusNode(network.ModuleArgsDict):
             )
             conv_in = up_channels + sum(skip_channels)
         kernel_value: Any = kernel_size
-        padding_value: Any = _same_padding(kernel_size)
+        padding_value: Any = same_padding(kernel_size)
         conv_config = BlockConfig(
             kernel_size=kernel_value,
             stride=1,
@@ -778,8 +775,8 @@ class LatentDistribution(network.ModuleArgsDict):
         def __init__(self) -> None:
             super().__init__()
 
-        def forward(self, mu: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
-            return torch.exp(log_std / 2) * torch.randn_like(mu) + mu
+        def forward(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
+            return torch.exp(log_var / 2) * torch.randn_like(mu) + mu
 
     def __init__(self, shape: list[int], latent_dim: int) -> None:
         super().__init__()

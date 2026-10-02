@@ -147,19 +147,7 @@ class DiscriminatorADA(network.Network):
                     blocks.ConvBlock(in_channels, out_channels, [block_config(stride=stride)], dim),
                 )
 
-    class DiscriminatorHead(network.ModuleArgsDict):
-        def __init__(self, channels: int, dim: int) -> None:
-            super().__init__()
-            self.add_module(
-                "Conv",
-                blocks.get_torch_module("Conv", dim)(
-                    in_channels=channels,
-                    out_channels=1,
-                    kernel_size=4,
-                    stride=1,
-                    padding=1,
-                ),
-            )
+    DiscriminatorHead = Discriminator.DiscriminatorHead
 
     class UpdateP(torch.nn.Module):
         """Adaptive-augmentation (ADA) probability controller.
@@ -518,20 +506,7 @@ class GeneratorV2(network.Network):
 
 
 class GeneratorV3(network.Network):
-    class NestedUNetHead(network.ModuleArgsDict):
-        def __init__(self, in_channels: list[int], dim: int) -> None:
-            super().__init__()
-            self.add_module(
-                "Conv",
-                blocks.get_torch_module("Conv", dim)(
-                    in_channels=in_channels[1],
-                    out_channels=1,
-                    kernel_size=1,
-                    stride=1,
-                    padding=0,
-                ),
-            )
-            self.add_module("Tanh", torch.nn.Tanh())
+    NestedUNetHead = GeneratorV2.NestedUNetHead
 
     class GeneratorBlock(network.ModuleArgsDict):
         def __init__(

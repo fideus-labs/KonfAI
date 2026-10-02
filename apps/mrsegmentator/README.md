@@ -51,7 +51,7 @@ process-tree resident set; peak VRAM = over baseline. Measured with
 
 ### 📈 Key observations
 
-- **1.2–1.7× faster**, **1.4–5.4× less host RAM**; the gap widens with the volume.
+- **1.1–1.7× faster**, **1.4–5.4× less host RAM**; the gap widens with the volume.
 - The GPU-resident accumulator trades **more VRAM** for the speed and low host RAM,
   while streaming keeps it **bounded**: on the **large** case host RAM stays at
   **6.9 GB** where the original grows to **37.4 GB**.

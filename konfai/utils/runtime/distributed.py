@@ -185,6 +185,11 @@ class DistributedObject(ABC):
             result = {k: (_means(losses), _means(metrics)) for k, (losses, metrics) in totals.items()}
         return result
 
+    def outputs(self) -> list[Path]:
+        """Where a finished run left what it wrote, which the CLI names once the run ends; empty for a
+        run that reports it itself."""
+        return []
+
     @property
     def world_size(self) -> int:
         """How many ranks ``setup`` sharded the run over: one dataloader list per rank."""

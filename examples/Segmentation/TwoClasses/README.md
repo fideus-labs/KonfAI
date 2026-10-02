@@ -16,7 +16,7 @@ konfai EVALUATION -y --cpu 1 --config Evaluation.yml
 python quickstart.py verify
 ```
 
-Twenty epochs take about seven seconds on one core and reach a Dice of about 0.98 on
+Twenty epochs take a few seconds on one core and reach a Dice of about 0.98 on
 every case, the held-out one included. `quickstart.py checkpoint` prints the one dated
 file `BEST` kept (`resume_latest.pt` is a training continuation, `crash_*.pt` an
 exceptional save, and several `--models` paths run an ensemble). `verify` reads the four
@@ -36,5 +36,6 @@ To adapt the three configs together:
 | Classes | `nb_class`, `Dice.labels` | `nb_class` | `Dice.labels` |
 | Held-out cases | `validation` names | the cases to predict | a `subset` for held-out scoring |
 
-`verify` knows these four case names; give it yours. The larger
+`verify` knows these four case names: for yours, edit `CASES` at the top of `quickstart.py`, and
+`RUN` when you change `train_name`. The larger
 [Segmentation](../README.md) example trains 41 classes on real pelvis CT.

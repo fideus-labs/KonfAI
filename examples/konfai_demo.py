@@ -22,6 +22,7 @@ run a CLI command with readable output, and draw a row of slices.
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 import re
 import subprocess
@@ -40,14 +41,18 @@ warnings.filterwarnings("ignore", message="IProgress not found.*")
 def setup(repo_dir: Path, example: str, *packages: str | tuple[str, str]) -> tuple[Path, Path, list[str]]:
     """Install what is missing and return the example directory, its dataset directory, and the device flags.
 
-    `packages` are pip requirements, installed only when already absent. The import name is derived
-    from the requirement (`konfai[imaging]` -> `konfai`, `huggingface-hub` -> `huggingface_hub`); pass a
+    `packages` are pip requirements, installed only when absent. For one already there, only what its extras
+    declare and is absent is installed (`konfai[imaging]` over a base konfai -> `SimpleITK>=2.0`, ...): the
+    package itself is left as it is, an editable install included. The import name is derived from the
+    requirement (`konfai[imaging]` -> `konfai`, `huggingface-hub` -> `huggingface_hub`); pass a
     `(import_name, requirement)` pair when it cannot be, as for a local path.
     """
     global _WORKDIR
 
     wanted = [item if isinstance(item, tuple) else (_import_name(item), item) for item in packages]
-    missing = [package for module, package in wanted if importlib.util.find_spec(module) is None]
+    missing: list[str] = []
+    for module, package in wanted:
+        missing += [package] if importlib.util.find_spec(module) is None else _missing_extras(module, package)
     if missing:
         print("Installing", ", ".join(missing), "...", flush=True)
         report = subprocess.run(
@@ -76,6 +81,27 @@ def setup(repo_dir: Path, example: str, *packages: str | tuple[str, str]) -> tup
 
 def _import_name(requirement: str) -> str:
     return re.split(r"[\[<>=;]", requirement, maxsplit=1)[0].strip().replace("-", "_")
+
+
+def _missing_extras(distribution: str, requirement: str) -> list[str]:
+    """The requirements the requirement's extras declare whose distribution is not installed."""
+    extras = set(re.findall(r"[\w-]+", requirement.partition("[")[2].partition("]")[0]))
+    if not extras:
+        return []
+    try:
+        declared = importlib.metadata.requires(distribution) or []
+    except importlib.metadata.PackageNotFoundError:  # importable without metadata, from a PYTHONPATH checkout
+        return []
+    missing = []
+    # Markers other than `extra ==` are not evaluated: konfai's extras carry none.
+    for spec, _, marker in (entry.partition(";") for entry in declared):
+        extra = re.search(r"extra\s*==\s*[\"']([\w-]+)", marker)
+        if extra and extra.group(1) in extras:
+            try:
+                importlib.metadata.distribution(re.split(r"[\s\[<>=!~(]", spec.strip(), maxsplit=1)[0])
+            except importlib.metadata.PackageNotFoundError:
+                missing.append(spec.strip())
+    return missing
 
 
 def run(*command: str) -> None:

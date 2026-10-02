@@ -53,7 +53,7 @@ from konfai import (
 )
 from konfai.data.data_manager import BatchSample, DatasetIter, DataTrain
 from konfai.data.data_manager.subset import case_list_encoding
-from konfai.network.network import Measure, Model, ModelLoader, NetState, Network
+from konfai.network.network import Measure, Model, ModelLoader, NetState, Network, place_graph
 from konfai.utils import vram
 from konfai.utils.clock import SweepClock, startup_clock
 from konfai.utils.config import apply_config, config, strict_config
@@ -65,6 +65,7 @@ from konfai.utils.runtime import (
     NullSummaryWriter,
     ProgressBar,
     State,
+    checkpoint_source,
     clear_directory_except_logs,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
@@ -1223,6 +1224,9 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         except (OSError, ValueError):
             return None
 
+    def outputs(self) -> list[Path]:
+        return [checkpoints_directory() / self.name, statistics_directory() / self.name]
+
     def setup(self, world_size: int):
         """Initialize the training environment: clear previous outputs unless resuming, build the model
         and EMA, load the checkpoint when resuming, prepare the dataloaders.
@@ -1328,10 +1332,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         Returns:
             dict: State dictionary loaded from checkpoint.
         """
-        if self.path_to_model.startswith("https://") or Path(self.path_to_model).exists():
-            state_dict = safe_torch_load(self.path_to_model, torch.device("cpu"))
-        else:
-            raise ValueError(f"Invalid model path entry: {self.path_to_model}")
+        state_dict = safe_torch_load(checkpoint_source(self.path_to_model, TrainerError), torch.device("cpu"))
 
         self._resume_state = None
         if "resume" in state_dict:
@@ -1380,7 +1381,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             local_rank (int): Local rank within the node.
             dataloaders (list[DataLoader]): Training and validation dataloaders.
         """
-        model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
+        model = place_graph(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
         if self.channels_last:
             Network.set_channels_last(model)
         if self.torch_compile:
@@ -1392,7 +1393,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         else:
             model = Model(model)
         if self.model_ema is not None:
-            self.model_ema.module = Network.to(_ema_network(self.model_ema), local_rank * self.size)
+            self.model_ema.module = place_graph(_ema_network(self.model_ema), local_rank * self.size)
             if self.channels_last:
                 Network.set_channels_last(_ema_network(self.model_ema))
         device = local_rank * self.size if len(cuda_visible_devices()) else None

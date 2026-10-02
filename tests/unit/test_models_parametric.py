@@ -149,6 +149,30 @@ def test_plainconvunet_is_weight_exact(
     assert transferred == expected_leaves
 
 
+def test_plainconvunet_pads_an_even_kernel_as_nnunet_does() -> None:
+    """nnU-Net pads every kernel by ``(k - 1) // 2``: with an even kernel the graph keeps the
+    reference's shapes and logits (the stem's two kernel-2 convs trim 34 to 32, the head 32 to 30)."""
+    features, strides, kernels = [8, 16, 32, 64], [1, 2, 2, 2], [2, 3, 3, 3]
+    oracle = build_plainconv_oracle(4, features, strides, kernels)
+    net = PlainConvUNet(
+        dim=3, in_channels=1, n_stages=4, features_per_stage=features, strides=strides, kernel_sizes=kernels
+    )
+    x = seeded_input(1, 1, 34, 34, 34)
+    transfer_weights_by_execution_order(
+        net, oracle, target_forward=lambda: list(net.named_forward(x)), source_forward=lambda: oracle(x)
+    )
+
+    net.eval()
+    oracle.eval()
+    oracle_seg = capture_oracle_seg_outputs(oracle, 4, lambda: oracle(x))
+    with torch.no_grad():
+        trace = dict(net.named_forward(x))
+
+    assert trace["SegHead_2"].shape == (1, 2, 30, 30, 30)
+    for j in range(3):
+        assert torch.allclose(trace[f"SegHead_{j}"], oracle_seg[j], atol=1e-4)
+
+
 # =========================================================================================== #
 # ResidualEncoderUNet vs dynamic_network_architectures ResidualEncoderUNet (the nnU-Net ResEnc
 # backbone). One config is the exact ImpactSeg "body" model (5-channel 2D input, 6 stages, 12

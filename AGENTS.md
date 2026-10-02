@@ -153,10 +153,15 @@ publish workflow renders the same section into the GitHub Release, so the file m
 being tagged:
 
 ```bash
-uvx --from commitizen cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8   # 1. write the section
+uvx --from commitizen cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8   # 1. draft the section
 git commit -am "ci: changelog for vX.Y.Z"                                          # 2. commit it
 git tag -s vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z                            # 3. sign, tag, push
 ```
+
+The draft is not the section: it sees commit subjects only (a squash merge is one line, a subject with no
+conventional prefix is dropped), and the command regenerates the whole file, edited sections included. Keep the
+new section, restore the rest from git, then write what a user gets (`docs/source/development.md`, "Cutting a
+release").
 
 `-s` and not `-a`: releases are signed (`v1.7.0` is), and `tag.gpgsign` already makes `-a` sign on a machine
 that has it configured, which is exactly why `-s` is spelled out. On a machine that does not, `-a` publishes an

@@ -222,7 +222,8 @@ Documentation should stay aligned with the codebase, examples, and tests. When
 updating the docs:
 
 - prefer code-backed statements
-- call out behavior inferred from code when needed
+- state what the code does as a fact; check it against the code or a run
+  rather than saying how it was found
 - avoid documenting private helpers unless they are essential extension points
 - update cross-links when you rename or move pages, and add the old URL to
   `_REDIRECTS` in `docs/source/conf.py` so it keeps resolving
@@ -271,6 +272,8 @@ The generated draft is a starting point, not the answer. It sees commit subjects
 only, so a squash merge collapses to one line, a subject with no conventional
 prefix is dropped, and a subject written for a reviewer tells a reader nothing.
 Take the draft, then say what a *user* of the package gets that they did not have, and re-read it against anything that landed after you drafted it.
+The command regenerates the whole file from the commits, edited sections included:
+keep the new section and restore the rest from git before committing.
 
 ```bash
 # 1. Draft the section for the version you are about to cut, then edit it

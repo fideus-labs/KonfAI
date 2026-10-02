@@ -16,6 +16,8 @@
 
 """The shipped YAML model catalog: 'default|<Name>.yml' resolution and catalog health."""
 
+import re
+
 import pytest
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.errors import ConfigError
@@ -72,3 +74,14 @@ def test_catalog_unet_stays_in_sync_with_the_example_copy() -> None:
     example = (REPO / "examples" / "Segmentation" / "UNet.yml").read_text(encoding="utf-8")
     catalog = (CATALOG / "UNet.yml").read_text(encoding="utf-8")
     assert example == catalog
+
+
+def test_every_test_file_a_catalog_entry_cites_exists() -> None:
+    # `konfai list models` shows these headers: a citation must lead to the test that backs the claim.
+    missing = {
+        f"{entry.name}: {path}"
+        for entry in CATALOG.glob("*.yml")
+        for path in re.findall(r"tests/[\w/]+\.py", entry.read_text(encoding="utf-8"))
+        if not (REPO / path).is_file()
+    }
+    assert not missing

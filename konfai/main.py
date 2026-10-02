@@ -23,9 +23,6 @@ import importlib
 import importlib.metadata
 import os
 import sys
-import warnings
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
 from konfai.utils import State
@@ -53,7 +50,7 @@ class _VersionAction(argparse.Action):
         parser.exit()
 
 
-def _add_common_args(parser: argparse.ArgumentParser, tensorboard: bool = True) -> None:
+def _add_common_args(parser: argparse.ArgumentParser, command: State, tensorboard: bool = True) -> None:
     """The arguments TRAIN / RESUME / PREDICTION / EVALUATION share; TRANSFORM declares its own set.
     ``tensorboard=False`` leaves ``-tb`` out: a workflow that writes no events has nothing to show."""
     parser.add_argument(
@@ -61,8 +58,7 @@ def _add_common_args(parser: argparse.ArgumentParser, tensorboard: bool = True) 
         "--config",
         type=str,
         default=None,
-        help="Path to the configuration file (YAML). "
-        "If omitted, a command-specific default is used: Config.yml, Prediction.yml, Evaluation.yml.",
+        help=f"Path to the configuration file (YAML). If omitted, {_INIT_TARGETS[str(command)][0]} is used.",
     )
     parser.add_argument(
         "-y",
@@ -108,15 +104,15 @@ def _add_dir_argument(parser: argparse.ArgumentParser, name: str, help_text: str
 
 def _add_train(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(str(State.TRAIN), help="Train a model from scratch.")
-    _add_common_args(parser)
+    _add_common_args(parser, State.TRAIN)
     _add_dir_argument(parser, "checkpoints", "Directory where checkpoints are saved")
     _add_dir_argument(parser, "statistics", "Directory where training statistics/logs are saved")
 
 
 def _add_resume(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(str(State.RESUME), help="Resume training from existing checkpoints.")
-    _add_common_args(parser)
-    parser.add_argument("--model", type=str, required=True, help="Checkpoint path to resume from")
+    _add_common_args(parser, State.RESUME)
+    parser.add_argument("--model", type=str, help="Checkpoint path to resume from. Required, except with --init.")
     _add_dir_argument(parser, "checkpoints", "Directory where checkpoints are saved")
     _add_dir_argument(parser, "statistics", "Directory where training statistics/logs are saved")
     parser.add_argument(
@@ -130,21 +126,21 @@ def _add_resume(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_predict(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(str(State.PREDICTION), help="Run inference using a trained model.")
-    _add_common_args(parser)
+    _add_common_args(parser, State.PREDICTION)
     parser.add_argument(
         "--models",
         type=str,
         nargs="+",
         metavar="PATH",
-        required=True,
-        help="One or more checkpoint/model paths to resume from.",
+        default=[],
+        help="One or more checkpoint paths to predict with; several form an ensemble. Required, except with --init.",
     )
     _add_dir_argument(parser, "predictions", "Directory where predictions are written")
 
 
 def _add_evaluate(subparsers: argparse._SubParsersAction) -> None:
-    parser = subparsers.add_parser(str(State.EVALUATION), help="Evaluate model.")
-    _add_common_args(parser, tensorboard=False)
+    parser = subparsers.add_parser(str(State.EVALUATION), help="Compute metrics on saved outputs.")
+    _add_common_args(parser, State.EVALUATION, tensorboard=False)
     _add_dir_argument(parser, "evaluations", "Directory where evaluation outputs are written")
 
 
@@ -230,6 +226,9 @@ _COMMANDS: dict[str, tuple[str, str, str]] = {
     str(State.TRANSFORM): ("konfai.transformer", "transform", "transform_file"),
 }
 
+# Command -> the checkpoint flag its run needs; --init loads no weights, so it runs without it.
+_CHECKPOINT_FLAGS: dict[str, str] = {str(State.RESUME): "model", str(State.PREDICTION): "models"}
+
 # Command -> (default config filename, root key, pure build function beside the entrypoint).
 _INIT_TARGETS: dict[str, tuple[str, str, str]] = {
     str(State.TRAIN): ("Config.yml", "Trainer", "build_train"),
@@ -259,15 +258,18 @@ def _run_init(args: dict[str, Any]) -> None:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(f"{root}: {{}}\n", encoding="utf-8")
     args[config_key] = config_path
+    from konfai.utils.runtime.logging import konfai_warnings
+
     builder = getattr(importlib.import_module(module_name), builder_name)
     accepted = inspect.signature(builder).parameters
     try:
-        builder(**{name: value for name, value in args.items() if name in accepted})
+        with konfai_warnings():
+            builder(**{name: value for name, value in args.items() if name in accepted})
     except Exception as error:
         print(f"[KonfAI] Wrote what resolved before the error to '{config_path}'.", flush=True)
         if not isinstance(error, KonfAIError):
             raise  # not a designed refusal: its type and traceback are the message, as on the run path
-        print(f"[KonfAI] {error}")
+        print(f"[KonfAI] {error}", *getattr(error, "__notes__", ()), sep="\n")
         sys.exit(1)
     print(f"[KonfAI] Resolved default configuration written to '{config_path}'.")
 
@@ -289,16 +291,13 @@ def _check_gpu_ids(parser: argparse.ArgumentParser, gpu: list[int]) -> None:
         parser.error(f"argument --gpu: invalid choice: {unknown[0]} (choose from {choices})")
 
 
-@contextmanager
-def _konfai_warning_format() -> Iterator[None]:
-    """A workflow's build warns before its run Log captures the console: its warnings read as KonfAI's."""
-    from konfai.utils.runtime.logging import _show_warning
+def _report_outputs(workflow: object) -> None:
+    """Name the absolute path of what a finished run wrote, so a train_name that differs between two
+    configs shows."""
+    from konfai.utils.runtime.distributed import DistributedObject
 
-    previous, warnings.showwarning = warnings.showwarning, _show_warning
-    try:
-        yield
-    finally:
-        warnings.showwarning = previous
+    if isinstance(workflow, DistributedObject) and (outputs := workflow.outputs()):
+        print(f"[KonfAI] outputs in {', '.join(str(path.absolute()) for path in outputs)}")
 
 
 def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
@@ -312,9 +311,12 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         del args["config"]  # the entrypoint's own default config filename applies
     elif config_key != "config":
         args[config_key] = args.pop("config")
-    if args.pop("init", False):
-        with _konfai_warning_format():
-            _run_init(args)
+    init = args.pop("init", False)
+    checkpoint = _CHECKPOINT_FLAGS.get(args["command"])
+    if checkpoint and not init and not args[checkpoint]:
+        parser.error(f"{args['command']}: the following arguments are required: --{checkpoint}")
+    if init:
+        _run_init(args)
         return
     if args.pop("plan", False):
         # --plan must SHORT-CIRCUIT here: the distributed wrapper filters kwargs by the entrypoint's
@@ -324,13 +326,15 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
         # plan_transform declares the TRANSFORM flags and nothing else; the command name is not one.
         del args["command"]
         function_name = "plan_transform"
-    entrypoint = getattr(importlib.import_module(module_name), function_name)
     from konfai.utils.errors import KonfAIError
+    from konfai.utils.runtime.logging import konfai_warnings
     from konfai.utils.utils import env_flag
 
-    with _konfai_warning_format():
+    entrypoint = getattr(importlib.import_module(module_name), function_name)
+    # The build warns of the keys it did not read before the run's Log sets this format.
+    with konfai_warnings():
         try:
-            entrypoint(**args)
+            workflow = entrypoint(**args)
         except KeyboardInterrupt:
             print("\n[KonfAI] Manual interruption (Ctrl+C)")
             sys.exit(130)
@@ -338,8 +342,12 @@ def _dispatch(parser: argparse.ArgumentParser, args: dict[str, Any]) -> None:
             # A designed refusal: the message alone, the traceback only under KONFAI_DEBUG=1.
             if env_flag("KONFAI_DEBUG", False):
                 raise
-            print(str(error).strip(), file=sys.stderr)
+            # The notes carry what the config binder saw, such as a misspelt key (strict_config).
+            print(str(error).strip(), *getattr(error, "__notes__", ()), sep="\n", file=sys.stderr)
             sys.exit(1)
+    # A cluster job is only submitted here: its outputs exist once the job ends.
+    if "num_nodes" not in args and not args.get("quiet"):
+        _report_outputs(workflow)
 
 
 def _run(parser: argparse.ArgumentParser) -> None:
@@ -355,19 +363,18 @@ def _run(parser: argparse.ArgumentParser) -> None:
     _dispatch(parser, vars(parser.parse_args()))
 
 
+_DESCRIPTION = "KonfAI: a declarative execution engine for reproducible medical-imaging workflows"
+
+
 def main():
     """Entry point for the ``konfai`` command-line interface."""
-    parser = argparse.ArgumentParser(
-        prog="konfai", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
-    )
+    parser = argparse.ArgumentParser(prog="konfai", description=_DESCRIPTION, allow_abbrev=False)
     _run(parser)
 
 
 def cluster():
     """Entry point for the ``konfai-cluster`` CLI: the standard commands plus SLURM job arguments."""
-    parser = argparse.ArgumentParser(
-        prog="konfai-cluster", description="KonfAI - Deep learning framework for Medical AI Models", allow_abbrev=False
-    )
+    parser = argparse.ArgumentParser(prog="konfai-cluster", description=_DESCRIPTION, allow_abbrev=False)
     cluster_args = parser.add_argument_group("Cluster manager arguments")
     cluster_args.add_argument("--name", type=str, help="Task name", required=True)
     cluster_args.add_argument("--num-nodes", "--num_nodes", default=1, type=int, help="Number of nodes")

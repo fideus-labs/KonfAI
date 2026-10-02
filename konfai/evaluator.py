@@ -353,6 +353,9 @@ class Evaluator(DistributedObject):
                 f"Available groups: {sorted(groups_dest)}",
             )
 
+    def outputs(self) -> list[Path]:
+        return [self.metric_path]
+
     def setup(self, world_size: int):
         """Prepare the evaluator: check for previous results and overwrite or resume, create the output
         directory with a copy of the configuration, load the dataset for ``world_size`` processes.

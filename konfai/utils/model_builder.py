@@ -36,6 +36,7 @@ from konfai.network.network import (
     OptimizerLoader,
     TargetCriterionsLoader,
 )
+from konfai.network.network.base import is_accumulated
 from konfai.utils.errors import ConfigError
 
 ModuleFactory = Callable[..., torch.nn.Module]
@@ -319,8 +320,16 @@ def _populate_graph(
         if not isinstance(spec, dict):
             raise ConfigError(f"Module at index {index} must be a mapping.")
         raw_name = spec.get("name", str(index))
-        if not isinstance(raw_name, str) or not raw_name or "." in raw_name:
-            raise ConfigError(f"Invalid module name '{raw_name}': names must be non-empty and contain no '.'.")
+        # '.' and ':' both separate a module path in a config key, and the patch marker is read out of names.
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name
+            or any(c in raw_name for c in ".:")
+            or is_accumulated(raw_name)
+        ):
+            raise ConfigError(
+                f"Invalid module name '{raw_name}': names must be non-empty and contain no '.', no ':' and no ';accu;'."
+            )
         if raw_name in graph._modules:
             raise ConfigError(f"Duplicate module name '{raw_name}'.")
         module = _build_single_module(spec, parameters)
@@ -354,7 +363,7 @@ def _load_definition(yaml_str: str | None, yaml_path: str | Path | None) -> dict
         yaml_text = yaml_str or ""
     try:
         definition = _yaml.load(yaml_text)
-    except ruamel.yaml.YAMLError as exc:
+    except (ruamel.yaml.YAMLError, RecursionError) as exc:
         raise ConfigError("Invalid YAML passed to build_model_from_yaml.", str(exc)) from exc
     if not isinstance(definition, dict):
         raise ConfigError("The model YAML must be a mapping with a top-level 'modules' list.")

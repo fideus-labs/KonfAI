@@ -22,7 +22,7 @@
 # (spatial_dims=3, act='prelu', bias=False). The two graphs carry the identical
 # 81 parametric leaves in the same execution order; transferring MONAI's weights
 # leaf-by-leaf reproduces its forward output to `torch.allclose` in eval mode.
-# See tests/unit/test_yaml_model_vnet.py. V-Net is inherently 3D but the graph is
+# See tests/unit/test_models_yaml.py. V-Net is inherently 3D but the graph is
 # `dim`-parametrized, so a 2D build also runs for a fast smoke test.
 name: VNet
 

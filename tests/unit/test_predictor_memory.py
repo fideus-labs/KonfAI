@@ -23,7 +23,7 @@ import torch
 import tqdm
 from konfai.data.data_manager import BatchDataItem, DatasetIter
 from konfai.data.transform import TransformInverse
-from konfai.network.network import Network
+from konfai.network.network import Network, place_graph
 from konfai.predictor import PREDICTION_CLOCK, Mean, ModelComposite, OutputDataset
 from konfai.predictor.ensemble import _colocate_loaded_modules
 from konfai.predictor.loop import _prediction_report, _Predictor
@@ -881,7 +881,7 @@ def test_ensemble_load_colocates_late_added_head_on_gpu() -> None:
     # The TotalSegmentator pattern: the model is placed on the GPU, then a per-model load() appends
     # a Head on CPU. The forward must not hit "Input cuda, weight CPU".
     composite = ModelComposite(_LateHeadNetwork(), Mean())
-    Network.to(composite, 0)  # place on cuda:0, exactly as the predictor does before inference
+    place_graph(composite, 0)  # place on cuda:0, exactly as the predictor does before inference
 
     composite.load([{"nb_class": 5}])  # single source -> triggers _ensure_model_loaded(0)
     model = composite["Model_0"]

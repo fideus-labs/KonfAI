@@ -1,12 +1,11 @@
 ```{include} ../../../examples/Transform/README.md
 ```
 
-## Why start here
+## Why run it
 
-This is the shortest way to see KonfAI do something real. It is dataset
-preparation, so there is nothing to train first and no dataset to download:
-`make_dataset.py` writes 3.5 MB of synthetic volumes, and both configs run on
-CPU in about a minute. `Transform_demo.ipynb` runs the whole thing cell by cell,
+It is dataset preparation, so there is nothing to train first and no dataset
+to download: `make_dataset.py` writes 3.5 MB of synthetic volumes, and both
+configs run on CPU in about a minute. `Transform_demo.ipynb` runs the whole thing cell by cell,
 in Colab too.
 
 It also shows the two things only this workflow does. `Transform.yml` folds a

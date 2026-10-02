@@ -195,22 +195,25 @@ every stage streams: each patch's source region is read straight from the file,
 and the result is written slab by slab as it completes. Neither the input nor the
 output is ever held whole. A stage that cannot stream takes the whole-volume
 path described below. A 16 GiB
-uncompressed volume trains at a peak of **0.46 GiB of host RAM**, stable across
-epochs, with VRAM equal to one batch. The bounded-memory claim is reproducible
-with one command, `python benchmarks/bench_streaming.py --gib 16 --budget 1`:
-see [Reproducing the numbers](#reproducing-the-numbers).
+uncompressed volume trained at a peak of **0.46 GiB of host RAM**, stable across
+epochs, with VRAM equal to one batch (patch 64³, batch 2, under an 8 GiB cap;
+measured for aa69df3a, 2026-07-15). For `TRANSFORM` the bound is reproducible
+with one command, `python benchmarks/bench_streaming.py --gib 16 --budget 1`,
+which transforms a 16 GiB volume under a 1 GiB budget: see
+[Reproducing the numbers](#reproducing-the-numbers).
 
 That is not only a memory story. Running published models through KonfAI, on the
-same weights and the same card, against their reference implementations:
+same weights and the same card, against their reference implementations
+(`benchmarks/perf/bench_apps.py`, 2026-09-09):
 
 | Model, large case (512 × 512 × 531) | Time | Peak host RAM | Peak VRAM |
 | --- | --- | --- | --- |
-| MRSegmentator, KonfAI | **120 s** | **6.2 GB** | 16.7 GB |
-| MRSegmentator, original | 192 s | 37.5 GB | 14.6 GB |
-| TotalSegmentator, KonfAI | **314 s** | **19.3 GB** | **10.4 GB** |
-| TotalSegmentator, original | 459 s | 51.8 GB | 23.3 GB |
+| MRSegmentator, KonfAI | **86 s** | **6.9 GB** | 20.6 GB |
+| MRSegmentator, original | 143 s | 37.4 GB | 14.9 GB |
+| TotalSegmentator, KonfAI | **212 s** | **17.6 GB** | **10.6 GB** |
+| TotalSegmentator, original | 377 s | 47.9 GB | 23.1 GB |
 
-Across sizes that is 1.5 to 3.6× faster with 1.4 to 6× less host RAM, and on the
+Across sizes that is 1.1 to 3.9× faster with 1.4 to 5.4× less host RAM, and on the
 large case KonfAI bounds VRAM where the original nears the card limit. The full
 tables, including small and medium cases, are in the
 [MRSegmentator](https://github.com/fideus-labs/KonfAI/tree/main/apps/mrsegmentator)
@@ -250,7 +253,7 @@ and the write lands as each slab completes.
 | --- | --- | --- |
 | **Cache** | the training default | every case, resident for the whole run |
 | **Stream** | the predict/eval/transform default, or a budget the dataset exceeds, chain streamable | one patch |
-| **Buffer** | same triggers, chain not streamable | a FIFO of `batch_size + 1` cases, or `shuffle_window`, whichever is larger |
+| **Buffer** | same triggers, chain not streamable | predict/eval: two cases, the one being finished and the next; training: a FIFO of `batch_size + 1` cases, or `shuffle_window`, whichever is larger |
 
 The decision is per case **and** per augmented copy, so stream and buffer coexist
 in one run: a chain that streams for one draw may load the volume for the next.
@@ -362,10 +365,11 @@ mask by region, and declares those reads to the decoded-chunk cache ahead of a s
 case's patches, as the reader declares its own.
 
 The transforms that load the volume do so because their answer needs it:
-`Clip` and `Standardize` under a `mask` read a second full volume a patch cannot
-locate itself in; `Clip` with percentile bounds and `HistogramMatching` need the
-whole histogram; `Argmax`, `Softmax` and `Sum` over a spatial `dim` reduce across
-the extent; `Canonical` on an oblique direction resamples.
+`Clip` with percentile bounds and `HistogramMatching` need the whole
+histogram; `Argmax`, `Softmax` and `Sum` over a spatial `dim` reduce across
+the extent; `Canonical` on an oblique direction resamples. Under a `mask`,
+`Clip` (`min`/`max` bounds) and `Standardize` stream: their statistic comes from
+one streamed scan of the volume and its mask per case.
 
 `Save` is the useful exception. A `Save` whose cache exists becomes the streaming
 source, and only the transforms after it are planned. A `Save` whose cache is
@@ -425,7 +429,10 @@ What streaming cannot honour splits instead: the pointwise prefix still streams
 into a light buffer and the remaining stages run once on it. Four things keep the
 whole-volume path: a TTA draw whose inverse moves the slab axis (a z-flip, a
 z-moving permute), a case too light to be worth slab synchronization, a
-non-voxel-local reduction, or a destination without region writes.
+reduction or a `before_reduction_transforms` stage that is not voxel-local, or a
+destination without region writes. A case that
+takes the whole-volume path prints why, once per reason:
+`[KonfAI] streaming: case 'CASE_000' takes the whole-volume path: <reason>.`
 `KONFAI_STREAMED_WRITES=0` forces the whole-volume path globally, which is the
 reference to compare against.
 

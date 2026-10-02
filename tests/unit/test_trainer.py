@@ -1449,3 +1449,19 @@ def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monk
     assert reported == {"CE": 0.2, "Dice": 0.9, "MAE": 5.0}  # what the boards and the description show
     assert trainer._loss_score == {"CE": 0.2, "Dice": pytest.approx(0.1)}  # what selects the checkpoint
     assert trainer.early_stopping.get_score(trainer._loss_score) == pytest.approx(0.3)
+
+
+def test_a_resume_model_that_is_no_checkpoint_is_refused_by_name(tmp_path: Path) -> None:
+    run = tmp_path / "Checkpoints" / "RUN"
+    run.mkdir(parents=True)
+    (run / "resume_latest.pt").touch()
+    trainer = Trainer.__new__(Trainer)
+
+    trainer.set_model(tmp_path / "NOPE.pt")
+    with pytest.raises(TrainerError, match=r"NOPE\.pt' does not exist"):
+        trainer._load()
+
+    trainer.set_model(run)
+    with pytest.raises(TrainerError, match="is a directory") as refused:
+        trainer._load()
+    assert "resume_latest.pt" in str(refused.value)

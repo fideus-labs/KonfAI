@@ -9,7 +9,7 @@
 # same sequence as the reference, a REAL nnU-Net checkpoint loads straight into
 # this KonfAI model through the execution-order bridge
 # `konfai.utils.pretrained.transfer_weights_by_execution_order` (see
-# tests/unit/test_yaml_model_plainconvunet.py, which transfers a real
+# tests/unit/test_models_yaml.py, which transfers a real
 # PlainConvUNet's weights in and checks the logits are `torch.allclose`).
 #
 # nnU-Net signature reproduced here (Isensee et al., Nature Methods 18, 2021):

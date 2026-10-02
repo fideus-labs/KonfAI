@@ -1164,7 +1164,7 @@ class DataPrediction(Data):
 
     def __init__(
         self,
-        dataset_filenames: list[str] = ["default|./Dataset"],
+        dataset_filenames: list[str] = ["default|./Dataset:mha"],
         groups_src: dict[str, Group] = {"default": Group()},
         augmentations: dict[str, DataAugmentationsList] | None = None,
         patch: DatasetPatch | None = DatasetPatch(),

@@ -26,6 +26,8 @@ import subprocess  # nosec B404
 import sys
 import time
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -172,6 +174,17 @@ def _show_warning(message, category, filename, lineno, file=None, line=None) -> 
         (file or sys.stderr).write(text)
     except (OSError, ValueError):
         pass
+
+
+@contextmanager
+def konfai_warnings() -> Iterator[None]:
+    """Show KonfAI's warnings as its other messages inside the block, as a run's ``Log`` does."""
+    previous = warnings.showwarning
+    warnings.showwarning = _show_warning
+    try:
+        yield
+    finally:
+        warnings.showwarning = previous
 
 
 class _ConsoleHandler(logging.Handler):

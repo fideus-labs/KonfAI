@@ -148,6 +148,19 @@ Key fields:
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
 | `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `batch_size` | int | Number of patches per inference batch. `0` measures it on the GPU: a forward of one patch, then of two, then the largest power of two whose forward fits half of the usable VRAM (80 % of the free memory once the case's accumulation is reserved); the other half is headroom for the convolution workspace. Halved if it still runs out. On CPU, `0` runs one patch at a time. |
+| `num_workers` | int or null | DataLoader workers. `None` resolves to `0`, or to `max(1, min(cpu_count, 4))` when reading one patch decodes a whole volume (a store that cannot serve a region). |
+| `pin_memory` | bool | Pinned host memory for the batches (`false` when absent). |
+| `prefetch_factor` | int or null | Prefetched batches per worker, only with workers; `None` resolves to `2`. |
+| `persistent_workers` | bool or null | Keep the workers alive, only with workers; `None` resolves to `false`. |
+
+`Patch` takes the training keys:
+
+| Field | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `patch_size` | list[int] | `[128, 128, 128]` | The patch the model is fed; a `0` is a free axis the framework sizes (below). |
+| `overlap` | int / float / string / list / null | `null` | Overlap between neighbouring patches: a voxel count, a fraction in `[0, 1[`, a percent string (`"20%"`) or a per-axis list of those. `null` takes 20 % of the patch. |
+| `pad_value` | float or null | `null` | Value that pads a patch reaching past the volume. `null` pads with the data's minimum; a `uint8` volume always pads with `0`. |
+| `extend_slice` | int | `0` | 2.5D context: the number of neighbouring slices read around a slice patch of an input group and stacked as channels. Only with `patch_size[0] == 1`. |
 
 Use `Dataset.Patch` when:
 
@@ -247,6 +260,7 @@ Important nested fields:
 | `before_reduction_transforms` | Applied before combining ensemble or TTA outputs. None when absent. |
 | `after_reduction_transforms` | Applied after reduction. None when absent. |
 | `final_transforms` | Final transforms applied before writing. None when absent. |
+| `attributes` | Header keys set on the written output, as `key=value` strings applied over the ones it inherits from `same_as_group`; `key=` drops that key. `konfai_displacement_field=true` declares the output a displacement field. None when absent. |
 | `reduction` | Combines the test-time augmentation copies, with the vocabulary of `combine` (`Vote` for label maps). |
 | `patch_combine` | Optional patch reassembly strategy. `Trim` when absent. A weighting one (`Mean`, `Cosinus`, `Gaussian`) is refused on an integer output such as an `Argmax` head: blend the `Softmax` it is taken from instead, or keep `Trim`. |
 
