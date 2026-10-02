@@ -451,3 +451,24 @@ def test_an_extrema_only_request_folds_min_and_max_in_the_stored_dtype(tmp_path:
         assert got[key] == full[key]
     got = dataset.read_data_statistics("CT", "P0", [1], keys=["max"])
     assert got["max"] == float(volume[1].max()) and got["min"] == float(volume[1].min())
+
+
+@pytest.mark.parametrize("keys", [None, ["min", "max"]], ids=["moments", "extrema"])
+@pytest.mark.parametrize("plane", [0, 15], ids=["first block", "last block"])
+def test_a_nan_in_the_volume_is_its_min_and_max_as_numpy_says(
+    tmp_path: Path, image_attributes, small_blocks: None, keys: list[str] | None, plane: int
+) -> None:
+    """numpy's min and max of a volume holding a NaN are NaN, as are the per-channel figures of the
+    same fold: the scalars agree whatever block the NaN lands in. The extremes sit beside the NaN,
+    in the piece a fold that skipped it would drop."""
+    volume = _volume((1, 16, 10, 10))
+    volume[0, plane, 3, 4] = np.nan
+    volume[0, plane, 3, 5], volume[0, plane, 3, 6] = -1000.0, 1000.0
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+
+    got = dataset.read_data_statistics("CT", "P0", keys=keys)
+
+    for key in ("min", "max"):
+        assert np.isnan(got[f"{key}_per_channel"]).all(), got
+        assert np.isnan(got[key]), (key, got[key], float(getattr(np, f"nan{key}")(volume)))

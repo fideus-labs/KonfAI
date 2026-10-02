@@ -52,6 +52,7 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import BatchSample, DatasetIter, DataTrain
+from konfai.data.data_manager.subset import case_list_encoding
 from konfai.network.network import Model, ModelLoader, NetState, Network
 from konfai.utils import vram
 from konfai.utils.clock import SweepClock, startup_clock
@@ -821,7 +822,7 @@ class _Trainer:
         if not target.is_file():
             return
         yaml = YAML()
-        with open(target) as file:
+        with open(target, encoding="utf-8") as file:
             data = yaml.load(file)
         if not isinstance(data, dict):
             return
@@ -832,7 +833,7 @@ class _Trainer:
         if isinstance(data.get("Trainer"), dict):
             data["Trainer"]["it_validation"] = self.it_validation
         tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-        with open(tmp, "w") as file:
+        with open(tmp, "w", encoding="utf-8") as file:
             yaml.dump(data, file)
         os.replace(tmp, target)
 
@@ -1205,12 +1206,10 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         shutil.copyfile(self.config_path_src, self.config_namefile)
 
         self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
-        with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
-            for name in train_names:
-                f.write(name + "\n")
-        with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
-            for name in validation_names:
-                f.write(name + "\n")
+        for split, names in (("Train", train_names), ("Validation", validation_names)):
+            # Written as a subset or validation list reads it back.
+            path = statistics_directory() / self.name / f"{split}_{self.it}.txt"
+            path.write_text("".join(f"{name}\n" for name in names), encoding=case_list_encoding())
         # The split seed, where _resolve_split_seed reads it on RESUME; written after the clearing above.
         (statistics_directory() / self.name / "Seed.txt").write_text(f"{self._split_seed}\n")
 

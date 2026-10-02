@@ -31,8 +31,10 @@ class Save(Transform):
     ``scale_factors`` writes an OME-NGFF pyramid instead of a single level: ``[4]`` adds a level 1 at
     a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth. A pyramid is indexed by
     position (``:omezarr@1`` is the second entry), 0 finest. ``downsample_method`` names how the
-    coarse levels are derived; its default is ``DASK_BIN_SHRINK`` (block averaging), not ngff-zarr's
-    own ``ITKWASM_GAUSSIAN``.
+    coarse levels are derived, each from the one above it over aligned windows of the factor. Left
+    unnamed, a label dtype (uint8, int64, bool) takes the majority of each window, the smallest value
+    on a tie, and every other dtype takes the block mean ``DASK_BIN_SHRINK``, not ngff-zarr's own
+    ``ITKWASM_GAUSSIAN``.
     """
 
     working_multiple = 0.0

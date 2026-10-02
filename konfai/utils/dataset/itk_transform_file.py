@@ -191,12 +191,7 @@ class ItkTransformFile(AbstractFile):
             data, attributes = image_to_data(field)
             attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
             return data, attributes
-        leaves = _encode_transform_leaves(transform, name, attributes)
-        longest = max(len(leaf) for leaf in leaves)
-        return (
-            np.asarray([np.pad(leaf, (0, longest - len(leaf)), constant_values=np.nan) for leaf in leaves]),
-            attributes,
-        )
+        return _encode_transform_leaves(transform, name, attributes), attributes
 
     def bounded_region_reads(self, name: str) -> bool:
         shape, _attributes = self.get_infos("", name)

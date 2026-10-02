@@ -250,9 +250,18 @@ class MinimalLog:
             else:
                 msg = f"{self._mirror_take_pending()}{msg}"
             self._mirror_at_line_start = msg.endswith("\n")
+        self._mirror_write(msg)
+
+    def _mirror_write(self, text: str) -> None:
         # Best-effort: a broken pipe (the mirror's reader is gone) never stops the job.
         try:
-            self._stdout_bak.write(msg)
+            try:
+                self._stdout_bak.write(text)
+            except UnicodeEncodeError as error:
+                # A console outside UTF-8 (a Windows pipe) shows what it cannot encode escaped. The
+                # stream names its code page; the error of a single-byte one only says 'charmap'.
+                encoding = getattr(self._stdout_bak, "encoding", None) or error.encoding
+                self._stdout_bak.write(text.encode(encoding, "backslashreplace").decode(encoding))
             self._stdout_bak.flush()
         except (BrokenPipeError, ValueError):
             pass
@@ -274,11 +283,7 @@ class MinimalLog:
     def _mirror_emit_pending(self) -> None:
         held = self._mirror_take_pending()
         if held:
-            try:
-                self._stdout_bak.write(held)
-                self._stdout_bak.flush()
-            except (BrokenPipeError, ValueError):
-                pass
+            self._mirror_write(held)
 
     def fileno(self):
         if sys.__stdout__ is None:
@@ -315,7 +320,7 @@ class Log(MinimalLog):
         if self.outer is not None:
             return
         # Append, never truncate: this file is opened before the overwrite prompt runs.
-        self.file = open(file_path, "a", buffering=1)
+        self.file = open(file_path, "a", buffering=1, encoding="utf-8")
         self._last_logged: str | None = None
         # Re-runs append to one file: each opens with a line saying which run follows.
         self.file.write(

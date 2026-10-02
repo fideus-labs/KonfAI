@@ -20,13 +20,22 @@ backends (modes, locking, transforms, path resolution), and ``get_infos`` shape 
 import multiprocessing
 import os
 import stat
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
-from konfai.utils.dataset import Attribute, Dataset, get_infos, image_to_data
+from konfai.utils.dataset import (
+    Attribute,
+    Dataset,
+    get_infos,
+    image_to_data,
+    is_staging_entry,
+    read_landmarks,
+)
 from konfai.utils.dataset import raw_block as raw_block_module
 from konfai.utils.dataset.h5 import _get_h5_file_lock
 from konfai.utils.errors import DatasetManagerError
@@ -325,6 +334,67 @@ def test_supported_transform_types_round_trip(tmp_path: Path) -> None:
 
     assert isinstance(restored, sitk.Euler3DTransform)
     np.testing.assert_allclose(restored.GetParameters(), (0.1, 0.2, 0.3, 4.0, 5.0, 6.0))
+
+
+@pytest.mark.parametrize("file_format", ["h5", "itk.txt"])
+def test_a_composite_of_leaves_with_different_parameter_counts_round_trips(tmp_path: Path, file_format: str) -> None:
+    """Euler (6 parameters) then BSpline (375): the leaves' parameter rows differ in length, and
+    every backend stores them as one array padded with NaN."""
+    euler = sitk.Euler3DTransform()
+    euler.SetParameters((0.1, 0.2, 0.3, 1.0, 2.0, 3.0))
+    spline = sitk.BSplineTransformInitializer(sitk.Image([8, 8, 8], sitk.sitkFloat32), [2, 2, 2])
+    spline.SetParameters(tuple(np.linspace(-1.0, 1.0, spline.GetNumberOfParameters())))
+    composite = sitk.CompositeTransform([euler, spline])
+    dataset = Dataset(tmp_path / "Transforms", file_format)
+
+    dataset.write("T", "CASE_000", composite, Attribute())
+    restored = dataset.read_transform("T", "CASE_000")
+
+    for point in [(1.0, 2.0, 3.0), (4.5, 0.5, 6.0), (7.0, 7.0, 0.0)]:
+        np.testing.assert_allclose(restored.TransformPoint(point), composite.TransformPoint(point))
+
+
+# --------------------------------------------------------------------------------------
+# Landmarks: a fiducial file is read in LPS whatever coordinate system its header declares
+# --------------------------------------------------------------------------------------
+
+
+def _fiducial_file(path: Path, coordinate_system: str | None) -> Path:
+    """One point (1, 2, 3) in a Slicer fiducial file, with or without the CoordinateSystem line."""
+    header = ["# Markups fiducial file version = 4.10"]
+    if coordinate_system is not None:
+        header.append(f"# CoordinateSystem = {coordinate_system}")
+    header.append("# columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID")
+    path.write_text("\n".join([*header, "vtkMRMLMarkupsFiducialNode_0,1,2,3,0,0,0,1,1,1,0,F-1,,"]) + "\n")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("coordinate_system", "expected"),
+    [
+        ("RAS", [-1.0, -2.0, 3.0]),
+        ("0", [1.0, 2.0, 3.0]),
+        ("1", [1.0, 2.0, 3.0]),
+        ("LPS", [1.0, 2.0, 3.0]),
+        (None, [1.0, 2.0, 3.0]),
+    ],
+)
+def test_read_landmarks_returns_lps_points(
+    tmp_path: Path, coordinate_system: str | None, expected: list[float]
+) -> None:
+    """KonfAI's physical space is LPS: an RAS point has its x and y negated. '0' is ambiguous (RAS
+    in 3D Slicer before 4.11, LPS in KonfAI up to 1.5.3) and stays LPS."""
+    points = read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
+
+    np.testing.assert_array_equal(points, [expected])
+
+
+@pytest.mark.parametrize("coordinate_system", ["2", "IJK"])
+def test_read_landmarks_refuses_a_coordinate_system_other_than_ras_or_lps(
+    tmp_path: Path, coordinate_system: str
+) -> None:
+    with pytest.raises(DatasetManagerError, match="CoordinateSystem"):
+        read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
 
 
 # --------------------------------------------------------------------------------------
@@ -633,6 +703,19 @@ def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) 
 
     assert reader.is_dataset_exist("MASK", "P001")
     assert reader.is_dataset_exist("MASK", "P002")
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nii.gz", "mhd", "hdr", "img"])
+def test_a_group_whose_name_holds_a_dot_is_listed_whole(tmp_path: Path, image_attributes, file_format: str) -> None:
+    """A dot in the stem belongs to the name (``CT.contrast.nii.gz`` is the group ``CT.contrast``):
+    the listing names the groups every lookup answers for (Resample and the Evaluator's maps pick
+    their group from it)."""
+    dataset = Dataset(tmp_path / "ds", file_format)
+    dataset.write("CT.contrast", "case1", np.zeros((1, 2, 2, 2), np.float32), image_attributes([0, 0, 0], [1, 1, 1]))
+    dataset.write("MASK", "case1", np.zeros((1, 2, 2, 2), np.uint8), image_attributes([0, 0, 0], [1, 1, 1]))
+
+    assert sorted(dataset.get_group()) == ["CT.contrast", "MASK"]
+    assert all(dataset.is_dataset_exist(group, "case1") for group in dataset.get_group())
 
 
 def test_membership_is_asked_of_disk_not_of_the_listing(tmp_path: Path) -> None:
@@ -1136,6 +1219,63 @@ def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path,
     np.testing.assert_array_equal(got, replaced[:, 0:1])
     assert attributes["Rewritten"] == "yes"
     assert reads["header"] == 2
+
+
+@pytest.mark.parametrize("file_format", ["mhd", "hdr", "img"])
+def test_a_detached_format_publishes_both_its_files_under_the_entry_name(tmp_path: Path, file_format: str) -> None:
+    """MetaImage .mhd and Analyze .hdr/.img keep the header and the pixels in two files, the header
+    naming the pixels. Both land under the entry's own name: no part of the case looks like a
+    writer's staging, and a copy of its visible files reads back."""
+    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(1, 2, 3, 4)
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([1.0, 2.0, 3.0])
+    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
+    attributes["Direction"] = np.eye(3).flatten()
+    Dataset(tmp_path / "written", file_format).write("CT", "case1", volume, attributes)
+
+    case = tmp_path / "written" / "case1"
+    names = sorted(path.name for path in case.iterdir())
+    assert not any(name.startswith(".") or is_staging_entry(name) for name in names), names
+    copy = tmp_path / "copied" / "case1"
+    copy.mkdir(parents=True)
+    for name in names:
+        (copy / name).write_bytes((case / name).read_bytes())
+    data, _ = Dataset(tmp_path / "copied", file_format).read_data("CT", "case1")
+    np.testing.assert_array_equal(data, volume)
+
+
+def test_a_writer_killed_while_staging_a_detached_format_leaves_no_group(tmp_path: Path) -> None:
+    """A .mhd is staged as a hidden directory holding both files under their final names. A writer
+    killed before moving them in leaves that directory behind: the listing must not descend into it,
+    and the entry it was replacing still reads. Run in a child, since the failure is a hard kill."""
+    script = f"""
+import os
+import shutil
+import numpy as np
+import SimpleITK as sitk
+from konfai.utils.dataset import Attribute, Dataset
+attributes = Attribute()
+attributes["Origin"] = np.zeros(3)
+attributes["Spacing"] = np.ones(3)
+attributes["Direction"] = np.eye(3).flatten()
+dataset = Dataset({str(tmp_path)!r}, "mhd")
+dataset.write("MASK", "c1", np.zeros((1, 2, 3, 4), np.float32), attributes)
+dataset.write("CT", "c2", np.zeros((1, 2, 3, 4), np.float32), attributes)
+write = sitk.WriteImage
+def killed(*args, **kwargs):
+    write(*args, **kwargs)
+    os._exit(9)
+sitk.WriteImage = killed
+dataset.write("CT", "c2", np.ones((1, 2, 3, 4), np.float32), attributes)
+"""
+    run = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert run.returncode == 9, run.stderr[-2000:]
+    assert any(path.is_dir() and is_staging_entry(path.name) for path in (tmp_path / "c2").iterdir())
+
+    dataset = Dataset(tmp_path, "mhd")
+    assert sorted(dataset.get_group()) == ["CT", "MASK"]
+    data, _ = dataset.read_data("CT", "c2")
+    np.testing.assert_array_equal(data, np.zeros((1, 2, 3, 4), np.float32))
 
 
 def test_an_h5_sidecar_is_read_once_per_pooled_handle_and_dropped_with_it(tmp_path: Path, monkeypatch) -> None:

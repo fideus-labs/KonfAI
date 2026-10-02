@@ -268,7 +268,6 @@ def _pixel_block_attributes(block: _PixelBlock, spatial_slices: tuple[slice, ...
     return attributes
 
 
-@functools.cache
 def _nifti_extract_aborts(path: str) -> bool:
     """Whether an ITK region read of ``path`` would take the process down.
 
@@ -277,6 +276,13 @@ def _nifti_extract_aborts(path: str) -> bool:
     or corruption``, no exception, nothing to catch (measured with the SimpleITK this ships with,
     compressed or not). Such a file is read whole and sliced here.
     """
+    info = os.stat(path)
+    return _nifti_extract_aborts_at(path, (info.st_mtime_ns, info.st_size))
+
+
+@functools.lru_cache(maxsize=4096)
+def _nifti_extract_aborts_at(path: str, stamp: tuple[int, int]) -> bool:
+    del stamp  # part of the key: a file rewritten with another channel count gets its own answer
     if sitk.ImageFileReader.GetImageIOFromFileName(path) != "NiftiImageIO":
         return False
     reader = sitk.ImageFileReader()

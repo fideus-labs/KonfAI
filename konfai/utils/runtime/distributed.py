@@ -84,6 +84,14 @@ def preserved_rng() -> Iterator[None]:
             torch.cuda.set_rng_state_all(cuda_states)
 
 
+def forget_memoised_inputs() -> None:
+    """Forget the DICOM series an earlier workflow of this process memoised: a workflow reads a DICOM
+    series as it is when it starts, and another tool may have rewritten it in place since."""
+    dicom = sys.modules.get("konfai.utils.dicom")  # a process that never read DICOM memoised none
+    if dicom is not None:
+        dicom.forget_series()
+
+
 def seed_all(seed: int) -> None:
     """Seed random, numpy and torch (``torch.manual_seed`` reaches every CUDA generator too)."""
     random.seed(seed)
@@ -266,6 +274,7 @@ def run_distributed_app(
         previous_local_ranks = os.environ.get("KONFAI_LOCAL_RANKS")
         os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, local_ranks))
         try:
+            forget_memoised_inputs()
             with restart_startup_clock().phase("build"):
                 workflow = func(*args, **kwargs_fun)
             execute_distributed_object(

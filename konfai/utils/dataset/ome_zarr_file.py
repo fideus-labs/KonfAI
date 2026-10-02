@@ -82,7 +82,8 @@ def _divisor_tile(extent: int, cap: int) -> int:
 
 
 #: Where each entry's store was resolved on disk, keyed by ``(root, entry)``. A write through this
-#: backend forgets the memo; a store replaced at the same path keeps its resolution.
+#: backend forgets the memo, an existence probe resolves its entry again; a store replaced at the
+#: same path keeps its resolution.
 _resolved_store_paths: dict[tuple[str, str], str] = {}
 
 
@@ -309,7 +310,7 @@ class OmeZarrFile(AbstractFile):
             scale_factors=self.scale_factors,
             downsample_method=self.downsample_method,
         )
-        replaced = final.with_name(f"{final.name}.{os.getpid()}.replaced")
+        replaced = final.with_name(_replaced_name(final.name))
         shutil.rmtree(replaced, ignore_errors=True)
         try:
             if final.exists():
@@ -380,8 +381,11 @@ class OmeZarrFile(AbstractFile):
         return sorted(groups)
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
+        entry = f"{group}/{name}" if name else group
+        # Asked of disk: a store deleted since it was resolved is absent.
+        _resolved_store_paths.pop((self.filename, entry), None)
         try:
-            self._path(f"{group}/{name}" if name else group)
+            self._path(entry)
             return True
         except DatasetManagerError:
             return False
