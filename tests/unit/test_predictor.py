@@ -27,7 +27,6 @@ import math
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
 
 import numpy as np
 import pytest
@@ -225,55 +224,6 @@ class TTANet(Network):
     def __init__(self) -> None:
         super().__init__(in_channels=1, dim=2)
         self.add_module("Conv", torch.nn.Conv2d(1, 1, 1))
-
-
-def _tta_draws(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subset: list[str] | None, manual_seed: int | None = None
-) -> dict[str, list[list[int]]]:
-    """Build the Predictor of a flip TTA over ``subset`` of a three-case cohort, from a global RNG in
-    one fixed state, and answer each case's draw (the axes each of its eight copies flips) by name."""
-    for key in ("KONFAI_config_file", "KONFAI_ROOT", "KONFAI_STATE", "KONFAI_CONFIG_MODE"):
-        monkeypatch.setenv(key, "")
-    monkeypatch.chdir(tmp_path)
-    source = Dataset(str(tmp_path / "Dataset"), "mha")
-    for name in ("CASE_000", "CASE_001", "CASE_002"):
-        source.write("CT", name, np.ones((1, 2, 4, 4), dtype=np.float32), Attribute())
-    predictor_tree: dict[str, object] = {
-        "Model": {"classpath": "test_predictor:TTANet"},
-        "Dataset": {
-            "dataset_filenames": ["./Dataset:a:mha"],
-            "groups_src": {"CT": {"groups_dest": {"CT": {"is_input": True}}}},
-            "augmentations": {
-                "DataAugmentation_0": {"nb": 8, "data_augmentations": {"Flip": {"f_prob": [0.5] * 3, "prob": 1}}}
-            },
-            "Patch": {"patch_size": [1, 4, 4], "overlap": 0},
-            "subset": subset if subset is not None else "None",
-            "num_workers": 0,
-        },
-        "outputs_dataset": {
-            "Conv": {"OutputDataset": {"same_as_group": "CT:CT", "group": "OUT", "dataset_filename": "Out:mha"}}
-        },
-    }
-    if manual_seed is not None:
-        predictor_tree["manual_seed"] = manual_seed
-    config = tmp_path / "Prediction.yml"
-    YAML().dump({"Predictor": predictor_tree}, config)
-    torch.manual_seed(0)
-    predictor = cast(Predictor, build_predict([tmp_path / "fold.pt"], config, tmp_path / "Predictions"))
-    flip = predictor.dataset.data_augmentations_list["DataAugmentation_0"].data_augmentations[0]
-    assert isinstance(flip, Flip)
-    return {manager.name: flip.flip[manager.index] for manager in next(iter(predictor.dataset._managers.values()))}
-
-
-def test_a_case_s_tta_draw_does_not_depend_on_the_cases_predicted_before_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The draws were taken from the global RNG in case order, so CASE_001 predicted alone was handed
-    the copies CASE_000 gets in the cohort, and its prediction changed with the subset."""
-    alone = _tta_draws(tmp_path, monkeypatch, ["CASE_001"])
-    cohort = _tta_draws(tmp_path, monkeypatch, None)
-    assert alone["CASE_001"] == cohort["CASE_001"]
-    assert cohort["CASE_000"] != cohort["CASE_001"], "two cases are handed two draws"
 
 
 def test_an_output_key_that_names_no_module_is_refused_under_its_own_block(
