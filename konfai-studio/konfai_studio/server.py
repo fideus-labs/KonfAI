@@ -905,7 +905,7 @@ def _experiment_info(session: str) -> dict[str, Any]:
     if not root.is_dir():
         return {"checkpoints": [], "predictions": [], "jobs": [], "bundlable": False, "exportable": False}
     # "**/Checkpoints" / "**/Predictions" so isolated app outputs (<app_output>-<hash>/…) count too.
-    checkpoints = sorted(str(p.relative_to(root)) for p in root.glob("**/Checkpoints/**/*.pt"))
+    checkpoints = sorted(p.relative_to(root).as_posix() for p in root.glob("**/Checkpoints/**/*.pt"))
     predictions = sorted(
         {p.name for pred in root.glob("**/Predictions") if pred.is_dir() for p in pred.iterdir() if p.is_dir()}
     )

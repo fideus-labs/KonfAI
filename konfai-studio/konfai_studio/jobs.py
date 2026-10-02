@@ -252,7 +252,9 @@ def _tail_lines(path: Path, pos: int, buf: str, limit: int = _TICK_BYTES) -> tup
         part if len(part) <= _MAX_LOG_LINE else _TRUNCATED_LINE + part[-(_MAX_LOG_LINE - len(_TRUNCATED_LINE)) :]
         for part in parts
     ]
-    return parts[:-1], pos, parts[-1]  # last element is the (possibly empty) incomplete remainder
+    # A log written on Windows ends its lines with \r\n; a \r inside a line is a progress bar's redraw.
+    lines = [part.removesuffix("\r") for part in parts[:-1]]
+    return lines, pos, parts[-1]  # last element is the (possibly empty) incomplete remainder
 
 
 def _phase_stage(label: str) -> str:
@@ -368,7 +370,7 @@ def _transform_outputs(session: str, base: str) -> list[dict[str, str]]:
         if not isinstance(path, str) or not path:  # a manifest is data: a non-string path is not one
             path = dataset
         with suppress(ValueError):
-            path = str(Path(path).relative_to(_session_dir(session)))
+            path = Path(path).relative_to(_session_dir(session)).as_posix()
         found.append(
             {
                 **{key: str(entry.get(key) or "") for key in ("group_src", "group_dest", "group", "format")},
@@ -428,7 +430,7 @@ def _discover_session_runs(
         else:  # nothing claims this log: how recently it was written is all there is to go on
             status = "running" if (time.time() - mtime) < _MTIME_LIVE_WINDOW else "done"
         try:
-            base = str(log.parent.relative_to(base_root))
+            base = log.parent.relative_to(base_root).as_posix()
         except ValueError:
             base = log.parent.name
         found.append((log, run_name, kind, status, base, mtime))

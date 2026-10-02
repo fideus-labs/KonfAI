@@ -139,7 +139,8 @@ def test_the_dataset_is_read_back_from_the_config_without_rewriting_it(tmp_path:
     root = workspace(tmp_path, config=True)
     before = (root / "Config.yml").read_bytes()
     payload = state(root)
-    assert payload["dataset"] == "/data/pelvis"
+    # Rooted without a drive, the config's path names the workspace's drive on Windows.
+    assert payload["dataset"] == str((root / "/data/pelvis").resolve())
     assert payload["groups"] == ["CT", "Label"]
     assert payload["has_reference"] is True
     assert (root / "Config.yml").read_bytes() == before
@@ -280,7 +281,7 @@ def test_the_state_line_is_a_line(tmp_path: Path) -> None:
     root = workspace(tmp_path, config=True, checkpoints=["run_01"], predictions=["run_01"])
     line = state_line(state(root, [job("done", "prediction")]))
     assert line.startswith("stage=prediction")
-    assert "dataset=/data/pelvis" in line and "groups=CT/Label" in line and "run=run_01" in line
+    assert f"dataset={(root / '/data/pelvis').resolve()}" in line and "groups=CT/Label" in line and "run=run_01" in line
     assert "\n" not in line and len(line) < 200
 
 

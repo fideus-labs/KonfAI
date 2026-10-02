@@ -258,7 +258,7 @@ def test_the_rail_reads_a_run_the_way_its_panel_does(workspace: Path, monkeypatc
                 "status": "done",
                 "created_at": 1000.0,
                 "finished_at": 1100.0,  # long over; the log above was written just now
-                "pid": 1,
+                "pid": os.getpid(),
             }
         ),
         encoding="utf-8",

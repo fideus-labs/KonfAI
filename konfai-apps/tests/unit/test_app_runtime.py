@@ -94,13 +94,22 @@ def test_run_distributed_app_removes_auto_created_workspace_when_a_path_does_not
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
     monkeypatch.setattr(app_module.tempfile, "mkdtemp", lambda prefix: str(auto_dir))
+    # Path.resolve refuses a NUL byte on POSIX and accepts it on Windows: the refusal is staged instead.
+    resolve = Path.resolve
+
+    def refusing(self: Path, strict: bool = False) -> Path:
+        if self.name == "unresolvable.mha":
+            raise ValueError("this path does not resolve")
+        return resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", refusing)
 
     @app_module.run_distributed_app
     def wrapped(inputs: list[list[str]]) -> None:
         raise AssertionError("never reached: the input path does not resolve")
 
     with pytest.raises(ValueError):
-        wrapped(inputs=[["CT\x00.mha"]])
+        wrapped(inputs=[["unresolvable.mha"]])
 
     assert auto_dir.exists() is False
 

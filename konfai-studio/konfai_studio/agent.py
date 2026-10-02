@@ -17,7 +17,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -136,8 +136,21 @@ SYSTEM_PROMPT = (
 # A tool executor: given (name, arguments) run the MCP tool, return (ok, text_preview).
 ToolFn = Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]]
 
-# Absolute NIfTI / MHA volume paths NAMED by the assistant -> auto-load in NiiVue.
-_VOLUME_RE = re.compile(r"(/[^\s\"'`|,)\]]+\.(?:nii\.gz|nii|mha|mhd|nrrd))")
+# Absolute NIfTI / MHA volume paths NAMED by the assistant -> auto-load in NiiVue. A server on Windows
+# names them from a drive.
+_VOLUME_RE = re.compile(r"((?:[A-Za-z]:[\\/]|/)[^\s\"'`|,)\]]+\.(?:nii\.gz|nii|mha|mhd|nrrd))")
+
+
+def _strings_in(value: Any) -> Iterator[str]:
+    """Every string a tool's arguments carry, nested ones included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings_in(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _strings_in(item)
 
 
 def _detect_volumes(text: str) -> list[str]:
@@ -257,7 +270,8 @@ async def with_volume_events(events: AsyncIterator[dict[str, Any]]) -> AsyncIter
             event["text"] = visible
             volumes = _detect_volumes(visible)
         elif event["type"] == "tool_call":
-            volumes = _detect_volumes(json.dumps(event.get("input"), default=str))
+            # The arguments as written: their JSON spells a Windows path with doubled backslashes.
+            volumes = _detect_volumes(" ".join(_strings_in(event.get("input"))))
         elif event["type"] == "tool_result":
             full = event.get("preview", "")
             actions = _next_actions(full)

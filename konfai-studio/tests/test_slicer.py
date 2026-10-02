@@ -51,7 +51,8 @@ def test_a_running_slicer_gets_the_volumes_without_a_second_instance(
     response = post([str(sct), str(ct)])
 
     assert response.json() == {"ok": True, "via": "webserver"}
-    assert str(sct) in sent[0] and str(ct) in sent[0]
+    # The paths reach Slicer as Python literals, so a Windows path arrives with its backslashes escaped.
+    assert repr(str(sct)) in sent[0] and repr(str(ct)) in sent[0]
 
 
 def test_without_a_running_slicer_one_is_launched_on_the_volumes(
