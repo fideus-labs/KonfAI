@@ -1215,15 +1215,16 @@ class DataPrediction(Data):
     def _batching(self, sampler: Sampler[int]) -> dict[str, Any]:
         # Off a GPU nothing measures, nor where two patches may not stack: one patch per batch, as
         # batch_size: 1 has it.
-        if not self.measures_batch or not cuda_visible_devices() or not self._patches_stack():
+        if not self.measures_batch or not cuda_visible_devices() or not self.patches_stack():
             return super()._batching(sampler)
         # One patch, then two, then the measured batch: the predictor sets the size as it measures.
         return {"batch_sampler": GrowingBatchSampler(sampler, 1)}
 
-    def _patches_stack(self) -> bool:
+    def patches_stack(self) -> bool:
         """Whether the patches of each group share one shape, as a batch of several stacks them: a declared
-        patch axis pads every patch to its size, a free one (``0``, or no patch) keeps each case's extent.
-        Without a patch, every copy is cut into patches of the case's shape, so only that shape counts."""
+        patch axis pads every patch to its size, a free one (``0``, or no patch) keeps each case's extent
+        until the predictor pins it to the largest. Without a patch, every copy is cut into patches of the
+        case's shape, so only that shape counts."""
         patch_size = self.patch.patch_size if self.patch is not None else None
         multiple = self.patch.free_axis_multiple if self.patch is not None else None
         copies = slice(None) if self.patch is not None else slice(1)

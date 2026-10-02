@@ -82,7 +82,7 @@ with them resident restarts with them loading per batch. At one batch size the o
 | `augmentations` | Test-time augmentation. A `Flip` gives the copies the distinct mirrors its `f_prob` allows, in turn (7 copies: all seven), rather than drawing them. |
 | `Patch` | How the volume is cut (below). |
 | `subset` | Which cases to predict. |
-| `batch_size` | Patches per batch. `0`, the default, measures the largest batch that fits on the GPU, when the patches share one shape (a `0` axis keeps each case's own extent, and one patch per batch). |
+| `batch_size` | Patches per batch. `0`, the default, measures the largest batch that fits on the GPU. A `0` patch axis then takes the largest extent among the cases, the smaller ones padded up to it, so the patches share one shape. |
 | `num_workers` | Loader workers (`null`: 0, or up to 4 when the format cannot read regions). Each worker holds the case it prepares, so more workers use more RAM. |
 | `pin_memory`, `prefetch_factor`, `persistent_workers` | DataLoader settings, as in training. |
 
