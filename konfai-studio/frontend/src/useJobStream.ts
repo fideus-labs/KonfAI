@@ -194,6 +194,10 @@ export function useJobStream(session: string, runNonce: number): JobStream {
 
     async function pump(seen: () => void) {
       const resp = await fetch(`/api/live?session=${encodeURIComponent(session)}`, { signal: ctrl.signal });
+      // Every connection replays each run's tail: the curves are rebuilt from it, not appended to.
+      itCount.current = {};
+      ramTick.current = {};
+      setRuns((prev) => prev.map((r) => ({ ...r, series: {}, live: r.live && { ...r.live, ram: [] } })));
       for await (const ev of readSSE(resp)) {
         seen();
         if (ev.type === "job") {
