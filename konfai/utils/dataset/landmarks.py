@@ -74,4 +74,3 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
                 + str(i + 1)
                 + ",,vtkMRMLScalarVolumeNode1\n"
             )
-        f.close()

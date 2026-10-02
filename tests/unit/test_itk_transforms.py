@@ -55,6 +55,31 @@ def test_apply_to_data_transform_returns_ndarray() -> None:
     np.testing.assert_allclose(result, points + np.array([10.0, 20.0, 30.0]))
 
 
+def _composite() -> "sitk.CompositeTransform":
+    euler = sitk.Euler3DTransform()
+    euler.SetRotation(0.1, 0.0, 0.0)
+    euler.SetTranslation((1.0, 2.0, 3.0))
+    return sitk.CompositeTransform([sitk.AffineTransform(3), euler])
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        pytest.param(_composite, id="composite"),
+        pytest.param(lambda: sitk.Similarity3DTransform(2.0, (0, 0, 1), 0.1, (1, 2, 3)), id="similarity"),
+        pytest.param(lambda: sitk.ScaleTransform(3, (2.0, 2.0, 2.0)), id="scale"),
+    ],
+)
+def test_apply_to_data_transform_maps_a_point_as_simpleitk_does(transform) -> None:
+    """A transform of a kind the reader does not name is applied as it is, not cast to a B-spline."""
+    transform = transform()
+    points = np.array([[1.0, 2.0, 3.0], [-4.0, 0.5, 6.0]], dtype=np.double)
+
+    result = apply_to_data_transform(points, {transform: False})
+
+    np.testing.assert_allclose(result, [transform.TransformPoint(tuple(point)) for point in points])
+
+
 def test_resample_transform_applies_displacement_in_physical_space() -> None:
     # A stored-transform Resample must not add the physical (dx, dy, dz) displacement straight onto a (z, y, x)
     # voxel-index grid: that transposes x/z and treats millimetres as voxels. A +6 mm translation along

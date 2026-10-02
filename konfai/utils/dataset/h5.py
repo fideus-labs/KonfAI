@@ -40,7 +40,7 @@ except ImportError:
 from konfai import current_date
 from konfai.utils.budget import budget_share
 from konfai.utils.dataset.abstract import AbstractFile
-from konfai.utils.dataset.attribute import Attribute, _encode_transform_leaves, image_to_data
+from konfai.utils.dataset.attribute import Attribute, _encode_transform_leaves, image_to_data, record_region
 from konfai.utils.dataset.staging import (
     _REPLACED_MARKER,
     _orphaned_backup_names,
@@ -198,21 +198,26 @@ class _H5DataStream(DataStream):
         if not success:
             del parent[temporary_name]
             return
-        backup = _replaced_name(self._final_name)
-        replaced = self._final_name in parent
-        if replaced:
-            if backup in parent:
-                del parent[backup]
-            parent.move(self._final_name, backup)
-        try:
-            parent.move(temporary_name, self._final_name)
-        except Exception:
-            # A failed publish leaves the store as it found it.
-            if replaced and self._final_name not in parent:
-                parent.move(backup, self._final_name)
-            raise
-        if replaced:
-            del parent[backup]
+        _publish(parent, temporary_name, self._final_name)
+
+
+def _publish(h5_group: h5py.Group, staged: str, final: str) -> None:
+    """Move the entry ``staged`` onto ``final``. The old entry is moved aside first and put back if
+    the move fails, so a failed publish leaves the store as it found it."""
+    backup = _replaced_name(final)
+    replaced = final in h5_group
+    if replaced:
+        if backup in h5_group:
+            del h5_group[backup]
+        h5_group.move(final, backup)
+    try:
+        h5_group.move(staged, final)
+    except Exception:
+        if replaced and final not in h5_group:
+            h5_group.move(backup, final)
+        raise
+    if replaced:
+        del h5_group[backup]
 
 
 class H5File(AbstractFile):
@@ -332,7 +337,7 @@ class H5File(AbstractFile):
     def file_to_data_slice(self, groups: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         dataset = self._require_dataset(groups, name)
         data = np.asarray(dataset[slices])
-        return data, self._sidecar(dataset)
+        return data, record_region(self._sidecar(dataset), dataset.shape, slices)
 
     def data_to_file(
         self,
@@ -344,33 +349,19 @@ class H5File(AbstractFile):
             return
         if attributes is None:
             attributes = Attribute()
-        if isinstance(data, sitk.Image):
+        if sitk is not None and isinstance(data, sitk.Image):
             data, attributes_tmp = image_to_data(data)
             attributes.update(attributes_tmp)
-        elif isinstance(data, sitk.Transform):
+        elif sitk is not None and isinstance(data, sitk.Transform):
             data = _encode_transform_leaves(data, name, attributes)
 
         h5_group, name = self._resolve_group(name)
-        # Staged under a temp name and moved, never created under the final one; the old entry is
-        # moved aside and put back if the publish fails.
+        # Staged under a temp name and moved, never created under the final one.
         staging = f"{name}.{DataStream.temporary_suffix()}"
         if staging in h5_group:
             del h5_group[staging]
         self._create_entry(h5_group, staging, attributes, data=data, dtype=data.dtype)
-        backup = _replaced_name(name)
-        replaced = name in h5_group
-        if replaced:
-            if backup in h5_group:
-                del h5_group[backup]
-            h5_group.move(name, backup)
-        try:
-            h5_group.move(staging, name)
-        except Exception:
-            if replaced and name not in h5_group:
-                h5_group.move(backup, name)
-            raise
-        if replaced:
-            del h5_group[backup]
+        _publish(h5_group, staging, name)
 
     @staticmethod
     def _create_entry(h5_group: h5py.Group, key: str, attributes: Attribute, **dataset_kwargs: Any) -> h5py.Dataset:
@@ -513,4 +504,4 @@ class H5File(AbstractFile):
 
     def get_infos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
         dataset = self._require_dataset(groups, name)
-        return dataset.shape, self._sidecar(dataset)
+        return list(dataset.shape), self._sidecar(dataset)

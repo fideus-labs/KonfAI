@@ -64,13 +64,16 @@ class DicomFile(AbstractFile):
         return attributes
 
     def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
-        from konfai.utils.dicom import read_dicom_series
+        from konfai.utils.dicom import _decode_cached_planes, get_dicom_info
 
-        data, origin, spacing, direction = read_dicom_series(self._path(name))
+        # Off the memoised header read; no plane is cached, since a whole read touches each once.
+        info = get_dicom_info(self._path(name))
+        whole = (slice(None), slice(None))
+        data = _decode_cached_planes(info["sorted_files"], whole, apply_rescale=True, keep=False)[np.newaxis]
         attributes = Attribute()
-        attributes["Origin"] = origin
-        attributes["Spacing"] = spacing
-        attributes["Direction"] = direction
+        attributes["Origin"] = np.asarray(info["origin"])
+        attributes["Spacing"] = np.asarray(info["spacing"])
+        attributes["Direction"] = np.asarray(info["direction"])
         return data, attributes
 
     def bounded_region_reads(self, name: str) -> bool:

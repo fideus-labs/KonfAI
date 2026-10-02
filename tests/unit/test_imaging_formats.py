@@ -463,7 +463,7 @@ class TestDicomRegionDecode:
         assert dataset.read_granularity("CT", "CASE_001") == (1, 1, 6, 5)
 
     def test_the_series_info_memo_is_unbounded_and_a_write_clears_it(self, tmp_path: Path) -> None:
-        """A miss re-reads every slice header twice; a bound of 64 series missed on every patch of a
+        """A miss re-reads every slice header; a bound of 64 series missed on every patch of a
         cohort read in any order but case by case. A write of a series is what changes a directory."""
         pytest.importorskip("pydicom")
         from konfai.utils import dicom
