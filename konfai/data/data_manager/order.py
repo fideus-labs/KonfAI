@@ -50,8 +50,9 @@ def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple
 
     A streamed TTA write reduces the copies slab by slab, so it can only advance to the slowest
     copy's frontier: walked copy-major, the first copy would be complete (and fully retained)
-    before the second began. Ordering by each patch's declared first-spatial-axis start bounds that
-    skew at one patch extent, whatever grid each copy was cut on. The sort is total on
+    before the second began. Ordering by each patch's start along its grid's sweep axis bounds that
+    skew at one patch extent, whatever grid each copy was cut on, and keeps each copy's reads in the
+    slab its input streams. The sort is total on
     ``(start, copy, patch)``, so within a copy the order is untouched: per-copy accumulation is
     byte-identical either way, and the whole-volume path reduces at the end whatever the order.
 
@@ -62,7 +63,7 @@ def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple
 
     def starts(patch: "DatasetPatch") -> list[int] | None:
         try:
-            return [patch.get_patch_slices(copy)[index][0].start for copy, index in entries]
+            return [patch.get_patch_slices(copy)[index][patch.get_sweep_axis(copy)].start for copy, index in entries]
         except (IndexError, KeyError):
             return None
 
