@@ -298,7 +298,12 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
 
 @pytest.mark.parametrize(
     ("stored", "written", "verdict"),
-    [("nii.gz", "nii.gz", "WHOLE-VOLUME"), ("nii.gz", "mha", "LOAD"), ("mha", "mha", "STREAM")],
+    [
+        ("nii.gz", "nii.gz", "WHOLE-VOLUME"),
+        ("nrrd", "mha", "LOAD"),
+        ("nii.gz", "mha", "STREAM"),  # read from its uncompressed twin
+        ("mha", "mha", "STREAM"),
+    ],
 )
 def test_a_crop_writes_the_region_of_interest_header_on_every_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stored: str, written: str, verdict: str

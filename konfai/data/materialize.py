@@ -124,6 +124,7 @@ class CaseMaterializer:
         with self._materialization(rewrite, fallback_budget_bytes, device):
             verdict = self._write_case(a, fallback_budget_bytes, allow_fallback, prefer_whole)
             self.manager.unload()
+            self.manager.release_case()
             return verdict
 
     def _write_case(
@@ -236,6 +237,7 @@ class CaseMaterializer:
                     self._assemble_and_write(a)
                     outcomes[a] = (Verdict.WHOLE_VOLUME, None)
             manager.unload()
+            manager.release_case()
             return outcomes
 
     def classify_copies(self, copies: Iterable[int]) -> dict[int, CopyRoute]:
@@ -427,7 +429,7 @@ class CaseMaterializer:
 
     def reads_its_source_whole(self, a: int = 0, apply_augmentations: bool = False) -> bool | None:
         """Whether a sweep of this case would decode its stored source whole for every region: the
-        store serves no bounded region read (a gzipped NIfTI). ``None`` when the chain cannot stream;
+        store serves no bounded region read (an NRRD). ``None`` when the chain cannot stream;
         a Save cache still to write lands on a store serving bounded reads, so it never counts."""
         segments = self.manager.sweep_segments(a, apply_augmentations)
         if segments is None:

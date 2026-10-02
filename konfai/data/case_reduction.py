@@ -99,8 +99,8 @@ class ReductionPlan:
     #: blocks, so below one stored block this is the same figure at every height: charged flat,
     #: never divided by the rows.
     read_bytes: int = 0
-    #: Members read from a store that cannot serve a bounded region read (a gzipped NIfTI, a
-    #: compressed MetaImage, NRRD), by name, with the store's format: every region asked of such a
+    #: Members read from a store that cannot serve a bounded region read (NRRD, a compressed file
+    #: with no uncompressed twin), by name, with the store's format: every region asked of such a
     #: member decodes its whole volume, so the fold reads it once per region rather than once.
     unbounded: dict[str, str] = field(default_factory=dict)
     refusal: str | None = None
@@ -659,6 +659,8 @@ class CaseReduction:
 
         with SWEEP_CLOCK.phase("sweep"):
             self._write_folds(plan)
+        for manager in self.managers:
+            manager.release_case()
         return True
 
     def _write_folds(self, plan: ReductionPlan) -> None:

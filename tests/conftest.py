@@ -37,6 +37,9 @@ def _konfai_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("KONFAI_config_file", str(tmp_path / "konfai-none.yml"))
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    # The uncompressed twins of compressed test volumes stay in the test's own directory.
+    monkeypatch.setenv("KONFAI_DECOMPRESSED_DIRECTORY", str(tmp_path / "decompressed"))
+    monkeypatch.delenv("KONFAI_DECOMPRESSED_RUN", raising=False)
 
 
 @pytest.fixture

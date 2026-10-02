@@ -1463,8 +1463,12 @@ def _prepared_prediction(root: Path, file_format: str, **kwargs) -> DataPredicti
 
 @pytest.mark.parametrize(
     ("file_format", "spins_workers"),
-    [("mha", False), ("nii.gz", True)],
-    ids=["a region read decodes the region", "a region read decodes the volume"],
+    [("mha", False), ("nii.gz", False), ("nrrd", True)],
+    ids=[
+        "a region read decodes the region",
+        "a compressed region is read from the uncompressed twin",
+        "a region read decodes the volume",
+    ],
 )
 def test_prediction_spins_workers_only_where_a_patch_read_decodes_the_volume(
     tmp_path: Path, file_format: str, spins_workers: bool

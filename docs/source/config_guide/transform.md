@@ -170,8 +170,8 @@ The verdicts, and each one is a fact about *your* run:
 - **STREAM**: the case is read and written region by region. Memory is one
   slab, whatever the volume's size.
 - **LOAD**: the case *could* stream and fits the budget, but its store serves
-  no bounded region read (a gzipped NIfTI decodes the whole volume for every
-  region), so a sweep would read it once per region. Loading reads it once. A
+  no bounded region read (an NRRD decodes the whole volume for every region), so
+  a sweep would read it once per region. Loading reads it once. A
   choice, not a fallback: `on_fallback` has nothing to say about it. A store
   that serves regions (mha, h5, OME-Zarr) always streams: a halo's overlap or
   a regrid's window costs reads, never the route.
@@ -413,11 +413,11 @@ belongs in a second chain that reads the written output back.
 
 **What it reads.** The fold walks the output's regions and reads each region
 from every member. A member on a store that serves bounded region reads (`h5`,
-`omezarr`, an uncompressed `mha` or `nii`) is read once. A member on a store
-that cannot (`nii.gz`, a compressed `mha`, NRRD) decodes its whole volume
-behind every region read: once per region, twice that when a statistic of the
-result is seeded by a first pass, and a `memory_budget` that lowers the slab
-raises the count. The plan prices it (`reads: ... decodes per member`) and
+`omezarr`, `mha`, `nii`, and `nii.gz` or a compressed `mha` through their
+uncompressed copy) is read once. A member on a store that cannot (NRRD) decodes
+its whole volume behind every region read: once per region, twice that when a
+statistic of the result is seeded by a first pass, and a `memory_budget` that
+lowers the slab raises the count. The plan prices it (`reads: ... decodes per member`) and
 prints the remedy: put a `Save: {dataset: ./Cache:h5}` before the `Reduce`, so
 each member is materialized on a bounded store first and the fold reads the
 cache. A reduction is also one work item: `--cpu N` cannot split it over ranks.

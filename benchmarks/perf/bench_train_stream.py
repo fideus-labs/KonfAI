@@ -53,9 +53,9 @@ from harness import (
     write_result,
 )
 
-#: A compressed MetaImage cannot serve a region, so a patch read off one decodes the whole volume.
-#: The pair is here on purpose: it is the axis the framework's own guard
-#: (``_patch_read_decodes_the_volume``) turns on.
+#: A compressed MetaImage cannot serve a region itself: its patches are read from an uncompressed
+#: twin decompressed once per case and run (``konfai.utils.dataset.decompressed``). The pair is here on
+#: purpose: it measures that decompression against the uncompressed ``mha`` it produces.
 COMPRESSED = {"mha-gz"}
 
 

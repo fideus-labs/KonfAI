@@ -88,8 +88,9 @@ class _PixelBlock(NamedTuple):
         return np.asarray(self.probe.GetDirection())
 
 
-def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
-    """Where an uncompressed local-data MetaImage keeps its pixels and how; ``None`` for any other."""
+def _mha_header(path: str) -> tuple[dict[str, str], int] | None:
+    """A MetaImage header's fields in order, up to ``ElementDataFile`` (MetaIO's last), and the offset
+    its local data starts at; ``None`` when no such field is within the probe."""
     with open(path, "rb") as file:
         head = file.read(_MHA_HEADER_PROBE_BYTES)
     fields: dict[str, str] = {}
@@ -102,6 +103,15 @@ def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
         position = end + 1
         if separator:
             fields[key.strip()] = value.strip()
+    return fields, position
+
+
+def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
+    """Where an uncompressed local-data MetaImage keeps its pixels and how; ``None`` for any other."""
+    header = _mha_header(path)
+    if header is None:
+        return None
+    fields, position = header
     dtype = _MHA_DTYPES.get(fields.get("ElementType", ""))
     if (
         dtype is None

@@ -379,6 +379,13 @@ fine-tune job (default 64 GiB): the archive, each member and the total extracted
 bytes. Past it the server answers **413**. See the limits of the
 [app server API](app-server-api.md).
 
+#### `KONFAI_DECOMPRESSED_DIRECTORY`
+
+Where runs keep the uncompressed twins of the compressed files they read by
+region (`.nii.gz`, a compressed MetaImage). Default `~/.cache/konfai/decompressed`
+(`$XDG_CACHE_HOME/konfai/decompressed` when that is set). See
+[compressed files](components/storage-backends.md#compressed-files).
+
 #### Streaming and write-path switches
 
 Diagnostic kill-switches for the streamed prediction writer. Defaults are the

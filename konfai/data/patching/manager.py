@@ -81,7 +81,7 @@ from konfai.data.transform import (
     split_expand,
     stat_seed_valid,
 )
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, decompressed
 from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
 from konfai.utils.runtime import return_freed_heap
@@ -2040,9 +2040,13 @@ class DatasetManager:
             " shape, where a patch's extent cannot say it.",
         )
 
-    def release_slabs(self) -> None:
-        """Drop the slabs a one-pass reader cut this case's patches from, once it has left the case."""
+    def release_case(self) -> None:
+        """Drop what a one-pass reader holds of this case once it has left it: the slabs its patches
+        were cut from, and the uncompressed twins read for it and for its ``Expand`` copies, from any
+        root (a mask, a field, a Save cache of the copies)."""
         self._landed_slabs.clear()
+        for a in range(1 + (self._expand.nb if self._expand is not None else 0)):
+            decompressed.release(self.copy_entry(a))
 
     def unload(self) -> None:
         self._landed_slabs.clear()

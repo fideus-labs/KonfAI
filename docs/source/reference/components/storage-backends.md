@@ -18,19 +18,69 @@ whole).
 
 | Backend | Format token(s) | Kind | Region reads | Streamed writes | Optional extra |
 | --- | --- | --- | --- | --- | --- |
-| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **uncompressed MetaImage and NIfTI only** | **the same set**: uncompressed `.mha` and `.nii` | `konfai[itk]` (`SimpleITK`) |
+| `Dataset.SitkFile` | `mha, mhd, nii, nii.gz, nrrd, nrrd.gz, gipl(.gz), hdr, img, dcm, tif(f), png, jpg, jpeg, bmp, itk.txt, fcsv, xml, vtk, npy` | Directory of per-case image files (default) | **MetaImage and NIfTI**: uncompressed ones directly, compressed ones (`.nii.gz`, a zlib `.mha`/`.mhd`) through an [uncompressed twin](#compressed-files); not NRRD | uncompressed `.mha` and `.nii` only | `konfai[itk]` (`SimpleITK`) |
 | `Dataset.H5File` | `h5` | Single monolithic HDF5 file | yes (chunked) | yes | `konfai[hdf5]` (`h5py`) |
 | `Dataset.OmeZarrFile` | `omezarr, ome-zarr, ome_zarr, zarr` (+ `@level`) | OME-Zarr pyramid directory | yes (chunked) | yes, `scale_factors` pyramids included | `konfai[omezarr]` (`zarr` + `ngff-zarr`) |
 | `Dataset.DicomFile` (DICOM series; scalar-array writes) | `dicom` | DICOM series directory | per slice | no (whole series) | `konfai[dicom]` (`pydicom`) |
 | `Dataset.ItkTransformFile` | `itktransform` | ITK transform files (`.h5`, `.tfm`), one per case and group | yes, for a displacement entry | yes, for a 3-component 3-D displacement field with image geometry | `konfai[itk]` + `konfai[hdf5]` |
 
-Reading a region is only cheap when the format allows it. A compressed stream is
-not seekable, and NRRD never streams in ITK, so those decode the whole volume per
-region: correct, but slow. The region-**writable** set is deliberately the
-region-**readable** one, a memmap over the raw pixel block, which needs the image
-geometry up front. An `:itktransform` entry writes its parameters region by
-region and the file is exactly what `sitk.WriteTransform` would have produced;
+Reading a region is only cheap when the format allows it. NRRD never streams in
+ITK, so it decodes the whole volume per region: correct, but slow. A compressed
+stream is not seekable either, so KonfAI decompresses it once into an
+uncompressed twin and reads its regions from that (below). The region-**writable**
+set is the uncompressed MetaImage and NIfTI, a memmap over the raw pixel block,
+which needs the image geometry up front: writing `.nii.gz` still assembles the
+volume and writes it whole. An `:itktransform` entry writes its parameters region
+by region and the file is exactly what `sitk.WriteTransform` would have produced;
 any other transform kind is written whole.
+
+### Compressed files
+
+A `.nii.gz`, or a MetaImage written with `CompressedData = True` (its pixels in
+the `.mha` itself or in a separate `.zraw`), is a zlib or gzip stream: ITK has to
+decode it from its start for every region asked of it. The first time a run needs
+a region of such a file, KonfAI decompresses it once, 1 MiB at a time, into an
+uncompressed twin (a `.nii`, or a `.mha` with the same header and
+`CompressedData = False`), and reads every region from the twin. The values and
+the geometry are the ones SimpleITK reads from the original. A file read whole
+anyway gets no twin: a training cache, a stage that needs the whole volume, or a
+region that is the whole volume (a patch the size of the case, a TRANSFORM case
+that fits its budget in one region), which decodes the volume once either way. A
+twin already there serves such a read.
+
+- **Where.** `~/.cache/konfai/decompressed/<host>-<pid>/` (`$XDG_CACHE_HOME`
+  replaces `~/.cache` when set), one directory per run, named after the host and
+  the process that started it. Never beside the dataset. Set
+  `KONFAI_DECOMPRESSED_DIRECTORY` to move them, for instance to a larger or faster
+  local disk; avoid a directory in memory (`/tmp` is one on many systems).
+- **How much.** A twin is the volume's uncompressed size. PREDICTION, EVALUATION
+  and TRANSFORM remove a case's twins when they leave the case, a mask or a
+  displacement field read from another dataset included, and so are the twins of
+  its `Expand` copies (a compressed `Save` of the copies read back by region), so
+  the disk holds the cases in flight. TRAIN draws patches from every case every
+  epoch and keeps its twins for the run. Either way, a run's twins take at most
+  half of the space free on that disk: past it, an entry is read from its
+  compressed stream as before, and KonfAI warns once, naming
+  `KONFAI_DECOMPRESSED_DIRECTORY`. A directory that cannot be written makes no
+  twin at all: TRAIN and PREDICTION warn the same way, and TRANSFORM plans the
+  file as it did before twins (`LOAD` when the case fits its budget).
+- **When they go.** The run removes its directory when it ends, on an error
+  included. A directory a killed run left, whose process no longer runs on this
+  host, is removed by the next run on this host; another host's directories are
+  left alone, so a cache on a shared home serves several nodes.
+- **Processes.** Every rank and loader worker of a run shares its directory (a
+  cluster job, one directory per task): the first reader of an entry decompresses
+  it under a lock, the others wait and read the finished twin, and a twin is
+  published by rename, never half written. A script reading a `Dataset` outside
+  a workflow keeps one directory per process, loader workers included, each
+  removed when its process exits.
+
+The plan counts such a file as a store serving regions: TRANSFORM streams it
+instead of loading it whole (`LOAD`), and PREDICTION no longer starts loader
+workers to hide per-patch decodes. The decompression itself is not in the plan's
+figures, which price memory, not time. NRRD, gzipped or not, and a compressed
+MetaImage whose pixels are split over several files keep the old route and its
+warning.
 
 `pip install "konfai[imaging]"` installs every backend at once
 (`SimpleITK, h5py, pydicom, zarr, ngff-zarr`).
