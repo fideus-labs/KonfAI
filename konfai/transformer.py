@@ -59,6 +59,7 @@ from konfai.utils.budget import (
     format_bytes,
     node_local_ranks,
     record_resident_floor,
+    resident_floor,
     run_peak_resident_bytes,
     set_per_rank_budget,
     sweep_share,
@@ -376,6 +377,9 @@ class Transformer(DistributedObject):
         # What the RANK may hold, beside _budget_bytes which is the share left for the work: the
         # closing line judges the process's peak against the first, the sizing spends the second.
         self._rank_budget_bytes: float = 0.0
+        # A declared budget states what the WORK may take (MemoryBudget.work_bytes), so the closing
+        # line judges what the run held above the process floor; an 'auto' one the whole process.
+        self._budget_is_work = False
         self._shards: list[list[int]] = []
         # Whether a spawned rank hands its failed items to the launcher instead of raising: mp.spawn
         # terminates the other ranks mid-case when one raises. A cluster task keeps raising.
@@ -740,6 +744,7 @@ class Transformer(DistributedObject):
         # decoded-chunk cache is bounded here too, as part of what the process holds.
         self._budget_bytes = per_rank_budget
         self._rank_budget_bytes = budget.per_rank_bytes(node_ranks)
+        self._budget_is_work = not budget.shared_across_ranks
         set_per_rank_budget(per_rank_budget)
         chunk_cache_bytes = bound_chunk_cache()
         entries: list[TransformPlanEntry] = []
@@ -942,10 +947,13 @@ class Transformer(DistributedObject):
         peak = run_peak_resident_bytes()
         if peak is None:
             return None
-        # The RANK's whole figure, not the share left for the work: the peak includes the interpreter
-        # and the libraries, which the work budget has taken off it.
+        # A declared budget is the work's, so the work is judged above the floor the run started from;
+        # an 'auto' one is the rank's whole figure, the interpreter and the libraries included.
+        floor = resident_floor() if self._budget_is_work else None
+        if floor is not None:
+            peak = max(0, peak - floor)
+        held = f"held {format_bytes(peak)}{' above the process floor' if floor is not None else ''} at its peak"
         budget = self._rank_budget_bytes or self._budget_bytes
-        held = f"held {format_bytes(peak)} at its peak"
         if not budget or budget <= 0:
             return f"{held} (no memory_budget declared: nothing bounded it)"
         over = peak / budget
