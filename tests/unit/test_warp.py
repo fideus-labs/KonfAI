@@ -88,15 +88,13 @@ def test_the_source_region_is_the_target_moved_by_the_field_range(tmp_path: Path
     target = (slice(4, 6), slice(4, 6), slice(4, 6))
     window = warp.measured_region_source("CASE_000", target, [10, 12, 14], _attributes())
 
-    # The rule, written out: the region's OUTER faces (start - 0.5 .. stop - 0.5) in world units,
-    # extended by the field's range CLAMPED TO INCLUDE the identity -- here [0, +4] um, so the
-    # window keeps its own faces and reaches one-sidedly where the field points -- back to indices,
-    # floor/ceil, one voxel of margin for the taps.
+    # The rule, written out: the region's first and last voxels moved by the field, back to
+    # indices, floor/ceil, one voxel of margin for the taps.
     extents, per_voxel = (10, 12, 14), (1.0, 1.0, 2.0)  # array order (z, y, x)
     expected = []
     for axis, extent in enumerate(extents):
         reach = 4.0 / per_voxel[axis]
-        low, high = 4 - 0.5, 6 - 0.5 + reach
+        low, high = 4 + reach, 5 + reach
         expected.append((max(0, int(np.floor(low)) - 1), min(extent, int(np.ceil(high)) + 2)))
     assert [(part.start, part.stop) for part in window] == expected
     # And it is strictly less than what the same field priced as a radius would have read.
@@ -146,7 +144,8 @@ def test_the_header_scan_survives_an_unreadable_entry_in_the_field_group(tmp_pat
 
 def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_path: Path) -> None:
     """A bound-less field is not a whole-volume answer: the field window a region samples is read
-    for sampling regardless, and the sup of those very values sizes that region's source pull: per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
+    for sampling regardless, and the region's faces walked through it size that region's source
+    pull: per region, so a quiet slab pays a quiet halo where the shifted one pays its shift."""
     _source, _fields, _volume = _fixture(tmp_path, shift_um=(4.0, 0.0, 0.0))  # 4 um along x alone
     warp = _recorded(Resample(field=f"{tmp_path / 'dvf'}:h5", field_group="DVF"))
 
@@ -158,10 +157,9 @@ def test_a_field_with_no_bound_still_streams_with_windows_measured_at_run(tmp_pa
 
     # The plan prices as if the field were zero: the target's outer faces plus the taps' voxel.
     assert [(part.start, part.stop) for part in priced] == [(2, 8), (2, 8), (2, 8)]
-    # The run pays the shift the values actually hold: 4 um at spacing 2 is 2 voxels, on x alone,
-    # and only where the field points -- the window keeps its identity faces (the field displaces
-    # nothing outside its grid) and extends one-sidedly along x.
-    assert [(part.start, part.stop) for part in measured] == [(2, 8), (2, 8), (2, 10)]
+    # The run reads where the field points: 4 um at spacing 2 moves the window 2 voxels along x,
+    # and the voxels the field does not move keep only the taps' margin.
+    assert [(part.start, part.stop) for part in measured] == [(3, 7), (3, 7), (5, 9)]
 
 
 def test_sizing_and_sampling_share_one_field_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -44,6 +44,7 @@ from konfai.data.geometry import (
     Grid,
     SpatialStages,
     TransformBound,
+    WorldBox,
 )
 
 #: Coordinates are accumulated in float64 and only the gather runs in the payload's dtype. In
@@ -806,3 +807,51 @@ def source_window(
     residual), read back as a clamped index window on the source.
     """
     return source_grid.index_window(bound.map_box(target_grid.world_box()), margin)
+
+
+def _face_points(target_grid: Grid, onto: Grid, stages: SpatialStages) -> np.ndarray:
+    """The region's face voxels sent through the map, as continuous indices on ``onto``, ``(N, rank)``."""
+    rank = target_grid.rank
+    faces = []
+    for axis, extent in enumerate(target_grid.size_zyx):
+        for face in {0, int(extent) - 1}:
+            face_grid = target_grid.sub_grid(
+                tuple(
+                    slice(face, face + 1) if a == axis else slice(0, int(n)) for a, n in enumerate(target_grid.size_zyx)
+                )
+            )
+            # Each displacement is walked on the lattice window its face reaches, never the whole field.
+            box = face_grid.world_box()
+            local: list[AffineStage | DisplacementStage] = []
+            for stage in stages:
+                if isinstance(stage, DisplacementStage):
+                    stage = stage.over(box)
+                box = stage.bound().map_box(box)
+                local.append(stage)
+            faces.append(source_index(face_grid, onto, tuple(local), torch.device("cpu")).reshape(-1, rank))
+    return torch.cat(faces).numpy()
+
+
+def walked_window(target_grid: Grid, source_grid: Grid, stages: SpatialStages, margin: int = 1) -> tuple[slice, ...]:
+    """The source window a target region pulls, from the map walked along the region's faces.
+
+    A map that does not fold sends the region's boundary to the boundary of its image, so the
+    extremes the walk meets on the faces are the extremes of the whole region. That holds for the
+    fields a registration writes; a field that folds reaches past its faces, and the region then
+    reads outside its window. Faces rather than :func:`source_window`'s bound: a displacement's range
+    widens every region by the whole of its variation where the region itself moves by far less.
+    """
+    points = _face_points(target_grid, source_grid, stages)
+    # A sample at continuous index c reads floor(c) - (margin - 1) to floor(c) + margin: two taps
+    # linear or nearest, four cubic. A millionth of a voxel covers the sampler's own rounding of c.
+    low = np.floor(points.min(axis=0) - 1e-6) - (margin - 1)
+    high = np.floor(points.max(axis=0) + 1e-6) + margin
+    return source_grid.continuous_window(low, high, 0)
+
+
+def walked_box(target_grid: Grid, stages: SpatialStages) -> WorldBox:
+    """Where the map sends the region's voxels, as a world box: :func:`walked_window`'s walk."""
+    rank = target_grid.rank
+    world = Grid((1,) * rank, np.zeros(rank), np.ones(rank), np.eye(rank))
+    points = _face_points(target_grid, world, stages)
+    return WorldBox(points.min(axis=0), points.max(axis=0))

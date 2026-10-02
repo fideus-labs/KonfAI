@@ -194,6 +194,10 @@ class DataAugmentation(NeedDevice, ABC):
     #: Companion to a ``HALO`` :attr:`locality`: per-spatial-axis radius in array order.
     halo: tuple[int, ...] = ()
 
+    #: Whether the run reads a region's pull from :meth:`_measured_region_source` rather than the
+    #: plan's closed form: a walk too costly to price every candidate block with.
+    measures_at_run: bool = False
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         # A draw is a chain stage too: konfai.api writes the config tree back from live objects.
         super().__init_subclass__(**kwargs)
@@ -310,6 +314,27 @@ class DataAugmentation(NeedDevice, ABC):
 
     def _axis_remap(self, index: int, a: int) -> AxisRemap | None:
         return None
+
+    def measured_region_source(
+        self,
+        index: int,
+        a: int,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+    ) -> list[slice]:
+        """The region copy *a* reads at run time, where the draw :attr:`measures_at_run`."""
+        if a not in self.who_index[index]:
+            return list(target_slices)
+        return self._measured_region_source(index, self._slot(index, a), target_slices, source_spatial_shape)
+
+    def _measured_region_source(
+        self,
+        index: int,
+        a: int,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+    ) -> list[slice]:
+        return self._stream_region_source(index, a, target_slices, source_spatial_shape)
 
     def _stream_region_source(
         self,
