@@ -485,3 +485,23 @@ def test_a_seeded_prediction_replays_its_test_time_augmentation(tmp_path: Path, 
             )
         outputs.append(sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Dataset" / "P000" / "OUT.mha"))))
     assert np.array_equal(outputs[0], outputs[1])
+
+
+def test_a_checkpoint_path_that_does_not_exist_is_refused_before_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--models nope.pt`` listed every case, printed 'Running on CPU' and then raised a bare
+    ValueError from setup; the config it read was rewritten on the way."""
+    from konfai.predictor import predict
+
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / "Prediction.yml"
+    config.write_text("Predictor:\n  train_name: MISSING_CHECKPOINT\n", encoding="utf-8")
+
+    with pytest.raises(PredictorError) as refused:
+        predict(models=["nope.pt"], quiet=True, prediction_file=config, predictions_dir=tmp_path / "Predictions")
+
+    message = str(refused.value)
+    assert "[Predictor] Checkpoint 'nope.pt' does not exist" in message and str(tmp_path / "nope.pt") in message
+    assert config.read_text(encoding="utf-8") == "Predictor:\n  train_name: MISSING_CHECKPOINT\n"
+    assert not (tmp_path / "Predictions").exists()

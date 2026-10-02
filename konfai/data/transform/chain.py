@@ -26,7 +26,7 @@ from konfai.data.transform.base import LocalityKind, PatchLocality, Transform
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ReductionError, TransformError
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 
 #: Keys the ``Reduce`` stage reads from its own mapping. An operator sharing one of these names is
 #: refused.
@@ -41,7 +41,7 @@ def resolve_operator(reduce: "Reduce") -> Reduction:
     chain assembled in Python builds the operator from its own defaults.
     """
     module, name = get_module(reduce.operator_classpath, "konfai.data.reduction")
-    factory = getattr(module, name)
+    factory = module_attribute(module, name)
     shadowed = sorted(set(inspect.signature(factory.__init__).parameters) & _REDUCE_OWN_KEYS)
     if shadowed:
         raise ReductionError(

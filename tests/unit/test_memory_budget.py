@@ -480,12 +480,12 @@ def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytes
 
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
     for kwargs in ({"gpu": [0, 1]}, {"gpu": [], "cpu": 3}):
-        with pytest.raises(SystemExit):
+        with pytest.raises(KeyboardInterrupt):
             factory(**kwargs)
     assert captured == ["2", "3"]
     assert "KONFAI_LOCAL_RANKS" not in os.environ
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "7")
-    with pytest.raises(SystemExit):
+    with pytest.raises(KeyboardInterrupt):
         factory(gpu=[0])
     assert captured[-1] == "1" and os.environ["KONFAI_LOCAL_RANKS"] == "7"
 

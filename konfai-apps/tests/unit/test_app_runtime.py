@@ -127,6 +127,26 @@ def test_run_distributed_app_restores_cwd_after_keyboard_interrupt(
     assert "Manual interruption" in capsys.readouterr().out
 
 
+def test_a_refusal_of_the_workflow_an_app_runs_reaches_its_python_caller(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An app action runs a KonfAI workflow in process: that workflow's designed refusal reaches the app's
+    Python caller as the KonfAIError, not as a SystemExit, and the workspace is still restored."""
+    from konfai.evaluator import evaluate
+    from konfai.utils.errors import ConfigError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
+
+    @app_module.run_distributed_app
+    def evaluate_app(tmp_dir: Path) -> None:
+        evaluate(evaluations_file="Nope.yml")
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        evaluate_app(tmp_dir=tmp_path / "workspace")
+    assert Path.cwd() == tmp_path
+
+
 def test_run_distributed_app_resolves_relative_output_before_chdir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

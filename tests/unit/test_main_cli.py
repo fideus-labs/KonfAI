@@ -72,7 +72,8 @@ def test_the_version_is_looked_up_only_when_asked_for(monkeypatch: pytest.Monkey
     ],
 )
 def test_konfai_help_and_usage_errors_do_not_import_torch(argv: list[str], exit_code: int) -> None:
-    """The parser is built without the runtime module: torch loads only for the command that runs."""
+    """The parser is built without the runtime module: torch and the host probes (psutil, pynvml) load
+    only for the command that runs."""
     script = f"""
 import sys
 sys.argv = ["konfai", *{argv!r}]
@@ -83,7 +84,7 @@ except SystemExit as exit:
     assert exit.code == {exit_code}, exit.code
 else:
     raise AssertionError("expected an exit")
-loaded = sorted(name for name in ("torch", "konfai.utils.runtime") if name in sys.modules)
+loaded = sorted(name for name in ("torch", "konfai.utils.runtime", "psutil", "pynvml") if name in sys.modules)
 assert not loaded, loaded
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
@@ -104,6 +105,50 @@ def test_gpu_ids_are_checked_against_the_visible_devices(monkeypatch: pytest.Mon
     monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--gpu", "1"])
     main_module.main()
     assert captured["gpu"] == [1]
+
+
+def test_a_gpu_named_by_uuid_is_a_usage_error_naming_the_variable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(trainer_module, "train", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-3f2a1b4c")
+
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--gpu", "0"])
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main()
+    assert exc_info.value.code == 2
+    assert "CUDA_VISIBLE_DEVICES='GPU-3f2a1b4c'" in capsys.readouterr().err
+    assert not captured
+
+
+def test_init_reports_a_refusal_by_its_message_and_a_bug_by_its_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A user model's NameError under --init printed "[KonfAI] name 'nb_classes' is not defined": no type,
+    no file, no line. A bug propagates as the run path lets it; a designed refusal stays a message."""
+    from konfai.utils.errors import ConfigError
+
+    config = tmp_path / "Config.yml"
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--init", "-c", str(config)])
+
+    def buggy_build(config: Path) -> None:
+        raise NameError("name 'nb_classes' is not defined")
+
+    monkeypatch.setattr(trainer_module, "build_train", buggy_build)
+    with pytest.raises(NameError, match="nb_classes"):
+        main_module.main()
+    assert "Wrote what resolved before the error" in capsys.readouterr().out
+
+    def refusing_build(config: Path) -> None:
+        raise ConfigError("'Trainer.Dataset' is empty.")
+
+    monkeypatch.setattr(trainer_module, "build_train", refusing_build)
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+    assert exited.value.code == 1
+    out = capsys.readouterr().out
+    assert "Wrote what resolved before the error" in out and "[Config] 'Trainer.Dataset' is empty." in out
 
 
 def test_konfai_train_dispatches_correctly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,7 +326,8 @@ def test_konfai_cluster_refuses_plan(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_predict_evaluate_expose_tensorboard_param():
-    """#7 CLI -tb/--tensorboard (dest 'tensorboard') must reach predict()/evaluate()."""
+    """#7 CLI -tb/--tensorboard (dest 'tensorboard') must reach predict(); evaluate() keeps the parameter,
+    which konfai-apps passes by position."""
     for fn in (predictor_module.predict, evaluator_module.evaluate):
         params = inspect.signature(fn).parameters
         assert "tensorboard" in params, f"{fn.__name__} must accept 'tensorboard'"
@@ -318,3 +364,47 @@ def test_konfai_list_refuses_an_unknown_kind(monkeypatch: pytest.MonkeyPatch) ->
         main_module.main()
 
     assert exc_info.value.code == 2  # an argparse choices error, before anything heavy loads
+
+
+@pytest.mark.parametrize("argv", [["TRAIN"], ["TRAIN", "--init"]])
+def test_a_warning_the_build_raises_reads_in_konfais_format(tmp_path: Path, argv: list[str]) -> None:
+    """A workflow's build warns before its run Log captures the console (an unread key): the CLI still
+    spells the warning as KonfAI's, not as Python's 'file:line: KonfAIWarning:' with the source line."""
+    script = f"""
+import sys, warnings
+import konfai.trainer as trainer
+from konfai.utils.errors import KonfAIWarning
+
+def build(**kwargs):
+    warnings.warn("Unknown key 'Trainer.epoch'.", KonfAIWarning, stacklevel=1)
+
+trainer.train = trainer.build_train = build
+sys.argv = ["konfai", *{argv!r}]
+from konfai.main import main
+main()
+"""
+    run = subprocess.run(
+        [sys.executable, "-c", script], cwd=tmp_path, check=True, capture_output=True, text=True, timeout=300
+    )
+    assert "[KonfAI] WARNING: Unknown key 'Trainer.epoch'." in run.stderr
+    assert "KonfAIWarning:" not in run.stderr
+
+
+def test_an_interrupted_run_exits_with_the_interrupt_status(tmp_path: Path) -> None:
+    """Ctrl+C ends the command with status 130, so ``konfai TRAIN && konfai PREDICTION`` stops there. In a
+    subprocess: a KeyboardInterrupt the CLI let through would stop the test session itself."""
+    script = """
+import sys
+import konfai.trainer as trainer
+
+def interrupted(**kwargs):
+    raise KeyboardInterrupt
+
+trainer.train = interrupted
+sys.argv = ["konfai", "TRAIN"]
+from konfai.main import main
+main()
+"""
+    run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 130, run.stderr
+    assert "Manual interruption (Ctrl+C)" in run.stdout

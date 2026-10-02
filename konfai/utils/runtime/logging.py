@@ -158,8 +158,11 @@ _KONFAI_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 def _show_warning(message, category, filename, lineno, file=None, line=None) -> None:
-    """KonfAI's own warnings read as its other messages; a third party's keep Python's format. The
-    category decides, not the frame, which a ``stacklevel`` may place in the caller's code."""
+    """KonfAI's own warnings read as its other messages; a third party's keep Python's format. Own is a
+    ``KonfAIWarning``, whose frame a ``stacklevel`` may place in the caller's code, or a warning raised
+    from a file under the package's directory. That prefix has no separator, so the sibling packages
+    (``konfai_apps``, ``konfai_mcp``, ``konfai_studio``, or ``konfai-apps/`` beside ``konfai/`` in a
+    source tree) count as own too."""
     if issubclass(category, KonfAIWarning) or str(filename).startswith(_KONFAI_ROOT):
         text = f"[KonfAI] WARNING: {message}\n"
     else:

@@ -31,7 +31,7 @@ from konfai.utils.clock import SweepClock
 from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError
 from konfai.utils.pretrained import PretrainedFrom
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 
 
 @config("Model")
@@ -144,7 +144,7 @@ class ModelLoader:
                 f"Write '{absolute}', or the relative form the built-in models take: '{relative}'.",
             )
         module, name = get_module(classpath, "konfai.models.python")
-        cls = getattr(module, name)
+        cls = module_attribute(module, name)
         if not hasattr(cls, "_key"):
             konfai_args += "." + name
 

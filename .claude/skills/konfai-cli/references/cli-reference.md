@@ -21,7 +21,7 @@ EVALUATION to `konfai.evaluator.evaluate`.
 | `--gpu ID [ID ...]` | GPU device ids, constrained to the visible devices, e.g. `--gpu 0` or `--gpu 0 1 2`. Omit to run on CPU. |
 | `--cpu N` | Run on CPU with `N` (>0) worker processes. **Mutually exclusive with `--gpu`.** |
 | `-q`, `--quiet` | Suppress console output. |
-| `-tb`, `--tensorboard` | Launch TensorBoard. |
+| `-tb`, `--tensorboard` | Launch TensorBoard (needs the `tensorboard` extra). Not accepted by `EVALUATION` or `TRANSFORM`. |
 
 `--gpu` and `--cpu` are a mutually-exclusive group. With neither, execution falls back to CPU.
 

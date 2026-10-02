@@ -20,17 +20,20 @@
 import ctypes
 import inspect
 import os
+import pickle  # nosec B403
 import random
 import shutil
 import socket
 import subprocess  # nosec B404
 import sys
+import tempfile
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from functools import wraps
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -108,7 +111,7 @@ def cudnn_flags(manual_seed: int | None, benchmark: bool) -> tuple[bool, bool]:
 
 
 class DistributedObject(ABC):
-    """Base class for trainer, predictor, and evaluator distributed workflows."""
+    """Base class for the trainer, predictor, evaluator and transformer distributed workflows."""
 
     #: Whether the ranks talk to each other (DDP, gathers). A workflow whose ranks only share the
     #: work list sets it False and runs without a process group: no rendezvous port, no gloo/NCCL.
@@ -191,8 +194,25 @@ class DistributedObject(ABC):
         inline, else one spawned process each."""
         if _runs_inline(world_size):
             self(0)
-        else:
-            mp.spawn(self, nprocs=world_size)
+            return
+        with tempfile.TemporaryDirectory(prefix="konfai_ranks_") as refusals:
+            try:
+                mp.spawn(_run_rank, args=(self, refusals), nprocs=world_size)
+            except mp.ProcessRaisedException as error:
+                refusal = _kept_refusal(Path(refusals) / f"{error.error_index}.pickle")
+                if refusal is None:
+                    raise
+                raise refusal from error
+            except mp.ProcessExitedException as error:
+                if error.signal_name != "SIGKILL":
+                    raise
+                raise KonfAIError(
+                    "Runtime",
+                    f"Rank {error.error_index} was killed by SIGKILL, the signal the kernel's out-of-memory killer"
+                    " sends: the run most likely ran out of RAM.",
+                    "Give each rank less to hold (fewer ranks or DataLoader workers, a smaller memory_budget);"
+                    " the kernel log (dmesg) names an out-of-memory kill.",
+                ) from error
 
     def _bound_chunk_cache(self, world_size: int) -> None:
         """Bound the decoded-chunk cache by this rank's share of the memory budget. Set on the rank: a
@@ -250,16 +270,38 @@ class DistributedObject(ABC):
                     pynvml.nvmlShutdown()
 
 
+def _run_rank(rank: int, workflow: DistributedObject, refusals: str) -> None:
+    """One spawned rank. mp.spawn hands the launcher only the text of a rank's traceback: a designed
+    refusal is also kept, pickled, for the launcher to raise as itself."""
+    try:
+        workflow(rank)
+    except KonfAIError as refusal:
+        with suppress(Exception), open(Path(refusals) / f"{rank}.pickle", "wb") as file:
+            pickle.dump(refusal, file)
+        raise
+
+
+def _kept_refusal(path: Path) -> KonfAIError | None:
+    """The refusal a rank kept at PATH, or None when it kept none (or none the launcher can load)."""
+    try:
+        with open(path, "rb") as file:
+            refusal = pickle.load(file)  # nosec B301 - written by this run's own ranks
+    except Exception:
+        return None
+    return refusal if isinstance(refusal, KonfAIError) else None
+
+
 def run_distributed_app(
     func: Callable[..., DistributedObject],
-) -> Callable[..., DistributedObject | None]:
+) -> Callable[..., DistributedObject]:
     """Wrap a workflow factory so it executes with KonfAI runtime conventions; the wrapper returns
-    the workflow it ran, ``None`` when interrupted."""
+    the workflow it ran. A designed refusal raises ``KonfAIError`` and Ctrl+C ``KeyboardInterrupt``:
+    the CLI turns them into a message and an exit status, an in-process caller catches them."""
 
     sig = inspect.signature(func)
 
     @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> DistributedObject | None:
+    def wrapper(*args: Any, **kwargs: Any) -> DistributedObject:
         params = sig.parameters
         # A kwarg the entrypoint does not declare is refused. Tolerated beside the signature: the cluster
         # kwargs (read from the raw kwargs below) and 'command', which only the TRAIN/RESUME entrypoint declares.
@@ -303,15 +345,6 @@ def run_distributed_app(
                 ),
             )
             return workflow
-        except KeyboardInterrupt:
-            print("\n[KonfAI] Manual interruption (Ctrl+C)")
-            sys.exit(130)
-        except KonfAIError as error:
-            # A designed refusal: the message alone, the traceback only under KONFAI_DEBUG=1.
-            if env_flag("KONFAI_DEBUG", False):
-                raise
-            print(str(error).strip(), file=sys.stderr)
-            sys.exit(1)
         finally:
             if previous_local_ranks is None:
                 os.environ.pop("KONFAI_LOCAL_RANKS", None)
@@ -363,6 +396,11 @@ def execute_distributed_object(
     cpu_workers = 1 if cpu is None else int(cpu)
     if cpu_workers < 1:
         raise ConfigError(f"cpu={cpu!r} is not a rank count.", "Pass cpu=1 or more (the CLI refuses it the same way).")
+    if tensorboard and shutil.which("tensorboard") is None:
+        raise ConfigError(
+            "TensorBoard was asked for (-tb), and no 'tensorboard' executable is on PATH.",
+            "Install it with `pip install konfai[tensorboard]`, or run without -tb.",
+        )
     if cluster_kwargs is not None and not gpu_ids:
         raise ConfigError(
             "A cluster job runs one rank per GPU of each node, and no GPU was given: it would submit zero tasks.",

@@ -21,7 +21,7 @@ import multiprocessing
 import os
 import shutil
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from multiprocessing.sharedctypes import SynchronizedArray
 from pathlib import Path
 from typing import Any
@@ -54,7 +54,7 @@ from konfai.utils.runtime import (
     configure_workflow_environment,
     run_distributed_app,
 )
-from konfai.utils.utils import concretize_patch_size, get_module
+from konfai.utils.utils import concretize_patch_size, get_module, module_attribute
 
 
 @config()
@@ -112,9 +112,9 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.predicted: list[str] | None = None
         module, name = get_module(combine, "konfai.predictor")
         if module.__name__ == "konfai.predictor":
-            self.combine = getattr(module, name)()
+            self.combine = module_attribute(module, name)()
         else:
-            self.combine = apply_config(f"{konfai_root()}.{combine}")(getattr(module, name))()
+            self.combine = apply_config(f"{konfai_root()}.{combine}")(module_attribute(module, name))()
 
         self.autocast = autocast
         self.channels_last = channels_last
@@ -309,22 +309,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self.path_to_models = path_to_models
 
     def _load(self) -> list[dict[str, Any] | Path | str]:
-        """Resolve the checkpoint sources for ensemble prediction, one per model.
-
-        A URL remains a reloadable source: torch.hub keeps its download on disk, while the composite's
-        bounded host cache decides which deserialized weights stay resident. A local path is kept as a
-        path and ``ModelComposite`` streams its weights into a single model instance during prediction.
-        Raises when a path neither exists nor is a URL.
-        """
-        state_dicts: list[dict[str, Any] | Path | str] = []
-        for path_to_model in self.path_to_models:
-            if isinstance(path_to_model, str) and path_to_model.startswith("https://"):
-                state_dicts.append(path_to_model)
-            elif Path(path_to_model).exists():
-                state_dicts.append(Path(path_to_model))
-            else:
-                raise ValueError(f"Invalid model path entry: {path_to_model}")
-        return state_dicts
+        """The checkpoint sources for ensemble prediction, one per model (:func:`checkpoint_sources`)."""
+        return [*checkpoint_sources(self.path_to_models)]
 
     def run_process(
         self,
@@ -516,6 +502,25 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         return str(self)
 
 
+def checkpoint_sources(path_to_models: Sequence[Path | str]) -> list[Path | str]:
+    """Each checkpoint as ``ModelComposite`` loads it. A URL remains a reloadable source: torch.hub keeps
+    its download on disk, while the composite's bounded host cache decides which deserialized weights
+    stay resident. A local path is kept as a path, its weights streamed into a single model instance
+    during prediction. A path that neither exists nor is a URL is refused by name."""
+    sources: list[Path | str] = []
+    for path_to_model in path_to_models:
+        if isinstance(path_to_model, str) and path_to_model.startswith("https://"):
+            sources.append(path_to_model)
+        elif Path(path_to_model).exists():
+            sources.append(Path(path_to_model))
+        else:
+            raise PredictorError(
+                f"Checkpoint '{path_to_model}' does not exist (resolved: '{Path(path_to_model).resolve()}').",
+                "Pass the path of a checkpoint file (--models), or an https:// URL.",
+            )
+    return sources
+
+
 def build_predict(
     models: list[Path],
     prediction_file: Path | str | dict = Path("./Prediction.yml"),
@@ -565,6 +570,7 @@ def predict(
     build step is :func:`build_predict`.
     """
     del overwrite, gpu, cpu, quiet, tensorboard
+    checkpoint_sources(models)  # before the build reads the config and lists the dataset
     return build_predict(
         models=models,
         prediction_file=prediction_file,

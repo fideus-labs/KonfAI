@@ -21,18 +21,9 @@ import os
 from importlib import metadata
 from pathlib import Path
 
-import psutil
-
-try:
-    import pynvml
-
-    _PYNVML_AVAILABLE = True
-except ImportError:
-    _PYNVML_AVAILABLE = False
-
-# ``torch`` (device-name lookup only) is imported lazily at its point of use so that
-# ``import konfai`` stays light. The remote-server helpers speak plain HTTP over the stdlib.
-from konfai.utils.errors import KonfAIError
+# ``torch``, ``psutil`` and ``pynvml`` are imported at their point of use so that ``import konfai``
+# stays light. The remote-server helpers speak plain HTTP over the stdlib.
+from konfai.utils.errors import ConfigError, KonfAIError
 
 try:
     __version__ = metadata.version("konfai")
@@ -126,7 +117,16 @@ def cuda_visible_devices() -> list[int]:
         GPU ids exposed through ``CUDA_VISIBLE_DEVICES`` or detected by PyTorch.
     """
     if "CUDA_VISIBLE_DEVICES" in os.environ:
-        return [int(gpu) for gpu in os.environ["CUDA_VISIBLE_DEVICES"].split(",") if gpu != ""]
+        value = os.environ["CUDA_VISIBLE_DEVICES"]
+        try:
+            return [int(gpu) for gpu in value.split(",") if gpu != ""]
+        except ValueError:
+            # --gpu names these indices and the launcher writes the chosen ones back: a UUID fits neither.
+            raise ConfigError(
+                f"CUDA_VISIBLE_DEVICES={value!r} names a GPU by something other than its index.",
+                "KonfAI selects GPUs by the integer indices CUDA_VISIBLE_DEVICES lists: export indices"
+                " (e.g. CUDA_VISIBLE_DEVICES=0,1; `nvidia-smi -L` numbers the GPUs) or unset it.",
+            ) from None
     else:
         import torch
 
@@ -186,6 +186,8 @@ def get_ram(remote_server: RemoteServer | None = None, timeout_s: float = 2.0) -
         data = remote_server.get_json("ram", timeout_s)
         return data["used_gb"], data["total_gb"]
     else:
+        import psutil
+
         ram = psutil.virtual_memory()
         used_gb = (ram.total - ram.available) / (1024**3)
         total_gb = ram.total / (1024**3)
@@ -216,11 +218,13 @@ def get_vram(
         data = remote_server.get_json("vram", timeout_s, params=[("devices", device) for device in devices])
         return data["used_gb"], data["total_gb"]
     else:
-        if not _PYNVML_AVAILABLE:
+        try:
+            import pynvml
+        except ImportError:
             raise KonfAIError(
                 "GPU monitoring",
                 "nvidia-ml-py is required for local VRAM queries. Install it with `pip install konfai[monitoring]`.",
-            )
+            ) from None
         used_gb = 0.0
         total_gb = 0.0
         pynvml.nvmlInit()

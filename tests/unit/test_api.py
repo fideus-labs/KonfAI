@@ -363,6 +363,53 @@ def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     )
 
 
+def test_a_local_module_classpath_resolves_from_the_working_directory_as_under_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``konfai.main`` puts the working directory on ``sys.path``; a script kept elsewhere and run from the
+    experiment directory has only its own directory there, and ``LocalMetric:OffsetMAE`` raised
+    ModuleNotFoundError through the API where the CLI resolved it."""
+    import sys
+
+    (tmp_path / "LocalMetric.py").write_text(
+        "from konfai.metric.measure import MAE\n\n\nclass OffsetMAE(MAE):\n    pass\n", encoding="utf-8"
+    )
+    truth = np.zeros((6, 7, 8), dtype=np.float32)
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", truth)
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", truth + 2.0)
+    elsewhere = [entry for entry in sys.path if entry not in ("", os.getcwd(), str(tmp_path))]
+    monkeypatch.setattr(sys, "path", elsewhere)
+    monkeypatch.delitem(sys.modules, "LocalMetric", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    result = api.evaluate(
+        "LOCAL_MODULE",
+        "./Raw:mha",
+        {"sCT": {"CT": {"LocalMetric:OffsetMAE": {}}}},
+        evaluations_dir=tmp_path / "Evaluations",
+        quiet=True,
+    )
+
+    assert list(result.metrics["TRAIN"]["case"].values()) == [{"P000": pytest.approx(2.0)}]
+    assert sys.path == elsewhere
+
+
+def test_a_gpu_the_process_does_not_see_is_refused_before_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ids the CLI's --gpu accepts: gpu=[7] under CUDA_VISIBLE_DEVICES='' printed 'Running on cuda:7'
+    and scored on CPU."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", np.zeros((6, 7, 8), dtype=np.float32))
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", np.zeros((6, 7, 8), dtype=np.float32))
+
+    with pytest.raises(ConfigError, match=r"gpu=\[7\] names \[7\].*visible: none"):
+        api.evaluate("HIDDEN_GPU", "./Raw:mha", {"sCT": {"CT": [MAE()]}}, gpu=[7], quiet=True)
+    assert not (tmp_path / "Evaluations").exists()
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+
+
 def test_an_evaluation_yml_without_transforms_scores_the_stored_values(tmp_path: Path) -> None:
     """The key a hand-written Evaluation.yml leaves out once bound a min-max Normalize per group: a
     prediction 10 HU off its reference scored a MAE of 1e-10, exit 0."""

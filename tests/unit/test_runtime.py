@@ -32,7 +32,7 @@ import pytest
 from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.errors import ConfigError, KonfAIWarning
+from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -256,6 +256,15 @@ def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
     assert devices_index == [3, 5]
     assert devices_name == ["GPU0", "GPU1"]
     assert queried_indices == [0, 1]
+
+
+def test_cuda_visible_devices_refuses_a_device_named_by_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A UUID entry (a MIG slice, some containers) has no index ``--gpu`` could name, nor one the
+    launcher could write back."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-3f2a1b4c")
+
+    with pytest.raises(ConfigError, match="CUDA_VISIBLE_DEVICES='GPU-3f2a1b4c'"):
+        konfai_module.cuda_visible_devices()
 
 
 # ---------------------------------------------------------------------------
@@ -924,22 +933,24 @@ def test_the_inline_path_is_the_default(monkeypatch) -> None:
     assert spawned == []
 
 
-def test_an_interrupted_run_exits_with_the_interrupt_status(monkeypatch, capsys) -> None:
-    """Ctrl+C ends the command with status 130, so ``konfai TRAIN && konfai PREDICTION`` stops there."""
+def test_the_workflow_wrapper_lets_an_interrupt_and_a_refusal_reach_its_caller(monkeypatch) -> None:
+    """The wrapper exits nothing: an in-process caller catches Ctrl+C and a designed refusal as
+    exceptions (the CLI turns them into exit statuses)."""
+    raised: list[BaseException] = []
 
-    def interrupted(*args, **kwargs):
-        raise KeyboardInterrupt
+    def execute(*args, **kwargs):
+        raise raised[-1]
 
-    monkeypatch.setattr(rt_dist, "execute_distributed_object", interrupted)
+    monkeypatch.setattr(rt_dist, "execute_distributed_object", execute)
 
     @rt_dist.run_distributed_app
     def workflow(gpu: list[int] = [], cpu: int = 1):
         return object()
 
-    with pytest.raises(SystemExit) as exited:
-        workflow()
-    assert exited.value.code == 130
-    assert "Manual interruption (Ctrl+C)" in capsys.readouterr().out
+    for error in (KeyboardInterrupt(), ConfigError("refused")):
+        raised.append(error)
+        with pytest.raises(type(error)):
+            workflow()
 
 
 def _budget_applied(
@@ -1119,7 +1130,7 @@ def test_windows_refuses_several_ranks_only_where_they_must_talk(monkeypatch, us
     monkeypatch.setattr(rt_dist, "os", WindowsOs())  # only the runtime sees Windows, not pathlib
     monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
-    monkeypatch.setattr(rt_dist.mp, "spawn", lambda fn, nprocs: spawned.append(nprocs))
+    monkeypatch.setattr(rt_dist.mp, "spawn", lambda fn, nprocs, args=(): spawned.append(nprocs))
 
     if uses_collectives:
         with pytest.raises(ConfigError, match="Windows"):
@@ -1294,3 +1305,49 @@ def test_a_seed_makes_cudnn_deterministic_unless_the_run_benchmarks() -> None:
     assert rt_dist.cudnn_flags(7, False) == (False, True)
     assert rt_dist.cudnn_flags(7, True) == (True, False)
     assert rt_dist.cudnn_flags(None, True) == (True, False)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGKILL is POSIX")
+@pytest.mark.parametrize(
+    ("how", "raised", "message"),
+    [
+        ("refuses", ConfigError, "Rank refuses."),
+        ("is_killed", KonfAIError, "Rank 1 was killed by SIGKILL, the signal the kernel's out-of-memory killer"),
+    ],
+)
+def test_a_spawned_rank_that_refuses_or_is_killed_reaches_the_caller_as_a_konfai_error(
+    monkeypatch, tmp_path, how: str, raised: type, message: str
+) -> None:
+    """Two CPU ranks, the last one refuses or dies by SIGKILL (what the out-of-memory killer sends): the
+    caller catches the rank's own refusal, or a KonfAIError naming the likely cause, not torch's
+    ProcessRaisedException or ProcessExitedException."""
+    from rank_failures import FailingLastRank
+
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    with pytest.raises(raised) as refusal:
+        execute_distributed_object(FailingLastRank(how), cpu=2, quiet=True)
+    assert type(refusal.value) is raised
+    assert message in str(refusal.value)
+
+
+def test_tensorboard_without_its_executable_is_refused_before_the_setup(monkeypatch, tmp_path) -> None:
+    """-tb launches the tensorboard executable: without it the run is refused with the extra to install,
+    before the workflow's setup loads anything."""
+    set_up: list[int] = []
+
+    class Workflow(rt_dist.DistributedObject):
+        def setup(self, world_size: int) -> None:
+            set_up.append(world_size)
+            self.dataloader = [[] for _ in range(world_size)]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            pass
+
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    monkeypatch.setattr(rt_dist.shutil, "which", lambda name: None)
+    monkeypatch.setattr("konfai.utils.runtime.logging.shutil.which", lambda name: None)
+    with pytest.raises(ConfigError, match=r"pip install konfai\[tensorboard\]"):
+        rt_dist.execute_distributed_object(Workflow("no-tensorboard"), cpu=1, quiet=True, tensorboard=True)
+    assert set_up == []
