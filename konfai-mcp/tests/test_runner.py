@@ -103,6 +103,7 @@ def test_a_validation_refusal_is_its_message_and_a_crash_keeps_its_traceback(
 ) -> None:
     """A designed refusal already says what to change: a traceback would bury it. A crash needs its
     trace, also when the binder wrapped it in a refusal (a bug in a user's nested settings object)."""
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
     config_path = tmp_path / "Config.yml"
     config_path.write_text("Trainer:\n  train_name: X\n", encoding="utf-8")
 

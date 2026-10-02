@@ -65,7 +65,7 @@ def test_the_masked_scan_matches_numpy_over_the_selected_values(tmp_path: Path) 
 
 
 def test_a_mask_stored_0_255_selects_what_its_0_1_twin_selects(tmp_path: Path) -> None:
-    """Any value but 0 is inside: a 0/255 mask, as an 8-bit export writes it, once selected nothing."""
+    """Any value but 0 is inside: a 0/255 mask, as an 8-bit export writes it, selects its 0/1 twin's voxels."""
     dataset = _masked_pair(tmp_path / "data")
     dataset.write("MASK255", "CASE", dataset.read_data("MASK", "CASE")[0] * 255, Attribute())
 

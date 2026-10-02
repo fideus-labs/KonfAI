@@ -931,3 +931,47 @@ def test_a_permute_given_the_wrong_draw_count_is_refused_at_construction() -> No
     """A configuration mistake stops the build, which names the key, rather than the first draw."""
     with pytest.raises(AugmentationError, match="prob_permute"):
         Permute(prob_permute=[0.5])
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.float16, torch.float32, torch.float64])
+def test_cutout_keeps_the_dtype_of_the_group_it_cuts(dtype: torch.dtype) -> None:
+    """A label map cut by CutOUT stays a label map: widened to float, the next spatial draw
+    interpolated it linearly and wrote labels that are no class."""
+    labels = torch.zeros(1, 32, 32, dtype=dtype)
+    labels[:, 8:24, 8:24] = 1
+    labels[:, 12:20, 12:20] = 3
+    draw = CutOUT(0.3, 0.0)
+    draw._state_init(0, [[32, 32]], [Attribute()])
+    cut = draw._apply(0, 0, labels, (0, 0), (32, 32))
+    assert cut.dtype == dtype
+    assert torch.equal(cut.double(), torch.where(cut == 0, 0.0, labels.double()))
+
+
+@pytest.mark.parametrize(
+    ("build", "shapes"),
+    [
+        (lambda: Permute(), [[4, 4]]),
+        (lambda: Permute(prob_permute=[0.5]), [[4, 4, 4]]),
+        (lambda: Permute(prob_permute=None), [[4, 4, 4]] * 3),
+    ],
+    ids=["2d", "probabilities", "copies"],
+)
+def test_a_permute_draw_it_cannot_make_is_an_augmentation_error(build, shapes: list[list[int]]) -> None:
+    """The CLI reports a KonfAIError as a message and anything else as a traceback."""
+    with pytest.raises(AugmentationError, match="Permute"):
+        draw = build()
+        draw.load(1.0)
+        draw.state_init(0, shapes, [Attribute() for _ in shapes])
+
+
+def test_a_draw_that_cannot_be_undone_is_an_augmentation_error() -> None:
+    with pytest.raises(AugmentationError, match="Elastix cannot be undone"):
+        Elastix()._inverse(0, 0, torch.zeros(1, 4, 4, 4))
+
+
+def test_the_three_axis_flip_draw_is_refused_by_name_on_a_2d_case() -> None:
+    """``f_prob`` names three axes by default: a 2-D case fell on torch's error at the first copy."""
+    draw = Flip()
+    draw.load(1.0)
+    with pytest.raises(AugmentationError, match="'Flip' draws on 3 axes"):
+        draw.state_init(0, [[5, 6]], [Attribute()])

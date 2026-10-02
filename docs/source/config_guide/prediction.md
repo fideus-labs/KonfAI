@@ -148,7 +148,7 @@ Key fields:
 | `Patch` | mapping | Sliding-window or slice-wise inference setup. |
 | `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `batch_size` | int | Number of patches per inference batch. `0` measures it on the GPU: a forward of one patch, then of two, then the largest power of two whose forward fits half of the usable VRAM (80 % of the free memory once the case's accumulation is reserved); the other half is headroom for the convolution workspace. Halved if it still runs out. On CPU, `0` runs one patch at a time. |
-| `num_workers` | int or null | DataLoader workers. `None` resolves to `0`, or to `max(1, min(cpu_count, 4))` when reading one patch decodes a whole volume (a store that cannot serve a region). |
+| `num_workers` | int or null | DataLoader workers. `None` resolves to `0`, or to `max(1, min(cpu_count, 4))` when reading one patch decodes a whole volume (a store that cannot serve a region). Each worker prepares the cases it reads itself, so a case whose chain runs on the whole volume is held once per worker: the RAM peak grows with the count. |
 | `pin_memory` | bool | Pinned host memory for the batches (`false` when absent). |
 | `prefetch_factor` | int or null | Prefetched batches per worker, only with workers; `None` resolves to `2`. |
 | `persistent_workers` | bool or null | Keep the workers alive, only with workers; `None` resolves to `false`. |

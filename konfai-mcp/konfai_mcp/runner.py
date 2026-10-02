@@ -39,6 +39,7 @@ from konfai.trainer import build_train
 from konfai.transformer import build_transform
 from konfai.utils.errors import KonfAIError
 from konfai.utils.runtime import State, execute_distributed_object
+from konfai.utils.utils import env_flag
 
 from .workspace import WORKFLOW_CONFIG_FILES
 
@@ -937,13 +938,14 @@ def validate_workflow_api(
                 payload["train_step"] = _run_one_train_step(workflow_object)
             return payload
         except KonfAIError as exc:
-            # A designed refusal names what to change; the traceback would only bury it. The binder
-            # also wraps any exception raised while building an object: that crash keeps its trace.
+            # A designed refusal names what to change; the traceback would only bury it, except under
+            # KONFAI_DEBUG=1, as on the CLI. The binder also wraps any exception raised while building
+            # an object: that crash keeps its trace.
             refusal: dict[str, Any] = {"ok": False, "error_type": type(exc).__name__, "error": str(exc).strip()}
             cause = exc.__cause__
             while isinstance(cause, KonfAIError):
                 cause = cause.__cause__
-            if cause is not None:
+            if cause is not None or env_flag("KONFAI_DEBUG", False):
                 refusal["traceback"] = traceback.format_exc()
             return refusal
         except Exception as exc:

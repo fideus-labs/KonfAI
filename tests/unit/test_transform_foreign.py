@@ -108,3 +108,13 @@ def test_foreign_reads_the_whole_volume(tmp_path, monkeypatch) -> None:
     # A foreign class states nothing about where its output reads from, so it reads everywhere.
     transform = _load(tmp_path, monkeypatch, "Scale", {"factor": 1.0})
     assert transform.patch_locality(Attribute()).kind is LocalityKind.WHOLE_VOLUME
+
+
+def test_foreign_named_by_itself_is_refused(tmp_path, monkeypatch) -> None:
+    # Bound by name, the wrapper had no class to call: the first case raised a bare TypeError.
+    config = tmp_path / "Config.yml"
+    config.write_text("t:\n  Foreign:\n    classpath: torch.nn:Sigmoid\n")
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    with pytest.raises(TransformError, match="Write the class as the key"):
+        TransformLoader().get_transform("Foreign", "t")

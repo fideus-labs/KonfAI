@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import time
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,7 +65,7 @@ from konfai.utils.budget import (
 )
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import Attribute, Dataset, refuse_shared_single_file
-from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
+from konfai.utils.errors import ConfigError, DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache, chunk_cache_counts
 from konfai.utils.runtime import (
     DistributedObject,
@@ -902,10 +903,12 @@ class Transformer(DistributedObject):
                 remedy,
             )
         if self.on_fallback == "warn" and plan.fallback_entries:
-            print(
-                f"[KonfAI] WARNING: {len(plan.fallback_entries)} case(s) take the whole-volume"
-                " path (which stage refused, and why, is in the plan this run wrote to its log). They"
-                " fit the budget; set on_fallback: error to refuse them."
+            warnings.warn(
+                f"{len(plan.fallback_entries)} case(s) take the whole-volume path (which stage refused, and"
+                " why, is in the plan this run wrote to its log). They fit the budget; set on_fallback: error"
+                " to refuse them.",
+                KonfAIWarning,
+                stacklevel=2,
             )
 
     def _shard_work(self, world_size: int) -> None:

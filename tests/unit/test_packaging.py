@@ -402,10 +402,9 @@ def test_the_dependency_self_check_names_only_what_an_install_carries(monkeypatc
 
 @pytest.mark.parametrize("setup_py", _SIBLING_SETUPS)
 def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monkeypatch) -> None:
-    """Every sibling once pinned ``konfai==<its own scm version>``: from a working tree that is a
-    ``.dev`` version no installed core carries, so ``pip install -e ./konfai-mcp`` resolved nowhere
-    but at a clean release tag. The pin must admit the core this tree installs: exact at a tag,
-    the closest release or newer from a tree."""
+    """A sibling's own scm version is, from a working tree, a ``.dev`` version no installed core
+    carries. The pin must admit the core this tree installs: exact at a tag, the closest release or
+    newer from a tree."""
     import importlib.metadata
     import runpy
 

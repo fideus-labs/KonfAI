@@ -86,6 +86,16 @@ def test_streamed_tta_flip_matches_whole_volume(
     assert torch.equal(streamed, reference)
 
 
+def test_streamed_tta_vector_field_flip_matches_whole_volume(tmp_path, monkeypatch, drive_tta) -> None:
+    # A displacement field's un-flip negates the mirrored components voxel by voxel, which a slab does
+    # on its own: three components on a 3-D grid, so the negation fires.
+    kwargs = {"augmentation": Flip(f_prob=[0, 1, 1], vector_field=True), "channels": 3}
+    streamed, whole_volume = drive_tta(tmp_path / "streamed", monkeypatch, streamed=True, **kwargs)
+    assert not whole_volume, "the TTA case should have streamed"
+    reference, _ = drive_tta(tmp_path / "reference", monkeypatch, streamed=False, **kwargs)
+    assert torch.equal(streamed, reference)
+
+
 def test_streamed_tta_concat_layout_matches_whole_volume(tmp_path, monkeypatch, drive_tta) -> None:
     # reduce=Concat keeps the copies as leading blocks for after_reduction to merge (the documented
     # contract): the streamed prefix must hand Sum the same [T, C, ...] layout, slab by slab.

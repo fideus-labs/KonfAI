@@ -458,7 +458,6 @@ def _decode_cached_planes(
     return volume
 
 
-@cache
 def get_dicom_info(
     directory: str | Path,
     *,
@@ -466,10 +465,23 @@ def get_dicom_info(
 ) -> dict[str, Any]:
     """Read DICOM series shape and geometry without decoding pixel data.
 
-    Memoised per directory and unbounded: input DICOM is read-only for a run, and a cohort read case
-    by case would miss on every patch past a bound. ``write_dicom_series`` and :func:`forget_series`
-    clear it. Callers that mutate the result must copy it first.
+    Memoised per directory and unbounded: a cohort read case by case would miss on every patch past a
+    bound. A series another process republished or added a slice to, in the directory or one below it, is
+    read again: the memo is keyed by the inode and modification time of every directory it walks.
+    ``write_dicom_series`` and :func:`forget_series` clear it. Callers that mutate the result must copy it
+    first.
     """
+    state = []
+    for walked, _, _ in os.walk(directory):
+        with contextlib.suppress(OSError):
+            status = os.stat(walked)
+            state.append((status.st_ino, status.st_mtime_ns))
+    # A missing directory has no state: _discover_headers refuses it by name.
+    return _dicom_info(str(directory), series_uid, tuple(state))
+
+
+@cache
+def _dicom_info(directory: str, series_uid: str | None, _state: tuple[tuple[int, int], ...]) -> dict[str, Any]:
     selected_uid, members = _select_series(directory, series_uid)
     # The headers the discovery parsed, in the order sort_series puts them in: a stable sort on the
     # slice position.
@@ -495,7 +507,7 @@ def get_dicom_info(
 
 def forget_series() -> None:
     """Drop every memoised series header and decoded plane: the next read sees the disk as it is."""
-    get_dicom_info.cache_clear()
+    _dicom_info.cache_clear()
     _plane_cache.clear()
 
 

@@ -35,7 +35,15 @@ from konfai.data.geometry import (
     signed_permutation,
 )
 from konfai.data.sampling import default_interpolation, gather, source_index_rows, walk_rows
-from konfai.data.transform.base import LocalityKind, PatchLocality, RegionContext, Transform, TransformInverse, sitk
+from konfai.data.transform.base import (
+    _RANK_CHANGE,
+    LocalityKind,
+    PatchLocality,
+    RegionContext,
+    Transform,
+    TransformInverse,
+    sitk,
+)
 from konfai.data.transform.resample import _resample_with_sitk
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
@@ -169,7 +177,8 @@ class Squeeze(TransformInverse):
         super().__init__(inverse)
         self.dim = dim
 
-    # WHOLE_VOLUME on purpose: a rank change past the accumulator grid cannot region-stream.
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_RANK_CHANGE)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         # ``shape`` is the channel-stripped spatial shape, so the runtime tensor is [C, *shape] and
@@ -251,7 +260,7 @@ class Crop(TransformInverse):
         if "box" in cache_attribute:
             box = self._parse_box(cache_attribute["box"])
             return [int(s - a - b) for (a, b), s in zip(box, shape, strict=False)]
-        source = next((dataset for dataset in self.datasets if dataset.is_dataset_exist(group_src, name)), None)
+        source = self.dataset_holding(group_src, name)
         if source is None:
             return shape
         Crop._require_the_stored_grid(source, group_src, name, shape, cache_attribute)
@@ -384,6 +393,16 @@ def _pop_remap_geometry(cache_attribute: Attribute, rank: int) -> None:
             cache_attribute.pop(key)
 
 
+def _refuse_axes_off_the_case(stage: str, axes: list[int], rank: int, example: str) -> None:
+    """Refuse spatial ``axes`` (0-based) a case of ``rank`` spatial axes does not have, as ``Flip()`` and
+    ``Permute()`` name three by default."""
+    if axes and max(axes) >= rank:
+        raise TransformError(
+            f"'{stage}' names the spatial axes {'|'.join(map(str, axes))}, and the case has {rank}.",
+            f'Name the axes of a {rank}-D case: dims: "{example}".',
+        )
+
+
 class Permute(TransformInverse):
     """Reorder the spatial axes: ``dims`` names the new order, ``|``-separated (``"1|0|2"``).
 
@@ -408,7 +427,17 @@ class Permute(TransformInverse):
         # Output spatial axis k reads input axis ``self.dims[k + 1] - 1``, never mirrored.
         return [(d - 1, False) for d in self.dims[1:]]
 
+    def _check(self, rank: int) -> None:
+        axes = [d - 1 for d in self.dims[1:]]
+        _refuse_axes_off_the_case("Permute", axes, rank, "|".join(map(str, reversed(range(rank)))))
+        if len(axes) != rank:
+            raise TransformError(
+                f"'Permute' orders {len(axes)} spatial axes, and the case has {rank}.",
+                f'Give every axis once: dims: "{"|".join(map(str, reversed(range(rank))))}".',
+            )
+
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        self._check(len(shape))
         return remap_shape(shape, self._remap())
 
     def stream_region_source(
@@ -440,6 +469,7 @@ class Permute(TransformInverse):
         _record_remap_geometry(cache_attribute, self._remap(), source_spatial_shape)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self._check(tensor.dim() - 1)
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return tensor.permute(tuple(self.dims))
 
@@ -492,7 +522,12 @@ class Flip(TransformInverse):
         del name
         _record_remap_geometry(cache_attribute, self._remap(len(source_spatial_shape)), source_spatial_shape)
 
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        _refuse_axes_off_the_case("Flip", [d - 1 for d in self.dims], len(shape), "|".join(map(str, range(len(shape)))))
+        return shape
+
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self.transform_shape("", name, list(tensor.shape[1:]), cache_attribute)
         self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return tensor.flip(tuple(self.dims))
 
@@ -516,7 +551,7 @@ class Canonical(TransformInverse):
     it swaps, so ``transform_shape`` folds the patch grid onto the reoriented shape.
     """
 
-    working_multiple = 3.0  # an oblique case is resampled: the resample's own figure
+    working_multiple = 3.0  # an oblique case: ITK's filter on the host; the device walk slabs itself against its budget
 
     def __init__(self, inverse: bool = True, fill: float = 0.0) -> None:
         super().__init__(inverse)
@@ -777,6 +812,9 @@ class Flatten(Transform):
 
     def __init__(self) -> None:
         super().__init__()
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason=_RANK_CHANGE)
 
     def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
         return [int(np.prod(np.asarray(shape)))]

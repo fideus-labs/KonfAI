@@ -738,8 +738,8 @@ def test_a_third_stage_of_one_class_is_spelled_by_occurrence() -> None:
 
 
 def test_three_clips_run_as_one_chain(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The third occurrence once refused with 'split the chain'; it binds under Clip#3 and runs in
-    order: three nested clips equal the innermost."""
+    """The third occurrence binds under Clip#3 and runs in order: three nested clips equal the
+    innermost."""
     monkeypatch.chdir(cohort)
     api.transform(
         "THREE",

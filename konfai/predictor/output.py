@@ -670,8 +670,13 @@ class OutputDataset(Dataset, NeedDevice):
                 "the case is too light for slab streaming to pay, its output being under"
                 f" KONFAI_STREAM_WORTH_THRESHOLD (default {_STREAM_WORTH_MIN_FRACTION}) of the per-rank memory budget"
             )
-        if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
-            return "a TTA copy's un-augment does not act slab by slab (it moves the slab axis)"
+        if self.nb_data_augmentation != 1:
+            try:
+                streamable = self._tta_streamable(dataset, index, attribute)
+            except Exception as error:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
+                return f"a TTA copy's un-augment could not be probed ({type(error).__name__}: {error})"
+            if not streamable:
+                return "a TTA copy's un-augment does not act slab by slab (it moves the slab axis)"
         for transform in self.before_reduction_transforms:
             locality = transform.patch_locality(Attribute(attribute))
             # A SLAB before-reduction transform streams through ``stream_slab``; any other
@@ -764,32 +769,29 @@ class OutputDataset(Dataset, NeedDevice):
         A POINTWISE draw does; an ORIENTATION draw does when its declared region remap fixes the slab
         axis row for row and its shape fold keeps the slab extent. Any other kind refuses outright.
         """
-        try:
-            input_dataset = dataset.get_dataset_from_index(self.group_dest, index)
-            case = input_dataset.index
-            for index_augmentation in range(1, self.nb_data_augmentation):
-                draw = self._copy_draw(dataset, index_augmentation)
-                if draw is None:
+        input_dataset = dataset.get_dataset_from_index(self.group_dest, index)
+        case = input_dataset.index
+        for index_augmentation in range(1, self.nb_data_augmentation):
+            draw = self._copy_draw(dataset, index_augmentation)
+            if draw is None:
+                continue
+            augmentations, a = draw
+            shape = [int(extent) for extent in input_dataset.shapes[0]]
+            for augmentation in augmentations:
+                locality = augmentation.patch_locality(case, a, Attribute(attribute))
+                if locality.kind is LocalityKind.POINTWISE:
                     continue
-                augmentations, a = draw
-                shape = [int(extent) for extent in input_dataset.shapes[0]]
-                for augmentation in augmentations:
-                    locality = augmentation.patch_locality(case, a, Attribute(attribute))
-                    if locality.kind is LocalityKind.POINTWISE:
-                        continue
-                    if locality.kind is not LocalityKind.ORIENTATION:
+                if locality.kind is not LocalityKind.ORIENTATION:
+                    return False
+                out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
+                if out_shape[0] != shape[0]:
+                    return False
+                plane = tuple(slice(0, extent) for extent in out_shape[1:])
+                for row in range(out_shape[0]):
+                    source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
+                    if (source[0].start, source[0].stop) != (row, row + 1):
                         return False
-                    out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
-                    if out_shape[0] != shape[0]:
-                        return False
-                    plane = tuple(slice(0, extent) for extent in out_shape[1:])
-                    for row in range(out_shape[0]):
-                        source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
-                        if (source[0].start, source[0].stop) != (row, row + 1):
-                            return False
-                    shape = out_shape
-        except Exception:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
-            return False
+                shape = out_shape
         return True
 
     def _consume_slabs(
@@ -903,7 +905,9 @@ class OutputDataset(Dataset, NeedDevice):
                     pull_fns.append(lambda target: list(target))
                     shapes.append(list(shape))
                     probe = stage.stream_region(name, probe, _corner_context(shape), walking)
-        except Exception:  # nosec B110 - an unplannable pipe just keeps the case on the buffered path
+        except Exception as error:  # nosec B110 - an unplannable pipe keeps the case on the buffered path
+            reason = f"its region pipe could not be planned ({type(error).__name__}: {error})"
+            self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason}.")
             return None
 
         state = _RegionState(shapes)

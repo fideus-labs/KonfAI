@@ -483,6 +483,13 @@ class Flip(DataAugmentation):
         self.flip: dict[int, list[list[int]]] = {}
 
     def _state_init(self, index: int, shapes: list[list[int]], caches_attribute: list[Attribute]) -> list[list[int]]:
+        rank = len(shapes[0])
+        if len(self.f_prob) > rank:
+            # The default names three axes.
+            raise AugmentationError(
+                f"'Flip' draws on {len(self.f_prob)} axes (f_prob={self.f_prob}), and the case has {rank}.",
+                f"Give one probability per axis: f_prob: {[0.33] * rank}.",
+            )
         prob = torch.rand((len(shapes), len(self.f_prob))) < torch.tensor(self.f_prob)
         dims = torch.tensor([1, 2, 3][: len(self.f_prob)])
         self.flip[index] = [dims[mask].tolist() for mask in prob]
@@ -499,15 +506,9 @@ class Flip(DataAugmentation):
         return result
 
     def _patch_locality(self, index: int, a: int, cache_attribute: Attribute) -> PatchLocality:
-        # A mirror is a bijection on the voxels (ORIENTATION), but negating a component channel maps
-        # values, so a later GLOBAL_STAT could no longer seed from the stored volume.
-        if self.vector_field:
-            return PatchLocality(
-                LocalityKind.WHOLE_VOLUME,
-                reason="vector_field: true negates the mirrored component channel, so the stored"
-                " volume's statistics are not this stage's output's",
-            )
-        return PatchLocality(LocalityKind.ORIENTATION)
+        # A mirror is a bijection on the voxels (ORIENTATION). Negating a component channel is a
+        # per-voxel map, but it changes the values, so a later GLOBAL_STAT cannot seed from the stored volume.
+        return PatchLocality(LocalityKind.ORIENTATION, preserves_statistics=False if self.vector_field else None)
 
     def _stream_region_source(
         self,

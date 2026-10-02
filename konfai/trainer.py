@@ -292,6 +292,35 @@ def _ema_network(model_ema: AveragedModel) -> Network:
     return cast(Network, model_ema.module)
 
 
+def _traced_interventions(snapshot: Path) -> list[Any]:
+    """The ``Interventions`` trace of a run's config snapshot, empty when it holds none."""
+    data = YAML().load(snapshot.read_text(encoding="utf-8")) if snapshot.is_file() else None
+    trace = data.get("Interventions") if isinstance(data, dict) else None
+    return list(trace) if isinstance(trace, list) else []
+
+
+def _record_interventions(snapshot: Path, entries: list[Any], it_validation: int | None = None) -> None:
+    """Append ``entries`` to the snapshot's ``Interventions`` trace, once per iteration and key, and
+    record ``it_validation`` under ``Trainer`` when given. Atomic."""
+    if not snapshot.is_file():
+        return
+    yaml = YAML()
+    with open(snapshot, encoding="utf-8") as file:
+        data = yaml.load(file)
+    if not isinstance(data, dict):
+        return
+    existing = data.get("Interventions")
+    existing = list(existing) if isinstance(existing, list) else []
+    seen = {(e.get("it"), e.get("key")) for e in existing if isinstance(e, dict)}
+    data["Interventions"] = existing + [e for e in entries if (e.get("it"), e.get("key")) not in seen]
+    if it_validation is not None and isinstance(data.get("Trainer"), dict):
+        data["Trainer"]["it_validation"] = it_validation
+    tmp = snapshot.with_name(f"{snapshot.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as file:
+        yaml.dump(data, file)
+    os.replace(tmp, snapshot)
+
+
 class _Trainer:
     """Training loop for one process, distributed or standalone: epochs with optional validation,
     autocast, EMA, early stopping, TensorBoard logging, checkpoint saving (ALL or BEST).
@@ -373,6 +402,8 @@ class _Trainer:
                     " (pip install konfai[tensorboard] to keep them)."
                 )
             self.tb: Any = NullSummaryWriter()
+        elif self.global_rank != 0:
+            self.tb = NullSummaryWriter()  # rank 0 alone writes the curves
         else:
             self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self._best_checkpoint_path: Path | None = None
@@ -868,26 +899,8 @@ class _Trainer:
         return None
 
     def _record_interventions(self) -> None:
-        """Append the intervention audit trail and the current it_validation to the config snapshot.
-        Rank 0, atomic."""
-        target = self._config_snapshot
-        if not target.is_file():
-            return
-        yaml = YAML()
-        with open(target, encoding="utf-8") as file:
-            data = yaml.load(file)
-        if not isinstance(data, dict):
-            return
-        existing = data.get("Interventions")
-        existing = list(existing) if isinstance(existing, list) else []
-        seen = {(e.get("it"), e.get("key")) for e in existing if isinstance(e, dict)}
-        data["Interventions"] = existing + [e for e in self._interventions if (e.get("it"), e.get("key")) not in seen]
-        if isinstance(data.get("Trainer"), dict):
-            data["Trainer"]["it_validation"] = self.it_validation
-        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-        with open(tmp, "w", encoding="utf-8") as file:
-            yaml.dump(data, file)
-        os.replace(tmp, target)
+        """Append the intervention audit trail and the current it_validation to the config snapshot. Rank 0."""
+        _record_interventions(self._config_snapshot, self._interventions, self.it_validation)
 
     def checkpoint_save(self, loss: float | None, crash: bool = False) -> None:
         """Save model and optimizer states, keeping all checkpoints or only the best one.
@@ -991,7 +1004,7 @@ class _Trainer:
 
         Args:
             type_log (str): "Training" or "Validation".
-            batch_item (dict): Dictionary of BatchItem from current batch.
+            batch_sample (BatchSample): The current batch, one item per destination group.
 
         Returns:
             dict[str, float]: Aggregated losses and metrics on rank 0; empty on the other ranks.
@@ -1265,13 +1278,16 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
             if self.ema_decay > 0:
                 self.model_ema = AveragedModel(self.model, **self._ema_update())
-                if state_dict is not None:
-                    _ema_network(self.model_ema).load(state_dict, init=False, ema=True)
-                    if "Model_EMA_n_averaged" in state_dict:
-                        self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
+                _ema_network(self.model_ema).load(state_dict, init=False, ema=True)
+                if "Model_EMA_n_averaged" in state_dict:
+                    self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
 
         (statistics_directory() / self.name).mkdir(exist_ok=True)
+        # The snapshot traces the run's live changes, which a RESUME continues: the trace outlives the copy.
+        traced = _traced_interventions(self.config_namefile) if state == State.RESUME else []
         shutil.copyfile(self.config_path_src, self.config_namefile)
+        if traced:
+            _record_interventions(self.config_namefile, traced)
 
         self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
         # A checkpoint of weights alone (no cursor, iteration 0) starts a new training: no split to keep.
@@ -1476,8 +1492,8 @@ def build_train(
         ``State.TRAIN`` or ``State.RESUME``.
     model : Path | str | None, optional
         Checkpoint path used when resuming training.
-    config : Path | str, optional
-        Training configuration file.
+    config : Path | str | dict, optional
+        The training configuration: its file, or the config tree itself (``{"Trainer": {...}}``).
     checkpoints_dir : Path | str, optional
         Output directory for checkpoints.
     statistics_dir : Path | str, optional
@@ -1491,6 +1507,12 @@ def build_train(
     DistributedObject
         Configured trainer, executed by the runtime wrapper.
     """
+    if command == State.RESUME and model is None:
+        raise TrainerError(
+            "RESUME continues from a checkpoint, and none was given.",
+            "Pass model= the checkpoint to resume from (the CLI's --model), such as"
+            " Checkpoints/<train_name>/resume_latest.pt.",
+        )
     configure_workflow_environment(
         config_path=config,
         root="Trainer",

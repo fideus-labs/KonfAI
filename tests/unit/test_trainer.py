@@ -76,6 +76,7 @@ def _build_trainer(
     it_validation: int = 1,
     dataloader_validation: Any = None,
     resume_state: dict[str, Any] | None = None,
+    global_rank: int = 0,
 ) -> _Trainer:
     checkpoints_dir = tmp_path / "Checkpoints"
     statistics_dir = tmp_path / "Statistics"
@@ -87,8 +88,8 @@ def _build_trainer(
     monkeypatch.setattr(trainer_module, "current_date", lambda: next(date_iter))
 
     return _Trainer(
-        world_size=1,
-        global_rank=0,
+        world_size=1 + global_rank,
+        global_rank=global_rank,
         local_rank=0,
         size=1,
         train_name="RUN",
@@ -1224,6 +1225,45 @@ def test_a_resume_names_the_cases_a_changed_cohort_moved_between_training_and_va
     assert "give 'validation' by case names" in warning
 
 
+def test_a_resume_without_a_checkpoint_or_with_one_that_is_not_there_is_refused(tmp_path: Path, monkeypatch) -> None:
+    """The CLI requires --model for RESUME and the API did not: without one the run died on an
+    AttributeError, and with a mistyped path on a bare ValueError."""
+    from konfai import api
+
+    _add_case, run = _split_cohort(tmp_path, monkeypatch)
+
+    with pytest.raises(TrainerError, match="checkpoint"):
+        api.train(
+            _embedding_train_config(tmp_path / "Dataset"),
+            resume=True,
+            cpu=1,
+            quiet=True,
+            checkpoints_dir=tmp_path / "Checkpoints",
+            statistics_dir=tmp_path / "Statistics",
+        )
+    with pytest.raises(TrainerError, match=r"nope\.pt"):
+        run(resume=tmp_path / "nope.pt")
+
+
+def test_a_resume_keeps_the_live_changes_its_run_recorded(tmp_path: Path, monkeypatch) -> None:
+    """RESUME copies the config it is given over the run's snapshot, where the live changes of the run
+    are traced under ``Interventions``: the trace outlives the copy."""
+    from ruamel.yaml import YAML
+
+    _add_case, run = _split_cohort(tmp_path, monkeypatch)
+    run()
+    (snapshot,) = (tmp_path / "Statistics" / "EMBEDDING").glob("*.yml")
+    trace = [{"it": 2, "key": "lr", "from": 0.01, "to": 0.005}]
+    recorded = YAML().load(snapshot.read_text(encoding="utf-8"))
+    recorded["Interventions"] = trace
+    with snapshot.open("w", encoding="utf-8") as file:
+        YAML().dump(recorded, file)
+
+    run(resume=tmp_path / "Checkpoints" / "EMBEDDING" / "resume_latest.pt")
+
+    assert YAML().load(snapshot.read_text(encoding="utf-8"))["Interventions"] == trace
+
+
 def _read_for_resume(path: Path) -> Trainer:
     trainer = Trainer.__new__(Trainer)
     trainer.path_to_model = str(path)
@@ -1419,8 +1459,8 @@ def test_latest_resume_copy_fallback_is_atomic_and_never_truncates_a_prior_link(
 
 def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monkeypatch) -> None:
     # A Dice loss reports the coefficient on the boards and minimizes one minus it. The default
-    # selection once summed the reported values, so a cross entropy of 0.2 plus a Dice of 0.9 read
-    # worse than 0.7 plus 0.3, and BEST kept the early epoch (a two-class CT: Dice 0 at prediction).
+    # selection sums the minimized values: summing the reported ones reads a cross entropy of 0.2 plus
+    # a Dice of 0.9 as worse than 0.7 plus 0.3.
     from types import SimpleNamespace
 
     from konfai.utils.runtime import DistributedObject

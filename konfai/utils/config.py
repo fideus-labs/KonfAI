@@ -840,6 +840,12 @@ def _bind_dict(config: Config, param: inspect.Parameter, annotation, section_key
         # The list spelling of a chain: bound under occurrence keys, the level's copy holds the mapping.
         values = _occurrence_mapping(values, f"{section_key}.{param.name}")
         config.config[param.name] = values
+    elif isinstance(values, collections.abc.Mapping):
+        # An entry written with nothing under it ('Canonical:') binds every default, as a list item does.
+        # Written to the tree first: the entry's class and anything bound later read it from there.
+        for entry in [entry for entry, arguments in values.items() if arguments is None]:
+            with Config(f"{section_key}.{param.name}.{_escape_key_component(entry)}") as node:
+                node.config = {}
     with _locating(f"{section_key}.{param.name}", "Failed to build an entry of"):
         return {
             value: apply_config(f"{section_key}.{param.name}.{_escape_key_component(value)}")(value_type)()

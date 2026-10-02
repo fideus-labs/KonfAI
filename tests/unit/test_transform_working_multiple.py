@@ -19,8 +19,7 @@
 ``Transform.working_multiple`` is the one figure every sizing route reads: the sweep prices a region
 with it, the reduction charges the member chain by it, and the whole-volume fallback is sized against
 it. A stage that holds more than it declares is a region sized for less than it takes, on every route
-at once -- and nothing checked it. An audit of the 39 built-ins found nine wrong, including the two
-that declared a non-zero figure at all: ``Resample`` at 3.0 holding 21, ``Dilate`` at 3.0 holding 15.
+at once.
 
 The allocator reports the peak exactly, so the declaration is checked rather than argued. The
 configurations come from the same registry the locality contract enumerates, so a stage is covered
