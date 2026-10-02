@@ -64,7 +64,7 @@ from konfai.utils.dataset.statistics import (
     _update_running_statistics,
     needs_moments,
 )
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.errors import DatasetManagerError, KonfAIError
 from konfai.utils.utils import (
     STORE_FORMS,
     SUPPORTED_FORMATS,
@@ -630,3 +630,22 @@ class Dataset:
         result = self._resolve_entry(groups, name, lambda file, group, entry: file.get_infos(group, entry))
         self._infos_cache[cache_key] = (list(result[0]), Attribute(result[1]))
         return result
+
+
+def refuse_shared_single_file(world_size: int, destinations: Iterable[Dataset], error: type[KonfAIError]) -> None:
+    """Refuse a multi-rank run before any rank writes into a single-file store.
+
+    Ranks shard by case, and a directory dataset gives each case its own file or store, so their writes
+    are disjoint; a single-file store (h5) puts every case in one handle, and no lock spans processes.
+    NOT ``concurrent_write_safe()``: that asks whether two entries of one shared store may be written at
+    once, and answers no for omezarr, whose cases are disjoint stores.
+    """
+    if world_size <= 1:
+        return
+    for destination in destinations:
+        if not destination.is_directory:
+            raise error(
+                f"{world_size} processes: destination '{destination.store_root}' is a single-file store,"
+                " and every rank would write into the same file.",
+                "Use one process, or a directory destination (omezarr, mha, nii.gz).",
+            )

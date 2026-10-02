@@ -404,6 +404,13 @@ def execute_distributed_object(
                     world_size = len(gpu_ids)
                     if world_size == 0:
                         world_size = cpu_workers
+                    if os.name == "nt" and world_size > 1 and configured_object.uses_collectives:
+                        # setup_gpu opens no process group on Windows.
+                        raise ConfigError(
+                            f"{world_size} processes need a process group, and KonfAI opens none on Windows:"
+                            " each rank would train or score only its own share.",
+                            "Run with one process on Windows (--cpu 1, or a single --gpu).",
+                        )
                     if not quiet:
                         # One line naming the resolved devices: omitting --gpu runs on CPU.
                         device_line = (

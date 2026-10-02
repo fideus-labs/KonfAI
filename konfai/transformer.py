@@ -63,7 +63,7 @@ from konfai.utils.budget import (
     sweep_share,
 )
 from konfai.utils.config import apply_config, config, strict_config
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, refuse_shared_single_file
 from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
 from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache
 from konfai.utils.runtime import (
@@ -822,23 +822,17 @@ class Transformer(DistributedObject):
 
     def _guard_sharded_destinations(self, world_size: int) -> None:
         """Multi-rank runs refuse a single-file Save destination before anything is written."""
-        if world_size <= 1:
-            return
-        for managers in self.dataset.managers.values():
-            for transform in managers[0].transforms if managers else []:
-                if not isinstance(transform, Save):
-                    continue
-                destination, _group = save_destination(transform, managers[0].dataset, managers[0].group_dest)
-                # NOT concurrent_write_safe(): that asks whether two entries of one shared store may
-                # be written at once, and answers no for omezarr. Ranks shard by CASE, and a
-                # directory dataset gives each case its own file or store, so their writes are
-                # disjoint; only a single-file store (h5) puts every case in one handle.
-                if not destination.is_directory:
-                    raise TransformerError(
-                        f"--cpu {world_size}: destination '{destination.filename}' is a"
-                        " single-file store, and every rank would write into the same file.",
-                        "Use one process, or a directory destination (omezarr, mha, nii.gz).",
-                    )
+        refuse_shared_single_file(
+            world_size,
+            (
+                save_destination(transform, managers[0].dataset, managers[0].group_dest)[0]
+                for managers in self.dataset.managers.values()
+                if managers
+                for transform in managers[0].transforms
+                if isinstance(transform, Save)
+            ),
+            TransformerError,
+        )
 
     def _enforce_plan(self, plan: TransformPlan) -> None:
         """The refusals the plan's verdicts imply, raised before any byte moves: an output over the

@@ -23,6 +23,7 @@ import konfai_apps.app as app_module
 import numpy as np
 import pytest
 import SimpleITK as sitk
+from konfai.utils.dataset import Dataset
 from konfai_apps.app_repository import DataEntry, VolumeType, _parse_input_default
 from konfai_apps.errors import AppMetadataError
 from multipart_support import decode_multipart
@@ -192,6 +193,24 @@ def test_dataset_writer_preserves_registered_extension_for_multidot_names(
     volume = tmp_path / "Dataset" / "P000" / "Volume_0.nii.gz"
     assert volume.is_symlink() or volume.exists()
     assert Path(os.readlink(volume)).name == "patient.1.nii.gz"
+
+
+def test_dataset_staging_replaces_its_own_and_is_invisible_to_the_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A staging an earlier run left in a caller-owned workspace is konfai-apps' own: the next run
+    replaces it, its marker lists as no case, and the cleanup removes it."""
+    _write_volume(tmp_path / "input.mha")
+    monkeypatch.chdir(tmp_path)
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+
+    app._write_inputs_to_dataset([[tmp_path / "input.mha"]])
+    app._write_inputs_to_dataset([[tmp_path / "input.mha"]])
+
+    assert Dataset("Dataset", "mha").get_names("Volume_0") == ["P000"]
+    app._clear_dataset()
+    assert not (tmp_path / "Dataset").exists()
 
 
 def _write_volume(path: Path, shape: tuple[int, int, int] = (4, 5, 6), value: int = 7) -> None:
@@ -407,7 +426,7 @@ def test_dataset_writers_pair_cases_by_sorted_name_across_directories(
     app._write_gt_to_dataset([[refs]])
     app._write_mask_or_default([[masks]])
 
-    cases = sorted((tmp_path / "Dataset").iterdir())
+    cases = sorted(path for path in (tmp_path / "Dataset").iterdir() if path.is_dir())
     assert [c.name for c in cases] == ["P000", "P001", "P002"]
     assert [_case_name(c / "Volume_0.nii.gz") for c in cases] == ["case_a", "case_b", "case_c"]
     for case in cases:

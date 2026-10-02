@@ -35,6 +35,7 @@ from konfai.data.patching import Accumulator, blend_axes
 from konfai.predictor import PREDICTION_CLOCK, OutputDataset
 from konfai.predictor.loop import _Predictor
 from konfai.predictor.output import _AsyncWriter
+from konfai.predictor.workflow import Predictor
 from konfai.utils.dataset import Dataset
 from konfai.utils.errors import PredictorError
 from konfai.utils.utils import get_patch_slices_from_shape
@@ -194,3 +195,15 @@ def test_the_published_sink_name_resolves_to_the_output_dataset() -> None:
 
     module, name = get_module("OutSameAsGroupDataset", "konfai.predictor")
     assert getattr(module, name) is OutputDataset
+
+
+def test_two_rank_prediction_refuses_a_single_file_output(tmp_path: Path) -> None:
+    """Two ranks writing one h5 lost cases with exit 0: its lock serializes the threads of one process
+    only. Refused before the first write, as TRANSFORM refuses it."""
+    predictor = Predictor.__new__(Predictor)
+    predictor.gpu_checkpoints = None
+    predictor.outputs_dataset = {"Head": Dataset(tmp_path / "Prediction", "h5")}
+
+    with pytest.raises(PredictorError, match="single-file store"):
+        predictor.setup(2)
+    assert not any(tmp_path.iterdir())

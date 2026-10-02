@@ -51,6 +51,9 @@ from .app_repository import LocalAppRepository, get_app_repository_info
 from .errors import AppRepositoryError, KonfAIAppClientError
 from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
 
+# Marks the ``./Dataset`` directories konfai-apps staged: the only ones it may delete from a caller's workspace.
+_STAGED_MARKER = ".konfai-apps-staged"
+
 
 class CancelProcess(RuntimeError):
     """
@@ -1031,9 +1034,7 @@ class KonfAIApp(AbstractKonfAIApp):
         inputs : list[list[Path]]
             Nested list of paths. Each inner list is scanned for supported files.
         """
-        dataset_path = Path("./Dataset/")
-        if dataset_path.exists():
-            shutil.rmtree(dataset_path)
+        dataset_path = KonfAIApp._stage_dataset()
         for i, input_path in enumerate(inputs):
             for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(input_path)):
                 KonfAIApp.symlink(source, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
@@ -1119,9 +1120,7 @@ class KonfAIApp(AbstractKonfAIApp):
         FileNotFoundError
             If a provided input is not multi-channel (single-component).
         """
-        dataset_path = Path("./Dataset/")
-        if dataset_path.exists():
-            shutil.rmtree(dataset_path)
+        dataset_path = KonfAIApp._stage_dataset()
         for i, input_path in enumerate(inputs):
             for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
                 reader = sitk.ImageFileReader()
@@ -1196,13 +1195,28 @@ class KonfAIApp(AbstractKonfAIApp):
         """Drop the ``./Dataset`` staging.
 
         The auto-created temp workspace is deleted wholesale, so this only matters when the caller owns
-        the workspace (``tmp_dir`` set): there ``output`` must keep the results alone, not the inputs.
+        the workspace (``tmp_dir`` set): there ``output`` must keep the results alone, not the inputs. A
+        ``Dataset`` konfai-apps did not stage there is the user's data (a project run with ``-o .``).
         """
         link = Path("./Dataset")
-        if link.is_symlink() or link.is_file():
+        if link.is_symlink():
             link.unlink()
-        elif link.is_dir():
+        elif link.exists():
+            if not (link / _STAGED_MARKER).is_file():
+                raise AppRepositoryError(
+                    f"'{link.resolve()}' was not staged by konfai-apps, and this workspace stages its inputs there.",
+                    "Nothing was deleted. Move it, or choose another --output (fine-tune) or --tmp-dir.",
+                )
             shutil.rmtree(link, ignore_errors=True)
+
+    @staticmethod
+    def _stage_dataset() -> Path:
+        """An empty ``./Dataset`` for the inputs, marked as konfai-apps' own."""
+        KonfAIApp._clear_dataset()
+        dataset = Path("./Dataset")
+        dataset.mkdir()
+        (dataset / _STAGED_MARKER).touch()
+        return dataset
 
     @staticmethod
     def _collect_result(output: Path, tmp_dir: Path | None, name: str) -> None:
@@ -1510,10 +1524,14 @@ class KonfAIApp(AbstractKonfAIApp):
         gpu = cuda_visible_devices() if gpu is None else gpu
         import torch
 
+        staged = Path("./Dataset")
+        KonfAIApp._clear_dataset()  # before the install writes into the workspace
         selected_models = self.app_repository.install_fine_tune(
             config_file, Path("./"), name, epochs, it_validation, models, config_overrides, batch_size=batch_size
         )
-        KonfAIApp.symlink(dataset, Path("./Dataset").absolute())
+        KonfAIApp.symlink(dataset, staged.absolute())
+        if staged.is_dir() and not staged.is_symlink():  # the copy fallback is konfai-apps' own to delete
+            (staged / _STAGED_MARKER).touch()
 
         from konfai.trainer import train
 

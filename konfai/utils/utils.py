@@ -282,11 +282,8 @@ def get_patch_slices_from_shape(
                 if s > 1:
                     tmp[i] = np.mod(patch_size[i] - np.mod(shape[i], patch_size[i]), patch_size[i]) // (size[i] - 1)
             overlap = tmp
-    elif isinstance(overlap_tmp, int):
-        # Plain int: the same voxel overlap on every axis whose patch is > 1.
-        overlap = [overlap_tmp if size > 1 else 0 for size in patch_size]
     else:
-        # Rich spec: a fraction, a "20%" string, or a per-axis list mixing forms.
+        # Voxels, a fraction, a "20%" string, or a per-axis list mixing forms.
         overlap = resolve_overlap(overlap_tmp, patch_size, shape)
 
     for dim in range(len(shape)):

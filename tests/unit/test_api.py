@@ -19,6 +19,7 @@ one engine. Pins the kwargs recording, the object->tree serialization, the run c
 exit; the process env left as found; one workflow at a time), and byte-identity between the two
 spellings of the same run."""
 
+import json
 import os
 from pathlib import Path
 
@@ -271,9 +272,9 @@ def test_a_crop_writes_the_region_of_interest_header_on_every_route(
 def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An absent ``transforms`` key is not an absent chain: the binder materializes its own default
-    (``Normalize``), and two groups each rescaled to [-1, 1] by their own extrema no longer differ
-    where they did. On a pair related by ``0.9 x + 0.05`` that reported MAE 1.9e-8 for 0.025."""
+    """No chain declared scores the values as stored: two groups each rescaled to [-1, 1] by their own
+    extrema no longer differ where they did. On a pair related by ``0.9 x + 0.05`` that reported MAE
+    1.9e-8 for 0.025."""
     monkeypatch.chdir(tmp_path)
     truth = np.linspace(0.0, 1.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)
     prediction = (0.9 * truth + 0.05).astype(np.float32)
@@ -292,6 +293,43 @@ def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     assert result.metrics["TRAIN"]["case"]["sCT:CT:MAE"]["P000"] == pytest.approx(
         float(np.abs(prediction - truth).mean()), rel=1e-5
     )
+
+
+def test_an_evaluation_yml_without_transforms_scores_the_stored_values(tmp_path: Path) -> None:
+    """The key a hand-written Evaluation.yml leaves out once bound a min-max Normalize per group: a
+    prediction 10 HU off its reference scored a MAE of 1e-10, exit 0."""
+    from konfai.evaluator import evaluate
+
+    truth = np.linspace(-100.0, 100.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", truth)
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", truth + 10.0)
+    config = tmp_path / "Evaluation.yml"
+    config.write_text(
+        "Evaluator:\n"
+        "  train_name: NO_CHAIN\n"
+        "  metrics:\n"
+        "    sCT:\n"
+        "      targets_criterions:\n"
+        "        CT:\n"
+        "          criterions_loader:\n"
+        "            MAE: {}\n"
+        "  Dataset:\n"
+        f"    dataset_filenames: ['{tmp_path / 'Raw'}:mha']\n"
+        "    groups_src:\n"
+        "      CT:\n"
+        "        groups_dest:\n"
+        "          CT: {}\n"
+        "      sCT:\n"
+        "        groups_dest:\n"
+        "          sCT: {}\n",
+        encoding="utf-8",
+    )
+
+    evaluate(overwrite=True, quiet=True, evaluations_file=config, evaluations_dir=tmp_path / "Evaluations")
+
+    report = json.loads((tmp_path / "Evaluations" / "NO_CHAIN" / "Metric_TRAIN.json").read_text(encoding="utf-8"))
+    assert report["case"]["sCT:CT:MAE"]["P000"] == pytest.approx(10.0, rel=1e-5)
+    assert "Normalize" not in config.read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- uncertainty vocabulary

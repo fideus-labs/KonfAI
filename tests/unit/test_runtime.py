@@ -124,6 +124,8 @@ def test_execute_distributed_object_sets_shared_master_port_without_forcing_laun
             return None
 
     class DummyDistributed(DistributedObject):
+        uses_collectives = False  # spawns two ranks on Windows too, which opens no process group
+
         def __init__(self) -> None:
             super().__init__("dummy")
 
@@ -284,6 +286,7 @@ def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monke
     from konfai.transformer import Transformer
 
     assert Transformer.uses_collectives is False
+    assert Predictor.uses_collectives is False
     assert rt_dist.DistributedObject.uses_collectives is True
 
 
@@ -739,6 +742,8 @@ def _execute_counting(
     spawned: list[int] = []
 
     class FakeObject(rt_dist.DistributedObject):
+        uses_collectives = False  # spawns several ranks on Windows too, which opens no process group
+
         def __init__(self) -> None:
             super().__init__("fake-inline")
             self.size = size
@@ -956,6 +961,42 @@ def test_zarr_keeps_a_small_share_whole(monkeypatch, cores: int, expected: int) 
         assert zarr.config.get("async.concurrency") == expected
     finally:
         zarr.config.set({"async.concurrency": previous})
+
+
+@pytest.mark.parametrize("uses_collectives", [True, False])
+def test_windows_refuses_several_ranks_only_where_they_must_talk(monkeypatch, uses_collectives: bool) -> None:
+    """Windows gets no process group: TRAIN and EVALUATION ranks would each work alone (the metrics
+    counted rank 0's cases only), while ranks that share only the work list still run."""
+    spawned: list[int] = []
+
+    class FakeObject(rt_dist.DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("fake-windows")
+
+        def setup(self, world_size: int) -> None:
+            self.dataloader = [[] for _ in range(world_size)]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            pass
+
+    class WindowsOs:
+        name = "nt"
+
+        def __getattr__(self, attribute: str):
+            return getattr(os, attribute)
+
+    FakeObject.uses_collectives = uses_collectives
+    monkeypatch.setattr(rt_dist, "os", WindowsOs())  # only the runtime sees Windows, not pathlib
+    monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist.mp, "spawn", lambda fn, nprocs: spawned.append(nprocs))
+
+    if uses_collectives:
+        with pytest.raises(ConfigError, match="Windows"):
+            rt_dist.execute_distributed_object(FakeObject(), cpu=2, quiet=True)
+    else:
+        rt_dist.execute_distributed_object(FakeObject(), cpu=2, quiet=True)
+    assert spawned == ([] if uses_collectives else [2])
 
 
 def test_the_startup_line_takes_the_nested_phases_out_and_closes_on_other() -> None:

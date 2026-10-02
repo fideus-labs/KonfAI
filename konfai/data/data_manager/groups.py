@@ -199,14 +199,10 @@ class GroupTransform:
 
 
 class GroupTransformMetric(GroupTransform):
-    """Metric-specific group transform that omits patch-time transforms."""
+    """Metric-specific group transform that omits patch-time transforms. No chain by default: a metric
+    compares the values as stored, and a rescale per group would erase the difference it measures."""
 
-    def __init__(
-        self,
-        transforms: dict[str, TransformLoader] = {
-            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
-        },
-    ):
+    def __init__(self, transforms: dict[str, TransformLoader] = {}):
         super().__init__(transforms, {})
 
 

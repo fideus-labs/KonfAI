@@ -133,7 +133,10 @@ The app installs its training assets, links your dataset, then restarts training
 from each selected checkpoint's pretrained weights with a fresh optimizer,
 schedule and epoch counter, so `--epochs` epochs really run. `--models` picks
 which checkpoints, defaulting to the first; each is fine-tuned independently. The
-output is another app bundle, ready to run.
+output is another app bundle, ready to run. The run works in its output directory
+(`./Output` by default) and links your dataset there as `Dataset`, so an output
+directory that already holds a `Dataset` of its own, such as a project root, is
+refused and nothing is deleted.
 
 ## Running on another machine
 

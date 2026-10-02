@@ -73,7 +73,7 @@ Common fields:
 | Field | Type | Effect |
 | --- | --- | --- |
 | `dataset_filenames` | list[str] | Pairs or merges the datasets needed for evaluation. |
-| `groups_src` | mapping | Defines how the compared tensors are loaded. |
+| `groups_src` | mapping | Defines how the compared tensors are loaded. A group without `transforms` is compared as stored. |
 | `subset` | string / list / null | Restricts evaluated cases: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
 | `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |
 
