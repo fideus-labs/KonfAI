@@ -36,7 +36,6 @@ def _session_service(tmp_path: Path) -> SessionService:
     layout = WorkspaceLayout(tmp_path)
     layout.ensure_session_workspace()
     return SessionService(
-        repo_root=repo_root,
         examples_root=repo_root / "examples",
         workspace_layout=layout,
         job_registry=JobRegistry({"queued", "running"}, workspace_layout=layout),

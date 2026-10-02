@@ -826,17 +826,6 @@ async def run_config_diff(
     return {"ok": True, "run_a": run_a, "run_b": run_b, "identical": not diff, "diff": "\n".join(diff)}
 
 
-@app.get("/api/curves")
-async def curves(session: str = Query("default"), run: str = Query(...), q: str = Query("")) -> dict[str, Any]:
-    """A run's full training curves (the complete downsampled TensorBoard history, not the live tail): konfai-mcp's ``read_training_curves``, optionally filtered to tags containing ``q``. Powers clicking a
-    live chart to expand it into its whole history."""
-    args: dict[str, Any] = {"run_name": run, "max_points": 2000}
-    if q:
-        args["tags"] = [q]
-    ok, _text, data = await _mcp_json(_sane_session(session), "read_training_curves", args)
-    return {"ok": ok, "curves": data.get("curves", {}) if ok and isinstance(data, dict) else {}}
-
-
 class ConfigSave(BaseModel):
     session: str
     name: str
@@ -1209,7 +1198,14 @@ async def index() -> FileResponse:
     keeps loading the previous build's assets: an updated Studio silently serving the old front until
     someone thinks to hard-reload.
     """
-    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache, must-revalidate"})
+    index_html = WEB_DIR / "index.html"
+    if not index_html.is_file():
+        raise HTTPException(
+            503,
+            "the front is not built: run `npm --prefix konfai-studio/frontend install` then "
+            "`npm --prefix konfai-studio/frontend run build`",
+        )
+    return FileResponse(index_html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/konfai-logo.png")

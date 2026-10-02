@@ -599,6 +599,7 @@ def test_list_components_names_the_config_vocabulary() -> None:
 
     assert {"Dice", "MAE"} <= {component.name for component in api.list_components("criteria")}
     assert "Median" in {component.name for component in api.list_components("reductions")}
+    assert "CosineAnnealing" in {component.name for component in api.list_components("schedulers")}
     assert "Flip" in {component.name for component in api.list_components("augmentations")}
     assert "Conv" in {component.name for component in api.list_components("blocks")}
 

@@ -107,7 +107,7 @@ jobs:
         run: pip install ruff==0.15.2
 
       - name: Run ruff lint
-        run: ruff check konfai konfai-apps/konfai_apps tests
+        run: ruff check konfai konfai-apps/konfai_apps apps tests
 
   typecheck:
     runs-on: ubuntu-latest
@@ -153,7 +153,7 @@ jobs:
         run: pip install ruff==0.15.2
 
       - name: Check formatting
-        run: ruff format --check konfai konfai-apps/konfai_apps tests
+        run: ruff format --check konfai konfai-apps/konfai_apps apps tests
 
   docs:
     runs-on: ubuntu-latest

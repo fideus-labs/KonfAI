@@ -34,6 +34,7 @@ import inspect
 import types
 from typing import Any, Union, get_args, get_origin
 
+from konfai_mcp.catalog import COMPONENT_KINDS
 from konfai_mcp.classpaths import public_classpath
 from konfai_mcp.workflows import WORKFLOW_SPECS
 
@@ -61,7 +62,7 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "schema_tool": "describe_config_schema(workflow)",
         },
         "components": {
-            "kinds": ["criterion (loss/metric)", "transform", "augmentation", "scheduler", "model", "block"],
+            "kinds": list(COMPONENT_KINDS),
             "discover": "list_components(kind)",
             "inspect": "inspect_object_signature(classpath)",
         },

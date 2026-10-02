@@ -36,14 +36,15 @@ from typing import Any
 from konfai.utils.errors import ConfigError
 
 #: Kinds backed by "concrete subclasses of one base class, re-exported by one package".
-_SUBCLASS_KINDS: dict[str, tuple[str, str]] = {
+SUBCLASS_KINDS: dict[str, tuple[str, str]] = {
     "transform": ("konfai.data.transform", "Transform"),
     "augmentation": ("konfai.data.augmentation", "DataAugmentation"),
     "criterion": ("konfai.metric.measure", "Criterion"),
     "reduction": ("konfai.data.reduction", "Reduction"),
+    "scheduler": ("konfai.metric.schedulers", "Scheduler"),
 }
 
-COMPONENT_KINDS: tuple[str, ...] = (*_SUBCLASS_KINDS, "model", "block")
+COMPONENT_KINDS: tuple[str, ...] = (*SUBCLASS_KINDS, "model", "block")
 
 _KIND_ALIASES: dict[str, str] = {
     "transforms": "transform",
@@ -54,6 +55,7 @@ _KIND_ALIASES: dict[str, str] = {
     "metric": "criterion",
     "metrics": "criterion",
     "reductions": "reduction",
+    "schedulers": "scheduler",
     "models": "model",
     "blocks": "block",
 }
@@ -66,7 +68,7 @@ class Component:
     #: The class (or block/file) name.
     name: str
     #: The exact spelling a YAML config references it by: a bare class name for transforms,
-    #: augmentations, criteria and reductions; a ``Model.classpath`` value for models
+    #: augmentations, criteria, reductions and schedulers; a ``Model.classpath`` value for models
     #: (``segmentation.UNet.UNet`` or ``default|UNet.yml``); a module ``type`` for builder blocks.
     config_reference: str
     #: The importable module defining it (``None`` for a declarative catalog file or a block).
@@ -136,14 +138,15 @@ def _list_blocks() -> list[Component]:
     )
 
 
-def _list_python_models() -> list[Component]:
+def _list_python_models() -> tuple[list[Component], dict[str, str]]:
     # The builtin Python models live under konfai/models/python (PEP 420, no __init__.py): walk the
     # files the way ModelLoader resolves a classpath, listing each Network subclass under the short
-    # '<task>.<Module>.<Class>' spelling. A module whose optional dependency is missing cannot be
-    # referenced either, so it is skipped rather than reported.
+    # '<task>.<Module>.<Class>' spelling. A module that fails to import (an absent optional dependency)
+    # cannot be referenced either: it is left out of the list and returned with the reason.
     models_pkg = importlib.import_module("konfai.models.python")
     network_base = importlib.import_module("konfai.network.network").Network
     components: dict[str, Component] = {}
+    unavailable: dict[str, str] = {}
     for root in list(getattr(models_pkg, "__path__", [])):
         for dirpath, _dirs, files in os.walk(root):
             for filename in sorted(files):
@@ -153,7 +156,8 @@ def _list_python_models() -> list[Component]:
                 module_name = f"konfai.models.python.{rel}"
                 try:
                     module = importlib.import_module(module_name)
-                except Exception:  # nosec B112 - a catalog model needing an absent optional dep is not an error
+                except Exception as exc:  # a catalog model needing an absent optional dep is not an error
+                    unavailable[module_name] = f"{type(exc).__name__}: {exc}"
                     continue
                 for name, obj in inspect.getmembers(module, inspect.isclass):
                     if obj.__module__ != module_name or name.startswith("_"):
@@ -165,7 +169,7 @@ def _list_python_models() -> list[Component]:
                         classpath,
                         Component(name=name, config_reference=classpath, module=module_name, doc=_doc_summary(obj)),
                     )
-    return list(components.values())
+    return list(components.values()), unavailable
 
 
 def _list_yaml_catalog_models() -> list[Component]:
@@ -200,11 +204,19 @@ def _list_yaml_catalog_models() -> list[Component]:
     return components
 
 
+def list_models() -> tuple[list[Component], dict[str, str]]:
+    """The catalog models sorted by reference (Python classpaths and ``default|<Name>.yml`` files), and
+    the Python model modules that failed to import, each with the reason."""
+    python_models, unavailable = _list_python_models()
+    models = sorted(python_models + _list_yaml_catalog_models(), key=lambda component: component.config_reference)
+    return models, unavailable
+
+
 def list_components(kind: str) -> list[Component]:
     """Every shipped component of one ``kind``, with the spelling a YAML config references it by.
 
     ``kind`` is one of :data:`COMPONENT_KINDS` (plural spellings accepted): ``transform``,
-    ``augmentation``, ``criterion`` (losses and metrics), ``reduction``, ``model`` (the Python
+    ``augmentation``, ``criterion`` (losses and metrics), ``reduction``, ``scheduler``, ``model`` (the Python
     catalog classpaths and the ``default|<Name>.yml`` declarative catalog), or ``block`` (the YAML
     model builder's registered types).
     """
@@ -212,6 +224,5 @@ def list_components(kind: str) -> list[Component]:
     if canonical == "block":
         return _list_blocks()
     if canonical == "model":
-        models = _list_python_models() + _list_yaml_catalog_models()
-        return sorted(models, key=lambda component: component.config_reference)
-    return _list_subclasses(*_SUBCLASS_KINDS[canonical])
+        return list_models()[0]
+    return _list_subclasses(*SUBCLASS_KINDS[canonical])

@@ -44,7 +44,6 @@ def _service(tmp_path: Path) -> SessionService:
     layout = WorkspaceLayout(tmp_path)
     layout.ensure_session_workspace()
     return SessionService(
-        repo_root=repo_root,
         examples_root=repo_root / "examples",
         workspace_layout=layout,
         job_registry=JobRegistry({"queued", "running"}, workspace_layout=layout),
@@ -330,15 +329,15 @@ def test_leaderboard_ranks_app_evaluation_trials(tmp_path: Path) -> None:
 
 def test_session_summary_blocks_evaluation_without_prediction_artifacts(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    service.workspace_layout.train_config_path().write_text(
+    service.workspace_layout.config_path("train").write_text(
         "Trainer:\n  train_name: DEMO\n  Dataset:\n    dataset_filenames:\n      - ./Dataset:a:mha\n",
         encoding="utf-8",
     )
-    service.workspace_layout.prediction_config_path().write_text(
+    service.workspace_layout.config_path("prediction").write_text(
         "Predictor:\n  train_name: DEMO\n  Dataset:\n    dataset_filenames:\n      - ./Dataset:a:mha\n",
         encoding="utf-8",
     )
-    service.workspace_layout.evaluation_config_path().write_text(
+    service.workspace_layout.config_path("evaluation").write_text(
         "Evaluator:\n"
         "  train_name: DEMO\n"
         "  Dataset:\n"
@@ -392,7 +391,7 @@ def test_validation_runner_creates_runtime_directories_for_setup(
 
 def test_validate_semantics_blocks_missing_local_model_source(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    config_path = service.workspace_layout.train_config_path()
+    config_path = service.workspace_layout.config_path("train")
     config_path.write_text(
         "Trainer:\n"
         "  Model:\n"
@@ -526,3 +525,21 @@ def test_a_metric_ranks_one_way_for_every_run_that_reports_it(
 
     assert {row["direction"] for row in board} == {"max"}, "the newest run states the current definition"
     assert board[0]["run_name"] == "new_run", "and the ranking follows it"
+
+
+def test_an_example_seeds_the_workflows_it_has(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    examples = service.examples_root
+
+    # By default, a training example seeds its training config and an example without one seeds what it has.
+    assert service.seeded_workflows(examples / "Segmentation", None) == ["train"]
+    assert service.seeded_workflows(examples / "Transform", None) == ["transform"]
+    assert service.seeded_workflows(examples / "Segmentation", ["train", "evaluation"]) == ["train", "evaluation"]
+    # A workflow the example has no config for is refused, not silently skipped.
+    with pytest.raises(ValueError, match=r"no config for \['train'\]; it provides \['transform'\]"):
+        service.seeded_workflows(examples / "Transform", "train")
+
+    # Examples are offered for the workflows they provide.
+    transform_options = service.example_options(["CT"], ["transform"])
+    assert [(option["name"], option["workflows"]) for option in transform_options] == [("Transform", ["transform"])]
+    assert "Transform" not in {option["name"] for option in service.example_options(["CT", "SEG"], ["train"])}

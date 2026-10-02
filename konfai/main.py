@@ -202,7 +202,7 @@ def _add_transform(subparsers: argparse._SubParsersAction) -> None:
 
 
 #: The component families `konfai list` prints, spelled as the CLI takes them.
-_LIST_KINDS = ("transforms", "augmentations", "criteria", "reductions", "models", "blocks")
+_LIST_KINDS = ("transforms", "augmentations", "criteria", "reductions", "schedulers", "models", "blocks")
 
 
 def _add_list(subparsers: argparse._SubParsersAction) -> None:

@@ -127,6 +127,10 @@ Both flags can also be set through the environment
 only to `streamable-http`; stdio is inherently per-process and the
 deprecated SSE transport requires sessions.
 
+A non-loopback `--host` needs `--bearer-token` (or `KONFAI_MCP_BEARER_TOKEN`):
+without one the server refuses to start, unless `--i-know-this-is-insecure` is
+passed.
+
 ```{warning}
 Stateless mode removes MCP *protocol* session state, not KonfAI's own
 experiment state. Experiment workspaces live on disk under

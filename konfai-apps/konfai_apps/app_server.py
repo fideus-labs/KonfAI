@@ -958,8 +958,7 @@ async def start_job(job: Job, cmd: list[str], requested_gpus: list[int] | None):
             release_gpus(gpus)
 
         job.finished_at = time.time()
-        # The lease: a download that starts renews it, so a slow or late client is not cut off at a
-        # fixed 120 s after completion as it once was.
+        # The lease: a download that starts renews it, so a slow or late client is not cut off.
         job.retain_until = job.finished_at + RESULT_RETENTION_S
         while True:
             with job.lifecycle_lock:

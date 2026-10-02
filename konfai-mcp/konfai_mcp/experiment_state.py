@@ -42,6 +42,7 @@ from konfai.utils.uri import is_uri
 from ruamel.yaml.error import YAMLError
 
 from .config_io import YAML_SAFE
+from .workflows import WORKFLOW_SPECS
 from .workspace import WORKFLOW_CONFIG_FILES, WORKFLOW_ROOT_KEYS
 
 Stage = Literal[
@@ -117,12 +118,7 @@ STAGE_ACTIONS: dict[str, list[str]] = {
 # Which config file each launcher needs, so an action is never offered for a workflow this session has
 # not written. Without the gate, a session holding only a Transform.yml is told to "run train": an
 # action naming a file that is not there, while the workflow it could run is offered by nothing.
-_LAUNCHER_CONFIG: dict[str, str] = {
-    "run_train": "Config.yml",
-    "run_prediction": "Prediction.yml",
-    "run_evaluation": "Evaluation.yml",
-    "run_transform": "Transform.yml",
-}
+_LAUNCHER_CONFIG: dict[str, str] = {spec.retry_tool: spec.config_file for spec in WORKFLOW_SPECS.values()}
 
 # The dry run that must precede a launcher, where one exists. A transform writes a dataset, so its plan
 # comes first: it is what says how much, how, and whether the run would refuse before writing a byte.

@@ -79,7 +79,7 @@ konfai TRAIN --init -c Config.yml
 
 ### `konfai list`
 
-`konfai list {transforms,augmentations,criteria,reductions,models,blocks}`
+`konfai list {transforms,augmentations,criteria,reductions,schedulers,models,blocks}`
 prints one component family: the exact spelling a YAML config references, and
 each component's one-line doc. `konfai list models` covers both the Python
 catalog (`segmentation.UNet.UNet`) and the declarative catalog
@@ -329,6 +329,14 @@ server without arguments: see [Environment variables](#environment-variables).
 | `--path` | HTTP path prefix, for the SSE/HTTP transports. |
 | `--log-level` | FastMCP/Uvicorn log level, where the transport supports it. |
 | `--bearer-token` | Token required by the SSE/HTTP transports. |
+| `--i-know-this-is-insecure` | Bind a non-loopback address with no bearer token. |
+
+```{warning}
+An SSE/HTTP server that binds a non-loopback address with no bearer token is
+refused: it would let anyone on the network run jobs and read files on the host.
+Bound to loopback with no token, it answers only requests addressed to
+`127.0.0.1`, `localhost` or `::1`, which keeps a DNS-rebound web page out.
+```
 
 ## `konfai-studio`
 
@@ -496,9 +504,9 @@ implementation details unless you are actively extending the framework.
 
 ### konfai-mcp
 
-Every `konfai-mcp` command-line option has a matching variable, so an MCP client
-that can only set `env` configures the server without arguments. The option wins
-when both are given.
+Every `konfai-mcp` command-line option but `--i-know-this-is-insecure` has a
+matching variable, so an MCP client that can only set `env` configures the server
+without arguments. The option wins when both are given.
 
 | Variable | Equivalent option | Effect |
 | --- | --- | --- |
