@@ -288,6 +288,19 @@ class DataSources(ABC):
                 f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "
                 "from a dataset, there are no common dataset names shared across all groups, the intersection is empty."
             )
+        # A case some group lacks is left out of the run: say which, and which group lacks it.
+        lacking = {group: sorted(set().union(*cohort.values()) - held) for group, held in cohort.items()}
+        if any(lacking.values()):
+            warnings.warn(
+                f"{len(set().union(*lacking.values()))} case(s) are left out, missing from a group: "
+                + "; ".join(
+                    f"'{group}' lacks {', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}"
+                    for group, missing in lacking.items()
+                    if missing
+                ),
+                KonfAIWarning,
+                stacklevel=2,
+            )
 
         subset_names: set[str] | None = None
         for group in dataset_name:

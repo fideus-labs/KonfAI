@@ -934,23 +934,28 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Raises
         ------
-        FileNotFoundError
+        AppRepositoryError
             If a path does not exist, or contains no supported files.
         """
         files = []
         for path in paths:
             if not path.exists():
-                raise FileNotFoundError(f"Path does not exist: '{path}'")
+                raise AppRepositoryError(
+                    f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
+                )
 
             if path.is_file():
                 if KonfAIApp._match_supported(path):
                     files.append(path)
                 else:
-                    raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
+                    raise AppRepositoryError(
+                        f"'{path}' is not a supported image format.",
+                        "Give a volume KonfAI reads (.mha, .nii.gz, .nrrd, DICOM, OME-Zarr...).",
+                    )
             else:
                 files.extend(sorted(f for f in path.rglob("*") if f.is_file() and KonfAIApp._match_supported(f)))
                 if not files:
-                    raise FileNotFoundError(f"No supported files found in directory: '{path}'.")
+                    raise AppRepositoryError(f"No supported volume found in '{path}'.")
         return files
 
     @staticmethod
@@ -981,7 +986,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Raises
         ------
-        FileNotFoundError
+        AppRepositoryError
             If a path does not exist, is an unsupported file, or yields no volume.
         """
         units: list[tuple[Path, str]] = []
@@ -1012,13 +1017,18 @@ class KonfAIApp(AbstractKonfAIApp):
 
         for path in paths:
             if not path.exists():
-                raise FileNotFoundError(f"Path does not exist: '{path}'")
+                raise AppRepositoryError(
+                    f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
+                )
             if path.is_file() and not KonfAIApp._match_supported(path):
-                raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
+                raise AppRepositoryError(
+                    f"'{path}' is not a supported image format.",
+                    "Give a volume KonfAI reads (.mha, .nii.gz, .nrrd, DICOM, OME-Zarr...).",
+                )
             before = len(units)
             walk(path)
             if len(units) == before:
-                raise FileNotFoundError(f"No supported inputs found in: '{path}'.")
+                raise AppRepositoryError(f"No supported volume found in '{path}'.")
         return units
 
     @staticmethod
@@ -1095,10 +1105,24 @@ class KonfAIApp(AbstractKonfAIApp):
         inputs : list[list[Path]]
             Nested list of paths. Each inner list is scanned for supported files.
         """
-        dataset_path = KonfAIApp._stage_dataset()
-        for i, input_path in enumerate(inputs):
-            for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(input_path)):
-                KonfAIApp.symlink(source, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
+        KonfAIApp._stage_dataset()
+        KonfAIApp._stage_groups(inputs, "Volume")
+
+    @staticmethod
+    def _stage_groups(groups: list[list[Path]], prefix: str) -> None:
+        """Link each group's volumes as ``Dataset/P{idx}/{prefix}_{i}``. The idx-th volume of every group is
+        case idx, so each group must list one volume per staged case (the first input group sets them)."""
+        dataset = Path("./Dataset")
+        listed = [KonfAIApp._list_input_units(group) for group in groups]
+        cases = sum(1 for case in dataset.iterdir() if case.is_dir()) or (len(listed[0]) if listed else 0)
+        for i, units in enumerate(listed):
+            if len(units) != cases:
+                raise AppRepositoryError(
+                    f"{prefix} group {i} lists {len(units)} volume(s) for {cases} case(s): cases pair by position.",
+                    "Give every group one volume per case, in the same order.",
+                )
+            for idx, (source, suffix) in enumerate(units):
+                KonfAIApp.symlink(source, dataset / f"P{idx:03d}" / f"{prefix}_{i}{suffix}")
 
     @staticmethod
     def _dataset_level(prediction_file: str, dataset_dir: Path) -> int:
@@ -1178,7 +1202,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Raises
         ------
-        FileNotFoundError
+        AppRepositoryError
             If a provided input is not multi-channel (single-component).
         """
         dataset_path = KonfAIApp._stage_dataset()
@@ -1192,9 +1216,9 @@ class KonfAIApp(AbstractKonfAIApp):
                     suffix = KonfAIApp._supported_suffix(file)
                     KonfAIApp.symlink(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
                 else:
-                    raise FileNotFoundError(
-                        "Invalid input volume for inference: a multi-channel volume stack is required, "
-                        "but a single-channel volume was provided."
+                    raise AppRepositoryError(
+                        f"'{file}' has one channel: uncertainty reads an inference stack, one channel per inference.",
+                        "Give the InferenceStack.mha an inference with -uncertainty wrote.",
                     )
 
     def _write_gt_to_dataset(self, gt: list[list[Path]]) -> None:
@@ -1209,9 +1233,7 @@ class KonfAIApp(AbstractKonfAIApp):
         gt : list[list[Path]]
             Ground truth file paths grouped similarly to inputs.
         """
-        for i, gt_path in enumerate(gt):
-            for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(gt_path)):
-                KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Reference_{i}{suffix}"))
+        KonfAIApp._stage_groups(gt, "Reference")
 
     def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
         """
@@ -1236,9 +1258,7 @@ class KonfAIApp(AbstractKonfAIApp):
                 shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
                 dataset.write("Mask_0", name, np.ones(shape, dtype=np.uint8), attr)
         else:
-            for i, mask_path in enumerate(mask):
-                for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(mask_path)):
-                    KonfAIApp.symlink(source, Path(f"./Dataset/P{idx:03d}/Mask_{i}{suffix}"))
+            KonfAIApp._stage_groups(mask, "Mask")
 
     @staticmethod
     def _stage_result_dir(output: Path, tmp_dir: Path | None, name: str) -> Path:
@@ -1293,6 +1313,26 @@ class KonfAIApp(AbstractKonfAIApp):
                 shutil.copytree(result, output, dirs_exist_ok=True)
         else:
             KonfAIApp._clear_dataset()
+
+    @staticmethod
+    def _case_volumes(root: Path, cases: list[str]) -> dict[str, list[Path]]:
+        """The volumes under ``root`` of each of ``cases``, in their order: a destination an earlier run
+        wrote to keeps files of cases this run does not own. A directory that is itself one volume (a DICOM
+        series, an OME-Zarr store) is one volume, not its slices or chunks."""
+        found: dict[str, list[Path]] = {case: [] for case in cases}
+
+        def walk(path: Path, case: str | None) -> None:
+            case = path.name if path.name in found else case
+            if path.is_file() or KonfAIApp._directory_volume_suffix(path) is not None:
+                if case is not None and (path.is_dir() or KonfAIApp._match_supported(path)):
+                    found[case].append(path)
+            elif path.is_dir():
+                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+                    walk(child, case)
+
+        if root.exists():
+            walk(root, None)
+        return found
 
     @run_distributed_app
     def infer(
@@ -1361,6 +1401,8 @@ class KonfAIApp(AbstractKonfAIApp):
         )
         self._predicted = getattr(predictor, "predicted", None)
         self._collect_result(output, tmp_dir, "Predictions")
+        for case, volumes in KonfAIApp._case_volumes(output, self._predicted or []).items():
+            print(f"[KonfAI-Apps] {case}: {', '.join(str(volume) for volume in volumes)}")
 
     @run_distributed_app
     def evaluate(
@@ -1500,31 +1542,17 @@ class KonfAIApp(AbstractKonfAIApp):
             quiet=quiet,
             tmp_dir=tmp_dir,
         )
-        outputs: list[Path] = []
-        inference_stacks: list[Path] = []
-
-        def _collect(path: Path) -> None:
-            # Treat a directory that is itself one volume (DICOM series / OME-Zarr store) as a single
-            # output unit instead of descending into its slices/chunks.
-            if path.is_file():
-                if KonfAIApp._match_supported(path):
-                    (inference_stacks if path.name == "InferenceStack.mha" else outputs).append(path)
-            elif KonfAIApp._directory_volume_suffix(path) is not None:
-                outputs.append(path)
-            else:
-                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
-                    _collect(child)
-
         predictions_dir = output / "Predictions"
-        if predictions_dir.exists():
-            _collect(predictions_dir)
         # The stages below stage the predictions by position: a case the prediction set aside would put
         # every later prediction on the next case's reference, or score what an earlier run left in its place.
-        staged = {f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))}
-        missing = staged - set(self._predicted) if self._predicted is not None else set()
+        staged = [f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))]
+        volumes = [volume for files in KonfAIApp._case_volumes(predictions_dir, staged).values() for volume in files]
+        outputs = [volume for volume in volumes if volume.name != "InferenceStack.mha"]
+        inference_stacks = [volume for volume in volumes if volume.name == "InferenceStack.mha"]
+        missing = [case for case in staged if self._predicted is not None and case not in self._predicted]
         if (gt is not None or uncertainty) and missing:
             raise AppRepositoryError(
-                f"Case(s) {', '.join(sorted(missing))} have no prediction: their inputs could not be"
+                f"Case(s) {', '.join(missing)} have no prediction: their inputs could not be"
                 " read, and evaluation and uncertainty pair each prediction with its case by position.",
                 f"Fix or leave out those inputs and run the pipeline again; the other predictions are in"
                 f" '{predictions_dir}'.",

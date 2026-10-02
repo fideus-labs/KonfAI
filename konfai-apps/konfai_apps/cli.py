@@ -160,7 +160,11 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
             help="Input path(s): one or multiple volume files, or a dataset directory.",
         )
     parser.add_argument(
-        "-o", "--output", type=_resolved_path, default=Path("./Output").resolve(), help="Output directory / file."
+        "-o",
+        "--output",
+        type=_resolved_path,
+        default=Path("./Output").resolve(),
+        help="Output directory: each case's files are listed when the run ends.",
     )
     if not fine_tune:
         parser.add_argument(
