@@ -1,88 +1,58 @@
 # KonfAI in Python
 
-The four CLI commands are callables: `konfai.transform` (with `konfai.plan_transform`, its
-dry-run twin), `konfai.evaluate`, `konfai.predict` and `konfai.train`. One engine, two spellings: everything below builds the same config tree the YAML file would hold and hands it to the same
-binder, so nothing here can drift from what a YAML run does.
+The four commands are Python functions: `konfai.transform` (and `konfai.plan_transform`, which only plans),
+`konfai.evaluate`, `konfai.predict` and `konfai.train`. They build the same config a YAML file would hold and
+run the same workflow.
 
 ```python
 import konfai
 from konfai.data.transform import Resample, Write
 
-result = konfai.transform(
-    "moved",
-    "./Staged:mha",
-    {"Moving": {"Moved": [
-        Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
-        Write(dataset="./Output:mha"),
-    ]}},
-    memory_budget="8G",
-)
-result.outputs      # every chain's terminal Write: where the deliverables landed
-result.config       # the resolved YAML the run kept -- commit this file to version the experiment
+if __name__ == "__main__":
+    result = konfai.transform(
+        "moved",
+        "./Staged:mha",
+        {"Moving": {"Moved": [
+            Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
+            Write(dataset="./Output:mha"),
+        ]}},
+        memory_budget="8G",
+    )
+    result.outputs      # where each chain's Write landed
+    result.config       # the resolved YAML of the run: keep it to reproduce the experiment
 ```
 
-A chain is a list of **live stage objects** (the very classes the YAML names, with the very same
-constructor arguments, which the extension bases record as given) or the equivalent mapping
-(`{"Resample": {...}, "Write": {...}}`), or a whole tree loaded from an existing YAML and modified
-in place. Two stages of the same class in one chain spell the second one module-qualified
-(`konfai.data.transform:Resample`), exactly as the YAML file must.
+A chain is a list of stage objects (the classes the YAML names, with the same arguments), or the same thing
+as a dictionary (`{"Resample": {...}, "Write": {...}}`), or a tree loaded from a YAML file and modified.
 
-## The contract, and how it differs from the CLI
+| Workflow | Python |
+| --- | --- |
+| TRANSFORM | `konfai.transform(name, datasets, chains, ...)` with stage objects |
+| EVALUATION | `konfai.evaluate(name, datasets, metrics={"PRED": {"GT": [MAE(), Dice()]}}, ...)` |
+| PREDICTION | `konfai.predict(models=[...], config=tree_or_path, ...)` |
+| TRAIN / RESUME | load the YAML into a dictionary, change what you study, `konfai.train(config=tree)` |
 
-- **A designed refusal raises** `KonfAIError`: the message and the remedy are the exception; the
-  caller decides. Only the `konfai` and `konfai-apps` commands catch it and exit.
-- **Results come back structured**: `transform` returns the `outputs.json` destinations and the
-  workspace; `evaluate` returns the parsed `Metric_*.json` as a dict.
-- **What a call restores**: the `KONFAI_*` environment and the per-rank memory budget a run
-  publishes are restored around every call, so one call's `memory_budget` never sizes the next,
-  and one workflow runs at a time per process: a second concurrent call is refused with the remedy
-  (subprocesses), never allowed to corrupt the first. Each call reads a DICOM series as it is when
-  the call starts: a series another tool rewrote in place since the previous call is read afresh.
-- **What a call leaves set for the process**: the first call sizes ITK's thread pool, zarr's
-  asynchronous concurrency and, except on macOS, torch's thread pool (at most 12 threads, unless
-  `OMP_NUM_THREADS` is set), once for the life of the process: resizing torch's pool after parallel
-  work has run can crash the OpenMP runtime. Every call switches `torch.multiprocessing` to the
-  `file_system` sharing strategy, and on Linux a call may pin glibc's mmap threshold so that a
-  freed volume goes back to the system.
-- **A local module resolves as on the CLI**: the working directory is on `sys.path` for the whole
-  call, so `Model:UNet` finds `./Model.py` wherever the calling script lives. It is searched last: a
-  module the calling script already reaches is not replaced by a namesake in the working directory.
-- **`gpu=[...]` names the ids the CLI's `--gpu` takes**: when `CUDA_VISIBLE_DEVICES` is set, an id
-  it does not list is refused before the run starts. Unset, the ids are not checked: counting the
-  devices would initialize CUDA before the run selects its GPU.
-- **A script runs the workflow under `if __name__ == "__main__":`.** The processes a run starts
-  are fresh interpreters that import the script: the ranks of a run on several processes, and on
-  macOS and Windows the data loader's workers. Unguarded, each of them starts the workflow again
-  and the run fails.
-- **The record remains.** Every call materializes the resolved YAML in the run's workspace:
-  promoting a notebook run to a versioned experiment is copying `result.config`: nothing to
-  rewrite, and the run stays resumable like any other.
+Every function takes a config as a file path or as a dictionary, which makes sweeps simple: each run keeps
+its resolved config as the record of what was tried.
 
-`konfai.plan_transform(...)` takes the same arguments and returns the `TransformPlan` without
-running anything: plan first is the same reflex in Python as on the CLI.
+## How a call behaves
 
-## Which spelling fits which workflow
+- **Errors raise.** A refusal is a `KonfAIError` with its message and remedy; your code decides what to do.
+- **Results are objects.** `transform` returns the outputs and the workspace; `evaluate` returns the metrics
+  as a dictionary.
+- **Your config file is not modified.** It is copied to a scratch folder, which receives the resolved
+  defaults.
+- **One workflow at a time per process.** The `KONFAI_*` environment and the memory budget are restored
+  after each call.
+- **Run it under `if __name__ == "__main__":`.** Worker processes import your script again; without the
+  guard, each would start the workflow.
+- **A local classpath works as on the CLI**: `Model:UNet` finds `./Model.py` in the working directory.
+- **`gpu=[...]`** takes the same ids as `--gpu`.
+- The first call sets torch's, ITK's and zarr's thread pools for the life of the process.
 
-| Workflow | Its config is… | The Python spelling |
-| --- | --- | --- |
-| TRANSFORM | a chain of stage objects | `konfai.transform(name, datasets, chains, ...)` with live stages |
-| EVALUATION | criteria per group | `konfai.evaluate(name, datasets, metrics={"PRED": {"GT": [MAE(), Dice()]}}, ...)` |
-| PREDICTION | wiring (checkpoints, patches, TTA) | `konfai.predict(models=[...], config=tree_or_path, ...)`: the tree or the file |
-| TRAIN / RESUME | the full graph (model, losses, optimizers) | the tree: load the YAML into a dict, change the keys under study, call `konfai.train(config=tree)` |
-
-Every workflow entry point accepts the config **tree as a dict** wherever it accepts a file path, that alone is the sweep idiom for TRAIN: the resolved config each run keeps *is* the record of what
-was tried. The object spelling exists where a config is a list of objects (TRANSFORM chains,
-EVALUATION criteria); rebuilding a training graph in nested kwargs would add nothing over the YAML
-that publishes it.
-
-## Building a workflow without running it
-
-Each workflow's builder returns the configured object without launching the
-runtime: `konfai.trainer.build_train(...)`, `konfai.predictor.build_predict(...)`,
-`konfai.evaluator.build_evaluate(...)` and
-`konfai.transformer.build_transform(transform_file=..., transforms_dir=...)`.
-That is the way to validate a config before the full run; `konfai.plan_transform`
-above is the same idea one step further, and the `--plan` flag's entrypoint.
+`konfai.plan_transform(...)` takes the same arguments as `transform` and returns the plan without running
+anything. To build a workflow without running it, use `konfai.trainer.build_train`,
+`konfai.predictor.build_predict`, `konfai.evaluator.build_evaluate` or `konfai.transformer.build_transform`.
 
 ## Signatures
 
@@ -125,61 +95,37 @@ above is the same idea one step further, and the `--plan` flag's entrypoint.
    :no-index:
 ```
 
-The root classes behind them (`Trainer`, `Predictor`, `Evaluator`,
-`Transformer`, `TransformPlan`) are in the {doc}`full module reference <../reference/api/index>`.
+The workflow classes (`Trainer`, `Predictor`, `Evaluator`, `Transformer`, `TransformPlan`) are in the
+{doc}`module reference <../reference/api/index>`.
 
 ## Apps: the `konfai_apps` package
 
-Besides the {doc}`CLI <../reference/cli>` and the {doc}`HTTP server <../reference/app-server-api>`,
-KonfAI Apps expose a small **Python API** in the standalone `konfai_apps`
-package (install it separately: see {doc}`../getting-started/installation`).
-Use it to run an app from a script or notebook, locally or against a remote
-server, with the same behaviour as the CLI. It is a layer on top of the
-workflow API above.
-
-### Public exports
-
-`from konfai_apps import ...`: `KonfAIApp`, `KonfAIAppClient`, `AbstractKonfAIApp`,
-`run_distributed_app`, `run_remote_job`, `main_apps`, `main_apps_server`. Plus
-`from konfai import RemoteServer`.
-
-### `KonfAIApp`: run an app locally
+`konfai_apps` (installed separately, {doc}`../getting-started/installation`) runs apps from Python, locally or
+on a server, like the {doc}`konfai-apps CLI <../reference/cli>`.
 
 ```python
-from konfai_apps import KonfAIApp
 from pathlib import Path
+from konfai_apps import KonfAIApp
 
 app = KonfAIApp("VBoussot/ImpactSynth:MR", download=False, force_update=False)
 app.infer(
-    inputs=[[Path("case_0000.nii.gz")]],   # list of input groups; each group is a list of paths
+    inputs=[[Path("case_0000.nii.gz")]],   # a list of input groups, each a list of files
     output=Path("./Output"),
     ensemble=3, tta=4, gpu=[0],
 )
 ```
 
-`KonfAIApp(app, download, force_update)` resolves `app` to a **local directory** or
-a **Hugging Face repo** (`repo_id:app_name`, optionally `repo_id@revision:app_name`).
-A remote identifier raises: use `KonfAIAppClient` for that. Each call runs inside
-an isolated temporary workspace.
+`KonfAIApp` takes a local folder or a Hugging Face reference (`repo:app`, or `repo@revision:app`). Its methods
+are `infer`, `evaluate`, `uncertainty`, `pipeline` and `fine_tune` ([signatures](#app-signatures)). `inputs`,
+`gt` and `mask` are lists of groups: one group per modality.
 
-The full method signatures of `KonfAIApp` and `KonfAIAppClient` (`infer`,
-`evaluate`, `uncertainty`, `pipeline`, `fine_tune`) are single-sourced from the
-docstrings on [App signatures](#app-signatures) below.
-
-`inputs` (and `gt`, `mask`) are a **list of groups**, where each group is a list of
-file paths: `inputs=[[Path("a.nii.gz")]]` is one group of one file. Multi-modality
-apps take one group per modality.
-
-### `KonfAIAppClient`: run an app on a remote server
+To run on a {doc}`server <../reference/app-server-api>`, use `KonfAIAppClient` with the same methods:
 
 ```python
 from konfai import RemoteServer
 from konfai_apps import KonfAIAppClient
 
-client = KonfAIAppClient(
-    "VBoussot/ImpactSynth:MR",
-    RemoteServer("127.0.0.1", 8000, token="changeme"),
-)
+client = KonfAIAppClient("VBoussot/ImpactSynth:MR", RemoteServer("127.0.0.1", 8000, token="changeme"))
 client.pipeline(
     inputs=[[Path("case_0000.nii.gz")]],
     gt=[[Path("ref_0000.nii.gz")]],
@@ -188,72 +134,38 @@ client.pipeline(
 )
 ```
 
-`KonfAIAppClient(app, remote_server)` mirrors `KonfAIApp`'s methods, but each one
-submits a job to the {doc}`HTTP server <../reference/app-server-api>`, streams the logs,
-downloads and unpacks the result zip into `output`, and kills the remote job on
-interrupt. `RemoteServer(host, port, token)` builds the base URL
-(`http://host:port`) and the `Authorization: Bearer` header.
+It uploads the inputs, streams the logs, downloads the result into `output`, and stops the remote job if
+you interrupt it.
 
 ```{warning}
-`RemoteServer` uses **plain HTTP**: the token and the medical volumes travel
-unencrypted. Put the server behind a TLS-terminating reverse proxy for anything
-beyond localhost. Remote `patch_size` / `batch_size` **are** carried: each job endpoint takes an
-`options` form field, and the client refuses the submission if the server does not
-echo the tunables back in `accepted_options`: a server too old to honour them fails
-loudly instead of ignoring them.
+`RemoteServer` speaks plain HTTP: the token and the images are not encrypted. Put the server behind a TLS
+reverse proxy beyond localhost.
 ```
 
-### Bundle & ONNX export
+```{danger}
+Resolving an app **runs its Python code** and, by default, **installs its `requirements.txt`** (never touching
+`torch` or `konfai`; `KONFAI_APPS_INSTALL_REQUIREMENTS=0` turns this off). Only use apps from sources you
+trust. On a server, the `--apps` list decides which apps can run.
+```
 
-`konfai_apps.bundle` assembles an app bundle offline and (experimentally) exports
-ONNX for the `konfai-rs` portable-inference path:
+### Bundles and ONNX export
+
+`konfai_apps.bundle` builds an app folder from Python, and can export an ONNX model (experimental):
 
 ```python
 from konfai_apps.bundle import assemble_bundle, export_onnx_into_bundle
 
-b = assemble_bundle(
+bundle = assemble_bundle(
     "MR", "dist", "app.json",
     ["Prediction.yml", "Evaluation.yml"], ["CV_0.pt", "CV_1.pt"],
     model_py="Model.py",
 )
-export_onnx_into_bundle(b, checkpoint="CV_0.pt")   # writes model.onnx + manifest.json
+export_onnx_into_bundle(bundle, checkpoint="CV_0.pt")   # writes model.onnx and manifest.json
 ```
 
-| Function | Purpose |
-| --- | --- |
-| `assemble_bundle(name, out_dir, app_json, configs, checkpoints, model_py=None, requirements=None)` | Validate `app.json` and stage configs / checkpoints / `Model.py` / `requirements.txt` into a bundle dir. |
-| `export_onnx_into_bundle(bundle, *, patch_size=None, in_channels=None, prediction_config="Prediction.yml", checkpoint=None, output_module=None, root="Predictor")` | Load the model, export `model.onnx` + `manifest.json` via `konfai.export`. |
-| `derive_requirements(py_files)` | Best-effort AST import scan → PyPI names (a draft to review, not authoritative). |
-
-There is no `konfai` subcommand for ONNX export, but there **is** a
-`konfai-apps` one: `konfai-apps bundle <name> --onnx …` exports `model.onnx` plus a
-manifest into a bundle (and `--patch-size`, `--in-channels`, `--output-module` size
-it).
-It exports a **single, static-shape** head of a feed-forward model; custom-`forward`
-models (diffusion/StyleGAN/…) do not round-trip. See `konfai/export.py`.
-
-The manifest tiles with the `Patch.overlap` the inference config declares. A config that
-declares none exports an overlap of 0: the exported app tiles without overlap, where KonfAI
-spreads the remainder of the last patch between the tiles of each axis, so values near tile
-borders can differ from KonfAI's. Declare `overlap` to export the overlap KonfAI tiles with.
-
-A `Resample` or `Canonical` whose `fill` is not 0 carries it in its op (`"fill": -1024.0`): the
-value written where the stage reads outside the source. A stage left at 0 carries none, so its
-op is unchanged.
-
-### Trust model
-
-```{danger}
-Resolving an app **copies its `.py` files into the run workspace and imports
-them** unconditionally: running a model by classpath (`Model:MyNet`) executes
-the app's own Python, i.e. arbitrary code. Resolving also **pip-installs the
-app's `requirements.txt` by default**: only missing or version-mismatched
-packages are installed, core packages (`torch`, `konfai`, …) are never touched,
-and non-PEP 508 lines (`-r`, `--extra-index-url`, `git+…`) are skipped. Set
-`KONFAI_APPS_INSTALL_REQUIREMENTS=0` to opt out (offline / CI / reproducible
-environments). **Only resolve apps from sources you trust.** On the server
-side, the `--apps` allowlist is the trust boundary; keep it tightly scoped.
-```
+`konfai-apps bundle <name> --onnx` does the same from the command line. The export takes one output of fixed
+shape from a feed-forward model; models with a custom `forward` (diffusion, StyleGAN) do not export. It uses
+the `Patch.overlap` of the inference config: declare it, or the exported model tiles without overlap.
 
 ### App signatures
 
@@ -289,7 +201,5 @@ side, the `--apps` allowlist is the trust boundary; keep it tightly scoped.
 
 ## Next steps
 
-- {doc}`making-data`: the TRANSFORM workflow as a guide, with its Python spelling.
+- {doc}`making-data`: preparing a dataset, in YAML and in Python.
 - {doc}`adopting-konfai`: `train_model` and `predict_model` on a model you already have.
-- {doc}`../reference/cli`: the same workflows from the command line.
-- {doc}`../reference/app-server-api`: the HTTP endpoints `KonfAIAppClient` calls.

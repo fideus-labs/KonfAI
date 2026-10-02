@@ -6,9 +6,8 @@ One command runs a published medical model on your data:
 konfai-apps infer VBoussot/ImpactSynth:CBCT -i input.mha -o ./Output --gpu 0
 ```
 
-No YAML, no training, no download step. The app carries its weights, its
-preprocessing, its reconstruction and its evaluation, so the result comes back on
-your input's geometry, ready to open.
+The app brings its weights, preprocessing and evaluation, and the result comes back on your input's
+geometry.
 
 ```{warning}
 Resolving an app **copies and imports its `.py` files**, so it runs arbitrary
@@ -19,10 +18,8 @@ trust.
 
 ## What ships today
 
-These are full medical models, not demonstrations. Every figure is the medium case
-(249 × 246 × 246) of the bundle's own README table, measured with
-`benchmarks/perf/bench_apps.py` on an NVIDIA RTX PRO 5000 24 GB on 2026-09-09; the
-rows are not comparable to each other, since the tasks and ensemble sizes differ.
+Figures for the medium case (249 × 246 × 246) of each bundle's README, on an RTX PRO 5000 24 GB
+(`benchmarks/perf/bench_apps.py`, 2026-09-09). The rows measure different tasks and are not comparable.
 
 | App | Workload | Measured |
 | --- | --- | --- |
@@ -32,11 +29,7 @@ rows are not comparable to each other, since the tasks and ensemble sizes differ
 | `ImpactSynth` | three MR/CBCT→sCT variants, five models each | `MR`: 24.6 s, 2.7 GB RAM, 12.8 GB VRAM |
 | `ImpactReg:FireANTs_SyN` | fixed + moving → moved image and displacement field on the fixed grid | 108 s, 6.3 GB RAM, 16.0 GB VRAM |
 
-Between them: four TotalSegmentator tasks, a five-fold MRSegmentator, one
-modality-agnostic ImpactSeg model, three ImpactSynth variants and thirteen
-IMPACT-Reg presets. Each ships as a runnable notebook that fetches a demo case
-and plots the result, which is the fastest way to see what one produces: see
-{doc}`../examples/index`.
+Each app has a notebook that downloads a demo case and shows the result ({doc}`../examples/index`).
 
 ### The command each ships
 
@@ -48,19 +41,13 @@ and plots the result, which is the fastest way to see what one produces: see
 | `totalsegmentator-konfai segment` | Whole-body CT/MRI segmentation | CT / MRI | `total`, `total_mr`, 3 mm variants |
 | `impact-reg-konfai register` | Multimodal deformable registration | MR/CT, CBCT/CT | presets |
 
-Each also exposes `eval` and (except TotalSegmentator) `uncertainty`; the thin
-wrappers add `pipeline`. See {doc}`../usage/apps` for how to run them and
-{doc}`../reference/cli` for the full flag reference.
+Each also has `eval`, `uncertainty` (except TotalSegmentator) and `pipeline` ({doc}`../reference/cli`).
 
 ### One real case, end to end
 
-SynthRAD 2025 Task 1 abdomen case `1ABB124`, de-identified, CC BY-NC 4.0, with
-hashes in the <a href="../_static/apps/ASSET_PROVENANCE.md">asset provenance
-manifest</a>. ImpactSynth ran five checkpoints and two test-time augmentations
-over the MR; the full TotalSegmentator app then ran its five checkpoints on the
-resulting synthetic CT; KonfAI ran the evaluation and uncertainty workflows on
-top. Every panel is a real output on the same physical plane, and the headline
-values come from the per-case metric JSON.
+SynthRAD 2025 case `1ABB124` (CC BY-NC 4.0, <a href="../_static/apps/ASSET_PROVENANCE.md">provenance</a>):
+ImpactSynth turns the MR into a synthetic CT, TotalSegmentator segments that CT, and KonfAI evaluates and
+estimates uncertainty. Every panel is a real output on the same plane.
 
 <ul class="kf-example-grid kf-example-grid--compact" aria-label="Completed real-data KonfAI App workflow stages">
   <li><figure class="kf-example-card"><a class="kf-example-media" href="../_static/apps/impact-synth/mr-input.png" aria-label="Open the real abdominal MR input"><img src="../_static/apps/impact-synth/mr-input.png" alt="Real abdominal MR plane used as input to the completed ImpactSynth App execution." width="422" height="350" loading="lazy" decoding="async"></a><figcaption><span class="kf-example-step">01 · INPUT</span><strong>MR input</strong><span>One extracted plane from the paired abdominal case.</span><span class="kf-example-stats">Z +18 MM · 2 MM GRID</span></figcaption></figure></li>
@@ -82,8 +69,7 @@ konfai-apps uncertainty APP -i input.mha -o ./Output
 konfai-apps pipeline    APP -i input.mha --gt ct.mha -o ./Output -uncertainty
 ```
 
-`pipeline` chains inference, evaluation and uncertainty in one call. What each
-family returns:
+`pipeline` runs inference, evaluation and uncertainty in one call.
 
 | Family | Input | Result | Also available |
 | --- | --- | --- | --- |
@@ -91,67 +77,25 @@ family returns:
 | Synthesis | MR or CBCT | synthetic CT with the reference geometry | masked MAE/SSIM evaluation, uncertainty |
 | Registration | fixed + moving | moved image, displacement field, transform | image, label and landmark evaluation, field spread |
 
-An app identifier is a local directory or a Hugging Face reference,
-`owner/repository:variant`, optionally pinned to a revision with
-`owner/repository@rev:variant`. For example `VBoussot/ImpactSynth:MR`,
-`VBoussot/TotalSegmentator-KonfAI:total`. Without `@rev`, a konfai-apps release
-takes the revision tagged with its own version (`v1.9.0`) when the repository has
-it, and `main` otherwise, so each release runs the configs made for it. Whether a
-repository has that tag is asked once and kept until a refresh (a tag already
-downloaded counts too). A run waits at most 3 seconds for the answer and keeps
-`main` for the rest of the process if none came. A run asks again for a tag not
-downloaded yet, unless a listing of the process has just read it, and takes `main`
-when the Hub does not answer and `main` is here. A listing never waits for it: it
-lists `main` until the answer is known, and the next listing reads the tagged
-revision. Offline, only a tag already downloaded counts.
+An app is a local folder or a Hugging Face reference `owner/repository:app`, such as
+`VBoussot/ImpactSynth:MR`. `owner/repository@rev:app` pins a revision. Without one, a release of
+konfai-apps uses the repository's tag for its own version (`v1.9.0`) when it exists, and `main`
+otherwise, so each release runs the configs made for it.
 
-The apps of a repository, as the Studio catalogue, `list_apps` in the MCP server
-and the Slicer app list show them, are read from the Hub once per machine:
+The first listing of a repository (in Studio, the MCP server, Slicer or `konfai-apps`) downloads every
+app's files except the checkpoints; later ones only ask the Hub for the file list. Offline
+(`HF_HUB_OFFLINE=1`), or when the Hub does not answer, the apps already downloaded are listed.
+`--force_update` downloads again. Checkpoints are downloaded when an app first runs; `konfai-apps download`
+fetches everything ahead of time.
 
-- The first time a machine lists a repository, its file list is read in one
-  call and waited for at most 3 seconds, and the files of every app except the
-  checkpoints (manifest, icon, configs) are then downloaded together in the
-  background; the summaries wait for them until the same 3 seconds are up, and
-  an app whose files are not there yet is listed without its summary. The
-  repositories of one listing are read together, so they share that wait, and
-  once a Hub call of the process has gone 3 seconds without an answer, the next
-  ones are not waited for: a Hub that does not answer holds a process once. A
-  repository not read in time is listed from the local Hugging Face cache; with
-  nothing there, the Slicer app list and the `konfai-apps` commands wait for the
-  Hub, and `list_apps` reports the repository as not listed yet. A process that
-  ends first (Studio starts the MCP server for each call) leaves the rest to the
-  next listing, which keeps the files already downloaded.
-- Afterwards the listing and each app's summary (name, description, inputs and
-  outputs, task, fine-tuning, patch size, icon) come from what was kept under
-  `~/.cache/huggingface/assets/konfai-apps` and from the Hugging Face cache,
-  with no network call. A download that brings a newer commit of the
-  repository makes the next listing read it again. A release tag whose files
-  are not here yet is read the same way as a repository never listed; when it
-  cannot be read (`list_apps` waits 3 seconds for it), `main` is listed if `main`
-  is here. Studio shows an app's icon once the catalogue has downloaded it, and
-  never waits for the Hub for it.
-- A refresh reads the Hub again, release tag included, and waits for it:
-  `list_apps` or `describe_app` with `force_update`, the refresh of the Slicer
-  app list, `--force_update` on the `konfai-apps` commands.
-- Offline (`HF_HUB_OFFLINE=1`) nothing goes to the network: the listing uses
-  what was kept, or else the apps the local Hugging Face cache holds.
-
-`konfai-apps download` and an app export take every file of the app,
-checkpoints included, even the ones not downloaded yet.
-
-Repeat `-i` / `--inputs` to pass several input groups, which is how an app that
-expects an image plus a mask, or several files per group, receives them. The same
-operations are available from Python through `konfai_apps.KonfAIApp`.
+Repeat `-i` for each input group (an image and a mask, for example). The same operations are available
+from Python through `konfai_apps.KonfAIApp`.
 
 ### Registration
 
-IMPACT-Reg packages thirteen presets: rigid, rigid plus B-spline,
-modality-specific MR/CT and CBCT/CT semantic presets, native ConvexAdam stages
-and FireANTs presets. A preset writes `Moved.mha` and `DVF.mha`, the moved image and
-the displacement field, on the fixed grid (the groups are named `MovedImage` and
-`DisplacementField`). The orchestrator can ensemble several presets, write a
-reusable transform, evaluate against images, labels or landmarks, and derive a
-voxel-wise spread map from the ensemble.
+IMPACT-Reg has thirteen presets (rigid, B-spline, MR/CT and CBCT/CT, ConvexAdam, FireANTs). A preset
+writes the moved image and the displacement field on the fixed image's grid. Several presets can be
+combined, and the spread between them gives an uncertainty map.
 
 ```bash
 impact-reg-konfai register MR_CT_MRSeg MR_CT_TS \
@@ -173,22 +117,14 @@ konfai-apps fine-tune APP NAME -d ./Dataset --epochs 10 --gpu 0
 konfai-apps fine-tune APP NAME -d ./Dataset --models CV_0 CV_1 --epochs 10 --gpu 0
 ```
 
-The app installs its training assets, links your dataset, then restarts training
-from each selected checkpoint's pretrained weights with a fresh optimizer,
-schedule and epoch counter, so `--epochs` epochs really run. `--models` picks
-which checkpoints, defaulting to the first; each is fine-tuned independently. The
-output is another app bundle, ready to run. The run works in its output directory
-(`./Output` by default) and links your dataset there as `Dataset`, so an output
-directory that already holds a `Dataset` of its own, such as a project root, is
-refused and nothing is deleted.
+Training restarts from each selected checkpoint (`--models`, the first by default) with a fresh optimizer
+and schedule, for `--epochs` epochs. The result is a new app. The run works in `./Output` and links your
+dataset there, so it refuses a folder that already has a `Dataset` of its own.
 
 ## Running on another machine
 
-Any command becomes remote when you pass `--host`. The CLI is unchanged; the
-client uploads the inputs, schedules the job, streams the logs over SSE and
-downloads the result. Server side, jobs queue, get a GPU, run in an isolated
-workspace and are cleaned up after a grace period. The server comes with the
-`server` extra (`pip install "konfai-apps[server]"`); the client needs nothing more.
+Add `--host` to any command to run it on a server: the inputs are uploaded, the logs streamed, and the
+result downloaded. The server needs `pip install "konfai-apps[server]"`.
 
 ```bash
 echo '{"apps": ["VBoussot/ImpactSynth:CBCT"]}' > apps.json   # the apps the server exposes
@@ -199,23 +135,14 @@ konfai-apps infer VBoussot/ImpactSynth:CBCT -i input.mha -o ./Output \
   --host my.server.org --port 8000 --token "$KONFAI_API_TOKEN"
 ```
 
-Bearer authentication is on by default: without a token the server exits before
-binding rather than serving unauthenticated. `--auth off` drops it deliberately,
-`--token` supplies one inline for development. The HTTP contract behind all this,
-health, device and app metadata, job status, log, result and kill, is in
+The server requires a token unless started with `--auth off`. The HTTP API is in
 {doc}`../reference/app-server-api`.
 
 ## From 3D Slicer
 
-[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) is the external Slicer
-client. It lists apps, maps Slicer volumes onto their declared inputs, launches
-locally or remotely, and loads the returned volumes and segmentations back into
-the scene.
-
-Slicer is another client of a validated app, not a separate package: test the
-bundle with `konfai-apps infer` first, then use the same identifier there. The
-integration is external and its progress contract is less stable than the Python
-API, so pin compatible versions for clinical-facing installs.
+[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI) runs apps from 3D Slicer, locally or on a server,
+and loads the results into the scene. Test an app with `konfai-apps infer` first, then use the same name in
+Slicer.
 
 <figure class="kf-visual kf-visual--app">
   <a class="kf-visual-frame" href="../_static/slicer/inference.webp" aria-label="Open the SlicerKonfAI inference screenshot at full resolution">
@@ -262,11 +189,7 @@ Screenshots vendored from
 
 ## Packaging your own workflow
 
-Once a workflow is stable, `bundle` is the handoff. It validates the metadata,
-copies the prediction and evaluation configs and the checkpoints, includes custom
-Python when needed, and writes the layout every resolver understands.
-
-An app is recognized by its `app.json`:
+When a workflow is ready, `bundle` packages it as an app. An app is a folder with an `app.json`:
 
 ```json
 {
@@ -287,34 +210,23 @@ konfai-apps bundle CT_SEG \
   --model-py Model.py
 ```
 
-That writes `dist/CT_SEG/`, containing `app.json`, the configs, the checkpoints
-and any custom Python. `app.json.models` is filled from the checkpoint filenames
-when you omit it, and a missing `requirements.txt` is drafted from `Model.py`'s
-imports: review that draft, it is a convenience rather than an environment lock.
-Omit `--model-py` when the workflow uses no custom Python, and add `Uncertainty.yml`
-to `--config` when the app should expose an uncertainty workflow. `--onnx` exports
-an ONNX graph beside the checkpoints, which is experimental and not needed for
-normal execution.
+This writes `dist/CT_SEG/` with `app.json`, the configs, the checkpoints and your Python code. The model
+list comes from the checkpoint names, and a `requirements.txt` is drafted from `Model.py`'s imports: check
+it. Leave out `--model-py` if there is no custom code; add `Uncertainty.yml` to offer uncertainty.
 
-Validate before publishing, and look at the images rather than the exit code:
+Check the images the app produces, not only the exit code:
 
 ```bash
 konfai-apps infer ./dist/CT_SEG -i input.mha -o ./Output --gpu 0
 konfai-apps eval ./dist/CT_SEG -i ./Output/<prediction>.mha --gt reference.mha
 ```
 
-Once local inference matches the research workflow, upload `CT_SEG/` as a variant
-in a Hugging Face model repository and address it as `owner/repository:CT_SEG`.
-
-The YAML stays inside the bundle as the inspectable record, which is what lets
-the same app be evaluated, fine-tuned, served or automated later instead of being
-replaced by a deployment script.
+Then upload `CT_SEG/` to a Hugging Face model repository and use it as `owner/repository:CT_SEG`.
 
 ## The ecosystem around an app
 
-KonfAI is the core, but several packages and tools sit around it. This map
-shows how they relate and, more importantly, **what is shipped versus what is
-external or experimental**, so you know what you can rely on today.
+KonfAI is the core; the other packages and tools build on it. The map shows what is released and what is
+external or experimental.
 
 ```{raw} html
 <figure class="kf-ecosystem-map" aria-labelledby="kf-ecosystem-map-caption">
@@ -428,21 +340,21 @@ external or experimental**, so you know what you can rely on today.
 
 | Piece | Status | What it is |
 | --- | --- | --- |
-| **`konfai`** | ✅ Shipped (PyPI) | The core framework: config-by-reflection, lazy patch-based data, model graphs, and the three YAML workflows. This is what the rest of this documentation is about. |
-| **`konfai-apps`** | ✅ Shipped (PyPI, own CI) | Packages a mature workflow as a reusable **app**: see {doc}`../usage/apps`. |
-| **`konfai-mcp`** | ✅ Shipped (PyPI, own CI) | Operates KonfAI workflows and Apps through structured tools for dataset inspection, config authoring and validation, job execution, monitoring, metrics, and comparison: see {doc}`../usage/mcp`. |
-| **App bundles** (`apps/`) | ✅ Shipped (thin wrappers) | Ready-to-use CLI shims: `impact-synth-konfai`, `impact-seg-konfai`, `mrsegmentator-konfai`, `totalsegmentator-konfai`. Config + weights live on Hugging Face and download on first run. |
-| **`impact-reg-konfai`** | 🟡 Shipped, heaviest | A full multi-preset registration orchestrator with Elastix, ConvexAdam, and FireANTs engines behind the IMPACT semantic metric, **not** a thin wrapper. The most moving parts of the five. |
-| **Demo data & models (HF)** | ✅ Published | `VBoussot/konfai-demo` (demo dataset), plus per-app model repos (`ImpactSynth`, `ImpactSeg`, `TotalSegmentator-KonfAI`, `MRSegmentator-KonfAI`, `ImpactReg`) and `impact-torchscript-models` (the SAM2.1 backbone behind `IMPACTSynth`). |
-| **Challenge repos** | ✅ External | Top-ranking MICCAI-challenge projects built on KonfAI (SynthRAD 2025 T1/T2, TrackRAD 2025, Panther, CURVAS, CURVAS-PDACVI). Referenced from the README; not in this tree. |
+| **`konfai`** | ✅ Shipped (PyPI) | The core: YAML workflows, streamed data, model graphs. |
+| **`konfai-apps`** | ✅ Shipped (PyPI) | Runs and packages apps (this page). |
+| **`konfai-mcp`** | ✅ Shipped (PyPI) | Lets an LLM agent run KonfAI ({doc}`mcp`). |
+| **App CLIs** (`apps/`) | ✅ Shipped | `impact-synth-konfai`, `impact-seg-konfai`, `mrsegmentator-konfai`, `totalsegmentator-konfai`; the models download on first run. |
+| **`impact-reg-konfai`** | 🟡 Shipped | The registration orchestrator (Elastix, ConvexAdam, FireANTs, with the IMPACT metric). |
+| **Models and demo data** | ✅ Published | On Hugging Face: `VBoussot/konfai-demo`, one repository per app, and `impact-torchscript-models`. |
+| **Challenge repositories** | ✅ External | MICCAI challenge entries built on KonfAI (SynthRAD 2025, TrackRAD 2025, PANTHER, CURVAS), listed in the README. |
 
 ### External clients and experimental edge
 
 | Piece | Status | Notes |
 | --- | --- | --- |
-| **SlicerKonfAI** | ✅ External GUI | A [3D Slicer](https://github.com/vboussot/SlicerKonfAI) client of the `konfai-apps` CLI/server, covered by API, CLI, and JSON contract tests in the Apps package. |
-| **SlicerImpactReg** | ✅ External GUI | A dedicated 3D Slicer client for the complete `impact-reg-konfai` registration orchestrator. |
-| **ONNX export → `konfai-rs`** | 🧪 Experimental | `konfai/export.py` produces ONNX + a manifest for the portable (native/WASM) inference engine; KonfAI Studio ships a build of that engine in its deployment pane (`konfai-studio/frontend/src/konfai-rs/`, provenance in the README beside it). Python-API-only, single static-shape head, feed-forward models only. See {doc}`python-api`. |
+| **SlicerKonfAI** | ✅ External | The [3D Slicer](https://github.com/vboussot/SlicerKonfAI) client of `konfai-apps`. |
+| **SlicerImpactReg** | ✅ External | The 3D Slicer client of `impact-reg-konfai`. |
+| **ONNX export → `konfai-rs`** | 🧪 Experimental | ONNX export from Python ({doc}`python-api`) for a portable inference engine, which Studio's deployment pane runs in the browser. |
 
 ## Next steps
 
