@@ -598,6 +598,7 @@ class DiffusionGan(network.Network):
             in_branch=[1],
             out_branch=[-1],
             requires_grad=True,
+            training=True,  # the real B is a training input
         )
         self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
         self.add_module(
@@ -605,6 +606,7 @@ class DiffusionGan(network.Network):
             discriminator,
             in_branch=["pB_detach"],
             out_branch=[-1],
+            training=True,
         )
         self.add_module(
             "Discriminator_pB",
@@ -612,6 +614,7 @@ class DiffusionGan(network.Network):
             in_branch=["pB"],
             out_branch=[-1],
             requires_grad=False,
+            training=True,
         )
 
 
@@ -629,6 +632,7 @@ class DiffusionGanV2(network.Network):
             in_branch=[1],
             out_branch=[-1],
             requires_grad=True,
+            training=True,  # the real B is a training input
         )
         self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
         self.add_module(
@@ -636,6 +640,7 @@ class DiffusionGanV2(network.Network):
             discriminator,
             in_branch=["pB_detach"],
             out_branch=[-1],
+            training=True,
         )
         self.add_module(
             "Discriminator_pB",
@@ -643,6 +648,7 @@ class DiffusionGanV2(network.Network):
             in_branch=["pB"],
             out_branch=[-1],
             requires_grad=False,
+            training=True,
         )
 
 
@@ -711,6 +717,7 @@ class CycleGanGeneratorV1(network.Network):
             GeneratorV1.GeneratorBlock(32, dim),
             in_branch=[1],
             out_branch=["pA"],
+            training=True,  # B to A closes the cycle in training; a prediction translates A to B
         )
 
 
@@ -769,6 +776,7 @@ class CycleGanGeneratorV2(network.Network):
             ),
             in_branch=[1],
             out_branch=["pA"],
+            training=True,  # B to A closes the cycle in training; a prediction translates A to B
         )
 
 
@@ -827,6 +835,7 @@ class CycleGanGeneratorV3(network.Network):
             ),
             in_branch=[1],
             out_branch=["pA"],
+            training=True,  # B to A closes the cycle in training; a prediction translates A to B
         )
 
 
@@ -844,20 +853,22 @@ class DiffusionCycleGan(network.Network):
             in_branch=[0, 1],
             out_branch=[-1],
             requires_grad=True,
+            training=True,  # the discriminators, the identity and the cycle terms serve training only
         )
 
-        self.add_module("Generator_identity", generators, in_branch=[1, 0], out_branch=[-1])
+        self.add_module("Generator_identity", generators, in_branch=[1, 0], out_branch=[-1], training=True)
 
-        self.add_module("Generator_p", generators, in_branch=["pA", "pB"], out_branch=[-1])
+        self.add_module("Generator_p", generators, in_branch=["pA", "pB"], out_branch=[-1], training=True)
 
-        self.add_module("detach_pA", blocks.Detach(), in_branch=["pA"], out_branch=["pA_detach"])
-        self.add_module("detach_pB", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
+        self.add_module("detach_pA", blocks.Detach(), in_branch=["pA"], out_branch=["pA_detach"], training=True)
+        self.add_module("detach_pB", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"], training=True)
 
         self.add_module(
             "Discriminator_p_detach",
             discriminators,
             in_branch=["pA_detach", "pB_detach"],
             out_branch=[-1],
+            training=True,
         )
         self.add_module(
             "Discriminator_p",
@@ -865,4 +876,5 @@ class DiffusionCycleGan(network.Network):
             in_branch=["pA", "pB"],
             out_branch=[-1],
             requires_grad=False,
+            training=True,
         )

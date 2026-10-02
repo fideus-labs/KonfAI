@@ -22,9 +22,12 @@ from __future__ import annotations
 import contextlib
 import functools
 import glob
+import gzip
 import os
 import re
+import secrets
 import shutil
+import struct
 import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
 from collections.abc import Sequence
@@ -49,6 +52,7 @@ from konfai.utils.dataset.attribute import (
 )
 from konfai.utils.dataset.landmarks import read_landmarks, write_landmarks
 from konfai.utils.dataset.raw_block import (
+    _mha_header,
     _nifti_extract_aborts,
     _pixel_block,
     _pixel_block_attributes,
@@ -99,6 +103,18 @@ _UNWRITABLE_VOLUME = (
 )
 
 
+def _mhd_pixels(header: str) -> str | None:
+    """The pixel file a detached MetaImage header names, when it is the entry's own: a file beside it, named
+    after it, as KonfAI writes it. A pixel file shared with other headers or kept elsewhere is not the
+    entry's to remove."""
+    fields = _mha_header(header) if os.path.exists(header) else None
+    pixels = fields[0].get("ElementDataFile") if fields else None
+    stem = os.path.basename(header)[: -len(".mhd")]
+    if pixels is None or os.path.basename(pixels) != pixels or not pixels.startswith(f"{stem}."):
+        return None
+    return pixels
+
+
 def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> None:
     """``sitk.WriteImage`` of the entry published as ``final``: a format with no writer for this
     volume is refused by name, not by ITK's trace naming the staging file. Any other failure (a
@@ -118,6 +134,43 @@ def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> 
         ) from error
 
 
+def _nifti_declared_bytes(path: str) -> int | None:
+    """The uncompressed size a single-file NIfTI-1 header declares (ITK writes no NIfTI-2): where its
+    pixels start plus the pixels. ``None`` when the head is short or not such a header."""
+    try:
+        with (gzip.open if path.endswith(".gz") else open)(path, "rb") as file:
+            head = file.read(348)
+    except (OSError, EOFError):
+        return None
+    order = next((order for order in "<>" if len(head) == 348 and struct.unpack(f"{order}i", head[:4])[0] == 348), None)
+    if order is None:
+        return None
+    dims = struct.unpack(f"{order}8h", head[40:56])
+    bitpix = struct.unpack(f"{order}h", head[72:74])[0]
+    offset = int(struct.unpack(f"{order}f", head[108:112])[0])
+    return offset + int(np.prod(dims[1 : dims[0] + 1], dtype=np.int64)) * bitpix // 8
+
+
+def _check_nifti_written(path: str, final: str) -> None:
+    """Refuse a NIfTI that holds fewer bytes than its header declares. ITK's NIfTI writer does not
+    check its writes, so a full disk leaves a short file and no error. A gzip file ends on the size of
+    what it compressed, modulo 2**32: the check reads its header and its last four bytes."""
+    declared = _nifti_declared_bytes(path)
+    if path.endswith(".gz"):
+        with open(path, "rb") as file:
+            file.seek(-4, os.SEEK_END)
+            written = struct.unpack("<I", file.read(4))[0]
+        complete = declared is not None and written == declared % 2**32
+    else:
+        complete = declared is not None and os.path.getsize(path) == declared
+    if not complete:
+        free = shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free
+        raise DatasetManagerError(
+            f"The write of '{final}' stopped short: the file holds less than its header declares.",
+            f"The disk may be full ({free / 2**30:.1f} GiB free there). Free space and run again.",
+        )
+
+
 def _warn_unstreamed_region_read(path: str) -> None:
     """Warn that `path`'s format decodes the whole volume for every patch region read from it.
 
@@ -129,8 +182,8 @@ def _warn_unstreamed_region_read(path: str) -> None:
         return
     _unstreamed_formats_warned.add(suffix)
     warnings.warn(
-        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
-        "(NRRD, or a compressed file that has no uncompressed twin), so every patch decodes the whole "
+        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region, "
+        "so every patch decodes the whole "
         "volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr "
         "or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
         KonfAIWarning,
@@ -335,7 +388,9 @@ class SitkFile(AbstractFile):
                 attributes["Spacing"] = spacing
             return data[normalized], attributes
 
-        if not self._supports_region_read(path) and not self._spans(normalized, data_shape):
+        # A compressed file that got no twin was reported with the reason (decompressed._warn_untwinned).
+        unstreamed = not self._supports_region_read(path) and decompressed.layout(path) is None
+        if unstreamed and not self._spans(normalized, data_shape):
             _warn_unstreamed_region_read(path)
 
         extract_index_xyz = [item.start for item in reversed(normalized[1:])]
@@ -457,21 +512,47 @@ class SitkFile(AbstractFile):
             final = f"{self.filename}{name}.{self.file_format}"
             staging = DataStream.staging_path(final)
             if self.file_format in ("mhd", "hdr", "img"):
-                # Header and pixels are two files, the header naming the pixels: both are written under
-                # their final names in a staging directory, then moved in, the entry's own file last.
+                # Header and pixels are two files, written in a staging directory and moved in, the header
+                # last. A MetaImage header names its pixels, so they land under a name of their own and the
+                # header swaps to them in one replace: interrupted, the entry is the old pair or the new one.
+                # Analyze names its pixels after its header, so its pair has no such swap.
                 while True:  # a writer killed under a reused pid may have left this very name
                     with contextlib.suppress(FileExistsError):
                         os.mkdir(staging)
                         break
                     staging = DataStream.staging_path(final)
+                header = os.path.basename(final)
+                written = (
+                    f"{header[: -len('.mhd')]}.{secrets.token_hex(4)}.mhd" if self.file_format == "mhd" else header
+                )
+                old_pixels = _mhd_pixels(final) if self.file_format == "mhd" else None
+                moved: list[str] = []
                 try:
-                    _write_image(data, os.path.join(staging, os.path.basename(final)), final, self.file_format)
-                    for part in sorted(os.listdir(staging), key=lambda part: part == os.path.basename(final)):
-                        os.replace(os.path.join(staging, part), os.path.join(os.path.dirname(final), part))
+                    _write_image(data, os.path.join(staging, written), final, self.file_format)
+                    for part in sorted(os.listdir(staging), key=lambda part: part == written):
+                        target = os.path.join(os.path.dirname(final), header if part == written else part)
+                        os.replace(os.path.join(staging, part), target)
+                        moved.append(target)
+                except BaseException:
+                    if self.file_format == "mhd":  # the header never swapped: the new pixels belong to no entry
+                        for target in moved:
+                            with contextlib.suppress(OSError):
+                                os.remove(target)
+                    raise
                 finally:
                     shutil.rmtree(staging, ignore_errors=True)
+                if old_pixels is not None:
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(os.path.dirname(final), old_pixels))
             else:
-                _write_image(data, staging, final, self.file_format)
+                try:
+                    _write_image(data, staging, final, self.file_format)
+                    if self.file_format in ("nii", "nii.gz"):
+                        _check_nifti_written(staging, final)
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.remove(staging)
+                    raise
                 os.replace(staging, final)
             with contextlib.suppress(Exception):
                 _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write

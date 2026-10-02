@@ -412,8 +412,9 @@ class TestDiceConfusionMatrix:
                 counts[name] = len(caught)
         finally:
             torch.cuda.set_sync_debug_mode("default")
-        # forward + partial_metric: bincount (one sync each) and one .tolist() each, never one per label.
-        assert counts["soft"] <= 8 and counts["hard"] <= 12, counts
+        # forward + partial_metric: bincount (one sync each) and one .tolist() each, never one per label;
+        # the soft route adds its first call's range check, one sync per criterion.
+        assert counts["soft"] <= 10 and counts["hard"] <= 12, counts
 
 
 class TestSaveMaps:
@@ -1636,3 +1637,58 @@ def test_impact_synth_given_one_target_is_a_designed_refusal() -> None:
         IMPACTSynth.forward(
             IMPACTSynth.__new__(IMPACTSynth), torch.rand(1, 1, 4, 4), torch.rand(1, 1, 4, 4), attributes=[[]]
         )
+
+
+def test_dice_refuses_logits_on_its_first_call_and_scores_probabilities() -> None:
+    """A multi-channel output is read as probabilities: logits (no Softmax) are refused by their
+    range on the first call, a softmax passes and is scored."""
+    logits = torch.tensor([[[3.0, -2.0], [-1.0, 4.0]]]).permute(0, 2, 1)  # [1, 2 channels, 2 voxels]
+    target = torch.tensor([[[0, 1]]])
+    with pytest.raises(MeasureError, match="probabilities"):
+        Dice()(logits, target)
+    loss, _ = Dice()(torch.softmax(logits, dim=1), target)
+    assert 0.0 <= float(loss) <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("version", "tagged", "revisions", "said"),
+    [
+        ("1.9.0", True, ["v1.9.0"], "at v1.9.0, commit abc123"),
+        ("1.9.0", False, ["v1.9.0", None], "at main, commit abc123"),
+        ("1.9.1.dev3", True, [None], "at main, commit abc123"),
+    ],
+    ids=["tagged-release", "untagged-release", "development"],
+)
+def test_an_impact_model_is_downloaded_at_the_release_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    version: str,
+    tagged: bool,
+    revisions: list[object],
+    said: str,
+) -> None:
+    """A released konfai scores with the weights published under its own tag when the repository
+    carries it, else with main, and says which commit it took; no network, no Hugging Face cache."""
+    import importlib.metadata
+
+    errors = pytest.importorskip("huggingface_hub.errors")
+    from konfai.metric.measure import impact
+
+    asked: list[object] = []
+
+    class NoSuchRevision(errors.RevisionNotFoundError):
+        def __init__(self) -> None:  # the Hub's error wants a response; the class is what is caught
+            Exception.__init__(self, "no such revision")
+
+    def download(repo_id: str, filename: str, repo_type: str, revision: object) -> str:
+        asked.append(revision)
+        if revision is not None and not tagged:
+            raise NoSuchRevision()
+        return f"/cache/models--x/snapshots/abc123/{filename}"
+
+    monkeypatch.setattr(impact, "_hf_hub_download", lambda criterion: download)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: version)
+
+    assert impact._download_model("IMPACT", "VBoussot/x", "M.pt") == "/cache/models--x/snapshots/abc123/M.pt"
+    assert asked == revisions
+    assert said in capsys.readouterr().out

@@ -47,6 +47,8 @@ def _attribute_text(value: Any) -> str:
     """
     if type(value) is str:
         return value.replace("\n", "")
+    if type(value) in (int, float, bool):
+        return str(value)  # a Python scalar prints its shortest exact form, as the path below would
     if isinstance(value, torch.Tensor):
         # A tensor from any device: attributes are host-side strings.
         value = value.detach().cpu().numpy()
@@ -304,6 +306,18 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
     return image_to_data(transform.GetDisplacementField())
 
 
+def push_geometry(attributes: Attribute, key: str, value: Any) -> None:
+    """Record ``value`` as the latest ``key`` of the geometry stack unless it already is.
+
+    A header KonfAI wrote carries the stack it was written with, ending on the geometry the header
+    holds: read back, the stack is the one written, where pushing the header's geometry again would
+    grow it by one entry each write and read. A header another tool changed pushes its geometry."""
+    array = Attribute._parse_array(value) if isinstance(value, str) else np.asarray(value, dtype=np.float64)
+    if key in attributes and _same_values(attributes.get_np_array(key), array):
+        return
+    attributes[key] = value
+
+
 def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     """Convert a SimpleITK image into a channel-first NumPy array and attributes."""
     attributes = Attribute()
@@ -311,11 +325,10 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
         # ``ITK_*`` keys are the reader's own bookkeeping, not the volume's metadata.
         if not k.startswith("ITK_"):
             attributes[k] = image.GetMetaData(k)
-    # After the metadata import: the metadata may carry a stale geometry stack, and the header must
-    # land as its latest version.
-    attributes["Origin"] = np.asarray(image.GetOrigin())
-    attributes["Spacing"] = np.asarray(image.GetSpacing())
-    attributes["Direction"] = np.asarray(image.GetDirection())
+    # After the metadata import: the header's geometry lands as the stack's latest version.
+    push_geometry(attributes, "Origin", np.asarray(image.GetOrigin()))
+    push_geometry(attributes, "Spacing", np.asarray(image.GetSpacing()))
+    push_geometry(attributes, "Direction", np.asarray(image.GetDirection()))
     if image.GetNumberOfComponentsPerPixel() == 1:
         return np.expand_dims(sitk.GetArrayFromImage(image), 0), attributes
     # One contiguous channel-first copy off ITK's interleaved buffer. np.array and not
@@ -324,8 +337,9 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
 
 
 def _same_values(recorded: np.ndarray, level: np.ndarray) -> bool:
-    """Whether a sidecar value is the level's own, up to the rounding of a unit conversion."""
-    return recorded.shape == level.shape and bool(np.allclose(recorded, level, rtol=1e-6, atol=0.0))
+    """Whether a sidecar value is the level's own, up to single precision: the rounding of a unit conversion
+    or of a header that stores float32, far below a voxel's move at any coordinate."""
+    return recorded.shape == level.shape and np.array_equal(recorded.astype(np.float32), level.astype(np.float32))
 
 
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
