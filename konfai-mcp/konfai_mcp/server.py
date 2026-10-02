@@ -2030,7 +2030,7 @@ def write_session_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content.rstrip() + "\n", encoding="utf-8")
     return {
-        "written": str(path.relative_to(WORKSPACE_LAYOUT.workspace_dir())),
+        "written": path.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "path": str(path),
         "bytes": path.stat().st_size,
         "next_actions": ["inspect_object_signature", "review_config_semantics", "validate_config_semantics"],
@@ -2050,7 +2050,7 @@ def read_session_file(
     payload = read_text_range(resolved, max_chars=max_chars, offset=offset)
     return {
         **payload,
-        "relative_path": str(resolved.relative_to(WORKSPACE_LAYOUT.workspace_dir())),
+        "relative_path": resolved.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "session": WORKSPACE_LAYOUT.current_session,
         "next_actions": ["write_session_file", "write_workflow_config", "review_config_semantics"],
     }
@@ -2405,7 +2405,7 @@ def delete_run(
             raise ValueError("Refused: the resolved path escapes the session workspace.")
         if target.is_dir():
             shutil.rmtree(target)
-            removed.append(str(target.relative_to(base)))
+            removed.append(target.relative_to(base).as_posix())
     return {"run_name": cleaned, "kind": kind, "deleted": removed}
 
 

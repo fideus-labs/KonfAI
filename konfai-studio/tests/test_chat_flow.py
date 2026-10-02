@@ -24,6 +24,7 @@ a turn, what is derived from what the turn actually achieved, and what comes bac
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
@@ -150,7 +151,8 @@ def test_the_next_turn_carries_what_the_last_one_achieved_not_what_it_said(
     turn(client, "what does patch size mean?")
 
     second = agent.messages[1]
-    assert second.startswith("[state] stage=configuration dataset=/data/pelvis")
+    # Rooted without a drive, the config's path names the session's drive on Windows.
+    assert second.startswith(f"[state] stage=configuration dataset={(session / '/data/pelvis').resolve()}")
     assert "groups=CT/Label" in second
     assert "[now] Validate the config" in second
     assert "set up a segmentation" not in second  # the previous turn is never replayed
@@ -163,7 +165,7 @@ def test_a_launched_job_is_reported_as_open_not_as_a_result(
     """The turn claims success in words; the job record says it is still running, and the record wins."""
     client, agent, session = studio
     agent.script = [{"type": "text", "text": "Training finished successfully!"}, {"type": "done"}]
-    agent.effect = lambda: record_job(session, status="running", pid=1)
+    agent.effect = lambda: record_job(session, status="running", pid=os.getpid())
 
     events = turn(client, "train it")
 
@@ -273,7 +275,8 @@ def test_a_silent_llm_still_leaves_a_usable_bar(studio: tuple[TestClient, _Scrip
         "Read training curves",
         "Package app from session",
     ]
-    assert all("/data/pelvis" in p["prompt"] or "run_01" in p["prompt"] for p in prompts)
+    dataset = str((session / "/data/pelvis").resolve())
+    assert all(dataset in p["prompt"] or "run_01" in p["prompt"] for p in prompts)
 
 
 def test_a_correction_typed_mid_turn_cuts_the_turn_short(studio: tuple[TestClient, _ScriptedAgent, Path]) -> None:
@@ -413,7 +416,7 @@ def test_remembered_buttons_are_dropped_once_the_experiment_moves(
     turn(client, "hello")
 
     agent.script = [{"type": "done"}]
-    agent.effect = lambda: record_job(session, status="running", pid=1)
+    agent.effect = lambda: record_job(session, status="running", pid=os.getpid())
     moved = of_type(turn(client, "and now"), "next_prompts")["prompts"]
 
     assert "Inspect The Data" not in [move["label"] for move in moved]

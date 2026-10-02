@@ -43,7 +43,7 @@ from konfai_studio.agent import with_volume_events
 def job_record(session: Path, **fields: Any) -> None:
     job_dir = session / ".konfai_mcp" / "jobs" / str(fields.get("job_id", "job-1"))
     job_dir.mkdir(parents=True, exist_ok=True)
-    payload = {"job_id": "job-1", "status": "running", "created_at": 1.0, "pid": 1}
+    payload = {"job_id": "job-1", "status": "running", "created_at": 1.0, "pid": os.getpid()}
     (job_dir / "job.json").write_text(json.dumps({**payload, **fields}), encoding="utf-8")
 
 

@@ -987,7 +987,9 @@ class AppService:
                 resolved_checkpoints,
                 model_py=str(Path(model_py).expanduser()) if model_py else None,
                 requirements=str(Path(requirements).expanduser()) if requirements else None,
-                support_files={name: str(source.relative_to(session_dir)) for name, source in planned_support.items()},
+                support_files={
+                    name: source.relative_to(session_dir).as_posix() for name, source in planned_support.items()
+                },
                 support_root=session_dir,
             )
         finally:
