@@ -39,8 +39,6 @@ class Save(Transform):
 
     working_multiple = 0.0
 
-    alters_values = False
-
     def __init__(
         self,
         dataset: str | None = None,
