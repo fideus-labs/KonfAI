@@ -30,6 +30,7 @@ The contract:
 - Every call materializes the resolved YAML in the run's workspace, the record of the experiment.
 """
 
+import hashlib
 import importlib
 import json
 import os
@@ -581,8 +582,22 @@ def live_model(token: str) -> object:
 
 @contextmanager
 def _registered_live_model(model: object) -> Iterator[str]:
-    """The token the run's config names, registered for the run only."""
-    token = f"{type(model).__name__}-{id(model):x}"
+    """The token the run's config names, registered for the run only. It names the model's recipe, less
+    its weights, which a resumed prediction compares apart: the structure torch.nn prints, when every
+    module is torch.nn's own, so an equal model built again resumes. A class of the caller's may run any
+    forward, so its instance is its only identity, and a rerun recomputes (--overwrite)."""
+    import torch
+
+    modules = list(model.modules()) if isinstance(model, torch.nn.Module) else [model]
+    name = f"{type(model).__module__}:{type(model).__qualname__}"
+    if all(type(module).__module__.startswith("torch.nn.") for module in modules):
+        base = f"{name}-{hashlib.sha256(repr(model).encode()).hexdigest()[:16]}"
+    else:
+        base = f"{name}-{id(model):x}"
+    token, occurrence = base, 1
+    while token in _LIVE_MODELS:
+        occurrence += 1
+        token = f"{base}-{occurrence}"
     _LIVE_MODELS[token] = model
     try:
         yield token
@@ -787,6 +802,7 @@ def predict_model(
     unless absolute; the prediction lands under ``group`` with the input's geometry. One rank, inline.
     """
     from konfai.predictor import build_predict
+    from konfai.predictor.workflow import checkpoint_sources
     from konfai.utils.runtime.environment import register_scratch_config
     from konfai.utils.utils import split_path_spec
 
@@ -845,12 +861,10 @@ def predict_model(
             if checkpoints is None:
                 scratch = Path(tempfile.mkdtemp(prefix="konfai_live_"))
                 register_scratch_config(scratch)
-                sources = [_live_checkpoint(model, scratch)]
+                sources: list[Path | str] = [_live_checkpoint(model, scratch)]
             else:
-                sources = (
-                    [Path(checkpoints)]
-                    if isinstance(checkpoints, (str, Path))
-                    else [Path(entry) for entry in checkpoints]
+                sources = checkpoint_sources(
+                    [checkpoints] if isinstance(checkpoints, (str, Path)) else list(checkpoints)
                 )
             return build_predict(models=sources, prediction_file=_config_copy(tree), predictions_dir=predictions_dir)
 
@@ -906,8 +920,7 @@ def predict(
     # A bare str is a Sequence[str]: "best.pt" would expand per character.
     if isinstance(models, (str, Path)):
         models = [models]
-    checkpoints = [Path(model) for model in models]  # one pass: a generator (Path.glob) is read once
-    checkpoint_sources(checkpoints)
+    checkpoints = checkpoint_sources(list(models))  # one pass: a generator (Path.glob) is read once
     return _launch(
         len(gpu or []) or cpu,
         lambda: build_predict(

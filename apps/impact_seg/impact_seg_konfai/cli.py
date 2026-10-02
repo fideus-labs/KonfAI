@@ -36,7 +36,9 @@ def _add_selection(parser: argparse.ArgumentParser) -> None:
 def _add_infer_knobs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--ensemble", type=int, default=0, help="Size of model ensemble.")
     parser.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
-    parser.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples.")
+    parser.add_argument(
+        "--mc", type=int, default=0, help="Monte Carlo dropout: not implemented, any value but 0 is refused."
+    )
 
 
 main = build_app_cli(
