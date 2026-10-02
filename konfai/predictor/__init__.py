@@ -22,6 +22,7 @@ from konfai.predictor.ensemble import ModelComposite as ModelComposite
 from konfai.predictor.output import PREDICTION_CLOCK as PREDICTION_CLOCK
 from konfai.predictor.output import OutputDataset as OutputDataset
 from konfai.predictor.output import OutputDatasetLoader as OutputDatasetLoader
+from konfai.predictor.output import OutputLayerDataset as OutputLayerDataset
 from konfai.predictor.workflow import Predictor as Predictor
 from konfai.predictor.workflow import build_predict as build_predict
 from konfai.predictor.workflow import predict as predict
@@ -31,6 +32,7 @@ __all__ = [
     "ModelComposite",
     "OutputDataset",
     "OutputDatasetLoader",
+    "OutputLayerDataset",
     "Predictor",
     "build_predict",
     "predict",
