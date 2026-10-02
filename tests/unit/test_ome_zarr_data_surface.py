@@ -166,9 +166,9 @@ def test_write_ome_zarr_builds_a_pyramid_by_position(tmp_path: Path) -> None:
 
 def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path) -> None:
     """The konfai sidecar records the geometry the writer was handed: level 0's. Read at ``@1``
-    through the Dataset, it used to win over the level's own scale and translation, and level 1
-    came back with level 0's spacing on an eighth of the voxels (half the samples along each of the
-    three axes): half the extent per axis, for every consumer that registers on the coarse level."""
+    through the Dataset, the level's own scale and translation win over it: from the sidecar, level 1
+    would come back with level 0's spacing on an eighth of the voxels (half the samples along each of
+    the three axes): half the extent per axis, for every consumer that registers on the coarse level."""
     root = tmp_path / "cases"
     store = root / "case_1" / "CT.ome.zarr"
     store.parent.mkdir(parents=True)
@@ -375,7 +375,7 @@ def test_a_reader_that_deviates_from_its_plan_loses_it_and_nothing_else() -> Non
 
 
 def test_forgetting_one_store_leaves_the_others_alone() -> None:
-    """Creating an output store used to drop every input's decoded chunks with it."""
+    """Forgetting a store (an output being created) drops its decoded chunks and keeps every other's."""
     from konfai.utils.ome_zarr import _DecodedChunkCache
 
     cache = _DecodedChunkCache(1 << 20)
@@ -728,7 +728,7 @@ def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_be
     store's footprint, the companion decodes its 61 whatever is declared and the source is what
     the ranking moves: 50 alone, 59 with the companion's future competing for the same slots,
     still under LRU's 65. (A window is served from the decoded hull before the hull is released,
-    so a sparse miss no longer decodes a chunk twice: the counts above are the misses.)"""
+    so a sparse miss decodes a chunk once: the counts above are the misses.)"""
     _two_stores(tmp_path)
 
     def sweep(declared: str) -> dict[str, int]:
@@ -741,7 +741,7 @@ def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_be
     assert both["Labels"] <= lru["Labels"], "the companion is decoded no more than under LRU"
     if both_is_best:
         assert sum(both.values()) < sum(alone.values()), f"{both} against {alone} with the source alone declared"
-        assert both["Labels"] < alone["Labels"], "the companion is no longer sacrificed to the source's future"
+        assert both["Labels"] < alone["Labels"], "the companion is not sacrificed to the source's future"
     else:
         assert sum(alone.values()) <= sum(both.values()) < sum(lru.values())
 

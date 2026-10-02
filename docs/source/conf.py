@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.abspath("../../konfai-apps"))  # standalone konfai_ap
 
 project = "KonfAI"
 author = "Valentin Boussot"
-copyright = f"{datetime.now().year}, {author}"  # noqa: A001 - required by Sphinx
+copyright = f"{datetime.now().year}, {author}"
 
 extensions = [
     "sphinx.ext.autodoc",
@@ -213,7 +213,7 @@ def _write_redirects(app, exception):
         stub = outdir / old
         stub.parent.mkdir(parents=True, exist_ok=True)
         stub.write_text(
-            "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+            '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
             f'<meta http-equiv="refresh" content="0; url={href}">\n'
             f'<link rel="canonical" href="{_LLMS_BASE_URL}/{new}">\n'
             "<title>This page moved</title>\n</head>\n<body>\n"

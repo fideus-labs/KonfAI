@@ -403,7 +403,7 @@ def test_two_rank_evaluation_refuses_a_single_file_map(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("streamed", [False, True])
 def test_two_metrics_of_one_class_keep_a_row_each(streamed: bool) -> None:
-    """Two metrics of one class once wrote one row, the second over the first."""
+    """Two metrics of one class keep a row each: the second does not overwrite the first."""
     torch.manual_seed(4)
     volumes = {"SEG": torch.randint(0, 3, (1, 1, 6, 5)), "PRED": torch.randint(0, 3, (1, 1, 6, 5))}
     metrics = {"PRED": {"SEG": {Dice(labels=[1]): None, Dice(labels=[2]): None}}}

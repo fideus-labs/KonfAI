@@ -134,14 +134,6 @@ _TTA_OVERLAP = 1
 _TTA_CHANNELS = 2
 
 
-def _tta_geometry_attribute() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.zeros(3)
-    attribute["Spacing"] = np.ones(3)
-    attribute["Direction"] = np.eye(3).flatten()
-    return attribute
-
-
 def _tta_augmentations(
     augmentation, nb: int = 1, shape: list[int] | None = None, case_index: int = 0
 ) -> DataAugmentationsList:
@@ -199,7 +191,9 @@ def _drive_tta(
     else:
         monkeypatch.setenv("KONFAI_STREAM_WORTH_THRESHOLD", "0")
 
-    attribute = _tta_geometry_attribute()
+    from oracle_support import geometry
+
+    attribute = geometry()
     volume = torch.from_numpy(
         np.random.default_rng(0).standard_normal((_TTA_CHANNELS, *_TTA_SHAPE)).astype(np.float32)
     ).to(dtype)

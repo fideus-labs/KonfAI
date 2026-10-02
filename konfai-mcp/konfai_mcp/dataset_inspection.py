@@ -494,7 +494,7 @@ class DatasetInspectionMixin:
     def _sample_dataset_names(self, names: list[str], max_cases: int | None, seed: int) -> list[str]:
         if max_cases is None or max_cases <= 0 or len(names) <= max_cases:
             return sorted(names)
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311 - a seeded case sample, not a secret
         return sorted(rng.sample(names, max_cases))
 
     def compute_dataset_group_statistics(

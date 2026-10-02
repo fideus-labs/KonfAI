@@ -236,10 +236,10 @@ def _fresh_chain_reference(volume: np.ndarray, transforms: list[Transform], attr
 def test_a_resample_behind_a_canonical_lands_on_the_reoriented_grid(streaming_dataset_stub) -> None:
     """The landing fold evolves the case state, so a Resample is judged on what Canonical left.
 
-    The regression this pins: the fold used to hand every stage the STORED header, so the Resample
-    recorded the pre-Canonical grid: the whole-volume path then resampled the wrong axis (silently:
-    every voxel real, the anatomy at the wrong density), and the patched routes crashed or refused
-    with the blame on the stage. The chain is the shipped TotalSegmentator prediction prefix.
+    Handed the STORED header instead, the Resample would record the pre-Canonical grid: the
+    whole-volume path would resample the wrong axis (silently: every voxel real, the anatomy at the
+    wrong density), and the patched routes would crash or refuse with the blame on the stage. The
+    chain is the shipped TotalSegmentator prediction prefix.
     """
     rng = np.random.default_rng(3)
     volume = (rng.standard_normal((1, 9, 10, 11)).astype(np.float32)) * 100.0
@@ -271,9 +271,9 @@ def test_a_resample_behind_a_canonical_lands_on_the_reoriented_grid(streaming_da
 def test_a_second_resample_reads_the_first_ones_grid(streaming_dataset_stub) -> None:
     """[Resample(3), Resample(1.5)] downsamples then upsamples: the second stage is not a no-op.
 
-    The regression this pins: both stages used to record their grid from the stored header, so the
-    second saw the ORIGINAL spacing, concluded nothing changes, and handed its input through: the
-    run then wrote a volume at half the asked density with a header claiming otherwise.
+    Each stage records its grid from what the previous one left: from the stored header, the second
+    would see the ORIGINAL spacing, conclude nothing changes and hand its input through, and the run
+    would write a volume at half the asked density with a header claiming otherwise.
     """
     rng = np.random.default_rng(5)
     volume = (rng.standard_normal((1, 8, 10, 10)).astype(np.float32)) * 100.0

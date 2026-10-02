@@ -63,14 +63,10 @@ SimpleITK = pytest.importorskip("SimpleITK")
 h5py = pytest.importorskip("h5py")
 
 
-def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    return geometry(origin, spacing)
-
-
 def test_dataset_read_data_slice_h5_reads_only_requested_region(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Volumes", "h5")
     volume = np.arange(1 * 4 * 5, dtype=np.float32).reshape(1, 4, 5)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([1.0, 2.0], [0.5, 1.5]))
+    dataset.write("CT", "CASE_000", volume, geometry([1.0, 2.0], [0.5, 1.5]))
 
     patch, _ = dataset.read_data_slice("CT", "CASE_000", (slice(None), slice(1, 3), slice(2, 5)))
 
@@ -84,7 +80,7 @@ def test_h5_read_handle_is_pooled_across_reads(tmp_path: Path, monkeypatch: pyte
 
     dataset = Dataset(tmp_path / "Pooled", "h5")
     volume = np.arange(1 * 6 * 5, dtype=np.float32).reshape(1, 6, 5)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([1.0, 2.0], [0.5, 1.5]))
+    dataset.write("CT", "CASE_000", volume, geometry([1.0, 2.0], [0.5, 1.5]))
 
     real_file = h5py.File
     read_opens = 0
@@ -104,7 +100,7 @@ def test_h5_read_handle_is_pooled_across_reads(tmp_path: Path, monkeypatch: pyte
 
 def test_h5_write_invalidates_the_pooled_reader(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Invalidated", "h5")
-    attrs = _image_attributes([1.0, 2.0], [0.5, 1.5])
+    attrs = geometry([1.0, 2.0], [0.5, 1.5])
     volume = np.zeros((1, 4, 5), dtype=np.float32)
     dataset.write("CT", "CASE_000", volume, attrs)
     first, _ = dataset.read_data_slice("CT", "CASE_000", (slice(None), slice(0, 4), slice(0, 5)))
@@ -119,7 +115,7 @@ def test_h5_write_invalidates_the_pooled_reader(tmp_path: Path) -> None:
 def test_dataset_read_data_statistics_h5_returns_global_stats_without_loading_full_array(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Volumes", "h5")
     volume = np.arange(1 * 4 * 5, dtype=np.float32).reshape(1, 4, 5)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([1.0, 2.0], [0.5, 1.5]))
+    dataset.write("CT", "CASE_000", volume, geometry([1.0, 2.0], [0.5, 1.5]))
 
     stats = dataset.read_data_statistics("CT", "CASE_000")
 
@@ -134,7 +130,7 @@ def test_dataset_read_data_slice_sitk_reads_requested_patch_and_updates_origin(t
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
     origin = [10.0, 20.0, 30.0]
     spacing = [0.5, 1.5, 2.0]
-    dataset.write("CT", "CASE_000", volume, _image_attributes(origin, spacing))
+    dataset.write("CT", "CASE_000", volume, geometry(origin, spacing))
 
     patch, attributes = dataset.read_data_slice(
         "CT",
@@ -201,7 +197,7 @@ def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     dataset = Dataset(tmp_path / "Dataset", file_format)
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
     for name in ("CASE_000", "CASE_001"):
-        dataset.write("CT", name, volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+        dataset.write("CT", name, volume, geometry([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
         _write_image(tmp_path / "Dataset" / name / f"CT.{file_format}", compress)
 
     with warnings.catch_warnings(record=True) as caught:
@@ -227,7 +223,7 @@ def test_dataset_read_data_statistics_sitk_accumulates_slabs_without_loading_ful
 ) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+    dataset.write("CT", "CASE_000", volume, geometry([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
 
     # One slab per plane, so the running merge spans several reads on a volume this small.
     monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1)
@@ -246,7 +242,7 @@ def test_dataset_read_data_statistics_sitk_selects_channels_while_streaming(
 ) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
     volume = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+    dataset.write("CT", "CASE_000", volume, geometry([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
 
     monkeypatch.setattr("konfai.utils.dataset.statistics._STATISTICS_CHUNK_ELEMENTS", 1)
     monkeypatch.setattr(SimpleITK, "ReadImage", _reject_whole_volume_read)
@@ -260,7 +256,7 @@ def test_dataset_read_data_statistics_sitk_selects_channels_while_streaming(
 def test_dataset_read_data_statistics_sitk_keeps_whole_read_for_compressed_volumes(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
     volume = np.arange(1 * 4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
-    dataset.write("CT", "CASE_000", volume, _image_attributes([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
+    dataset.write("CT", "CASE_000", volume, geometry([10.0, 20.0, 30.0], [0.5, 1.5, 2.0]))
     _write_image(tmp_path / "Dataset" / "CASE_000" / "CT.mha", compress=True)
 
     stats = dataset.read_data_statistics("CT", "CASE_000")
@@ -505,7 +501,7 @@ def test_dataset_iter_keeps_cache_lookup_in_sync_with_load_and_unload() -> None:
 
 def test_dataset_get_names_caches_result_and_avoids_repeated_listdir(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
-    attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    attrs = geometry([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
     volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
     dataset.write("CT", "CASE_000", volume, attrs)
     dataset.write("CT", "CASE_001", volume, attrs)
@@ -519,7 +515,7 @@ def test_dataset_get_names_caches_result_and_avoids_repeated_listdir(tmp_path: P
 
 def test_dataset_get_names_cache_invalidated_on_write(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
-    attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    attrs = geometry([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
     volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
     dataset.write("CT", "CASE_000", volume, attrs)
 
@@ -532,11 +528,11 @@ def test_dataset_get_names_cache_invalidated_on_write(tmp_path: Path) -> None:
 
 
 def test_dataset_is_dataset_exist_probes_the_entry_without_listing(tmp_path: Path) -> None:
-    """Membership is a point question: one probe, not a slice of the directory listing. It used to build
-    that listing, which both cost O(N) headers and froze an answer a run producing the group would
-    outgrow (a ``Save`` writing into the dataset being read, from a loader worker)."""
+    """Membership is a point question: one probe, not a slice of the directory listing. A listing
+    costs O(N) headers and freezes an answer a run producing the group outgrows (a ``Save`` writing
+    into the dataset being read, from a loader worker)."""
     dataset = Dataset(tmp_path / "Dataset", "mha")
-    attrs = _image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+    attrs = geometry([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
     volume = np.zeros((1, 4, 4, 4), dtype=np.float32)
     dataset.write("CT", "CASE_000", volume, attrs)
 

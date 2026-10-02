@@ -352,6 +352,8 @@ def test_konfai_cluster_refuses_plan(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_predict_evaluate_expose_tensorboard_param():
     """#7 CLI -tb/--tensorboard (dest 'tensorboard') must reach predict(); evaluate() keeps the parameter,
     which konfai-apps passes by position."""
+
+    """CLI -tb/--tensorboard (dest 'tensorboard') must reach predict()/evaluate()."""
     for fn in (predictor_module.predict, evaluator_module.evaluate):
         params = inspect.signature(fn).parameters
         assert "tensorboard" in params, f"{fn.__name__} must accept 'tensorboard'"

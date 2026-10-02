@@ -2895,7 +2895,7 @@ def generate_folds(
         raise ValueError(f"Only {len(cases)} case directories found; cannot make k={k} folds.")
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()  # a setup step: create the session if needed
     shuffled = list(cases)
-    random.Random(seed).shuffle(shuffled)
+    random.Random(seed).shuffle(shuffled)  # nosec B311 - a seeded fold split, not a secret
     folds_dir = workspace / "folds"
     folds_dir.mkdir(exist_ok=True)
     folds: dict[str, Any] = {}

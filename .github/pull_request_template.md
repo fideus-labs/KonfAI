@@ -38,7 +38,7 @@ pixi run check
 - [ ] PR title and commits follow **Conventional Commits**
 - [ ] `pixi run check` passes (ruff lint + format + core and konfai-apps tests)
 - [ ] `pixi run --environment dev python -m pytest konfai-mcp/tests` passes *(if `konfai/`, `konfai-apps/`, `konfai-mcp/`, `examples/` or `pyproject.toml` changed; install it first, AGENTS.md §6)*
-- [ ] `pixi run --environment dev python -m pytest konfai-studio/tests` passes *(if `konfai/`, `konfai-mcp/`, `konfai-studio/` or `pyproject.toml` changed; install it and build its front first, AGENTS.md §6: without the front every test skips)*
+- [ ] `pixi run --environment dev python -m pytest konfai-studio/tests` passes *(if `konfai/`, `konfai-apps/`, `konfai-mcp/`, `konfai-studio/` or `pyproject.toml` changed; install it and build its front first, AGENTS.md §6: without the front its two front tests skip)*
 - [ ] Tests added/updated for the change
 - [ ] Docs updated *(if user-facing CLI/config behaviour changed)*
 - [ ] No new runtime dependency without an explicit request + a matching `pyproject.toml` update in the same commit

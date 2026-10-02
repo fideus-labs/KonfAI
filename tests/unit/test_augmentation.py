@@ -73,7 +73,7 @@ def test_saturation_matrix_scales_chroma_not_luma() -> None:
 
 
 def test_augmentation_resamples_after_reset_state():
-    """#1 Augmentation parameters must be re-sampled each epoch via reset_state.
+    """Augmentation parameters must be re-sampled each epoch via reset_state.
 
     Within an epoch ``state_init`` caches the per-case draw so every patch shares
     one transform; ``reset_state`` must clear that cache so the next epoch draws
@@ -221,7 +221,7 @@ def test_flip_default_stays_layout_only_on_vector_data() -> None:
 
 
 def test_rotate_converts_degrees_to_radians():
-    """#6 A 90-degree rotation must yield [[0,-1],[1,0]], not cos/sin of 90 radians."""
+    """A 90-degree rotation must yield [[0,-1],[1,0]], not cos/sin of 90 radians."""
     rot = Rotate(a_min=90.0, a_max=90.0, is_quarter=False)
     rot._state_init(0, [[8, 8]], [Attribute()])
     block = rot.matrix[0][0][0, :2, :2]
@@ -630,8 +630,8 @@ def test_cutout_fraction_binds_through_the_config_and_cuts_its_share(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``cutout_size`` is a FRACTION and must survive the YAML binder as one: 0.34 through
-    apply_config cuts about ``0.34**rank`` of the volume (the ``int`` annotation once bound it to
-    0, a silent no-op, while any integer erased the whole copy)."""
+    apply_config cuts about ``0.34**rank`` of the volume (bound as an ``int`` it would be 0, a
+    silent no-op, and any integer size erases the whole copy)."""
     config = tmp_path / "Config.yml"
     config.write_text(
         "Trainer:\n  Dataset:\n    augmentations:\n      A:\n        nb: 1\n"

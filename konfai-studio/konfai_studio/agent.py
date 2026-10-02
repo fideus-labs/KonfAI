@@ -535,7 +535,7 @@ class StudioAgent:
         await self._client.__aexit__(*exc)
 
     async def send(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
-        assert self._backend is not None, "agent must be entered before use"
+        assert self._backend is not None, "agent must be entered before use"  # nosec B101 - type narrowing
         async for event in with_volume_events(self._backend.send(user_message)):
             yield event
         if self._history_file:  # persist after each turn so a restart continues the conversation

@@ -88,14 +88,14 @@ def test_accumulator_is_full_tracks_added_patches():
 
 
 def test_assemble_without_any_patch_raises_patch_error():
-    """#14: assembling an empty accumulator must raise a typed PatchError, not crash."""
+    """Assembling an empty accumulator must raise a typed PatchError, not crash."""
     acc = Accumulator([(slice(0, 2),), (slice(2, 4),)], [2], patch_combine=None, batch=False)
     with pytest.raises(PatchError):
         acc.assemble()
 
 
 def test_assemble_with_missing_first_patch_does_not_crash():
-    """#14: a missing index-0 patch must not raise UnboundLocalError.
+    """A missing index-0 patch must not raise UnboundLocalError.
 
     The seed tensor (shape/dtype/device) is taken from the first *present* patch,
     so any single missing patch (including index 0) assembles cleanly.
@@ -1063,8 +1063,8 @@ def test_a_pickled_manager_hands_every_copy_the_grid_it_was_counted_on(streaming
 )
 def test_trim_streams_a_padded_final_patch_like_the_whole_volume(shape, patch, overlap):
     """The kept run of a padded final patch may end in the padding, past the volume. The whole
-    volume buffer clipped that implicitly; the streaming window, wider than the volume's tail,
-    once wrote a [1, 4] destination from a [3] source and failed at the last patch."""
+    volume buffer clips that implicitly; the streaming window, wider than the volume's tail, clips
+    it too, or it writes a [1, 4] destination from a [3] source and fails at the last patch."""
     labels = torch.randint(0, 5, (2, *shape)).float()
     slices = get_patch_slices_from_shape(patch, shape, overlap)
     patches = _padded_patches(labels, slices, patch)

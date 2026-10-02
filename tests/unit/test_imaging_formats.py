@@ -413,9 +413,9 @@ class TestDicomRegionDecode:
         assert sorts["count"] == 0
 
     def test_overlapping_region_reads_decode_each_plane_once(self, tmp_path: Path, monkeypatch) -> None:
-        """A series stores one file per plane, and every region read touching a z index used to
-        re-parse and re-decode that file whole: overlapping regions of a sweep paid one full
-        ``dcmread`` per touched slice per region. The plane cache decodes each file once per pass."""
+        """A series stores one file per plane, and a region read touching a z index decodes that
+        file whole. The plane cache decodes each file once per pass, so overlapping regions of a sweep
+        do not pay one full ``dcmread`` per touched slice per region."""
         pydicom = pytest.importorskip("pydicom")
         from konfai.utils import dicom
 

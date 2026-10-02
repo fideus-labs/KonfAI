@@ -30,7 +30,7 @@ from konfai.utils.model_builder import list_registered_modules
 
 
 def test_vae_latent_uses_gaussian_noise():
-    """#3 LatentDistributionZ must sample N(0,1), not U[0,1]."""
+    """LatentDistributionZ must sample N(0,1), not U[0,1]."""
     layer = LatentDistribution.LatentDistributionZ()
     mu = torch.zeros(200_000)
     log_std = torch.zeros(200_000)
@@ -40,12 +40,12 @@ def test_vae_latent_uses_gaussian_noise():
 
 
 def test_unsqueeze_forward_accepts_tensor():
-    """#8 Unsqueeze.forward(tensor) must work on a single tensor."""
+    """Unsqueeze.forward(tensor) must work on a single tensor."""
     assert Unsqueeze(dim=1)(torch.randn(3, 4)).shape == (3, 1, 4)
 
 
 def test_select_squeezes_size_one_dims_by_size():
-    """#12 Select must squeeze dimensions whose size is 1, not the dim at index 1."""
+    """Select must squeeze dimensions whose size is 1, not the dim at index 1."""
     out = Select([slice(0, 1), slice(None), slice(None)])(torch.randn(1, 5, 6))
     assert out.shape == (5, 6)
     # a tensor with no size-1 dims is unchanged

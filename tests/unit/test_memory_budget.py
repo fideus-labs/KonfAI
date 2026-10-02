@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the B1 memory-budget chooser: it derives ``use_cache`` from a declared RAM budget,
+"""Tests for the memory-budget chooser: it derives ``use_cache`` from a declared RAM budget,
 estimates the dataset size from headers alone, and (for ``"auto"``) reads the cgroup limit rather
 than the host so a container/SLURM job is not OOM-killed."""
 

@@ -114,7 +114,7 @@ def segmentation_panels(example: Path) -> None:
     print(f"  labels predicted: {sorted(int(v) for v in np.unique(prediction) if v)}")
 
 
-def elastix_bspline(path: Path) -> "sitk.BSplineTransform":
+def elastix_bspline(path: Path) -> sitk.BSplineTransform:
     """The B-spline an Elastix parameter file describes, as a SimpleITK transform.
 
     Elastix writes the map from FIXED points to MOVING points, which is the direction
@@ -192,9 +192,7 @@ def registration_panels(case: Path, transform_file: Path) -> None:
 
     fixed_labels = sitk.ReadImage(str(case / "fixed_labels.nii.gz"))
     moving_labels = sitk.ReadImage(str(case / "moving_labels.nii.gz"))
-    warped = sitk.Resample(
-        moving_labels, ct_image, transform, sitk.sitkNearestNeighbor, 0, moving_labels.GetPixelID()
-    )
+    warped = sitk.Resample(moving_labels, ct_image, transform, sitk.sitkNearestNeighbor, 0, moving_labels.GetPixelID())
     truth = sitk.GetArrayFromImage(fixed_labels)
     before = dice_per_label(truth, sitk.GetArrayFromImage(moving_labels))
     after = dice_per_label(truth, sitk.GetArrayFromImage(warped))
@@ -232,7 +230,9 @@ def main() -> None:
     parser.add_argument("--mrct-case", type=Path, help="A folder with ct.mha, mr.mha and both label maps.")
     parser.add_argument("--mrct-transform", type=Path, help="The published Elastix parameter file for it.")
     parser.add_argument("--cohort", type=Path, help="A REGISTERED cohort, one folder per case.")
-    parser.add_argument("--folded", type=Path, help="Where the Reduce runs wrote ct_median, ct_std, seg_vote, seg_mean.")
+    parser.add_argument(
+        "--folded", type=Path, help="Where the Reduce runs wrote ct_median, ct_std, seg_vote, seg_mean."
+    )
     args = parser.parse_args()
 
     print("segmentation")

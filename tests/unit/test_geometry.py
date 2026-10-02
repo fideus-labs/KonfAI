@@ -225,8 +225,7 @@ class TestDisplacementStageBound:
         values = np.random.RandomState(5).normal(0.0, 3.0, (3, 6, 7, 8))
         stage = DisplacementStage(_grid(), values, 1)
         # Computed once and kept: asked of the property itself rather than of whichever numpy call
-        # it happens to make, so the claim survives a change of arithmetic. It did not: the body
-        # used to call np.abs and the count was the probe.
+        # it happens to make, so the claim survives a change of arithmetic.
         assert "bound_xyz" not in stage.__dict__
         first = stage.bound_xyz
         assert "bound_xyz" in stage.__dict__

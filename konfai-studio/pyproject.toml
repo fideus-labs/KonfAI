@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69", "setuptools_scm>=8"]
+requires = ["setuptools>=77", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,7 +10,8 @@ dynamic = ["version", "dependencies"]
 description = "KonfAI Studio - a chatbot web UI driving the konfai-mcp server (BFF + front)"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.66"]  # Claude API with a metered key / OAuth token
