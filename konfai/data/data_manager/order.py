@@ -141,8 +141,8 @@ class WindowedCaseSampler(Sampler[int]):
     """Locality-aware training order: shuffle cases, window them, shuffle patches within each window.
 
     ``DatasetIter`` loads each non-streamable case into a FIFO buffer, so a global patch shuffle
-    reloads a volume repeatedly (once per patch that lands after an eviction. Keeping only
-    ``window`` cases in play at a time) their patches shuffled together, emitted before advancing: reads each
+    reloads a volume repeatedly (once per patch that lands after an eviction). Keeping only ``window``
+    cases in play at a time, their patches shuffled together and emitted before advancing, reads each
     volume ~once. ``window`` is the decorrelation knob: ``1`` is perfect locality, and
     ``None`` (default) or ``>= n_cases`` is a single all-cases window, i.e. a plain global shuffle,
     byte for byte.

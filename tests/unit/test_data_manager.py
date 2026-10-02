@@ -1526,20 +1526,35 @@ def test_data_prediction_forwards_its_declared_augmentations() -> None:
     assert dataset.data_augmentations_list == {"DataAugmentation_0": augmentations}
 
 
-def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> None:
+class _MainProcessStage(Transform):
+    """A stage that spawns processes of its own, so it cannot run inside a daemonic loader worker."""
+
+    single_process = True
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor
+
+
+def test_a_stage_that_must_run_in_the_main_process_turns_the_loader_workers_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stage declares it; the loader reads the declaration on the bound chain, whatever the
+    stage is named and whatever ``num_workers`` asked for."""
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    monkeypatch.setattr(TransformLoader, "get_transform", lambda *_, **__: _MainProcessStage())
     dataset = DataPrediction(
         augmentations=None,
+        num_workers=2,
         groups_src={
             "Volume_0": Group(
-                groups_dest={
-                    "MASK": GroupTransform(
-                        transforms={"KonfAIInference": TransformLoader()},
-                        patch_transforms=None,
-                    )
-                }
+                groups_dest={"MASK": GroupTransform(transforms={"Nested": TransformLoader()}, patch_transforms=None)}
             )
         },
     )
+    for group_src, group in dataset.groups_src.items():
+        for group_dest, chain in group.items():
+            chain.prepare(group_src, group_dest)
+    dataset._configure_data_loading(use_cache=False)
 
     assert dataset.requires_single_process_loading is True
     assert dataset.dataLoader_args["num_workers"] == 0

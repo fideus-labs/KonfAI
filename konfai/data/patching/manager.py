@@ -90,6 +90,10 @@ from konfai.utils.utils import env_flag
 #: The most a sequential reader's landed slab holds, whatever its rows.
 _SLAB_BYTES = 256 << 20
 
+#: The refusal of a statistic whose input an earlier stage changes: the one a statistic declared on
+#: the stage, a reordered chain or a Save cures.
+STATISTIC_AFTER_A_VALUE_CHANGE = "needs whole-volume statistics, but an earlier stage changes the values"
+
 
 def _covers(region: tuple[slice, ...], target: tuple[slice, ...]) -> bool:
     """Whether ``region`` holds all of ``target``."""
@@ -273,13 +277,7 @@ class DatasetManager:
         # the draw's own, and a re-draw is a new one. Drop every plan, so the next request replans
         # against the draw the copies actually carry.
         self._records_source = None
-        self._patch_stream_sources.clear()
-        self._stream_refusals.clear()
-        self._stream_ok.clear()
-        self._stream_evolved.clear()
-        self._stream_attributes_persisted.clear()
-        self._landed_slabs.clear()
-        self._block_reads.clear()
+        self._invalidate_stream_plans()
         # A wait is for the draw the plan saw: a pass under the new draw must not answer it.
         self._wanted_measurements.clear()
         self._awaiting_measurement.clear()
@@ -611,7 +609,7 @@ class DatasetManager:
             self._statistics_deferred = False
             self._invalidate_stream_plans()
 
-    def warm_stream_statistics(self, copies: Sequence[int] = (0,), apply_augmentations: bool = True) -> None:
+    def warm_stream_statistics(self, copies: Sequence[int] = (0,), apply_augmentations: bool = True) -> bool:
         """Read now the statistics the copies' streamed plans will want, and resolve those plans, in the
         process that forks the workers.
 
@@ -619,24 +617,25 @@ class DatasetManager:
         for every epoch; but the memo holding it lives on this manager, and a DataLoader worker that
         is not persistent is forked anew for each epoch. Filled before the fork, the scan happens
         once for the run instead of once per worker per epoch. A chain that wants no statistic
-        resolves its plan here and reads nothing.
+        resolves its plan here and reads nothing. Whether a pass read the whole volume and a copy then streams.
         """
         # A probe resolves the plans with the statistics still deferred, so it reads nothing: a case none of
         # whose copies can stream, and that no pass would change, is left alone rather than scanned.
         streams = [self.can_stream_patch(a, apply_augmentations) for a in copies]
         if not any(streams) and not self._awaiting_measurement.intersection(copies):
-            return
+            return False
         # The store's statistics reach the plans before any pass, so a pass runs under the seeds the regions
         # replay.
         self._require_statistics()
         answered = -1
+        passed = False
         while True:
             refused = [a for a in copies if not self.can_stream_patch(a, apply_augmentations)]
             known = len(self._measured_statistics) + len(self._unmeasurable)
             # A case in hand is served whole, and unloading it would take it from under its buffer; a pass
             # that answered nothing new would answer nothing the next time either.
             if not self._awaiting_measurement.intersection(refused) or self.loaded or known == answered:
-                return
+                return passed and len(refused) < len(copies)
             answered = known
             # A stage here wants its own input, which the chain has changed, and only a pass over the volume
             # can say it: one pass for every copy and every stage waiting on it. Nothing a selected draw
@@ -645,6 +644,7 @@ class DatasetManager:
             self.load(self.transforms, self.data_augmentations_list, load_augmentations=apply_augmentations)
             self.unload()
             self.unload_augmentation()
+            passed = True
 
     def _store_seed(
         self,
@@ -768,8 +768,7 @@ class DatasetManager:
                         # A stage seeding itself from the stored volume (a masked bound), or one that records
                         # nothing of its own when it runs whole: only the whole-volume route has its number.
                         return refuse(
-                            f"{label} needs whole-volume statistics, but an earlier stage changes the values, and"
-                            " no whole-volume pass records them for it."
+                            f"{label} {STATISTIC_AFTER_A_VALUE_CHANGE}, and no whole-volume pass records them for it."
                         )
                     elif measured is None:
                         # Planned on without a seed: a stage after it may refuse for a reason no pass settles,
@@ -813,8 +812,8 @@ class DatasetManager:
         if waiting:
             self._wait_for_a_pass(a, stages, localities)
             return refuse(
-                f"{waiting[0]} needs whole-volume statistics, but an earlier stage changes the values: the"
-                " stored volume's statistic is not this stage's input."
+                f"{waiting[0]} {STATISTIC_AFTER_A_VALUE_CHANGE}: the stored volume's statistic is not this"
+                " stage's input."
             )
         return True, tuple(plans), evolved, None
 
@@ -1241,10 +1240,7 @@ class DatasetManager:
         # case as STORED. An earlier boundary-based plan wrote the OUTPUT's header into the backup, and
         # a rewrite planned from that geometry re-writes untransformed data over the deliverable.
         self._rewrite_saves = rewrite
-        self._patch_stream_sources.clear()
-        self._stream_refusals.clear()
-        self._stream_ok.clear()
-        self._stream_evolved.clear()
+        self._invalidate_stream_plans()
         self._swept_entries.clear()
         self._sweep_failure = None
         self.cache_attributes_bak = copy.deepcopy(self._cache_attributes_pristine)
@@ -1279,6 +1275,7 @@ class DatasetManager:
         return self._sweep_failure is not None
 
     def _invalidate_stream_plans(self) -> None:
+        """Drop every plan and what the reads under it left: the next request replans."""
         self._landed_slabs.clear()
         self._block_reads.clear()
         # A replan rebuilds each copy's case attribute, and its first region fills it again.
@@ -1565,11 +1562,7 @@ class DatasetManager:
     def sweep_block_bytes(
         self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
     ) -> int:
-        """:meth:`SegmentSizer.sweep_block_bytes` of the whole declared chain against the raw source.
-
-        Public because the sizing holds this figure to the budget and a caller sizing a budget for a
-        decomposition asks for it: one price, not two that drift apart.
-        """
+        """:meth:`SegmentSizer.sweep_block_bytes` of the whole declared chain against the raw source."""
         return self._chain_sizer(spatial, channels, plans).sweep_block_bytes(tile, depth)
 
     def _sweep_shape(self, spatial: list[int], plans: Sequence["_ReadStagePlan"], rows: int) -> list[int]:
