@@ -49,6 +49,7 @@ from konfai.data.patching import (
 from konfai.data.patching.stage import _halo_radii, _HaloPull, _RemapPull
 from konfai.data.reduction import Concat, Reduction
 from konfai.data.transform import (
+    InferenceStack,
     LocalityKind,
     PatchLocality,
     RegionContext,
@@ -1236,9 +1237,20 @@ class OutputDataset(Dataset, NeedDevice):
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda":
             return torch.device("cpu")
-        # Every transformed chunk is parked on the reduce device until the final stack: budget all of
-        # them plus a same-size working temp per chunk and one stack copy.
-        needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
+        # Every copy parks its transformed chunks here until the cross-copy fold, which then holds its
+        # own working buffers and output (a Concat's is every copy again), and the after-reduction
+        # transforms work on that output: budget the whole case, plus one copy's working temp.
+        copies = max(1, self.nb_data_augmentation)
+        if self._copy_fold() is not None:
+            # The copies are folded as they come: one in flight, the running total, and what the
+            # after-reduction transforms that follow the fold work with on it.
+            rest = max((transform.working_multiple for transform in self.after_reduction_transforms[1:]), default=0.0)
+            parked, fold = 1, 1.0 + rest
+        else:
+            folded = self.reduction.output_channels(1, copies)
+            after = max((transform.working_multiple for transform in self.after_reduction_transforms), default=0.0)
+            parked, fold = copies, self.reduction.working_multiple_for(copies) + folded * (1 + after)
+        needed = chunk.numel() * chunk.element_size() * max(1, nb_chunks) * (parked + 1 + fold)
         try:
             free = _free_vram(device, needed)
         except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
@@ -1282,16 +1294,32 @@ class OutputDataset(Dataset, NeedDevice):
             return torch.device("cpu")
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
+    def _copy_fold(self) -> InferenceStack | None:
+        """The first after-reduction transform when it folds a Concat's copies one at a time (``fold_copies``)."""
+        first = self.after_reduction_transforms[0] if self.after_reduction_transforms else None
+        if isinstance(self.reduction, Concat) and isinstance(first, InferenceStack) and first.folds_copies:
+            return first
+        return None
+
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
-        results = [
-            self._get_output(index, index_augmentation, number_of_channels_per_model, dataset).unsqueeze(0)
-            for index_augmentation in self.output_layer_accumulator[index].keys()
-        ]
+        accumulators = self.output_layer_accumulator[index]
+
+        def copies() -> Iterator[torch.Tensor]:
+            for index_augmentation in list(accumulators):
+                yield self._get_output(index, index_augmentation, number_of_channels_per_model, dataset)
+                del accumulators[index_augmentation]  # the copy is out: its accumulator is spent
+
+        # The finalize runs where the volume was blended; only the final result returns to the host.
+        after_reduction = self.after_reduction_transforms
+        fold = self._copy_fold()
+        if fold is not None:
+            result = fold.fold_copies(self.names[index], copies(), len(accumulators), self.attributes[index][0][0])
+            after_reduction = after_reduction[1:]
+        else:
+            result = self._reduce_copies([copy.unsqueeze(0) for copy in copies()])
         self.output_layer_accumulator.pop(index)
         self._accum_device.pop(index, None)
         self._reduce_device.pop(index, None)
-        # The finalize runs where the volume was blended; only the final result returns to the host.
-        result = self._reduce_copies(results)
         # combine = aggregation across models (M), reduce = aggregation across TTA copies (T):
         #   Mean/Median at both levels : [M, C, ...] -> [C, ...], then [T, C, ...] -> [C, ...]
         #   combine Concat, reduce Mean : [T, M, C, ...] -> [M, C, ...]
@@ -1299,7 +1327,7 @@ class OutputDataset(Dataset, NeedDevice):
         #   Concat at both levels       : [M * T, C, ...]
         # With a Concat at either level, the first ``after_reduction_transforms`` entry must be
         # ``InferenceStack`` or ``Sum`` so a ``[C, ...]`` follows.
-        for transform in self.after_reduction_transforms:
+        for transform in after_reduction:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
         for transform in self._inverses(dataset, patch=False):

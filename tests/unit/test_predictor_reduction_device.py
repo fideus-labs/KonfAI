@@ -18,7 +18,10 @@ from typing import cast
 
 import pytest
 import torch
+from konfai.data.reduction import Concat, Mean
+from konfai.data.transform import InferenceStack, Resample, Softmax
 from konfai.predictor import OutputDataset
+from konfai.predictor import output as output_module
 from konfai.utils.utils import get_patch_slices_from_shape
 
 
@@ -26,6 +29,8 @@ def _dataset(device: torch.device | int, nb_data_augmentation: int = 1) -> Outpu
     ds = OutputDataset.__new__(OutputDataset)
     ds.device = device  # NeedDevice stores a torch.device on CPU and a CUDA ordinal (int) on GPU
     ds.nb_data_augmentation = nb_data_augmentation
+    ds.reduction = Mean()
+    ds.after_reduction_transforms = []
     return ds
 
 
@@ -60,6 +65,33 @@ def test_reduction_device_uses_gpu_when_it_fits_and_falls_back_when_it_does_not(
             return 2
 
     assert ds._reduction_device(_Oversized()).type == "cpu"
+
+
+def test_the_reduction_device_prices_every_copy_and_the_fold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eight TTA copies stay on the device until their fold: a Mean then holds one more copy (10 in all),
+    an after-reduction Softmax its working copy on top of that (11), and a Concat all eight again (17).
+    A device with room for 10.5 copies keeps only the first."""
+    copy = torch.zeros(6, 64, dtype=torch.float32)
+    room = int(10.5 * copy.numel() * copy.element_size())
+    monkeypatch.setattr(output_module, "_free_vram", lambda device, needed: room)
+    ds = _dataset(0, nb_data_augmentation=8)
+    assert ds._reduction_device(copy).type == "cuda"
+    ds.after_reduction_transforms = [Softmax(dim=0)]
+    assert ds._reduction_device(copy).type == "cpu"
+    ds.after_reduction_transforms, ds.reduction = [], Concat()
+    assert ds._reduction_device(copy).type == "cpu"
+
+
+def test_folded_copies_price_what_follows_the_fold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """InferenceStack folds a Concat's copies one at a time, three copies' worth held; a transform after it
+    adds what it works with on the result."""
+    copy = torch.zeros(6, 64, dtype=torch.float32)
+    monkeypatch.setattr(output_module, "_free_vram", lambda device, needed: 5 * copy.numel() * copy.element_size())
+    ds = _dataset(0, nb_data_augmentation=8)
+    ds.reduction, ds.after_reduction_transforms = Concat(), [InferenceStack("", "stack", mode="Seg")]
+    assert ds._reduction_device(copy).type == "cuda"
+    ds.after_reduction_transforms.append(Resample())
+    assert ds._reduction_device(copy).type == "cpu"
 
 
 class _FakeAccumulator:
