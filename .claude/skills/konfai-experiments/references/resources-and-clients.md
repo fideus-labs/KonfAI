@@ -2,25 +2,15 @@
 
 ## MCP resources (read-only state the agent can pull)
 
-Prefer these over re-deriving state; they are the machine-readable checkpoints.
+Prefer these over re-deriving state; they are the machine-readable checkpoints. The full list,
+generated from the server's registry, is the Resources section of
+[tool-reference.md](tool-reference.md) (live: the client's `resources/list` and `resources/templates/list`).
+The ones a loop reaches for:
 
-**Server / guide / docs**
-- `server://info`, `server://capabilities`
-- `guide://tool-index`, `guide://config-design`
-- `docs://index`, `docs://patching`, `docs://modeling`, `docs://configuration`, `docs://dataset-mapping`, `docs://examples`
-
-**Templates**
-- `templates://list`, `template://{name}/summary`
-
-**Session (current workspace)**
-- `sessions://list`
-- `session://current/summary`
-- `session://current/config/{workflow}`: `workflow` in `train` | `prediction` | `evaluation`
-- `session://current/log`
-- `session://current/metrics`
-
-**Jobs**
-- `job://{job_id}/status`, `job://{job_id}/log`, `job://{job_id}/manifest`
+- `server://capabilities`: the devices a run can use.
+- `session://current/summary`, `session://current/metrics`, `session://current/log`.
+- `session://current/config/{workflow}`: `workflow` in `train` | `prediction` | `evaluation` | `transform`.
+- `job://{job_id}/status`, `job://{job_id}/log`, `job://{job_id}/manifest`.
 
 The job **manifest** holds the config snapshot captured at launch: the reproducible record
 of that run, independent of any later config edit.
@@ -32,9 +22,11 @@ of that run, independent of any later config edit.
 | `KONFAI_MCP_WORKSPACES_ROOT` | Root for session workspaces (default `~/KonfAI_Workspaces`) |
 | `KONFAI_MCP_SESSION` | Default session name for the server process |
 | `KONFAI_MCP_LOG_TAIL_LINES` | Default max log lines returned by log-tail helpers |
-| `KONFAI_MCP_VALIDATE_ROOT` | Scratch workspace root used by side-effect-free validation |
+| `KONFAI_MCP_APP_CATALOG` | A JSON file of your own app sources, layered over the shipped catalogue |
+| `KONFAI_MCP_SUBPROCESS_TIMEOUT` | Seconds a spawn subprocess outside a job (validation, smoke test, plan, signature, app import) may run; default `1800`, `0` waits unbounded |
 | `KONFAI_MCP_TRANSPORT` | `stdio` (default) \| `sse` \| `streamable-http` |
 | `KONFAI_MCP_HOST` / `KONFAI_MCP_PORT` / `KONFAI_MCP_PATH` | Bind settings for HTTP transports |
+| `KONFAI_MCP_STATELESS_HTTP` / `KONFAI_MCP_JSON_RESPONSE` | `1` serves streamable HTTP without session state / with plain JSON bodies |
 | `KONFAI_MCP_LOG_LEVEL` | FastMCP/Uvicorn log level |
 | `KONFAI_MCP_BEARER_TOKEN` | Optional bearer token; when set, protects `sse` / `streamable-http` (stdio ignores it) |
 

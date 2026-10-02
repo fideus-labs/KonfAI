@@ -925,3 +925,9 @@ def test_an_affine_draw_keeps_a_float64_volume_s_digits() -> None:
     sampled = EulerTransform._walk(volume.reshape(1, -1), coordinates, [0, 0, 0], list(full), full)
     assert sampled.dtype == torch.float64
     assert torch.equal(sampled, volume)
+
+
+def test_a_permute_given_the_wrong_draw_count_is_refused_at_construction() -> None:
+    """A configuration mistake stops the build, which names the key, rather than the first draw."""
+    with pytest.raises(AugmentationError, match="prob_permute"):
+        Permute(prob_permute=[0.5])

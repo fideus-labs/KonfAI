@@ -14,7 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""MIND. Modality-Independent Neighbourhood Descriptor (Heinrich et al. 2012).
+"""MIND-SSC. The self-similarity context form (Heinrich et al., MICCAI 2013) of the
+Modality-Independent Neighbourhood Descriptor (Heinrich et al. 2012).
 
 A hand-crafted, parameter-free feature extractor: fixed neighbourhood-shift convolution
 kernels turn an image into a self-similarity descriptor that is robust across modalities.
@@ -23,8 +24,9 @@ feature/perceptual/registration losses (the descriptor the IMPACT loss consumes)
 it as ``classpath: features.mind.MIND``; attach a loss to its ``Descriptor`` output.
 
 The descriptor maths are ported verbatim from the reference MIND implementation
-(github.com/vboussot/ImpactLoss ``Data/Models/builds/Mind``); this module returns the
-descriptor tensor directly instead of the reference's one-element list.
+(github.com/vboussot/ImpactLoss ``Data/Models/builds/Mind``), itself adapted from Heinrich's
+``MINDSSC`` and ``pdist_squared`` in github.com/multimodallearning/convexAdam (Apache-2.0); this
+module returns the descriptor tensor directly instead of the reference's one-element list.
 """
 
 import torch

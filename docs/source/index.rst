@@ -315,6 +315,7 @@ KonfAI
    reference/cli
    reference/app-server-api
    reference/api/index
+   reference/glossary
 
 .. toctree::
    :maxdepth: 1

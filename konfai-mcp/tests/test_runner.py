@@ -26,6 +26,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from konfai.utils.errors import ConfigError
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
@@ -79,6 +80,48 @@ def test_validation_reads_a_scratch_copy_beside_the_original(tmp_path: Path, mon
     assert config_path.read_bytes() == authored + b"  epochs: 3\r\n"  # the edit, not the write-back
     assert seen and not seen[0].exists()  # the copy is gone
     assert [entry.name for entry in tmp_path.iterdir() if entry.name.startswith(".")] == []
+
+
+def _bound(cause: Exception) -> ConfigError:
+    """The refusal the binder raises around what building an object raised (``raise ... from exc``)."""
+    refusal = ConfigError(f"Failed to instantiate settings, error {cause}")
+    refusal.__cause__ = cause
+    return refusal
+
+
+@pytest.mark.parametrize(
+    ("raised", "error", "traced"),
+    [
+        (ConfigError("EarlyStopping.mode must be 'min' or 'max'.", "Set it to one of them."), "[Config] ", False),
+        (_bound(ConfigError("EarlyStopping.mode must be 'min' or 'max'.")), "[Config] Failed", False),
+        (_bound(ZeroDivisionError("division by zero")), "[Config] Failed", True),
+        (ZeroDivisionError("division by zero"), "division by zero", True),
+    ],
+)
+def test_a_validation_refusal_is_its_message_and_a_crash_keeps_its_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raised: Exception, error: str, traced: bool
+) -> None:
+    """A designed refusal already says what to change: a traceback would bury it. A crash needs its
+    trace, also when the binder wrapped it in a refusal (a bug in a user's nested settings object)."""
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Trainer:\n  train_name: X\n", encoding="utf-8")
+
+    def build(**kwargs: Any) -> object:
+        raise raised
+
+    monkeypatch.setattr(runner, "build_train", build)
+    payload = runner.validate_workflow_api(
+        workflow="train",
+        level="instantiate",
+        workspace_dir=str(tmp_path),
+        config=str(config_path),
+        validate_root=str(tmp_path / "validate"),
+    )
+
+    assert payload["ok"] is False and payload["error_type"] == type(raised).__name__
+    assert payload["error"].startswith(error)
+    assert ("traceback" in payload) is traced
+    assert not traced or "ZeroDivisionError: division by zero" in payload["traceback"]
 
 
 def test_a_scratch_copy_a_killed_child_left_is_swept_by_the_parent(tmp_path: Path) -> None:

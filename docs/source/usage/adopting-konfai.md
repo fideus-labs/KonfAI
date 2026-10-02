@@ -55,13 +55,14 @@ import konfai, torch
 from konfai.metric.measure import CrossEntropyLoss
 from konfai.data.transform import TensorCast
 
-model = torch.nn.Sequential(torch.nn.Conv2d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(16, 2, 1))
-checkpoints = konfai.train_model(
-    model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
-    patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]},
-)
-konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
-                     checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
+if __name__ == "__main__":
+    model = torch.nn.Sequential(torch.nn.Conv2d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(16, 2, 1))
+    checkpoints = konfai.train_model(
+        model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
+        patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]},
+    )
+    konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
+                         checkpoints=sorted(checkpoints.glob("*.pt"))[-1])
 ```
 
 `inputs` and `targets` are the dataset's groups; `patch` is what the model is

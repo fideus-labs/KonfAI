@@ -118,8 +118,9 @@ are thin task-named wrappers.
 
 The five workflows are also **Python callables** (`konfai.transform` / `plan_transform` /
 `evaluate` / `predict` / `train`), with structured results and a copy-the-caller's-config contract;
-see `docs/source/usage/python-workflows.md` when a script or notebook fits better than the CLI.
+see `docs/source/usage/python-api.md` when a script or notebook fits better than the CLI.
 
 The authoritative user-facing catalogue lives in `docs/source/config_guide/` (`training.md`,
-`prediction.md`, `evaluation.md`, `transform.md`) and `docs/source/reference/cli.md`; `AGENTS.md`
-is the source of truth for framework internals and conventions.
+`prediction.md`, `evaluation.md`, `transform.md`) and `docs/source/reference/cli.md`, and
+`docs/source/reference/glossary.md` defines the words with two meanings (group, fold, worker,
+workspace, bundle); `AGENTS.md` is the source of truth for framework internals and conventions.

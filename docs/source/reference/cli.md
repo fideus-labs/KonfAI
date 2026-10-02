@@ -280,7 +280,7 @@ Important options:
 | `--token` | Development-only token override. |
 | `--apps` | JSON file listing the available apps. |
 | `--download` | Pre-download configured apps at startup. |
-| `--check` | Validate configured apps without downloading them. |
+| `--check` | Validate configured apps without downloading them, then exit without starting the server (with `--download`, download them and serve). |
 
 ## `konfai-cluster`
 
@@ -345,6 +345,33 @@ Binding a non-loopback address without `KONFAI_STUDIO_TOKEN` is refused, not
 warned about: an unauthenticated Studio is a shell on the host. Set a token and
 serve over TLS: see `konfai-studio/docs/REMOTE.md`.
 ```
+
+## Exit codes
+
+The workflow commands (`konfai`, `konfai-cluster`, `konfai-apps` and the app
+CLIs built on it, such as `impact-seg-konfai`) share one convention, so a shell
+script or a notebook can decide on the code alone:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | The command ran and failed: a refusal (a configuration, dataset or App it cannot run) or an unexpected error. |
+| `2` | Usage error, reported by the argument parser before any work starts: an unknown or missing argument, an invalid value, or a combination of options the command refuses. |
+| `130` | Interrupted by Ctrl+C. |
+
+A command stopped by a signal ends with that signal: a shell reports 128 plus
+the signal number (`143` for `SIGTERM`), Python's `subprocess` a negative code
+(`-15`).
+
+`impact-reg-konfai` does not follow the `130` code yet: Ctrl+C stops it as the
+signal would, after a Python traceback, so a shell reports `130` but Python's
+`subprocess` reports `-2`.
+
+The servers (`konfai-apps-server`, `konfai-studio`) run until they are stopped:
+Ctrl+C shuts them down and they exit with `0`. On its default `stdio`
+transport, `konfai-mcp` exits with `130` on Ctrl+C, and on its own once its
+client closes stdin. A server that refuses to start exits with `1` or `2`, as
+above.
 
 ## ONNX export is not a subcommand
 
@@ -446,10 +473,12 @@ The codebase also references internal variables such as:
 - `KONFAI_DEBUG_LAST_LAYER`: under `KONFAI_DEBUG`, the network sets it to each module it enters,
   as `name:memory:device`, so after a crash it names the last layer reached
 - `KONFAI_MASTER_PORT`: distributed rendezvous bookkeeping
+- `KONFAI_DECOMPRESSED_RUN`: the run's own directory under `KONFAI_DECOMPRESSED_DIRECTORY`,
+  shared by every process of the run (its ranks and their loader workers inherit it) and removed
+  when the run ends
 - `KONFAI_LOCAL_RANKS`: how many ranks share one node's RAM, published by the
   launcher so a node-scoped `memory_budget` is divided before the spawn. It changes
   the cache-versus-stream decision, so it is not mere bookkeeping.
-- `KONFAI_ATTR_KEY`, `KONFAI_DEPS`, `KONFAI_COMPONENT_BASES`, `KONFAI_VERSION`
 
 These are part of KonfAI's internal execution model and are best treated as
 implementation details unless you are actively extending the framework.
@@ -472,9 +501,13 @@ when both are given.
 | `KONFAI_MCP_LOG_TAIL_LINES` | `--log-tail-lines` | Default maximum lines returned by log-tail helpers. |
 
 An invalid `KONFAI_MCP_TRANSPORT` is rejected at startup rather than passed
-through. A few further `KONFAI_MCP_*` names configure internals with no option of
-their own (the app catalog, the subprocess timeout, the validation root) and
-are covered in {doc}`../usage/mcp`.
+through. A few further `KONFAI_MCP_*` names have no option of their own:
+
+| Variable | Effect |
+| --- | --- |
+| `KONFAI_MCP_APP_CATALOG` | A JSON file of app sources layered over the shipped catalogue, see {doc}`../usage/mcp`. |
+| `KONFAI_MCP_SUBPROCESS_TIMEOUT` | Seconds a subprocess the server runs outside a job (validation, smoke test, plan) may take before it is stopped. Default `1800`; `0` waits without bound. |
+| `KONFAI_MCP_VALIDATE_ROOT` | Scratch root of `konfai_mcp.runner.validate_workflow_api` when it is called without one. The server never reads it: each validation builds in a fresh temporary directory. |
 
 ### KonfAI Studio
 
@@ -494,6 +527,8 @@ refused unless you override it. See `konfai-studio/docs/REMOTE.md`.
 | `KONFAI_STUDIO_MAX_TOKENS` | Per-response token ceiling. |
 | `KONFAI_STUDIO_MAX_TURNS` | Agent-loop turn ceiling. |
 | `KONFAI_STUDIO_TERMINAL` | Enables the in-app terminal. |
+| `KONFAI_STUDIO_SLICER` | The 3D Slicer executable the viewer launches when no Slicer is listening (default: `Slicer` on `PATH`). |
+| `KONFAI_STUDIO_PROXY_HEADERS` / `KONFAI_STUDIO_LOOPBACK` | Set by `konfai-studio` for the server it starts, from `--proxy-headers` and from whether `--host` is a loopback address: a value in your shell is overwritten. |
 
 ## Next steps
 

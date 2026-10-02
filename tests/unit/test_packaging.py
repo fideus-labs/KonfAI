@@ -416,3 +416,60 @@ def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monke
         assert operators in ({"=="}, {">="}), requirement
         if requirement.name == "konfai":
             assert requirement.specifier.contains(core, prereleases=True), f"{requirement} against the core {core}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the image entrypoint is a POSIX shell script")
+@pytest.mark.parametrize(
+    ("argv", "runs"),
+    [
+        ([], "konfai --help"),
+        (["TRAIN", "-c", "Config.yml"], "konfai TRAIN -c Config.yml"),
+        (["--version"], "konfai --version"),
+        (["konfai-apps", "infer"], "konfai-apps infer"),
+        (["python", "-c", "print(1)"], "python -c print(1)"),
+    ],
+)
+def test_the_docker_entrypoint_runs_a_program_as_given_and_konfai_arguments_through_konfai(
+    tmp_path: Path, argv: list[str], runs: str
+) -> None:
+    """docker/README.md checks CUDA with ``docker run ... python -c ...``: a program the image carries
+    runs as given, and anything else is handed to ``konfai``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for program in ("konfai", "konfai-apps", "python"):
+        stub = bin_dir / program
+        stub.write_text(f'#!/bin/sh\necho "{program} $*"\n', encoding="utf-8")
+        stub.chmod(0o755)
+    result = subprocess.run(
+        ["sh", str(_REPO_ROOT / "docker" / "entrypoint.sh"), *argv],
+        env={"PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode, result.stdout.strip()) == (0, runs), result.stderr
+
+
+_SPDX_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".css", ".html", ".sh")
+# wasm-bindgen writes these; the README beside them pins their hashes.
+_GENERATED_SOURCES = "konfai-studio/frontend/src/konfai-rs/"
+
+
+def test_every_source_file_carries_the_spdx_header() -> None:
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", *(f"*{suffix}" for suffix in _SPDX_SUFFIXES)],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("not a git checkout")
+    missing = [
+        name
+        for name in listing.stdout.splitlines()
+        if not name.startswith(_GENERATED_SOURCES)
+        and "SPDX-License-Identifier: Apache-2.0" not in (_REPO_ROOT / name).read_text(encoding="utf-8")[:2000]
+    ]
+    assert not missing, missing

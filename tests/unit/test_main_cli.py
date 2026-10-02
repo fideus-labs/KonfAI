@@ -390,6 +390,23 @@ main()
     assert "KonfAIWarning:" not in run.stderr
 
 
+def test_a_designed_refusal_exits_with_status_1_and_its_message(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """The exit-code contract of the CLI reference: a refusal ends the command with 1, message only."""
+    from konfai.utils.errors import ConfigError
+
+    def refused(**kwargs):
+        raise ConfigError("Nothing to run.", "Name a dataset.")
+
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    monkeypatch.setattr(evaluator_module, "evaluate", refused)
+    monkeypatch.setattr(sys, "argv", ["konfai", "EVALUATION"])
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+    assert exited.value.code == 1
+    err = capsys.readouterr().err
+    assert "[Config] Nothing to run." in err and "Traceback" not in err
+
+
 def test_an_interrupted_run_exits_with_the_interrupt_status(tmp_path: Path) -> None:
     """Ctrl+C ends the command with status 130, so ``konfai TRAIN && konfai PREDICTION`` stops there. In a
     subprocess: a KeyboardInterrupt the CLI let through would stop the test session itself."""
@@ -408,3 +425,47 @@ main()
     run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=300)
     assert run.returncode == 130, run.stderr
     assert "Manual interruption (Ctrl+C)" in run.stdout
+
+
+_REPO = Path(__file__).resolve().parents[2]
+_DOCUMENTED_COMMAND_SOURCES = (".claude/skills", "docs/source", "examples", "README.md")
+
+
+def _documented_konfai_commands() -> list[tuple[str, str]]:
+    """Every ``konfai``/``konfai-cluster`` line of a shell block in the Markdown docs and skills."""
+    commands = []
+    for source in _DOCUMENTED_COMMAND_SOURCES:
+        root = _REPO / source
+        for path in sorted(root.rglob("*.md") if root.is_dir() else [root]):
+            fence = None
+            pending = ""
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    fence = None if fence is not None else stripped[3:].strip()
+                    continue
+                if fence not in ("", "bash", "sh", "shell", "console"):
+                    continue
+                if pending or stripped.startswith(("konfai ", "konfai-cluster ")):
+                    pending += stripped.removesuffix("\\")
+                    if stripped.endswith("\\"):
+                        continue
+                    commands.append((f"{path.relative_to(_REPO)}:{number}", pending))
+                    pending = ""
+    return commands
+
+
+@pytest.mark.parametrize(("where", "command"), _documented_konfai_commands())
+def test_every_documented_konfai_command_parses(monkeypatch: pytest.MonkeyPatch, where: str, command: str) -> None:
+    """A command line the docs or skills show is accepted by the parser it names (nothing runs)."""
+    import shlex
+
+    argv = shlex.split(command, comments=True)
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(main_module, "_dispatch", lambda parser, args: None)
+    entry = main_module.cluster if argv[0] == "konfai-cluster" else main_module.main
+
+    try:
+        entry()
+    except SystemExit as exit:
+        assert exit.code == 0, f"{where}: {command}"

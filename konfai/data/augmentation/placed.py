@@ -221,4 +221,6 @@ class PlacedMask(DataAugmentation):
         )
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("PlacedMask has no inverse; do not use it for invertible TTA.")
+        raise AugmentationError(
+            "PlacedMask cannot be undone.", "Drop it from the test-time augmentations: their copies are undone."
+        )

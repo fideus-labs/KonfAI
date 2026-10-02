@@ -19,9 +19,8 @@
 Every other test pins a part: this one pins what a user gets. A four-case cohort, a two-class
 network of elementwise parameters (``tests/assets/Workflows/TinySeg.py``), one epoch of AdamW on a
 cross-entropy, then the checkpoint predicting label maps through Argmax. What holds it still: no
-validation split (drawn from the unseeded global RNG), no shuffle, no augmentation, ``manual_seed``,
-and a network whose forward is elementwise, so a value's result does not depend on the patch it
-arrives in.
+validation split, no shuffle, no augmentation, ``manual_seed``, and a network whose forward is
+elementwise, so a value's result does not depend on the patch it arrives in.
 
 CPU only. A GPU's kernels do not reproduce these bits, and a seed is not portable across devices.
 

@@ -48,6 +48,7 @@ from konfai.data.transform import (
     PatchLocality,
     Permute,
     RegionContext,
+    Resample,
     Standardize,
     TensorCast,
     Transform,
@@ -301,6 +302,39 @@ def test_dataset_iter_streams_patch_reads_when_cache_disabled(streaming_dataset_
     assert dataset_stub.patch_reads == 1
     assert manager.loaded is False
     np.testing.assert_array_equal(sample.numpy(), volume[:, 0:2, 2:4])
+
+
+def _halo_patch() -> DatasetPatch:
+    patch = DatasetPatch([2, 2, 2], overlap=0)
+    patch.pad_to_patch, patch.halo = False, 1
+    return patch
+
+
+@pytest.mark.parametrize(
+    ("patch", "transforms", "is_input", "expected"),
+    [
+        (_halo_patch(), [], True, ["a 1-voxel halo"]),
+        (DatasetPatch([1, 4, 4], overlap=0, extend_slice=2), [], True, ["a 2.5D stack (extend_slice: 2)"]),
+        (DatasetPatch([1, 4, 4], overlap=0, extend_slice=2), [], False, []),
+        (DatasetPatch([2, 2, 2], overlap=0), [Resample(shape=[6, 6, 6])], True, ["'Resample'"]),
+    ],
+    ids=["halo", "2.5D-input", "2.5D-target", "resample"],
+)
+def test_the_widenings_of_a_streamed_read_are_named_from_the_grid_and_the_plans(
+    streaming_dataset_stub, patch: DatasetPatch, transforms: list[Transform], is_input: bool, expected: list[str]
+) -> None:
+    manager = DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=cast(Dataset, streaming_dataset_stub(np.zeros((1, 4, 4, 4), dtype=np.float32))),
+        patch=patch,
+        transforms=transforms,
+        data_augmentations_list=[],
+    )
+
+    assert manager.streamed_read_widenings(0, is_input, True) == expected
 
 
 def test_dataset_iter_streams_base_patch_when_augmentations_are_disabled(streaming_dataset_stub) -> None:

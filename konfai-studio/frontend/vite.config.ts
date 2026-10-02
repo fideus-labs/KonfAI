@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -10,6 +12,8 @@ export default defineConfig({
   build: {
     outDir: "../konfai_studio/web",
     emptyOutDir: false, // keep konfai-logo.png next to the built index.html
+    // The bundles carry third-party code whose licences ask for their notice in every copy.
+    license: { fileName: "THIRD_PARTY_LICENSES.md" },
   },
   server: {
     port: 5173,

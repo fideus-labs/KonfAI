@@ -11,7 +11,6 @@ faster path that changes a voxel is a regression.
 2. **Byte-identity first.** A/B against the relevant kill-switch and require **0 mismatched voxels + identical
    geometry** before reading any timing:
    - `KONFAI_STREAMED_WRITES=0`: streamed vs whole-volume writer (the general control).
-   - `KONFAI_STREAM_LINEAR_RESAMPLE=0`: bit-exact linear resample inverse (streaming trades a few ulp).
    - Confirm the path actually streamed via the writer fingerprint (a streamed MetaImage sink omits
      `CenterOfRotation`): this defeats the "silently disabled → trivially equal" false pass.
 3. **Measure memory.** Peak host RSS over the process tree and peak VRAM (`nvml` `memory.used` over baseline,
@@ -28,26 +27,24 @@ Reference bench data and harness notes live in `.audit-local/` (git-ignored) fro
 
 ## Release gate
 
-Versions are tag-derived (`setuptools_scm`, `^v(?P<version>.*)$`) for konfai / konfai-apps / konfai-mcp: **never hand-edit a version**. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core+apps+mcp)
-→ build the 8-package matrix → publish via OIDC → build Docker once konfai is on PyPI. The `apps/*` bundles
-pin `konfai==` and `konfai-apps==` the same version, so the matrix releases in lockstep.
+Versions are tag-derived (`setuptools_scm`, `^v(?P<version>.*)$`) for every package: **never hand-edit a
+version**. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core+apps+mcp+studio) → build the
+9-package matrix (konfai, konfai-apps, konfai-mcp, konfai-studio and the 5 `apps/*` bundles) → publish via
+OIDC → build Docker once konfai is on PyPI. The `apps/*` bundles pin `konfai==` and `konfai-apps==`, and
+konfai-studio pins `konfai-mcp==`, all the same version, so the matrix releases in lockstep (AGENTS.md §6b).
 
 Before tagging:
 
-1. `pixi run check` green (lint + format-check + core + apps).
+1. `pixi run check` green (lint + format-check + core + apps; the core tests include the wheel tests of step 4).
 2. Both sibling suites green: `pip install -e ./konfai-mcp && pixi run --environment dev python -m pytest konfai-mcp/tests`,
    and the apps suite.
 3. `pixi run --environment dev typecheck` clean.
-4. **`python scripts/check_release_ready.py`**: the CI gate tests the *source tree*; this tests the *wheel*
-   (a clean non-editable install), which is what users receive. It builds the konfai wheel, installs it in a
-   fresh venv, and asserts: `import konfai`, the `konfai`/`konfai-cluster` entry points, `default|UNet.yml`
-   builds, `konfai.models.python.*` imports, the wheel ships ≥16 `models/python` files + 14 catalog `.yml`,
-   and no hyphenated sibling leaked in. This catches the PEP 420 / `package-data` breakage an editable
-   install hides.
+4. **`pytest tests/unit/test_packaging.py -m slow`**: tests the *wheel* (a clean non-editable install),
+   which is what users receive, where the rest of the suite tests the source tree. It builds the konfai wheel
+   (or takes the one `KONFAI_WHEEL` names), checks it ships every `models/python` file and catalog `.yml` of
+   the tree and no sibling package, installs it in a fresh venv, and checks that `konfai` and
+   `konfai.models.python` import from there and `konfai --version` answers. This catches the PEP 420 /
+   `package-data` breakage an editable install hides; CI's build job runs it on the wheel it built.
 5. If you touched a public symbol, grep the SlicerKonfAI / SlicerImpactReg checkouts and confirm the contract
    tests still pass (see SKILL.md → ecosystem compatibility).
 6. HF bundle staging: confirm the published bundles carry the checkpoints they reference before the tag.
-
-Known gap to close in CI itself (not just this local gate): wire the wheel-content assertion into
-`publish.yml`'s build job so a packaging regression fails the release instead of shipping green. CI installs
-editable, which hides PEP 420 / package-data breakage.

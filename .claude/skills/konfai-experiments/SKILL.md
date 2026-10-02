@@ -45,16 +45,18 @@ the discovery steps only when the dataset and task are already understood.
 4. `initialize_session(from_example=..., workflows=[...])`: create the sandboxed workspace, seeding configs from a template. Everything else resolves paths against this session.
 5. If a config will reference a **local** `Model:X` / `Loss:X`, `write_session_file` that `.py` **before** validating or running: otherwise validation blocks on a missing local component.
 6. Resolve every object name before writing it: `list_components` (what exists) → `inspect_object_signature` / `describe_config_schema` (how to configure it).
-7. `write_workflow_config(workflow, content)` for each of `train` / `prediction` / `evaluation`. The root key (`Trainer`/`Predictor`/`Evaluator`) is validated on write.
+7. `write_workflow_config(workflow, content)` for each of `train` / `prediction` / `evaluation` / `transform`. The root key (`Trainer`/`Predictor`/`Evaluator`/`Transformer`) is validated on write.
 
 **Validate: always, before every run**
 8. `review_config_semantics`: cheap static check; clear all `blocking_issues`.
-9. `validate_config_semantics(workflow, level="instantiate")`: instantiates KonfAI objects to catch runtime errors. **Side-effect-free on your authored config** (validates on a snapshot, restores your file). Use `workflow="all"` to check every config at once.
+9. `validate_config_semantics(workflow, level="instantiate")`: instantiates KonfAI objects to catch runtime errors. **Side-effect-free on your authored config** (it reads a scratch copy beside it, never your file). Use `workflow="all"` to check every config at once.
 
 **Run: destructive; commits real compute (get human OK first, see below)**
 10. `run_train` → then `wait_for_job` (**omit `timeout_s`** for real multi-hour runs) and/or `read_live_metrics` to watch progress.
 11. `run_prediction` → `wait_for_job`. Needs a checkpoint from a finished train; it does not look outside the session.
 12. `run_evaluation` → `wait_for_job`. Needs prediction artifacts to exist first.
+
+Dataset preparation (`Transform.yml`, root `Transformer:`) sits outside that loop: `plan_transform` first (the dry run, which names each case's verdict), then `run_transform` → `wait_for_job`, then `inspect_dataset` on what it wrote.
 
 **Compare & iterate**
 13. `summarize_session`: one compact snapshot (readiness, latest job, metrics, next actions).
@@ -76,14 +78,16 @@ Most payloads carry a `next_actions` list: follow it instead of guessing the nex
   workspace) and warrant the same confirmation.
 - **One active job per session.** A second launch while one is queued/running raises. Serialize
   and `wait_for_job` first (or use a separate session).
-- **A `wait_for_job` timeout is not a failure**: it raises `TimeoutError`; re-poll or raise the
-  timeout. For real training, pass no `timeout_s` at all.
+- **A `wait_for_job` timeout is not a failure**: it returns the job's current status with
+  `timed_out=true`; wait again. For real training, pass no `timeout_s` at all.
 - **On any non-`done` terminal status** (`error` / `killed`), read `job://<id>/log` for the
   cause and `job://<id>/manifest` for the exact config snapshot, then `validate_config_semantics`
-  → fix → retry. A server restart reports previously-running jobs as `error`/`recovered`: relaunch them.
+  → fix → retry. After a server restart a job whose process still lives stays `running` with
+  `recovered=true` (still watched and cancellable); one whose process is gone reports `error` with
+  `recovered=true`: relaunch it.
 - **Reading a config mutates it.** KonfAI writes resolved defaults back to disk on load: so
   after a run the on-disk YAML is the fully-resolved snapshot. `validate_config_semantics` is the
-  deliberate exception (snapshot + restore).
+  deliberate exception (it reads a scratch copy beside your config).
 - **Trust model.** Validation and runs **import the workspace's `.py` files** and can pip-install
   dependencies. Only validate/run configs and code you trust. Vet external libraries with
   `check_external_dependency` before referencing `package.module:Class` in YAML.
@@ -91,9 +95,10 @@ Most payloads carry a `next_actions` list: follow it instead of guessing the nex
 ## Reference material (load on demand)
 
 - [references/tool-reference.md](references/tool-reference.md): every tool/prompt/resource, generated from the registry (`python konfai-mcp/scripts/generate_tool_reference.py`).
-- [references/config-authoring.md](references/config-authoring.md): writing KonfAI YAML: the three files, root keys, classpath resolution, conventions.
+- [references/config-authoring.md](references/config-authoring.md): writing KonfAI YAML: the four files, root keys, classpath resolution, conventions.
 - [references/troubleshooting.md](references/troubleshooting.md): symptom → tool recovery map, job lifecycle, validation quirks.
 - [references/resources-and-clients.md](references/resources-and-clients.md): resources, env vars, and wiring the server into Claude Code / Codex.
+- [The glossary](https://konfai.readthedocs.io/en/latest/reference/glossary.html): the words with two meanings (a criterion's integer `group` against a dataset group, fold, worker, workspace, bundle).
 
 ## Not in scope
 

@@ -47,6 +47,7 @@ from konfai.data.sampling import _apply, _displacement_at, _to_index, nearest_in
 from konfai.data.transform import LocalityKind, PatchLocality, RegionContext
 from konfai.data.transform.shape import _has_geometry, _record_remap_geometry
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import AugmentationError
 
 
 def _carry_spacing(attribute: Attribute, remap: AxisRemap) -> None:
@@ -530,6 +531,11 @@ class Flip(DataAugmentation):
 class Permute(DataAugmentation):
     def __init__(self, prob_permute: list[float] | None = [0.5, 0.5]) -> None:
         super().__init__()
+        if prob_permute and len(prob_permute) != 2:
+            raise AugmentationError(
+                f"Permute.prob_permute takes two probabilities, one per axis swap; got {prob_permute}.",
+                "Give two values, or none to apply each swap to one of exactly two copies.",
+            )
         self._permute_dims = torch.tensor([[0, 2, 1, 3], [0, 3, 1, 2]])
         self.prob_permute = prob_permute
         self.permute: dict[int, torch.Tensor] = {}
@@ -538,16 +544,18 @@ class Permute(DataAugmentation):
         if len(shapes):
             dim = len(shapes[0])
             if dim != 3:
-                raise ValueError("The permute augmentation only support 3D images")
+                raise AugmentationError(f"Permute swaps the axes of a 3D volume; this case has {dim} spatial axes.")
             if self.prob_permute:
-                if len(self.prob_permute) != 2:
-                    raise ValueError("Size of prob_permute must be equal 2")
                 self.permute[index] = torch.rand((len(shapes), len(self.prob_permute))) < torch.tensor(
                     self.prob_permute
                 )
             else:
                 if len(shapes) != 2:
-                    raise ValueError("The number of augmentation images must be equal to 2")
+                    raise AugmentationError(
+                        f"Permute without prob_permute applies each of its two axis swaps to one copy, so it "
+                        f"needs 2 copies; got {len(shapes)}.",
+                        "Set nb to 2, or give prob_permute two probabilities.",
+                    )
                 self.permute[index] = torch.eye(2, dtype=torch.bool)
             for i in range(len(shapes)):
                 shapes[i] = remap_shape(shapes[i], self._axis_remap(index, i))
@@ -739,4 +747,6 @@ class Elastix(DataAugmentation):
         return self._warp(stage, grid, tensor, tuple(context.source), tuple(context.target))
 
     def _inverse(self, index: int, a: int, tensor: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("Elastix augmentation has no inverse; do not use it for invertible TTA.")
+        raise AugmentationError(
+            "Elastix cannot be undone.", "Drop it from the test-time augmentations: their copies are undone."
+        )

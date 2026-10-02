@@ -25,7 +25,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any, TypeAlias
 
 import torch
-import tqdm
 from torch.cuda import device_count
 from torch.utils import data
 
@@ -38,7 +37,14 @@ from konfai.data.patching.manager import STATISTIC_AFTER_A_VALUE_CHANGE
 from konfai.utils.budget import per_rank_budget_bytes
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import CaseReadError, KonfAIError
-from konfai.utils.runtime import get_cpu_info, get_memory, get_memory_info, memory_forecast, return_freed_heap
+from konfai.utils.runtime import (
+    ProgressBar,
+    get_cpu_info,
+    get_memory,
+    get_memory_info,
+    memory_forecast,
+    return_freed_heap,
+)
 from konfai.utils.utils import OverlapSpec
 
 
@@ -59,12 +65,18 @@ def _cache_worker_count(cpu_count: int, device_count: int, case_bytes: float = 0
     return max(1, min(cores, int(budget / case_bytes)))
 
 
-#: Said once per process: a chain that cannot serve a region costs a whole case per patch, and the
+#: Said once per run: a chain that cannot serve a region costs a whole case per patch, and the
 #: reader needs the refusing stage named once, not once per item.
 _said_why_a_case_is_materialized = False
 
-#: Said once per process, beside it: what a streamed case costs in reads of its own voxels.
+#: Said once per run, beside it: what a streamed case costs in reads of its own voxels.
 _said_what_streaming_reads = False
+
+
+def forget_explanations() -> None:
+    """Let the next run of this process explain its cases again."""
+    global _said_why_a_case_is_materialized, _said_what_streaming_reads
+    _said_why_a_case_is_materialized = _said_what_streaming_reads = False
 
 
 @dataclass(frozen=True)
@@ -345,7 +357,7 @@ class DatasetIter(data.Dataset):
         raise the first failure with the worker's traceback."""
         if not work:
             return
-        pbar = tqdm.tqdm(total=len(work), desc=describe(0), leave=False)
+        pbar = ProgressBar(total=len(work), desc=describe(0), leave=False)
         threads = _cache_worker_count(os.cpu_count() or 1, device_count(), self._fill_case_bytes())
         executor = ThreadPoolExecutor(max_workers=threads)
         futures = [executor.submit(run, item) for item in work]
@@ -411,7 +423,7 @@ class DatasetIter(data.Dataset):
         return self.data[group_dest][index].unload()
 
     def _say_why_a_case_is_materialized(self, case: int, a: int) -> None:
-        """Name the stage that costs a case its whole volume, once per process.
+        """Name the stage that costs a case its whole volume, once per run.
 
         The check above has already resolved the plan, so the refusal is read from it rather than
         asked for: naming it costs a dictionary lookup, and the flag makes it one boolean test per
@@ -436,12 +448,13 @@ class DatasetIter(data.Dataset):
                 )
 
     def _say_what_streaming_reads(self, case: int, a: int) -> None:
-        """Say what a streamed case costs in reads, once per process.
+        """Say what a streamed case costs in reads, and what widens them, once per run.
 
-        A patch pulls the window its chain needs, not the patch: a resample widens it on every axis
-        and a 2.5D stack widens it again, so a case can be read many times over in one pass. Nothing
-        refuses on the figure, because materializing the case instead is what a shuffled order over a
-        cohort makes expensive. It is said so a reader can act on the budget, the patch or the chain.
+        A patch pulls the window its chain needs, not its slot: overlapping slots, a halo, a 2.5D stack
+        and a stage pulling a wider window (a resample) each widen it, so a case can be read many times
+        over in one pass. Nothing refuses on the figure, because materializing the case instead is what
+        a shuffled order over a cohort makes expensive. It is said so a reader can act on the budget,
+        the patch or the chain.
         """
         global _said_what_streaming_reads
         _said_what_streaming_reads = True
@@ -450,14 +463,19 @@ class DatasetIter(data.Dataset):
             factor = manager.streamed_read_amplification(a, chain.is_input, self.apply_augmentations)
             if factor is None or factor < 2.0:
                 continue
-            print(
-                f"[KonfAI] {group_dest}: streaming reads this case {factor:.1f} times over per pass."
-                " A resample and a 2.5D stack each widen what a patch pulls. A 'shuffle_window' keeps"
-                " a few cases under the reader, so neighbouring patches fall on windows already in"
-                " hand, and it draws a batch from those cases rather than from the cohort; a larger"
-                " patch, a coarser target spacing or a budget that fits the case cost nothing in how"
-                " the batches are drawn."
+            widenings = manager.streamed_read_widenings(a, chain.is_input, self.apply_augmentations)
+            cause = f" What widens a patch's read: {', '.join(widenings)}." if widenings else ""
+            # A one-pass workflow reads each case once, in order: only training draws its batches from
+            # a window of cases.
+            advice = (
+                " A larger patch or a budget that fits the case reads it fewer times."
+                if self.single_pass
+                else " A 'shuffle_window' keeps a few cases under the reader, so neighbouring patches fall"
+                " on windows already in hand, and it draws a batch from those cases rather than from the"
+                " cohort; a larger patch, a coarser target spacing or a budget that fits the case cost"
+                " nothing in how the batches are drawn."
             )
+            print(f"[KonfAI] {group_dest}: streaming reads this case {factor:.1f} times over per pass.{cause}{advice}")
 
     def _declare_case_reads(self, index: int) -> None:
         """Tell each group's store the patches this process will read of the case ``index`` enters,

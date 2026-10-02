@@ -458,7 +458,7 @@ def _run_execute(monkeypatch, obj):
 
 
 def test_execute_seeds_parent_before_setup(monkeypatch):
-    """The parent process (which runs the train/val split) must be seeded."""
+    """The parent process is seeded before ``setup``: two runs with one seed draw the same there."""
 
     recorded = []
 
@@ -1083,10 +1083,23 @@ def test_cpu_thread_budget_is_applied_once_per_process(monkeypatch) -> None:
     assert calls == [12]
 
 
-def test_cpu_thread_budget_skips_macos(monkeypatch) -> None:
+def test_cpu_thread_budget_leaves_torch_alone_on_macos(monkeypatch) -> None:
     """On macOS set_num_threads intermittently crashes libomp once any parallel region ran (CI
-    SIGSEGV, whichever workflow called it first); the default stays."""
-    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None, platform="darwin") == []
+    SIGSEGV, whichever workflow called it first): torch keeps its default. ITK and zarr, which
+    that crash does not concern, still take the rank's share, or N ranks each use every core."""
+    sitk = pytest.importorskip("SimpleITK")
+    zarr = pytest.importorskip("zarr")
+    before = sitk.ProcessObject.GetGlobalDefaultNumberOfThreads()
+    concurrency = zarr.config.get("async.concurrency") if hasattr(zarr, "config") else None
+    try:
+        assert _budget_applied(monkeypatch, cores=24, ranks="4", omp=None, platform="darwin") == []
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 6
+        if concurrency is not None:
+            assert zarr.config.get("async.concurrency") == 4
+    finally:
+        sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(before)
+        if concurrency is not None:
+            zarr.config.set({"async.concurrency": concurrency})
 
 
 @pytest.mark.parametrize("cores,expected", [(24, 8), (12, 4), (4, 4), (2, 2), (1, 1)])

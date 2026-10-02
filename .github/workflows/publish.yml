@@ -155,13 +155,15 @@ jobs:
       - name: Verify the studio wheel ships the built front
         # web/ is non-Python payload swept in by package-data at build time: a setuptools or glob
         # regression would publish a wheel whose UI is an empty directory, and nothing else fails.
+        # THIRD_PARTY_LICENSES.md is the notice of the bundled npm packages (vite.config.ts).
         if: matrix.name == 'konfai-studio'
         run: |
           python -c "
           import glob, sys, zipfile
           names = zipfile.ZipFile(glob.glob('konfai-studio/dist/*.whl')[0]).namelist()
-          ok = 'konfai_studio/web/index.html' in names and any(n.startswith('konfai_studio/web/assets/') for n in names)
-          sys.exit(0 if ok else 'the studio wheel is missing konfai_studio/web/index.html or assets/')
+          ok = {'konfai_studio/web/index.html', 'konfai_studio/web/THIRD_PARTY_LICENSES.md'} <= set(names)
+          ok = ok and any(n.startswith('konfai_studio/web/assets/') for n in names)
+          sys.exit(0 if ok else 'the studio wheel is missing web/index.html, web/THIRD_PARTY_LICENSES.md or assets/')
           "
 
       - name: Upload dist

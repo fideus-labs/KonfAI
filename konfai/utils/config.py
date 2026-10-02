@@ -96,14 +96,26 @@ def _load_tree(filename: Path | str) -> dict:
     return {} if tree is None else tree
 
 
+def _line_ending(path: Path) -> str | None:
+    """The line ending ``path`` is written with; ``None`` (the platform's) for a file with no line yet."""
+    try:
+        with open(path, "rb") as stream:
+            line = stream.readline()
+    except OSError:
+        return None
+    if line.endswith(b"\r\n"):
+        return "\r\n"
+    return "\n" if line.endswith(b"\n") else None
+
+
 def _write_tree(target: Path, tree: dict) -> None:
     """Write TREE to TARGET atomically (a sibling temp file, then ``os.replace``); a concurrent reader
-    never observes it truncated. A file the writer owns keeps its group and mode."""
+    never observes it truncated. A file the writer owns keeps its group, its mode and its line ending."""
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     before = target.stat() if target.exists() else None
     try:
         try:
-            with open(tmp, "w", encoding="utf-8") as yml:
+            with open(tmp, "w", encoding="utf-8", newline=_line_ending(target)) as yml:
                 yaml.dump(tree, yml)
         except OSError as error:
             raise ConfigError(

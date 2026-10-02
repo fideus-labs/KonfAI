@@ -30,21 +30,30 @@ in place. Two stages of the same class in one chain spell the second one module-
 ## The contract, and how it differs from the CLI
 
 - **A designed refusal raises** `KonfAIError`: the message and the remedy are the exception; the
-  caller decides. Only the entrypoints the `konfai` and `konfai-apps` commands call
-  (`konfai.trainer.train`, `konfai.predictor.predict`, ...) catch it and exit.
+  caller decides. Only the `konfai` and `konfai-apps` commands catch it and exit.
 - **Results come back structured**: `transform` returns the `outputs.json` destinations and the
   workspace; `evaluate` returns the parsed `Metric_*.json` as a dict.
-- **The process is left as found**: the `KONFAI_*` environment and the per-rank memory budget a
-  run publishes are restored around every call, so one call's `memory_budget` never sizes the
-  next, and one workflow runs at a time per process: a second concurrent call is refused with the
-  remedy (subprocesses), never allowed to corrupt the first. Each call reads a DICOM series as it is
-  when the call starts: a series another tool rewrote in place since the previous call is read afresh.
+- **What a call restores**: the `KONFAI_*` environment and the per-rank memory budget a run
+  publishes are restored around every call, so one call's `memory_budget` never sizes the next,
+  and one workflow runs at a time per process: a second concurrent call is refused with the remedy
+  (subprocesses), never allowed to corrupt the first. Each call reads a DICOM series as it is when
+  the call starts: a series another tool rewrote in place since the previous call is read afresh.
+- **What a call leaves set for the process**: the first call sizes ITK's thread pool, zarr's
+  asynchronous concurrency and, except on macOS, torch's thread pool (at most 12 threads, unless
+  `OMP_NUM_THREADS` is set), once for the life of the process: resizing torch's pool after parallel
+  work has run can crash the OpenMP runtime. Every call switches `torch.multiprocessing` to the
+  `file_system` sharing strategy, and on Linux a call may pin glibc's mmap threshold so that a
+  freed volume goes back to the system.
 - **A local module resolves as on the CLI**: the working directory is on `sys.path` for the whole
   call, so `Model:UNet` finds `./Model.py` wherever the calling script lives. It is searched last: a
   module the calling script already reaches is not replaced by a namesake in the working directory.
 - **`gpu=[...]` names the ids the CLI's `--gpu` takes**: when `CUDA_VISIBLE_DEVICES` is set, an id
   it does not list is refused before the run starts. Unset, the ids are not checked: counting the
   devices would initialize CUDA before the run selects its GPU.
+- **A script runs the workflow under `if __name__ == "__main__":`.** The processes a run starts
+  are fresh interpreters that import the script: the ranks of a run on several processes, and on
+  macOS and Windows the data loader's workers. Unguarded, each of them starts the workflow again
+  and the run fails.
 - **The record remains.** Every call materializes the resolved YAML in the run's workspace:
   promoting a notebook run to a versioned experiment is copying `result.config`: nothing to
   rewrite, and the run stays resumable like any other.

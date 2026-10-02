@@ -21,7 +21,7 @@ import os
 import random
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
@@ -500,14 +500,14 @@ class Data(DataSources):
         }
         if resolved_num_workers > 0:
             self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
-            # Persistent workers hold a fork-time copy of the dataset and never see the per-epoch
+            # Persistent workers keep the copy of the dataset they started with and never see the per-epoch
             # redraw, so inline augmentations freeze; an explicit persistent_workers=True cannot win.
             inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
             if inline_augmentation_active:
                 if self._persistent_workers:
                     warnings.warn(
                         "persistent_workers=True is dropped: inline augmentations redraw once per epoch and a"
-                        " persistent worker holds a fork-time copy that never sees the redraw. Set"
+                        " persistent worker keeps the copy it started with, which never sees the redraw. Set"
                         " inline_augmentations=False to keep the workers alive across epochs.",
                         KonfAIWarning,
                         stacklevel=2,
@@ -681,6 +681,17 @@ class Data(DataSources):
     @staticmethod
     def _get_nb_augmentation(data_augmentations_list: list[DataAugmentationsList]) -> int:
         return max(int(np.sum([data_augmentation.nb for data_augmentation in data_augmentations_list]) + 1), 1)
+
+    def leave_out(self, training: Collection[str], validation: Collection[str]) -> None:
+        """Drop the named cases of each partition from its mapping before :meth:`get_data` shards it:
+        the cases a resumed run already finished, which are then never read. A partition this leaves
+        empty is still walked."""
+        self._prepared_mapping = [
+            entry for entry in self._prepared_mapping if self.case_names[entry[0]] not in training
+        ]
+        self._prepared_validation_mapping = [
+            entry for entry in self._prepared_validation_mapping if self._validation_names[entry[0]] not in validation
+        ]
 
     def _get_validation_mapping(self) -> list[tuple[int, int, int]]:
         if self.validation_augmentations:
@@ -1034,8 +1045,8 @@ class Data(DataSources):
         train_mappings = Data._split(self._prepared_mapping, world_size)
         validate_shards = Data._split_validation(self._get_validation_mapping(), world_size, self.batch_size)
         # Every rank walks the validation split, an empty shard included: its gather is collective. A
-        # split whose every case was set aside at selection is walked too, so it is reported.
-        has_validation = any(shard for shard, _ in validate_shards) or bool(self.unreadable[1])
+        # split whose every case was set aside at selection, or left out, is walked too, so it is reported.
+        has_validation = bool(self._validation_names) or bool(self.unreadable[1])
         for i, (train_mapping, (validate_mapping, _)) in enumerate(zip(train_mappings, validate_shards, strict=False)):
             self.data.append([])
             self.mapping.append([])
@@ -1202,9 +1213,9 @@ class DataMetric(Data):
     Evaluation never exposes a patch: each run sizes its own from ``memory_budget`` (a missing key
     means ``"auto"``). A case that fits the budget is evaluated whole; one that does not is cut into
     the largest DISJOINT patches that fit (overlap 0, no padding) and the reducible metrics combine
-    their running partials into the exact whole-case value. A metric scoring through a window
-    declares a halo, and every patch is read that much wider than its slot. The sizing is disabled
-    when any metric is not reducible.
+    their running partials into the whole-case value, to float32 rounding. A metric scoring through
+    a window declares a halo, and every patch is read that much wider than its slot. The sizing is
+    disabled when any metric is not reducible.
     """
 
     _reads_each_case_once = True
@@ -1285,7 +1296,7 @@ class DataMetric(Data):
         print(
             f"[KonfAI] memory_budget: worst case '{worst}' "
             f"({channels_by_name[worst]}ch x {extent}) exceeds the budget -> "
-            f"evaluating in disjoint patches of {core} (overlap 0){read}, metrics combined exactly."
+            f"evaluating in disjoint patches of {core} (overlap 0){read}, metrics combined from running sums."
         )
 
     def prepare(self) -> None:

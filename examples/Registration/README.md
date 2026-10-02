@@ -72,8 +72,8 @@ which the declarative YAML builder (a feed-forward `add_module` graph over curat
 types) cannot express. Custom-`forward` models (registration warps, diffusion samplers,
 adversarial loops) stay in Python; standard feed-forward graphs can be YAML.
 
-> `VoxelMorph` currently supports `dim: 2` only (its warping components are 2D-hardcoded),
-> so this example is slice-wise. Keep `shape` equal to the `(Y, X)` size of the training patch.
+> This example is slice-wise (`dim: 2`); `VoxelMorph` also registers volumes with `dim: 3` and a
+> three-axis `shape`. Keep `shape` equal to the spatial size of the training patch, `(Y, X)` here.
 
 ## Dataset
 
