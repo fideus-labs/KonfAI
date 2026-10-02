@@ -65,6 +65,8 @@ def main() -> None:
     # The app is imported by uvicorn from a string, so it cannot read these arguments. /api/quit
     # needs to know whether the peer it sees was rewritten from X-Forwarded-For or is a proxy's.
     os.environ["KONFAI_STUDIO_PROXY_HEADERS"] = "1" if args.proxy_headers else "0"
+    # Without a token, a loopback server answers only to loopback names (DNS rebinding).
+    os.environ["KONFAI_STUDIO_LOOPBACK"] = "1" if loopback else "0"
     uvicorn.run(
         "konfai_studio.server:app",
         host=args.host,

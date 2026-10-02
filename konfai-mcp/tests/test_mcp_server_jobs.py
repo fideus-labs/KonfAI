@@ -20,6 +20,7 @@ import json
 import multiprocessing
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -28,6 +29,7 @@ from types import ModuleType
 from typing import Any, cast
 
 import fastmcp
+import psutil
 import pytest
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -166,6 +168,95 @@ def test_cancel_reaps_the_whole_process_group_including_grandchildren(tmp_path: 
                     os.kill(pid, signal.SIGKILL)
                 except OSError:
                     pass
+
+
+class _WindowsView(ModuleType):
+    """A module as Windows exposes it: ``overrides`` replace attributes, ``missing`` ones do not exist."""
+
+    def __init__(self, real: ModuleType, overrides: dict[str, Any], missing: tuple[str, ...] = ()) -> None:
+        super().__init__(real.__name__)
+        self._real, self._overrides, self._missing = real, overrides, missing
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._missing:
+            raise AttributeError(f"module {self._real.__name__!r} has no attribute {name!r}")
+        return self._overrides[name] if name in self._overrides else getattr(self._real, name)
+
+
+def _jobs_as_on_windows(
+    monkeypatch: pytest.MonkeyPatch, *, console: bool, terminate: Callable[[int], None]
+) -> ModuleType:
+    """server_jobs with CPython's Windows ``os.kill``: signals 0 and 1 are CTRL_C_EVENT/CTRL_BREAK_EVENT,
+    sent by GenerateConsoleCtrlEvent (it succeeds whatever the pid from a console, and fails without
+    one); any other signal is TerminateProcess. ``signal`` has no SIGKILL there."""
+
+    def kill(pid: int, sig: int) -> None:
+        if sig in (0, 1):
+            if not console:
+                raise OSError(22, "The handle is invalid")
+            return
+        terminate(pid)
+
+    jobs = importlib.import_module("konfai_mcp.server_jobs")
+    monkeypatch.setattr(jobs, "os", _WindowsView(os, {"name": "nt", "kill": kill}, ("killpg", "setsid")))
+    monkeypatch.setattr(jobs, "signal", _WindowsView(signal, {}, ("SIGKILL", "SIGUSR1")))
+    return jobs
+
+
+def _record_running_job(layout: WorkspaceLayout, pid: int, created: float) -> None:
+    """A job.json left 'running' by a server that stopped while the job ran."""
+    job_dir = layout.job_dir("orphan")
+    job_dir.mkdir(parents=True)
+    record = json.loads(_persisted_job_record("orphan", "running", layout.root / "Config.yml"))
+    record.update(pid=pid, proc_create_time=created, log_path=str(job_dir / "job.log"))
+    layout.job_state_path("orphan").write_text(json.dumps(record), encoding="utf-8")
+
+
+def _sleeper() -> tuple[subprocess.Popen[bytes], float]:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    return proc, psutil.Process(proc.pid).create_time()
+
+
+def test_on_windows_a_job_that_died_with_the_server_is_not_recovered_as_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From a console, os.kill(pid, 0) succeeds for any pid: taken as a liveness probe it kept a dead job
+    'running' for good, holding its devices against every later launch."""
+    jobs = _jobs_as_on_windows(monkeypatch, console=True, terminate=lambda pid: None)
+    proc, created = _sleeper()
+    proc.kill()
+    proc.wait()
+    layout = WorkspaceLayout(tmp_path)
+    layout.ensure_session_workspace()
+    _record_running_job(layout, proc.pid, created)
+
+    registry = jobs.JobRegistry({"queued", "running"}, workspace_layout=layout)
+
+    assert registry.get("orphan").status == "error"
+
+
+def test_on_windows_cancel_answers_when_the_process_outlives_the_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past its wait, cancel forces the stop with SIGKILL, which Windows does not define."""
+
+    def refused(pid: int) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    jobs = _jobs_as_on_windows(monkeypatch, console=True, terminate=refused)
+    proc, created = _sleeper()
+    try:
+        layout = WorkspaceLayout(tmp_path)
+        layout.ensure_session_workspace()
+        _record_running_job(layout, proc.pid, created)
+        registry = jobs.JobRegistry({"queued", "running"}, workspace_layout=layout)
+
+        payload = registry.cancel("orphan", lambda value: None, wait_s=0.2)
+
+        assert payload["status"] == "running"  # it could not be stopped, and says so
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def test_dataloader_worker_death_gets_actionable_hint(tmp_path: Path) -> None:

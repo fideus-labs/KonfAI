@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import importlib.util
 import inspect
@@ -35,7 +36,7 @@ from typing import Any, Literal, get_args, get_origin
 
 import numpy as np
 import requests
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+from huggingface_hub import HfApi, constants, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.config import Choices, Range
@@ -43,6 +44,7 @@ from konfai.utils.errors import ConfigError
 from konfai.utils.utils import is_windows_absolute_path
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from ruamel.yaml import YAML
 
 from .errors import AppMetadataError, AppRepositoryError
@@ -116,47 +118,65 @@ def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str
     return [str(a) for a in apps]
 
 
-def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]:
-    """List app folders available inside a Hugging Face repository."""
-    api = HfApi()
-    app_names: list[str] = []
-    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+def _cache_name(repo_id: str) -> str:
+    """The folder the Hugging Face cache keeps ``repo_id`` in."""
+    return f"models--{repo_id.replace('/', '--')}"
 
-    if force_update:
-        try:
-            tree = api.list_repo_tree(repo_id=base_repo_id, revision=revision, repo_type="model")
-            for entry in tree:
-                app_name = Path(entry.path).name
-                if isinstance(entry, RepoFolder) and is_app_repo(
-                    LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, True)
-                ):
-                    app_names.append(app_name)
-            return app_names
-        except Exception as exc:
-            raise AppRepositoryError(
-                f"Failed to inspect Hugging Face repository '{repo_id}'. "
-                "Unable to list its tree and detect valid application folders. "
-                "Please check that the repository exists, that you have access to it, "
-                "that your authentication is valid, and that your internet connection is working.\n"
-                f"Original error: {exc}"
-            ) from exc
 
+def _apps_in(files: list[str]) -> list[str]:
+    """The folders holding an ``app.json``."""
+    return [path.split("/")[0] for path in files if PurePosixPath(path).parts[1:] == ("app.json",)]
+
+
+def _cached_apps(repo_id: str, revision: str | None) -> list[str] | None:
+    """The folders whose ``app.json`` the local cache holds at ``revision``, or ``None`` when it holds no snapshot."""
+    cache = Path(constants.HF_HUB_CACHE) / _cache_name(repo_id)
     try:
-        snapshot_dir = snapshot_download(
-            repo_id=base_repo_id,
-            repo_type="model",
-            local_files_only=True,
-            revision=revision,
-        )  # nosec B615
-        root = Path(snapshot_dir)
-        for path in root.iterdir():
-            if path.is_dir():
-                app_name = path.name
-                if is_app_repo(LocalAppRepositoryFromHF.get_filenames(repo_id, app_name, False)):
-                    app_names.append(app_name)
-        return app_names
-    except Exception:
-        return get_available_apps_on_hf_repo(repo_id, True)
+        commit: str | None = (cache / "refs" / (revision or "main")).read_text(encoding="utf-8").strip()
+    except OSError:
+        commit = revision  # a commit hash is its own revision
+    snapshot = cache / "snapshots" / (commit or "")
+    if not commit or not snapshot.is_dir():
+        return None
+    return sorted(path.name for path in snapshot.iterdir() if (path / "app.json").is_file())
+
+
+def get_available_apps_on_hf_repo(repo_id: str, force_update: bool = False) -> list[str]:
+    """List the app folders of a Hugging Face repository, and download each one's files but its checkpoints.
+
+    The Hub is asked once, for the repository's file list at the resolved revision. Offline, or when the Hub
+    cannot be reached, the apps the local cache holds are listed. ``force_update`` requires the Hub.
+    """
+    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+    failure: Exception | None = None
+    if not constants.HF_HUB_OFFLINE:
+        try:
+            files = [
+                sibling.rfilename for sibling in HfApi().model_info(base_repo_id, revision=revision).siblings or []
+            ]
+            apps = sorted(_apps_in(files))
+            if force_update or _cached_apps(base_repo_id, revision) != apps:
+                prefixes = tuple(f"{app}/" for app in apps)
+                small = [path for path in files if path.startswith(prefixes) and not path.endswith(".pt")]
+                snapshot_download(repo_id=base_repo_id, repo_type="model", revision=revision, allow_patterns=small)  # nosec B615
+            return apps
+        except Exception as exc:
+            failure = exc
+    cached = None if force_update else _cached_apps(base_repo_id, revision)
+    if cached is None:
+        raise AppRepositoryError(
+            f"Failed to inspect Hugging Face repository '{repo_id}'. Check that the repository exists, that you "
+            "have access to it and that your internet connection is working; offline, only cached apps are listed.\n"
+            f"Original error: {failure or 'HF_HUB_OFFLINE is set and nothing is cached'}"
+        ) from failure
+    return cached
+
+
+def get_downloaded_apps_on_hf_repo(repo_id: str) -> dict[str, str]:
+    """The apps of a Hugging Face repository the local cache holds, each with the reference that resolves it."""
+    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+    names = _cached_apps(base_repo_id, revision) or []
+    return {name: f"{base_repo_id}@{revision or 'main'}:{name}" for name in names}
 
 
 def is_app_repo(filenames: list[str]) -> bool:
@@ -516,7 +536,7 @@ class LocalAppRepository(AppRepositoryInfo):
         if self._patch_size is not None:
             return self._patch_size
         try:
-            filenames = self._all_repo_filenames()
+            filenames = self._get_filenames()
             path = self._download(self._require_repo_filename("Prediction.yml", filenames))
             with open(path) as file:
                 data = YAML().load(file)
@@ -761,7 +781,7 @@ class LocalAppRepository(AppRepositoryInfo):
         new local app runs with them as its defaults: the inference-side "save as a local app" that mirrors
         :meth:`install_fine_tune`. ``display_name`` renames the copy in ``app.json``.
         """
-        filenames = self._get_filenames()
+        filenames = self._all_repo_filenames()
         if not is_app_repo(filenames):
             raise AppRepositoryError(f"'{self._app_name}' is not a valid KonfAI app (no app.json); cannot export.")
         path.mkdir(parents=True, exist_ok=True)
@@ -853,7 +873,7 @@ class LocalAppRepository(AppRepositoryInfo):
         inference app reports False. Root-level membership on purpose: a nested ``x/Config.yml`` would
         match the basename fallback but fail fine-tune's flat lookup. Best-effort on error."""
         try:
-            return "Config.yml" in self._all_repo_filenames()
+            return "Config.yml" in self._get_filenames()
         except Exception:
             return False
 
@@ -948,7 +968,8 @@ class LocalAppRepository(AppRepositoryInfo):
             canonicalize_name(name) for name in ("torch", "torchvision", "torchaudio", "konfai", "konfai-apps")
         }
         with open(self._download(requirements_filename), encoding="utf-8") as file:
-            required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
+            # pip's comment rule: '#' at the start of a line or after whitespace.
+            required_lines = [line for line in (re.sub(r"(^|\s+)#.*$", "", raw).strip() for raw in file) if line]
         installed = {
             canonicalize_name(dist.metadata["Name"]): dist.version
             for dist in importlib.metadata.distributions()
@@ -1209,6 +1230,28 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
         self._apply_config_overrides(str(config), overrides)
 
 
+@functools.cache
+def _release_tag(repo_id: str) -> str | None:
+    """The bundle revision published for this konfai-apps, decided once per process: ``v<version>`` when this is
+    a release and ``repo_id`` carries that tag (downloaded already, or listed by the Hub), else ``None``
+    (``main``). A development build and an unreachable Hub take ``main``."""
+    try:
+        version = Version(importlib.metadata.version("konfai-apps"))
+    except (importlib.metadata.PackageNotFoundError, InvalidVersion):
+        return None
+    if version.is_devrelease or version.local:
+        return None
+    tag = f"v{version}"
+    if (Path(constants.HF_HUB_CACHE) / _cache_name(repo_id) / "refs" / tag).is_file():
+        return tag
+    if constants.HF_HUB_OFFLINE:
+        return None
+    try:
+        return tag if any(ref.name == tag for ref in HfApi().list_repo_refs(repo_id).tags) else None
+    except Exception:
+        return None
+
+
 class LocalAppRepositoryFromHF(LocalAppRepository):
     """KonfAI app repository backed by a Hugging Face model repository."""
 
@@ -1219,8 +1262,12 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
 
     @staticmethod
     def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:
+        """The repository and its revision: the one after ``@`` (``main`` is the default one), else the release
+        tag of this konfai-apps."""
         base_repo_id, _, revision = repo_id.partition("@")
-        return base_repo_id, revision or None
+        if revision:
+            return base_repo_id, revision if revision != "main" else None
+        return base_repo_id, _release_tag(base_repo_id)
 
     @staticmethod
     def _list_repo_tree(repo_id: str, app_name: str, recursive: bool = False) -> list[Any]:
@@ -1359,8 +1406,8 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         return LocalAppRepositoryFromHF.download(self._repo_id, filename, self._force_update)
 
     def get_app_filenames(self) -> list[str]:
-        """Return the app files as paths relative to the app folder."""
-        return self._get_filenames()
+        """Return the app files as paths relative to the app folder, downloaded or not."""
+        return self._all_repo_filenames()
 
     def download_files(self, filenames: list[str] | None = None, force_update: bool = True) -> list[Path]:
         """

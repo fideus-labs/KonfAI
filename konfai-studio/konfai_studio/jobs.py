@@ -114,6 +114,11 @@ def _pid_alive(pid: Any) -> bool:
         return False
     if value <= 0:
         return False
+    if os.name == "nt":
+        import psutil
+
+        # No /proc, and os.kill(pid, 0) sends CTRL_C_EVENT: it succeeds or fails whatever the pid.
+        return bool(psutil.pid_exists(value))
     # A crashed job whose parent-reaper died leaves a zombie: it has exited but still owns a pid, so both
     # os.kill(0) and psutil see it as "alive". On Linux read the state directly and treat 'Z' as dead.
     try:

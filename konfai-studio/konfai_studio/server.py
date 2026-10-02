@@ -1046,7 +1046,8 @@ async def quit_server(request: Request) -> dict[str, bool]:
 
     async def _after_reply() -> None:
         await asyncio.sleep(0.3)  # let this response leave before the shutdown begins
-        os.kill(os.getpid(), signal.SIGTERM)
+        # Raised in the process, it reaches uvicorn's handler; os.kill would be TerminateProcess on Windows.
+        signal.raise_signal(signal.SIGTERM)
 
     # Held: the loop keeps only a weak reference and would collect the task mid-sleep.
     _SHUTDOWN_TASKS.add(task := asyncio.get_running_loop().create_task(_after_reply()))
@@ -1058,11 +1059,20 @@ async def quit_server(request: Request) -> dict[str, bool]:
 async def app_icon(ref: str = Query(...)) -> FileResponse:
     """The app's own bundle icon (its ``icon.png`` / ``app.json``-declared icon file)."""
     try:
-        from konfai_apps.app_repository import AppRepositoryError, get_app_repository_info
+        from konfai_apps.app_repository import (
+            AppRepositoryError,
+            get_app_repository_info,
+            get_downloaded_apps_on_hf_repo,
+        )
     except ImportError as exc:  # pragma: no cover - konfai-apps not installed
         raise HTTPException(503, "konfai-apps is not installed") from exc
     try:
-        icon_path = get_app_repository_info(ref, force_update=False).get_icon_path()
+        resolved: str | None = ref
+        repo, _, name = ref.partition(":")
+        if ref.count(":") == 1 and "/" in repo and not Path(ref).expanduser().exists():
+            # A Hugging Face app, as the catalogue downloaded it: never read from the Hub in this route.
+            resolved = get_downloaded_apps_on_hf_repo(repo).get(name)
+        icon_path = get_app_repository_info(resolved, force_update=False).get_icon_path() if resolved else None
     except (AppRepositoryError, FileNotFoundError, OSError, ValueError) as exc:
         raise HTTPException(404, f"app '{ref}' has no icon") from exc
     if icon_path is None or not Path(icon_path).is_file():

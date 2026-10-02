@@ -152,9 +152,11 @@ async def tensorboard_link(session: str = Query("default")) -> dict[str, Any]:
     if not session_root.is_dir() or not any(session_root.glob("**/tb")):
         return {"ok": False, "detail": "no TensorBoard events yet: run a training first"}
     # Look next to the running interpreter first: the server is launched as a console script, so the env's
-    # bin dir may not be on PATH and shutil.which alone would miss it.
-    sibling = Path(sys.executable).with_name("tensorboard")
-    binary = str(sibling) if sibling.exists() else shutil.which("tensorboard")
+    # bin dir may not be on PATH and shutil.which alone would miss it. Not which(path=...): on Windows it
+    # searches the working directory first. A Windows console script carries the .exe suffix.
+    bin_dir = Path(sys.executable).parent
+    sibling = next((path for path in (bin_dir / "tensorboard", bin_dir / "tensorboard.exe") if path.is_file()), None)
+    binary = str(sibling) if sibling else shutil.which("tensorboard")
     if not binary:
         return {"ok": False, "detail": "tensorboard is not installed (pip install konfai[tensorboard])"}
     port = _free_port()

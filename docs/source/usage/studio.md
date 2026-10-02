@@ -134,3 +134,8 @@ unless you set an access token. To reach it over a network, set
 single-operator deployment guide (token auth, TLS with Caddy or nginx, a systemd
 unit, and the threat model) is in
 [`konfai-studio/docs/REMOTE.md`](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/docs/REMOTE.md).
+
+Without a token, a Studio bound to loopback answers only to `127.0.0.1`, `localhost`
+and `::1`: a request under any other name, such as a web page that points its own
+domain at your machine, gets a 400. Serving Studio under another name, through a
+proxy or a forwarded port, needs `KONFAI_STUDIO_TOKEN`.

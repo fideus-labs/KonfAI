@@ -39,6 +39,7 @@ import os
 import re
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -206,15 +207,30 @@ class AppService:
         else:
             entries, catalog = self.resolve_catalog()
 
+        # Every Hugging Face repository at once, so a slow Hub is waited for once; an app is summarised from the
+        # files its repository's listing downloaded, never read from the Hub on its own.
+        kinds = {ref: self._classify(ref) for ref in entries}
+        hf_repos = [ref for ref in entries if kinds[ref] == "hf_repo"]
+        if include_summary:
+            hf_repos += [ref.partition(":")[0] for ref in entries if kinds[ref] == "hf_app"]
+
+        def hf_listing(repo: str) -> list[str] | Exception:
+            try:
+                return list(app_repository.get_available_apps_on_hf_repo(repo, force_update))
+            except Exception as exc:  # network / repo errors -> report, keep going
+                return exc
+
+        with ThreadPoolExecutor() as pool:
+            hf_listings = dict(zip(hf_repos, pool.map(hf_listing, hf_repos), strict=True))
+
         apps: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         for ref in entries:
-            kind = self._classify(ref)
+            kind = kinds[ref]
             if kind == "hf_repo":
-                try:
-                    names = app_repository.get_available_apps_on_hf_repo(ref, force_update)
-                except Exception as exc:  # network / repo errors -> report, keep going
-                    errors.append({"ref": ref, "error": f"{type(exc).__name__}: {exc}"})
+                names = hf_listings[ref]
+                if isinstance(names, Exception):
+                    errors.append({"ref": ref, "error": f"{type(names).__name__}: {names}"})
                     continue
                 for name in names:
                     apps.append({"ref": f"{ref}:{name}", "source": "hf", "repo": ref, "app_name": name})
@@ -250,9 +266,25 @@ class AppService:
                 errors.append({"ref": ref, "error": "Unrecognized app reference format."})
 
         if include_summary:
+            downloaded = {
+                repo: app_repository.get_downloaded_apps_on_hf_repo(repo)
+                for repo, listed in hf_listings.items()
+                if not isinstance(listed, Exception)
+            }
             for app in apps:
+                listed = hf_listings.get(app["repo"]) if app["source"] == "hf" else None
+                if isinstance(listed, Exception):
+                    app["summary_error"] = f"{type(listed).__name__}: {listed}"
+                    continue
+                if listed is not None and app["app_name"] not in listed:
+                    app["summary_error"] = f"'{app['app_name']}' is not among the apps listed in '{app['repo']}'"
+                    continue
+                ref = downloaded[app["repo"]].get(app["app_name"]) if listed is not None else app["ref"]
+                if ref is None:
+                    app["summary_error"] = f"the files of '{app['app_name']}' are still being downloaded; list again"
+                    continue
                 try:
-                    summary = self.describe_app(app["ref"], force_update=False)
+                    summary = self.describe_app(ref, force_update=False)
                 except Exception as exc:  # resolution is best-effort here
                     app["summary_error"] = f"{type(exc).__name__}: {exc}"
                     continue
@@ -393,12 +425,14 @@ class AppService:
         display_name: str | None = None,
         config_overrides: list[str] | None = None,
         force_update: bool = False,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """Materialise a resolved app into a local, editable bundle (optionally baking tuned --set values).
 
         This is the inference-side reproducibility artifact: 'save this HuggingFace/remote-cached app,
         with my tuned parameters, as a local app'. It copies files and rewrites the config; it does not
-        import the app's model code. Local/HuggingFace apps only.
+        import the app's model code. Local/HuggingFace apps only. ``path`` is any host folder: a file of
+        the app already there is only replaced with ``overwrite=True``.
         """
         if self._is_remote(ref):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
@@ -407,6 +441,13 @@ class AppService:
         if not isinstance(info, app_repository.LocalAppRepository):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         target = Path(path).expanduser().resolve()
+        if not overwrite:
+            existing = [name for name in info._all_repo_filenames() if (target / name).exists()]
+            if existing:
+                raise ValueError(
+                    f"Exporting into {target} would overwrite {', '.join(existing)}. Choose another folder, "
+                    "or pass overwrite=True to replace them."
+                )
         info.export_app(target, display_name=display_name, config_overrides=config_overrides)
         return {
             "ref": ref,

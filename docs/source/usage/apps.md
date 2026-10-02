@@ -93,7 +93,50 @@ family returns:
 An app identifier is a local directory or a Hugging Face reference,
 `owner/repository:variant`, optionally pinned to a revision with
 `owner/repository@rev:variant`. For example `VBoussot/ImpactSynth:MR`,
-`VBoussot/TotalSegmentator-KonfAI:total`.
+`VBoussot/TotalSegmentator-KonfAI:total`. Without `@rev`, a konfai-apps release
+takes the revision tagged with its own version (`v1.9.0`) when the repository has
+it, and `main` otherwise, so each release runs the configs made for it. Whether a
+repository has that tag is asked once and kept until a refresh (a tag already
+downloaded counts too). A run waits at most 3 seconds for the answer and keeps
+`main` for the rest of the process if none came. A run asks again for a tag not
+downloaded yet, unless a listing of the process has just read it, and takes `main`
+when the Hub does not answer and `main` is here. A listing never waits for it: it
+lists `main` until the answer is known, and the next listing reads the tagged
+revision. Offline, only a tag already downloaded counts.
+
+The apps of a repository, as the Studio catalogue, `list_apps` in the MCP server
+and the Slicer app list show them, are read from the Hub once per machine:
+
+- The first time a machine lists a repository, its file list is read in one
+  call and waited for at most 3 seconds, and the files of every app except the
+  checkpoints (manifest, icon, configs) are then downloaded together in the
+  background; the summaries wait for them until the same 3 seconds are up, and
+  an app whose files are not there yet is listed without its summary. The
+  repositories of one listing are read together, so they share that wait, and
+  once a Hub call of the process has gone 3 seconds without an answer, the next
+  ones are not waited for: a Hub that does not answer holds a process once. A
+  repository not read in time is listed from the local Hugging Face cache; with
+  nothing there, the Slicer app list and the `konfai-apps` commands wait for the
+  Hub, and `list_apps` reports the repository as not listed yet. A process that
+  ends first (Studio starts the MCP server for each call) leaves the rest to the
+  next listing, which keeps the files already downloaded.
+- Afterwards the listing and each app's summary (name, description, inputs and
+  outputs, task, fine-tuning, patch size, icon) come from what was kept under
+  `~/.cache/huggingface/assets/konfai-apps` and from the Hugging Face cache,
+  with no network call. A download that brings a newer commit of the
+  repository makes the next listing read it again. A release tag whose files
+  are not here yet is read the same way as a repository never listed; when it
+  cannot be read (`list_apps` waits 3 seconds for it), `main` is listed if `main`
+  is here. Studio shows an app's icon once the catalogue has downloaded it, and
+  never waits for the Hub for it.
+- A refresh reads the Hub again, release tag included, and waits for it:
+  `list_apps` or `describe_app` with `force_update`, the refresh of the Slicer
+  app list, `--force_update` on the `konfai-apps` commands.
+- Offline (`HF_HUB_OFFLINE=1`) nothing goes to the network: the listing uses
+  what was kept, or else the apps the local Hugging Face cache holds.
+
+`konfai-apps download` and an app export take every file of the app,
+checkpoints included, even the ones not downloaded yet.
 
 Repeat `-i` / `--inputs` to pass several input groups, which is how an app that
 expects an image plus a mask, or several files per group, receives them. The same

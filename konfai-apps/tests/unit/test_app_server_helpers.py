@@ -603,6 +603,39 @@ def test_extract_zip_safely_blocks_zip_slip(tmp_path: Path, evil_name: str) -> N
     assert not Path("/abs/evil.txt").exists()
 
 
+def test_extract_zip_safely_stops_a_zip_bomb_while_extracting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bound = 64 * 1024
+    monkeypatch.setenv("KONFAI_APPS_MAX_DATASET_BYTES", str(bound))
+    upload = _make_zip_bomb_upload(16 * 1024 * 1024)  # 16 MiB extracted, about 16 KiB on the wire
+    dest = tmp_path / "job" / "dataset"
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.extract_zip_safely(upload, dest)
+
+    assert exc.value.status_code == 413
+    assert "KONFAI_APPS_MAX_DATASET_BYTES" in exc.value.detail
+    assert sum(f.stat().st_size for f in dest.rglob("*") if f.is_file()) <= bound
+    assert list(dest.parent.glob("*.zip")) == []
+
+
+def test_extract_zip_safely_bounds_the_archive_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KONFAI_APPS_MAX_DATASET_BYTES", str(64 * 1024))
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w", compression=zipfile.ZIP_STORED) as zf:
+        zf.writestr("case.bin", os.urandom(256 * 1024))
+    payload.seek(0)
+    dest = tmp_path / "job" / "dataset"
+
+    with pytest.raises(HTTPException) as exc:
+        app_server.extract_zip_safely(SimpleNamespace(filename="dataset.zip", file=payload), dest)
+
+    assert exc.value.status_code == 413
+    assert "KONFAI_APPS_MAX_DATASET_BYTES" in exc.value.detail
+    # Refused while receiving the archive: nothing was extracted and the partial archive is gone.
+    assert list(dest.iterdir()) == []
+    assert list(dest.parent.glob("*.zip")) == []
+
+
 def test_extract_zip_safely_rejects_non_zip_payload(tmp_path: Path) -> None:
     upload = SimpleNamespace(filename="dataset.zip", file=io.BytesIO(b"not a zip"))
 

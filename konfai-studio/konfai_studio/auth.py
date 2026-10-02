@@ -4,9 +4,9 @@ scheme, and the login/logout endpoints.
 
 Studio drives konfai-mcp, which reads arbitrary host paths and runs jobs: arbitrary compute by
 design. On loopback that is the operator's own machine; exposed on a network it is not. A single
-shared token (KONFAI_STUDIO_TOKEN) turns on authentication: unset, everything is open exactly as
-before (trusted-local); set, every request must carry a valid session cookie or bearer token. TLS
-is the reverse proxy's job (see konfai-studio/docs/REMOTE.md).
+shared token (KONFAI_STUDIO_TOKEN) turns on authentication: unset, everything is open (trusted-local),
+to loopback host names only when bound to loopback; set, every request must carry a valid session
+cookie or bearer token. TLS is the reverse proxy's job (see konfai-studio/docs/REMOTE.md).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import os
 from contextlib import suppress
 from http.cookies import SimpleCookie
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -27,6 +28,7 @@ _COOKIE_NAME = "ks_session"
 _PUBLIC_PATHS = frozenset(
     {"/", "/index.html", "/api/auth", "/api/login", "/api/health", "/konfai-logo.png", "/favicon.ico"}
 )
+_LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 router = APIRouter()
 
@@ -47,6 +49,20 @@ def _scope_header(scope: dict[str, Any], name: bytes) -> str | None:
         if key == name:
             return value.decode("latin-1")
     return None
+
+
+def _host_allowed(scope: dict[str, Any]) -> bool:
+    """Whether the request's Host may reach this server. Bound to loopback with no token (the CLI sets
+    KONFAI_STUDIO_LOOPBACK), only a loopback name may: a DNS-rebound page sends its own name as Host."""
+    if _studio_token() or os.environ.get("KONFAI_STUDIO_LOOPBACK") != "1":
+        return True
+    host = _scope_header(scope, b"host")
+    if host is None:
+        return True
+    try:
+        return urlsplit(f"//{host}").hostname in _LOOPBACK_NAMES
+    except ValueError:
+        return False
 
 
 def _authorised(scope: dict[str, Any]) -> bool:
@@ -86,14 +102,21 @@ class _AuthGate:
         self._app = app
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] not in {"http", "websocket"} or _authorised(scope):
+        if scope["type"] not in {"http", "websocket"}:
+            await self._app(scope, receive, send)
+            return
+        if not _host_allowed(scope):
+            status, detail = 400, "unknown host: open Studio on 127.0.0.1 or localhost, or set KONFAI_STUDIO_TOKEN"
+        elif not _authorised(scope):
+            status, detail = 401, "authentication required"
+        else:
             await self._app(scope, receive, send)
             return
         if scope["type"] == "websocket":
             await receive()  # consume the connect so the close handshake is well-formed
             await send({"type": "websocket.close", "code": 1008})
             return
-        await JSONResponse({"detail": "authentication required"}, status_code=401)(scope, receive, send)
+        await JSONResponse({"detail": detail}, status_code=status)(scope, receive, send)
 
 
 class LoginRequest(BaseModel):

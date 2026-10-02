@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
@@ -118,6 +119,35 @@ def ensure_finally_on_signals():
         signal.signal(signal.SIGTERM, old_term)
 
 
+# The janitor blocks on its stdin, a pipe whose write end only the process that started it (and the children
+# that process forks) holds: the read returns once they are all gone, whatever ended them.
+_WORKSPACE_JANITOR = "import os, shutil, sys\nos.read(0, 1)\nshutil.rmtree(sys.argv[1], ignore_errors=True)\n"
+
+
+def _start_workspace_janitor(workspace_dir: Path) -> subprocess.Popen[bytes] | None:
+    """Start a process that removes ``workspace_dir`` once this one has ended.
+
+    A SIGTERM or a SIGKILL ends the process without running the ``finally`` that removes the workspace. A
+    signal handler would not do: it runs between bytecodes only, so it would hold a SIGTERM back for as long
+    as a C call lasts. The janitor has a session of its own, so a signal sent to this process group spares
+    it; the ``finally`` kills it once it has cleaned up. POSIX only; when it cannot start, the ``finally``
+    alone cleans up.
+    """
+    if os.name != "posix" or not sys.executable:
+        return None
+    try:
+        return subprocess.Popen(  # nosec B603
+            [sys.executable, "-S", "-c", _WORKSPACE_JANITOR, str(workspace_dir)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+
+
 def run_distributed_app(
     func: Callable[..., None],
 ) -> Callable[..., None]:
@@ -130,7 +160,7 @@ def run_distributed_app(
     - Adds that directory to `sys.path` (so local imports work)
     - Executes the wrapped function inside a minimal logging context (`MinimalLog`)
     - Restores the user's original working directory
-    - Deletes the temporary directory if it was created automatically
+    - Deletes the temporary directory if it was created automatically, also when a signal ends the process
 
     The decorated function may declare a `tmp_dir` argument. If provided, that
     directory is used and NOT automatically deleted (unless it lives under the
@@ -152,10 +182,7 @@ def run_distributed_app(
 
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> None:
-        params = sig.parameters
-        kwargs_fun = {k: v for k, v in kwargs.items() if k in params}
-
-        bound = sig.bind_partial(*args, **kwargs_fun)
+        bound = sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
 
         tmp_dir = bound.arguments.get("tmp_dir")
@@ -166,19 +193,22 @@ def run_distributed_app(
             workspace_dir = Path(cast(str | os.PathLike[str], tmp_dir))
         workspace_dir = workspace_dir.resolve()
         user_dir = os.getcwd()
-        # Resolve every caller-supplied path against the caller's directory before chdir'ing
-        # into the workspace: a relative path would otherwise be interpreted inside the
-        # (possibly auto-created and then deleted) temporary workspace.
-        if bound.arguments.get("output") is not None:
-            bound.arguments["output"] = Path(bound.arguments["output"]).resolve()
-        for key in ("inputs", "gt", "mask"):
-            value = bound.arguments.get(key)
-            if value is not None:
-                bound.arguments[key] = [[Path(p).resolve() for p in group] for group in value]
-        if bound.arguments.get("dataset") is not None:
-            bound.arguments["dataset"] = Path(bound.arguments["dataset"]).resolve()
         added_to_syspath = False
+        janitor = None
         try:
+            if auto_created:
+                janitor = _start_workspace_janitor(workspace_dir)
+            # Resolve every caller-supplied path against the caller's directory before chdir'ing
+            # into the workspace: a relative path would otherwise be interpreted inside the
+            # (possibly auto-created and then deleted) temporary workspace.
+            if bound.arguments.get("output") is not None:
+                bound.arguments["output"] = Path(bound.arguments["output"]).resolve()
+            for key in ("inputs", "gt", "mask"):
+                value = bound.arguments.get(key)
+                if value is not None:
+                    bound.arguments[key] = [[Path(p).resolve() for p in group] for group in value]
+            if bound.arguments.get("dataset") is not None:
+                bound.arguments["dataset"] = Path(bound.arguments["dataset"]).resolve()
             os.makedirs(workspace_dir, exist_ok=True)
             os.chdir(str(workspace_dir))
             cwd = os.getcwd()
@@ -197,6 +227,9 @@ def run_distributed_app(
                 os.chdir(user_dir)
             if auto_created:
                 shutil.rmtree(str(workspace_dir), ignore_errors=True)
+            if janitor is not None:
+                janitor.kill()
+                janitor.communicate()  # reaps it and closes the pipe
 
     return wrapper
 
