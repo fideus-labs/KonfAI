@@ -2,6 +2,8 @@ name: commit-hygiene
 
 on:
   pull_request:
+    # edited: a retitled pull request is checked again.
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
@@ -37,3 +39,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: cz check --rev-range "${BASE_SHA}..${HEAD_SHA}"
+
+      # A squash merge of several commits takes the pull request's title as its subject on main.
+      - name: Validate the title a squash merge commits
+        if: github.event.pull_request.commits > 1
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: cz check --message "${PR_TITLE}"

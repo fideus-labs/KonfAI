@@ -131,7 +131,7 @@ pixi run --environment dev python -m pip install -e ./konfai-mcp && pixi run --e
 pixi run --environment dev python -m pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or its two front tests skip)
 ```
 
-The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it the two tests of the served front skip and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `ssim`, `cluster`, `export`, …).
+The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it the two tests of the served front skip and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `cluster`, `export`, …).
 
 ## 6b. Releasing
 
