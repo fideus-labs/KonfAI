@@ -195,6 +195,23 @@ def _grid_of_image(image: sitk.Image) -> Grid:
     )
 
 
+def physical_point_to_index(grid: Grid) -> np.ndarray:
+    """The world-to-index matrix ITK holds for ``grid`` (``ImageBase::m_PhysicalPointToIndex``).
+
+    ITK inverts ``direction @ diag(spacing)`` through a singular value decomposition, whose last bits
+    are not the exact inverse's (on a signed permutation, terms of an ulp's order where the exact
+    inverse has zeros); a nearest pick on a half-voxel tie follows them. Read off an image of that
+    geometry at origin zero, where a unit vector's continuous index is the matrix's column exactly.
+    Without SimpleITK no route runs ITK, and the exact inverse stands in.
+    """
+    if sitk is None:
+        return grid.world_to_index.matrix
+    image = sitk.Image([1] * grid.rank, sitk.sitkUInt8)
+    image.SetSpacing(np.asarray(grid.spacing_xyz, dtype=np.float64).tolist())
+    image.SetDirection(np.asarray(grid.direction_xyz, dtype=np.float64).ravel().tolist())
+    return np.array([image.TransformPhysicalPointToContinuousIndex(tuple(axis)) for axis in np.eye(grid.rank)]).T
+
+
 def _displacement_stage(
     grid: Grid, values: np.ndarray, order: int, what: str, dtype: np.dtype | type = np.float64
 ) -> DisplacementStage:
