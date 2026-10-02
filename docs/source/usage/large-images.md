@@ -36,8 +36,9 @@ Dataset:
     overlap: 16
 ```
 
-Prediction, evaluation and transform stream by default. Training keeps the dataset in memory unless it is
-larger than `memory_budget`: set a budget below the dataset's size to make training stream too.
+Prediction, evaluation and transform stream by default. With test-time augmentation, prediction reads a case
+whole when that fits `memory_budget`, so its chain runs once for all the copies. Training keeps the dataset in
+memory unless it is larger than `memory_budget`: set a budget below the dataset's size to make training stream too.
 
 The format decides how cheap a region read is:
 
