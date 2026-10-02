@@ -101,6 +101,17 @@ class _MaskedStatisticsSeed:
         return stats
 
 
+def _masked_values(stage: "Clip | Standardize", name: str, tensor: torch.Tensor) -> torch.Tensor:
+    """The tensor's values under ``stage``'s mask, on the whole-volume path."""
+    mask = stage.read_companion(stage.mask, name)  # type: ignore[arg-type]
+    if tuple(mask.shape) != tuple(tensor.shape):
+        raise TransformError(
+            f"The mask '{stage.mask}' has shape {list(mask.shape)} where the tensor in hand has {list(tensor.shape)}.",
+            "The mask is read on the stored grid: apply this stage before the stages that change the grid.",
+        )
+    return tensor[mask != 0]
+
+
 class Clip(Transform):
     """Clip tensor intensities to a fixed or data-dependent value range."""
 
@@ -158,17 +169,6 @@ class Clip(Transform):
         saved = {key for key, save in (("Min", self.save_clip_min), ("Max", self.save_clip_max)) if save}
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys), records=frozenset(saved))
 
-    def _masked_values(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
-        """The tensor's values under the mask, on the whole-volume path."""
-        mask = self.read_companion(self.mask, name)  # type: ignore[arg-type]
-        if tuple(mask.shape) != tuple(tensor.shape):
-            raise TransformError(
-                f"The mask '{self.mask}' has shape {list(mask.shape)} where the tensor in hand has"
-                f" {list(tensor.shape)}.",
-                "The mask is read on the stored grid: apply this stage before the stages that change the grid.",
-            )
-        return tensor[mask != 0]
-
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         seeded_masked = self.mask is not None and "StatisticsSeeded" in cache_attribute
         selected: torch.Tensor | None = None
@@ -176,7 +176,7 @@ class Clip(Transform):
         def values() -> torch.Tensor:
             nonlocal selected
             if selected is None:
-                selected = tensor if self.mask is None else self._masked_values(name, tensor)
+                selected = tensor if self.mask is None else _masked_values(self, name, tensor)
             return selected
 
         if isinstance(self.min_value, str):
@@ -376,17 +376,6 @@ class Standardize(TransformInverse):
             return PatchLocality(LocalityKind.GLOBAL_STAT)
         return PatchLocality(LocalityKind.GLOBAL_STAT, stat_keys=frozenset(stat_keys), takes_present=True)
 
-    def _masked_values(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
-        """The tensor's values under the mask, on the whole-volume path."""
-        mask = self.read_companion(self.mask, name)  # type: ignore[arg-type]
-        if tuple(mask.shape) != tuple(tensor.shape):
-            raise TransformError(
-                f"The mask '{self.mask}' has shape {list(mask.shape)} where the tensor in hand has"
-                f" {list(tensor.shape)}.",
-                "The mask is read on the stored grid: apply this stage before the stages that change the grid.",
-            )
-        return tensor[mask != 0]
-
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if self.mask is not None and (self.mean is None or self.std is None) and "StatisticsSeeded" in cache_attribute:
             # A streamed region: the mask cannot be indexed against it, and a bare 'Mean' seed may be
@@ -409,7 +398,7 @@ class Standardize(TransformInverse):
         def values() -> torch.Tensor:
             nonlocal selected
             if selected is None:
-                selected = tensor if self.mask is None else self._masked_values(name, tensor)
+                selected = tensor if self.mask is None else _masked_values(self, name, tensor)
             return selected
 
         if "Mean" not in cache_attribute:
