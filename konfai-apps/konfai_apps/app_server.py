@@ -43,6 +43,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.types import Receive, Scope, Send
 
 from .app_repository import get_app_repository_info
+from .cli import REFUSAL_FILE_ENV
 from .errors import AppMetadataError, AppRepositoryError
 from .remote_options import parse_remote_options, remote_options_to_cli_args
 
@@ -125,6 +126,9 @@ _T = TypeVar("_T")
 
 
 # Form fields naming a config file the job installs in its workspace (the job's working directory).
+#: Where a job's designed refusal lands, in its run directory (``REFUSAL_FILE_ENV``).
+_REFUSAL_FILE = "refusal.txt"
+
 _WORKSPACE_FILE_FIELDS = ("prediction_file", "evaluation_file", "uncertainty_file", "config_file")
 # Comma-separated form fields whose entries become separate tokens of the job command.
 _COMMAND_LIST_FIELDS = ("ensemble_models", "models")
@@ -452,6 +456,8 @@ class Job:
     log_q: asyncio.Queue[str] = field(default_factory=lambda: asyncio.Queue(maxsize=10_000))
     status: str = "queued"  # queued|running|done|error
     error: str | None = None
+    #: The error is a designed refusal (a config or input to fix), not a failure of the server.
+    refused: bool = False
     proc: subprocess.Popen | None = None
 
     requested_gpus: list[int] | None = None  # None => auto
@@ -864,6 +870,7 @@ def _run_job_sync(
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(job.run_dir),
+                env={**os.environ, REFUSAL_FILE_ENV: str(job.run_dir / _REFUSAL_FILE)},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -882,7 +889,13 @@ def _run_job_sync(
                 return
             if rc != 0:
                 job.status = "error"
-                job.error = f"Subprocess failed (exit code {rc})"
+                refusal = job.run_dir / _REFUSAL_FILE
+                job.refused = refusal.is_file()
+                job.error = (
+                    refusal.read_text(encoding="utf-8").strip()
+                    if job.refused
+                    else f"Subprocess failed (exit code {rc})"
+                )
                 emit_log(job, f"__ERROR__ {job.error}")
                 emit_log(job, "__DONE__")
                 return
@@ -1561,7 +1574,10 @@ def job_result(job_id: str):
     job = get_job_or_404(job_id)
 
     if job.status == "error":
-        return JSONResponse(status_code=500, content={"job_id": job.job_id, "status": job.status, "error": job.error})
+        return JSONResponse(
+            status_code=422 if job.refused else 500,
+            content={"job_id": job.job_id, "status": job.status, "error": job.error},
+        )
 
     if job.status != "done" or not job.zip_path.exists():
         return JSONResponse(status_code=202, content={"job_id": job.job_id, "status": job.status})

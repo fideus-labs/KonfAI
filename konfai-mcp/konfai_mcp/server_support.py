@@ -169,6 +169,12 @@ def template_dir(examples_root: Path, name: str) -> Path:
     # The name comes from the MCP client: reject separators / '..' so it cannot escape examples/.
     if not name or Path(name).name != name or name in {".", ".."}:
         raise ValueError(f"Invalid template name '{name}'.")
+    if not examples_root.is_dir():
+        raise ValueError(
+            f"No examples at '{examples_root}': the konfai-mcp wheel carries them, and this install has none"
+            " (a source install outside a KonfAI checkout). Install konfai-mcp from PyPI, or run it from a"
+            " checkout."
+        )
     template = examples_root / name
     if not template.exists() or not template.is_dir():
         raise ValueError(

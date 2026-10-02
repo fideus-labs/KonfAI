@@ -207,6 +207,11 @@ export function useJobStream(session: string, runNonce: number): JobStream {
           // The console is per-job, and this event also carries later status changes of the SAME job:
           // clearing on every one of them would wipe a crashed run's traceback the moment it died.
           if (ev.console_reset) setLines([]);
+          // A failed job's cause and fix, read by konfai-mcp: what to do, above the raw log.
+          if (ev.diagnosis) {
+            const reading = `✖ ${ev.diagnosis.summary} ${ev.diagnosis.fix}`.trim();
+            setLines((p) => [...p.slice(-800), reading]);
+          }
         } else if (ev.type === "run") {
           // A run of the experiment was announced or discovered: make sure its tab exists, even before
           // it has produced a single metric.

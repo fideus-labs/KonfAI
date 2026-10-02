@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
+from konfai_mcp.experiment_state import job_diagnosis
 from konfai_mcp.live_parse import parse_host_stats, parse_live_metric_line, parse_live_progress, progress_label
 
 from .paths import _sane_session, _session_dir, _session_jobs_dir
@@ -576,6 +577,12 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                             # Only a new job's console starts empty. Clearing on a status change too
                             # would drop a crashed run's traceback the instant it turned red.
                             "console_reset": fresh_console,
+                            # A failed job's recorded error and konfai-mcp's reading of it (the cause and
+                            # the fix), so the user reads those rather than the raw log.
+                            "error": latest.get("error"),
+                            "diagnosis": job_diagnosis(
+                                {"status": status, "error": latest.get("error")}, Path(latest["log_path"])
+                            ),
                         }
                     )
             if cpath is not None:

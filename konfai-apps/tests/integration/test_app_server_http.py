@@ -219,3 +219,43 @@ def test_group_sizes_that_do_not_cover_the_uploads_are_refused(submit, groups: s
     assert response.status_code == 422, [cmd for _, cmd in scheduled]
     assert scheduled == []
     assert app_server.JOBS == {}
+
+
+@pytest.mark.parametrize(
+    ("script", "status", "error"),
+    [
+        (
+            "from konfai_apps.cli import _exit_on_refusal\n"
+            "from konfai.utils.errors import ConfigError\n"
+            "with _exit_on_refusal():\n"
+            "    raise ConfigError(\"Invalid value 'many' for field 'epochs'.\")",
+            422,
+            "[Config] Invalid value 'many' for field 'epochs'.",
+        ),
+        ("import sys; sys.exit(3)", 500, "Subprocess failed (exit code 3)"),
+    ],
+    ids=["refusal", "crash"],
+)
+def test_a_refused_job_answers_its_refusal_and_a_crash_its_exit_code(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str, status: int, error: str
+) -> None:
+    """A designed refusal in the job's process reaches the client as its message, a 422; a crash stays
+    a 500 naming the exit code. The refusal was 'Subprocess failed (exit code 1)' and a 500 too."""
+    import sys
+
+    monkeypatch.delenv("KONFAI_API_TOKEN", raising=False)
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    job = _make_job("refused", "queued")
+    job.run_dir = tmp_path
+    previous_jobs = dict(app_server.JOBS)
+    app_server.JOBS.clear()
+    app_server.JOBS[job.job_id] = job
+    try:
+        app_server._run_job_sync(job, [sys.executable, "-c", script])
+        result = client.get(f"/jobs/{job.job_id}/result")
+    finally:
+        app_server.JOBS.clear()
+        app_server.JOBS.update(previous_jobs)
+
+    assert result.status_code == status
+    assert result.json()["error"] == error
