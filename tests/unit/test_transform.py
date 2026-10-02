@@ -17,7 +17,6 @@
 """Tests for ``konfai.data.transform``: Clip, Dilate, Norm, Crop, Standardize, Padding,
 Resample, and InferenceStack."""
 
-import builtins
 from pathlib import Path
 
 import numpy as np
@@ -665,54 +664,6 @@ def test_inference_stack_super_init_enables_dataset_fallback():
     assert written["shape"] == (2, 2, 2)
     # 'mean' mode averages the two predictions element-wise.
     assert torch.allclose(out, torch.full((1, 2, 2), 4.0))
-
-
-def test_konfai_inference_bare_name_resolves_from_konfai_apps() -> None:
-    """Published bundles (ImpactSynth) spell the bare name ``KonfAIInference:``; the package must
-    keep handing the class over, now imported from konfai-apps."""
-    pytest.importorskip("konfai_apps")
-    import konfai.data.transform as transform_package
-
-    cls = transform_package.KonfAIInference
-    assert cls.__name__ == "KonfAIInference"
-    assert cls.__module__ == "konfai_apps.transforms"
-
-
-def test_konfai_inference_without_konfai_apps_names_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without konfai-apps the resolution refuses with the install command, not an AttributeError
-    the loader would turn into 'no transform is named KonfAIInference'."""
-    import konfai.data.transform as transform_package
-
-    real_import = builtins.__import__
-
-    def import_without_konfai_apps(name, *args, **kwargs):
-        if name.split(".")[0] == "konfai_apps":
-            raise ImportError("konfai_apps unavailable")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_konfai_apps)
-
-    with pytest.raises(TransformError, match="pip install konfai-apps"):
-        _ = transform_package.KonfAIInference
-
-
-def test_konfai_inference_names_the_missing_dependency_of_an_installed_konfai_apps(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """konfai-apps installed with a dependency missing is not konfai-apps missing: the install hint
-    would send the user to install what they have."""
-    import konfai.data.transform as transform_package
-
-    real_import = builtins.__import__
-
-    def import_missing(name, *args, **kwargs):
-        if name == "konfai_apps.transforms":
-            raise ModuleNotFoundError("No module named 'nibabel'", name="nibabel")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_missing)
-    with pytest.raises(ModuleNotFoundError, match="nibabel"):
-        _ = transform_package.KonfAIInference
 
 
 @pytest.mark.parametrize(
@@ -1404,13 +1355,10 @@ def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
     assert clip.plan_note("G", "case", [4, 4, 4], Attribute()) is None
 
 
-def test_a_repeated_stage_binds_by_occurrence_and_the_slash_key_is_refused(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_repeated_stage_binds_by_occurrence(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A repeated stage is keyed ``Name``, ``Name#2``: each key binds its own block and resolves to
-    the class. The old ``Name/N`` key is refused, naming that spelling."""
+    the class."""
     from konfai.data.transform import Clip, TensorCast, TransformLoader
-    from konfai.utils.errors import ConfigError
 
     config = tmp_path / "Prediction.yml"
     config.write_text(
@@ -1419,7 +1367,6 @@ def test_a_repeated_stage_binds_by_occurrence_and_the_slash_key_is_refused(
         "    Clip: {min_value: -1024, max_value: 5000}\n"
         "    TensorCast#2: {dtype: int16}\n"
         "    Clip#2: {min_value: 0, max_value: 10}\n"
-        "    Save/1: {dataset: ./Out}\n"
     )
     monkeypatch.setenv("KONFAI_config_file", str(config))
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
@@ -1429,8 +1376,6 @@ def test_a_repeated_stage_binds_by_occurrence_and_the_slash_key_is_refused(
     assert [type(stage) for stage in stages.values()] == [TensorCast, Clip, TensorCast, Clip]
     assert [stages[key].dtype for key in ("TensorCast", "TensorCast#2")] == [torch.float16, torch.int16]
     assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip", "Clip#2")] == [(-1024, 5000), (0, 10)]
-    with pytest.raises(ConfigError, match="'Save', 'Save#2', 'Save#3'"):
-        TransformLoader().get_transform("Save/1", "T.transforms")
 
 
 def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -194,14 +194,6 @@ def test_konfai_inference_targets_the_ranks_own_device(monkeypatch: pytest.Monke
     assert launched["gpu"] == [7], "the rank's own device, in the launch's numbering"
 
 
-def test_konfai_inference_bare_name_resolves_through_core() -> None:
-    """Published bundles spell the bare name ``KonfAIInference:``; core's transform package must
-    keep resolving it to this class."""
-    import konfai.data.transform as transform_package
-
-    assert transform_package.KonfAIInference is KonfAIInference
-
-
 def test_a_bound_konfai_inference_turns_the_loader_workers_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The stage spawns the nested run itself, which a daemonic DataLoader worker cannot: bound from
     the bare name a published config spells, it keeps the loader in the main process."""
@@ -211,12 +203,14 @@ def test_a_bound_konfai_inference_turns_the_loader_workers_off(tmp_path: Path, m
     config = tmp_path / "Prediction.yml"
     config.write_text(
         "Predictor:\n  Dataset:\n    groups_src:\n      Volume_0:\n        groups_dest:\n          MASK:\n"
-        "            transforms:\n              KonfAIInference: {}\n"
+        "            transforms:\n              konfai_apps.transforms:KonfAIInference: {}\n"
     )
     monkeypatch.setenv("KONFAI_config_file", str(config))
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
     monkeypatch.setenv("KONFAI_ROOT", "Predictor")
-    chain = GroupTransform(transforms={"KonfAIInference": TransformLoader()}, patch_transforms=None)
+    chain = GroupTransform(
+        transforms={"konfai_apps.transforms:KonfAIInference": TransformLoader()}, patch_transforms=None
+    )
     dataset = DataPrediction(
         augmentations=None, num_workers=2, groups_src={"Volume_0": Group(groups_dest={"MASK": chain})}
     )

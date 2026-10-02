@@ -43,7 +43,6 @@ def env_flag(name: str, default: bool) -> bool:
 
 
 _OCCURRENCE = re.compile(r"#\d+$")
-_LEGACY_OCCURRENCE = re.compile(r"([A-Za-z_]\w*)/\d+$")
 
 
 def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]:
@@ -55,12 +54,6 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     # A repeated stage is keyed by occurrence (`Clip#2`): the suffix is the stage's identity in the
     # config, not part of the class it names.
     classpath = classpath.rsplit("#", 1)[0] if _OCCURRENCE.search(classpath) else classpath
-    if legacy := _LEGACY_OCCURRENCE.search(classpath):
-        stage = legacy.group(1)
-        raise ConfigError(
-            f"'{classpath}' keys a repeated stage with '/', which is no longer read.",
-            f"Key its occurrences '{stage}', '{stage}#2', '{stage}#3' in the order they run.",
-        )
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])
         name = classpath.split(":")[-1]

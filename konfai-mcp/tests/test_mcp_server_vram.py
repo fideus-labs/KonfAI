@@ -51,9 +51,6 @@ def test_runtime_capabilities_breaks_vram_down_per_device_and_recommends_most_fr
     assert by_index[0]["vram_free_gb"] == pytest.approx(4.0)
     assert by_index[1]["vram_free_gb"] == pytest.approx(22.0)
     assert by_index[0]["name"] == "A"
-    # Aggregate VRAM is kept (derived from the per-device breakdown) for backward compatibility.
-    assert caps["gpu"]["vram_gb"]["total"] == pytest.approx(48.0)
-    assert caps["gpu"]["vram_gb"]["used"] == pytest.approx(22.0)
     # Recommends the GPU with the most free VRAM, not just the first.
     assert caps["recommended_device"] == {"gpu": [1]}
 
@@ -72,7 +69,6 @@ def test_runtime_capabilities_degrades_when_vram_unreadable(
 
     assert caps["gpu"]["available"] is True
     assert caps["gpu"]["devices"][0]["vram_free_gb"] is None
-    assert caps["gpu"]["vram_gb"]["total"] is None
     assert len(caps["warnings"]) == 1
     # VRAM unreadable -> cannot rank -> falls back to the first visible device.
     assert caps["recommended_device"] == {"gpu": [0]}
