@@ -64,6 +64,10 @@ class DatasetManagerError(NamedKonfAIError):
     TYPE = "DatasetManager"
 
 
+class CaseReadError(DatasetManagerError):
+    """A stored entry of one case could not be read or decoded: the file is at fault, not the configuration."""
+
+
 class PatchError(NamedKonfAIError):
     TYPE = "Patch"
 

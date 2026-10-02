@@ -203,6 +203,40 @@ def test_cluster_kwargs_route_the_run_through_submitit_instead_of_spawning(
     assert len(submitted) == 1
 
 
+def test_a_cluster_submission_without_gpus_is_refused_before_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cluster job runs one rank per GPU of each node: without --gpu it has no rank, and it was
+    submitted with zero tasks after setup had already run (and cleared the run's outputs)."""
+    parameters: dict[str, object] = {}
+    setups: list[int] = []
+
+    class Executor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def update_parameters(self, **kwargs) -> None:
+            parameters.update(kwargs)
+
+        def submit(self, *_args, **_kwargs) -> None:
+            pass
+
+    class Workflow(DistributedObject):
+        def setup(self, world_size: int):
+            setups.append(world_size)
+            self.dataloader = []
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders):
+            raise AssertionError("run_process should not be called on the submitting side")
+
+    monkeypatch.setattr(rt_dist, "Log", lambda *_args, **_kwargs: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *_args, **_kwargs: contextlib.nullcontext())
+    monkeypatch.setitem(sys.modules, "submitit", SimpleNamespace(AutoExecutor=Executor))
+
+    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 2, "time_limit": 60}
+    with pytest.raises(ConfigError, match="--gpu"):
+        execute_distributed_object(Workflow("job"), gpu=[], cpu=1, quiet=True, cluster_kwargs=cluster_kwargs)
+    assert setups == [] and parameters == {}
+
+
 def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -373,6 +407,29 @@ def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
     assert initialized["init_method"] == "tcp://node001:29500"
     assert initialized["interface"] is None
     assert "GLOO_SOCKET_IFNAME" not in os.environ
+
+
+@pytest.mark.skipif(os.name == "nt", reason="setup_gpu builds no process group on Windows")
+def test_a_multi_node_job_that_cannot_name_its_master_is_refused(monkeypatch):
+    """Without scontrol every node of a cluster job would rendezvous on its own localhost and wait
+    there until the timeout. A single-node job still rendezvous on localhost."""
+    nodes = {"count": 2}
+    monkeypatch.setitem(
+        sys.modules,
+        "submitit",
+        SimpleNamespace(JobEnvironment=lambda: SimpleNamespace(global_rank=2, local_rank=0, num_nodes=nodes["count"])),
+    )
+    monkeypatch.setenv("SLURM_JOB_NODELIST", "node[001-002]")
+    monkeypatch.setattr(rt_dist.shutil, "which", lambda _name: None)
+    initialized = _gloo_rendezvous(monkeypatch)
+
+    with pytest.raises(ConfigError, match="scontrol not found"):
+        rt_dist.setup_gpu(4, None)
+    assert initialized == {}
+
+    nodes["count"] = 1
+    assert rt_dist.setup_gpu(4, None) == (2, 0)
+    assert initialized["init_method"] == "tcp://localhost:29500"
 
 
 def test_synchronize_data_no_dist(monkeypatch):
@@ -724,6 +781,61 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# data_log: the TensorBoard strategies
+# ---------------------------------------------------------------------------
+
+
+def test_data_log_entries_parse_to_a_strategy_and_a_count_per_target() -> None:
+    parsed = rt_logg.DataLog.parse(["CT/IMAGES/5", "Generator:Head:Tanh/VIDEO/2"])
+    assert parsed == {"CT": (rt_logg.DataLog.IMAGES, 5), "Generator.Head.Tanh": (rt_logg.DataLog.VIDEO, 2)}
+
+
+@pytest.mark.parametrize("entry", ["CT/VIDEO", "CT/MOVIE/2", "CT/IMAGES/two"])
+def test_a_malformed_data_log_entry_is_a_config_error_naming_it(entry: str) -> None:
+    with pytest.raises(ConfigError, match=f"'{entry}'") as refusal:
+        rt_logg.DataLog.parse([entry])
+    assert "IMAGES, VIDEO" in str(refusal.value)
+
+
+class _Board:
+    """Keeps what a VIDEO log hands TensorBoard."""
+
+    def add_video(self, name: str, video, it: int) -> None:
+        self.video = video
+
+
+def _normalized(array):
+    return (array - array.min()) / (array.max() - array.min())
+
+
+def test_a_video_log_shows_each_sample_its_own_frames() -> None:
+    """A [B, C, Z, Y, X] layer: one video per sample, a frame per channel, its middle slice in grey."""
+    import numpy as np
+
+    layer = np.random.default_rng(0).random((2, 3, 4, 5, 6))
+    board = _Board()
+    rt_logg.DataLog.VIDEO(board, "CT", layer, 0)
+    assert board.video.shape == (2, 3, 3, 5, 6)
+    for sample in range(2):
+        for frame in range(3):
+            for colour in range(3):
+                np.testing.assert_allclose(board.video[sample, frame, colour], _normalized(layer[sample, frame, 2]))
+
+
+def test_a_video_log_of_three_channels_shows_them_as_the_colours_of_each_frame() -> None:
+    """A [B, T, C, Z, Y, X] layer of three channels: each channel is one colour of its own sample's frame."""
+    import numpy as np
+
+    layer = np.random.default_rng(0).random((2, 2, 3, 4, 5, 6))
+    board = _Board()
+    rt_logg.DataLog.VIDEO(board, "CT", layer, 0)
+    assert board.video.shape == (2, 2, 3, 5, 6)
+    for sample in range(2):
+        for frame in range(2):
+            np.testing.assert_allclose(board.video[sample, frame], _normalized(layer[sample, frame, :, 2]))
+
+
+# ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
 def _execute_counting(
@@ -810,6 +922,24 @@ def test_the_inline_path_is_the_default(monkeypatch) -> None:
 
     assert ran_here == [0]
     assert spawned == []
+
+
+def test_an_interrupted_run_exits_with_the_interrupt_status(monkeypatch, capsys) -> None:
+    """Ctrl+C ends the command with status 130, so ``konfai TRAIN && konfai PREDICTION`` stops there."""
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rt_dist, "execute_distributed_object", interrupted)
+
+    @rt_dist.run_distributed_app
+    def workflow(gpu: list[int] = [], cpu: int = 1):
+        return object()
+
+    with pytest.raises(SystemExit) as exited:
+        workflow()
+    assert exited.value.code == 130
+    assert "Manual interruption (Ctrl+C)" in capsys.readouterr().out
 
 
 def _budget_applied(

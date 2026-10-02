@@ -17,9 +17,12 @@
 
 """The configured prediction workflow and its Python entrypoints."""
 
+import multiprocessing
 import os
 import shutil
+import warnings
 from collections.abc import Mapping
+from multiprocessing.sharedctypes import SynchronizedArray
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +45,7 @@ from konfai.utils.chain_diff import dataset_tree, input_chain_differences, train
 from konfai.utils.clock import startup_clock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.dataset import refuse_shared_single_file
-from konfai.utils.errors import ConfigError, KonfAIError, PredictorError
+from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
 from konfai.utils.runtime import (
     DataLog,
@@ -103,6 +106,10 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         #: Cases whose every configured output already existed when the run started: frozen at
         #: ``setup`` on the launcher, so every rank (restarts included) shards the same work list.
         self._done_case_indices: set[int] = set()
+        #: One flag per case, set by the rank that predicted it, while the launcher waits for the ranks.
+        self._predicted_flags: SynchronizedArray[int] | None = None
+        #: The cases the last launch predicted; ``None`` when no launcher waited for the ranks.
+        self.predicted: list[str] | None = None
         module, name = get_module(combine, "konfai.predictor")
         if module.__name__ == "konfai.predictor":
             self.combine = getattr(module, name)()
@@ -203,8 +210,6 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             if not os.path.exists(path):
                 os.makedirs(path)
 
-        shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
-
         # Per-case resume, the semantics TRANSFORM documents: a case whose every configured output is
         # already on disk is skipped, and --overwrite recomputes everything. The set is frozen here, on
         # the launcher, so every rank (and every OOM-restart re-plan) shards the same work list.
@@ -219,6 +224,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                     f"[KonfAI] prediction: {len(self._done_case_indices)}/{len(self.dataset.case_names)}"
                     " case(s) already written -> skipped (--overwrite recomputes)."
                 )
+
+        shutil.copyfile(config_file(), self.predict_path / "Prediction.yml")
 
         self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
         if not self.path_to_models and any(parameter.numel() for parameter in self.model.parameters()):
@@ -375,6 +382,24 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             try:
                 with predictor:
                     predictor.run()
+                # Each rank names its own; the cases whose header no rank could read, rank 0.
+                set_aside = dict(predictor.set_aside.values())
+                if global_rank == 0:
+                    set_aside.update(self.dataset.unreadable[0])
+                if set_aside:
+                    who = f"rank {global_rank}: " if world_size > 1 else ""
+                    warnings.warn(
+                        f"{who}{len(set_aside)} case(s) could not be read and have no prediction:"
+                        f" {', '.join(sorted(set_aside))}. A rerun predicts them once their files read.",
+                        KonfAIWarning,
+                        stacklevel=2,
+                    )
+                if self._predicted_flags is None:
+                    self._refuse_a_cohort_set_aside(world_size, predictor, set_aside)
+                else:
+                    managers = next(iter(predictor.dataset.data.values()))
+                    for x in {x for x, _, _ in predictor.dataset.mapping} - predictor.set_aside.keys():
+                        self._predicted_flags[managers[x].index] = 1
                 return
             except torch.cuda.OutOfMemoryError:
                 # The restart loop IS the sizing iteration: the run that just OOMed already measured the
@@ -402,6 +427,29 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 )
                 self._adopt_patch_candidate(candidate)
                 dataloader = self._rank_dataloader(world_size, global_rank)
+
+    def launch_ranks(self, world_size: int) -> None:
+        """Run the ranks, then refuse a run that predicted nothing because no case of the cohort could
+        be read: that is a wrong tree or an unreadable disk more often than a bad file. The ranks share
+        no process group, so each flags the cases it predicted in memory this launcher reads."""
+        self._predicted_flags = multiprocessing.get_context("spawn").Array("b", len(self.dataset.case_names))
+        try:
+            super().launch_ranks(world_size)
+            flags = self._predicted_flags[:]
+        finally:
+            self._predicted_flags = None
+        self.predicted = [name for name, flag in zip(self.dataset.case_names, flags, strict=True) if flag]
+        cohort = len(self.dataset.case_names) + len(self.dataset.unreadable[0])
+        if cohort and not self.predicted and not self._done_case_indices:
+            raise _nothing_predicted(cohort)
+
+    def _refuse_a_cohort_set_aside(self, world_size: int, predictor: _Predictor, set_aside: dict[str, str]) -> None:
+        """On a rank no launcher waits for (a cluster job), the same refusal, where the rank can tell:
+        the only rank, or every rank when no header read."""
+        if not set_aside or self._done_case_indices or (world_size > 1 and self.dataset.case_names):
+            return
+        if {x for x, _, _ in predictor.dataset.mapping} <= predictor.set_aside.keys():
+            raise _nothing_predicted(len(set_aside))
 
     def _rank_dataloader(self, world_size: int, global_rank: int) -> DataLoader:
         """This rank's loader over the re-planned grids, the already-written cases dropped again
@@ -490,6 +538,13 @@ def build_predict(
         predictor = apply_config()(Predictor)()
     predictor.set_models(models)
     return predictor
+
+
+def _nothing_predicted(cases: int) -> PredictorError:
+    return PredictorError(
+        f"None of the {cases} case(s) could be read, so nothing was predicted.",
+        "Check the dataset path and the files' permissions; the warnings name each case and why.",
+    )
 
 
 @run_distributed_app

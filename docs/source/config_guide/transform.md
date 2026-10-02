@@ -58,7 +58,9 @@ A case whose output already exists is **skipped**: rerunning after an
 interruption resumes where it stopped. Pass `-y/--overwrite` to recompute
 everything. A case that fails (an unreadable file, a stage that raises) does
 not stop the others: the rank finishes its shard, prints the failed cases,
-and exits non-zero; a rerun resumes at exactly those cases.
+and exits non-zero; a rerun resumes at exactly those cases. Over several
+ranks, every rank finishes its shard and the run lists all the failed cases
+once, at the end.
 
 `--plan` reads the config the way a run does, and reading a config resolves
 its defaults back into the file: after `--plan`, `Transform.yml` carries every
@@ -701,8 +703,10 @@ transforms:
 
 The list binds in its order under occurrence keys (`Clip`, `Clip#2`, `Clip#3`), which is how the
 resolved config the run writes back spells it; the suffix is the stage's identity in the config,
-not part of the class it names, so `konfai.data.transform:Clip#2` resolves like `Clip`. The mapping
-form keeps its two spellings (bare and module-qualified) as before.
+not part of the class it names, so `konfai.data.transform:Clip#2` resolves like `Clip`. In a list,
+name each stage without the suffix: an item written `Clip#2` next to two bare `Clip` items would take
+the key the second one binds under, and the list is refused. The mapping form keeps its two spellings
+(bare and module-qualified) as before.
 ```
 
 `pattern` is a `str.format` template and **both** tokens are required: `{name}`

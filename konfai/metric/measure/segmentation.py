@@ -34,6 +34,7 @@ LabelSums = dict[int, tuple[float, float, float, bool]]
 
 class Dice(Criterion):
     maximize = True  # reported value is the Dice coefficient (higher-is-better); DiceSaveMap inherits it
+    resamples_target = True  # a target of another shape is put on the output's grid (on_grid)
 
     @staticmethod
     def on_grid(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -135,6 +136,13 @@ class Dice(Criterion):
         for a label its reference lacks still reaches the whole-case ratio in ``combine_metric``;
         only the labels the reference holds are scored.
         """
+        # A float map is binned by truncation: a probability would read as background.
+        if output.is_floating_point() and bool(torch.frac(output.detach()).nan_to_num_().any()):
+            raise MeasureError(
+                "Dice reads a one-channel output as a label map, and this one holds non-integer values.",
+                "Give a probability map one channel per label (background and foreground), "
+                "or threshold it to labels before Dice scores it.",
+            )
         (predicted_labels, reference_labels), offset, nan_bin, minlength = Dice._bins([output, target], labels)
         counts = [
             torch.bincount(reference_labels[reference_labels == predicted_labels], minlength=minlength),

@@ -124,6 +124,8 @@ class ItkTransformFile(AbstractFile):
     the parameter rows and type keys of ``_encode_transform_leaves``. Needs ``h5py``.
     """
 
+    read_errors = (OSError, KeyError, RuntimeError)  # h5py, and SimpleITK's transform reader
+
     def __init__(self, filename: str, read: bool) -> None:
         if h5py is None:
             raise DatasetManagerError(

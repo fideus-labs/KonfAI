@@ -37,7 +37,13 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml \
 ```
 
 When multiple checkpoints are provided, the predictor combines them using the
-`combine` strategy from the YAML, usually `Mean` or `Median`.
+`combine` strategy from the YAML: a reduction of `konfai.data.reduction`
+(`Mean`, `Median`, `Std`, `Vote`, `Concat`) by its bare name, or your own by
+classpath. To ensemble a segmentation, write the Softmax output and apply
+`Argmax` in `final_transforms`, so the members' probabilities are averaged
+before the labels are drawn, or fold the label maps with `Vote`: `Mean` refuses
+an integer output such as an `Argmax` head, where the mean of two class indices
+would be a third class.
 
 The combination runs in float16 on purpose: each member's output is cast to
 float16 as it arrives and `Mean` accumulates in that dtype, which halves the
@@ -54,6 +60,20 @@ not make the combination float32; the intentional fast cast stays unchanged.
 A rerun resumes: a case whose every configured output is already on disk is
 skipped (the run prints how many), so a mid-cohort failure pays only the
 missing cases. `-y`/`--overwrite` recomputes everything.
+
+A case whose input cannot be read (a truncated, empty or corrupt file) is set
+aside and the other cases go on. A warning names the case, the file and the
+error when it happens, and a last warning lists every case set aside; the run
+exits 0. A case set aside gets no output from the run, not even a partial one,
+so the rerun that follows once the file is fixed predicts it; under `-y`, an
+output an earlier run left for that case stays, and a rerun without `-y` counts
+it as written. Only a read error of the case's own files is set aside: a
+configuration error, an out-of-memory or an error raised by a transform still
+stops the run. Under several ranks, each rank reports the cases of its own
+shard. A run none of whose cases can be read, and none already written, fails
+instead, on any number of ranks. A `konfai-cluster` job is the exception: no
+launcher waits for its ranks, so it fails only when it runs on one rank or when
+no case header reads.
 
 ## Top-level fields
 
@@ -228,7 +248,7 @@ Important nested fields:
 | `before_reduction_transforms` | Applied before combining ensemble or TTA outputs. None when absent. |
 | `after_reduction_transforms` | Applied after reduction. None when absent. |
 | `final_transforms` | Final transforms applied before writing. None when absent. |
-| `reduction` | Combines multiple predictions, usually `Mean` or `Median`. |
+| `reduction` | Combines the test-time augmentation copies, with the vocabulary of `combine` (`Vote` for label maps). |
 | `patch_combine` | Optional patch reassembly strategy. `Trim` when absent. A weighting one (`Mean`, `Cosinus`, `Gaussian`) is refused on an integer output such as an `Argmax` head: blend the `Softmax` it is taken from instead, or keep `Trim`. |
 
 One `Prediction.yml` can be shared between different checkpoints as long as

@@ -17,13 +17,15 @@
 
 """Prediction workflow entrypoints and orchestration for KonfAI.
 
-The reductions ``Mean``, ``Median`` and ``Concat`` are re-exported: published configs name them as
-``konfai.predictor.<Reduction>``."""
+Every reduction of :mod:`konfai.data.reduction` is re-exported: a bare ``combine`` or ``reduction`` name
+resolves here, and published configs name them as ``konfai.predictor.<Reduction>``."""
 
 from konfai.data.reduction import Concat as Concat
 from konfai.data.reduction import Mean as Mean
 from konfai.data.reduction import Median as Median
 from konfai.data.reduction import Reduction as Reduction
+from konfai.data.reduction import Std as Std
+from konfai.data.reduction import Vote as Vote
 from konfai.predictor.ensemble import ModelComposite as ModelComposite
 from konfai.predictor.output import PREDICTION_CLOCK as PREDICTION_CLOCK
 from konfai.predictor.output import OutputDataset as OutputDataset
@@ -44,6 +46,8 @@ __all__ = [
     "OutputDatasetLoader",
     "Predictor",
     "Reduction",
+    "Std",
+    "Vote",
     "build_predict",
     "predict",
 ]

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 # ---------------------------------------------------------------- what a whole-volume scan decodes
 
 
@@ -101,3 +103,53 @@ def test_a_chunked_h5_entry_declares_its_chunk_and_a_contiguous_one_declares_non
     assert dataset.read_granularity("CT", "CHUNKED") == (1, 64, 16, 16)
     assert dataset.read_granularity("CT", "PLAIN") is None
     assert dataset.bounded_region_reads("CT", "CHUNKED")
+
+
+# ---------------------------------------------------------------- an entry the backend cannot read
+
+
+def _one_case(root: "Path", file_format: str) -> None:
+    import numpy as np
+    from konfai.utils.dataset import Attribute, Dataset
+
+    attribute = Attribute()
+    attribute["Origin"], attribute["Spacing"], attribute["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+    Dataset(str(root), file_format).write("CT", "CASE_000", np.ones((1, 4, 8, 8), dtype=np.float32), attribute)
+
+
+def _spoil(root: "Path", how: str) -> None:
+    for path in (path for path in root.rglob("*") if path.is_file()):
+        data = path.read_bytes()
+        path.write_bytes(data[: len(data) * 7 // 10] if how == "truncated" else b"not an image\n")
+
+
+@pytest.mark.parametrize(("file_format", "how"), [("mha", "truncated"), ("mha", "garbage"), ("h5", "garbage")])
+def test_an_entry_the_backend_cannot_decode_is_a_case_read_error_naming_it(
+    tmp_path: "Path", file_format: str, how: str
+) -> None:
+    """What the backend's library raises on a corrupt file (SimpleITK's RuntimeError, h5py's OSError)
+    comes out as one error the one-pass workflows can set the case aside on, naming case and entry."""
+    from konfai.utils.dataset import Dataset
+    from konfai.utils.errors import CaseReadError
+
+    _one_case(tmp_path / "Dataset", file_format)
+    _spoil(tmp_path, how)
+
+    with pytest.raises(CaseReadError, match=r"'CT' entry of case 'CASE_000'") as raised:
+        Dataset(str(tmp_path / "Dataset"), file_format).read_data("CT", "CASE_000")
+    assert isinstance(raised.value.__cause__, (RuntimeError, OSError))
+
+
+def test_an_out_of_memory_in_a_read_is_not_a_read_error(tmp_path: "Path", monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only what the backend declares as its read errors is a case's fault: a MemoryError stops the run."""
+    from konfai.utils.dataset import Dataset
+    from konfai.utils.dataset.sitk_file import SitkFile
+
+    _one_case(tmp_path / "Dataset", "mha")
+
+    def no_memory(self, group, name):
+        raise MemoryError()
+
+    monkeypatch.setattr(SitkFile, "file_to_data", no_memory)
+    with pytest.raises(MemoryError):
+        Dataset(str(tmp_path / "Dataset"), "mha").read_data("CT", "CASE_000")

@@ -376,6 +376,9 @@ class Transformer(DistributedObject):
         # closing line judges the process's peak against the first, the sizing spends the second.
         self._rank_budget_bytes: float = 0.0
         self._shards: list[list[int]] = []
+        # Whether a spawned rank hands its failed items to the launcher instead of raising: mp.spawn
+        # terminates the other ranks mid-case when one raises. A cluster task keeps raising.
+        self._report_to_launcher = False
         self._reductions: dict[str, CaseReduction | None] = {}
         self._planned: dict[tuple[str, str], Verdict] = {}
 
@@ -797,6 +800,9 @@ class Transformer(DistributedObject):
         # No overwrite prompt on the run folder: it holds the logs and a config copy, both rewritten
         # in place, and prompting would break the default per-case resume.
         os.makedirs(self.transform_path, exist_ok=True)
+        for stale in self.transform_path.glob("failed_rank_*.json"):
+            stale.unlink()
+        self._report_to_launcher = os.environ.get("KONFAI_CLUSTER") != "True"
         config_copy = self.transform_path / config_file().name
         if not (config_copy.exists() and config_copy.samefile(config_file())):  # -c may name the copy itself
             shutil.copyfile(config_file(), config_copy)
@@ -1001,14 +1007,27 @@ class Transformer(DistributedObject):
             held = self._held_line()
             if held is not None:
                 print(f"[KonfAI] {who}{held}")
-            if failed:
-                listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
-                raise TransformerError(
-                    f"{len(failed)} of {len(shard)} work item(s) failed on {who or 'this rank '}:\n{listed}",
-                    "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
-                )
+            if failed and world_size > 1 and self._report_to_launcher:
+                self._failures_file(global_rank).write_text(json.dumps(failed), encoding="utf-8")
+            elif failed:
+                raise _failed_items_error(failed, len(shard), f"on {who or 'this rank '}")
         finally:
             clear_resident_floor()
+
+    def _failures_file(self, rank: int) -> Path:
+        return self.transform_path / f"failed_rank_{rank}.json"
+
+    def __exit__(self, exc_type, value, traceback):
+        """Leave the run, then raise once for the items the spawned ranks could not write."""
+        super().__exit__(exc_type, value, traceback)
+        failed: list[list[str]] = []
+        for rank in range(self.world_size):
+            path = self._failures_file(rank)
+            if path.exists():
+                failed.extend(json.loads(path.read_text(encoding="utf-8")))
+                path.unlink()
+        if failed and exc_type is None:
+            raise _failed_items_error(failed, sum(map(len, self._shards)), f"over {self.world_size} ranks")
 
     def _run_item(
         self, item: WorkItem, chain_device: torch.device, allow_fallback: bool, progress: tqdm.tqdm
@@ -1065,6 +1084,14 @@ class Transformer(DistributedObject):
                 f" (planned {planned}: {manager.stream_refusal(0) or 'see the log'})"
             )
         return counts
+
+
+def _failed_items_error(failed: list, total: int, where: str) -> TransformerError:
+    listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
+    return TransformerError(
+        f"{len(failed)} of {total} work item(s) failed {where}:\n{listed}",
+        "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
+    )
 
 
 def build_transform(

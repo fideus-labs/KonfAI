@@ -24,6 +24,7 @@ group, no port, no gloo).
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -106,3 +107,55 @@ def test_two_spawned_ranks_write_every_case_once_without_a_process_group(tmp_pat
     everything = completed.stdout + completed.stderr + "".join(log.read_text(encoding="utf-8") for log in logs.values())
     for rendezvous in ("init_process_group", "gloo", "MASTER"):
         assert rendezvous not in everything, f"a rank spoke of a rendezvous ({rendezvous!r}):\n{everything}"
+
+
+# CASE_001 refuses at once; every other case takes a few seconds, so the rank holding CASE_001
+# closes its shard while the other rank is still inside one of its cases.
+_REFUSING_STAGE = """
+import time
+
+from konfai.data.transform import LocalityKind, Transform
+from konfai.utils.errors import TransformError
+
+
+class RefuseOne(Transform):
+    locality = LocalityKind.POINTWISE
+
+    def __call__(self, name, tensor, cache_attribute):
+        if name == "CASE_001":
+            raise TransformError("refused on purpose", "test stage")
+        time.sleep(3)
+        return tensor
+"""
+
+
+@pytest.mark.integration
+def test_two_rank_transform_writes_the_other_cases_when_one_fails(tmp_path: Path) -> None:
+    """A case that fails on one rank is that rank's failure only: the other rank finishes its shard,
+    every other case is written, and the run exits non-zero naming the failed case once."""
+    volumes = _cohort(tmp_path)
+    (tmp_path / "RefuseOne.py").write_text(_REFUSING_STAGE, encoding="utf-8")
+    config = tmp_path / "Transform.yml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            "            transforms:\n", "            transforms:\n              RefuseOne:RefuseOne: {}\n"
+        ),
+        encoding="utf-8",
+    )
+    env = subprocess_env()
+    env["PYTHONPATH"] = f"{tmp_path}{os.pathsep}{env['PYTHONPATH']}"
+    completed = subprocess.run(
+        [*konfai_cli_command(), "TRANSFORM", "--config", "Transform.yml", "--cpu", "2"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=600,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 1, output
+    written = Dataset(f"{tmp_path / 'Out'}/", "omezarr").get_names("CT_out")
+    assert sorted(written) == sorted(case for case in volumes if case != "CASE_001"), output
+    assert "SIGTERM" not in output, output
+    assert output.count("1 of 4 work item(s) failed") == 1, output
+    assert "'CASE_001'" in output, output

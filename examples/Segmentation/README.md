@@ -62,14 +62,20 @@ mv Dataset/Segmentation/* Dataset/ && rmdir Dataset/Segmentation && rm -rf Datas
 
 ## Two ways to write the model
 
-Both files build the same network, so `Config.yml` and `Prediction.yml` take
-either:
+Both files build the same network under the same state names, so `Config.yml`
+and `Prediction.yml` take either, and a checkpoint trained with one predicts with
+the other:
 
 ```yaml
 Model:
   classpath: UNet.yml      # declarative, the default here
   # classpath: Model:UNet  # the same network in Python
 ```
+
+They take their settings from different places: `UNet.yml` reads `dim`,
+`channels` and `nb_class` under `UNet.parameters`, `Model:UNet` takes them as
+its own arguments, directly under `UNet`. Move them when you swap: a key the
+model does not read is reported as unknown and its default is used instead.
 
 The YAML form is shareable and safe by construction: it can only reference a
 curated set of block types. The Python form is for a model that needs a custom
@@ -97,6 +103,7 @@ path in the graph, so `UNet.yml` and the config have to agree on it.
 
 `epochs: 5` is sized so the notebook finishes, so the score says the pipeline
 works, not that the model does. Two config keys decide what you are reading:
-`validation: 0.2` holds one case out of five, and `Dice.labels: None` averages
-over every label present in the reference. Set `Dice.labels` in `Evaluation.yml`
-to the labels you care about.
+`validation: 0.2` holds out the cases closest to 20% of the patches, one case
+out of five here, and `Dice.labels: None` averages over every label present in
+the reference. Set `Dice.labels` in `Evaluation.yml` to the labels you care
+about.

@@ -43,7 +43,7 @@ class Save(Transform):
 
     def __init__(
         self,
-        dataset: str,
+        dataset: str | None = None,
         group: str | None = None,
         scale_factors: list[int] | None = None,
         downsample_method: str | None = None,

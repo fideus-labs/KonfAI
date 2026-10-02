@@ -61,6 +61,12 @@ Dataset/
     └── CT.ome.zarr/
 ```
 
+A local root whose cases hold OME-Zarr stores or DICOM series is read as such,
+whatever its token says. Up to 16 case folders, spread over the root by name,
+are looked at and the form most of them hold decides: a hidden folder
+(`.git`, a trash) is skipped, and a folder beside the cases (an atlas, a QC
+folder) is outvoted by them.
+
 The selector can name a pyramid level, `omezarr@1`. KonfAI reads metadata through
 `get_infos()` and touches only the chunks that intersect the window. Chunk shape
 matters: chunks much larger than your patches cost I/O you throw away, very small

@@ -17,17 +17,18 @@
 
 """The data sources of each workflow: training, prediction, evaluation, dataset preparation."""
 
-import math
 import os
 import random
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import torch
 from torch.utils.data import DataLoader, Sampler
 
 from konfai import konfai_state
@@ -57,9 +58,12 @@ from konfai.utils.budget import (
 from konfai.utils.clock import startup_clock
 from konfai.utils.config import config
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformerError
+from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
 from konfai.utils.utils import SUPPORTED_FORMATS, resolve_patch, split_path_spec
+
+#: The workflows that read each case once, sharded by case across ranks.
+_ONE_PASS_STATES = (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM))
 
 
 class DataSources(ABC):
@@ -452,6 +456,10 @@ class Data(DataSources):
         self._pin_memory = pin_memory
         self._prefetch_factor = prefetch_factor
         self._persistent_workers = persistent_workers
+        #: The run's seed, set by the workflow. A loader then draws its workers' base seed from a
+        #: generator of its own, and the global one, which draws the order, sees the same draws in
+        #: every worker regime.
+        self.manual_seed: int | None = None
         # ``memory_budget`` may later override ``use_cache`` in ``get_data``; one builder for both.
         self._configure_data_loading(use_cache)
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
@@ -460,6 +468,9 @@ class Data(DataSources):
         self._prepared_mapping: list[tuple[int, int, int]] = []
         self._prepared_validation_mapping: list[tuple[int, int, int]] = []
         self._validation_names: list[str] = []
+        #: A one-pass workflow's cases whose header cannot be read, and why: the training (first)
+        #: and the validation partition's, each set aside before its managers are built.
+        self.unreadable: tuple[dict[str, str], dict[str, str]] = ({}, {})
 
     def _configure_data_loading(self, use_cache: bool) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
@@ -703,10 +714,35 @@ class Data(DataSources):
             managers = self._build_managers(names, dataset_name, self.patch, self._get_data_augmentations(True))
             counts = self._case_entry_counts(managers)
         self.case_names, self._validation_names = self._split_train_validation_names(names, counts)
+        if self._reads_each_case_once:
+            # After the split, so a validation named by index keeps the cases it names.
+            self.case_names = self._readable(self.case_names, dataset_name, self.unreadable[0])
+            self._validation_names = self._readable(self._validation_names, dataset_name, self.unreadable[1])
         split = len(self.case_names)
         if managers is not None and (self.case_names, self._validation_names) != (names[:split], names[split:]):
             managers = None  # not a cut of the run order: the built indices would not follow the partitions
         self._build_partitions(dataset_name, managers)
+
+    def _readable(
+        self, names: list[str], dataset_name: dict[str, dict[str, list[str]]], set_aside: dict[str, str]
+    ) -> list[str]:
+        """``names`` whose every entry's header reads, from the first root that holds it; each other
+        case is recorded in ``set_aside`` with why, and named at once."""
+        held = {group: [(root, set(cases)) for root, cases in roots.items()] for group, roots in dataset_name.items()}
+        kept = []
+        for name in names:
+            try:
+                for group, roots in held.items():
+                    root = next(root for root, cases in roots if name in cases)
+                    self.datasets[root].get_infos(group, name)
+            except CaseReadError as error:
+                set_aside[name] = str(error.args[0])
+                warnings.warn(
+                    f"Case '{name}' is set aside, the others go on: {error.args[0]}", KonfAIWarning, stacklevel=2
+                )
+                continue
+            kept.append(name)
+        return kept
 
     def _build_partitions(
         self, dataset_name: dict[str, dict[str, list[str]]], managers: dict[str, list[DatasetManager]] | None = None
@@ -834,12 +870,15 @@ class Data(DataSources):
                 )
             if case_entry_counts is None:
                 raise DatasetManagerError("Internal error: missing case entry counts for float validation split.")
-            threshold = math.floor(sum(case_entry_counts) * (1 - self.validation))
-            cumulative = 0
-            for dataset_index, count in enumerate(case_entry_counts):
-                cumulative += count
-                if cumulative > threshold:
-                    return list(range(dataset_index, len(subset_names)))
+            # Validation takes the tail whose entries come closest to the share, as written (0.2 is 1/5).
+            # A tie goes to validation, which keeps at least one case.
+            target = Fraction(str(self.validation)) * sum(case_entry_counts)
+            tail = 0
+            for size, count in enumerate(reversed(case_entry_counts), start=1):
+                shorter, tail = tail, tail + count
+                if tail >= target:
+                    held = size - 1 if size > 1 and target - shorter < tail - target else size
+                    return list(range(len(subset_names) - held, len(subset_names)))
             return []
         if isinstance(self.validation, list) and all(isinstance(item, int) for item in self.validation):
             return cast(list[int], self.validation)
@@ -925,7 +964,7 @@ class Data(DataSources):
         mappings: list[list[tuple[int, int, int]]] = []
         # One-pass workflows shard by CASE; the TRAIN branch below pads duplicates for DDP, which
         # would hand the same case to two ranks, two concurrent writers of one per-case output.
-        if konfai_state() in (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM)):
+        if konfai_state() in _ONE_PASS_STATES:
             mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
             for entry in mapping:
                 mapping_by_index.setdefault(entry[0], []).append(entry)
@@ -952,6 +991,28 @@ class Data(DataSources):
         return mappings
 
     @staticmethod
+    def _split_validation(
+        mapping: list[tuple[int, int, int]], world_size: int, batch_size: int
+    ) -> list[tuple[list[tuple[int, int, int]], int]]:
+        """Contiguous shards, each with the padding it ends with: every entry is scored once, on one
+        rank. DDP needs the same number of forwards on every rank, and the shards differ by one entry
+        at most, so a shard a batch short (its length a multiple of the batch) takes one entry more,
+        its head or the mapping's: a batch of its own at the end, run and never scored. A one-pass
+        workflow runs no DDP and scores a case from all its patches: its shards are ``_split``'s."""
+        if konfai_state() in _ONE_PASS_STATES:
+            return [(shard, 0) for shard in Data._split(mapping, world_size)]
+        size = len(mapping)
+        shards = [
+            mapping[(size * rank) // world_size : (size * (rank + 1)) // world_size] for rank in range(world_size)
+        ]
+        batch_size = max(1, batch_size)
+        batches = max(-(-len(shard) // batch_size) for shard in shards)
+        return [
+            (shard + (shard or mapping)[:1], 1) if -(-len(shard) // batch_size) < batches else (shard, 0)
+            for shard in shards
+        ]
+
+    @staticmethod
     def _remap_dataset_indices(mapping_tmp: list[tuple[int, int, int]]) -> tuple[list[int], list[tuple[int, int, int]]]:
         """Compress sparse dataset indices into local contiguous indices for one loader shard."""
         local_indices: list[int] = []
@@ -974,14 +1035,17 @@ class Data(DataSources):
         self.data = []
         self.mapping = []
         train_mappings = Data._split(self._prepared_mapping, world_size)
-        validate_mappings = Data._split(self._get_validation_mapping(), world_size)
-        for i, (train_mapping, validate_mapping) in enumerate(zip(train_mappings, validate_mappings, strict=False)):
+        validate_shards = Data._split_validation(self._get_validation_mapping(), world_size, self.batch_size)
+        # Every rank walks the validation split, an empty shard included: its gather is collective. A
+        # split whose every case was set aside at selection is walked too, so it is reported.
+        has_validation = any(shard for shard, _ in validate_shards) or bool(self.unreadable[1])
+        for i, (train_mapping, (validate_mapping, _)) in enumerate(zip(train_mappings, validate_shards, strict=False)):
             self.data.append([])
             self.mapping.append([])
             train_indices, train_remapped_mapping = self._remap_dataset_indices(train_mapping)
             self.data[i].append({k: [v[it] for it in train_indices] for k, v in self._managers.items()})
             self.mapping[i].append(train_remapped_mapping)
-            if len(validate_mapping):
+            if has_validation:
                 validation_indices, validation_remapped_mapping = self._remap_dataset_indices(validate_mapping)
                 self.data[i].append(
                     {k: [v[it] for it in validation_indices] for k, v in self._validation_managers.items()}
@@ -1011,9 +1075,17 @@ class Data(DataSources):
                     self.batch_size,
                     self.resolved_num_workers,
                     dataset_iter.read_order,
+                    padding=validate_shards[i][1] if loader_index else 0,
                 )
+                # A loader draws its workers' base seed at each fresh iterator: once for a persistent
+                # pool, once per epoch otherwise.
+                generator = None
+                if self.manual_seed is not None:
+                    generator = torch.Generator().manual_seed(self.manual_seed * world_size + i)
                 data_loaders[i].append(
-                    DataLoader(dataset=dataset_iter, **self._batching(sampler), **self.dataLoader_args)
+                    DataLoader(
+                        dataset=dataset_iter, **self._batching(sampler), **self.dataLoader_args, generator=generator
+                    )
                 )
         return data_loaders, self.case_names, self._validation_names
 
@@ -1163,7 +1235,10 @@ class DataMetric(Data):
             for filename, _append in entries:
                 dataset = self.datasets[filename]
                 for name in dataset.select_names(group, requested):
-                    shape, _ = dataset.get_infos(group, name)
+                    try:
+                        shape, _ = dataset.get_infos(group, name)
+                    except CaseReadError:
+                        continue  # set aside, and named, as the cases are selected
                     channels_by_name[name] = channels_by_name.get(name, 0) + int(shape[0])
                     spatial = [int(s) for s in shape[1:]]
                     known = spatial_by_name.setdefault(name, spatial)

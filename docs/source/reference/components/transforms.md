@@ -158,7 +158,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 
 | Name | Purpose | Key args | Shape | Stream |
 | --- | --- | --- | --- | --- |
-| `InferenceStack` | Aggregate an ensemble stack; writes an `InferenceStack` volume. `mode` is `mean`, `median` or `Seg` (spelled so; any other is refused). `Seg` writes each member's argmax to the stack and returns the members' mean. | `dataset, name, mode="mean"` | no | no, it writes the whole per-member stack |
+| `InferenceStack` | Aggregate an ensemble stack; writes an `InferenceStack` volume. `mode` is `mean`, `median` or `Seg` (spelled so; any other is refused). `Seg` writes each member's argmax to the stack and returns the members' mean. | `dataset=None` (the manager's own dataset), `name=None`, `mode="mean"` | no | no, it writes the whole per-member stack |
 | `Norm` | Vector magnitude over the trailing axis (drops it). |: | **yes** | no‡ |
 | `Magnitude` | Vector magnitude over the **channel** axis (`[C, …]` → `[1, …]`): the channel-first sibling of `Norm`, for a stored vector volume such as a displacement field read as a case. |: | no† | **yes**: pointwise |
 | `Variance` | Per-voxel variance over N. |: | no† | **yes** |
@@ -175,7 +175,7 @@ Operate on a stacked `[N, …]` ensemble axis (prediction post-processing).
 readable by any backend, including from a loader worker (`Mask: {path: <group>}`);
 on `h5` the reader and the writer share one store, which HDF5 does not define for
 concurrent access without SWMR, so a read racing a write can raise. One file per
-case (`mha`, `nii`, …) has no such window. `dataset` takes a format token (`mha`, `nii`, `h5`, `omezarr`, `itktransform`); `scale_factors=None` writes an OME-NGFF pyramid, `downsample_method=None` picks how its levels are derived: unnamed, a label dtype (`uint8`, `int64`, `bool`) takes the majority of each window and any other dtype its mean (see [OME-Zarr](storage-backends.md#multiscale-levels)). | `dataset`, `group=None`, `scale_factors=None`, `downsample_method=None` |
+case (`mha`, `nii`, …) has no such window. `dataset` takes a format token (`mha`, `nii`, `h5`, `omezarr`, `itktransform`); `scale_factors=None` writes an OME-NGFF pyramid, `downsample_method=None` picks how its levels are derived: unnamed, a label dtype (`uint8`, `int64`, `bool`) takes the majority of each window and any other dtype its mean (see [OME-Zarr](storage-backends.md#multiscale-levels)). | `dataset=None` (the manager's own dataset), `group=None`, `scale_factors=None`, `downsample_method=None` |
 | `Write` | A `Save` that is a **deliverable**: same boundary and same arguments, but `dataset` has no default, so a bare `Write:` fails at config time instead of writing into the source tree. | same as `Save` |
 | `Reduce` | Folds every case of a group into one volume, at fixed voxel: the stage that makes a chain N-to-1. `operator` is a `Reduction` classpath resolved against `konfai.data.reduction` (`Mean`, `Median`, `Std`, `Vote`, `Concat`), `output` names the single result, and `grid` demands `strict` (extents and geometry), `shape_only` or `reference:<case>`. | `operator="Median"`, `output` (required), `grid="strict"`, `grid_tolerance=1e-6` |
 | `Expand` | Turns one case into `nb` copies at a declared point of the chain: `Reduce`'s mirror, 1-to-N. Stages before it run once per case, stages after it once per copy. `pattern` is a `str.format` template over `{name}` and `{a}`, both required so copies never collide. | `nb=2`, `pattern="{name}_{a:02d}"`, `seed=None` |

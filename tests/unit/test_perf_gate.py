@@ -2,6 +2,7 @@
 """The release gate rejects regressions and incomplete or incomparable evidence."""
 
 import copy
+import importlib.util
 import json
 import runpy
 import subprocess
@@ -122,6 +123,77 @@ def test_metrics_without_machine_fingerprints_cannot_certify_a_release(tmp_path)
 def test_invalid_tolerances_cannot_disable_the_gate(tmp_path, option, invalid):
     baseline = result()
     assert compare(tmp_path, baseline, baseline, [option, invalid]).returncode == 2
+
+
+def load_harness(monkeypatch):
+    """The real harness, under its own name only for this test."""
+    spec = importlib.util.spec_from_file_location("harness", PERF / "harness.py")
+    harness = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "harness", harness)
+    spec.loader.exec_module(harness)
+    return harness
+
+
+def perf_script(monkeypatch, name):
+    """The globals of a bench script."""
+    load_harness(monkeypatch)
+    return runpy.run_path(str(PERF / f"{name}.py"))
+
+
+def konfai_from(monkeypatch, root):
+    """The environment imports konfai from ``root``."""
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.delitem(sys.modules, "konfai", raising=False)
+
+
+def test_the_gate_refuses_to_time_a_konfai_imported_from_another_tree(monkeypatch, tmp_path):
+    harness = load_harness(monkeypatch)
+    # os.getloadavg is Unix-only; the Windows lane runs this test too.
+    monkeypatch.setattr(harness.os, "getloadavg", lambda: (0.0, 0.0, 0.0), raising=False)
+    monkeypatch.setattr(harness, "power_profile", lambda: "performance")
+    monkeypatch.setattr(harness, "gpu_busy", lambda: None)
+    monkeypatch.setattr(harness, "cpu_hogs", lambda: [])
+    (tmp_path / "konfai").mkdir()
+    (tmp_path / "konfai" / "__init__.py").write_text("")
+    konfai_from(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit, match="konfai"):
+        harness.machine_gate()
+    assert any(str(tmp_path) in warning for warning in harness.machine_gate(force=True).warnings)
+    konfai_from(monkeypatch, harness.REPO)
+    assert harness.machine_gate().quiet
+
+
+def importtime_line(self_us, cumulative_us, level, name):
+    # CPython's own format: "import time: %9ld | %10ld | %*s%s" with two spaces per import level.
+    return f"import time: {self_us:9d} | {cumulative_us:10d} | {'  ' * level}{name}"
+
+
+def test_import_time_is_split_by_the_top_level_packages_the_import_reaches(monkeypatch):
+    lines = [
+        "import time: self [us] | cumulative | imported package",
+        importtime_line(603, 1128, 0, "_frozen_importlib_external"),
+        importtime_line(100, 100, 2, "konfai.utils"),
+        importtime_line(3715, 99268, 1, "konfai"),
+        importtime_line(1440, 55378, 1, "numpy"),
+        importtime_line(323, 323, 2, "ruamel"),
+        importtime_line(600, 28749, 1, "ruamel.yaml"),
+        importtime_line(50, 50, 2, "torch._C"),
+        importtime_line(253562, 1507770, 1, "torch"),
+        importtime_line(1183, 170529, 3, "SimpleITK"),
+        importtime_line(500, 200000, 2, "konfai.data.dataset"),
+        importtime_line(90, 448495, 1, "konfai.data.data_manager"),
+        importtime_line(56, 240838, 1, "torch.utils.tensorboard.writer"),
+        importtime_line(3005, 2407461, 0, "konfai.trainer"),
+    ]
+    bench = perf_script(monkeypatch, "bench_startup")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stderr="\n".join(lines)))
+    assert bench["importtime"]("konfai.trainer") == {
+        "konfai": 2407.5,
+        "numpy": 55.4,
+        "ruamel": 28.7,
+        "torch": 1748.6,
+        "SimpleITK": 170.5,
+    }
 
 
 @pytest.mark.parametrize("returncode", [0, 1])

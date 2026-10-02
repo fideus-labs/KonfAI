@@ -132,10 +132,11 @@ This creates:
 ### 2. Predict
 
 Checkpoints are named after the moment they were written, and this example keeps only the best one, so
-a glob resolves to exactly one file:
+a glob on the date resolves to exactly one file (`resume_latest.pt` beside it is a training continuation,
+not a model to predict with):
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/REG_BASELINE/*.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/REG_BASELINE/[0-9]*.pt
 ```
 
 This creates `Predictions/REG_BASELINE/`, where each case now has a `MOVED.mha` (the registered image).

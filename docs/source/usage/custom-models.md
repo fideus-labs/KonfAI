@@ -131,7 +131,7 @@ class MySegNet(network.Network):
             "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {
-            "Argmax": network.TargetCriterionsLoader()
+            "Softmax": network.TargetCriterionsLoader()
         },
         patch: ModelPatch | None = None,
         dim: int = 2,
@@ -146,6 +146,7 @@ class MySegNet(network.Network):
         )
         self.add_module("Backbone", torch.nn.Conv2d(1, 8, kernel_size=3, padding=1))
         self.add_module("Head", torch.nn.Conv2d(8, 2, kernel_size=1))
+        self.add_module("Softmax", torch.nn.Softmax(dim=1))
         self.add_module("Argmax", blocks.ArgMax(dim=1))
 ```
 
@@ -158,7 +159,7 @@ Trainer:
     MySegNet:                     # the model's own subtree, decorated or not
       dim: 2
       outputs_criterions:
-        Argmax:
+        Softmax:                  # a loss needs a differentiable output: not Argmax
           targets_criterions:
             SEG:
               criterions_loader:
@@ -579,9 +580,9 @@ Matching YAML:
 
 ```yaml
 outputs_criterions:
-  Argmax:
+  Head:Tanh:                # a loss needs a differentiable output: the Synthesis example's image
     targets_criterions:
-      SEG:
+      CT:
         criterions_loader:
           MyLosses:BoundaryMAE:
             is_loss: true
@@ -611,9 +612,9 @@ What each base class asks of you, and what is worth setting beside it:
 
 | Base class | You must implement | Also worth setting |
 | --- | --- | --- |
-| `konfai.metric.measure.Criterion` | `forward(output, *targets) -> Tensor` | `maximize` (higher-is-better, drives ranking) and `reducible` (whether streamed evaluation may accumulate it): both default `False` |
+| `konfai.metric.measure.Criterion` | `forward(output, *targets) -> Tensor` | `maximize` (higher-is-better, drives ranking), `reducible` (whether streamed evaluation may accumulate it) and `batch_mean` (the value is the mean of one value per patch of the batch, so a batch weighs its patch count in the logged mean): all default `False`; `default_is_loss` (the role when the config leaves `is_loss` out) and `loss_capable` (`False` refuses `is_loss: true`): both default `True` |
 | `CriterionWithInit` | `forward`, plus `init(model, output_group, target_group) -> str` | |
-| `CriterionWithAttribute` | `forward(output, *targets, attributes: list[list[Attribute]])`: `attributes` is **keyword-only** | |
+| `CriterionWithAttribute` | `forward(output, *targets, attributes: list[list[Attribute]])`: `attributes` is **keyword-only**, one list per target in the order of the target group, in training and in evaluation | `accepts_output_attributes = True` and an `output_attributes` keyword to also receive the output's own (`None` in training: a model output has none) |
 
 The loss-weight schedulers a criterion's `schedulers:` block names resolve
 against `konfai.metric.schedulers` only: see {doc}`../reference/components/losses-metrics`.

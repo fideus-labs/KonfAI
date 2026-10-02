@@ -93,14 +93,15 @@ def _log_video_format(array: np.ndarray) -> np.ndarray:
         result_list.append(_log_images_format(array[:, t, ...]))
     result = np.stack(result_list, axis=1)
 
+    # [B, T, C, Y, X]: the channels (axis 2) become the three colours of each sample's frame.
     nb_channel = result.shape[2]
     if nb_channel < 3:
-        channel_split = [result[:, :, 0, ...] for i in range(3)]
+        channel_split = [result[:, :, :1] for i in range(3)]
     else:
-        channel_split = np.split(result, 3, axis=0)
+        channel_split = np.array_split(result, 3, axis=2)
     array = np.zeros((result.shape[0], result.shape[1], 3, *list(result.shape[3:])))
     for i, channels in enumerate(channel_split):
-        array[:, :, i] = np.mean(channels, axis=0)
+        array[:, :, i] = np.mean(channels, axis=2)
     return array
 
 
@@ -119,8 +120,15 @@ class DataLog(Enum):
         module path is keyed by its dotted name."""
         parsed: dict[str, tuple[DataLog, int]] = {}
         for entry in entries or []:
-            target, strategy, count = entry.split("/")
-            parsed[target.replace(":", ".")] = (cls[strategy], int(count))
+            try:
+                target, strategy, count = entry.split("/")
+                parsed[target.replace(":", ".")] = (cls[strategy], int(count))
+            except (ValueError, KeyError) as error:
+                raise ConfigError(
+                    f"Invalid data_log entry '{entry}'.",
+                    f"Write 'group_or_module/STRATEGY/N', STRATEGY one of {', '.join(cls.__members__)}"
+                    " and N the number of samples to log.",
+                ) from error
         return parsed
 
     def __call__(self, tb: "SummaryWriter | NullSummaryWriter", name: str, layer: np.ndarray, it: int):

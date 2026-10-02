@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from konfai.utils.config import Config, _load_tree, _parse_bool, _recordable
+from konfai.utils.utils import _OCCURRENCE
 
 if TYPE_CHECKING:
     from konfai.data.transform import Transform
@@ -122,9 +123,9 @@ def _plain(value: Any) -> Any:
 
 
 def _stage_name(classpath: str) -> str:
-    """The class a chain key names, without its module and without the ``/n`` that keeps two stages
-    of the same class apart (the rule :func:`konfai.utils.utils.get_module` reads a classpath by)."""
-    return classpath.split(":")[-1].split(".")[-1].split("/")[0]
+    """The class a chain key names, without its module and without the ``#n`` or ``/n`` that keeps two
+    stages of the same class apart (the rule :func:`konfai.utils.utils.get_module` reads a classpath by)."""
+    return _OCCURRENCE.sub("", classpath).split(":")[-1].split(".")[-1].split("/")[0]
 
 
 def _stage_identity(classpath: str) -> str:

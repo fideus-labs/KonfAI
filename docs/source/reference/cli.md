@@ -151,7 +151,8 @@ fails takes down nothing but its own shard. Windows gets no process group, so
 there TRAIN, RESUME and EVALUATION refuse more than one process. No workflow
 lets several processes write a single-file output (`h5`): every rank would
 write into the same file. The `KONFAI_*` variables the wrappers set on the way
-are listed under [Environment variables](#environment-variables).
+are listed under [Environment variables](#environment-variables). Ctrl+C stops
+a run with exit code 130, so `konfai TRAIN && konfai PREDICTION` stops there.
 
 ## `konfai-apps`
 
@@ -294,8 +295,13 @@ parser, so putting them after it fails with `the following arguments are
 required: --name`:
 
 ```bash
-konfai-cluster --name my_job --num-nodes 2 TRAIN -y --config Config.yml
+konfai-cluster --name my_job --num-nodes 2 TRAIN -y --gpu 0 1 --config Config.yml
 ```
+
+`--gpu` is required: the job runs one rank per listed GPU on each node, and
+`--cpu` does not apply. A job over several nodes names its rendezvous host with `scontrol`: a rank
+that cannot run it (a container without the host's Slurm client) refuses at
+startup rather than waiting on its own node until the rendezvous timeout.
 
 ## `konfai-mcp`
 
@@ -419,9 +425,10 @@ The codebase also references internal variables such as:
 - `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH`: the config binder's mode machine
 - `KONFAI_APPS_CONFIG`
 - `KONFAI_DEBUG`: `1` re-attaches the framework traceback to a designed refusal (a
-  `KonfAIError`), which otherwise prints its message and remedy alone
-- `KONFAI_DEBUG_LAST_LAYER`: set it (empty) before a run and the network appends each module
-  it enters, so after a crash it names the last layer reached
+  `KonfAIError`), which otherwise prints its message and remedy alone, and walks the graph
+  eagerly to fill `KONFAI_DEBUG_LAST_LAYER`; `0`, `false` or unset leave it off
+- `KONFAI_DEBUG_LAST_LAYER`: under `KONFAI_DEBUG`, the network sets it to each module it enters,
+  as `name:memory:device`, so after a crash it names the last layer reached
 - `KONFAI_MASTER_PORT`: distributed rendezvous bookkeeping
 - `KONFAI_LOCAL_RANKS`: how many ranks share one node's RAM, published by the
   launcher so a node-scoped `memory_budget` is divided before the spawn. It changes

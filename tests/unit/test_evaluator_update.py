@@ -20,17 +20,34 @@ An ``Evaluator`` is faked with the attributes ``__init__`` sets, no config or da
 paths run on in-memory batches.
 """
 
+import json
+import warnings
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from konfai.data.data_manager import BatchDataItem
 from konfai.data.patching import DatasetPatch
 from konfai.evaluator import Evaluator, Statistics
-from konfai.metric.measure import MAE, MSE, SSIM, MAESaveMap
+from konfai.metric.measure import (
+    MAE,
+    MSE,
+    SSIM,
+    CriterionWithAttribute,
+    Dice,
+    FocalLoss,
+    Gram,
+    MAESaveMap,
+    Mean,
+)
+from konfai.metric.schedulers import Constant
+from konfai.network.network import CriterionsAttr, Measure, ModuleArgsDict
 from konfai.utils.clock import SweepClock
-from konfai.utils.errors import EvaluatorError
+from konfai.utils.dataset import Attribute
+from konfai.utils.errors import EvaluatorError, KonfAIWarning
 
 
 def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], streamed: bool = False) -> Evaluator:
@@ -45,12 +62,13 @@ def _evaluator(metrics: dict[str, dict[str, dict[torch.nn.Module, None]]], strea
     evaluator._last_result = {}
     evaluator._map_sinks = {}
     evaluator._scored_names = set()
+    evaluator.dataset = SimpleNamespace(unreadable=({}, {}))
     return evaluator
 
 
 def _batch(name: str, p: int = 0, **tensors: torch.Tensor) -> dict[str, BatchDataItem]:
     return {
-        group: BatchDataItem(name=[name], tensor=tensor, attribute=[None], x=[0], a=[0], p=[p], is_input=False)
+        group: BatchDataItem(name=[name], tensor=tensor, attribute=[Attribute()], x=[0], a=[0], p=[p], is_input=False)
         for group, tensor in tensors.items()
     }
 
@@ -209,6 +227,171 @@ class TestStreamedUpdateWithAHalo:
         assert with_halo == without
 
 
+class _ReadsGeometry(CriterionWithAttribute):
+    """A metric that places its tensors itself from their headers."""
+
+    def forward(self, output, *targets, attributes):
+        return torch.tensor(0.0)
+
+
+class TestGridMismatch:
+    """An output and a target a metric compares voxel to voxel lie on one grid, or the case is refused."""
+
+    @pytest.mark.parametrize("output_z", [16, 1])  # torch raises at 16, broadcasts in silence at 1
+    def test_an_output_of_another_shape_is_refused_naming_the_case(self, output_z):
+        batch = _batch("CASE_1", sCT=torch.rand(1, 1, output_z, 16, 16), CT=torch.rand(1, 1, 8, 16, 16))
+        statistics = Statistics(None)
+
+        with pytest.raises(EvaluatorError, match=r"CASE_1(.|\n)*'sCT'(.|\n)*'CT'"):
+            _evaluator({"sCT": {"CT": {MAE(): None}}}).update(batch, statistics)
+        assert statistics.measures == {}
+
+    def test_a_mask_of_another_shape_is_refused(self):
+        batch = _batch("CASE_1", sCT=torch.rand(1, 1, 8, 8), CT=torch.rand(1, 1, 8, 8), MASK=torch.ones(1, 1, 8, 1))
+
+        with pytest.raises(EvaluatorError, match="'MASK'"):
+            _evaluator({"sCT": {"CT;MASK": {MAE(): None}}}).update(batch, Statistics(None))
+
+
+def _header(origin=(0.0, 0.0, 0.0), spacing=(1.0, 1.0, 1.0), direction=None) -> Attribute:
+    """An image header as a reader returns it."""
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(origin, dtype=np.float64)
+    attribute["Spacing"] = np.asarray(spacing, dtype=np.float64)
+    attribute["Direction"] = np.eye(len(origin)).reshape(-1) if direction is None else np.asarray(direction)
+    return attribute
+
+
+def _headed(batch: dict[str, BatchDataItem], **headers: Attribute) -> dict[str, BatchDataItem]:
+    return {
+        group: replace(item, attribute=[headers[group]]) if group in headers else item for group, item in batch.items()
+    }
+
+
+def _stored_as(evaluator: Evaluator, **formats: str) -> Evaluator:
+    """The evaluator reading each group from a dataset of the given format, ``mha`` by default."""
+    evaluator._iter_dataset = SimpleNamespace(
+        get_dataset_from_index=lambda group, x: SimpleNamespace(
+            dataset=SimpleNamespace(file_format=formats.get(group, "mha"))
+        )
+    )
+    return evaluator
+
+
+def _geometry_warnings(caught: list[warnings.WarningMessage]) -> list[str]:
+    return [str(w.message) for w in caught if issubclass(w.category, KonfAIWarning) and "geometry" in str(w.message)]
+
+
+class TestGeometryMismatch:
+    """An output and a target of one shape but two geometries are warned about once per case, and scored."""
+
+    @pytest.mark.parametrize(
+        ("output_header", "key", "values"),
+        [
+            (_header(origin=(10.0, 0.0, 0.0)), "Origin", ("[10.0, 0.0, 0.0]", "[0.0, 0.0, 0.0]")),
+            (_header(origin=(0.01, 0.0, 0.0)), "Origin", ("[0.01, 0.0, 0.0]", "[0.0, 0.0, 0.0]")),  # 1/100 voxel
+            (_header(spacing=(2.0, 1.0, 1.0)), "Spacing", ("[2.0, 1.0, 1.0]", "[1.0, 1.0, 1.0]")),
+            (_header(direction=np.diag([-1.0, 1.0, 1.0]).reshape(-1)), "Direction", ("[-1.0, 0.0", "[1.0, 0.0")),
+        ],
+    )
+    def test_a_pair_on_two_geometries_is_warned_about_and_scored(self, output_header, key, values):
+        torch.manual_seed(0)
+        sct, ct = torch.rand(1, 1, 4, 5, 6), torch.rand(1, 1, 4, 5, 6)
+        batch = _headed(_batch("CASE_1", sCT=sct, CT=ct), sCT=output_header, CT=_header())
+        statistics = Statistics(None)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _stored_as(_evaluator({"sCT": {"CT": {MAE(): None, MSE(): None}}})).update(batch, statistics)
+
+        [message] = _geometry_warnings(caught)
+        assert "CASE_1" in message and "'sCT'" in message and "'CT'" in message
+        assert key in message and all(value in message for value in values)
+        assert result["sCT:CT:MAE"] == pytest.approx((sct - ct).abs().mean().item())
+        assert statistics.measures["CASE_1"] == result
+
+    @pytest.mark.parametrize(
+        ("metric", "output_header", "target_header", "output_format", "output_shape"),
+        [
+            (MAE(), _header(), _header(), "mha", [2, 4, 4]),
+            # Rounding: the origin within 1e-3 x the smallest spacing, the spacing within 1e-6 x the first,
+            # the direction within 1e-6.
+            (MAE(), _header(origin=(5e-4, 0.0, 0.0), spacing=(1.0 + 5e-7, 1.0, 1.0)), _header(), "mha", [2, 4, 4]),
+            (  # the Synthesis demo's 1THA001: its MR, hence its sCT, lies 6.1e-5 mm from its CT
+                MAE(),
+                _header(origin=(-254.5, -91.5, -134.99993896484375), spacing=(1.0, 1.0, 2.0)),
+                _header(origin=(-254.5, -91.5, -135.0), spacing=(1.0, 1.0, 2.0)),
+                "mha",
+                [2, 4, 4],
+            ),
+            (MAE(), _header(direction=np.eye(3).reshape(-1) + 5e-7), _header(), "mha", [2, 4, 4]),
+            (
+                MAE(),
+                _header(origin=(1e-4, 0, 0), spacing=(1e3, 1e3, 1e3)),
+                _header(spacing=(1e3, 1e3, 1e3)),
+                "mha",
+                [2, 4, 4],
+            ),
+            (Mean(), _header(origin=(10.0, 0.0, 0.0)), _header(), "mha", [2, 4, 4]),  # never compares voxels
+            (Gram(), _header(origin=(10.0, 0.0, 0.0)), _header(), "mha", [2, 4, 4]),
+            (_ReadsGeometry(), _header(origin=(10.0, 0.0, 0.0)), _header(), "mha", [2, 4, 4]),  # places both itself
+            (MAE(), _header(origin=(10.0, 0.0, 0.0)), _header(), "png", [2, 4, 4]),  # a png stores no origin
+            (MAE(), Attribute(), _header(), "h5", [2, 4, 4]),  # an h5 entry without attributes
+            (MAE(), _header(origin=(10.0, 0.0), spacing=(1.0, 1.0)), _header(), "mha", [4, 4]),  # beside [1, 4, 4]
+        ],
+    )
+    def test_no_warning_where_nothing_differs_or_nothing_compares_the_geometry(
+        self, metric, output_header, target_header, output_format, output_shape
+    ):
+        target_shape = [1, 4, 4] if len(output_shape) == 2 else output_shape
+        batch = _headed(
+            _batch("CASE_1", sCT=torch.ones(1, 1, *output_shape), CT=torch.ones(1, 1, *target_shape)),
+            sCT=output_header,
+            CT=target_header,
+        )
+        evaluator = _stored_as(_evaluator({"sCT": {"CT": {metric: None}}}), sCT=output_format)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", KonfAIWarning)
+            evaluator.update(batch, Statistics(None))
+
+    def test_a_nifti_prediction_against_an_mha_reference_is_not_warned_about(self, tmp_path):
+        sitk = pytest.importorskip("SimpleITK")
+        # NIfTI stores the origin in float32: -135.1 comes back 6.1e-6 mm away, a voxel of 1 mm has not moved.
+        image = sitk.Image([6, 5, 4], sitk.sitkFloat32)
+        image.SetOrigin((-254.123456789, -91.987654321, -135.1))
+        sitk.WriteImage(image, str(tmp_path / "CT.mha"))
+        sitk.WriteImage(image, str(tmp_path / "sCT.nii.gz"))
+        headers = {}
+        for group, file in (("CT", "CT.mha"), ("sCT", "sCT.nii.gz")):
+            read = sitk.ReadImage(str(tmp_path / file))
+            headers[group] = _header(read.GetOrigin(), read.GetSpacing(), read.GetDirection())
+        assert not np.array_equal(headers["CT"].get_np_array("Origin"), headers["sCT"].get_np_array("Origin"))
+        batch = _headed(_batch("CASE_1", sCT=torch.ones(1, 1, 4, 5, 6), CT=torch.ones(1, 1, 4, 5, 6)), **headers)
+        evaluator = _stored_as(_evaluator({"sCT": {"CT": {MAE(): None}}}), sCT="nii.gz")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", KonfAIWarning)
+            evaluator.update(batch, Statistics(None))
+
+    @pytest.mark.parametrize("metric", [Dice(labels=[1]), FocalLoss()])
+    def test_a_label_metric_on_the_output_shape_is_warned_about(self, metric):
+        # On the output's own shape Dice and FocalLoss take the target as it is: a voxel away, it is scored there.
+        label = torch.zeros(1, 1, 4, 5, 6, dtype=torch.uint8)
+        label[..., 1:3, :, :] = 1
+        output = torch.cat([1 - label, label], 1).float()
+        batch = _headed(_batch("CASE_1", PRED=output, SEG=label), PRED=_header(origin=(1.0, 0.0, 0.0)), SEG=_header())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = _stored_as(_evaluator({"PRED": {"SEG": {metric: None}}})).update(batch, Statistics(None))
+
+        [message] = _geometry_warnings(caught)
+        assert "CASE_1" in message and "'PRED'" in message and "'SEG'" in message and metric.get_name() in message
+        assert "[1.0, 0.0, 0.0]" in message and "[0.0, 0.0, 0.0]" in message
+        assert f"PRED:SEG:{metric.get_name()}" in result
+
+
 def test_two_rank_evaluation_refuses_a_single_file_map(tmp_path: Path) -> None:
     """Every rank writes its cases' error maps: into one h5, a map can go missing with exit 0."""
     evaluator = _evaluator({"MOVED": {"FIXED": {MAESaveMap(dataset=f"{tmp_path / 'Maps'}:h5"): None}}})
@@ -216,3 +399,174 @@ def test_two_rank_evaluation_refuses_a_single_file_map(tmp_path: Path) -> None:
     with pytest.raises(EvaluatorError, match="single-file store"):
         evaluator.setup(2)
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+def test_two_metrics_of_one_class_keep_a_row_each(streamed: bool) -> None:
+    """Two metrics of one class once wrote one row, the second over the first."""
+    torch.manual_seed(4)
+    volumes = {"SEG": torch.randint(0, 3, (1, 1, 6, 5)), "PRED": torch.randint(0, 3, (1, 1, 6, 5))}
+    metrics = {"PRED": {"SEG": {Dice(labels=[1]): None, Dice(labels=[2]): None}}}
+    statistics = Statistics(None)
+    evaluator = _evaluator(metrics, streamed=streamed)
+
+    evaluator.update(_batch("case", **volumes), statistics)
+    evaluator._flush_pending(statistics)
+
+    row = statistics.measures["case"]
+    assert row["PRED:SEG:Dice"] == row["PRED:SEG:Dice:1"] == Dice(labels=[1])(volumes["PRED"], volumes["SEG"])[1][1]
+    assert row["PRED:SEG:Dice#2"] == row["PRED:SEG:Dice#2:2"] == Dice(labels=[2])(volumes["PRED"], volumes["SEG"])[1][2]
+
+
+def _who(group: str) -> Attribute:
+    attribute = Attribute()
+    attribute["Who"] = group
+    return attribute
+
+
+def _score_in_training_and_in_evaluation(criterion, output_group: str, target_group: str) -> None:
+    """Score ``criterion`` once through the trainer's ``Measure.update`` and once through
+    ``Evaluator.update``, on one case whose every group's attribute carries the group's name."""
+    tensors = {group: torch.rand(1, 1, 4, 4) for group in (output_group, *target_group.split(";"))}
+    graph = ModuleArgsDict()
+    graph.add_module(output_group, torch.nn.Identity())
+    attribute = CriterionsAttr()
+    attribute.schedulers = {Constant(): None}
+    measure = Measure("Net", {})
+    measure.outputs_criterions = {output_group: {target_group: {criterion: attribute}}}
+    measure.init(graph, list(tensors))
+    targets = {group: (tensor, [_who(group)]) for group, tensor in tensors.items() if group != output_group}
+    measure.update(output_group, tensors[output_group], targets, it=0, nb_patch=1, training=False)
+
+    batch = {
+        group: BatchDataItem(name=["case"], tensor=tensor, attribute=[_who(group)], x=[0], a=[0], p=[0], is_input=False)
+        for group, tensor in tensors.items()
+    }
+    _evaluator({output_group: {target_group: {criterion: None}}}).update(batch, Statistics(None))
+
+
+def test_a_criterion_gets_the_same_attributes_in_training_and_in_evaluation() -> None:
+    """``attributes`` holds the targets' own, in the order of the target group, through both calls.
+    The evaluator once put the output's first, so one criterion indexed two different lists."""
+
+    class Recorder(CriterionWithAttribute):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[list[str]] = []
+
+        def forward(self, output, *targets, attributes):
+            self.seen.append([samples[0]["Who"] for samples in attributes])
+            return torch.zeros(())
+
+    recorder = Recorder()
+
+    _score_in_training_and_in_evaluation(recorder, "sCT", "CT;MASK")
+
+    assert recorder.seen == [["CT", "MASK"], ["CT", "MASK"]]
+
+
+@pytest.mark.parametrize(
+    ("name", "target_group", "training", "evaluation"),
+    [
+        ("IMPACTReg", "CT;MASK", [("CT", "CT")], [("sCT", "CT")]),
+        ("SAM_Perceptual", "CT;MASK", [("CT", "CT")], [("CT", "CT")]),
+        ("IMPACTSynth", "CT;MR", [("CT", "CT"), ("MR", "MR")], [("sCT", "CT"), ("MR", "MR")]),
+        ("IMPACTSynth", "CT;MR;MASK", [("CT", "CT"), ("MR", "MR")], [("sCT", "CT"), ("MR", "MR")]),
+    ],
+)
+def test_an_impact_criterion_reads_the_statistics_of_the_images_it_compares(
+    name: str, target_group: str, training: list, evaluation: list
+) -> None:
+    """Each image the extractor sees is normalized by the statistics of a group it compares: the
+    output by its own when it has any (a prediction on disk, not a model output), else by the
+    reference's; never by the mask's. IMPACTReg read the MASK's in training, IMPACTSynth failed there
+    (IndexError) or read the MR's and the MASK's, and SAM_Perceptual read the prediction's in
+    evaluation."""
+    from konfai.metric.measure import impact
+
+    seen: list[tuple[str, str]] = []
+
+    def slice_losses(output, output_attributes, target, target_attributes, mask, loss, project=None):
+        seen.append((output_attributes[0]["Who"], target_attributes[0]["Who"]))
+        return iter([(torch.tensor(1.0), 1)])
+
+    stub = SimpleNamespace(slice_losses=slice_losses)
+    criterion = getattr(impact, name).__new__(getattr(impact, name))
+    torch.nn.Module.__init__(criterion)
+    criterion.__dict__.update(
+        name=name, model=stub, content=stub, style=stub, loss=None, content_loss=None, style_loss=None, pca=0
+    )
+
+    _score_in_training_and_in_evaluation(criterion, "sCT", target_group)
+
+    assert seen == training + evaluation
+
+
+class _Loader(list):
+    """The loader ``_evaluate_split`` walks: its batches, and a dataset that loads nothing."""
+
+    dataset = SimpleNamespace(load=lambda label: None)
+
+
+def test_a_resumed_run_rescores_a_case_scored_before_a_metric_was_added(tmp_path: Path) -> None:
+    """An interrupted run scored CASE_0 with MAE alone; the config now also names MSE."""
+    evaluator = _evaluator({"sCT": {"CT": {MAE(): None, MSE(): None}}})
+    evaluator.metric_path = tmp_path
+    statistics = Statistics(tmp_path / "Metric_TRAIN.json")
+    row = {"name": "CASE_0", "values": {"sCT:CT:MAE": 0.5}}
+    (tmp_path / "Metric_TRAIN.cases.rank0.jsonl").write_text(json.dumps(row) + "\n")
+    zeros = torch.zeros(1, 1, 4, 4)
+    loader = _Loader([_batch(f"CASE_{i}", sCT=zeros + i, CT=zeros) for i in range(2)])
+
+    evaluator._evaluate_split(loader, statistics, "TRAIN", 1, 0, 0)
+
+    report = json.loads(statistics.filename.read_text())
+    assert report["aggregates"]["sCT:CT:MSE"]["count"] == 2
+    assert report["case"]["sCT:CT:MAE"] == {"CASE_0": 0.0, "CASE_1": 1.0}
+
+
+def test_a_resumed_run_reuses_the_cases_scored_with_the_same_metrics(tmp_path: Path) -> None:
+    """A row holding every configured metric, a dict-valued one's components included, is not scored again."""
+    evaluator = _evaluator({"PRED": {"SEG": {MAE(): None, Dice(labels=[1]): None}}})
+    evaluator.metric_path = tmp_path
+    statistics = Statistics(tmp_path / "Metric_TRAIN.json")
+    row = {"name": "CASE_0", "values": {"PRED:SEG:MAE": 0.5, "PRED:SEG:Dice:1": 0.25, "PRED:SEG:Dice": 0.25}}
+    (tmp_path / "Metric_TRAIN.cases.rank0.jsonl").write_text(json.dumps(row) + "\n")
+    ones = torch.ones(1, 1, 4, 4, dtype=torch.uint8)
+    loader = _Loader([_batch(f"CASE_{i}", PRED=ones, SEG=ones) for i in range(2)])
+
+    evaluator._evaluate_split(loader, statistics, "TRAIN", 1, 0, 0)
+
+    report = json.loads(statistics.filename.read_text())
+    assert report["case"]["PRED:SEG:MAE"] == {"CASE_0": 0.5, "CASE_1": 0.0}
+    assert report["case"]["PRED:SEG:Dice:1"] == {"CASE_0": 0.25, "CASE_1": 1.0}
+
+
+def test_a_case_set_aside_mid_stream_is_scored_neither_in_part_nor_after(tmp_path: Path) -> None:
+    """A chunk of CASE_1 the loader cannot read: its patches read before it are dropped, the ones read
+    after it are skipped, and the report lists it beside the other cases' values."""
+    evaluator = _evaluator({"sCT": {"CT": {MAE(): None}}}, streamed=True)
+    evaluator.metric_path = tmp_path
+    statistics = Statistics(tmp_path / "Metric_TRAIN.json")
+    zeros = torch.zeros(1, 1, 2, 4)
+    unreadable = {
+        group: BatchDataItem([], torch.empty(0), [], [], [], [], False, unreadable=[(1, "CASE_1", "why")])
+        for group in ("sCT", "CT")
+    }
+    loader = _Loader(
+        [
+            _batch("CASE_0", 0, sCT=zeros + 1, CT=zeros),
+            _batch("CASE_1", 0, sCT=zeros + 5, CT=zeros),
+            unreadable,
+            _batch("CASE_1", 2, sCT=zeros + 7, CT=zeros),
+            _batch("CASE_2", 0, sCT=zeros + 2, CT=zeros),
+        ]
+    )
+
+    with pytest.warns(KonfAIWarning, match="CASE_1"):
+        evaluator._evaluate_split(loader, statistics, "TRAIN", 1, 0, 0)
+
+    report = json.loads(statistics.filename.read_text())
+    assert report["case"]["sCT:CT:MAE"] == {"CASE_0": 1.0, "CASE_2": 2.0}
+    assert report["aggregates"]["sCT:CT:MAE"]["count"] == 2
+    assert report["set_aside"] == {"CASE_1": "why"}
