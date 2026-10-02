@@ -1465,21 +1465,26 @@ def test_data_prediction_disables_persistent_workers() -> None:
 
 
 def _prepared_prediction(
-    root: Path, file_format: str, patch_size: tuple[int, int] | None = (4, 4), **kwargs
+    root: Path,
+    file_format: str,
+    shapes: tuple[tuple[int, ...], ...] = ((8, 8), (8, 8)),
+    multiple: list[int] | None = None,
+    **kwargs,
 ) -> DataPrediction:
-    """A prediction over two 8x8 cases stored in ``file_format``, read in ``patch_size`` patches (whole
-    when ``None``), its managers built."""
+    """A prediction over cases of ``shapes`` (two 8x8 ones) stored in ``file_format``, its managers built."""
     store = Dataset(root, file_format)
-    for name in ("CASE_000", "CASE_001"):
-        store.write("CT", name, np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
+    for index, shape in enumerate(shapes):
+        attributes = geometry([0.0] * len(shape), [1.0] * len(shape))
+        store.write("CT", f"CASE_{index:03d}", np.zeros((1, *shape), np.float32), attributes)
+    kwargs.setdefault("patch", DatasetPatch(patch_size=[4, 4], overlap=None))
+    kwargs.setdefault("augmentations", None)
     dataset = DataPrediction(
-        augmentations=kwargs.pop("augmentations", None),
         dataset_filenames=[f"{root}:{file_format}"],
         groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
-        patch=None if patch_size is None else DatasetPatch(patch_size=list(patch_size), overlap=None),
         subset=PredictionSubset(),
         **kwargs,
     )
+    dataset.set_free_axis_multiple(multiple)
     dataset.prepare()
     return dataset
 
@@ -2035,3 +2040,93 @@ def test_a_negative_prediction_batch_is_refused_not_read_as_one() -> None:
     # 0 asks for a measured batch; anything below it is a typo, not a batch of one.
     with pytest.raises(DatasetManagerError, match="batch_size: -2 is negative"):
         DataPrediction(augmentations=None, batch_size=-2)
+
+
+@pytest.mark.parametrize(("visible", "measured"), [("", False), ("0", True)], ids=["cpu", "gpu"])
+def test_a_prediction_left_to_measure_its_batch_batches_one_patch_at_a_time_off_a_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visible: str, measured: bool
+) -> None:
+    """Left out, the batch is measured on a GPU; on a CPU the loader batches one patch at a time exactly as
+    ``batch_size: 1`` has it, its workers still declaring their reads to the store."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    dataset = _prepared_prediction(tmp_path, "mha")
+    batch_sampler = dataset.get_data(1)[0][0][0].batch_sampler
+
+    assert isinstance(batch_sampler, GrowingBatchSampler) is measured
+    assert batch_sampler.batch_size == 1
+    assert batch_sampler.sampler.read_order._batches_vary is measured
+
+
+@pytest.mark.parametrize(
+    ("shapes", "patch_size", "multiple", "measured"),
+    [
+        (((8, 8), (8, 12)), None, None, False),
+        (((8, 8), (8, 12)), [0, 0], None, False),
+        (((8, 8), (8, 12)), [8, 0], None, False),
+        (((8, 8), (8, 8)), None, None, True),
+        (((8, 8), (8, 8)), [0, 0], None, True),
+        (((8, 8), (12, 8)), [4, 0], None, True),
+        (((8, 8), (8, 12)), [4, 4], None, True),
+        (((8, 6), (8, 8)), [0, 0], [4, 4], True),
+    ],
+    ids=[
+        "whole volumes of two shapes",
+        "free axes of two extents",
+        "a free axis of two extents",
+        "whole volumes of one shape",
+        "free axes of one extent",
+        "two extents on a declared axis only",
+        "a declared patch",
+        "free extents rounded to one size",
+    ],
+)
+def test_a_prediction_measures_its_batch_only_where_its_patches_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shapes: tuple[tuple[int, int], ...],
+    patch_size: list[int] | None,
+    multiple: list[int] | None,
+    measured: bool,
+) -> None:
+    """A batch of several patches stacks them, and a free axis (``0``, or no patch) keeps each case's own
+    extent: two cases of two extents there run one patch per batch, as ``batch_size: 1`` has it, instead of
+    failing to stack at the second forward. A declared axis pads every patch to its size."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    patch = None if patch_size is None else DatasetPatch(patch_size=patch_size, overlap=None)
+    dataset = _prepared_prediction(tmp_path, "mha", shapes, multiple, patch=patch)
+    loader = dataset.get_data(1)[0][0][0]
+
+    assert isinstance(loader.batch_sampler, GrowingBatchSampler) is measured
+    if measured:
+        # The measured batch's second forward: every two patches, the two cases' included, stack.
+        loader.batch_sampler.batch_size = 2
+        assert sum(1 for _ in loader) == -(-len(loader.batch_sampler.sampler) // 2)
+
+
+@pytest.mark.parametrize(("patch_size", "measured"), [(None, True), ([0, 0, 0], False)], ids=["no patch", "free axes"])
+def test_a_prediction_measures_its_batch_over_copies_of_another_shape_it_pads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch_size: list[int] | None, measured: bool
+) -> None:
+    """Without a patch, every copy is cut into patches of the case's own shape, a permuted one padded to
+    it, so the copies stack whatever their shapes. Free axes keep each copy's own extent, and those do not."""
+    from konfai.data.augmentation import Permute
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    permute = Permute(prob_permute=[1.0, 0.0])
+    permute.load(1.0)
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={})
+    monkeypatch.setattr(augmentations, "prepare", lambda key: setattr(augmentations, "data_augmentations", [permute]))
+    patch = None if patch_size is None else DatasetPatch(patch_size=patch_size, overlap=None)
+    dataset = _prepared_prediction(
+        tmp_path, "mha", ((4, 8, 8), (4, 8, 8)), patch=patch, augmentations={"DataAugmentation_0": augmentations}
+    )
+    assert [manager.shapes for manager in dataset.managers["CT"]] == [[[4, 8, 8], [8, 4, 8]]] * 2
+    loader = dataset.get_data(1)[0][0][0]
+
+    assert isinstance(loader.batch_sampler, GrowingBatchSampler) is measured
+    if measured:
+        loader.batch_sampler.batch_size = 2
+        assert sum(1 for _ in loader) == -(-len(loader.batch_sampler.sampler) // 2)

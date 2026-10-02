@@ -250,3 +250,14 @@ def test_a_measured_batch_is_the_largest_power_of_two_whose_forward_fits_half_th
     assert measured_batch(400, 500, usable=2198) == 4
     # Nothing beyond the fixed part fits: one patch still runs, and an OOM halves from there.
     assert measured_batch(400, 500, usable=100) == 1
+
+
+def test_resident_weights_take_what_a_measured_batch_leaves_of_the_usable_vram(monkeypatch):
+    """An ensemble's members stay on a CUDA device within the usable VRAM a measured batch does not
+    claim; off CUDA the host already holds the checkpoints, so nothing is kept."""
+    import torch
+    from konfai.utils.vram import BATCH_SHARE, resident_room
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1000, 4000))
+    assert resident_room(torch.device("cuda", 0)) == usable_vram(1000) * (1 - BATCH_SHARE)
+    assert resident_room(torch.device("cpu")) == 0.0
