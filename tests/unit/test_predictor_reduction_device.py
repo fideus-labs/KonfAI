@@ -187,7 +187,7 @@ def test_reduction_declares_slab_locality_by_type() -> None:
     # The streamed-write gate asks the reduction whether it is voxel-local (per-voxel over the model/TTA
     # axis). Mean/Median/Concat all reduce orthogonally to the spatial slab axis; a bare custom reduction
     # is unknown and must default to not-streamable, the way a transform defaults to WHOLE_VOLUME.
-    from konfai.predictor import Concat, Mean, Median, Reduction
+    from konfai.data.reduction import Concat, Mean, Median, Reduction
 
     assert Mean().voxel_local
     assert Median().voxel_local

@@ -111,8 +111,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
         self._predicted_flags: SynchronizedArray[int] | None = None
         #: The cases the last launch predicted; ``None`` when no launcher waited for the ranks.
         self.predicted: list[str] | None = None
-        module, name = get_module(combine, "konfai.predictor")
-        if module.__name__ == "konfai.predictor":
+        module, name = get_module(combine, "konfai.data.reduction")
+        if module.__name__ == "konfai.data.reduction":
             self.combine = module_attribute(module, name)()
         else:
             self.combine = apply_config(f"{konfai_root()}.{combine}")(module_attribute(module, name))()

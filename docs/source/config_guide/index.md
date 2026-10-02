@@ -18,6 +18,10 @@ literal string `"None"`: it is written back as `"None"` and reparsed to
 binds `None`: null is the disabled spelling and is never replaced by the
 default.
 
+The file is written once the workflow is built: a run that fails before that (a
+missing dataset, a misspelled class) leaves it byte-identical. `--init` is the
+exception and writes what resolved before the error, for you to complete.
+
 The rewrite replaces the file through a temporary file in its directory, with
 the line ending the file had (LF or CRLF), whatever the system. On
 Linux and macOS, a config you own keeps its group and its mode: a read-only
@@ -184,7 +188,10 @@ reads its file inside `konfai.utils.config.strict_config(root)`, which records,
 level by level, what the file holds against what the binder read, and reports
 the difference by path with the keys read at that level: `TRANSFORM` refuses
 (its config is the deliverable), `TRAIN`/`PREDICTION`/`EVALUATION` warn, since
-files written back by earlier versions carry such keys. The check closes when
+files written back by earlier versions carry such keys. They refuse, though, an
+unread key that sits beside a key which took its default (`epoch: 20` beside
+`epochs`): its value would be lost, and the run would train with the default.
+The file is then left as written. The check closes when
 the builder returns, so everything a workflow reads from its file is bound at
 construction. When the build fails first, a key it had not read yet is not
 reported as unknown; the error only names an unread key that sits beside a key

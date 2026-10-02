@@ -1404,27 +1404,33 @@ def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
     assert clip.plan_note("G", "case", [4, 4, 4], Attribute()) is None
 
 
-def test_a_slash_occurrence_suffix_binds_the_stage_it_names(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The published ImpactSynth configs key a repeated stage ``Name/N`` (``TensorCast/0``, ``Clip/1``,
-    ``Save/2``): each key binds its own block and resolves to the class before the slash."""
+def test_a_repeated_stage_binds_by_occurrence_and_the_slash_key_is_refused(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeated stage is keyed ``Name``, ``Name#2``: each key binds its own block and resolves to
+    the class. The old ``Name/N`` key is refused, naming that spelling."""
     from konfai.data.transform import Clip, TensorCast, TransformLoader
+    from konfai.utils.errors import ConfigError
 
     config = tmp_path / "Prediction.yml"
     config.write_text(
         "T:\n  transforms:\n"
-        "    TensorCast/0: {dtype: float16}\n"
-        "    Clip/0: {min_value: -1024, max_value: 5000}\n"
-        "    TensorCast/1: {dtype: int16}\n"
-        "    Clip/1: {min_value: 0, max_value: 10}\n"
+        "    TensorCast: {dtype: float16}\n"
+        "    Clip: {min_value: -1024, max_value: 5000}\n"
+        "    TensorCast#2: {dtype: int16}\n"
+        "    Clip#2: {min_value: 0, max_value: 10}\n"
+        "    Save/1: {dataset: ./Out}\n"
     )
     monkeypatch.setenv("KONFAI_config_file", str(config))
     monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
 
-    keys = ("TensorCast/0", "Clip/0", "TensorCast/1", "Clip/1")
+    keys = ("TensorCast", "Clip", "TensorCast#2", "Clip#2")
     stages = {key: TransformLoader().get_transform(key, "T.transforms") for key in keys}
     assert [type(stage) for stage in stages.values()] == [TensorCast, Clip, TensorCast, Clip]
-    assert [stages[key].dtype for key in ("TensorCast/0", "TensorCast/1")] == [torch.float16, torch.int16]
-    assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip/0", "Clip/1")] == [(-1024, 5000), (0, 10)]
+    assert [stages[key].dtype for key in ("TensorCast", "TensorCast#2")] == [torch.float16, torch.int16]
+    assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip", "Clip#2")] == [(-1024, 5000), (0, 10)]
+    with pytest.raises(ConfigError, match="'Save', 'Save#2', 'Save#3'"):
+        TransformLoader().get_transform("Save/1", "T.transforms")
 
 
 def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

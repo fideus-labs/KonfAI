@@ -57,11 +57,12 @@ konfai RESUME -y --config Config.yml \
   --model Checkpoints/SEG_BASELINE/2026_08_03_02_36_00.pt
 ```
 
-A run preserves its preparation seed: the seed every preparation draw comes from
-(the train/validation split first) is recorded in
-`Statistics/<train_name>/Seed.txt`, and RESUME of an unseeded run reads it
-back, so resuming on the same cases draws the same split. Set `manual_seed`
-only to pick the seed yourself. The split is drawn on the cases found at each
+A run records its seed: without `manual_seed`, TRAIN draws one and every draw
+of the run comes from it (the model's construction, the train/validation split,
+the batch order), as from a configured one. It is recorded in
+`Statistics/<train_name>/Seed.txt`: RESUME of an unseeded run reads it back, so
+resuming on the same cases draws the same split, and `manual_seed` set to it
+replays the run. Set `manual_seed` only to pick the seed yourself. The split is drawn on the cases found at each
 launch: a case added, removed or renamed since moves others between training
 and validation. RESUME of a training that continues compares its split with the
 latest `Train_<it>.txt` and `Validation_<it>.txt` of the run and warns, naming
@@ -115,7 +116,7 @@ konfai TRAIN -y --config Config.yml \
 | `Model` | mapping | `ModelLoader()` | Yes | Selects and configures the model graph. |
 | `Dataset` | mapping | `DataTrain()` | Yes | Defines training data loading, transforms, augmentation, and patching. |
 | `train_name` | string | `TRAIN_01` | No | Names the run and its output folders. |
-| `manual_seed` | int or null | `None` | No | Seeds the model's construction, training generators and preparation. The batch order it draws is the same whether the workers persist or not, and whatever `num_workers` unless a `shuffle_window` deals the cases to the workers. With `None`, TRAIN still records its preparation seed in `Statistics/<train_name>/Seed.txt` for RESUME's cohort split; this does not promise deterministic GPU training. |
+| `manual_seed` | int or null | `None` | No | Seeds the model's construction, training generators and preparation. The batch order it draws is the same whether the workers persist or not, and whatever `num_workers` unless a `shuffle_window` deals the cases to the workers. With `None`, TRAIN draws a seed, seeds the same draws with it and records it in `Statistics/<train_name>/Seed.txt`: RESUME reads it back, and `manual_seed` set to it replays the run. cuDNN stays non-deterministic without a configured seed (see `cudnn_benchmark`). |
 | `epochs` | int | `100` | No | Number of training epochs. |
 | `it_validation` | int or null | `None` | No | Validation and checkpoint interval in iterations. |
 | `it_lr_update` | int or null | `None` | No | Scheduler-step interval in iterations, counted in batches: with `nb_batch_per_step: k`, `it_lr_update: 1` steps the scheduler k times per optimizer step. `None` steps once per epoch (it resolves to the training dataloader's length). Every resolved config on disk carries this key. |

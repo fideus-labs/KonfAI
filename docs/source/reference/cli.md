@@ -61,15 +61,19 @@ current directory**:
 | `TRANSFORM` | `./Transform.yml` | `Transformer:` |
 
 Reading a config rewrites it on disk: after a run your YAML holds the resolved
-defaults. See {doc}`../config_guide/index`.
+defaults. A run that fails while building its workflow leaves the file as you
+wrote it. See {doc}`../config_guide/index`.
 
 ### Generating a config: `--init`
 
 `konfai <COMMAND> --init` is how a config file is generated: it creates the
 command's config file when missing (seeded with its root key), binds the
 workflow once so every default resolves into the file, and exits without
-running anything. `-c` picks the filename. A binding error after partial
-resolution still leaves what resolved on disk, plus the error naming the key.
+running anything. `-c` picks the filename. It reads no data, so it works in an
+empty folder: the dataset keys (`Dataset.dataset_filenames`, `Dataset.groups_src`)
+are checked when the workflow runs. A refusal left by the defaults (an output
+module or a `Write` to name) is printed as what to complete, and `--init` still
+succeeds, with the file written (a run leaves the file untouched).
 An error that is not a KonfAI refusal (a bug in your own `Model.py`, say) prints
 its traceback, as a run does.
 

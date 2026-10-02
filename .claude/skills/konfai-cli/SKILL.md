@@ -74,8 +74,9 @@ Segmentation, Synthesis and Registration recipes, and
   paths (configs, `Dataset/`, output dirs, and local `File:Class` classpaths) against the
   current working directory (it prepends CWD to `sys.path`).
 - **Reading a config rewrites it on disk.** A run materialises resolved defaults back into the
-  YAML (`None` becomes the literal `"None"`). Expect a post-run git diff; keep configs under
-  version control. There is no read-only path. (Details:
+  YAML (`None` becomes the literal `"None"`) once its workflow is built; a run whose build fails
+  leaves the file as written (`--init` writes what resolved). Expect a post-run git diff; keep
+  configs under version control. There is no read-only path. (Details:
   [references/workspace-and-runtime.md](references/workspace-and-runtime.md).)
 - **`train_name` is the join key.** `Prediction.yml` and `Evaluation.yml` must use the *same*
   `train_name` as the training run whose checkpoints/predictions they consume: the most common

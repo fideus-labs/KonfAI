@@ -194,13 +194,17 @@ def test_a_grid_with_a_singleton_patch_axis_reassembles_its_case(write_config, m
     assert torch.equal(accumulator.assemble(), volume)
 
 
-def test_the_published_sink_name_resolves_to_the_output_dataset() -> None:
-    """Every published Prediction.yml names the sink ``OutSameAsGroupDataset``: the alias must resolve."""
+def test_the_old_sink_name_is_refused_naming_the_output_dataset() -> None:
+    """``OutSameAsGroupDataset``, the sink's old name, is refused, and the refusal names the class to
+    write instead; ``OutputDataset`` resolves."""
     from konfai.predictor import OutputDataset
-    from konfai.utils.utils import get_module
+    from konfai.utils.errors import ConfigError
+    from konfai.utils.utils import get_module, module_attribute
 
     module, name = get_module("OutSameAsGroupDataset", "konfai.predictor")
-    assert getattr(module, name) is OutputDataset
+    with pytest.raises(ConfigError, match="closest: 'OutputDataset'"):
+        module_attribute(module, name)
+    assert module_attribute(*get_module("OutputDataset", "konfai.predictor")) is OutputDataset
 
 
 def test_two_rank_prediction_refuses_a_single_file_output(tmp_path: Path) -> None:
@@ -562,9 +566,21 @@ class _WidthNet(Network):
 
 
 def test_a_checkpoint_of_another_architecture_is_refused_by_name() -> None:
-    from konfai.predictor import Mean, ModelComposite
+    from konfai.data.reduction import Mean
+    from konfai.predictor import ModelComposite
 
     composite = ModelComposite(_WidthNet(2), Mean())
     with pytest.raises(PredictorError, match="size mismatch") as refused:
         composite.load([{"Model": _WidthNet(1).network_states()}])
     assert "Predictor.Model._WidthNet" in str(refused.value)
+
+
+@pytest.mark.parametrize("same_as_group", ["CT", "a:b:c"])
+def test_same_as_group_names_a_source_and_a_destination_group(same_as_group: str) -> None:
+    """``same_as_group`` is ``<group_src>:<group_dest>``: the default was ``default`` and failed on an
+    unpacking ValueError; a value of another form is refused by name."""
+    from konfai.utils.errors import PredictorError
+
+    with pytest.raises(PredictorError, match="<group_src>:<group_dest>"):
+        OutputDataset(same_as_group=same_as_group, dataset_filename="./Out:mha")
+    assert OutputDataset(dataset_filename="./Out:mha").group_src == "default"

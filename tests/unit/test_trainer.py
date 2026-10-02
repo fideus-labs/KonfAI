@@ -525,7 +525,7 @@ def test_restoring_the_ema_weights_is_charged_to_the_checkpoint_phase(tmp_path: 
     trainer.name = "RUN"
     trainer.size = 1
     trainer.it = 0
-    trainer._split_seed = 0
+    trainer.drawn_seed = 0
     trainer.ema_decay = 0.999
     trainer.model_ema = None
     trainer.override_lr = None
@@ -567,7 +567,7 @@ def test_resume_refuses_another_rank_count_before_writing_its_statistics(
     trainer.name = "RUN"
     trainer.size = size
     trainer.it = 4
-    trainer._split_seed = 0
+    trainer.drawn_seed = 0
     trainer.ema_decay = 0
     trainer.model_ema = None
     trainer.override_lr = None
@@ -962,22 +962,22 @@ def test_resume_reuses_the_recorded_split_seed(tmp_path: Path, monkeypatch) -> N
 
     class _Seeded:
         name = "RUN"
-        _resolve_split_seed = Trainer._resolve_split_seed
-        _recorded_split_seed = Trainer._recorded_split_seed
+        _resolve_seed = Trainer._resolve_seed
+        _recorded_seed = Trainer._recorded_seed
 
         def __init__(self, manual_seed: int | None) -> None:
             self.manual_seed = manual_seed
 
     unseeded = _Seeded(None)
-    assert unseeded._recorded_split_seed() is None
+    assert unseeded._recorded_seed() is None
     (tmp_path / "RUN").mkdir()
     (tmp_path / "RUN" / "Seed.txt").write_text("1234\n")
 
-    assert unseeded._resolve_split_seed(State.RESUME) == 1234
-    assert _Seeded(7)._resolve_split_seed(State.RESUME) == 7
-    assert unseeded._resolve_split_seed(State.TRAIN) != 1234  # a TRAIN never reads a record
+    assert unseeded._resolve_seed(State.RESUME) == 1234
+    assert _Seeded(7)._resolve_seed(State.RESUME) == 7
+    assert unseeded._resolve_seed(State.TRAIN) != 1234  # a TRAIN never reads a record
     (tmp_path / "RUN" / "Seed.txt").write_text("not a seed\n")
-    assert unseeded._recorded_split_seed() is None
+    assert unseeded._recorded_seed() is None
 
 
 _EMBEDDING_NET = """
