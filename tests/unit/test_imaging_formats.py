@@ -485,7 +485,7 @@ class TestOmeZarrRequireZarr:
     def test_raises_without_zarr(self) -> None:
         from konfai.utils import ome_zarr
 
-        with patch.object(ome_zarr, "_ZARR_AVAILABLE", False):
+        with patch.object(ome_zarr, "_zarr_available", lambda: False):
             with pytest.raises(DatasetManagerError, match="zarr is required"):
                 ome_zarr._require_zarr()
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import importlib.util
 import itertools
 import operator
 import tempfile
@@ -46,14 +47,6 @@ import numpy as np
 from konfai.utils import uri
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.runtime import map_over_rank_pool
-
-try:
-    import zarr
-
-    _ZARR_AVAILABLE = True
-except ImportError:
-    zarr = None  # type: ignore[assignment]
-    _ZARR_AVAILABLE = False
 
 if TYPE_CHECKING:
     from ngff_zarr.v06.zarr_metadata import Metadata as MetadataV06
@@ -156,8 +149,14 @@ CHUNK_TARGET_BYTES = 32 << 20
 _COMPRESSOR = {"id": "blosc", "cname": "lz4", "clevel": 5, "shuffle": 1, "blocksize": 0}
 
 
+@cache
+def _zarr_available() -> bool:
+    """Whether zarr imports, asked at first use: a workflow that opens no store does not load it."""
+    return importlib.util.find_spec("zarr") is not None
+
+
 def _require_zarr() -> None:
-    if not _ZARR_AVAILABLE:
+    if not _zarr_available():
         raise DatasetManagerError(
             "zarr is required for OME-Zarr support.",
             "Install it with: pip install konfai[omezarr]",
@@ -552,6 +551,8 @@ def _level_array(store_path: str, level_path: str) -> Any:
     """The zarr array behind one level, opened once: chunk-wise reads go to it directly, not through
     the dask graph ngff-zarr wraps it in (which rebuilds a task per chunk per read)."""
     _require_zarr()
+    import zarr
+
     return zarr.open_group(store_path, mode="r")[level_path]
 
 
@@ -1195,6 +1196,8 @@ def create_ome_zarr_store(
     _write_skeleton(store_path, multiscales, version, **compression)
 
     # The level-0 key comes from the metadata: ngff-zarr builds it from the image name.
+    import zarr
+
     array = zarr.open_group(str(store_path), mode="r+")[multiscales.metadata.datasets[0].path]
     return _ComponentFlippedWriter(array) if displacement_field else array
 
@@ -1259,6 +1262,8 @@ def append_ome_zarr_levels(
     # The levels join the store as it stands, whatever this version writes today: its own layout, and
     # level 0's own compressor when the metadata names one (v2 does; v3 holds a built codec chain
     # instead, so the fallback is what the create path writes).
+    import zarr
+
     layout = zarr.open_group(str(store), mode="r")[multiscales.metadata.datasets[0].path].metadata.to_dict()
     compressor = layout.get("compressor")
     compression: dict[str, Any] = {} if field else {"compressor": _COMPRESSOR}

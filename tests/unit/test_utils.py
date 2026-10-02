@@ -40,15 +40,15 @@ assert not loaded, loaded
 
 
 @pytest.mark.parametrize("workflow", ["konfai.transformer", "konfai.evaluator", "konfai.predictor.workflow"])
-def test_a_workflow_that_reads_no_store_does_not_load_ngff_zarr(workflow: str) -> None:
-    """Every rank bounds the decoded-chunk cache; dask and ngff-zarr, some 700 modules and 50 MB, are
-    imported where a store is described or written, not with the cache."""
+def test_a_workflow_that_reads_no_store_does_not_load_zarr(workflow: str) -> None:
+    """Every rank bounds the decoded-chunk cache; zarr, dask and ngff-zarr are imported where a store is
+    opened, described or written, not with the cache."""
     script = f"""
 import sys
 import {workflow}
 from konfai.utils.ome_zarr import bound_chunk_cache
 bound_chunk_cache()
-loaded = sorted(name for name in ("dask", "ngff_zarr") if name in sys.modules)
+loaded = sorted(name for name in ("zarr", "dask", "ngff_zarr") if name in sys.modules)
 assert not loaded, loaded
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
