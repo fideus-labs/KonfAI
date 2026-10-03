@@ -380,6 +380,7 @@ def run_app_api(
     ensemble: int = 0,
     ensemble_models: list[str] | None = None,
     patch_size: list[int] | None = None,
+    max_voxels: int | None = None,
     batch_size: int | None = None,
     config_overrides: list[str] | None = None,
     uncertainty: bool = False,
@@ -405,6 +406,7 @@ def run_app_api(
             "ensemble_models": ensemble_models or [],
             "tta": tta,
             "patch_size": patch_size,
+            "max_voxels": max_voxels,
             "batch_size": batch_size,
             "uncertainty": uncertainty,
             "quiet": quiet,
@@ -448,6 +450,100 @@ def run_app_action_api(
             if mask is not None:
                 call["mask"] = _groups(mask)
         getattr(KonfAIApp(ref, download=True, force_update=force_update), action)(**call)
+
+
+def _impact_reg_app(repo: str | None = None) -> Any:
+    """impact-reg-konfai's app, its presets resolved from ``repo`` (read when the package is imported)."""
+    if repo is not None:
+        os.environ["KONFAI_IMPACTREG_REPO"] = repo
+    try:
+        from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp
+    except ImportError as error:
+        raise ImportError(
+            "A registration app runs through impact-reg-konfai, which derives the moved image from its field and"
+            " scores it through the transform: pip install impact-reg-konfai"
+        ) from error
+    return ImpactRegKonfAIApp
+
+
+def run_registration_api(
+    *,
+    repo: str,
+    preset: str,
+    fixed: list[str],
+    moving: list[str],
+    fixed_masks: list[str],
+    moving_masks: list[str],
+    output: str,
+    gpu: list[int] | None = None,
+    cpu: int | None = None,
+    tta: int = 0,
+    max_voxels: int | None = None,
+    config_overrides: list[str] | None = None,
+    force_update: bool = False,
+    cwd: str | None = None,
+) -> None:
+    """Child entrypoint that registers with a registration app, through impact-reg-konfai.
+
+    The app writes its displacement field; impact-reg-konfai derives the moved image, puts a pair on one grid
+    where it must, registers a pair too large for the device in native tiles and records the run: the same
+    output as its CLI and SlicerImpactReg (``P000/Transform.h5``, ``P000/Moved``, ``register.json``).
+    """
+    from konfai import cuda_visible_devices
+
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        _ensure_local_imports()
+        app = _impact_reg_app(repo)(download=True, force_update=force_update)
+        app.register(
+            presets=[preset],
+            fixed_images=[Path(path) for path in fixed],
+            moving_images=[Path(path) for path in moving],
+            fixed_masks=[Path(path) for path in fixed_masks],
+            moving_masks=[Path(path) for path in moving_masks],
+            output=Path(output).resolve(),
+            # an app job holds every visible GPU when none is named (see _app_job_devices)
+            gpu=cuda_visible_devices() if gpu is None else gpu,
+            cpu=cpu,
+            tta=tta,
+            config_overrides=config_overrides,
+            max_voxels=max_voxels,
+        )
+
+
+def run_registration_evaluate_api(
+    *,
+    transforms: list[str],
+    fixed_images: list[str],
+    moving_images: list[str],
+    fixed_seg: list[str],
+    moving_seg: list[str],
+    fixed_landmarks: list[str],
+    moving_landmarks: list[str],
+    mask: list[str],
+    output: str,
+    gpu: list[int] | None = None,
+    cpu: int | None = None,
+    cwd: str | None = None,
+) -> None:
+    """Child entrypoint that scores a registration through ``impact-reg-konfai eval``: MAE, Dice, TRE and the
+    field's Jacobian, the moving side warped through the transform (none: the pair as it is)."""
+    from konfai import cuda_visible_devices
+
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        _ensure_local_imports()
+        _impact_reg_app()().evaluate(
+            fixed_images=[Path(path) for path in fixed_images],
+            moving_images=[Path(path) for path in moving_images],
+            transforms=[Path(path) for path in transforms],
+            gt_fixed_seg=[Path(path) for path in fixed_seg],
+            gt_moving_seg=[Path(path) for path in moving_seg],
+            gt_fixed_fid=[Path(path) for path in fixed_landmarks],
+            gt_moving_fid=[Path(path) for path in moving_landmarks],
+            mask=[Path(path) for path in mask] or None,
+            output=Path(output).resolve(),
+            gpu=cuda_visible_devices() if gpu is None else gpu,
+            cpu=cpu,
+        )
 
 
 def run_finetune_api(

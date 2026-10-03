@@ -47,7 +47,11 @@ from konfai.utils.dataset.landmarks import read_landmarks as read_landmarks
 from konfai.utils.dataset.landmarks import write_landmarks as write_landmarks
 from konfai.utils.dataset.ome_zarr_file import OmeZarrFile as OmeZarrFile
 from konfai.utils.dataset.sitk_file import SitkFile as SitkFile
+from konfai.utils.dataset.staging import entry_files as entry_files
+from konfai.utils.dataset.staging import entry_links as entry_links
 from konfai.utils.dataset.staging import is_staging_entry as is_staging_entry
+from konfai.utils.dataset.staging import staged_entry as staged_entry
+from konfai.utils.dataset.staging import transfer_entry as transfer_entry
 from konfai.utils.dataset.statistics import chunk_hull_voxels as chunk_hull_voxels
 from konfai.utils.dataset.stream import DataStream as DataStream
 
@@ -63,6 +67,8 @@ __all__ = [
     "data_to_image",
     "data_to_transform",
     "displacement_field_to_data",
+    "entry_files",
+    "entry_links",
     "get_infos",
     "image_to_data",
     "is_an_image",
@@ -72,5 +78,7 @@ __all__ = [
     "refuse_shared_single_file",
     "region_geometry",
     "release_read_handles",
+    "staged_entry",
+    "transfer_entry",
     "write_landmarks",
 ]

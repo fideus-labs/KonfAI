@@ -19,6 +19,7 @@
 
 import ctypes
 import inspect
+import multiprocessing.util
 import os
 import pickle  # nosec B403
 import random
@@ -100,6 +101,49 @@ def forget_earlier_workflows() -> None:
     ome_zarr = sys.modules.get("konfai.utils.ome_zarr")
     if ome_zarr is not None:
         ome_zarr.clear_ome_zarr_cache()
+
+
+#: The longest temporary directory the run's sockets fit under: an AF_UNIX path holds 107 bytes, and Python's
+#: forkserver (the DataLoader workers') and torch's shared-memory manager put theirs about 40 bytes below it.
+SOCKET_TMPDIR_MAX = 64
+
+
+#: This process's short link, per temporary directory it stands for: multiprocessing names its own temporary directory
+#: through it once for the process, so the link lives until the process ends.
+_SOCKET_LINKS: dict[str, str] = {}
+
+
+@contextmanager
+def short_socket_tmpdir() -> Iterator[None]:
+    """``TMPDIR`` for the run, a short link to the temporary directory when that one is too long for a socket path
+    (:data:`SOCKET_TMPDIR_MAX`): the DataLoader workers and torch's shared-memory manager open their sockets under
+    it, and a path past the AF_UNIX limit made the loader hang. The files still land in the directory it links to."""
+    target = tempfile.gettempdir()
+    if len(target) <= SOCKET_TMPDIR_MAX or os.name != "posix":
+        yield
+        return
+    if target not in _SOCKET_LINKS:
+        try:
+            home = tempfile.mkdtemp(prefix="konfai-", dir="/tmp")  # nosec B108 - a private directory, for its short path
+        except OSError:  # no writable /tmp: the long path stays
+            yield
+            return
+        os.symlink(target, os.path.join(home, "t"))
+        # Removed after multiprocessing's own temporary directory (exit priority -100), which it removes through the link.
+        multiprocessing.util.Finalize(
+            None, shutil.rmtree, args=(home,), kwargs={"ignore_errors": True}, exitpriority=-101
+        )
+        _SOCKET_LINKS[target] = os.path.join(home, "t")
+    previous = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"], tempfile.tempdir = _SOCKET_LINKS[target], None
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = previous
+        tempfile.tempdir = None
 
 
 def seed_all(seed: int) -> None:
@@ -440,7 +484,7 @@ def execute_distributed_object(
     # The run seeds the process-wide RNGs and sets the cudnn flags; inline, that process is the caller's.
     previous_cudnn = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
 
-    with preserved_rng():
+    with preserved_rng(), short_socket_tmpdir():
         try:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(i) for i in gpu_ids if i >= 0])
             os.environ["KONFAI_OVERWRITE"] = str(overwrite)

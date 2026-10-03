@@ -30,9 +30,9 @@ import shutil
 import struct
 import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -67,9 +67,12 @@ from konfai.utils.dataset.staging import (
 from konfai.utils.dataset.stream import (
     _MHA_ELEMENT_TYPES,
     _NIFTI_DATATYPES,
+    _NRRD_TYPES,
     DataStream,
     _MhaDataStream,
     _NiftiDataStream,
+    _NiftiGzipStream,
+    _NrrdDataStream,
 )
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning
 from konfai.utils.utils import (
@@ -191,6 +194,15 @@ def _warn_unstreamed_region_read(path: str) -> None:
     )
 
 
+#: The formats a region write serves: their stream, and the dtypes it holds.
+_STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
+    "mha": (_MhaDataStream, _MHA_ELEMENT_TYPES),
+    "nii": (_NiftiDataStream, _NIFTI_DATATYPES),
+    "nii.gz": (_NiftiGzipStream, _NIFTI_DATATYPES),
+    "nrrd": (_NrrdDataStream, _NRRD_TYPES),
+}
+
+
 class SitkFile(AbstractFile):
     # SimpleITK raises RuntimeError; the npy, fcsv and xml sidecars ValueError, EOFError or ParseError.
     read_errors = (OSError, RuntimeError, ValueError, EOFError, SyntaxError)
@@ -207,7 +219,7 @@ class SitkFile(AbstractFile):
         read: bool,
         file_format: str,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> SitkFile:
         del level, scale_factors, downsample_method
@@ -215,9 +227,9 @@ class SitkFile(AbstractFile):
 
     @classmethod
     def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
-        # The region-writable formats are the region-readable ones: an uncompressed MetaImage or
-        # NIfTI is a fixed header plus a flat raw block, written through a memmap.
-        return file_format in ("mha", "nii") and is_an_image(attributes)
+        # An uncompressed MetaImage, NIfTI or NRRD is a fixed header plus a flat raw block, written through a
+        # memmap; a gzipped NIfTI is compressed as its planes come.
+        return file_format in _STREAMS and is_an_image(attributes)
 
     @staticmethod
     def _normalize_slices(slices: tuple[slice, ...], shape: list[int]) -> tuple[slice, ...]:
@@ -608,30 +620,23 @@ class SitkFile(AbstractFile):
         attributes: Attribute,
         region_shape: list[int] | None = None,
     ) -> DataStream | None:
-        # The region-writable SimpleITK formats are the region-READABLE ones, deliberately:
-        # uncompressed MetaImage and NIfTI are a fixed header plus a flat raw block, so the block
-        # is reserved and memmapped. Every other format writes whole in one WriteImage call --
-        # and streaming into a form the reader must then decode whole would only move the cost.
-        if self.file_format not in ("mha", "nii") or not is_an_image(attributes) or len(shape) < 3:
+        # A format outside _STREAMS writes whole in one WriteImage call.
+        if self.file_format not in _STREAMS or not is_an_image(attributes) or len(shape) < 3:
             return None
         element_dtype = np.dtype(dtype)
         if element_dtype == np.float16:
-            # Neither format has a half-float type; widen float16 to float32 (exact), as
+            # No streamed format has a half-float type; widen float16 to float32 (exact), as
             # data_to_image does, so streamed and whole-volume writes hold identical bytes.
             element_dtype = np.dtype(np.float32)
         dimension = len(shape) - 1
         geometry = (("Origin", dimension), ("Spacing", dimension), ("Direction", dimension * dimension))
         if any(len(attributes.get_np_array(key)) != n for key, n in geometry):
             return None
-        if self.file_format == "nii":
-            if dimension not in (2, 3) or element_dtype.name not in _NIFTI_DATATYPES:
-                return None
-            os.makedirs(self.filename, exist_ok=True)
-            return _NiftiDataStream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
-        if element_dtype.name not in _MHA_ELEMENT_TYPES:
+        stream, types = _STREAMS[self.file_format]
+        if element_dtype.name not in types or (stream is not _MhaDataStream and dimension not in (2, 3)):
             return None
         os.makedirs(self.filename, exist_ok=True)
-        return _MhaDataStream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
+        return stream(f"{self.filename}{name}.{self.file_format}", shape, element_dtype, attributes)
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
         base = f"{self.filename}{group}"

@@ -213,6 +213,17 @@ def test_a_calls_memory_budget_does_not_reach_the_next_call(
     assert per_rank_budget_bytes() is None  # the caller's process is left as found
 
 
+def test_a_quiet_run_prints_nothing(
+    cohort: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The build lists the cohort before the run's log captures the console: a quiet run printed that line."""
+    monkeypatch.chdir(cohort)
+    api.transform(
+        "QUIET", "./Raw:mha", {"CT": {"CT": [Write(dataset="./OutQ:mha")]}}, transforms_dir=cohort / "T", quiet=True
+    )
+    assert capsys.readouterr().out == ""
+
+
 def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A run's pooled h5 read handles are released when the call returns: HDF5 refuses to open for
     writing a file this process still holds for reading, so a notebook could not append to the
@@ -330,9 +341,9 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
 @pytest.mark.parametrize(
     ("stored", "written", "verdict"),
     [
-        ("nii.gz", "nii.gz", "WHOLE-VOLUME"),
+        ("nii.gz", "nii.gz", "STREAM"),  # read from its uncompressed twin, written in slabs
         ("nrrd", "mha", "LOAD"),
-        ("nii.gz", "mha", "STREAM"),  # read from its uncompressed twin
+        ("mhd", "mhd", "WHOLE-VOLUME"),
         ("mha", "mha", "STREAM"),
     ],
 )

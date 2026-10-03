@@ -1,0 +1,32 @@
+# The warped moving segmentation is scored against the fixed one, the reference: every label of the fixed
+# segmentation gets a Dice, near 0 when the moving one lost it (scored the other way round, a lost label was
+# dropped from the mean). int32, not uint8: 1002, 2002 and 1026 wrapped to 234, 210 and 2.
+Evaluator:
+  metrics:
+    MovingSeg:
+      targets_criterions:
+        FixedSeg:
+          criterions_loader:
+            DiceSaveMap:
+              labels: None
+              dataset: ./Evaluations/ImpactReg/Output:mha
+              group: Dice_map
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          FixedSeg:
+            transforms:
+              TensorCast:
+                dtype: int32
+      Reference_0:
+        groups_dest:
+          MovingSeg:
+            transforms:
+              TensorCast:
+                dtype: int32
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

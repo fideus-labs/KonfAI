@@ -796,20 +796,22 @@ class TestImpactRegPCA:
         return core
 
     def test_transform_reduces_channels(self):
-        core = self._core(3)
+        from konfai.metric.measure.impact import _pca_transform
+
         basis = torch.linalg.qr(torch.randn(8, 3))[0]  # orthonormal [8, 3]
-        out = core._pca_transform(torch.randn(2, 8, 4, 5, 6), basis)
+        out = _pca_transform(torch.randn(2, 8, 4, 5, 6), basis)
         assert out.shape == (2, 3, 4, 5, 6)
 
     def test_transform_centres_by_own_channel_mean(self):
-        core = self._core(2)
+        from konfai.metric.measure.impact import _pca_transform
+
         torch.manual_seed(0)
         basis = torch.linalg.qr(torch.randn(6, 2))[0]
         # Distinct per-channel constants: each channel is spatially flat, so per-CHANNEL mean-centring zeros
         # it -> projects to 0. A global/cross-channel mean would leave the per-channel offsets and project to
         # a non-zero value (~0.79 here), so this input discriminates the correct centring from that bug.
         const = torch.arange(1.0, 7.0).reshape(1, 6, 1, 1, 1).expand(1, 6, 3, 3, 3).contiguous()
-        out = core._pca_transform(const, basis)
+        out = _pca_transform(const, basis)
         assert torch.allclose(out, torch.zeros_like(out), atol=1e-5)
 
     def test_project_reduces_both_maps_to_top_k(self):
@@ -943,6 +945,23 @@ class TestMaskedFeatureLoss:
         mask[:, :, :8, :8] = 1
         loss, _ = self._run([1.0], mask=mask, x=x, y=y)
         assert loss.item() < 1e-6
+
+    def test_a_distance_over_channels_sees_them_inside_the_mask(self):
+        # A flat element selection took the channel axis away: cosine, NCC, Dice or a Gram matrix raised on any mask.
+        from konfai.metric.measure.impact import _masked_feature_loss
+
+        torch.manual_seed(0)
+        x = torch.rand(1, 3, 16, 16)
+        y = x.clone()
+        y[:, :, 8:, 8:] *= -1.0  # opposite feature vectors outside the mask only
+        mask = torch.zeros(1, 1, 16, 16, dtype=torch.uint8)
+        mask[:, :, :8, :8] = 1
+        cosine = lambda a, b: -F.cosine_similarity(a, b, dim=1).mean()  # noqa: E731
+        triple = lambda t: [t, torch.tensor([1]), torch.tensor([[0.0, 0.5, 1.0, 0.2]])]  # noqa: E731
+        loss, _ = _masked_feature_loss(_FakeFeatureModel(), triple(x), triple(y), [1.0], cosine, mask, None)
+        assert loss.item() == pytest.approx(-1.0, abs=1e-5)
+        l1, _ = self._run([1.0], mask=mask, x=x, y=y)  # an elementwise mean is what it was on the flat selection
+        assert l1.item() == pytest.approx(0.0, abs=1e-6)
 
     def test_patches_without_mask_are_not_counted(self):
         mask = torch.zeros(1, 1, 32, 32, dtype=torch.uint8)

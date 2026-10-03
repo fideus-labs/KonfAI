@@ -143,7 +143,7 @@ class ItkTransformFile(AbstractFile):
         read: bool,
         file_format: str,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> ItkTransformFile:
         del file_format, level, scale_factors, downsample_method

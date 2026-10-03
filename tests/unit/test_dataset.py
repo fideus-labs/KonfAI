@@ -317,16 +317,32 @@ def test_sitk_file_to_data_missing_entry_raises_nameerror(tmp_path: Path) -> Non
 
 def test_h5_write_unknown_transform_type_raises(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Transforms", "h5")
-    composite = sitk.CompositeTransform([sitk.TranslationTransform(3, (1.0, 2.0, 3.0))])
+    composite = sitk.CompositeTransform([sitk.TranslationTransform(2, (1.0, 2.0))])
     with pytest.raises(DatasetManagerError, match="Unsupported transform type"):
         dataset.write("T", "CASE_000", composite, Attribute())
 
 
 def test_sitk_read_unknown_transform_type_raises(tmp_path: Path) -> None:
     dataset = Dataset(tmp_path / "Dataset", "mha")
-    dataset.write("Transf", "CASE_000", sitk.TranslationTransform(3, (1.0, 2.0, 3.0)), Attribute())
+    dataset.write("Transf", "CASE_000", sitk.TranslationTransform(2, (1.0, 2.0)), Attribute())
     with pytest.raises(DatasetManagerError, match="Unsupported transform type"):
         dataset.read_transform("Transf", "CASE_000")
+
+
+@pytest.mark.parametrize("file_format", ["mha", "h5"])
+def test_a_linear_leaf_without_a_tag_is_stored_as_the_affine_it_is(tmp_path: Path, file_format: str) -> None:
+    """A translation, a versor or a similarity (what elastix and SimpleITK write for a rigid stage) maps every
+    point where it did, read back as an affine."""
+    versor = sitk.VersorRigid3DTransform()
+    versor.SetRotation((0.3, -0.5, 0.8), 0.4)
+    versor.SetTranslation((4.0, -1.0, 2.5))
+    versor.SetCenter((10.0, 20.0, 30.0))
+    composite = sitk.CompositeTransform([sitk.TranslationTransform(3, (1.0, 2.0, 3.0)), versor])
+    dataset = Dataset(tmp_path / "Dataset", file_format)
+    dataset.write("Transf", "CASE_000", composite, Attribute())
+    stored = dataset.read_transform("Transf", "CASE_000")
+    for point in [(0.0, 0.0, 0.0), (12.5, -3.0, 40.0)]:
+        np.testing.assert_allclose(stored.TransformPoint(point), composite.TransformPoint(point), atol=1e-9)
 
 
 def test_read_transform_unknown_type_attribute_raises(tmp_path: Path) -> None:
@@ -1850,3 +1866,41 @@ def test_the_geometry_stack_reads_back_as_it_was_written(tmp_path: Path, file_fo
     keys = [key for key in dict.keys(attributes) if key.split("_")[0] in ("Origin", "Spacing", "Direction")]
     assert sorted(keys) == ["Direction_0", "Origin_0", "Spacing_0"]
     assert attributes.get_np_array("Origin").tolist() == [1.0, 2.0, 3.0]
+
+
+def test_a_metaimage_entry_keeps_its_pixels_through_its_transfers_and_an_interrupted_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A .mhd keeps its pixels in the .raw its header names: a transfer brings them under a name of their own, so two
+    outputs of one folder never share one, and a replacement cut short before its header leaves the old header
+    reading its own pixels."""
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai.utils.dataset import entry_files, staged_entry, transfer_entry
+    from konfai.utils.dataset import staging as staging_module
+
+    def pair(value: float, spacing: float, name: str) -> Path:
+        image = sitk.GetImageFromArray(np.full((2, 3, 4), value, np.float32))
+        image.SetSpacing([spacing] * 3)
+        sitk.WriteImage(image, str(tmp_path / "src" / name))
+        return tmp_path / "src" / name
+
+    (tmp_path / "src").mkdir()
+    old, new = pair(1.0, 1.0, "old.mhd"), pair(9.0, 2.0, "new.mhd")
+    for name in ("a.mhd", "b.mhd"):  # two outputs of one folder, as apply writes them
+        with staged_entry(tmp_path / name) as staged:
+            transfer_entry(old, staged)
+    publish = staging_module.publish
+
+    def header_fails(staged: Path, final: Path) -> None:
+        if final.suffix == ".mhd":
+            raise OSError("the disk filled up")
+        publish(staged, final)
+
+    monkeypatch.setattr(staging_module, "publish", header_fails)
+    with pytest.raises(OSError), staged_entry(tmp_path / "a.mhd") as staged:
+        transfer_entry(new, staged)
+    for part in entry_files(old):
+        part.unlink()
+    for name in ("a.mhd", "b.mhd"):
+        image = sitk.ReadImage(str(tmp_path / name))
+        assert image.GetSpacing() == (1.0, 1.0, 1.0) and sitk.GetArrayFromImage(image).max() == 1.0

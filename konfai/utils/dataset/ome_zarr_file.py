@@ -47,7 +47,7 @@ from konfai.utils.dataset.attribute import (
     push_geometry,
     region_geometry,
 )
-from konfai.utils.dataset.staging import _recover_orphaned_backup, _replaced_name, _retire_dead_debris
+from konfai.utils.dataset.staging import _recover_orphaned_backup, _retire_dead_debris, publish
 from konfai.utils.dataset.stream import DataStream
 from konfai.utils.errors import DatasetManagerError
 from konfai.utils.utils import (
@@ -103,7 +103,7 @@ class _OmeZarrDataStream(DataStream):
         array: Any,
         store_path: Path,
         final_path: Path,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         self._array = array
@@ -129,22 +129,7 @@ class _OmeZarrDataStream(DataStream):
             # On the temporary store, so the rename publishes level 0 and its coarser levels in one step.
             append_ome_zarr_levels(self._store_path, self._scale_factors, downsample_method=self._downsample_method)
             self._array = None
-        replaced = self._final_path.exists()
-        backup = self._final_path.with_name(_replaced_name(self._final_path.name))
-        if replaced:
-            shutil.rmtree(backup, ignore_errors=True)
-            os.rename(self._final_path, backup)
-        try:
-            os.rename(self._store_path, self._final_path)
-        except OSError:
-            # A concurrent writer of the same entry renamed its complete store into place: keep it.
-            if not self._final_path.exists():
-                if replaced:
-                    os.rename(backup, self._final_path)  # a failed publish leaves the old entry in place
-                raise
-            shutil.rmtree(self._store_path, ignore_errors=True)
-        if replaced:
-            shutil.rmtree(backup, ignore_errors=True)
+        publish(self._store_path, self._final_path)
         # The reader memoises loaded stores by path, and this path now holds another store.
         clear_ome_zarr_cache(self._final_path)
         _forget_resolved_paths()
@@ -175,13 +160,13 @@ class OmeZarrFile(AbstractFile):
         filename: str,
         read: bool,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         self.filename = filename if filename.endswith("/") else f"{filename}/"
         self.read = read
         self.level = level
-        self.scale_factors = list(scale_factors) if scale_factors else None
+        self.scale_factors = scale_factors or None
         self.downsample_method = downsample_method
 
     def __enter__(self):
@@ -317,18 +302,11 @@ class OmeZarrFile(AbstractFile):
             scale_factors=self.scale_factors,
             downsample_method=self.downsample_method,
         )
-        replaced = final.with_name(_replaced_name(final.name))
-        shutil.rmtree(replaced, ignore_errors=True)
         try:
-            if final.exists():
-                final.rename(replaced)
-            staging.rename(final)
+            publish(staging, final)
         except BaseException:
-            if replaced.exists() and not final.exists():
-                replaced.rename(final)
             shutil.rmtree(staging, ignore_errors=True)
             raise
-        shutil.rmtree(replaced, ignore_errors=True)
         # The reader memoises decoded chunks by path, and this path now holds another store.
         clear_ome_zarr_cache(final)
         _forget_resolved_paths()
@@ -370,7 +348,7 @@ class OmeZarrFile(AbstractFile):
         read: bool,
         file_format: str,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> OmeZarrFile:
         del file_format

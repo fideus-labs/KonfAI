@@ -145,7 +145,8 @@ def test_write_inputs_stages_series_as_dir_and_store_with_suffix(
     app._write_inputs_to_dataset([[series], [store]])
 
     volume_dicom = tmp_path / "Dataset" / "P000" / "Volume_0"  # DICOM series -> bare directory
-    volume_zarr = tmp_path / "Dataset" / "P000" / "Volume_1.ome.zarr"  # OME-Zarr store -> suffixed
+    # OME-Zarr store -> suffixed, in a root of its own: the DICOM series sets ./Dataset's backend.
+    volume_zarr = tmp_path / "Dataset_omezarr" / "P000" / "Volume_1.ome.zarr"
     assert volume_dicom.is_symlink() or volume_dicom.is_dir()
     assert volume_zarr.is_symlink() or volume_zarr.is_dir()
     assert Path(os.readlink(volume_dicom)).name == "ser"

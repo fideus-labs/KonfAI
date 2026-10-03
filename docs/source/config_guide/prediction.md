@@ -92,6 +92,9 @@ with them resident restarts with them loading per batch. At one batch size the o
 | `overlap` | `null` | Voxels (`16`), a fraction (`0.2`), `"20%"`, or one per axis. `null`: 20%. |
 | `pad_value` | `null` | Padding past the volume. `null`: the data's minimum. |
 | `extend_slice` | `0` | 2.5-D: neighbouring slices added as channels (with `patch_size[0] == 1`). |
+| `mode` | `tile` | What a case over `max_voxels` gets: `tile` cuts it into patches, `resample` runs it whole on a grid coarse enough and brings the output back onto the case's grid. |
+| `max_voxels` | `null` | The voxels a patch (`tile`) or a case's coarse grid (`resample`) holds. `null`: sized from the two costs below. |
+| `vram_bytes_per_voxel`, `ram_bytes_per_voxel` | `null` | What a voxel costs the pass on the GPU and in RAM. With `max_voxels` unset, KonfAI holds the tighter of the free GPU memory and the rank's RAM budget. |
 
 ### Letting KonfAI size the patch
 

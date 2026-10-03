@@ -529,6 +529,6 @@ def _open_sweep_stream(
         raise PatchError(
             f"destination '{sweep.destination.filename}' refused the region write of"
             f" '{sweep.group}/{sweep.entry}' after accepting its plan.",
-            "h5 and omezarr always serve region writes; mha only with image geometry.",
+            "h5 and omezarr always serve region writes; mha, nii, nii.gz and nrrd with image geometry.",
         )
     return stream

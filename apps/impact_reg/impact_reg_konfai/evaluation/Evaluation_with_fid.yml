@@ -1,0 +1,22 @@
+Evaluator:
+  metrics:
+    FixedFid:
+      targets_criterions:
+        MovingFid:
+          criterions_loader:
+            TRE: {}
+  Dataset:
+    groups_src:
+      Volume_0:
+        groups_dest:
+          FixedFid:
+            transforms: None
+      Reference_0:
+        groups_dest:
+          MovingFid:
+            transforms: None
+    subset: None
+    dataset_filenames:
+    - ./Dataset:mha
+    validation: None
+  train_name: ImpactReg

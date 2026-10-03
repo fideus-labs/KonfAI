@@ -29,7 +29,8 @@ class Save(Transform):
     """Write the chain's state here, and become a source boundary.
 
     ``scale_factors`` writes an OME-NGFF pyramid instead of a single level: ``[4]`` adds a level 1 at
-    a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth. A pyramid is indexed by
+    a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth, ``auto`` halves each entry's grid down to
+    about 256 voxels along its longest axis. A pyramid is indexed by
     position (``:omezarr@1`` is the second entry), 0 finest. ``downsample_method`` names how the
     coarse levels are derived, each from the one above it over aligned windows of the factor. Left
     unnamed, a label dtype (uint8, int64, bool) takes the majority of each window, the smallest value
@@ -43,19 +44,23 @@ class Save(Transform):
         self,
         dataset: str | None = None,
         group: str | None = None,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         super().__init__()
         self.dataset = dataset
         self.group = group
-        if scale_factors and any(int(factor) < 2 for factor in scale_factors):
+        if scale_factors != "auto" and scale_factors and any(int(factor) < 2 for factor in scale_factors):
             raise TransformError(
                 f"'{type(self).__name__}' was given a scale factor below 2 in {list(scale_factors)}.",
                 "A pyramid level shrinks its parent, so each factor is 2 or more: scale_factors: [4]"
                 " writes one extra level at a quarter of the extent per axis.",
             )
-        self.scale_factors = [int(factor) for factor in scale_factors] if scale_factors else None
+        self.scale_factors = (
+            [int(factor) for factor in scale_factors]
+            if scale_factors and scale_factors != "auto"
+            else scale_factors or None
+        )
         self.downsample_method = downsample_method
         self._destination: Dataset | None = None
 
@@ -98,7 +103,7 @@ class Write(Save):
         self,
         dataset: str,
         group: str | None = None,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> None:
         if not dataset or not str(dataset).strip():

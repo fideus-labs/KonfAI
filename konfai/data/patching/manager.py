@@ -1069,7 +1069,7 @@ class DatasetManager:
                 None,
                 None,
                 f"destination '{destination.filename}' cannot serve region writes for this entry"
-                " (h5 and omezarr always can; mha only with image geometry).",
+                " (h5 and omezarr always can; mha, nii, nii.gz and nrrd with image geometry).",
             )
         sweep = _PendingSweep(
             destination,
@@ -1152,6 +1152,14 @@ class DatasetManager:
     def spatial_shape(self) -> list[int]:
         """The spatial extent this case's chain lands on: the source folded by every stage."""
         return list(self.shapes[0])
+
+    @property
+    def landed_geometry(self) -> Attribute:
+        """The case state the chain's landing fold ends on, draws aside: the geometry its patches are cut on.
+
+        Folded from the header at construction, so reading it costs nothing, unlike :meth:`landed_attributes`.
+        """
+        return Attribute(self._landed_folding)
 
     @property
     def landed_channels(self) -> int:

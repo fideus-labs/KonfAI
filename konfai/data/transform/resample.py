@@ -18,6 +18,7 @@
 """Resampling onto a target grid: reference grids, stored maps, displacement fields, the SimpleITK host path."""
 
 import functools
+import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from konfai.data.geometry import (
     bound_of,
 )
 from konfai.data.sampling import (
+    LABEL_DTYPES,
     blend_order,
     coordinate_precision,
     default_interpolation,
@@ -58,6 +60,7 @@ from konfai.data.transform.base import (
     LocalityKind,
     PatchLocality,
     RegionContext,
+    Transform,
     TransformInverse,
     sitk,
 )
@@ -134,6 +137,93 @@ class _DerivedGrid(_TargetGrid):
         if self.spacing is not None:
             return f"a spacing of {[float(value) for value in self.spacing]}"
         return f"a shape of {list(cast('tuple[int, ...]', self.shape))}"
+
+
+def coarse_spacing(size_zyx: list[int], spacing_xyz: list[float], max_voxels: int) -> list[float] | None:
+    """The spacing, ``(x, y, z)``, at which a grid of ``size_zyx`` holds at most ``max_voxels``; None when it fits.
+
+    Only the axes finer than one common threshold are coarsened: an anisotropic grid loses its finest axes first,
+    and the coarse grid is as isotropic as the budget allows.
+    """
+    extents = [count * step for count, step in zip(reversed(size_zyx), spacing_xyz, strict=True)]
+
+    def voxels(threshold: float) -> int:
+        return math.prod(
+            max(1, round(extent / max(step, threshold))) for extent, step in zip(extents, spacing_xyz, strict=True)
+        )
+
+    if voxels(0.0) <= max_voxels:
+        return None
+    low, high = min(spacing_xyz), max(extents)
+    for _ in range(60):
+        middle = (low + high) / 2
+        low, high = (low, middle) if voxels(middle) <= max_voxels else (middle, high)
+    return [max(step, high) for step in spacing_xyz]
+
+
+class _VoxelBudgetGrid(_TargetGrid):
+    """The case's own grid coarsened just enough to hold ``max_voxels`` (``coarse_spacing``), as it is when it fits:
+    what a prediction patch in ``mode: resample`` runs a case too large for memory on (``Resample.coarsened``)."""
+
+    def __init__(self, max_voxels: int) -> None:
+        self.max_voxels = int(max_voxels)
+
+    def of(self, source: Grid, name: str) -> Grid:
+        del name
+        spacing = coarse_spacing(list(source.size_zyx), [float(step) for step in source.spacing_xyz], self.max_voxels)
+        return source if spacing is None else source.resampled(spacing_xyz=np.asarray(spacing), align="extent")
+
+    def describe(self) -> str:
+        return f"the case's own grid within {self.max_voxels:,} voxels"
+
+
+class CoarseLabelDilate(Transform):
+    """Before a coarsening ``Resample``: a label map (a label dtype) max-pooled by half the coarsening factor on each
+    axis, so that no structure thinner than the coarse spacing is missed by every nearest-neighbour sample (an empty
+    mask made the registration engines return a zero field). Anything else passes through. No inverse."""
+
+    working_multiple = 15.0
+
+    def __init__(self, max_voxels: int) -> None:
+        super().__init__()
+        self.max_voxels = int(max_voxels)
+        #: Per case, the radius on each axis (z, y, x), recorded from its header in ``transform_shape``.
+        self._radius: dict[str, list[int]] = {}
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        del group_src
+        grid, _ = Grid.from_header(list(shape), cache_attribute, f"case '{name}'")
+        steps = [float(step) for step in grid.spacing_xyz]
+        coarse = coarse_spacing(list(grid.size_zyx), steps, self.max_voxels)
+        if coarse is not None:
+            factors = [goal / step for goal, step in zip(reversed(coarse), reversed(steps), strict=True)]
+            self._radius[name] = [math.ceil(factor / 2 - 1e-6) if factor > 1 else 0 for factor in factors]
+        return shape
+
+    def _widest(self) -> list[int]:
+        radii = list(self._radius.values())
+        return [max(axis) for axis in zip(*radii, strict=True)] if radii else []
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        widest = self._widest()
+        if not any(widest):
+            return PatchLocality(LocalityKind.POINTWISE)
+        return PatchLocality(LocalityKind.HALO, halo=(max(widest),))
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        radius = self._radius.get(name) or self._widest()
+        if tensor.dtype not in LABEL_DTYPES or not any(radius):
+            return tensor
+        data = tensor.to(torch.float32).unsqueeze(0)
+        for axis, r in enumerate(radius):
+            if r:
+                kernel = [1] * len(radius)
+                kernel[axis] = 2 * r + 1
+                padding = [0] * len(radius)
+                padding[axis] = r
+                pool = torch.nn.functional.max_pool3d if len(radius) == 3 else torch.nn.functional.max_pool2d
+                data = pool(data, kernel_size=kernel, stride=1, padding=padding)
+        return data.squeeze(0).to(tensor.dtype)
 
 
 class _ReferenceGrid(_TargetGrid):
@@ -754,6 +844,22 @@ class Resample(TransformInverse):
         self._sitk_input = _SitkInput()
         self._refusal: str | None = None
         self._probed = False
+        #: Per case: the grid its outputs go back onto when that is not the grid it was read on (a coarsening
+        #: resample reading a store from a coarser pyramid level, see ``coarsened``).
+        self._native: dict[str, Grid] = {}
+
+    @classmethod
+    def coarsened(cls, max_voxels: int) -> "Resample":
+        """A resample onto each case's own grid coarsened to at most ``max_voxels`` (``_VoxelBudgetGrid``), inverted
+        back onto the case's grid: linear, or nearest for a label dtype."""
+        stage = cls()
+        stage._target = _VoxelBudgetGrid(max_voxels)
+        return stage
+
+    @property
+    def coarsening(self) -> int | None:
+        """The voxel budget of a ``coarsened`` resample, None for any other."""
+        return self._target.max_voxels if isinstance(self._target, _VoxelBudgetGrid) else None
 
     def __getstate__(self) -> dict:
         state = dict(self.__dict__)
@@ -1431,6 +1537,17 @@ class Resample(TransformInverse):
         shape = [int(extent) for extent in source_spatial_shape]
         source, missing = Grid.from_header(shape, cache_attribute, f"case '{name}'" if name else "the case")
         target = self._target.of(source, name)
+        native = self._native.get(name) if name else None
+        if native is not None:
+            # Read off a coarser pyramid level: the grid ``inverse`` pops back to is the level-0 one.
+            for key, value in (
+                ("Spacing", native.spacing_xyz),
+                ("Origin", native.origin_xyz),
+                ("Direction", native.direction_xyz.ravel()),
+            ):
+                if key not in missing:
+                    cache_attribute[key] = value
+            shape = [int(extent) for extent in native.size_zyx]
         written = {
             "Spacing": target.spacing_xyz,
             "Origin": target.origin_xyz,

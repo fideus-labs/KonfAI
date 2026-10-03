@@ -103,6 +103,28 @@ def test_dicom_slice_arity_mismatch_raises_dataset_manager_error(tmp_path: Path)
         dicom.read_dicom_series_slice(root, (slice(None), slice(0, 2)))  # 2 slices, expected 4
 
 
+def test_a_series_written_from_a_dicom_source_is_a_new_series(tmp_path: Path) -> None:
+    # A registered DICOM moving came back under the source's SeriesInstanceUID: two series under one
+    # UID in a PACS or Slicer's DICOM database. The derived series gets its own and records the source's.
+    pytest.importorskip("pydicom")
+    import pydicom
+    from konfai.utils import dicom
+    from konfai.utils.dataset import Dataset
+
+    volume = np.arange(4 * 5 * 6, dtype=np.float32).reshape(1, 4, 5, 6)
+    source_uid = dicom.write_dicom_series(
+        tmp_path / "in" / "P000" / "Moving", volume, metadata={"SeriesInstanceUID": "1.2.3.4.5.6"}
+    )
+    source = Dataset(str(tmp_path / "in"), "dicom")
+    _, header = source.get_infos("Moving", "P000")  # the attributes a transform chain carries
+    Dataset(str(tmp_path / "out"), "dicom").write("Moved", "P000", source.read_data("Moving", "P000")[0], header)
+
+    derived = pydicom.dcmread(next((tmp_path / "out" / "P000" / "Moved").glob("*.dcm")))
+    assert source_uid == "1.2.3.4.5.6"
+    assert derived.SeriesInstanceUID != source_uid
+    assert source_uid in derived.DerivationDescription
+
+
 # ---------------------------------------------------------------------------
 # OME-Zarr round-trips & interop
 # ---------------------------------------------------------------------------

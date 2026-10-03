@@ -23,6 +23,8 @@ the traffic the option was added to move. These tests pin the forwarding for eac
 a new one cannot be added without it.
 """
 
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -39,18 +41,44 @@ def _tmp_dir_value(command: list[str]) -> str:
 
 
 def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_preset_output) -> None:
-    """``konfai-apps infer`` is told to work in the directory the orchestrator staged for it.
+    """``konfai-apps infer`` is told to work in a directory the orchestrator staged for it, beside ``-o``.
 
-    Pointed at ``-o``, so konfai-apps writes the prediction straight there instead of staging it in a
-    throwaway workspace and copying it in.
+    Given a workspace of its caller's, konfai-apps writes the prediction straight into ``-o`` instead of
+    staging it in a throwaway workspace and copying it in. Beside ``-o`` and not ``-o`` itself: the bundle
+    files it copies into its workspace, a preset's own folders among them, would otherwise sit where the
+    output group is discovered, and a second directory of directories there is a second group.
     """
     captured: list[list[str]] = []
+    # rank 1 re-planned after two out-of-memory errors, rank 0 did not
+    plans = [
+        {
+            "rank": 0,
+            "mode": "tile",
+            "resample_voxels": None,
+            "patch_size": [32] * 3,
+            "batch": 4,
+            "out_of_memory_restarts": 0,
+        },
+        {
+            "rank": 1,
+            "mode": "tile",
+            "resample_voxels": None,
+            "patch_size": [16] * 3,
+            "batch": 1,
+            "out_of_memory_restarts": 2,
+        },
+    ]
 
     def fake_run(command, **kwargs):
         captured.append(list(command))
         # Stand in for the preset run: konfai-apps leaves one dataset per output group under -o,
         # laid out <run>/<group>/<case>: the shape _find_output_group discovers the group from.
         write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
+        # with the plan each rank finished on
+        for plan, name in zip(plans, ("Plan.json", "Plan_1.json"), strict=True):
+            (Path(command[command.index("-o") + 1]) / "reg" / name).write_text(json.dumps(plan))
+        # and the bundle's files in its workspace, a folder of assets included
+        (Path(_tmp_dir_value(command)) / "assets" / "models").mkdir(parents=True)
         return None
 
     monkeypatch.setattr("impact_reg_konfai.impact_reg.subprocess.run", fake_run)
@@ -58,10 +86,14 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
     work = tmp_path / "work"
     work.mkdir()
     app = ImpactRegKonfAIApp()
-    app._infer_preset("FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], 1, work, [], None, True)
+    group, fields = app._infer_preset(
+        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], work, [], None, True
+    )
 
     assert len(captured) == 1
-    assert _tmp_dir_value(captured[0]) == str(work / "FireANTs_SyN")
+    assert work / "FireANTs_SyN" in Path(_tmp_dir_value(captured[0])).parents
+    assert group == "DVF" and list(fields) == ["P000"]
+    assert app._ran == {"FireANTs_SyN": plans}  # what register.json records as ``ran``
 
 
 def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_preset_output) -> None:
@@ -73,7 +105,6 @@ def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_pre
     staging = tmp_path / "staging"
 
     ImpactRegKonfAIApp().uncertainty(
-        preset="FireANTs_SyN",
         dvfs=[first, second],
         output=tmp_path / "out",
         quiet=True,
@@ -84,3 +115,21 @@ def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_pre
     assert list(staging.iterdir()) == []
     spread = sorted((tmp_path / "out" / "uncertainty").iterdir())
     assert [path.name for path in spread] == ["Uncertainty.mha"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot make a Windows directory read-only")
+def test_the_work_dir_falls_back_inside_an_output_whose_parent_is_read_only(tmp_path: Path) -> None:
+    """``-o .`` in a home directory under a root-owned ``/home``: the parent refuses, the output itself does not."""
+    from impact_reg_konfai.impact_reg import _work_dir
+
+    parent = tmp_path / "read_only"
+    output = parent / "out"
+    output.mkdir(parents=True)
+    parent.chmod(0o555)
+    try:
+        work = _work_dir(None, output, "impact_reg_")
+        assert work.parent == output and work.name.startswith(".impact_reg_")
+    finally:
+        parent.chmod(0o755)
+    beside = _work_dir(None, tmp_path / "elsewhere", "impact_reg_")
+    assert beside.parent == tmp_path and beside.name.startswith(".elsewhere.impact_reg_")

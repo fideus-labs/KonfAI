@@ -482,9 +482,9 @@ def test_plan_refuses_tta_custom_reduction_and_non_pointwise_before_reduction() 
 
 
 def test_plan_non_region_writable_format_buffers_and_writes_classically() -> None:
-    # nrrd cannot serve region writes: the pointwise chain still streams the accumulator into a buffer
+    # gipl cannot serve region writes: the pointwise chain still streams the accumulator into a buffer
     # (the windowed-accumulator win survives), and the volume is written through the classic writer.
-    plan = _output_dataset(file_format="nrrd")._plan_stream(_dataset_iter([]), 0, geometry())
+    plan = _output_dataset(file_format="gipl")._plan_stream(_dataset_iter([]), 0, geometry())
     assert plan is not None and plan.mode == "buffered" and plan.tail_start == len(plan.stages)
 
 

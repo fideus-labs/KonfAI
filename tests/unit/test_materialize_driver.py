@@ -96,12 +96,12 @@ def test_whole_volume_branch_still_writes_and_says_so(tmp_path: Path) -> None:
 
 
 def test_unstreamable_destination_falls_back_and_writes(tmp_path: Path) -> None:
-    # nii.gz cannot serve region writes: the sweep refuses, the classic load writes it anyway.
+    # gipl cannot serve region writes: the sweep refuses, the classic load writes it anyway.
     source = _source(tmp_path)
-    manager = _manager(source, [Clip(0.0, 50.0), Save(f"{tmp_path / 'out'}:nii.gz")])
+    manager = _manager(source, [Clip(0.0, 50.0), Save(f"{tmp_path / 'out'}:gipl")])
 
     assert CaseMaterializer(manager).materialize() is Verdict.WHOLE_VOLUME
-    assert Dataset(tmp_path / "out", "nii.gz").is_dataset_exist("CT", "CASE_000")
+    assert Dataset(tmp_path / "out", "gipl").is_dataset_exist("CT", "CASE_000")
 
 
 def test_materialize_never_reads_the_volume_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

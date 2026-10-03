@@ -35,7 +35,7 @@ def read_landmarks(filename: Path) -> np.ndarray | None:
     coordinate_system = "LPS"
     with open(filename, newline="") as csvfile:
         lines = csvfile.readlines()
-    for line in filter(lambda row: row[0] == "#", lines):
+    for line in (line for line in lines if line.startswith("#")):
         key, _, value = line[1:].partition("=")
         if key.strip() == "CoordinateSystem":
             coordinate_system = value.strip()
@@ -44,7 +44,8 @@ def read_landmarks(filename: Path) -> np.ndarray | None:
             f"'{filename}' declares '# CoordinateSystem = {coordinate_system}'.",
             "KonfAI reads landmarks given in RAS (RAS) or LPS (LPS, 1 or 0).",
         )
-    rows = list(csv.reader(filter(lambda row: row[0] != "#", lines)))
+    # A blank line (a trailing one, say) holds no point.
+    rows = list(csv.reader(line for line in lines if line.strip() and not line.startswith("#")))
     data = np.zeros((len(rows), 3), dtype=np.double)
     for i, row in enumerate(rows):
         data[i] = np.array(row[1:4], dtype=np.double)

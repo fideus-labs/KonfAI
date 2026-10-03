@@ -30,9 +30,12 @@ A prediction's batch is measured the same way (``batch_size: 0``): its first for
 its second two, and :func:`measured_batch` extrapolates the batch the rest run at.
 """
 
+import contextlib
+import gc
 import math
 from bisect import bisect_left
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
 
 import torch
 
@@ -50,12 +53,74 @@ from konfai.utils.utils import (
 VRAM_BUDGET_SAFETY_FRACTION = 0.8
 
 
+_T = TypeVar("_T")
+
+
+def device_out_of_memory(line: str) -> bool:
+    """Whether ``line`` reports a device allocation that failed: a device (CUDA, cuBLAS, cuDNN) and ``out of memory``
+    or cuBLAS's and cuDNN's ``ALLOC_FAILED``, as itk-impact's ``IsDeviceOutOfMemory`` reads it."""
+    lower = line.lower()
+    device = any(name in lower for name in ("cuda", "cublas", "cudnn"))
+    return device and ("out of memory" in lower or "alloc_failed" in lower)
+
+
+@contextlib.contextmanager
+def out_of_memory_as_torch(on_cuda: bool) -> Iterator[None]:
+    """Re-raise a CUDA out-of-memory reported as a plain ``RuntimeError`` (a TorchScript model, libtorch outside
+    PyTorch, a subprocess) as ``torch.cuda.OutOfMemoryError``, the class KonfAI shrinks its work on. Only on CUDA, and
+    only a line naming both the device and the failed allocation: a host allocation that fails is no reason to shrink."""
+    try:
+        yield
+    except torch.cuda.OutOfMemoryError:
+        raise
+    except RuntimeError as error:
+        lines = (line.strip() for line in str(error).splitlines())
+        line = next((line for line in lines if device_out_of_memory(line)), None)
+        if not on_cuda or line is None:
+            raise
+        raise torch.cuda.OutOfMemoryError(line) from error
+
+
+def halve_on_oom(run: Callable[[], _T], narrow: Callable[[], bool], on_cuda: bool) -> _T:
+    """``run()``, run again after each ``narrow()`` when it runs out of CUDA memory, until it fits; the error propagates
+    once ``narrow`` says the work can go no smaller."""
+    while True:
+        try:
+            with out_of_memory_as_torch(on_cuda):
+                return run()
+        except torch.cuda.OutOfMemoryError:
+            if not narrow():
+                raise
+        # Out of the handler, the traceback and the tensors its frames held are released.
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
 def usable_vram(free_bytes: float, resident_bytes: float = 0.0, margin: float = VRAM_BUDGET_SAFETY_FRACTION) -> float:
     """The VRAM a step's transient may claim: free memory under the safety margin, minus what must
     stay resident alongside the step (accumulators and the streamed assembly window for prediction;
     nothing extra for training, whose resident set is already allocated when ``free_bytes`` is read).
     """
     return free_bytes * margin - resident_bytes
+
+
+def max_voxels(vram_bytes_per_voxel: float | None, ram_bytes_per_voxel: float | None, gpu: int | None) -> int | None:
+    """The voxels a pass may hold where it runs, at the peak costs per voxel it declares: the tighter of what the
+    free VRAM of GPU ``gpu`` holds (the id ``--gpu`` names, read through NVML so no CUDA context is opened) under
+    :func:`usable_vram`'s margin, and what this rank's host budget holds. None when no declared cost bounds it: a
+    device whose cost is not declared promises nothing."""
+    caps = []
+    if gpu is not None and vram_bytes_per_voxel:
+        from konfai import get_vram
+
+        used, total = get_vram([gpu])
+        caps.append(usable_vram((total - used) * 2**30) / vram_bytes_per_voxel)
+    if ram_bytes_per_voxel:
+        from konfai.utils.budget import node_local_ranks, per_rank_budget_bytes, resolve_memory_budget
+
+        host = per_rank_budget_bytes() or resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
+        caps.append(host / ram_bytes_per_voxel)
+    return max(1, int(min(caps))) if caps else None
 
 
 #: The share of the usable VRAM a measured batch's forward may claim. The rest stays free for the convolution

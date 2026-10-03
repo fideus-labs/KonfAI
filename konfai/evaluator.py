@@ -241,6 +241,8 @@ class Statistics:
         if self.set_aside:
             result["set_aside"] = dict(sorted(self.set_aside.items()))
 
+        # The summary first: a reader that stops early (an agent's bounded read, a head) still gets it.
+        result = {"aggregates": result.pop("aggregates"), **result}
         # Staged, then renamed: a report on disk marks its split complete, so it is never left partial.
         staging = self.filename.with_name(f"{self.filename.name}.{os.getpid()}.tmp")
         try:

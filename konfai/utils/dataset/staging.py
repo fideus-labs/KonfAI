@@ -23,10 +23,11 @@ import os
 import re
 import shutil
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from konfai.utils.errors import KonfAIWarning
+from konfai.utils.errors import DatasetManagerError, KonfAIWarning
 
 #: The suffix an entry is moved to while its replacement is published. Per pid, so two writers of
 #: one entry never share a backup.
@@ -36,6 +37,123 @@ _REPLACED_MARKER = ".replaced-"
 def _replaced_name(name: str) -> str:
     """Where ``name`` (an h5 key or a directory leaf) is kept while its replacement is published."""
     return f"{name}{_REPLACED_MARKER}{os.getpid()}"
+
+
+def publish(staging: Path, final: Path) -> None:
+    """Put the complete ``staging`` entry, a file or a directory, at ``final``; the entry already there is replaced
+    only once its successor is in place. A file goes by ``os.replace``; a directory through the :func:`_replaced_name`
+    hop, which a failed rename puts back. A concurrent writer that published the same entry first keeps it."""
+    if not staging.is_dir():
+        os.replace(staging, final)
+        return
+    backup = final.with_name(_replaced_name(final.name))
+    replaced = final.exists()
+    if replaced:
+        shutil.rmtree(backup, ignore_errors=True)
+        final.rename(backup)
+    try:
+        staging.rename(final)
+    except OSError:
+        if not final.exists():
+            if replaced:
+                backup.rename(final)
+            raise
+        shutil.rmtree(staging, ignore_errors=True)
+    if replaced:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+@contextmanager
+def staged_entry(final: Path) -> Iterator[Path]:
+    """``final``'s own name in a hidden staging directory beside it, for a writer that may make companion files
+    (MetaImage's ``.raw``, Analyze's ``.img``). On a clean exit each file it made is published beside ``final``
+    under its own name, the companions first and ``final`` last, so a reader meets the entry complete; the pixel files
+    the replaced entry read go once it is replaced, when named after it. A MetaImage written under a pixel name of its
+    own (``transfer_entry``) is thus replaced whole or not at all. Analyze pairs its files by name, so two renames
+    could leave the old header over the new pixels: an existing pair is refused, before any work."""
+    from konfai.utils.dataset.stream import DataStream  # stream builds on this module
+
+    if final.name.lower().endswith(".hdr") and final.exists():
+        raise DatasetManagerError(
+            f"'{final}' already exists as an Analyze pair (.hdr/.img), which cannot be replaced whole: "
+            "its two files pair by name.",
+            "Write to a new destination, remove the existing pair first, or use .nii.gz, "
+            "which holds its pixels in the same file.",
+        )
+    directory = final.with_name(f".{final.name}.{DataStream.temporary_suffix()}")
+    directory.mkdir(parents=True)
+    try:
+        yield directory / final.name
+        replaced = entry_files(final)[1:] if final.exists() else []
+        made = sorted(directory.iterdir(), key=lambda path: path.name == final.name)
+        for part in made:
+            publish(part, final.with_name(part.name))
+        kept = {part.name for part in made}
+        for old in replaced:
+            if old.parent == final.parent and old.name not in kept and old.name.startswith(f"{final.stem}."):
+                old.unlink(missing_ok=True)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _pixel_reference(path: Path) -> Path | None:
+    """Where the detached header ``path`` reads its pixels, as it names them: Analyze's ``.img`` beside it under its
+    name, a MetaImage's ``ElementDataFile`` (relative to the header, or absolute); ``None`` for any other entry and
+    for pixels that follow the header (``LOCAL``)."""
+    name = path.name.lower()
+    if name.endswith(".hdr"):
+        return Path(path.with_suffix(".img").name)
+    if name.endswith(".mhd"):
+        from konfai.utils.dataset.raw_block import _mha_header  # raw_block builds on this module
+
+        fields = _mha_header(str(path))
+        data = fields[0].get("ElementDataFile") if fields else None
+        return None if data is None or data == "LOCAL" else Path(data)
+    return None
+
+
+def entry_links(src: Path, dest: Path) -> list[tuple[Path, Path]]:
+    """Each file of the image entry ``src`` and where it must lie for its header, left as it is, to read it as
+    ``dest``: the header at ``dest``, Analyze's pixels beside it under its name, a MetaImage's where its
+    ``ElementDataFile`` points from ``dest``. An absolute one is read where it lies, so a link leaves it there."""
+    links = [(src, dest)]
+    pixels = _pixel_reference(src)
+    if pixels is not None and not pixels.is_absolute():
+        read = dest.with_suffix(".img") if src.name.lower().endswith(".hdr") else dest.parent / pixels
+        links.append((src.parent / pixels, read))
+    return links
+
+
+def entry_files(path: Path) -> list[Path]:
+    """The files one image entry is made of beside its header: ``path``, then the pixel file it names."""
+    return [part for part, _ in entry_links(path, path)]
+
+
+def transfer_entry(src: Path, dest: Path, move: bool = False) -> None:
+    """Copy (``move``: move) the image entry ``src`` to ``dest``: a file, a store, or a detached header and its pixels,
+    wherever the header points, so the result stands without the source. A MetaImage's pixels take a name of their
+    own, which the header written at ``dest`` gives (``staged_entry`` publishes them before it); Analyze's follow
+    ``dest``'s name."""
+    reference = _pixel_reference(src)
+    if reference is None:
+        (shutil.move if move else shutil.copytree if src.is_dir() else shutil.copy2)(src, dest)
+        return
+    transfer = shutil.move if move else shutil.copy2
+    pixels = src.parent / reference
+    if not src.name.lower().endswith(".mhd"):
+        transfer(pixels, dest.with_suffix(".img"))
+        transfer(src, dest)
+        return
+    import secrets
+
+    own = dest.with_name(f"{dest.stem}.{secrets.token_hex(4)}{pixels.suffix}")
+    transfer(pixels, own)
+    header = src.read_text("latin-1")
+    dest.write_text(
+        re.sub(r"(?m)^(ElementDataFile\s*=\s*).*$", lambda match: match.group(1) + own.name, header), "latin-1"
+    )
+    if move:
+        src.unlink()
 
 
 def is_staging_entry(name: str) -> bool:

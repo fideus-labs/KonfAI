@@ -43,6 +43,7 @@ main = build_app_cli(
     "totalsegmentator-konfai",
     "TotalSegmentator (KonfAI app wrapper): whole-body CT segmentation.",
     resolve_app=lambda args: f"{TOTAL_SEGMENTATOR_KONFAI_REPO}:{args.task}",
+    repo=TOTAL_SEGMENTATOR_KONFAI_REPO,
     add_selection=_add_selection,
     add_infer_knobs=_add_infer_knobs,
     resolve_infer=lambda args: {"ensemble": 0, "ensemble_models": args.models, "tta": 0, "mc": 0},

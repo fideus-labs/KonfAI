@@ -1399,6 +1399,10 @@ _APP_TTA_DESC = "Number of test-time augmentations (0 disables; see the app's ma
 _APP_ENSEMBLE_DESC = "Number of checkpoints to ensemble; 0 with no ensemble_models uses every app checkpoint."
 _APP_ENSEMBLE_MODELS_DESC = "Explicit checkpoint names to ensemble (see describe_app checkpoints; overrides ensemble)."
 _APP_PATCH_SIZE_DESC = "Force the inference patch size (overrides the app's config default)."
+_APP_MAX_VOXELS_DESC = (
+    "Voxels a pass holds before KonfAI resamples or tiles it (default: sized from the free GPU memory and the RAM "
+    "budget)."
+)
 _APP_BATCH_SIZE_DESC = (
     "Force the inference batch size (overrides the app's config, whose `batch_size: 0` measures it on the GPU)."
 )
@@ -1408,7 +1412,16 @@ _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 
 # What each run_app action reads beyond ref, inputs, output and the device and trust parameters.
 _APP_ACTION_PARAMETERS: dict[str, set[str]] = {
-    "infer": {"tta", "ensemble", "ensemble_models", "patch_size", "batch_size", "set_parameters", "uncertainty"},
+    "infer": {
+        "tta",
+        "ensemble",
+        "ensemble_models",
+        "patch_size",
+        "max_voxels",
+        "batch_size",
+        "set_parameters",
+        "uncertainty",
+    },
     "evaluate": {"gt", "mask", "evaluation_file"},
     "uncertainty": {"uncertainty_file"},
     "pipeline": {
@@ -1461,6 +1474,7 @@ def run_app(
         list[str] | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_MODELS_DESC)
     ] = None,
     patch_size: Annotated[list[int] | None, Field(description="infer, pipeline: " + _APP_PATCH_SIZE_DESC)] = None,
+    max_voxels: Annotated[int | None, Field(description="infer: " + _APP_MAX_VOXELS_DESC)] = None,
     batch_size: Annotated[int | None, Field(description="infer, pipeline: " + _APP_BATCH_SIZE_DESC)] = None,
     set_parameters: Annotated[
         dict[str, Any] | None, Field(description="infer, pipeline: " + _APP_SET_PARAMETERS_DESC)
@@ -1492,6 +1506,7 @@ def run_app(
         "ensemble": ensemble,
         "ensemble_models": ensemble_models,
         "patch_size": patch_size,
+        "max_voxels": max_voxels,
         "batch_size": batch_size,
         "set_parameters": set_parameters,
         "uncertainty": uncertainty,
@@ -1529,12 +1544,65 @@ def run_app(
             "config_overrides": _config_overrides(set_parameters),
         }
         if action == "infer":
-            spec = APP_SERVICE.prepare_infer(**common, **model, uncertainty=bool(uncertainty))
+            spec = APP_SERVICE.prepare_infer(**common, **model, max_voxels=max_voxels, uncertainty=bool(uncertainty))
         else:
             spec = APP_SERVICE.prepare_pipeline(
                 **common, **model, gt=gt, mask=mask, uncertainty=uncertainty is not False
             )
     return _launch_app_job(spec)
+
+
+_REG_CASES = " One path per case, paired by order with the other lists (or one used for every case)."
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_registration_evaluate"]))
+def run_registration_evaluate(
+    transforms: Annotated[
+        list[str] | None,
+        Field(
+            description="The registration's Transform.h5 (from run_app's infer output, <case>/Transform.h5)."
+            + _REG_CASES
+            + " Omit it to score the pair as it is: the misalignment before registration."
+        ),
+    ] = None,
+    fixed_images: Annotated[list[str] | None, Field(description="Fixed images, for MAE." + _REG_CASES)] = None,
+    moving_images: Annotated[
+        list[str] | None, Field(description="ORIGINAL moving images, for MAE (same modality only)." + _REG_CASES)
+    ] = None,
+    fixed_seg: Annotated[list[str] | None, Field(description="Fixed label maps, for Dice." + _REG_CASES)] = None,
+    moving_seg: Annotated[
+        list[str] | None, Field(description="ORIGINAL moving label maps, for Dice." + _REG_CASES)
+    ] = None,
+    fixed_landmarks: Annotated[
+        list[str] | None, Field(description="Fixed landmark files (.fcsv/.json/.txt), for TRE." + _REG_CASES)
+    ] = None,
+    moving_landmarks: Annotated[
+        list[str] | None, Field(description="Moving landmark files, the same points in order, for TRE." + _REG_CASES)
+    ] = None,
+    mask: Annotated[list[str] | None, Field(description="Fixed-grid masks restricting MAE." + _REG_CASES)] = None,
+    output: Annotated[
+        str | None,
+        Field(description="Output directory (default: a unique dir under the session workspace AppEvaluations/)."),
+    ] = None,
+    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
+    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
+) -> dict[str, Any]:
+    """Score a registration through its transform (impact-reg-konfai eval), as a tracked job."""
+    return _launch_app_job(
+        APP_SERVICE.prepare_registration_evaluate(
+            transforms=transforms,
+            fixed_images=fixed_images,
+            moving_images=moving_images,
+            fixed_seg=fixed_seg,
+            moving_seg=moving_seg,
+            fixed_landmarks=fixed_landmarks,
+            moving_landmarks=moving_landmarks,
+            mask=mask,
+            output=output,
+            gpu=gpu,
+            cpu=cpu,
+        )
+    )
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["fine_tune_app"]))

@@ -417,6 +417,20 @@ class ModelComposite(Network):
         if len(self._state_sources) == 1:
             self._ensure_model_loaded(0)
 
+    def _accumulated(self, tensor: torch.Tensor) -> torch.Tensor:
+        """An output at the precision it is combined, blended and accumulated in.
+
+        Half, from float32: what a class probability or an intensity survives, at half the memory. A model whose
+        outputs are world coordinates keeps float32 by declaring ``full_precision_outputs`` (a registration's
+        displacement field, 0.06 mm steps at 100 mm in float16). Float64 is never kept: it is read as float32 first,
+        as the patch planning prices it.
+        """
+        if tensor.dtype == torch.float64:
+            tensor = tensor.float()
+        if tensor.dtype == torch.float32 and not getattr(self._get_model(), "full_precision_outputs", False):
+            return tensor.to(torch.float16)
+        return tensor
+
     @torch.inference_mode()
     def forward(  # type: ignore[override]
         self,
@@ -449,8 +463,7 @@ class ModelComposite(Network):
             channels: dict[str, list[int]] = defaultdict(list)
             for model_index in range(n_replicas):
                 for key, tensor in self._model_for_index(model_index)(data_dict, output_layers):
-                    if tensor.dtype == torch.float32:
-                        tensor = tensor.to(torch.float16)
+                    tensor = self._accumulated(tensor)
                     channels[key].append(tensor.shape[1])
                     if key not in sum_acc:
                         sum_acc[key] = tensor
@@ -476,9 +489,7 @@ class ModelComposite(Network):
             aggregated = defaultdict(list)
             for model_index in range(n_replicas):
                 for key, tensor in self._model_for_index(model_index)(data_dict, output_layers):
-                    if tensor.dtype == torch.float32:
-                        tensor = tensor.to(torch.float16)
-                    aggregated[key].append(tensor)
+                    aggregated[key].append(self._accumulated(tensor))
 
             for key, tensors in aggregated.items():
                 # Mean, Median -> [N, C, ...] | Concat -> [N, C*M, ...]

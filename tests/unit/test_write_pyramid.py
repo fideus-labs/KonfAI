@@ -112,6 +112,22 @@ def test_each_scale_factor_shrinks_the_level_above_it(tmp_path):
         assert shapes == [[1, 16, 16, 16], [1, 8, 8, 8], [1, 4, 4, 4]], root
 
 
+def test_an_auto_pyramid_halves_each_entry_down_to_its_top_extent(tmp_path):
+    """``auto`` halves while the longest axis passes 256 voxels and the shortest survives: one rule for every entry,
+    sized from its own grid on both write paths."""
+    from konfai.utils.ome_zarr import auto_scale_factors
+
+    assert auto_scale_factors([8, 8, 600]) == [2, 2] and auto_scale_factors([514, 1331, 1775]) == [2, 2, 2]
+    assert auto_scale_factors([2, 1000, 1000]) == [2] and auto_scale_factors([64, 64, 64]) == []
+    data = np.zeros((1, 4, 8, 600), dtype=np.float32)
+    Dataset(tmp_path / "whole", "omezarr", scale_factors="auto").write("G", "case", data, _geometry())
+    streamed = Dataset(tmp_path / "streamed", "omezarr", scale_factors="auto")
+    with streamed.open_data_stream("G", "case", list(data.shape), np.dtype("float32"), _geometry()) as stream:
+        stream.write_slice((slice(0, 1), slice(0, 4), slice(0, 8), slice(0, 600)), data)
+    for root in ("whole", "streamed"):
+        assert _levels(_only_store(tmp_path / root)) == 3, root
+
+
 def test_an_interrupted_level_append_leaves_the_original_store_readable(tmp_path, monkeypatch):
     """The coarse levels are grafted beside level 0, which is never rewritten, and the metadata that
     names them lands last: an append cut off while a level is being stored leaves a store that still

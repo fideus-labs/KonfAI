@@ -29,10 +29,10 @@ from typing import Any
 # the corresponding server endpoint do not carry. Every listed field must have an entry in
 # ``_OPTION_FIELDS`` and be declared on both ``KonfAIApp.<op>`` and ``KonfAIAppClient.<op>``.
 REMOTE_OPTION_FIELDS: dict[str, tuple[str, ...]] = {
-    "infer": ("patch_size", "batch_size", "config_overrides"),
+    "infer": ("patch_size", "max_voxels", "batch_size", "config_overrides"),
     "evaluate": (),
     "uncertainty": (),
-    "pipeline": ("patch_size", "batch_size", "config_overrides"),
+    "pipeline": ("patch_size", "max_voxels", "batch_size", "config_overrides"),
     "fine_tune": ("batch_size", "config_overrides"),
 }
 
@@ -55,6 +55,11 @@ _OPTION_FIELDS: dict[str, tuple[Callable[[Any], bool], str, Callable[[Any], list
         lambda v: isinstance(v, list) and len(v) > 0 and all(_is_int(x) for x in v),
         "a non-empty list of int",
         lambda v: ["--patch_size", *(str(x) for x in v)],
+    ),
+    "max_voxels": (
+        lambda v: _is_int(v) and v > 0,
+        "a positive int",
+        lambda v: ["--max_voxels", str(v)],
     ),
     "batch_size": (
         _is_int,

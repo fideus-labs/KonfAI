@@ -89,7 +89,7 @@ class AbstractFile(ABC):
         read: bool,
         file_format: str,
         level: int = 0,
-        scale_factors: list[int] | None = None,
+        scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
     ) -> AbstractFile:
         """This backend on ``filename``; each backend takes the arguments its constructor needs."""

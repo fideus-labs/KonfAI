@@ -14,8 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The elastix binary links LibTorch out of the environment's pip ``torch``, so every process that
-runs it needs the same loader path. The install probe used to run it with none, which fails on any
+"""The elastix binary links LibTorch, the installer's own or the environment's pip ``torch``, so every process
+that runs it needs the same loader path. The install probe used to run it with none, which fails on any
 machine that does not already carry LibTorch, and the failure was read as a broken download."""
 
 import os
@@ -34,13 +34,23 @@ def _loader_variable() -> str:
     return {"Windows": "PATH", "Darwin": "DYLD_LIBRARY_PATH"}.get(platform.system(), "LD_LIBRARY_PATH")
 
 
-def test_loader_env_names_torch_the_install_and_the_declared_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loader_env_names_torch_the_install_and_the_declared_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("KONFAI_ELASTIX_EXTRA_LIB", os.path.join("declared", "extra"))
+    packages = tmp_path.resolve()
+    (packages / "nvidia" / "cu13" / "lib").mkdir(parents=True)
+    monkeypatch.setattr(torch, "__file__", str(packages / "torch" / "__init__.py"))
     install = Path("install-root")
 
     searched = loader_env(install)[_loader_variable()].split(os.pathsep)
 
-    assert str(Path(torch.__file__).resolve().parent / "lib") in searched, "LibTorch comes from the pip torch"
+    assert str(packages / "torch" / "lib") in searched, "LibTorch comes from the pip torch"
+    # The CUDA plugin links libcudart itself, which pip installs beside torch, not in it: without this the plugin
+    # failed to load wherever no system CUDA toolkit provided the library.
+    assert str(packages / "nvidia" / "cu13" / "lib") in searched
+    # The LibTorch the asset was built against, when the installer had to bring it, wins over the pip torch.
+    assert searched[0] == str(install / "libtorch" / "lib")
     assert str(install / "lib") in searched, "the install's own runtime"
     # The Windows asset keeps its DLLs beside the executable, with no lib/ at all.
     assert str(install) in searched
@@ -69,11 +79,15 @@ def test_the_probe_runs_the_binary_under_the_loader_env(monkeypatch: pytest.Monk
 
     try_elastix(install)
 
-    assert seen.get("env") == loader_env(install), "the probe ran with a different environment"
+    env = seen.get("env")
+    assert isinstance(env, dict) and env[_loader_variable()] == loader_env(install)[_loader_variable()]
+    # Bound lazily, a LibTorch of another version missing one function passed -h and failed mid-case.
+    assert env["LD_BIND_NOW"] == "1"
 
 
-# 127 is the POSIX loader failure; the other two are Windows STATUS_DLL_NOT_FOUND, unsigned and signed.
-@pytest.mark.parametrize("code", [127, 0xC0000135, -1073741515])
+# 127 is the POSIX loader failure; then Windows STATUS_DLL_NOT_FOUND and STATUS_ENTRYPOINT_NOT_FOUND (a torch
+# DLL of another version), each unsigned and signed.
+@pytest.mark.parametrize("code", [127, 0xC0000135, -1073741515, 0xC0000139, -1073741511])
 def test_a_library_the_loader_cannot_find_is_named_as_such(code: int, monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing shared library aborts a child that did exec, so it never raises OSError. The OSError
     branch carried the wording, so the cause was never named."""
@@ -83,7 +97,7 @@ def test_a_library_the_loader_cannot_find_is_named_as_such(code: int, monkeypatc
 
     monkeypatch.setattr(subprocess, "run", refuse)
 
-    with pytest.raises(NameError, match="shared library could not be found"):
+    with pytest.raises(RuntimeError, match="shared library could not be found"):
         try_elastix(Path("install-root"))
 
 
