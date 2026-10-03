@@ -68,10 +68,11 @@ The members of an ensemble run one after the other in one model. Their weights s
 `checkpoint_cache_gib` (per process) and are reloaded when they do not fit; only the model's weights are kept,
 not the optimizer's. `0` turns the cache off.
 
-On a GPU, the members stay resident when that costs the batch nothing: each loads once, and a forward
-switches to its weights instead of copying a checkpoint in. When holding them would shrink the measured batch,
-they load per batch instead, as for a model whose class defines its own `load`; a rank that runs out of memory
-with them resident restarts with them loading per batch. At one batch size the outputs are the same to the bit.
+On a GPU, the members stay resident when their weights fit beside the batch: each loads once, and a forward
+switches to its weights instead of copying a checkpoint in. The batch is then measured beside them. When they
+do not fit, they load per batch instead, as for a model whose class defines its own `load`; a rank that runs
+out of memory with them resident restarts with them loading per batch. At one batch size the outputs are the
+same to the bit.
 
 ## `Predictor.Dataset`
 
