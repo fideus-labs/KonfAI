@@ -1,7 +1,7 @@
 # Working out of core
 
-A case larger than your RAM is an ordinary case in KonfAI. This page shows how to set up a dataset that
-streams, what to tune, and what KonfAI does when a chain cannot stream.
+Use region-readable storage and compatible transforms to process images larger than RAM.
+This guide explains storage choices, memory settings and stages that require a whole volume.
 
 <figure class="kf-visual kf-visual--wide">
   <a class="kf-visual-frame" href="../_static/gallery/scale-omezarr.webp" aria-label="Open the OME-Zarr regional-read figure at full resolution">
@@ -54,7 +54,7 @@ Set `KONFAI_DECOMPRESSED_DIRECTORY` to put the decompressed copies on another di
 one store per case and group (`Dataset/CASE_001/CT.ome.zarr/`); chunks much larger than your patches waste
 reads, very small ones waste decompression time.
 
-A public example needs no download: with `pip install konfai[s3]` and `FSSPEC_S3_ANON=true`, the entry
+A public example needs no complete local copy: with `pip install "konfai[s3]"` and `FSSPEC_S3_ANON=true`, the entry
 `s3://aind-open-data/exaSPIM_822174_2026-04-28_12-29-55_processed_2026-07-09_03-49-09:omezarr` streams
 ExaSPIM specimen `822174` (513 × 1331 × 1775, CC BY 4.0) region by region. The large-images notebook on
 {doc}`../examples/index` reads it.
@@ -91,9 +91,10 @@ needs, as in the `examples/Synthesis` GAN (3-D blocks for the GAN, 2-D slices in
 ## Patch streaming
 
 When every stage of a chain can work on a region, each patch reads only the part of the file it needs, and
-the output is written slab by slab as it completes. Neither the input nor the output is ever whole in
-memory. Nothing in the YAML asks for it: KonfAI reads the chain and streams when it can. When it cannot, it
-loads the volume, and the result is the same; only memory and speed change.
+the output is written slab by slab as it completes. This bounds image buffers on compatible routes.
+Stages that need a whole volume and `OutputLayerDataset` require additional case-sized memory.
+KonfAI chooses the route from the chain; `memory_budget` guides its planning and is not a limit on
+the entire process's memory use.
 
 ```{mermaid}
 flowchart TB
@@ -159,8 +160,8 @@ A chain loads the whole volume when:
 In training, prediction and evaluation, a statistic after a value-changing stage costs one whole read per
 case (the loader says how many), then the case streams.
 
-`transforms` runs once per case, `patch_transforms` once per patch. `patch_transforms` accepts only
-same-voxel and statistic stages, and a statistic there is the patch's own.
+`transforms` defines case preprocessing, replayed on regions when streaming. `patch_transforms`
+runs on each patch and accepts only same-voxel and statistic stages; a statistic there is the patch's own.
 
 ### The output
 

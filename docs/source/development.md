@@ -48,7 +48,7 @@ Where each part of the codebase lives:
 | `konfai.metric` | Metrics, losses, and schedulers |
 | `konfai.utils` | Config system, dataset helpers, distributed runtime utilities |
 | `konfai_apps` | Standalone package (in `konfai-apps/`) for local/remote app execution and the app server |
-| `konfai_mcp` | Standalone package (in `konfai-mcp/`) exposing KonfAI workflows and Apps to LLM agents via a FastMCP server |
+| `konfai_mcp` | Standalone package (in `konfai-mcp/`) exposing KonfAI workflows and Apps to MCP clients via a FastMCP server |
 
 ```{note}
 `konfai_apps` and `konfai_mcp` each live in their own directory with their own
@@ -116,7 +116,7 @@ git switch -c fix/short-description
 ```
 
 Use a Conventional Commit message such as `fix(config): improve YAML validation errors`. Commit messages must not
-contain agent names, generated-by/generated-with branding, or AI co-author trailers. The `commit-msg` hook validates
+contain generated-by/generated-with branding or automated authorship trailers. The `commit-msg` hook validates
 the Conventional Commit structure.
 
 Before pushing, run `pixi run format`, `pixi run check`, and `pre-commit run --all-files`. Push the feature branch,
@@ -308,9 +308,9 @@ changelog is current it has nothing to commit and stops without tagging.
 `v1.5.9`; rendering further back emits version headings with nothing under them,
 and everything older is summarised in the changelog's own closing section.
 
-## AI agent rules
+## Repository rules
 
-If you are an AI agent contributing to this repository, read `AGENTS.md` at
+Before contributing to this repository, read `AGENTS.md` at
 the repository root before making changes. It is the canonical source for branch and PR rules, Conventional Commits,
 forbidden commit branding, coding norms, checks, and project-specific pitfalls.
 

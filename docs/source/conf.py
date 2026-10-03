@@ -62,7 +62,7 @@ html_theme_options = {
     "nav_links": [
         {"title": "Quickstart", "url": "quickstart"},
         {"title": "Config guide", "url": "config_guide/index"},
-        {"title": "Components", "url": "reference/components/index"},
+        {"title": "Models", "url": "reference/components/models"},
         {"title": "CLI", "url": "reference/cli"},
         {"title": "Apps", "url": "usage/apps"},
     ],
@@ -107,7 +107,7 @@ intersphinx_mapping = {
 }
 
 # ---------------------------------------------------------------------------
-# llms.txt / llms-full.txt: agent-ingestible copies of the pages an agent needs
+# llms.txt / llms-full.txt: plain-text copies of the pages used
 # to author a config (quickstart, the config guides, the component catalog).
 # Emitted into the HTML output root, so they publish at /llms.txt beside the
 # site. llms.txt is the index; llms-full.txt concatenates the page sources.
@@ -118,6 +118,13 @@ _LLMS_BASE_URL = "https://konfai.readthedocs.io/en/latest"
 #: (section, source file, published page) in reading order.
 _LLMS_PAGES = [
     ("Getting started", "quickstart.rst", "quickstart.html"),
+    ("Task guides", "usage/apps.md", "usage/apps.html"),
+    ("Task guides", "usage/making-data.md", "usage/making-data.html"),
+    ("Task guides", "usage/adopting-konfai.md", "usage/adopting-konfai.html"),
+    ("Task guides", "usage/registration.md", "usage/registration.html"),
+    ("Task guides", "usage/studio.md", "usage/studio.html"),
+    ("Task guides", "usage/mcp.md", "usage/mcp.html"),
+    ("Task guides", "usage/packaging-apps.md", "usage/packaging-apps.html"),
     ("Config guide", "config_guide/index.md", "config_guide/index.html"),
     ("Config guide", "config_guide/training.md", "config_guide/training.html"),
     ("Config guide", "config_guide/prediction.md", "config_guide/prediction.html"),
@@ -135,7 +142,7 @@ _LLMS_HEADER = (
     "> KonfAI is a declarative deep-learning framework for medical imaging: a model, its data\n"
     "> pipeline, losses/metrics, and the whole train/predict/evaluate/transform workflow are\n"
     "> described in YAML and run by the `konfai` CLI. Configs are complete, reproducible records\n"
-    "> of an experiment; volumes are read as patches and never loaded whole on a streamable route.\n"
+    "> of an experiment; compatible workflows read and write images in regions.\n"
 )
 
 

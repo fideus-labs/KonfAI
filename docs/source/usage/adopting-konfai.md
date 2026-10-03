@@ -1,25 +1,14 @@
 # Adopt KonfAI from PyTorch, MONAI, or nnU-Net
 
-KonfAI does not replace every neighbouring tool. Use it when what you miss is one inspectable workflow,
-from the data on disk to training, prediction, evaluation and a reusable app.
+Reuse your PyTorch or MONAI model with KonfAI for dataset loading, training, prediction
+and evaluation. Start by importing the model; add named internal outputs only when you need them.
 
-## Which tool fits which job?
-
-| If your main need is… | Start with… | Where KonfAI fits |
-| --- | --- | --- |
-| Maximum breadth of medical transforms, losses, and networks | MONAI | Reuse MONAI components while KonfAI owns data layout, patch execution, artifacts, and application workflows. |
-| A strong automatically configured supervised segmentation baseline | nnU-Net | Keep nnU-Net for auto-configuration; use compatible KonfAI graphs/checkpoint bridges when you need named internals or a broader workflow. |
-| A mature general-purpose training-loop abstraction | PyTorch Lightning | Keep Lightning when generic training orchestration is the problem; use KonfAI when medical data, geometry, regional I/O, prediction datasets, and Apps are central. |
-| A declarative end-to-end medical-imaging execution path | KonfAI | Configure train/predict/evaluate together, then package the same workflow for local, remote, Slicer, or agent-driven use. |
-
-They combine: KonfAI can use installed PyTorch and MONAI classes, so adopting it does not mean rewriting a
-network or a loss.
-
-## Lowest-friction adoption: import the component
+## Import an existing component
 
 Name any installed class with `module:Class`. A model that is not a KonfAI `Network` is wrapped: its
 arguments go under its class name, and its output is called `Model` (the key losses attach to). A MONAI UNet
-(`pip install "konfai[monai]"`):
+(`pip install "konfai[monai]"`). This is a `Model` block to insert under
+`Trainer` in a complete training configuration:
 
 ```yaml
 Model:
@@ -60,25 +49,36 @@ criterions_loader:
 
 A wrapped model exposes only its final output. Start here when that is all you need.
 
-## Bring your model: ten lines, no YAML
+## Train a model built in Python
 
 A model built in Python trains and predicts on a KonfAI dataset in two calls, with KonfAI's patching,
 blending and run record:
 
 ```python
-import konfai, torch
+import konfai
+import torch
 from konfai.metric.measure import CrossEntropyLoss
 from konfai.data.transform import Argmax, TensorCast
 
 if __name__ == "__main__":
-    model = torch.nn.Sequential(torch.nn.Conv2d(1, 16, 3, padding=1), torch.nn.ReLU(), torch.nn.Conv2d(16, 2, 1))
+    model = torch.nn.Sequential(
+        torch.nn.Conv2d(1, 16, 3, padding=1),
+        torch.nn.ReLU(),
+        torch.nn.Conv2d(16, 2, 1),
+    )
     checkpoints = konfai.train_model(
         model, "./Dataset:mha", inputs="CT", targets="SEG", loss=CrossEntropyLoss(),
         patch=[1, 256, 256], epochs=20, batch_size=8, transforms={"SEG": [TensorCast(dtype="int64")]},
     )
-    konfai.predict_model(model, "./Dataset:mha", inputs="CT", patch=[1, 256, 256], output="./Pred:mha",
-                         checkpoints=sorted(checkpoints.glob("[0-9]*.pt"))[-1],
-                         final_transforms=[Argmax(), TensorCast(dtype="uint8")])
+    konfai.predict_model(
+        model,
+        "./Dataset:mha",
+        inputs="CT",
+        patch=[1, 256, 256],
+        output="./Pred:mha",
+        checkpoints=sorted(checkpoints.glob("[0-9]*.pt"))[-1],
+        final_transforms=[Argmax(), TensorCast(dtype="uint8")],
+    )
 ```
 
 - `inputs` and `targets` are the dataset's groups; `patch` is what the model sees (its non-1 axes make the
@@ -117,7 +117,7 @@ runtime loads (`models/model.ts`, traced, with its `metadata.json` and an
 konfai.export_bundle(network, torch.zeros(1, 1, 96, 96, 96), "./my_bundle", name="my_model")
 ```
 
-Both need the `monai` extra (`pip install konfai[monai]`).
+Both need the `monai` extra (`pip install "konfai[monai]"`).
 
 ## When you need named internal outputs
 
@@ -154,7 +154,7 @@ the next layer.
 KonfAI adds: named dataset groups with their geometry kept through to the written output; one resolved
 config for the whole workflow; patching at the dataset and model levels; streamed reads and writes;
 ensembles and test-time augmentation; apps usable locally, from Hugging Face, over HTTP, from Slicer, and
-by agents through MCP.
+through clients through MCP.
 
 It does not add nnU-Net's automatic planning, MONAI's breadth of components, or Lightning's ecosystem for
 arbitrary training loops.
@@ -170,3 +170,15 @@ sources only. YAML models are safer: they can only use registered module types.
 - {doc}`../reference/components/models`: graph schema and compatibility table
 - {doc}`large-images`: regional I/O and memory trade-offs
 - {doc}`apps`: package a stable workflow
+
+## Which tool fits which job?
+
+| If your main need is… | Start with… | Where KonfAI fits |
+| --- | --- | --- |
+| Maximum breadth of medical transforms, losses, and networks | MONAI | Reuse MONAI components while KonfAI owns data layout, patch execution, artifacts, and application workflows. |
+| A strong automatically configured supervised segmentation baseline | nnU-Net | Keep nnU-Net for auto-configuration; use compatible KonfAI graphs/checkpoint bridges when you need named internals or a broader workflow. |
+| A mature general-purpose training-loop abstraction | PyTorch Lightning | Keep Lightning when generic training orchestration is the problem; use KonfAI when medical data, geometry, regional I/O, prediction datasets, and Apps are central. |
+| A declarative end-to-end medical-imaging execution path | KonfAI | Configure train/predict/evaluate together, then package the same workflow for local, remote, Slicer, or automated use. |
+
+They combine: KonfAI can use installed PyTorch and MONAI classes, so adopting it does not mean rewriting a
+network or a loss.

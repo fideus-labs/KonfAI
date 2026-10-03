@@ -53,24 +53,23 @@ grid first.
 
 ## Read the plan before you read anything else
 
-`--plan` prints what the run will do and stops. Nothing is written first, and
-the plan is the run's own verdict, not an estimate of it:
+`--plan` prints the route and its estimated working set, then stops before
+producing the dataset. For the supplied configuration:
 
 ```text
-  CT -> CT_template: REDUCE 6 case(s) -> 1 output 'template': REDUCE
-    19 resident region(s) of 64 row(s) = 0.01 GiB  (every case resident per region)
-    peak ~= 0.01 GiB vs per-rank budget 1.86 GiB
+  CT -> CT_template (Clip -> Resample -> Reduce -> Write Template/:mha): REDUCE 6 case(s) -> 1 output 'template': REDUCE
+    24.3 resident region(s) of 48 row(s) = 0.01 GiB  (every case resident per region)
+    peak ~= 14.77 MiB vs the regions' share of the budget, 953.67 MiB of 1.86 GiB per rank
 ```
 
-Nineteen regions for six cases is `Median` being honest: it needs every case
-resident to name the middle one, then stacks them into a new tensor and sorts a
-copy of that. `Mean` folds one case at a time and holds two regions whatever the
-cohort's size: swap `operator: Mean` and watch the line change.
+The resident-region figure includes the cases and the buffers used to resample
+and reduce them. `Median` needs all six members to select the middle values.
+`Mean` can fold them one at a time: change `operator` to `Mean` and compare the plan.
 
 The plan also reports how much of the reference each member actually covers:
 
 ```text
-NOTE: case 'CASE_005' covers 82.0% of reference 'CASE_000'; the rest of what it writes is fill (0)
+NOTE: case 'CASE_005' covers 76.4% of reference 'CASE_000'; the rest of what it writes is fill (0)
 ```
 
 That is worth reading. A member covering 60% of the reference is contributing
