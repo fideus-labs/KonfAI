@@ -344,7 +344,9 @@ def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_cl
 
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
-        ElastixRegistration.forward(SimpleNamespace(_engine=Engine()), image, image, image, image, attributes)
+        ElastixRegistration.forward(
+            SimpleNamespace(_engine=Engine(), _fuse_texpr=True), image, image, image, image, attributes
+        )
 
 
 def test_fireants_static_mode_reaches_the_engine() -> None:

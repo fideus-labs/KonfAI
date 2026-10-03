@@ -322,7 +322,7 @@ def test_keep_fields_names_what_the_ensemble_holds(tmp_path, monkeypatch: pytest
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
     argv = ["register", "FireANTs_SyN", "Generic_Rigid", "-f", "a.mha", "-m", "b.mha", "-o", str(tmp_path)]
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--keep-fields"])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--keep-fields", "--cpu", "1"])
     cli.main()
 
     assert calls["register"]["keep_dvf"] is True
