@@ -354,8 +354,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Use to COMPARE two runs metric-by-metric on aligned cases: means, per-case deltas, and a "
         "direction-aware winner per metric (loss-like metrics count lower as better). "
         "This reads both runs' Metric_<SPLIT>.json; it does not rerun evaluation. "
-        "Outputs: metrics {direction, cases, mean_a/mean_b, mean_delta_b_minus_a, cases_better_a/b, winner, "
-        "per_case_delta_b_minus_a}, next_actions. "
+        "Only pairs with finite values in both runs count; excluded_cases lists aligned cases with undefined values. "
+        "Without a valid pair, means and winner are null (not a tie). "
+        "Outputs: metrics {direction, cases, excluded_cases, mean_a/mean_b, mean_delta_b_minus_a, cases_better_a/b, "
+        "winner, per_case_delta_b_minus_a}, warnings, next_actions. "
         "Next: get_run_metrics on the winner, or leaderboard."
     ),
     "read_training_curves": (

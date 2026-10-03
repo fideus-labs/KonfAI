@@ -22,6 +22,7 @@ this mixin."""
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -484,6 +485,19 @@ class MetricsServiceMixin:
                     "its direction, or read per-case deltas directly."
                 )
             common_cases = sorted(set(cases_a[name]) & set(cases_b[name]))
+            excluded_cases = [
+                case
+                for case in common_cases
+                if any(
+                    value is None or not math.isfinite(float(value))
+                    for value in (cases_a[name][case], cases_b[name][case])
+                )
+            ]
+            common_cases = sorted(set(common_cases) - set(excluded_cases))
+            if excluded_cases:
+                warnings.append(f"Excluded {len(excluded_cases)} aligned case(s) with undefined values for '{name}'.")
+            if not common_cases:
+                warnings.append(f"No aligned cases with finite values in both runs for '{name}'; no winner.")
             deltas = {case: float(cases_b[name][case]) - float(cases_a[name][case]) for case in common_cases}
             better_b = sum(1 for delta in deltas.values() if (delta > 0) == (direction == "max") and delta != 0)
             better_a = sum(1 for delta in deltas.values() if (delta < 0) == (direction == "max") and delta != 0)
@@ -497,12 +511,15 @@ class MetricsServiceMixin:
                 "direction": direction,
                 "direction_source": direction_source,
                 "cases": len(common_cases),
+                "excluded_cases": excluded_cases,
                 "mean_a": mean_a,
                 "mean_b": mean_b,
                 "mean_delta_b_minus_a": (mean_b - mean_a) if mean_a is not None and mean_b is not None else None,
                 "cases_better_a": better_a,
                 "cases_better_b": better_b,
-                "winner": (run_b if better_b > better_a else run_a if better_a > better_b else "tie"),
+                "winner": (run_b if better_b > better_a else run_a if better_a > better_b else "tie")
+                if common_cases
+                else None,
                 "per_case_delta_b_minus_a": deltas,
             }
         return {

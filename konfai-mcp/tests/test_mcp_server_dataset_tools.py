@@ -516,6 +516,60 @@ def test_mcp_server_leaderboard_ranks_runs_by_metric(
 
 
 @pytest.mark.usefixtures("workspace_root")
+@pytest.mark.parametrize(
+    ("cases_a", "cases_b", "excluded", "winner"),
+    [
+        ({"valid": 0.7, "undefined": None}, {"valid": 0.9, "undefined": 0.4}, ["undefined"], "run_b"),
+        ({"valid": 0.7, "undefined": 0.4}, {"valid": 0.9, "undefined": None}, ["undefined"], "run_b"),
+        ({"undefined": None}, {"undefined": None}, ["undefined"], None),
+        ({"only_a": 0.7}, {"only_b": 0.9}, [], None),
+        ({"valid": 0.7}, {"valid": 0.7}, [], "tie"),
+        (
+            {"valid": 0.7, "nan": float("nan"), "inf": float("inf"), "negative_inf": 0.4},
+            {"valid": 0.9, "nan": 0.4, "inf": 0.4, "negative_inf": float("-inf")},
+            ["inf", "nan", "negative_inf"],
+            "run_b",
+        ),
+    ],
+)
+def test_compare_runs_uses_only_finite_aligned_pairs(load_mcp_server, cases_a, cases_b, excluded, winner) -> None:
+    mcp_server = load_mcp_server()
+    metric = "PRED:SEG:Dice"
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            for run, cases in (("run_a", cases_a), ("run_b", cases_b)):
+                await client.call_tool(
+                    "write_session_file",
+                    {
+                        "relative_path": f"Evaluations/{run}/Metric_TRAIN.json",
+                        "content": json.dumps({"case": {metric: cases}, "aggregates": {}}),
+                    },
+                )
+            result = await client.call_tool("compare_runs", {"run_a": "run_a", "run_b": "run_b"})
+            payload = result.structured_content
+            row = payload["metrics"][metric]
+            assert row["winner"] == winner
+            assert row["excluded_cases"] == excluded
+            assert bool(payload["warnings"]) == (bool(excluded) or winner is None)
+            if winner is None:
+                assert row["cases"] == row["cases_better_a"] == row["cases_better_b"] == 0
+                assert row["mean_a"] is row["mean_b"] is row["mean_delta_b_minus_a"] is None
+                assert row["per_case_delta_b_minus_a"] == {}
+            else:
+                assert row["cases"] == 1
+                assert row["mean_a"] == pytest.approx(cases_a["valid"])
+                assert row["mean_b"] == pytest.approx(cases_b["valid"])
+                delta = cases_b["valid"] - cases_a["valid"]
+                assert row["mean_delta_b_minus_a"] == pytest.approx(delta)
+                assert row["per_case_delta_b_minus_a"] == {"valid": pytest.approx(delta)}
+            assert set(payload["next_actions"]) <= {tool.name for tool in await client.list_tools()}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("workspace_root")
 def test_metric_direction_and_leaderboard_controls(
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
