@@ -116,3 +116,7 @@ layer divided by its value when a level starts (`normalize`). elastix and itk-im
 implementation, and FireANTs uses KonfAI's IMPACT measure (`konfai.metric.measure.impact`), tested against it. What
 still differs is how each engine samples the image: elastix draws random points, ConvexAdam and FireANTs score the whole grid unless
 `voxel_sampling` asks them for random points too.
+
+One unit differs. In ConvexAdam's fine stage, itk-impact sums `L1` and `L2` over the feature channels, to balance its
+diffusion regulariser, where elastix and FireANTs average them. `normalize` divides the factor out; with
+`normalize: false`, a layer of C channels weighs C times more in that stage.

@@ -373,9 +373,6 @@ class ImpactFeatureLoss(torch.nn.Module):
         self._cores = torch.nn.ModuleList()
         for spec in self._specs:
             core = _ImpactCore(spec, mixed_precision, gradient=mode == "Jacobian")
-            if mode == "Jacobian":
-                # Loaded here once, on the CPU, and kept: the registration moves it to its device.
-                core.model.model = torch.jit.load(core.model.model_path, map_location="cpu").eval()  # nosec B614
             if spec.voxel_size is not None:
                 # As elastix reads it: the image's three axes, but a 2D network's own two in Jacobian mode (its slices
                 # or planes), where the swept axis keeps the level's resolution.

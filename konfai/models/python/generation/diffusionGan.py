@@ -598,21 +598,31 @@ def _wire_adversarial(gan: network.Network, generator: network.Network, discrimi
 class DiffusionGan(network.Network):
     def __init__(
         self,
-        generator: GeneratorV1 = GeneratorV1(),
-        discriminator: DiscriminatorADA = DiscriminatorADA(),
+        # As Gan: the annotations stay non-optional for the config binder, and the None default gives each
+        # construction its own sub-networks instead of instances shared through the signature.
+        generator: GeneratorV1 = None,  # type: ignore[assignment]
+        discriminator: DiscriminatorADA = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
-        _wire_adversarial(self, generator, discriminator)
+        _wire_adversarial(
+            self,
+            generator if generator is not None else GeneratorV1(),
+            discriminator if discriminator is not None else DiscriminatorADA(),
+        )
 
 
 class DiffusionGanV2(network.Network):
     def __init__(
         self,
-        generator: GeneratorV2 = GeneratorV2(),
-        discriminator: Discriminator = Discriminator(),
+        generator: GeneratorV2 = None,  # type: ignore[assignment]
+        discriminator: Discriminator = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
-        _wire_adversarial(self, generator, discriminator)
+        _wire_adversarial(
+            self,
+            generator if generator is not None else GeneratorV2(),
+            discriminator if discriminator is not None else Discriminator(),
+        )
 
 
 class CycleGanDiscriminator(network.Network):
@@ -805,10 +815,12 @@ class CycleGanGeneratorV3(network.Network):
 class DiffusionCycleGan(network.Network):
     def __init__(
         self,
-        generators: CycleGanGeneratorV3 = CycleGanGeneratorV3(),
-        discriminators: CycleGanDiscriminator = CycleGanDiscriminator(),
+        generators: CycleGanGeneratorV3 = None,  # type: ignore[assignment]
+        discriminators: CycleGanDiscriminator = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
+        generators = generators if generators is not None else CycleGanGeneratorV3()
+        discriminators = discriminators if discriminators is not None else CycleGanDiscriminator()
         self.add_module("Generator", generators, in_branch=[0, 1], out_branch=["pB", "pA"])
         self.add_module(
             "Discriminator",
