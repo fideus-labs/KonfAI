@@ -2,8 +2,8 @@
 
 Every performance figure a page of this repository carries should come from one of these scripts,
 run on a quiet machine, with the commit and the machine state written beside it. This folder is the
-harness for that; `benchmarks/bench_streaming.py` and `bench_hotpaths.py` stay as they are and the
-transform bench here reuses the former.
+harness for that; `benchmarks/bench_streaming.py` stays where it is and the transform bench here
+reuses it.
 
 ## Protocol (enforced, not promised)
 
@@ -14,7 +14,10 @@ transform bench here reuses the former.
    absolute number from the profile and the load alone; ratios measured back to back survive, absolute
    numbers do not.
 2. **A fingerprint beside every number.** Commit (and dirty flag), versions, CPU, GPU and driver,
-   power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`.
+   power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`. The
+   commit is this tree's, so the gate also refuses when the interpreter imports `konfai` from anywhere
+   else (an editable install of another checkout, for instance): run from a worktree with that
+   worktree on `PYTHONPATH`, or with its own environment.
 3. **Warmup, then the median of three**, every run kept in the JSON. Device timing is synchronized
    (`cuda_timer`, CUDA events on both ends).
 4. **Memory is the whole process tree** (`PeakSampler`, RSS at 50 ms; children count) and the GPU's
@@ -42,6 +45,9 @@ transform bench here reuses the former.
 | What does evaluation cost outside its loop? | `bench_evaluate.py` | `[KonfAI] startup`, wall | wall vs loop |
 | What does the framework add over a plain loop, and how does the region height matter? | `bench_transform.py` | `bench_streaming.py` reused, a 25-line numpy+h5py baseline, a budget sweep, `cProfile` share of the statistics scan | s/GiB over the naive loop, peak RSS, wall vs budget curve, the scan's share |
 | What do TRANSFORM's other routes cost: a fold, copies, the whole-volume fallback? | `bench_transform_routes.py` | the `[KonfAI] done` and `sweep` clocks, tree RSS | wall per route on the Transform example's cohort; valid only when the done line reports the route and the outputs exist |
+| Does a resample through a displacement field hold what it was given? | `bench_transform_field.py` | the `[KonfAI] held` line, SimpleITK voxel identity | one case warped through a smooth field per budget (256M, 512M, 1G): what the run held above the process floor against the budget, and 0 difference from SimpleITK's whole-volume resample; the plan prices a field as no displacement, so this is the route the plan does not see |
+| What does a training epoch cost when its patches are read from the store instead of held in RAM, per backend? | `bench_train_stream.py` | the trainer's `[KonfAI] epoch` clock (`wait(data)` against the rest), tree RSS | a fresh `konfai TRAIN` of the Segmentation example on synthetic cases per backend (`mha`, `mha-gz`, `h5`, `omezarr`) and regime (`loaded` at a 64G budget, `streamed` at 128M); a run that chose the other regime is rejected |
+| Does a case reduction hold what its plan prices? | `bench_reductions.py` | the CUDA caching allocator's peak | per operator, dtype and member count, the fold's peak against the members, buffers and output the plan charges; a fact per fold that the peak stays within the price |
 | How long is the test suite, and what does the thread pin do? | `bench_tests.py` | `pytest` wall and CPU-seconds, `OMP_NUM_THREADS` 1 vs unset | test-fast pinned/unpinned, CPU-s, failures |
 | Chunked store, region height (2026-09-07, quiet: 1G 18.8 s, 2G 11.2 s, 4G 8.1 s, 8G 5.5 s, 16G 5.5 s; before the growth 24.5 / 17.5 / 8.7 / 5.9 / 7 s) | `bench_exaspim_budget.sh` | wall, peak RSS, the sweep clock, three slices against a reference | a 513x1331x1775 uint16 OME-Zarr chunked at 256^3 resampled through an ITK transform, one run per budget (`KONFAI_EXASPIM_BENCH` names the bench directory, which is not in the tree) |
 | The apps against the tools they wrap, same input, torch and GPU | `bench_apps.py` | wall, whole-tree peak RSS, GPU memory added, the labels the output carries | one run per case (S/M/L) per tool after a warm-up; a manifest names the apps, the two command lines and the cases (`apps_manifest.example.json` is the shape; the inputs are not in the tree), the originals run in their own venv (`--venv`) |
@@ -58,8 +64,8 @@ transform bench here reuses the former.
   geometry, never bytes.
 - The framework's clock lines (`[KonfAI] startup|epoch|prediction|sweep`) print only above one second: a
   0.0 in a result means under a second, not zero.
-- The framework pins its own threads (`rank_cpu_share`) but the test task does not; the tests bench
-  measures both states on purpose.
+- The framework pins its own threads (`rank_cpu_share`) and the pixi test tasks pin `OMP_NUM_THREADS=1`;
+  a bare `pytest` does not, and the tests bench measures both states on purpose.
 
 ## Running
 
@@ -68,7 +74,8 @@ transform bench here reuses the former.
 pixi run --environment dev python benchmarks/perf/facts.py results/<host>/<run>.json
 # one bench, on a quiet machine (the gate refuses otherwise)
 pixi run --environment dev python benchmarks/perf/bench_train_step.py
-# everything, sequentially, into results/<host>/<stamp>-<sha>.json + .md
+# the series (run_all.BENCHES), sequentially, into results/<host>/<stamp>-<sha>.json + .md;
+# bench_apps.py, bench_train_stream.py and bench_exaspim_budget.sh are run on their own
 pixi run --environment dev python benchmarks/perf/run_all.py            # add --quick for a smoke pass
 # compare a run to a baseline (exit 1 on a regression beyond the thresholds)
 pixi run --environment dev python benchmarks/perf/compare.py results/<host>/<baseline>.json results/<host>/<run>.json
@@ -91,9 +98,11 @@ with its fingerprint.
 ## Reading a result
 
 A result is `{"bench", "fingerprint", "result"}`. Compare two results only when their fingerprints
-agree on the commit's dirty flag, the GPU, the power profile and the thread pin, and both load
-averages were under the gate. A `--force` result carries `"gate_warnings"`: it is a diagnostic, not a
-baseline.
+agree on the commit's dirty flag, the GPU, the power profile and the thread pin, and neither carries
+gate warnings: that is what `compare.py` checks. A series (`run_all.py`) checks the load once, before
+its first bench: the load average a later bench records includes the series' own work, so it is kept
+in the fingerprint and not compared. A `--force` result carries `"gate_warnings"`: it is a
+diagnostic, not a baseline.
 
 ## Facts and times
 
@@ -117,13 +126,13 @@ In CI:
 
 ## The numbers this folder was built to pin (audit of 2026-09-06, quiet machine, performance profile)
 
-| Bench | Figure | Where it is quoted |
+| Bench | Figure | Re-measured by |
 |---|---|---|
-| train step, 2D example | 39.5 ms fp32, 22.4 ms autocast (1.76x); backward 65 %, forward 30 %, criteria 4 %. This folder, 2026-09-07: 38.2 / 20.4 (1.88x) / channels_last 35.1 / both 17.0 ms (2.25x) | `.audit-local/AUDIT-2026-09-06.md` 3.3.2 |
-| train loop, 3D 64^3 toy | fp32 2.60 s, autocast 3.88 s, autocast + channels_last 2.23 s | `.audit-local/RECONCILIATION-CODEX-2026-09-07.md` 6 |
+| train step, 2D example | 39.5 ms fp32, 22.4 ms autocast (1.76x); backward 65 %, forward 30 %, criteria 4 %. This folder, 2026-09-07: 38.2 / 20.4 (1.88x) / channels_last 35.1 / both 17.0 ms (2.25x) | `bench_train_step.py` |
+| train loop, 3D 64^3 toy | fp32 2.60 s, autocast 3.88 s, autocast + channels_last 2.23 s | none: the audit's own run |
 | train step, SynthRAD 2025 Task 1 UNet++ (2.5D, batch 32 of 5x320x320, 26 M) | fp32 852 ms, autocast 521 (1.63x), channels_last 741 (1.15x), both 387 ms (2.20x) | this folder, 2026-09-07, `bench_train_step.py --model-classpath UNetpp:UNetpp5 --sys-path <clone>/KonfAI --shape 32,5,320,320` |
 | train step, CURVAS ResidualEncoderUNet (3D, batch 2 of 128x160x160, 102 M) | fp32 1244 ms / 17.6 GB, autocast 617 (2.02x) / 9.6 GB, channels_last 1532 (0.81x), both 779 ms (1.60x): channels_last hurts this model | this folder, 2026-09-07, `--model-classpath Model:ResidualEncoderUNet --sys-path <clone>:<clone>/dynamic-network-architectures --shape 2,1,128,160,160 --steps 10 --profile-steps 0` (at 1x1x112x224x288 the channels_last variant ran 40 min at the VRAM limit without finishing) |
-| prediction, 2D example | loop 4.1 s whole, 4.4 s streamed, voxel-identical | 3.3.5 |
-| transform, 2 GiB h5 | 7.8 s / 1.14 GiB vs naive 4.0 s / 0.24 GiB; flat past 4-8 chunk rows. This folder, fresh processes, 2026-09-07: 7.4-7.9 s / 0.9-1.0 GiB vs 4.1-4.6 s / 0.23 GiB; sweep 15.6 / 10.9 / 9.1 / 7.6 / 7.7 / 7.8 / 7.6 s; statistics scan 2.4 s cumulative, 0.6 s own (not 72 %) | 3.2.3, 3.2.6, 3.2.7 |
-| tests | test-fast 181 s unpinned, 21.6 s pinned (quiet). This folder under load 4-5: 116.5 vs 26.4 s, the three known failures listed | 3.4.0 |
-| startup | `import konfai.trainer` 2.0 s, 604 MB; OME-Zarr chain +0.28 s idle | 3.3.4 |
+| prediction, 2D example | loop 4.1 s whole, 4.4 s streamed, voxel-identical | `bench_predict.py` |
+| transform, 2 GiB h5 | 7.8 s / 1.14 GiB vs naive 4.0 s / 0.24 GiB; flat past 4-8 chunk rows. This folder, fresh processes, 2026-09-07: 7.4-7.9 s / 0.9-1.0 GiB vs 4.1-4.6 s / 0.23 GiB; sweep 15.6 / 10.9 / 9.1 / 7.6 / 7.7 / 7.8 / 7.6 s; statistics scan 2.4 s cumulative, 0.6 s own (not 72 %) | `bench_transform.py` |
+| tests | test-fast 181 s unpinned, 21.6 s pinned (quiet). This folder under load 4-5: 116.5 vs 26.4 s, the three known failures listed | `bench_tests.py` |
+| startup | `import konfai.trainer` 2.0 s, 604 MB; OME-Zarr chain +0.28 s idle | `bench_startup.py` |

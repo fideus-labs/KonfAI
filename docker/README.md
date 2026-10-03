@@ -28,9 +28,11 @@ docker run --rm vboussot/konfai
 ## Local Build
 
 The image installs the wheels it finds in `dist/`, so build them first. It then ships the
-working tree, so there is no version to name anywhere and none to keep in sync:
+working tree, so there is no version to name anywhere and none to keep in sync. Empty `dist/`
+first: each build adds its own version there, and the image refuses two wheels of one package.
 
 ```bash
+rm -rf dist
 python -m build --wheel --outdir dist .
 python -m build --wheel --outdir dist ./konfai-apps
 docker build -f docker/Dockerfile -t konfai .
@@ -71,11 +73,13 @@ The image exposes the KonfAI CLI entrypoints:
 - `konfai-cluster`
 
 If no command is provided, the container runs `konfai --help`.
-If the first argument is not one of the known executables, it is forwarded to `konfai`.
+If the first argument is a program on the image's `PATH` (`konfai-apps`, `python`, `bash`, ...), it runs as
+given; anything else is forwarded to `konfai`, so `TRAIN ...` runs `konfai TRAIN ...`.
 
 ## GPU Runtime
 
-The default image installs a CUDA-enabled PyTorch wheel. GPU access still depends on the host runtime.
+The default image installs the newest PyTorch and torchvision that `TORCH_INDEX_URL` serves (CUDA 12.8
+by default), whatever PyPI carries. GPU access still depends on the host runtime.
 
 Quick CUDA check:
 
@@ -92,14 +96,18 @@ If CUDA is not visible inside the container, check:
 
 ## Run KonfAI
 
-Train from the repository root:
+Run the commands from the directory that holds the configs and the data, here
+`examples/Segmentation` with its demo data downloaded as its README shows: a relative path such as
+`./Dataset`, and a local classpath such as `Model:UNetpp5`, resolve against that directory.
+
+Train:
 
 ```bash
 docker run --rm -it \
   --gpus all \
   -v "$(pwd):/workspace" \
   -w /workspace \
-  vboussot/konfai TRAIN --gpu 0 -c examples/Synthesis/Config.yml
+  vboussot/konfai TRAIN --gpu 0 -c Config.yml
 ```
 
 Run prediction or evaluation:
@@ -109,17 +117,26 @@ docker run --rm -it \
   --gpus all \
   -v "$(pwd):/workspace" \
   -w /workspace \
-  vboussot/konfai PREDICTION --models checkpoint.pt --gpu 0 -c examples/Synthesis/Prediction.yml
+  vboussot/konfai PREDICTION --models Checkpoints/SEG_BASELINE/[0-9]*.pt --gpu 0 -c Prediction.yml
 ```
 
 ```bash
 docker run --rm -it \
   -v "$(pwd):/workspace" \
   -w /workspace \
-  vboussot/konfai EVALUATION -c examples/Synthesis/Evaluation.yml
+  vboussot/konfai EVALUATION -c Evaluation.yml
 ```
 
+The `Synthesis` example also needs `segmentation_models_pytorch`: build the image with
+`--build-arg KONFAI_EXTRAS=imaging,smp` to run it.
+
 ## Run KonfAI Apps
+
+The named volume `konfai-cache` keeps the apps downloaded from Hugging Face (their cache lives
+under `/root/.cache/huggingface`) from one run to the next. Without it, `--rm` discards them and every
+run downloads the app again. Mount that directory and not all of `/root/.cache`: a run keeps
+decompressed copies of its compressed inputs under `/root/.cache/konfai`, and a stopped container
+would leave them in the volume.
 
 Run an app command:
 
@@ -127,6 +144,7 @@ Run an app command:
 docker run --rm -it \
   --gpus all \
   -v "$(pwd):/workspace" \
+  -v konfai-cache:/root/.cache/huggingface \
   -w /workspace \
   vboussot/konfai konfai-apps infer my_app -i input.mha -o ./Output
 ```
@@ -137,6 +155,7 @@ Run the apps server:
 docker run --rm -it -p 8000:8000 \
   --gpus all \
   -v "$(pwd):/workspace" \
+  -v konfai-cache:/root/.cache/huggingface \
   -w /workspace \
   -e KONFAI_API_TOKEN=my-token \
   vboussot/konfai konfai-apps-server --host 0.0.0.0 --port 8000 --apps konfai-apps/tests/assets/apps.json

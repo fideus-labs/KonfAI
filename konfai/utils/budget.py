@@ -26,7 +26,8 @@ import math
 import os
 import re
 import warnings
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,10 @@ AUTO_MEMORY_SAFETY_FRACTION = 0.8
 
 #: The smallest declared budget the stack can honor (see the warning in resolve_memory_budget).
 MINIMUM_DECLARED_BUDGET_BYTES = 256 << 20
+
+#: The largest budget a bare number (GiB) may declare: 1 PiB per rank. Above it the number is a byte count
+#: missing its unit.
+MAXIMUM_BARE_BUDGET_GIB = 2**20
 
 # Decimal (10^n) and binary (2^n) suffixes; "" / "b" are bytes. Case is folded before lookup.
 _MEMORY_UNIT_BYTES: dict[str, int] = {
@@ -171,9 +176,29 @@ def reset_resident_peak() -> bool:
     return True
 
 
+@contextmanager
+def run_peak_scope() -> Iterator[None]:
+    """Make :func:`run_peak_resident_bytes` read the peak of this scope, as it reads a fresh process's
+    whole life, and hand the process's own peak back when the scope closes. Where the kernel offers no
+    reset, the peak stays the process's."""
+    global _peak_before_resets
+    before = run_peak_resident_bytes()
+    if reset_resident_peak():
+        _peak_before_resets = 0
+    try:
+        yield
+    finally:
+        _peak_before_resets = max(_peak_before_resets, before or 0)
+
+
 def resident_bytes() -> int | None:
-    """What this process holds resident right now (``VmRSS``), or ``None`` where the kernel does not say."""
-    return _status_bytes("VmRSS")
+    """What this process holds resident right now: ``VmRSS``, or psutil's reading where there is no
+    ``/proc`` (macOS, Windows). ``None`` where neither says."""
+    resident = _status_bytes("VmRSS")
+    if resident is None:
+        with suppress(psutil.Error):
+            resident = int(psutil.Process().memory_info().rss)
+    return resident
 
 
 #: The resident set a workflow recorded before its first case: what its regions are measured above.
@@ -429,7 +454,8 @@ def parse_memory_budget_bytes(value: str | float) -> int:
     An unadorned ``24`` reads as ``24 GiB``, as a number or as the YAML string ``"24"``. A string may
     name its unit: decimal ``GB``/``MB`` (10^n) or binary ``GiB``/``MiB`` (2^n), case-insensitive, with
     an optional space (``"24GB"``, ``"32 GiB"``, ``"512mb"``); ``"b"`` means bytes. ``"auto"`` is
-    resolved by the caller.
+    resolved by the caller. A bare number above ``MAXIMUM_BARE_BUDGET_GIB`` (1 PiB) is refused: it is a
+    byte count missing its unit.
     """
     if isinstance(value, str):
         match = re.fullmatch(r"\s*(?P<number>[0-9]*\.?[0-9]+)\s*(?P<unit>[a-z]*)\s*", value.lower())
@@ -443,11 +469,17 @@ def parse_memory_budget_bytes(value: str | float) -> int:
         # A bare numeric string is the YAML face of a bare number: GiB, not bytes.
         number, factor = float(match.group("number")), _MEMORY_UNIT_BYTES[unit] if unit else 2**30
     else:
-        number, factor = float(value), 2**30
+        unit, number, factor = "", float(value), 2**30
     if number <= 0:
         raise ConfigError(
             f"memory_budget: {value!r} must be a positive size.",
             "Use a positive number in GiB (e.g. 24), a unit string ('24GB'), 'auto', or None.",
+        )
+    if not unit and number > MAXIMUM_BARE_BUDGET_GIB:
+        raise ConfigError(
+            f"memory_budget: {value!r} has no unit, and a bare number is in GiB: this declares"
+            f" {format_bytes(number * 2**30)} per rank, above the 1 PiB a bare number may declare.",
+            f"To give bytes, write the unit: '{number:.0f}b'. Or use '8GB', '32GiB'.",
         )
     return int(number * factor)
 
@@ -469,10 +501,10 @@ def resolve_memory_budget(memory_budget: str | float | None) -> MemoryBudget:
         # one imaging backend is already several hundred MiB resident before the first voxel. Warned
         # rather than refused: tests and probes size tiny fixtures under tiny declarations on purpose.
         warnings.warn(
-            f"memory_budget {memory_budget!r} is below the smallest supported declaration"
-            f" ({MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB): the process floor alone is several times"
-            " this figure, and what the sizing model cannot see may exceed it. Declare at least"
-            " 512 MiB, or 'auto' to size from the detected memory.",
+            f"memory_budget {memory_budget!r} is below {MINIMUM_DECLARED_BUDGET_BYTES >> 20} MiB: the process"
+            " floor alone is several times this figure, and what the sizing model cannot see may exceed it."
+            " Declare 512 MiB or more (a declaration of that size was measured to hold), or 'auto' to size"
+            " from the detected memory.",
             KonfAIWarning,
             stacklevel=2,
         )

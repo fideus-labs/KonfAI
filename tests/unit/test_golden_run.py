@@ -19,9 +19,8 @@
 Every other test pins a part: this one pins what a user gets. A four-case cohort, a two-class
 network of elementwise parameters (``tests/assets/Workflows/TinySeg.py``), one epoch of AdamW on a
 cross-entropy, then the checkpoint predicting label maps through Argmax. What holds it still: no
-validation split (drawn from the unseeded global RNG), no shuffle, no augmentation, ``manual_seed``,
-and a network whose forward is elementwise, so a value's result does not depend on the patch it
-arrives in.
+validation split, no shuffle, no augmentation, ``manual_seed``, and a network whose forward is
+elementwise, so a value's result does not depend on the patch it arrives in.
 
 CPU only. A GPU's kernels do not reproduce these bits, and a seed is not portable across devices.
 
@@ -234,3 +233,49 @@ def test_a_seeded_cpu_epoch_and_its_prediction_hold_their_values(tmp_path: Path,
         foreground[path.parent.name] = int(labels.sum())
         digest.update(np.ascontiguousarray(labels).tobytes())
     assert digest.hexdigest() == GOLDEN_LABELS, f"the predicted labels moved; foreground voxels: {foreground}"
+
+
+def _tensors(value: object, path: str = "") -> dict[str, torch.Tensor]:
+    """Every tensor a checkpoint holds, by its key path."""
+    if isinstance(value, torch.Tensor):
+        return {path: value}
+    if isinstance(value, dict):
+        return {k: v for key, item in value.items() for k, v in _tensors(item, f"{path}/{key}").items()}
+    return {}
+
+
+def test_an_unseeded_run_is_replayed_by_the_seed_it_recorded(tmp_path: Path, monkeypatch) -> None:
+    """Without manual_seed the run draws a seed, records it in Seed.txt and seeds everything from it:
+    manual_seed set to that seed gives the same split, batch order and weights."""
+    monkeypatch.syspath_prepend(str(ASSETS))
+    dataset = tmp_path / "Dataset"
+    _write_cohort(dataset)
+
+    def train(manual_seed: object, run: str) -> Path:
+        config = _train_config(dataset)
+        config["Trainer"]["manual_seed"] = manual_seed
+        config["Trainer"]["Dataset"]["shuffle"] = True
+        config["Trainer"]["Dataset"]["validation"] = 0.25
+        config["Trainer"]["Dataset"]["batch_size"] = 1
+        return api.train(
+            config,
+            gpu=[],
+            cpu=1,
+            quiet=True,
+            overwrite=True,
+            checkpoints_dir=tmp_path / run / "Checkpoints",
+            statistics_dir=tmp_path / run / "Statistics",
+        )
+
+    first = train("None", "first")
+    seed = int((tmp_path / "first" / "Statistics" / "GOLDEN" / "Seed.txt").read_text())
+    replay = train(seed, "replay")
+
+    def weights(workspace: Path) -> dict[str, torch.Tensor]:
+        return _tensors(torch.load(workspace / "resume_latest.pt", map_location="cpu", weights_only=False))
+
+    expected, produced = weights(first), weights(replay)
+    assert expected.keys() == produced.keys()
+    assert all(torch.equal(expected[key], produced[key]) for key in expected), [
+        key for key in expected if not torch.equal(expected[key], produced[key])
+    ]

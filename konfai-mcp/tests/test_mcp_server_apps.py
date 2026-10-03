@@ -15,11 +15,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import hashlib
 import json
 import sys
 from collections.abc import Callable
+from fnmatch import fnmatch
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import fastmcp
 import pytest
@@ -85,10 +88,9 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     # The bundle ships a Config.yml, so it is finetunable and offers fine_tune_app.
     assert payload["finetunable"] is True
     # An inference-capable app routes forward to the run/tune tools instead of dead-ending.
-    assert payload["next_actions"][0] == "run_app_infer"
+    assert payload["next_actions"][0] == "run_app"
     assert "fine_tune_app" in payload["next_actions"]
     assert "import_app" in payload["next_actions"]  # the modify-then-run path stays offered
-    assert "run_app_evaluate" not in payload["next_actions"]
 
 
 def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
@@ -114,7 +116,7 @@ def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
 
     payload = _service(tmp_path).describe_app(str(app_dir))
     assert payload["capabilities"]["inference"] is False
-    assert "run_app_infer" not in payload["next_actions"]
+    assert "run_app" not in payload["next_actions"]
     assert "import_app" not in payload["next_actions"]
     assert "design_config_strategy" in payload["next_actions"]
 
@@ -337,6 +339,41 @@ def test_export_app_copies_bundle(tmp_path: Path) -> None:
         _service(tmp_path).export_app("localhost:8000:MyApp", str(tmp_path / "x"))
 
 
+def test_export_app_refuses_to_overwrite_a_file_at_the_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    monkeypatch.setenv("KONFAI_MCP_WORKSPACES_ROOT", str(tmp_path / "workspaces"))
+    mcp_server = load_mcp_server()
+    app_dir = _write_local_app(tmp_path / "apps")
+    (app_dir / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "Prediction.yml").write_text("# the user's own config\n", encoding="utf-8")
+    (project / "notes.txt").write_text("kept\n", encoding="utf-8")
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    (unrelated / "notes.txt").write_text("kept\n", encoding="utf-8")
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            with pytest.raises(Exception, match=r"would overwrite Prediction\.yml\..*overwrite=True"):
+                await client.call_tool("export_app", {"ref": str(app_dir), "path": str(project)})
+            assert (project / "Prediction.yml").read_text(encoding="utf-8") == "# the user's own config\n"
+            assert not (project / "app.json").exists()
+
+            # A folder that shares no file name with the app is not an overwrite.
+            await client.call_tool("export_app", {"ref": str(app_dir), "path": str(unrelated)})
+            assert (unrelated / "app.json").is_file()
+
+            await client.call_tool("export_app", {"ref": str(app_dir), "path": str(project), "overwrite": True})
+            assert (project / "Prediction.yml").read_text(encoding="utf-8") == "Predictor: {}\n"
+            assert (project / "notes.txt").read_text(encoding="utf-8") == "kept\n"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("nested_run", [False, True])
 def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) -> None:
     layout = WorkspaceLayout(tmp_path / "workspaces")
@@ -360,7 +397,7 @@ def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) ->
     assert (bundle / "model.pt").exists()
     assert not (bundle / "resume_latest.pt").exists()
     assert result["checkpoints"] == ["model.pt"]
-    assert result["next_actions"] == ["describe_app", "run_app_infer", "import_app"]
+    assert result["next_actions"] == ["describe_app", "run_app", "import_app"]
     meta = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
     assert meta["display_name"] == "My App"
     assert meta["short_description"] == "My App"
@@ -492,10 +529,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             "import_app",
             "register_app_source",
             "unregister_app_source",
-            "run_app_infer",
-            "run_app_evaluate",
-            "run_app_uncertainty",
-            "run_app_pipeline",
+            "run_app",
             "fine_tune_app",
             "package_app_from_session",
         )
@@ -515,7 +549,7 @@ def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert "solve_task" in index["prompts"]
         solve = server.prompt_solve_task("segment the liver", "one CT group")
         content = solve[0]["content"]
-        for tool in ("run_app_infer", "fine_tune_app", "import_app", "design_config_strategy"):
+        for tool in ("run_app", "fine_tune_app", "import_app", "design_config_strategy"):
             assert tool in content
 
         app_dir = _write_local_app(tmp_path)
@@ -542,7 +576,7 @@ def test_set_parameters_preserve_value_types(
 
     captured: dict[str, list[str] | None] = {}
 
-    def fake_export_app(ref, path, *, display_name=None, config_overrides=None, force_update=False):
+    def fake_export_app(ref, path, *, display_name=None, config_overrides=None, force_update=False, overwrite=False):
         captured["config_overrides"] = config_overrides
         return {"ref": ref, "exported_to": str(path)}
 
@@ -584,7 +618,7 @@ def test_describe_app_inference_only_is_not_finetunable(tmp_path: Path) -> None:
     assert payload["finetunable"] is False
     assert "fine_tune_app" not in payload["next_actions"]
     # Inference routing is unaffected.
-    assert payload["next_actions"][0] == "run_app_infer"
+    assert payload["next_actions"][0] == "run_app"
 
 
 def test_prepare_infer_gates_local_app(tmp_path: Path) -> None:
@@ -804,8 +838,9 @@ def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.M
 
         monkeypatch.setattr(server.JOB_REGISTRY, "launch", fake_launch)
 
-        payload = server.run_app_infer(
+        payload = server.run_app(
             ref=str(app_dir),
+            action="infer",
             inputs=_dummy_inputs(tmp_path),
             allow_untrusted_code=True,
             cpu=2,
@@ -832,6 +867,39 @@ def test_app_tools_launch_tracked_app_jobs(tmp_path: Path, monkeypatch: pytest.M
         assert captured["target"] == "konfai_mcp.runner:run_finetune_api"
         assert captured["kwargs"]["epochs"] == 2  # type: ignore[index]
         assert tuned["kind"] == "finetune"
+
+        # One tool, four actions, each on its runner; a parameter the action does not read is refused.
+        truth = _dummy_inputs(tmp_path / "gt")
+        for action, extra, kind in (
+            ("evaluate", {"gt": truth}, "evaluate"),
+            ("uncertainty", {}, "uncertainty"),
+            ("pipeline", {"gt": truth, "tta": 2}, "pipeline"),
+        ):
+            server.run_app(
+                ref=str(app_dir), action=action, inputs=_dummy_inputs(tmp_path), allow_untrusted_code=True, **extra
+            )
+            assert captured["kind"] == kind
+            assert captured["target"] == "konfai_mcp.runner:run_app_action_api"
+        with pytest.raises(ValueError, match="does not read tta"):
+            server.run_app(ref=str(app_dir), action="evaluate", inputs=_dummy_inputs(tmp_path), gt=truth, tta=2)
+
+        # Every app job writes inside the session workspace: an output elsewhere is refused.
+        with pytest.raises(ValueError, match="escapes the session workspace"):
+            server.run_app(
+                ref=str(app_dir),
+                action="infer",
+                inputs=_dummy_inputs(tmp_path),
+                output=str(tmp_path / "elsewhere"),
+                allow_untrusted_code=True,
+            )
+        with pytest.raises(ValueError, match="escapes the session workspace"):
+            server.fine_tune_app(
+                ref=str(app_dir), dataset=str(dataset), output=str(tmp_path / "elsewhere"), allow_untrusted_code=True
+            )
+        inside = server.run_app(
+            ref=str(app_dir), action="infer", inputs=_dummy_inputs(tmp_path), output="Mine", allow_untrusted_code=True
+        )
+        assert inside["output"] == str(server.WORKSPACE_LAYOUT.workspace_dir().resolve() / "Mine")
     finally:
         sys.modules.pop("konfai_mcp.server", None)
 
@@ -841,7 +909,7 @@ def test_app_execution_tool_schemas_reach_the_client(
     monkeypatch: pytest.MonkeyPatch,
     load_mcp_server: Callable[[], ModuleType],
 ) -> None:
-    """The five app-execution tools were exercised at function level only; a broken Annotated/Field on
+    """The two app-execution tools were exercised at function level only; a broken Annotated/Field on
     any of them would surface as a client-side schema hole, invisible to those tests."""
     import fastmcp
 
@@ -854,10 +922,7 @@ def test_app_execution_tool_schemas_reach_the_client(
 
     schemas = asyncio.run(scenario())
     expected = {
-        "run_app_infer": {"ref", "inputs", "output"},
-        "run_app_evaluate": {"ref", "inputs", "gt"},
-        "run_app_uncertainty": {"ref", "inputs"},
-        "run_app_pipeline": {"ref", "inputs", "gt"},
+        "run_app": {"ref", "action", "inputs", "output", "gt", "uncertainty_file"},
         "fine_tune_app": {"ref", "dataset", "output"},
     }
     for name, required_params in expected.items():
@@ -1117,6 +1182,167 @@ def test_package_from_session_ships_declared_support_files_beside_config_referen
         AppService(workspace_layout=layout).package_from_session(
             name="Escape", display_name="h", description="h", support_files={"helpers": "../elsewhere"}
         )
+
+
+class _HubFolder(SimpleNamespace):
+    pass
+
+
+class _FakeHub:
+    """The Hugging Face Hub of a catalogue ({repo_id: [paths]}). What it serves lands in a Hugging Face cache under
+    `tmp_path`, laid out as the real client lays it out (so the real local-only reads find it), and every call that
+    would reach the network is counted."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repos: dict[str, list[str]], tags=()):
+        from huggingface_hub import constants
+        from konfai_apps import app_repository
+
+        self.repos, self.tags, self.display = repos, list(tags), {}
+        self.calls: list[tuple[str, ...]] = []
+        self.cache = tmp_path / "hf" / "hub"
+        monkeypatch.setattr(constants, "HF_HUB_CACHE", str(self.cache))
+        monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+        app_repository._release_tag.cache_clear()  # a process that has not read the Hub yet
+        local_file, local_snapshot = app_repository.hf_hub_download, app_repository.snapshot_download
+
+        def hub(kind: str, *call: str | None) -> None:
+            self.calls.append((kind, *(value or "" for value in call)))
+
+        def hf_hub_download(repo_id, filename, revision=None, local_files_only=False, **kwargs):
+            if local_files_only:
+                return local_file(repo_id, filename, revision=revision, local_files_only=True, **kwargs)
+            hub("file", repo_id, revision, filename)
+            return str(self._store(repo_id, revision, [filename]) / filename)
+
+        def snapshot_download(repo_id, revision=None, allow_patterns=None, local_files_only=False, **kwargs):
+            if local_files_only:
+                return local_snapshot(repo_id, revision=revision, local_files_only=True, **kwargs)
+            hub("snapshot", repo_id, revision)
+            patterns = [allow_patterns] if isinstance(allow_patterns, str) else allow_patterns
+            wanted = [
+                path for path in self.repos[repo_id] if patterns is None or any(fnmatch(path, p) for p in patterns)
+            ]
+            return str(self._store(repo_id, revision, wanted))
+
+        def list_repo_tree(repo_id, path_in_repo=None, recursive=False, revision=None, repo_type=None):
+            hub("tree", repo_id, revision, path_in_repo)
+            prefix = f"{path_in_repo}/" if path_in_repo else ""
+            entries: dict[str, SimpleNamespace] = {}
+            for path in (path for path in self.repos[repo_id] if path.startswith(prefix)):
+                parts = path[len(prefix) :].split("/")
+                for depth in range(1, len(parts) if recursive else min(len(parts), 2)):
+                    folder = prefix + "/".join(parts[:depth])
+                    entries.setdefault(folder, _HubFolder(path=folder))
+                if recursive or len(parts) == 1:
+                    entries[path] = SimpleNamespace(path=path)
+            return iter(entries.values())
+
+        def list_repo_refs(repo_id, **kwargs):
+            hub("refs", repo_id)
+            return SimpleNamespace(tags=[SimpleNamespace(name=tag) for tag in self.tags])
+
+        def model_info(repo_id, revision=None, **kwargs):
+            hub("info", repo_id, revision)
+            return SimpleNamespace(siblings=[SimpleNamespace(rfilename=path) for path in self.repos[repo_id]])
+
+        api = SimpleNamespace(list_repo_tree=list_repo_tree, list_repo_refs=list_repo_refs, model_info=model_info)
+        monkeypatch.setattr(app_repository, "HfApi", lambda: api)
+        monkeypatch.setattr(app_repository, "RepoFolder", _HubFolder)
+        monkeypatch.setattr(app_repository, "hf_hub_download", hf_hub_download)
+        monkeypatch.setattr(app_repository, "snapshot_download", snapshot_download)
+
+    def _store(self, repo_id: str, revision: str | None, paths: list[str]) -> Path:
+        repo = self.cache / f"models--{repo_id.replace('/', '--')}"
+        commit = hashlib.sha1((revision or "main").encode()).hexdigest()
+        (repo / "refs").mkdir(parents=True, exist_ok=True)
+        (repo / "refs" / (revision or "main")).write_text(commit, encoding="utf-8")
+        snapshot = repo / "snapshots" / commit
+        for path in paths:
+            (snapshot / path).parent.mkdir(parents=True, exist_ok=True)
+            (snapshot / path).write_text(self._content(repo_id, path), encoding="utf-8")
+        return snapshot
+
+    def _content(self, repo_id: str, path: str) -> str:
+        app, _, name = path.partition("/")
+        if name == "app.json":
+            slot = {"display_name": "Image", "volume_type": "VOLUME", "required": True}
+            return json.dumps(
+                {
+                    "display_name": self.display.get(f"{repo_id}/{app}", f"{app} app"),
+                    "description": f"{app} from {repo_id}",
+                    "short_description": app,
+                    "task": "segmentation",
+                    "tta": 0,
+                    "mc_dropout": 0,
+                    "inputs": {"Volume_0": slot},
+                    "outputs": {"Output_0": slot},
+                }
+            )
+        if name == "Prediction.yml":
+            return "Predictor:\n  Dataset:\n    Patch:\n      patch_size: [32, 32]\n"
+        return "x"
+
+
+#: Three repositories: apps with and without an icon, a train config, a checkpoint; files outside any app.
+_HF_CATALOGUE = {
+    "org/seg": [
+        "CT/app.json",
+        "CT/icon.png",
+        "CT/Prediction.yml",
+        "CT/Config.yml",
+        "CT/model.pt",
+        "MR/app.json",
+        "MR/Prediction.yml",
+        "MR/fold_0.pt",
+        "README.md",
+    ],
+    "org/reg": ["Rigid/app.json", "Rigid/icon.png", "Rigid/Prediction.yml", "Rigid/params.txt"],
+    "org/syn": ["CBCT/app.json", "CBCT/Prediction.yml", "CBCT/Uncertainty.yml", "CBCT/model.pt", "SAM2.1.pt"],
+}
+
+
+def _release(monkeypatch: pytest.MonkeyPatch, version: str) -> None:
+    """Run as konfai-apps ``version``."""
+    import importlib.metadata
+
+    installed = importlib.metadata.version
+    monkeypatch.setattr(
+        importlib.metadata, "version", lambda name: version if name == "konfai-apps" else installed(name)
+    )
+
+
+def _summaries(listing: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+    return {
+        app["ref"]: (app.get("display_name"), app.get("has_icon", False), app.get("summary_error"))
+        for app in listing["apps"]
+    }
+
+
+def test_studios_catalogue_reads_each_hf_repository_once_and_no_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Studio's catalogue is list_apps(include_summary=True): each repository's file list is read, its app files but
+    the checkpoints downloaded once, and a later catalogue only reads the file lists again."""
+    _release(monkeypatch, "1.9.0")
+    hub = _FakeHub(monkeypatch, tmp_path, _HF_CATALOGUE, tags=["v1.8.6"])
+    service = _service(tmp_path, default_catalog=sorted(_HF_CATALOGUE))
+
+    listing = service.list_apps(include_summary=True)
+
+    assert listing["errors"] == []
+    assert _summaries(listing) == {
+        "org/reg:Rigid": ("Rigid app", True, None),
+        "org/seg:CT": ("CT app", True, None),
+        "org/seg:MR": ("MR app", False, None),
+        "org/syn:CBCT": ("CBCT app", False, None),
+    }
+    assert not list(hub.cache.rglob("*.pt"))
+    reads = sorted(call[:2] for call in hub.calls if call[0] != "refs")  # the release tag is looked up aside
+    assert reads == sorted([("info", repo) for repo in _HF_CATALOGUE] + [("snapshot", repo) for repo in _HF_CATALOGUE])
+
+    hub.calls.clear()
+    assert _summaries(service.list_apps(include_summary=True)) == _summaries(listing)
+    assert sorted(call[0] for call in hub.calls) == ["info"] * len(_HF_CATALOGUE)
 
 
 def _registration_app(tmp_path: Path) -> Path:

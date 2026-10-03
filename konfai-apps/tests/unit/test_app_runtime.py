@@ -14,7 +14,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import errno
 import os
+import shutil
 import types
 from contextlib import nullcontext
 from pathlib import Path
@@ -23,6 +25,7 @@ import konfai_apps.app as app_module
 import numpy as np
 import pytest
 import SimpleITK as sitk
+from konfai.utils.dataset import Dataset
 from konfai_apps.app_repository import DataEntry, VolumeType, _parse_input_default
 from konfai_apps.errors import AppMetadataError
 from multipart_support import decode_multipart
@@ -82,6 +85,35 @@ def test_run_distributed_app_cleans_auto_created_temporary_workspace(
     assert auto_dir.exists() is False
 
 
+def test_run_distributed_app_removes_auto_created_workspace_when_a_path_does_not_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    auto_dir = tmp_path / "konfai_test_auto_workspace"
+    auto_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
+    monkeypatch.setattr(app_module.tempfile, "mkdtemp", lambda prefix: str(auto_dir))
+    # Path.resolve refuses a NUL byte on POSIX and accepts it on Windows: the refusal is staged instead.
+    resolve = Path.resolve
+
+    def refusing(self: Path, strict: bool = False) -> Path:
+        if self.name == "unresolvable.mha":
+            raise ValueError("this path does not resolve")
+        return resolve(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", refusing)
+
+    @app_module.run_distributed_app
+    def wrapped(inputs: list[list[str]]) -> None:
+        raise AssertionError("never reached: the input path does not resolve")
+
+    with pytest.raises(ValueError):
+        wrapped(inputs=[["unresolvable.mha"]])
+
+    assert auto_dir.exists() is False
+
+
 def test_run_distributed_app_restores_cwd_after_keyboard_interrupt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -104,6 +136,26 @@ def test_run_distributed_app_restores_cwd_after_keyboard_interrupt(
     assert excinfo.value.code == 130
     assert Path.cwd() == user_dir
     assert "Manual interruption" in capsys.readouterr().out
+
+
+def test_a_refusal_of_the_workflow_an_app_runs_reaches_its_python_caller(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An app action runs a KonfAI workflow in process: that workflow's designed refusal reaches the app's
+    Python caller as the KonfAIError, not as a SystemExit, and the workspace is still restored."""
+    from konfai.evaluator import evaluate
+    from konfai.utils.errors import ConfigError
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
+
+    @app_module.run_distributed_app
+    def evaluate_app(tmp_dir: Path) -> None:
+        evaluate(evaluations_file="Nope.yml")
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        evaluate_app(tmp_dir=tmp_path / "workspace")
+    assert Path.cwd() == tmp_path
 
 
 def test_run_distributed_app_resolves_relative_output_before_chdir(
@@ -164,6 +216,18 @@ def test_run_distributed_app_resolves_relative_inputs_before_chdir(
     assert seen["dataset"] == user_dir / "Dataset"
 
 
+def test_run_distributed_app_refuses_an_unknown_keyword(tmp_path: Path) -> None:
+    called: list[int] = []
+
+    @app_module.run_distributed_app
+    def wrapped(ensemble: int = 0, tmp_dir: Path | None = None) -> None:
+        called.append(ensemble)
+
+    with pytest.raises(TypeError, match="ensembel"):
+        wrapped(ensembel=5, tmp_dir=tmp_path)
+    assert called == []
+
+
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
@@ -192,6 +256,81 @@ def test_dataset_writer_preserves_registered_extension_for_multidot_names(
     volume = tmp_path / "Dataset" / "P000" / "Volume_0.nii.gz"
     assert volume.is_symlink() or volume.exists()
     assert Path(os.readlink(volume)).name == "patient.1.nii.gz"
+
+
+def test_dataset_staging_replaces_its_own_and_is_invisible_to_the_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A staging an earlier run left in a caller-owned workspace is konfai-apps' own: the next run
+    replaces it, its marker lists as no case, and the cleanup removes it."""
+    _write_volume(tmp_path / "input.mha")
+    monkeypatch.chdir(tmp_path)
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+
+    app._write_inputs_to_dataset([[tmp_path / "input.mha"]])
+    app._write_inputs_to_dataset([[tmp_path / "input.mha"]])
+
+    assert Dataset("Dataset", "mha").get_names("Volume_0") == ["P000"]
+    app._clear_dataset()
+    assert not (tmp_path / "Dataset").exists()
+
+
+def _refuse_symlinks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What Windows without developer mode answers to ``os.symlink``."""
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise OSError(1314, "A required privilege is not held by the client")
+
+    monkeypatch.setattr(app_module.os, "symlink", refused)
+
+
+def test_a_refused_symlink_shares_the_inputs_data_instead_of_copying_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Where symbolic links are refused, an input file and a fine-tune dataset directory are staged
+    through hard links: nothing is written twice, and removing the staging leaves the inputs."""
+    _refuse_symlinks(monkeypatch)
+    volume = tmp_path / "case.mha"
+    _write_volume(volume)
+    cohort = tmp_path / "cohort"
+    (cohort / "P0").mkdir(parents=True)
+    _write_volume(cohort / "P0" / "CT.mha")
+    monkeypatch.chdir(tmp_path)
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+
+    app._write_inputs_to_dataset([[volume]])
+    app_module.KonfAIApp.symlink(cohort, tmp_path / "staged")
+
+    assert (tmp_path / "Dataset" / "P000" / "Volume_0.mha").samefile(volume)
+    assert not (tmp_path / "staged").is_symlink()
+    assert (tmp_path / "staged" / "P0" / "CT.mha").samefile(cohort / "P0" / "CT.mha")
+    app._clear_dataset()
+    shutil.rmtree(tmp_path / "staged")
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(volume))).max() == 7
+    assert (cohort / "P0" / "CT.mha").is_file()
+
+
+def test_an_input_that_cannot_be_linked_either_is_copied(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Across volumes, or on a filesystem without hard links, the input is copied."""
+    _refuse_symlinks(monkeypatch)
+
+    def cross_device(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+    monkeypatch.setattr(app_module.os, "link", cross_device)
+    volume = tmp_path / "case.mha"
+    volume.write_bytes(b"volume")
+    staged = tmp_path / "Dataset" / "P000" / "Volume_0.mha"
+
+    app_module.KonfAIApp.symlink(volume, staged)
+
+    assert staged.read_bytes() == b"volume"
+    assert not staged.samefile(volume)
 
 
 def _write_volume(path: Path, shape: tuple[int, int, int] = (4, 5, 6), value: int = 7) -> None:
@@ -392,11 +531,15 @@ def _stub_client(monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> "app_modu
     return client
 
 
-def test_stream_logs_raises_on_error_marker(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _stub_client(monkeypatch, ["data: hello", "data: __ERROR__ boom happened", "data: __DONE__"])
+def test_stream_logs_stops_at_the_error_marker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The job's result, not its log, says whether it failed or was refused."""
+    client = _stub_client(monkeypatch, ["data: hello", "data: __ERROR__ boom happened", "data: after"])
 
-    with pytest.raises(RuntimeError, match="boom happened"):
-        client.stream_logs("job123")
+    client.stream_logs("job123")
+    out = capsys.readouterr().out
+    assert "hello" in out and "after" not in out
 
 
 def test_stream_logs_returns_on_done_marker(
@@ -470,7 +613,7 @@ def test_dataset_writers_pair_cases_by_sorted_name_across_directories(
     app._write_gt_to_dataset([[refs]])
     app._write_mask_or_default([[masks]])
 
-    cases = sorted((tmp_path / "Dataset").iterdir())
+    cases = sorted(path for path in (tmp_path / "Dataset").iterdir() if path.is_dir())
     assert [c.name for c in cases] == ["P000", "P001", "P002"]
     assert [_case_name(c / "Volume_0.nii.gz") for c in cases] == ["case_a", "case_b", "case_c"]
     for case in cases:

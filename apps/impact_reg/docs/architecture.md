@@ -42,9 +42,9 @@ models/<engine>.py        the preset's model class (Prediction.yml names it): Re
   without their dependencies (FireANTs); konfai-apps never replaces an installed core package to satisfy them.
 - **SlicerImpactReg drives the CLI** (`register --keep-fields`, `eval`, `uncertainty`, the output layout above):
   keep those arguments and files stable.
-- **KonfAI Studio drives it through konfai-mcp**: `run_app_infer` on an app whose `app.json` says `task:
+- **KonfAI Studio drives it through konfai-mcp**: `run_app` (action `infer`) on an app whose `app.json` says `task:
   registration` calls `ImpactRegKonfAIApp.register` in a job (the presets repository taken from the app reference), and
-  `run_registration_evaluate` calls `evaluate`; the generic `run_app_evaluate` refuses such an app, whose bundled
+  `run_registration_evaluate` calls `evaluate`; `run_app` (action `evaluate`) refuses such an app, whose bundled
   evaluation configs read the moving data without the transform.
 
 ## Adding an engine

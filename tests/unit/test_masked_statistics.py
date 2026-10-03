@@ -64,6 +64,16 @@ def test_the_masked_scan_matches_numpy_over_the_selected_values(tmp_path: Path) 
     assert stats["std"] == pytest.approx(float(selected.std(ddof=1, dtype=np.float64)), rel=1e-9)
 
 
+def test_a_mask_stored_0_255_selects_what_its_0_1_twin_selects(tmp_path: Path) -> None:
+    """Any value but 0 is inside: a 0/255 mask, as an 8-bit export writes it, selects its 0/1 twin's voxels."""
+    dataset = _masked_pair(tmp_path / "data")
+    dataset.write("MASK255", "CASE", dataset.read_data("MASK", "CASE")[0] * 255, Attribute())
+
+    assert read_masked_data_statistics(dataset, "CT", dataset, "MASK255", "CASE") == read_masked_data_statistics(
+        dataset, "CT", dataset, "MASK", "CASE"
+    )
+
+
 def test_the_masked_scan_refuses_a_mask_off_the_volume_grid(tmp_path: Path) -> None:
     dataset = _masked_pair(tmp_path / "data")
     small = Dataset(tmp_path / "small", "h5")

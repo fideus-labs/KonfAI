@@ -96,6 +96,7 @@ def test_get_infos_is_memoized_and_returns_independent_copies(monkeypatch):
     ds._names_cache = {}
     ds._infos_cache = {}
     ds._case_paths = {}
+    ds._entry_paths = {}
     ds._root_seen = False
     ds.case_facts = {}
     ds.scale_factors = None
@@ -175,40 +176,46 @@ def test_dicom_slice_info_threading_is_byte_identical_and_removes_rescans(tmp_pa
     with pytest.raises(DatasetManagerError):
         dicom.read_dicom_series_slice(root, (slice(None), slice(0, 2)))
 
-    # (b) redundant work is gone: spy discover_series / sort_series call counts
-    calls = {"discover": 0, "sort": 0}
-    real_discover, real_sort = dicom.discover_series, dicom.sort_series
+    # (b) redundant work is gone: spy the discovery and the header parses
+    import pydicom
+
+    calls = {"discover": 0, "headers": 0}
+    real_discover, real_dcmread = dicom._discover_headers, pydicom.dcmread
     monkeypatch.setattr(
         dicom,
-        "discover_series",
+        "_discover_headers",
         lambda *a, **k: (calls.__setitem__("discover", calls["discover"] + 1), real_discover(*a, **k))[1],
     )
-    monkeypatch.setattr(
-        dicom, "sort_series", lambda *a, **k: (calls.__setitem__("sort", calls["sort"] + 1), real_sort(*a, **k))[1]
-    )
+
+    def dcmread(*args, **kwargs):
+        calls["headers"] += bool(kwargs.get("stop_before_pixels"))
+        return real_dcmread(*args, **kwargs)
+
+    monkeypatch.setattr(pydicom, "dcmread", dcmread)
 
     dataset_file = Dataset.DicomFile(str(tmp_path / "P000"), read=True)
 
-    # one COLD patch read costs exactly 1 discovery + 1 sort (the headers, for the slice order).
-    # get_dicom_info is memoised, so the cache must be cleared for the spy to see the cold cost at all.
-    calls["discover"] = calls["sort"] = 0
-    dicom.get_dicom_info.cache_clear()
+    # one COLD patch read costs exactly 1 discovery, which parses each header once: the slice order
+    # is sorted from those headers. get_dicom_info is memoised, so the cache must be cleared for the
+    # spy to see the cold cost at all.
+    calls["discover"] = calls["headers"] = 0
+    dicom.forget_series()
     data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 1
-    assert calls["sort"] == 1
+    assert calls["headers"] == vol.shape[1]
 
-    # a WARM read of the same case re-discovers nothing and sorts nothing: the selected files are
+    # a WARM read of the same case re-discovers nothing and parses no header: the selected files are
     # decoded in the order the memoised info already holds them
-    calls["discover"] = calls["sort"] = 0
+    calls["discover"] = calls["headers"] = 0
     data, _attr = dataset_file.file_to_data_slice("", "CT", sl)
     assert np.array_equal(np.asarray(data), np.asarray(ref[0]))
     assert calls["discover"] == 0
-    assert calls["sort"] == 0
+    assert calls["headers"] == 0
 
     # statistics over Z: 1 cold discovery, not O(Z); numerics preserved (Welford, ddof=1)
-    calls["discover"] = calls["sort"] = 0
-    dicom.get_dicom_info.cache_clear()
+    calls["discover"] = calls["headers"] = 0
+    dicom.forget_series()
     stats = Dataset(tmp_path, "dicom").read_data_statistics("CT", "P000")
     assert calls["discover"] == 1
     assert np.isclose(stats["mean"], float(vol.mean()), atol=1e-4)
@@ -270,3 +277,20 @@ def test_clip_float32_nan_dynamic_bound_does_not_corrupt_volume():
     assert not bool(got.isnan().all()), "must not become all-NaN"
     assert got[0] == 1.0 and got[1] == 2.0 and got[3] == 3.0
     assert bool(got[2].isnan())
+
+
+def test_a_python_scalar_prints_as_the_general_path_prints_it() -> None:
+    """A Python int, float or bool skips numpy's printer: the text is bit for bit the one the
+    general path gives (the shortest exact form), which the stack's readers parse back."""
+    import sys
+
+    import numpy as np
+    from konfai.utils.dataset.attribute import _attribute_text
+
+    rng = np.random.default_rng(0)
+    values = [0, -7, 2**63, True, False, 0.1, -0.0, 1e-300, 1.7976931348623157e308, float("nan"), float("inf")]
+    values += [float(v) for v in rng.standard_normal(200) * 10.0 ** rng.integers(-30, 30, 200)]
+    for value in values:
+        with np.printoptions(threshold=sys.maxsize, floatmode="unique"):
+            general = str(value).replace("\n", "")
+        assert _attribute_text(value) == general, value

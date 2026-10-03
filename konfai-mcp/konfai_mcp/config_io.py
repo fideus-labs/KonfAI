@@ -59,40 +59,7 @@ def yaml_dump_content(data: dict[str, Any]) -> str:
 
 def _lint_config_data(data: Any) -> list[dict[str, str]]:
     """Static lint for silent-failure traps an agent cannot see from the schema alone."""
-    warnings: list[dict[str, str]] = []
-
-    def _walk(node: Any) -> None:
-        if isinstance(node, dict):
-            groups_dest = node.get("groups_dest")
-            if isinstance(groups_dest, dict):
-                for dest_name, dest in groups_dest.items():
-                    if isinstance(dest, dict) and "patch_transforms" not in dest:
-                        warnings.append(
-                            {
-                                "severity": "warning",
-                                "code": "missing_patch_transforms",
-                                "path": f"groups_dest.{dest_name}",
-                                "message": (
-                                    f"groups_dest entry '{dest_name}' omits 'patch_transforms'. Omitting it makes "
-                                    "KonfAI fill this group's tensor with -1 (a segmentation target then crashes "
-                                    "CrossEntropyLoss with 'Target -1 out of bounds'; a regression target is "
-                                    "silently corrupted). Set 'patch_transforms: None' explicitly."
-                                ),
-                            }
-                        )
-            for value in node.values():
-                _walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    # Only a Trainer/Predictor dataset has patch_transforms and its -1 fill: an Evaluator groups_dest
-    # entry binds to GroupTransformMetric and a Transformer one to a chain (`transforms` only).
-    if isinstance(data, dict):
-        for root in ("Trainer", "Predictor"):
-            _walk(data.get(root))
-    warnings.extend(_lint_prediction_default_outputs_criterions(data))
-    return warnings
+    return _lint_prediction_default_outputs_criterions(data)
 
 
 _DEFAULT_OUTPUTS_CRITERIONS_GROUP = "Labels"

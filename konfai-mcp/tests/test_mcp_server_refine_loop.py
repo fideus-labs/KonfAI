@@ -43,7 +43,7 @@ def _next_actions(job: Job) -> list[str]:
 def test_plain_infer_is_not_dragged_into_refine(tmp_path: Path) -> None:
     """A one-shot infer with no set_parameters stays a plain result: no evaluate/refine push."""
     actions = _next_actions(_done_job(tmp_path, "infer"))
-    assert "run_app_evaluate" not in actions
+    assert "run_app" not in actions
     assert "leaderboard" not in actions
     assert "compare_runs" not in actions
 
@@ -53,7 +53,7 @@ def test_tuned_infer_incites_scoring_the_trial(tmp_path: Path) -> None:
     payload = JobRegistry({"queued", "running"}).payload(job, lambda value: None)
     # The tuned trial's parameters ride along so the agent joins them to the score without a manifest read.
     assert payload["set_parameters"] == ["iterations=300"]
-    assert "run_app_evaluate" in payload["next_actions"]
+    assert "run_app" in payload["next_actions"]
     assert "compare_runs" in payload["next_actions"]
 
 
@@ -69,6 +69,5 @@ def test_finetune_points_at_use_then_evaluate_not_empty_leaderboard(tmp_path: Pa
     """A fine-tune keeps its training metrics out of the bundle, so it points at use+score, not a leaderboard
     that would have nothing to rank yet."""
     actions = _next_actions(_done_job(tmp_path, "finetune"))
-    assert "run_app_infer" in actions
-    assert "run_app_evaluate" in actions
+    assert "run_app" in actions
     assert "leaderboard" not in actions

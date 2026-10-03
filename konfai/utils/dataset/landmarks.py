@@ -24,34 +24,33 @@ import numpy as np
 
 from konfai.utils.errors import DatasetManagerError
 
+# "0" stays LPS: KonfAI up to 1.5.3 wrote it over LPS points, 3D Slicer before 4.11 over RAS points.
+_RAS = {"RAS"}
+_LPS = {"0", "1", "LPS"}
 
-def read_landmarks(filename: Path) -> np.ndarray:
-    """The points of a Slicer fiducial CSV (``.fcsv``) as an ``[N, 3]`` array in LPS, ITK's physical space.
 
-    The ``# CoordinateSystem`` header decides: ``LPS`` or ``1`` (Slicer >= 4.11) is read as it is, ``RAS``
-    or ``0`` (Slicer <= 4.10, or a file saved as RAS) has x and y negated. Read as LPS, a RAS file was a
-    reflection of its points: the TRE without a transform (distances survive a reflection) looked right
-    and the TRE through one came out 7 to 21 mm off a perfect registration. No header is read as LPS,
-    ITK's physical space; :func:`write_landmarks` declares LPS. Voxel indices (``IJK`` or ``2``) cannot be
-    placed without their image and are refused. Blank lines are skipped: a trailing one used to fail the
-    whole read.
-    """
-    with open(filename, newline="") as file:
-        lines = file.readlines()
-    header = {
-        key.strip(): value.strip()
-        for key, _, value in (line[1:].partition("=") for line in lines if line.startswith("#"))
-    }
-    rows = csv.reader(line for line in lines if line.strip() and not line.startswith("#"))
-    data = np.array([row[1:4] for row in rows], dtype=np.double).reshape(-1, 3)
-    system = header.get("CoordinateSystem", "LPS").upper()
-    if system in ("RAS", "0"):
-        data[:, :2] *= -1
-    elif system not in ("LPS", "1"):
+def read_landmarks(filename: Path) -> np.ndarray | None:
+    """Read Slicer-style fiducial landmarks from disk, in LPS. A file without a
+    ``# CoordinateSystem`` line is LPS, as 3D Slicer reads it."""
+    coordinate_system = "LPS"
+    with open(filename, newline="") as csvfile:
+        lines = csvfile.readlines()
+    for line in (line for line in lines if line.startswith("#")):
+        key, _, value = line[1:].partition("=")
+        if key.strip() == "CoordinateSystem":
+            coordinate_system = value.strip()
+    if coordinate_system.upper() not in _RAS | _LPS:
         raise DatasetManagerError(
-            f"'{filename}' holds its landmarks in the coordinate system '{system}'.",
-            "Save the markups in LPS or RAS (world coordinates), not in voxel indices.",
+            f"'{filename}' declares '# CoordinateSystem = {coordinate_system}'.",
+            "KonfAI reads landmarks given in RAS (RAS) or LPS (LPS, 1 or 0).",
         )
+    # A blank line (a trailing one, say) holds no point.
+    rows = list(csv.reader(line for line in lines if line.strip() and not line.startswith("#")))
+    data = np.zeros((len(rows), 3), dtype=np.double)
+    for i, row in enumerate(rows):
+        data[i] = np.array(row[1:4], dtype=np.double)
+    if coordinate_system.upper() in _RAS:
+        data[:, :2] *= -1
     return data
 
 
@@ -76,4 +75,3 @@ def write_landmarks(data: np.ndarray, filename: Path) -> None:
                 + str(i + 1)
                 + ",,vtkMRMLScalarVolumeNode1\n"
             )
-        f.close()

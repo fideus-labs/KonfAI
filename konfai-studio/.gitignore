@@ -1,3 +1,4 @@
 # Built frontend (produced by `npm --prefix frontend run build`; shipped by CI for release).
 konfai_studio/web/index.html
 konfai_studio/web/assets/
+konfai_studio/web/THIRD_PARTY_LICENSES.md

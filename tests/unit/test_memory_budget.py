@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the B1 memory-budget chooser: it derives ``use_cache`` from a declared RAM budget,
+"""Tests for the memory-budget chooser: it derives ``use_cache`` from a declared RAM budget,
 estimates the dataset size from headers alone, and (for ``"auto"``) reads the cgroup limit rather
 than the host so a container/SLURM job is not OOM-killed."""
 
@@ -65,6 +65,16 @@ def testparse_memory_budget_bytes(value: str | float, expected: int) -> None:
 def test_parse_memory_budget_bytes_rejects_garbage(value: str) -> None:
     with pytest.raises(ConfigError):
         parse_memory_budget_bytes(value)
+
+
+@pytest.mark.parametrize("value", [8_000_000_000, 8e9, "8000000000", " 8000000000 ", 2**20 + 1])
+def test_a_bare_number_above_one_pib_is_refused(value: str | float) -> None:
+    """A bare number is GiB, so a byte count written without its unit would bind a multi-PiB budget."""
+    with pytest.raises(ConfigError, match="bare number is in GiB") as refusal:
+        parse_memory_budget_bytes(value)
+    spelling = f"{int(float(value))}b"
+    assert f"'{spelling}'" in str(refusal.value)
+    assert parse_memory_budget_bytes(spelling) == int(float(value))
 
 
 # --------------------------------------------------------------------------------------
@@ -469,15 +479,17 @@ def test_run_distributed_app_exports_and_restores_local_ranks(monkeypatch: pytes
         raise KeyboardInterrupt
 
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
-    factory(gpu=[0, 1])
-    factory(gpu=[], cpu=3)
+    for kwargs in ({"gpu": [0, 1]}, {"gpu": [], "cpu": 3}):
+        with pytest.raises(KeyboardInterrupt):
+            factory(**kwargs)
     assert captured == ["2", "3"]
     assert "KONFAI_LOCAL_RANKS" not in os.environ
     monkeypatch.setenv("KONFAI_LOCAL_RANKS", "7")
-    factory(gpu=[0])
+    with pytest.raises(KeyboardInterrupt):
+        factory(gpu=[0])
     assert captured[-1] == "1" and os.environ["KONFAI_LOCAL_RANKS"] == "7"
 
-    # A genuine factory failure (not the swallowed KeyboardInterrupt) must restore the variable too: # the restore lives in a finally, not in the interrupt handler.
+    # A genuine factory failure (not the KeyboardInterrupt) must restore the variable too: # the restore lives in a finally, not in the interrupt handler.
     monkeypatch.delenv("KONFAI_LOCAL_RANKS", raising=False)
 
     @runtime.run_distributed_app

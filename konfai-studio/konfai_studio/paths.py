@@ -35,7 +35,9 @@ def _sessions_file() -> Path:
 
 
 def _credentials_file() -> Path:
-    """Where the LLM credentials set from the UI live: outside sessions.json, and readable by nobody else."""
+    """Where the LLM credentials set from the UI live: outside sessions.json, readable by their owner
+    alone. On Windows the file inherits the folder's permissions, which Python restricts to the owner from
+    3.11.10; an earlier Python leaves the workspace root's."""
     return _workspace_root() / ".konfai_studio" / "credentials.json"
 
 
@@ -61,19 +63,8 @@ def _studio_session_dir(session: str) -> Path:
 
     The workspace belongs to konfai-mcp: initialize_session(overwrite=True) legitimately rmtrees it.
     Studio files stored inside were deleted with it (a whole chat history, silently), and their mere
-    presence made a pristine workspace look non-empty, forcing the agent onto that destructive path.
-    Legacy files are adopted from the workspace on first touch."""
-    home = _workspace_root() / ".konfai_studio" / "sessions" / _sane_session(session)
-    for name in ("transcript.json", "history.json"):
-        legacy = _session_dir(session) / (name if name == "transcript.json" else f".konfai_studio/{name}")
-        target = home / name
-        if legacy.is_file() and not target.exists():
-            home.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(legacy), target)
-    legacy_nest = _session_dir(session) / ".konfai_studio"
-    if legacy_nest.is_dir() and not any(legacy_nest.iterdir()):
-        legacy_nest.rmdir()
-    return home
+    presence made a pristine workspace look non-empty, forcing the agent onto that destructive path."""
+    return _workspace_root() / ".konfai_studio" / "sessions" / _sane_session(session)
 
 
 def _session_jobs_dir(session: str) -> Path:

@@ -324,6 +324,51 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
     assert _single_case_metric(uncertainty_path, expected_metric_suffix="Uncertainty") == pytest.approx(0.0, abs=1e-6)
 
 
+def _run_pipeline(app_dir: Path, output: Path, cohort: str, spoiled: int | None) -> subprocess.CompletedProcess[str]:
+    """The pipeline over three inputs of ``cohort`` against their references, input ``spoiled`` unreadable."""
+    sign = -1.0 if cohort == "B" else 1.0
+    inputs, references = [], []
+    for i in range(3):
+        array = sign * np.linspace(-0.8, 0.8, 16 * 16, dtype=np.float32).reshape(1, 16, 16) * (i + 1) / 3
+        inputs.append(app_dir.parent / f"{cohort}_input_{i}.mha")
+        references.append(app_dir.parent / f"{cohort}_gt_{i}.mha")
+        _write_image(inputs[-1], array, SimpleITK.sitkFloat32)
+        _write_image(references[-1], np.tanh(array), SimpleITK.sitkFloat32)
+    if spoiled is not None:
+        inputs[spoiled].write_bytes(b"not an image\n")
+    return run(
+        [
+            sys.executable,
+            "-c",
+            "from konfai_apps.cli import main_apps; main_apps()",
+            "pipeline",
+            str(app_dir),
+            "-i",
+            *map(str, inputs),
+            "-o",
+            str(output),
+            "--gt",
+            *map(str, references),
+            "--cpu",
+            "1",
+        ]
+    )
+
+
+def test_konfai_apps_pipeline_refuses_to_score_around_a_case_it_could_not_predict(tmp_path: Path) -> None:
+    """The prediction sets the unreadable second input aside; scoring the others by position would put
+    the third prediction on the second reference, so the pipeline stops before the evaluation."""
+    app_dir = tmp_path / "TinySynthesisApp"
+    _write_local_synthesis_app(app_dir)
+
+    result = _run_pipeline(app_dir, tmp_path, "A", spoiled=1)
+
+    assert result.returncode != 0
+    assert "Case(s) P001 have no prediction" in result.stdout + result.stderr
+    assert sorted(path.parent.name for path in (tmp_path / "Predictions").rglob("sCT.mha")) == ["P000", "P002"]
+    assert not (tmp_path / "Evaluations").exists()
+
+
 # Counters baked into the fixture checkpoints. They mimic a released model whose `epoch` already
 # reaches the fine-tuning target: without the weights-only sanitize step, `range(epoch, epochs)` is
 # empty and fine-tuning silently trains for zero steps.

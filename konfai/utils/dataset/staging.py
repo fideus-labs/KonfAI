@@ -104,11 +104,11 @@ def _pixel_reference(path: Path) -> Path | None:
     if name.endswith(".hdr"):
         return Path(path.with_suffix(".img").name)
     if name.endswith(".mhd"):
-        with open(path, encoding="latin-1") as header:
-            for line in header:
-                key, _, value = line.partition("=")
-                if key.strip() == "ElementDataFile":
-                    return None if value.strip() == "LOCAL" else Path(value.strip())
+        from konfai.utils.dataset.raw_block import _mha_header  # raw_block builds on this module
+
+        fields = _mha_header(str(path))
+        data = fields[0].get("ElementDataFile") if fields else None
+        return None if data is None or data == "LOCAL" else Path(data)
     return None
 
 
@@ -170,8 +170,8 @@ _STAGING_PID = re.compile(r"\.(?:(?P<pid>\d+)(?:-\d+)?\.(?:tmp|replaced)|replace
 
 
 def _writer_is_dead(pid: int) -> bool:
-    """Whether the writer that staged under ``pid`` no longer runs. ``psutil``, not ``os.kill(pid, 0)``,
-    which on Windows raises a generic OSError for a missing pid."""
+    """Whether the writer that staged under ``pid`` no longer runs. ``psutil``, not ``os.kill(pid, 0)``:
+    on Windows signal 0 is CTRL_C_EVENT, sent to the process rather than probing it."""
     if pid == os.getpid():
         return False
     import psutil

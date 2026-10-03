@@ -42,6 +42,7 @@ from konfai.utils.dataset.attribute import (
     _encode_transform_leaves,
     image_to_data,
     is_an_image,
+    record_region,
 )
 from konfai.utils.dataset.h5 import _get_h5_file_lock, _h5_read_pool, _open_h5
 from konfai.utils.dataset.staging import is_staging_entry
@@ -124,6 +125,8 @@ class ItkTransformFile(AbstractFile):
     the parameter rows and type keys of ``_encode_transform_leaves``. Needs ``h5py``.
     """
 
+    read_errors = (OSError, KeyError, RuntimeError)  # h5py, and SimpleITK's transform reader
+
     def __init__(self, filename: str, read: bool) -> None:
         if h5py is None:
             raise DatasetManagerError(
@@ -184,19 +187,20 @@ class ItkTransformFile(AbstractFile):
                     # region read takes, so the two routes carry the same values.
                     shape, attributes = header
                     return self._field_region(file, shape[1:], (slice(None),) * 4), attributes
-        transform = sitk.ReadTransform(self._read_path(name))
+        path = self._read_path(name)
+        if sitk is None:  # a displacement field reads through h5py above; any other transform needs ITK
+            raise DatasetManagerError(
+                f"SimpleITK is required to read the transform '{path}'.",
+                "Install it with: pip install konfai[itk] (or konfai[imaging]).",
+            )
+        transform = sitk.ReadTransform(path)
         attributes = Attribute()
         if "DisplacementFieldTransform" in transform.GetName():  # a field in a text transform file
             field = sitk.DisplacementFieldTransform(transform).GetDisplacementField()
             data, attributes = image_to_data(field)
             attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
             return data, attributes
-        leaves = _encode_transform_leaves(transform, name, attributes)
-        longest = max(len(leaf) for leaf in leaves)
-        return (
-            np.asarray([np.pad(leaf, (0, longest - len(leaf)), constant_values=np.nan) for leaf in leaves]),
-            attributes,
-        )
+        return _encode_transform_leaves(transform, name, attributes), attributes
 
     def bounded_region_reads(self, name: str) -> bool:
         shape, _attributes = self.get_infos("", name)
@@ -276,9 +280,9 @@ class ItkTransformFile(AbstractFile):
                 header = self._field_header(file)
                 if header is not None and len(slices) == 4:
                     shape, attributes = header
-                    return self._field_region(file, shape[1:], slices), attributes
+                    return self._field_region(file, shape[1:], slices), record_region(attributes, shape, slices)
         data, attributes = self.file_to_data(group, name)
-        return data[slices], attributes
+        return data[slices], record_region(attributes, data.shape, slices)
 
     def data_to_file(
         self,
@@ -290,10 +294,10 @@ class ItkTransformFile(AbstractFile):
         # Always the `.h5` name: ITK selects its transform IO from the extension.
         final = os.path.join(self.filename, f"{name}.h5")
         staging = DataStream.staging_path(final)
-        if isinstance(data, sitk.Transform):
+        if sitk is not None and isinstance(data, sitk.Transform):
             sitk.WriteTransform(data, staging)
         else:
-            if isinstance(data, sitk.Image):
+            if sitk is not None and isinstance(data, sitk.Image):
                 data, attributes = image_to_data(data)
             array = np.asarray(data)
             if attributes is None or array.ndim != 4 or array.shape[0] != 3:

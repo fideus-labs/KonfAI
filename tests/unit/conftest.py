@@ -24,7 +24,8 @@ import pytest
 import torch
 from konfai.data.augmentation import DataAugmentationsList
 from konfai.data.data_manager import DatasetIter
-from konfai.predictor import Mean, OutputDataset, Reduction
+from konfai.data.reduction import Mean, Reduction
+from konfai.predictor import OutputDataset
 from konfai.utils import budget as budget_module
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import get_patch_slices_from_shape
@@ -134,14 +135,6 @@ _TTA_OVERLAP = 1
 _TTA_CHANNELS = 2
 
 
-def _tta_geometry_attribute() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.zeros(3)
-    attribute["Spacing"] = np.ones(3)
-    attribute["Direction"] = np.eye(3).flatten()
-    return attribute
-
-
 def _tta_augmentations(
     augmentation, nb: int = 1, shape: list[int] | None = None, case_index: int = 0
 ) -> DataAugmentationsList:
@@ -181,6 +174,7 @@ def _drive_tta(
     case_index: int = 0,
     file_format: str = "h5",
     worth_gate: bool = False,
+    channels: int = _TTA_CHANNELS,
 ):
     """Push one TTA case (identity copy + one augmented copy) patch by patch through ``add_layer``
     against an h5 sink, interleaved along the slab axis exactly as the prediction mapping orders it,
@@ -199,10 +193,11 @@ def _drive_tta(
     else:
         monkeypatch.setenv("KONFAI_STREAM_WORTH_THRESHOLD", "0")
 
-    attribute = _tta_geometry_attribute()
-    volume = torch.from_numpy(
-        np.random.default_rng(0).standard_normal((_TTA_CHANNELS, *_TTA_SHAPE)).astype(np.float32)
-    ).to(dtype)
+    from oracle_support import geometry
+
+    attribute = geometry()
+    rng = np.random.default_rng(0)
+    volume = torch.from_numpy(rng.standard_normal((channels, *_TTA_SHAPE)).astype(np.float32)).to(dtype)
     for transform in transforms:
         volume = transform("CASE_000", volume, attribute)
     augmentations = _tta_augmentations(augmentation, shape=list(volume.shape[1:]), case_index=case_index)
@@ -261,9 +256,9 @@ def _drive_tta(
     order = sorted((patch_slices[p][0].start, a, p) for a in range(2) for p in range(len(patch_slices)))
     whole_volume = False
     for _, a, p in order:
-        output_dataset.add_layer(0, a, p, patches[a][p].clone(), dataset_iter, Attribute(attribute), [_TTA_CHANNELS])
+        output_dataset.add_layer(0, a, p, patches[a][p].clone(), dataset_iter, Attribute(attribute), [channels])
         if output_dataset.is_done(0):
-            result = output_dataset.get_output(0, [_TTA_CHANNELS], dataset_iter)
+            result = output_dataset.get_output(0, [channels], dataset_iter)
             output_dataset.write_prediction(0, "CASE_000", result)
             whole_volume = True
 

@@ -39,6 +39,7 @@ import os
 import re
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -206,15 +207,30 @@ class AppService:
         else:
             entries, catalog = self.resolve_catalog()
 
+        # Every Hugging Face repository at once, so a slow Hub is waited for once; an app is summarised from the
+        # files its repository's listing downloaded, never read from the Hub on its own.
+        kinds = {ref: self._classify(ref) for ref in entries}
+        hf_repos = [ref for ref in entries if kinds[ref] == "hf_repo"]
+        if include_summary:
+            hf_repos += [ref.partition(":")[0] for ref in entries if kinds[ref] == "hf_app"]
+
+        def hf_listing(repo: str) -> list[str] | Exception:
+            try:
+                return list(app_repository.get_available_apps_on_hf_repo(repo, force_update))
+            except Exception as exc:  # network / repo errors -> report, keep going
+                return exc
+
+        with ThreadPoolExecutor() as pool:
+            hf_listings = dict(zip(hf_repos, pool.map(hf_listing, hf_repos), strict=True))
+
         apps: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         for ref in entries:
-            kind = self._classify(ref)
+            kind = kinds[ref]
             if kind == "hf_repo":
-                try:
-                    names = app_repository.get_available_apps_on_hf_repo(ref, force_update)
-                except Exception as exc:  # network / repo errors -> report, keep going
-                    errors.append({"ref": ref, "error": f"{type(exc).__name__}: {exc}"})
+                names = hf_listings[ref]
+                if isinstance(names, Exception):
+                    errors.append({"ref": ref, "error": f"{type(names).__name__}: {names}"})
                     continue
                 for name in names:
                     apps.append({"ref": f"{ref}:{name}", "source": "hf", "repo": ref, "app_name": name})
@@ -250,9 +266,25 @@ class AppService:
                 errors.append({"ref": ref, "error": "Unrecognized app reference format."})
 
         if include_summary:
+            downloaded = {
+                repo: app_repository.get_downloaded_apps_on_hf_repo(repo)
+                for repo, listed in hf_listings.items()
+                if not isinstance(listed, Exception)
+            }
             for app in apps:
+                listed = hf_listings.get(app["repo"]) if app["source"] == "hf" else None
+                if isinstance(listed, Exception):
+                    app["summary_error"] = f"{type(listed).__name__}: {listed}"
+                    continue
+                if listed is not None and app["app_name"] not in listed:
+                    app["summary_error"] = f"'{app['app_name']}' is not among the apps listed in '{app['repo']}'"
+                    continue
+                ref = downloaded[app["repo"]].get(app["app_name"]) if listed is not None else app["ref"]
+                if ref is None:
+                    app["summary_error"] = f"the files of '{app['app_name']}' are still being downloaded; list again"
+                    continue
                 try:
-                    summary = self.describe_app(app["ref"], force_update=False)
+                    summary = self.describe_app(ref, force_update=False)
                 except Exception as exc:  # resolution is best-effort here
                     app["summary_error"] = f"{type(exc).__name__}: {exc}"
                     continue
@@ -285,9 +317,9 @@ class AppService:
         inference, evaluation, uncertainty = info.has_capabilities()
         finetunable = info.is_finetunable()
 
-        # Route by what the app can actually do instead of dead-ending on describe/design. The run_app_*
-        # tools run the app AS PUBLISHED; import_app is offered beside them for the case where the app has
-        # to be modified first. fine_tune_app is only offered when the app ships a train config to
+        # Route by what the app can actually do instead of dead-ending on describe/design. run_app runs the
+        # app AS PUBLISHED; import_app is offered beside it for the case where the app has to be modified
+        # first. fine_tune_app is only offered when the app ships a train config to
         # warm-start from, so an inference-only bundle never routes the agent to a tool it cannot use.
         source = _source_of(info)
         next_actions: list[str] = []
@@ -299,13 +331,9 @@ class AppService:
             next_actions.append("list_apps")
         elif info.get_task() == "registration":
             # Registered through impact-reg-konfai (see _registration_preset): scored through the transform.
-            next_actions.extend(["run_app_infer", "list_app_parameters", "run_registration_evaluate"])
+            next_actions.extend(["run_app", "list_app_parameters", "run_registration_evaluate"])
         else:
-            next_actions.extend(["run_app_infer", "list_app_parameters", "run_app_pipeline", "import_app"])
-            if evaluation:
-                next_actions.append("run_app_evaluate")
-            if uncertainty:
-                next_actions.append("run_app_uncertainty")
+            next_actions.extend(["run_app", "list_app_parameters", "import_app"])
             if finetunable:
                 next_actions.append("fine_tune_app")
 
@@ -390,7 +418,7 @@ class AppService:
             "source": payload.get("source", "local"),
             "values": payload.get("values", {}),
             "constraints": payload.get("constraints", {}),
-            "next_actions": ["run_app_infer", "run_app_pipeline", "import_app", "export_app"],
+            "next_actions": ["run_app", "import_app", "export_app"],
         }
 
     def export_app(
@@ -400,12 +428,14 @@ class AppService:
         display_name: str | None = None,
         config_overrides: list[str] | None = None,
         force_update: bool = False,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """Materialise a resolved app into a local, editable bundle (optionally baking tuned --set values).
 
         This is the inference-side reproducibility artifact: 'save this HuggingFace/remote-cached app,
         with my tuned parameters, as a local app'. It copies files and rewrites the config; it does not
-        import the app's model code. Local/HuggingFace apps only.
+        import the app's model code. Local/HuggingFace apps only. ``path`` is any host folder: a file of
+        the app already there is only replaced with ``overwrite=True``.
         """
         if self._is_remote(ref):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
@@ -414,11 +444,18 @@ class AppService:
         if not isinstance(info, app_repository.LocalAppRepository):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         target = Path(path).expanduser().resolve()
+        if not overwrite:
+            existing = [name for name in info._all_repo_filenames() if (target / name).exists()]
+            if existing:
+                raise ValueError(
+                    f"Exporting into {target} would overwrite {', '.join(existing)}. Choose another folder, "
+                    "or pass overwrite=True to replace them."
+                )
         info.export_app(target, display_name=display_name, config_overrides=config_overrides)
         return {
             "ref": ref,
             "exported_to": str(target),
-            "next_actions": ["describe_app", "run_app_infer", "import_app", "register_app_source"],
+            "next_actions": ["describe_app", "run_app", "import_app", "register_app_source"],
         }
 
     def import_app(
@@ -566,6 +603,12 @@ class AppService:
         # Unique suffix so re-running the same app does not silently overwrite a previous run.
         return str(self.workspace_layout.workspace_dir() / subdir / f"{label}-{uuid.uuid4().hex[:8]}")
 
+    def _output_in_session(self, output: str) -> str:
+        """An app job writes inside the session workspace, like every other tool: the jail refuses the rest.
+        The job creates that workspace at launch anyway, so it exists before the output is resolved in it."""
+        self.workspace_layout.ensure_session_workspace()
+        return str(self.workspace_layout.resolve_workspace_relative_path(output))
+
     @staticmethod
     def _param_label_suffix(config_overrides: list[str] | None) -> str:
         """A short signature of the applied ``--set`` overrides, appended to a tuned trial's output label so
@@ -623,9 +666,7 @@ class AppService:
         label = self.workspace_layout.sanitize_name(
             f"app_{self._app_label(ref)}{self._param_label_suffix(config_overrides)}"
         )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppOutputs", label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output("AppOutputs", label)
 
         registration = self._registration_preset(ref)
         if registration is not None:
@@ -714,8 +755,8 @@ class AppService:
         if self._registration_preset(ref) is not None:
             raise ValueError(
                 f"{ref!r} is a registration app: its own {action} configs read the images as they are, never through"
-                " the transform, so they would score the pair before registration. Register with run_app_infer, then"
-                " score the result with run_registration_evaluate, which applies the transform."
+                " the transform, so they would score the pair before registration. Register with run_app (action"
+                " 'infer'), then score the result with run_registration_evaluate, which applies the transform."
             )
 
         normalized_gt = self._normalize_input_groups(gt, "gt") if gt is not None else None
@@ -741,9 +782,7 @@ class AppService:
         label = self.workspace_layout.sanitize_name(
             f"{label_prefix}_{self._app_label(ref)}{self._param_label_suffix(merged_extra.get('config_overrides'))}"
         )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output(output_subdir, label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output(output_subdir, label)
         kwargs: dict[str, Any] = {
             "ref": ref,
             "action": action,
@@ -970,9 +1009,7 @@ class AppService:
         label = self.workspace_layout.sanitize_name(
             f"finetune_{self._app_label(ref)}{self._param_label_suffix(labelled_params)}"
         )
-        resolved_output = (
-            str(Path(output).expanduser().resolve()) if output else self._default_output("AppBundles", label)
-        )
+        resolved_output = self._output_in_session(output) if output else self._default_output("AppBundles", label)
 
         kwargs: dict[str, Any] = {
             "ref": ref,
@@ -1023,7 +1060,7 @@ class AppService:
 
         Gathers checkpoints and a config from the current session workspace (or explicit paths),
         synthesizes an ``app.json`` from the given metadata, and writes a bundle (app.json + config +
-        checkpoint + optional Model.py/requirements) that ``describe_app`` / ``run_app_infer`` can then
+        checkpoint + optional Model.py/requirements) that ``describe_app`` / ``run_app`` can then
         consume. This closes the train-from-scratch branch onto the same bundle endpoint as fine-tuning.
         """
         from konfai_apps import bundle
@@ -1056,7 +1093,7 @@ class AppService:
         }
         # Derive inputs/outputs from the config so the bundle is actually runnable: describe_app reports
         # capabilities.inference from len(get_inputs()) > 0, so without these the packaged app reads as
-        # non-runnable and routes the agent back to design_config_strategy instead of run_app_infer.
+        # non-runnable and routes the agent back to design_config_strategy instead of run_app.
         inputs, outputs = self._derive_app_io(resolved_configs)
         if inputs:
             metadata["inputs"] = inputs
@@ -1075,7 +1112,9 @@ class AppService:
                 resolved_checkpoints,
                 model_py=str(Path(model_py).expanduser()) if model_py else None,
                 requirements=str(Path(requirements).expanduser()) if requirements else None,
-                support_files={name: str(source.relative_to(session_dir)) for name, source in planned_support.items()},
+                support_files={
+                    name: source.relative_to(session_dir).as_posix() for name, source in planned_support.items()
+                },
                 support_root=session_dir,
             )
         finally:
@@ -1090,7 +1129,7 @@ class AppService:
             "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
-            "next_actions": ["describe_app", "run_app_infer", "import_app"],
+            "next_actions": ["describe_app", "run_app", "import_app"],
         }
         if any(Path(path).name == "Config.yml" for path in resolved_configs):
             result["warnings"] = [

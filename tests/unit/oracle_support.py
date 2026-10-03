@@ -186,9 +186,6 @@ def _rotation(rank: int, angles: tuple[float, ...]) -> np.ndarray:
 #: sampler and never the boundary, which is the half that differs between the two paths. The field
 #: is COARSER than either, which is how one is actually solved: it is in world units, so it is read
 #: where it is asked rather than resampled to match anything first.
-#: World units the coarse field displaces by, reversing sign between adjacent nodes.
-_COARSE_FIELD_BOUND = 9.0
-
 FIXED_GEOMETRY = Geometry(
     extents=(9, 10, 11),
     spacing=(1.5, 1.5, 2.0),
@@ -360,22 +357,20 @@ def _field(geometry: Geometry) -> np.ndarray:
 
 
 def _coarse_field(geometry: Geometry) -> np.ndarray:
-    """A displacement field whose sign REVERSES from one node to the next, at several world units.
+    """A displacement field whose sign REVERSES from one node to the next.
 
-    The steepest thing a lattice can carry: the interpolated displacement swings the full amplitude
-    across one cell, so a region's face cuts through the middle of that swing. A field read over a
-    region's own box bounds every displacement INSIDE it, which is what
-    ``Resample.measured_region_source`` relies on; this asks whether the bound still holds at the
-    faces, where the interpolator blends nodes from outside the box.
+    The steepest thing a lattice can carry without folding: the displacement swings across one cell
+    by a quarter of the cell, so no point overtakes its neighbour. A region's source window is
+    walked along its faces (``Resample.measured_region_source``), which bounds the region only for
+    a map that does not fold; this asks whether it holds where the swing peaks inside a region.
     """
     extents = geometry.coarse_field_extents
+    bound = min(geometry.coarse_field_spacing) / 8.0
     parity = (-1.0) ** sum(
         np.arange(extent).reshape([-1 if axis == index else 1 for axis in range(geometry.rank)])
         for index, extent in enumerate(extents)
     )
-    return np.stack([weight * _COARSE_FIELD_BOUND * parity for weight in (1.0, -0.7, 0.4)[: geometry.rank]]).astype(
-        np.float32
-    )
+    return np.stack([weight * bound * parity for weight in (1.0, -0.7, 0.4)[: geometry.rank]]).astype(np.float32)
 
 
 def manager(
@@ -433,8 +428,8 @@ def attributes(geometry: Geometry, group: str) -> Attribute:
     attribute["Spacing"] = np.asarray(spacings.get(group, geometry.spacing))
     attribute["Direction"] = directions.get(group, np.eye(geometry.rank)).reshape(-1)
     if group == "Ensemble":
-        # What a `combine: Concat` reduction writes: the per-model channel counts MergeLabels and
-        # Sum shift their label ranges by.
+        # What a `combine: Concat` reduction writes: the per-model channel counts MergeLabels shifts
+        # their label ranges by.
         attribute["number_of_channels_per_model"] = np.asarray([3, 3, 3])
     if group == "Boxed":
         # What Crop.transform_shape leaves on the case: [start, after] margins per spatial axis.
@@ -536,11 +531,14 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "Mask": [StageCase(Mask(path="Labels", value_outside=-7))],
         "MergeLabels": [StageCase(MergeLabels(), group="Ensemble")],
         "OneHot": [StageCase(OneHot(4), group="Labels")],
-        # Pads reaching both borders of every axis, asymmetric and wider than the patch, constant and
-        # reflect: the fill and the mirror both need the source rows the clamp cut back to.
+        # Pads reaching both borders of every axis, asymmetric and wider than the patch, constant,
+        # reflect and replicate: the fill, the mirror and the edge all need the source rows the clamp
+        # cut back to; a circular pad reads the far end of the axis, which a region reaching a border pulls.
         "Padding": [
             StageCase(Padding(padding=[1, 2, 3, 0, 2, 4][: 2 * rank], mode="constant:-3")),
             StageCase(Padding(padding=[2, 1, 1, 2, 3, 2][: 2 * rank], mode="reflect")),
+            StageCase(Padding(padding=[2, 1, 1, 2, 3, 2][: 2 * rank], mode="replicate")),
+            StageCase(Padding(padding=[2, 1, 1, 2, 3, 2][: 2 * rank], mode="circular")),
             StageCase(Padding(padding=[0, 0, 0, 0, 0, 0][: 2 * rank])),
             StageCase(Padding([1, 2, 3, 4, 5, 6][: 2 * rank])),
             StageCase(Padding([5, 0, 0, 5, 2, 2][: 2 * rank], mode="constant:-7")),
@@ -564,10 +562,8 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
                 Resample(reference=CASE_NAME, reference_group="Reference", field_group="Field"),
                 atol=REGRID_ATOL,
             ),
-            # The same stage against a field that is COARSE and STEEP. A region sizes its source
-            # window from the field values inside its own box, which bounds every displacement the
-            # box contains; at the box's FACES the interpolator blends nodes from outside it, and a
-            # field that reverses sign between adjacent nodes is what makes the two differ.
+            # The same stage against a field that is COARSE and STEEP: a region sizes its source
+            # window by walking its faces, and the swing between nodes peaks inside the region.
             StageCase(
                 Resample(reference=CASE_NAME, reference_group="Reference", field_group="CoarseField"),
                 atol=REGRID_ATOL,
@@ -605,7 +601,7 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "Squeeze": [StageCase(Squeeze(0))],
         "Standardize": [StageCase(transform_module.Standardize(), atol=STAT_ATOL)],
         "StandardDeviation": [StageCase(StandardDeviation(), group="Ensemble")],
-        "Sum": [StageCase(Sum(0), group="Ensemble")],
+        "Sum": [StageCase(Sum(0)), StageCase(Sum(0), group="Ensemble")],
         "Variance": [StageCase(Variance(), group="Ensemble")],
     }
 
@@ -670,6 +666,10 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
     return {
         "Brightness": [AugmentationCase(augmentation_module.Brightness(0.5), LocalityKind.POINTWISE, True)],
         "Contrast": [AugmentationCase(augmentation_module.Contrast(0.5), LocalityKind.POINTWISE, True)],
+        # Scaled about the case's own mean, which the plan seeds: a region never measures itself.
+        "ContrastAroundMean": [
+            AugmentationCase(augmentation_module.ContrastAroundMean(0.5, 0.5), LocalityKind.GLOBAL_STAT, True)
+        ],
         # The box is normalised to the volume; a region keeps its part of it. A wide box so it lands
         # in more than one patch of the fixture.
         "CutOUT": [AugmentationCase(augmentation_module.CutOUT(0.5, 0.0), LocalityKind.POINTWISE, True)],
@@ -685,9 +685,13 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
         ],
         "Flip": [
             AugmentationCase(FlipAugmentation(f_prob=[1.0, 1.0, 1.0]), LocalityKind.ORIENTATION, True),
-            # A displacement field's flipped components are negated, which is not a bijection on values.
+            # A displacement field's flipped components are negated voxel by voxel, which a region does
+            # on its own; the field group is the one whose three components are negated.
             AugmentationCase(
-                FlipAugmentation(f_prob=[1.0, 1.0, 1.0], vector_field=True), LocalityKind.WHOLE_VOLUME, False
+                FlipAugmentation(f_prob=[1.0, 1.0, 1.0], vector_field=True),
+                LocalityKind.ORIENTATION,
+                True,
+                group="Field",
             ),
         ],
         # A class from another framework says nothing about where its draw reads from, so no draw of it
@@ -697,14 +701,24 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
                 augmentation_module.Foreign(torch.nn.Sigmoid(), "torch.nn:Sigmoid"), LocalityKind.WHOLE_VOLUME, False
             )
         ],
+        # The case's own per-channel range, seeded like ContrastAroundMean's mean.
+        "Gamma": [AugmentationCase(augmentation_module.Gamma(0.5, 0.5), LocalityKind.GLOBAL_STAT, True)],
+        "GaussianBlur": [
+            # A sigma of 0.5 cuts the kernel at a radius of 2: half the patch, the widest _affords_halo allows.
+            AugmentationCase(augmentation_module.GaussianBlur(0.5, 0.5), LocalityKind.HALO, True),
+            # A sigma of 1 reaches 3 voxels: an honest halo the dispatcher will not pay for.
+            AugmentationCase(augmentation_module.GaussianBlur(1.0, 1.0), LocalityKind.HALO, False),
+        ],
+        # A function of (seed, position), as Noise's field is.
+        "GaussianNoise": [AugmentationCase(augmentation_module.GaussianNoise(1.0, 1.0), LocalityKind.POINTWISE, True)],
         "HUE": [AugmentationCase(augmentation_module.HUE(1.0), LocalityKind.POINTWISE, True)],
         "LumaFlip": [AugmentationCase(augmentation_module.LumaFlip(), LocalityKind.POINTWISE, True)],
-        "Mask": [],  # a second on-disk volume that dictates the output grid; see its note.
         # The field at a voxel is a function of (seed, position): a region computes exactly its part.
         "Noise": [AugmentationCase(augmentation_module.Noise(1.0), LocalityKind.POINTWISE, True)],
         "Permute": [
             AugmentationCase(augmentation_module.Permute(prob_permute=[1.0, 1.0]), LocalityKind.ORIENTATION, True)
         ],
+        "PlacedMask": [],  # a second on-disk volume that dictates the output grid.
         "Rotate": [
             # A free angle resamples: a REGRID pulling the source box the region's corners map to.
             AugmentationCase(
@@ -718,6 +732,10 @@ def augmentation_cases() -> dict[str, list[AugmentationCase]]:
         ],
         "Saturation": [AugmentationCase(augmentation_module.Saturation(0.5), LocalityKind.POINTWISE, True)],
         "Scale": [AugmentationCase(augmentation_module.Scale(), LocalityKind.REGRID, True, atol=AUGMENTATION_ATOL)],
+        # Down then up by 2 reaches ceil(2) + 2 = 4 voxels in the plane, the whole patch.
+        "SimulateLowResolution": [
+            AugmentationCase(augmentation_module.SimulateLowResolution(2.0, 2.0), LocalityKind.HALO, False)
+        ],
         "Translate": [
             # A halo of ceil(1) + 1 = 2 on a patch of 4: half the patch, the widest _affords_halo allows.
             AugmentationCase(
@@ -756,7 +774,7 @@ def builtin_augmentations() -> list[type[DataAugmentation]]:
         cls
         for _, cls in inspect.getmembers(augmentation_module, inspect.isclass)
         if issubclass(cls, DataAugmentation)
-        and cls.__module__ == augmentation_module.__name__
+        and cls.__module__.startswith(augmentation_module.__name__)
         and not inspect.isabstract(cls)
     ]
 

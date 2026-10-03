@@ -21,12 +21,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from functools import partial
 from typing import Any
 
 import numpy as np
 
-from konfai.utils.budget import per_rank_budget_bytes
+from konfai.utils.budget import format_bytes, per_rank_budget_bytes
 from konfai.utils.errors import DatasetManagerError
 
 #: Elements a block of ``Dataset.iter_data_blocks`` holds when no budget was declared: the read grain
@@ -70,6 +69,7 @@ def _scan_block_on_the_store_grid(
     granularity: Sequence[int] | None,
     budget: float | None,
     element_bytes: int = _STATISTICS_ELEMENT_BYTES,
+    companions: Sequence[tuple[Sequence[int] | None, int]] = (),
 ) -> tuple[int, int]:
     """The rows one scan block reads, and what reading it holds.
 
@@ -77,23 +77,27 @@ def _scan_block_on_the_store_grid(
     the same block again at every step it takes inside it. Where the budget can hold a whole stored
     block the grain is RAISED to it, which reads each block once; where it cannot, the grain stays
     and what the store decodes is CHARGED, so an impossible scan is refused by the plan instead of
-    by the kernel.
+    by the kernel. ``companions`` are the entries read at the same steps (a mask), each as its grain
+    and its element size: each holds its own blocks and decodes on its own grain, so each is charged.
     """
     block = max(1, int(granularity[0])) if granularity else 0
+    sources = [(granularity, element_bytes), *companions]
 
-    def decoded(step: int) -> int:
-        """Rows the store materialises to serve one step, at the worst place the walk puts it."""
-        if not block:
+    def decoded(step: int, grain: Sequence[int] | None) -> int:
+        """Rows a store of ``grain`` materialises to serve one step, at the worst place the walk puts it."""
+        if not grain:
             return step
         return max(
-            chunk_hull_voxels([slice(start, min(extent, start + step))], [block], [extent])
+            chunk_hull_voxels([slice(start, min(extent, start + step))], [max(1, int(grain[0]))], [extent])
             for start in range(0, extent, step)
         )
 
     def held_for(step: int) -> int:
         """Blocks in flight, plus what the read in flight decodes above the step it serves."""
-        resident = step * _STATISTICS_BLOCKS_IN_FLIGHT + max(0, decoded(step) - step)
-        return int(resident * plane * element_bytes)
+        return sum(
+            int((step * _STATISTICS_BLOCKS_IN_FLIGHT + max(0, decoded(step, grain) - step)) * plane * nbytes)
+            for grain, nbytes in sources
+        )
 
     if block:
         aligned = max(block, rows // block * block)
@@ -101,6 +105,40 @@ def _scan_block_on_the_store_grid(
         if budget is None or held <= budget:
             return aligned, held
     return rows, held_for(rows)
+
+
+def _scan_rows(entries: Sequence[tuple[Any, str]], name: str, shape: list[int], piece: int = 1) -> int:
+    """The rows one step of a whole-volume scan reads along the first spatial axis, for ``entries``
+    read at the same steps (a volume and its mask; ``Dataset``s, duck typed): a whole number of
+    ``piece``, sized against the budget this rank published and put on the first entry's grain
+    where that fits. A budget the shortest step still exceeds is refused."""
+    budget = per_rank_budget_bytes()
+    # Only a declared budget pays the probe.
+    element_bytes = [
+        _STATISTICS_ELEMENT_BYTES if budget is None else dataset._scanned_element_bytes(group, name, shape)
+        for dataset, group in entries
+    ]
+    rows = _statistics_chunk_length(shape, 1, _statistics_block_elements(sum(element_bytes)))
+    grains = []
+    for dataset, group in entries:
+        granularity = dataset.read_granularity(group, name)
+        grains.append(granularity[1:2] if granularity else None)
+    rows, held = _scan_block_on_the_store_grid(
+        max(piece, rows // piece * piece),
+        int(shape[1]),
+        _statistics_plane_elements(shape, 1),
+        grains[0],
+        budget,
+        element_bytes[0],
+        list(zip(grains[1:], element_bytes[1:], strict=True)),
+    )
+    if budget is not None and held > budget:
+        raise DatasetManagerError(
+            f"'{name}': the shortest block a whole-volume scan of '{entries[0][1]}' can read holds"
+            f" {format_bytes(held)}, over the per-rank memory budget ({format_bytes(budget)}).",
+            "Raise 'memory_budget'.",
+        )
+    return rows
 
 
 def _statistics_block_elements(element_bytes: int = _STATISTICS_ELEMENT_BYTES) -> int:
@@ -127,7 +165,7 @@ def _statistics_chunk_length(shape: list[int] | tuple[int, ...], axis: int, budg
 
 def _update_pieces(block: np.ndarray) -> Iterator[np.ndarray]:
     """``block`` in pieces of about ``_STATISTICS_UPDATE_ELEMENTS`` along its first spatial axis, one
-    running-statistics update each; a vector is one piece."""
+    running-statistics update or one quantile binning each; a vector is one piece."""
     if block.ndim < 2:
         yield block
         return
@@ -170,6 +208,16 @@ def _binned(block: np.ndarray, low: Any, high: Any) -> tuple[np.ndarray, np.ndar
     return inside, np.minimum(scaled.astype(np.int64), _QUANTILE_BINS - 1)
 
 
+def _binned_pieces(
+    blocks: Callable[[], Iterator[np.ndarray]], low: Any, high: Any
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """:func:`_binned` over every block, one update piece at a time: binning holds about seven times
+    what it is handed, and a block is sized for :data:`_STATISTICS_BLOCKS_IN_FLIGHT` in flight."""
+    for block in blocks():
+        for piece in _update_pieces(block):
+            yield _binned(piece, low, high)
+
+
 def _min_of(current: Any, candidate: Any) -> Any:
     """``min`` of a running value that may not exist yet and a candidate."""
     return candidate if current is None or candidate < current else current
@@ -208,10 +256,8 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> t
             if second == first or first - below + 1 < inside_count:
                 return value, value, weight
             return value, min_above if min_above is not None else value, weight
-        binned = partial(_binned, low=low, high=high)
         histogram = np.zeros(_QUANTILE_BINS, dtype=np.int64)
-        for block in blocks():
-            _inside, index = binned(block)
+        for _inside, index in _binned_pieces(blocks, low, high):
             histogram += np.bincount(index, minlength=_QUANTILE_BINS)
         cumulative = np.cumsum(histogram)
         chosen = int(np.searchsorted(cumulative, first - below, side="right"))
@@ -220,8 +266,7 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> t
         collected: list[np.ndarray] = []
         bin_low = bin_high = None
         above_local: Any = None
-        for block in blocks():
-            inside, index = binned(block)
+        for inside, index in _binned_pieces(blocks, low, high):
             if not inside.size:
                 continue
             members = inside[index == chosen]
@@ -245,6 +290,12 @@ def _order_statistics(blocks: Callable[[], Iterator[np.ndarray]], q: float) -> t
             return value, second_value if second_value is not None else value, weight
         assert bin_low is not None and bin_high is not None  # nosec B101 - the bin holds target's rank
         low, high, inside_count = bin_low, bin_high, in_bin
+
+
+def _fold_extremum(fold: Callable[[float, float], float], current: float, candidate: float) -> float:
+    """``fold`` (``min`` or ``max``) of the running scalar and a piece's, a NaN kept as numpy keeps it:
+    Python's ``min`` and ``max`` drop a NaN candidate."""
+    return candidate if math.isnan(candidate) else fold(current, candidate)
 
 
 def _update_running_statistics(
@@ -296,8 +347,8 @@ def _update_running_statistics(
         state["mean"] += delta * chunk_count / total_count
         state["m2"] += chunk_m2 + delta * delta * state["count"] * chunk_count / total_count
         state["count"] = total_count
-        state["min"] = min(state["min"], float(channel_min.min()))
-        state["max"] = max(state["max"], float(channel_max.max()))
+        state["min"] = _fold_extremum(min, state["min"], float(channel_min.min()))
+        state["max"] = _fold_extremum(max, state["max"], float(channel_max.max()))
     return state
 
 
@@ -316,8 +367,8 @@ def _update_running_extrema(state: dict[str, Any] | None, array: np.ndarray) -> 
     channel_max = per_channel.max(axis=1)
     state["channel_min"] = np.minimum(state["channel_min"], channel_min)
     state["channel_max"] = np.maximum(state["channel_max"], channel_max)
-    state["min"] = min(state["min"], float(channel_min.min()))
-    state["max"] = max(state["max"], float(channel_max.max()))
+    state["min"] = _fold_extremum(min, state["min"], float(channel_min.min()))
+    state["max"] = _fold_extremum(max, state["max"], float(channel_max.max()))
     state["count"] += float(per_channel.size)
     state["channel_count"] += float(per_channel.shape[1])
     return state
@@ -354,13 +405,13 @@ def read_masked_data_statistics(
     """Min/max/mean/std of one entry over the voxels where the mask entry equals 1, streamed.
 
     The masked twin of ``Dataset.read_data_statistics``: both volumes are walked slab by slab along
-    the first spatial axis (the slab aligned to the volume's own read granularity where it states
-    one), and only the selected values enter the running fold, so neither volume is ever held. A
-    store that cannot serve bounded region reads is read whole ONCE and sliced in memory, as
-    ``Dataset.iter_data_blocks`` serves such stores.
+    the first spatial axis, the slab sized and refused as ``Dataset.iter_data_blocks`` sizes and
+    refuses its block, with the two entries it reads held together, and only the selected values
+    enter the running fold, so neither volume is ever held. A store that cannot serve bounded region
+    reads is read whole ONCE and sliced in memory, as ``Dataset.iter_data_blocks`` serves such stores.
 
     The mask must sit on the volume's own grid (same spatial extent) and the channel counts must
-    agree, since selection is ``volume[mask == 1]``. ``source`` and ``mask_source`` are Datasets
+    agree, since selection is ``volume[mask != 0]``. ``source`` and ``mask_source`` are Datasets
     (duck typed: this module is below the Dataset class).
     """
     shape, _ = source.get_infos(group, name)
@@ -372,19 +423,23 @@ def read_masked_data_statistics(
             " volume's own grid (same extent, same channels).",
         )
 
+    entries = [(source, group), (mask_source, mask_group)]
+    by_region = [
+        (dataset, entry) for dataset, entry in entries if len(shape) >= 2 and dataset.bounded_region_reads(entry, name)
+    ]
+
     def slab_reader(dataset: Any, entry_group: str) -> Callable[[tuple[slice, ...]], np.ndarray]:
-        if len(shape) >= 2 and dataset.bounded_region_reads(entry_group, name):
+        if (dataset, entry_group) in by_region:
             return lambda slices: dataset.read_data_slice(entry_group, name, slices)[0]
         resident = dataset.read_data(entry_group, name)[0]
         return lambda slices: resident[slices]
 
     read_volume = slab_reader(source, group)
     read_mask = slab_reader(mask_source, mask_group)
-    rows = _statistics_chunk_length(shape, 1, _statistics_block_elements()) if len(shape) >= 2 else 1
-    granularity = source.read_granularity(group, name) if len(shape) >= 2 else None
-    if granularity is not None and len(granularity) > 1:
-        block = max(1, int(granularity[1]))
-        rows = max(block, rows // block * block)
+    if by_region:
+        rows = _scan_rows(by_region, name, shape)
+    else:
+        rows = _statistics_chunk_length(shape, 1, _statistics_block_elements()) if len(shape) >= 2 else 1
     extent = int(shape[1]) if len(shape) >= 2 else 1
     state: dict[str, Any] | None = None
     for start in range(0, extent, rows):
@@ -395,7 +450,7 @@ def read_masked_data_statistics(
         )
         if len(shape) < 2:
             slices = (slice(None),)
-        selected = read_volume(slices)[read_mask(slices) == 1]
+        selected = read_volume(slices)[read_mask(slices) != 0]
         if selected.size:
             state = _update_running_statistics(state, selected.reshape(1, -1))
     return _finalize_running_statistics(state)

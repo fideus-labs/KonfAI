@@ -63,8 +63,5 @@ setup(
         "requests",
         "requests-toolbelt",
         "huggingface_hub",
-        "fastapi",
-        "uvicorn",
-        "python-multipart",
     ]
 )

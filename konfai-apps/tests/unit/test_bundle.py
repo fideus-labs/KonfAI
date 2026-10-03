@@ -16,7 +16,10 @@
 
 """Tests for the app-bundle assembler."""
 
+import codecs
 import json
+import locale
+import sys
 
 import pytest
 from konfai_apps.bundle import assemble_bundle
@@ -34,6 +37,22 @@ VALID_META = {
 def _write(path, obj):
     path.write_text(json.dumps(obj))
     return path
+
+
+@pytest.fixture
+def ascii_locale():
+    """The locale's encoding set to ASCII: a file opened without an encoding takes it, as it takes the
+    ANSI code page on Windows, and any character outside it fails there the same way."""
+    if sys.flags.utf8_mode:
+        pytest.skip("UTF-8 mode ignores the locale's encoding")
+    previous = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        if codecs.lookup(locale.getencoding()).name == "utf-8":
+            pytest.skip("this platform's C locale is UTF-8")
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, previous)
 
 
 def test_assemble_bundle_layout(tmp_path):
@@ -121,6 +140,34 @@ def test_derive_overlap_broadcasts_scalar_and_drops_singleton():
     assert _derive_overlap({}, [96, 128, 160]) is None  # no overlap declared
 
 
+@pytest.mark.parametrize(
+    "patch_size, overlap",
+    [
+        ([128, 64], 16),
+        ([128, 64], 0.25),
+        ([128, 64], "20%"),
+        ([128, 64], [0.5, 0.25]),
+        ([1, 256, 256], "20%"),
+        ([1, 256, 256], [0, 0.2, 0.2]),
+    ],
+)
+def test_the_manifest_overlap_is_the_one_konfai_tiles_with(patch_size, overlap):
+    """A fraction, a percent string or a list of fractions is a share of the patch: the manifest carries
+    the voxels KonfAI's own grid steps by on an axis it tiles, not ``int(0.25) == 0``."""
+    from konfai.utils.utils import get_patch_slices_from_shape
+    from konfai_apps.bundle import _derive_onnx_params, _derive_overlap
+
+    patch = {"patch_size": patch_size, "overlap": overlap}
+    exported, *_ = _derive_onnx_params({"Predictor": {"Dataset": {"Patch": patch}}}, "Predictor")
+    slices = get_patch_slices_from_shape(patch_size, [1000] * len(patch_size), overlap)
+    konfai = []
+    for axis, size in enumerate(patch_size):
+        starts = sorted({region[axis].start for region in slices})
+        if size > 1:  # the axis the manifest keeps
+            konfai.append(size - (starts[1] - starts[0]))
+    assert _derive_overlap(patch, exported) == konfai
+
+
 def test_derive_blend_reads_patch_combine():
     from konfai_apps.bundle import _derive_blend
 
@@ -195,6 +242,52 @@ def test_transform_manifest_reads_canonical_and_before_reduction_post():
     assert manifest["postprocessing"] == [{"op": "softmax", "dim": 0}, {"op": "argmax", "dim": 0}]
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["TensorCast", "Clip", "Resample", "Canonical", "Standardize", "Normalize", "UnNormalize", "Softmax", "Argmax"],
+)
+def test_an_unset_parameter_exports_the_core_stages_default(name):
+    """The export reads the raw Prediction.yml, so a parameter the config leaves out must take the value
+    the core stage binds when it runs that config, or the portable runtime computes something else."""
+    import inspect
+
+    import konfai.data.transform as transforms
+    from konfai_apps.bundle import _OP_MAP
+
+    assert set(_OP_MAP) == {
+        "TensorCast",
+        "Clip",
+        "Resample",
+        "Canonical",
+        "Standardize",
+        "Normalize",
+        "UnNormalize",
+        "Softmax",
+        "Argmax",
+    }, "a new op needs its case here"
+    given = {"spacing": [1.5, 1.5, 1.5]} if name == "Resample" else {}
+    defaults = inspect.signature(getattr(transforms, name)).parameters
+    step = _OP_MAP[name](given)
+    exported = {key: value for key, value in step.items() if key in defaults and key not in given}
+    assert exported == {key: defaults[key].default for key in exported}
+
+
+def _regrid_preprocessing(fill):
+    from konfai_apps.bundle import _transform_manifest
+
+    chain = {"Canonical": {"inverse": True, **fill}, "Resample": {"spacing": [1.5, 1.5, 1.5], "inverse": True, **fill}}
+    manifest, _folds = _transform_manifest({"Predictor": {"Dataset": {"g": {"transforms": chain}}}}, "Predictor")
+    return manifest["preprocessing"]
+
+
+def test_a_non_default_fill_reaches_the_regrid_ops():
+    """A fill the runtime is not told of is a fill of 0 wherever it resamples outside the source."""
+    assert _regrid_preprocessing({"fill": -1024}) == [
+        {"op": "canonical", "inverse": True, "fill": -1024.0},
+        {"op": "resample", "spacing": [1.5, 1.5, 1.5], "inverse": True, "fill": -1024.0},
+    ]
+
+
 def test_derive_reduction_reads_the_ensemble_reduction():
     from konfai_apps.bundle import _derive_reduction
 
@@ -222,7 +315,7 @@ def test_masked_tta_compiler_reads_the_config():
                             "MASK": {
                                 "is_input": False,
                                 "transforms": {
-                                    "KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
+                                    "konfai_apps.transforms:KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
                                     "Resample": {"spacing": [1, 1, 3]},
                                     "Dilate": {"dilate": 5},
                                     "Save": {"dataset": "x"},
@@ -269,6 +362,170 @@ def test_transform_manifest_refuses_an_unportable_transform():
     config = {"Predictor": {"Dataset": {"g": {"transforms": {"SomeCustomTransform": {"x": 1}}}}, "outputs_dataset": {}}}
     with pytest.raises(AppMetadataError, match="no portable runtime op"):
         _transform_manifest(config, "Predictor")
+
+
+def test_the_program_reads_every_occurrence_of_a_repeated_stage():
+    from konfai_apps.bundle import _aux_mask_groups, _derive_reduction, _mask_specs
+
+    before = {
+        "Mask": {"path": "BODY", "value_outside": -1024},
+        "Mask#2": {"path": "BONE", "value_outside": 0},
+        "konfai.data.transform:Mask": {"path": "AIR", "value_outside": 1},
+    }
+    config = {
+        "Predictor": {
+            "Dataset": {
+                "groups_src": {
+                    "CT": {
+                        "groups_dest": {
+                            "BODY": {
+                                "transforms": {
+                                    "KonfAIInference": {"repo_id": "R/S", "model_name": "body"},
+                                    "Resample": {"spacing": [1, 1, 3]},
+                                    "Dilate": {"dilate": 2},
+                                    "Dilate#2": {"dilate": 3},
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "outputs_dataset": {
+                "H": {
+                    "OutputDataset": {
+                        "before_reduction_transforms": before,
+                        "after_reduction_transforms": {"konfai.data.transform:MergeLabels": {}},
+                    }
+                }
+            },
+        }
+    }
+    assert _mask_specs(config, "Predictor") == [
+        {"group": "BODY", "value_outside": -1024.0},
+        {"group": "BONE", "value_outside": 0.0},
+        {"group": "AIR", "value_outside": 1.0},
+    ]
+    assert _aux_mask_groups(config, "Predictor")["BODY"]["ops"] == [
+        ("resample", {"spacing": [1, 1, 3]}),
+        ("dilate", 2),
+        ("dilate", 3),
+    ]
+    assert _derive_reduction(config, "Predictor") == "merge_labels"
+
+
+def test_a_chain_spelled_as_a_list_reaches_the_manifest_and_the_program():
+    """The list spelling binds in the core as its occurrence mapping; the export reads it the same way
+    instead of finding no chain at all."""
+    from konfai_apps.bundle import _aux_mask_groups, _mask_specs, _transform_manifest, _tta_passes
+
+    config = {
+        "Predictor": {
+            "Dataset": {
+                "groups_src": {
+                    "CT": {
+                        "groups_dest": {
+                            "CT": {
+                                "is_input": True,
+                                "transforms": [
+                                    {"Clip": {"min_value": -1000, "max_value": 1000}},
+                                    {"Clip": {"min_value": -500, "max_value": 500}},
+                                    {"Resample": {"spacing": [1.5, 1.5, 1.5]}},
+                                ],
+                            },
+                            "BODY": {
+                                "transforms": [
+                                    {"KonfAIInference": {"repo_id": "R/S", "model_name": "body"}},
+                                    {"Dilate": {"dilate": 2}},
+                                ]
+                            },
+                        }
+                    }
+                },
+                "augmentations": {"DA0": {"nb": 2, "data_augmentations": [{"Flip": {"f_prob": [0, 0.5, 0.5]}}]}},
+            },
+            "outputs_dataset": {
+                "H": {
+                    "OutputDataset": {
+                        "before_reduction_transforms": [{"Mask": {"path": "BODY", "value_outside": 0}}],
+                        "final_transforms": [{"Argmax": {"dim": 0}}],
+                    }
+                }
+            },
+        }
+    }
+    manifest, folds = _transform_manifest(config, "Predictor")
+    assert folds == []
+    assert [step["op"] for step in manifest["preprocessing"]] == ["clip", "clip", "resample"]
+    assert manifest["postprocessing"] == [{"op": "argmax", "dim": 0}]
+    assert _aux_mask_groups(config, "Predictor")["BODY"]["ops"] == [("dilate", 2)]
+    assert _mask_specs(config, "Predictor") == [{"group": "BODY", "value_outside": 0.0}]
+    assert len(_tta_passes(config, "Predictor")) == 3
+
+
+def _masked_config(dest: dict, section: str, chain) -> dict:
+    """An input group ``CT``, the ``dest`` groups beside it, and ``chain`` as its ``section``."""
+    groups = {"CT": {"is_input": True, "transforms": chain if section == "transforms" else {}}, **dest}
+    outputs = {} if section == "transforms" else {"H": {"OutputDataset": {section: chain}}}
+    return {"Predictor": {"Dataset": {"groups_src": {"CT": {"groups_dest": groups}}}, "outputs_dataset": outputs}}
+
+
+@pytest.mark.parametrize(
+    ("section", "chain"),
+    [
+        # A list of two masks, and the mapping it lands on disk as once the core reads it.
+        ("before_reduction_transforms", [{"Mask": {"path": "BODY"}}, {"Mask": {"path": "BONE"}}]),
+        ("before_reduction_transforms", {"Mask": {"path": "BODY"}, "Mask#2": {"path": "BONE"}}),
+        ("final_transforms", {"Mask": {"path": "BODY", "value_outside": -1024}}),
+        ("transforms", {"Dilate": {"dilate": 1}, "Dilate#2": {"dilate": 2}}),
+    ],
+)
+def test_a_program_stage_no_program_step_applies_is_refused_not_dropped(section, chain):
+    """The portable program masks the output only by a group a nested model produces: a mask read from
+    the dataset, or a Dilate on the input, would be skipped and the artifact's output left unmasked."""
+    from konfai_apps.bundle import _transform_manifest
+
+    config = _masked_config({"BODY": {"is_input": False}, "BONE": {"is_input": False}}, section, chain)
+    with pytest.raises(AppMetadataError, match="would be skipped by the portable runtime"):
+        _transform_manifest(config, "Predictor")
+
+
+def test_every_mask_on_a_group_a_nested_model_produces_is_left_to_the_program():
+    from konfai_apps.bundle import _transform_manifest
+
+    nested = {"transforms": {"KonfAIInference": {"repo_id": "R/S", "model_name": "body"}, "Dilate": {"dilate": 2}}}
+    before = {"Mask": {"path": "BODY"}, "Mask#2": {"path": "BONE"}, "Save": {"dataset": "x"}}
+    manifest, _ = _transform_manifest(
+        _masked_config({"BODY": nested, "BONE": nested}, "before_reduction_transforms", before), "Predictor"
+    )
+    assert manifest["postprocessing"] == []
+
+
+@pytest.mark.parametrize("resample", [False, True])
+@pytest.mark.parametrize(
+    "volume",
+    [{"is_input": True, "transforms": None}, {"is_input": True}, {}],
+    ids=["transforms-None", "no-transforms-key", "is_input-by-default"],
+)
+def test_an_input_group_without_a_chain_takes_no_other_groups_chain(volume, resample):
+    """The core writes an absent chain as ``transforms: None``: the model's input then has no
+    preprocessing, and the chain of the mask group a nested model produces is not the input's."""
+    from konfai_apps.bundle import _transform_manifest
+
+    mask_chain = {"KonfAIInference": {"repo_id": "R/S", "model_name": "body"}}
+    if resample:
+        mask_chain["Resample"] = {"spacing": [1, 1, 3]}
+    mask_chain["Dilate"] = {"dilate": 5}
+    groups = {"MASK": {"is_input": False, "transforms": mask_chain}, "Volume": volume}
+    before = {"TensorCast": {"dtype": "int16"}, "Mask": {"path": "MASK", "value_outside": -1024}}
+    config = {
+        "Predictor": {
+            "Dataset": {"groups_src": {"Volume_0": {"groups_dest": groups}}},
+            "outputs_dataset": {"H": {"OutputDataset": {"before_reduction_transforms": before}}},
+        }
+    }
+    manifest, folds = _transform_manifest(config, "Predictor")
+    assert manifest["preprocessing"] == [] and folds == []
+    assert [step["op"] for step in manifest["postprocessing"]] == ["cast"]
 
 
 def test_colliding_bundle_filenames_are_refused_before_anything_is_written(tmp_path):

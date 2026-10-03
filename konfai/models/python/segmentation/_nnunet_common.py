@@ -17,8 +17,7 @@
 """Shared construction helpers for the nnU-Net backbones (PlainConvUNet / ResidualEncoderUNet).
 
 nnU-Net shares ``UNetDecoder`` between its two backbones; this module mirrors that sharing so the
-two KonfAI counterparts cannot drift apart. Encoder construction and the per-model padding /
-activation conventions stay in each model file.
+two KonfAI counterparts cannot drift apart. Encoder construction stays in each model file.
 """
 
 from collections.abc import Callable
@@ -86,6 +85,27 @@ def as_kernel_list(kernel_sizes: int | list[Any], n_stages: int) -> list[Any]:
             "One kernel per resolution stage; each entry is an int or a per-axis list.",
         )
     return list(kernel_sizes)
+
+
+def conv_block_config(
+    stride: int | list[int], kernel_size: int | list[int], bias: bool = True, negative_slope: float = 1e-2
+) -> blocks.BlockConfig:
+    """One nnU-Net conv block: Conv -> InstanceNorm(affine) -> LeakyReLU, padded as nnU-Net pads.
+
+    ``stride`` and ``kernel_size`` are each an int (isotropic) or a per-axis list (anisotropic); nnU-Net
+    picks them independently, so both pass straight through to the convolution.
+    """
+    stride_value: Any = stride
+    kernel_value: Any = kernel_size
+    padding_value: Any = blocks.same_padding(kernel_size)
+    return blocks.BlockConfig(
+        kernel_size=kernel_value,
+        stride=stride_value,
+        padding=padding_value,
+        bias=bias,
+        activation=f"LeakyReLU;{negative_slope}",
+        norm_mode="INSTANCE_AFFINE",
+    )
 
 
 def build_unet_decoder(

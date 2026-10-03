@@ -179,7 +179,7 @@ def test_konfai_cli_resume_continues_training(tmp_path: Path, stochastic: bool) 
     epochs_rerun = EPOCHS_TOTAL - EPOCHS_INITIAL
     assert max(new_epochs) == EPOCHS_TOTAL - 1
     assert max(new_its) == it_end + epochs_rerun * its_per_epoch
-    # One checkpoint per training iteration (it_validation: 1). The exit no longer writes a
+    # One checkpoint per training iteration (it_validation: 1). The exit writes no
     # duplicate of the last scored save: an exit save happens only when iterations advanced
     # past it (a crash), and it is then named crash_*.pt.
     assert len(new_checkpoints) == epochs_rerun * its_per_epoch

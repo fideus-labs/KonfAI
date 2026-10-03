@@ -19,10 +19,9 @@ Predictor:
                 save_clip_min: false
                 save_clip_max: false
                 mask: MASK
-              # Every preprocessing step here must mirror Config.yml exactly: the network was trained
-              # on whole-volume statistics, so standardizing inside the mask instead -- or masking the
-              # input, which training never did -- feeds it a scale it has never seen. That single
-              # mismatch cost 4x on MAE (409 HU instead of 98) with the same checkpoint.
+              # Must mirror Config.yml's MR chain exactly: whole-volume statistics (mask: None) and an
+              # unmasked input, the scale the network was trained on. A mismatch runs without an error
+              # and degrades the output (see the README).
               Standardize:
                 lazy: false
                 mean: None
@@ -69,7 +68,7 @@ Predictor:
     subset: None # Use the full dataset
     dataset_filenames: # Dataset sources (format: folder_path:mode:image_format)
     - ./Dataset:a:mha
-    batch_size: 8 # Number of patches per inference batch; 32 needs about 17 GB of VRAM, 8 fits a 16 GB card
+    batch_size: 8 # Number of patches per inference batch; 0 measures the largest batch the GPU holds
     memory_budget: None
     num_workers: None
     pin_memory: false

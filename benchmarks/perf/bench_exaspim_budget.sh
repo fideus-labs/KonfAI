@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # Region-height sweep on a chunked OME-Zarr store: one TRANSFORM run per budget in a fresh process,
 # wall, peak RSS, the sweep clock line, and three z slices against a reference store.
 #

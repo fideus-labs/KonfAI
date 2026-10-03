@@ -258,8 +258,8 @@ class TestDisplacementStage:
         """ITK admits a continuous index ON the valid-region end (``InsideValidRegion`` nudges it
         back inside), so identity there is wrong bytes. The support slides one control point down,
         which changes no value: the outermost tap's weight is exactly zero at an integer offset.
-        The regression this pins: that plane used to fail the inside test, and a grid commensurate
-        with its coefficient mesh hits it in whole planes at a time, every voxel silently unmoved.
+        Were that plane to fail the inside test, a grid commensurate with its coefficient mesh would
+        hit it in whole planes at a time, every voxel silently unmoved.
         """
         import torch
         from konfai.data.sampling import _displacement_at

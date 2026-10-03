@@ -62,15 +62,15 @@ Run tasks with `pixi run <task>`:
 
 | Task | Command | Description |
 | --- | --- | --- |
-| `test` | `pytest -q -n auto --dist loadfile tests/` with `OMP_NUM_THREADS=1` | Run the full test suite (about 3 min on 24 cores; one torch thread per worker) |
-| `test-fast` | `pytest -q -n auto --dist loadfile -m "not slow and not integration" tests/` with `OMP_NUM_THREADS=1` | The iteration loop: skips the slow oracle and integration tests (about 25 s on 24 cores) |
+| `test` | `pytest -n auto --dist loadfile tests/` with `OMP_NUM_THREADS=1` | Run the full test suite (about 3 min on 24 cores; one torch thread per worker) |
+| `test-fast` | `pytest -n auto --dist loadfile -m "not slow and not integration" tests/` with `OMP_NUM_THREADS=1` | The iteration loop: skips the slow oracle and integration tests (about 25 s on 24 cores) |
 | `test-cov` | `pytest --cov=konfai tests/` | Run tests with coverage report |
-| `lint` | `ruff check konfai konfai-apps/konfai_apps` | Lint the source tree |
-| `format` | `ruff format konfai konfai-apps/konfai_apps` | Auto-format source files |
+| `lint` | `ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs` | Lint the source tree; the pre-commit hook and the CI `lint` job cover the same paths |
+| `format` | `ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs` | Auto-format source files |
 | `format-check` | `ruff format --check ...` | Check formatting without modifying files |
 | `typecheck` | `python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio` | Static type checking of the four packages; the pre-commit hook and the CI `typecheck` job run the same command |
 | `build` | `python -m build` | Build sdist and wheel |
-| `test-apps` | `pytest -q konfai-apps/tests` | Run the konfai-apps test suite |
+| `test-apps` | `pytest konfai-apps/tests` | Run the konfai-apps test suite |
 | `check` | lint + format-check + test + test-apps | Full pre-push gate; run it once before finishing any change (needs konfai-apps installed) |
 
 Always run `pixi run check` before pushing or opening a PR.
@@ -81,9 +81,9 @@ If Pixi is unavailable, use an editable pip install:
 
 ```bash
 pip install -e ".[dev]"
-pytest -q tests/
-ruff check konfai
-ruff format konfai
+pytest tests/
+ruff check konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs
+ruff format konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio apps tests examples benchmarks docs
 ```
 
 ## Pre-commit hooks
@@ -100,8 +100,8 @@ python -m pip install pre-commit
 pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
-After installation, `git commit` runs file checks plus Conventional Commit and forbidden-branding validation. Run all
-file checks manually with:
+After installation, `git commit` runs file checks plus Conventional Commit validation. Run all file checks manually
+with:
 
 ```bash
 pre-commit run --all-files
@@ -116,8 +116,8 @@ git switch -c fix/short-description
 ```
 
 Use a Conventional Commit message such as `fix(config): improve YAML validation errors`. Commit messages must not
-contain agent names, generated-by/generated-with branding, or AI co-author trailers. The `commit-msg` hooks validate
-both the Conventional Commit structure and forbidden branding.
+contain agent names, generated-by/generated-with branding, or AI co-author trailers. The `commit-msg` hook validates
+the Conventional Commit structure.
 
 Before pushing, run `pixi run format`, `pixi run check`, and `pre-commit run --all-files`. Push the feature branch,
 open a pull request, and leave it open for a maintainer to review and merge; do not merge your own PR.
@@ -153,7 +153,7 @@ for the `konfai-apps pipeline` flow in
 of `pixi run test`. Install the package first, then run its suite:
 
 ```bash
-pip install -e ./konfai-apps
+pip install -e "./konfai-apps[server]"
 pytest konfai-apps/tests
 ```
 
@@ -222,7 +222,8 @@ Documentation should stay aligned with the codebase, examples, and tests. When
 updating the docs:
 
 - prefer code-backed statements
-- call out behavior inferred from code when needed
+- state what the code does as a fact; check it against the code or a run
+  rather than saying how it was found
 - avoid documenting private helpers unless they are essential extension points
 - update cross-links when you rename or move pages, and add the old URL to
   `_REDIRECTS` in `docs/source/conf.py` so it keeps resolving
@@ -237,14 +238,22 @@ that builds a **9-package matrix**, all sharing a tag-derived version:
 
 - `konfai` (the core framework)
 - `konfai-apps`, `konfai-mcp` and `konfai-studio` (the standalone Apps, MCP and
-  Studio packages. Studio is wheel-only, and its build job runs `npm ci &&
-  npm run build` first because the React front is not in git)
+  Studio packages. konfai-mcp is wheel-only, the wheel carrying the repository's
+  examples; Studio is too, and its build job runs `npm ci && npm run build` first
+  because the built React front is not in git, only its source)
 - the five App bundles: `impact-synth-konfai`, `impact-seg-konfai`,
   `mrsegmentator-konfai`, `totalsegmentator-konfai`, `impact-reg-konfai`
 
 The bundles pin `konfai==` and `konfai-apps==` the same version, so the whole
 matrix releases in lockstep. A change to the core package can therefore affect
 the framework, the two sibling packages, and every published App.
+
+### Breaking changes
+
+A change may break a published config, checkpoint or call in any release. A
+renamed key, class or argument is refused with a message that names the one to write instead:
+there is no deprecation period, and no table of removed names to keep. The
+changelog lists each break under its own heading.
 
 ### Cutting a release
 
@@ -271,6 +280,8 @@ The generated draft is a starting point, not the answer. It sees commit subjects
 only, so a squash merge collapses to one line, a subject with no conventional
 prefix is dropped, and a subject written for a reviewer tells a reader nothing.
 Take the draft, then say what a *user* of the package gets that they did not have, and re-read it against anything that landed after you drafted it.
+The command regenerates the whole file from the commits, edited sections included:
+keep the new section and restore the rest from git before committing.
 
 ```bash
 # 1. Draft the section for the version you are about to cut, then edit it

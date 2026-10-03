@@ -17,11 +17,19 @@
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from konfai_apps import app_repository as app_repository_module
 from konfai_apps.errors import AppMetadataError, AppRepositoryError
 from ruamel.yaml import YAML
+
+
+@pytest.fixture(autouse=True)
+def _a_process_that_never_read_the_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Each test runs as a process that has not read the Hub yet, over a Hugging Face cache of its own."""
+    monkeypatch.setattr(app_repository_module.constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    app_repository_module._release_tag.cache_clear()
 
 
 def test_get_app_repository_info_rejects_missing_required_metadata_keys(tmp_path: Path) -> None:
@@ -156,6 +164,166 @@ def test_local_hf_get_filenames_returns_relative_files_and_ignores_folders(monke
 def test_is_app_repo_requires_root_app_json() -> None:
     assert app_repository_module.is_app_repo(["Inference.yml", "app.json", "weights/model.pt"])
     assert not app_repository_module.is_app_repo(["docs/app.json", "Inference.yml"])
+
+
+@pytest.mark.parametrize(
+    ("version", "tags", "expected"),
+    [("1.9.0", ["v1.8.6", "v1.9.0"], "v1.9.0"), ("1.9.0", ["v1.8.6"], None), ("1.9.1.dev3+g1234", ["v1.9.1"], None)],
+    ids=["tagged", "untagged", "development-build"],
+)
+def test_an_unpinned_hf_app_takes_the_bundle_tagged_for_this_release(
+    monkeypatch: pytest.MonkeyPatch, version: str, tags: list[str], expected: str | None
+) -> None:
+    """A bundle's configs follow KonfAI, so `main` breaks older releases (batch_size: 0 crashed
+    konfai 1.8.5). A release takes the revision tagged with its own version; a development build or a
+    repository without that tag keeps `main`, and an explicit @rev always wins."""
+    monkeypatch.setattr(app_repository_module.importlib.metadata, "version", lambda name: version)
+    refs = SimpleNamespace(tags=[SimpleNamespace(name=tag) for tag in tags])
+    monkeypatch.setattr(app_repository_module, "HfApi", lambda: SimpleNamespace(list_repo_refs=lambda repo_id: refs))
+    split = app_repository_module.LocalAppRepositoryFromHF._split_repo_reference
+
+    assert split("org/demo") == ("org/demo", expected)
+    assert split("org/demo@refs/pr/1") == ("org/demo", "refs/pr/1")
+
+
+def test_offline_an_unpinned_hf_app_takes_the_release_tag_a_run_cached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def offline(repo_id: str) -> None:
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(app_repository_module.importlib.metadata, "version", lambda name: "1.9.0")
+    monkeypatch.setattr(app_repository_module, "HfApi", lambda: SimpleNamespace(list_repo_refs=offline))
+    monkeypatch.setattr(app_repository_module.constants, "HF_HUB_CACHE", str(tmp_path))
+    split = app_repository_module.LocalAppRepositoryFromHF._split_repo_reference
+
+    assert split("org/demo") == ("org/demo", None)
+    app_repository_module._release_tag.cache_clear()  # a new process
+    (tmp_path / "models--org--demo" / "refs").mkdir(parents=True)
+    (tmp_path / "models--org--demo" / "refs" / "v1.9.0").write_text("0123abcd", encoding="utf-8")
+    assert split("org/demo") == ("org/demo", "v1.9.0")
+
+
+_DEMO_APP_JSON = json.dumps(
+    {"display_name": "Demo", "description": "HF test app", "short_description": "Demo", "tta": 0, "mc_dropout": 0}
+)
+_HUB_FILES = ["CBCT/app.json", "CBCT/Prediction.yml", "MR/app.json", "MR/model.pt", "SAM2.1_Small.pt", "docs/a.md"]
+
+
+class _HubFolder(SimpleNamespace):
+    pass
+
+
+def _hub_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cached: list[str]) -> Path:
+    """A Hugging Face cache of `org/demo` at `main` holding only `cached`; returns its snapshot folder."""
+    repo = tmp_path / "hub" / "models--org--demo"
+    snapshot = repo / "snapshots" / "0123abcd"
+    snapshot.mkdir(parents=True)
+    for name in cached:
+        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+        (snapshot / name).write_text(_DEMO_APP_JSON if name.endswith("app.json") else "x", encoding="utf-8")
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("0123abcd", encoding="utf-8")
+    monkeypatch.setattr(app_repository_module, "_release_tag", lambda repo_id, wait=True, refresh=False: None)
+    return snapshot
+
+
+def _fake_hub(monkeypatch: pytest.MonkeyPatch, files: list[str]) -> list[str]:
+    """Serve `files` as the Hub tree of any repository, and a download as the files it lands in the cache's
+    `main` snapshot; returns the `path_in_repo` of every tree call."""
+    calls: list[str] = []
+    cached_snapshot = app_repository_module.snapshot_download
+
+    def snapshot_download(repo_id, revision=None, allow_patterns=None, local_files_only=False, **kwargs):
+        if local_files_only:
+            return cached_snapshot(repo_id, revision=revision, local_files_only=True, **kwargs)
+        repo = Path(app_repository_module.constants.HF_HUB_CACHE) / f"models--{repo_id.replace('/', '--')}"
+        (repo / "refs").mkdir(parents=True, exist_ok=True)
+        (repo / "refs" / "main").write_text("0123abcd", encoding="utf-8")
+        for name in allow_patterns:
+            (repo / "snapshots" / "0123abcd" / name).parent.mkdir(parents=True, exist_ok=True)
+            (repo / "snapshots" / "0123abcd" / name).write_text(_DEMO_APP_JSON, encoding="utf-8")
+        return str(repo / "snapshots" / "0123abcd")
+
+    def list_repo_tree(repo_id, path_in_repo=None, recursive=False, revision=None, repo_type=None):
+        calls.append(path_in_repo or "")
+        prefix = f"{path_in_repo}/" if path_in_repo else ""
+        entries: dict[str, SimpleNamespace] = {}
+        for path in (path for path in files if path.startswith(prefix)):
+            parts = path[len(prefix) :].split("/")
+            for depth in range(1, len(parts) if recursive else min(len(parts), 2)):
+                folder = prefix + "/".join(parts[:depth])
+                entries.setdefault(folder, _HubFolder(path=folder))
+            if recursive or len(parts) == 1:
+                entries[path] = SimpleNamespace(path=path)
+        return iter(entries.values())
+
+    monkeypatch.setattr(app_repository_module, "RepoFolder", _HubFolder)
+
+    def model_info(repo_id, revision=None):
+        return SimpleNamespace(siblings=[SimpleNamespace(rfilename=path) for path in files])
+
+    monkeypatch.setattr(
+        app_repository_module, "HfApi", lambda: SimpleNamespace(list_repo_tree=list_repo_tree, model_info=model_info)
+    )
+    monkeypatch.setattr(app_repository_module, "snapshot_download", snapshot_download)
+    return calls
+
+
+def test_an_hf_catalogue_lists_every_app_of_the_hub_and_downloads_their_files_but_the_checkpoints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A cache filled by one app's run is not the repository's list: online, every app folder of the Hub is
+    listed, and its files but the checkpoints land in the cache the catalogue summaries read."""
+    snapshot = _hub_cache(monkeypatch, tmp_path, ["CBCT/app.json"])
+    _fake_hub(monkeypatch, _HUB_FILES)
+
+    assert app_repository_module.get_available_apps_on_hf_repo("org/demo") == ["CBCT", "MR"]
+    assert sorted(app_repository_module.get_downloaded_apps_on_hf_repo("org/demo")) == ["CBCT", "MR"]
+    assert (snapshot / "MR" / "app.json").is_file() and not (snapshot / "MR" / "model.pt").exists()
+
+
+def test_offline_an_hf_catalogue_lists_what_the_cache_holds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _hub_cache(monkeypatch, tmp_path, ["CBCT/app.json"])
+    monkeypatch.setattr(app_repository_module.constants, "HF_HUB_OFFLINE", True)
+
+    assert app_repository_module.get_available_apps_on_hf_repo("org/demo") == ["CBCT"]
+    with pytest.raises(AppRepositoryError, match="nothing is cached"):
+        app_repository_module.get_available_apps_on_hf_repo("org/other")
+
+
+@pytest.mark.parametrize(
+    ("operation", "whole"),
+    [
+        (lambda repo, out: repo.download_files(), True),
+        (lambda repo, out: repo.export_app(out), True),
+        (lambda repo, out: repo.download_app(), False),
+    ],
+    ids=["download_files", "export_app", "download_app"],
+)
+def test_a_whole_hf_app_includes_the_files_its_cache_lacks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, operation, whole: bool
+) -> None:
+    """`konfai-apps download` and an export take the whole app, checkpoints included, even when the cache
+    holds only the files an earlier resolution fetched. `--download` keeps to the cached files: Slicer passes
+    it on a first run, and the run fetches the checkpoints it selected."""
+    snapshot = _hub_cache(monkeypatch, tmp_path, ["MR/app.json"])
+    _fake_hub(monkeypatch, _HUB_FILES)
+    fetched: list[str] = []
+
+    def download(repo_id: str, filename: str, force_update: bool) -> Path:
+        fetched.append(filename)
+        path = snapshot / filename
+        if not path.exists():
+            path.write_text("x", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(app_repository_module.LocalAppRepositoryFromHF, "download", staticmethod(download))
+    repo = app_repository_module.LocalAppRepositoryFromHF("org/demo", "MR", False)
+
+    operation(repo, tmp_path / "export")
+
+    assert ("MR/model.pt" in fetched) is whole
 
 
 def test_local_hf_download_syncs_non_model_files_for_current_revision(
@@ -716,45 +884,6 @@ def test_install_fine_tune_rejects_unknown_checkpoint(tmp_path: Path) -> None:
 
     with pytest.raises(AppRepositoryError):
         _install_fine_tune(app_root, workspace, ["CV_9"])
-
-
-def test_hf_app_listing_reads_the_hub_once_and_falls_back_to_the_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # The listing read the cached snapshot first, which holds only the apps already used, and
-    # huggingface_hub refuses an incomplete snapshot, so offline listing died instead.
-    import types
-
-    from huggingface_hub import constants
-
-    calls: list[dict[str, object]] = []
-    files = ["README.md", "A/app.json", "A/Prediction.yml", "B/app.json", "C/notes.txt", "D/sub/app.json"]
-
-    class _Hub:
-        def list_repo_tree(self, **kwargs: object) -> list[object]:
-            calls.append(kwargs)
-            if online:
-                return [types.SimpleNamespace(path=path) for path in files]
-            raise ConnectionError("offline")
-
-    monkeypatch.setattr(app_repository_module, "HfApi", _Hub)
-    online = True
-    assert app_repository_module.get_available_apps_on_hf_repo("owner/repo@v1", False) == ["A", "B"]
-    assert calls == [{"repo_id": "owner/repo", "revision": "v1", "repo_type": "model", "recursive": True}]
-
-    online = False
-    cache = tmp_path / "hub" / "models--owner--repo"
-    (cache / "refs").mkdir(parents=True)
-    (cache / "refs" / "main").write_text("abc123", encoding="utf-8")
-    (cache / "snapshots" / "abc123" / "A").mkdir(parents=True)
-    (cache / "snapshots" / "abc123" / "A" / "app.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
-    assert app_repository_module.get_available_apps_on_hf_repo("owner/repo", False) == ["A"]
-    assert "cached here" in capsys.readouterr().out
-    with pytest.raises(AppRepositoryError):
-        app_repository_module.get_available_apps_on_hf_repo("owner/repo", True)
-    with pytest.raises(AppRepositoryError):
-        app_repository_module.get_available_apps_on_hf_repo("owner/other", False)
 
 
 def _write_app_with_requirements(app_root: Path, requirements: str) -> None:

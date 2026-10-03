@@ -36,6 +36,7 @@ from konfai.data.patching import (
     FALLBACK_INFLIGHT_FACTOR,
     AugmentedStage,
     DatasetManager,
+    save_destination,
 )
 from konfai.data.patching.stage import _ReadStagePlan, _stage_name
 from konfai.data.patching.sweep import (
@@ -123,6 +124,7 @@ class CaseMaterializer:
         with self._materialization(rewrite, fallback_budget_bytes, device):
             verdict = self._write_case(a, fallback_budget_bytes, allow_fallback, prefer_whole)
             self.manager.unload()
+            self.manager.release_case()
             return verdict
 
     def _write_case(
@@ -235,6 +237,7 @@ class CaseMaterializer:
                     self._assemble_and_write(a)
                     outcomes[a] = (Verdict.WHOLE_VOLUME, None)
             manager.unload()
+            manager.release_case()
             return outcomes
 
     def classify_copies(self, copies: Iterable[int]) -> dict[int, CopyRoute]:
@@ -334,18 +337,26 @@ class CaseMaterializer:
 
     # ---------------------------------------------------------------- what the plan asks
 
-    def write_targets(self, a: int = 0) -> list[tuple[Save, list[int], Attribute]]:
+    def write_targets(self, a: int = 0, rewrite: bool = False) -> list[tuple[Save, list[int], Attribute]]:
         """Every ``Save`` copy ``a`` writes, with the extent and case state it lands at: what a write
         probe must open to be the run's own verdict. Behind an ``Expand`` the stages after the marker
-        fold the COPY's grid."""
+        fold the COPY's grid. Unless ``rewrite``, the run reads the last Save whose entry exists and
+        writes none of the Saves up to it."""
         manager = self.manager
         spatial = [int(extent) for extent in manager.base_shape[1:]]
         attributes = Attribute(manager.cache_attributes_bak[0])
         targets: list[tuple[Save, list[int], Attribute]] = []
-        for stage in manager.chain_stages(a):
+        for position, stage in enumerate(manager.chain_stages(a)):
             spatial = manager._fold_case_state(stage, spatial, attributes)
-            if isinstance(stage, Save):
+            if not isinstance(stage, Save):
+                continue
+            # A Save before the Expand marker writes under the case's name, one after it under the copy's.
+            entry = manager.name if position < len(manager._expand_pre) else manager.copy_entry(a)
+            destination, group = save_destination(stage, manager.dataset, manager.group_dest)
+            if rewrite or not destination.is_dataset_exist(group, entry):
                 targets.append((stage, list(spatial), Attribute(attributes)))
+            else:
+                targets.clear()
         return targets
 
     def sub_cap_sweep(self) -> bool:
@@ -389,11 +400,10 @@ class CaseMaterializer:
         return notes
 
     def peak_case_bytes(self) -> int:
-        """The largest single tensor the whole-volume path holds: the chain's shapes folded through
-        each stage's own map, at ``CASE_ELEMENT_BYTES`` per element. Headers only."""
+        """The largest single tensor the whole-volume path holds: the chain's shapes, channels included,
+        folded through each stage's own map, at ``CASE_ELEMENT_BYTES`` per element. Headers only."""
         if self._peak_case_bytes is None:
             manager = self.manager
-            channels = int(manager.base_shape[0])
             peak = int(np.prod(manager.base_shape, dtype=np.int64))
 
             # Copy 0 carries no draw, copy 1 carries them all, and a draw widens the grid as readily
@@ -402,9 +412,11 @@ class CaseMaterializer:
             if manager._expand is not None or any(group.nb for group in manager.data_augmentations_list):
                 copies.append(1)
             for a in copies:
+                channels = int(manager.base_shape[0])
                 spatial = [int(extent) for extent in manager.base_shape[1:]]
                 attributes = Attribute(manager.stored_attributes)
                 for stage in manager.chain_stages(a):
+                    channels = stage.output_channels(channels)
                     spatial = manager._fold_case_state(stage, list(spatial), attributes)
                     peak = max(peak, channels * int(np.prod(spatial, dtype=np.int64)))
             self._peak_case_bytes = peak * CASE_ELEMENT_BYTES
@@ -417,7 +429,7 @@ class CaseMaterializer:
 
     def reads_its_source_whole(self, a: int = 0, apply_augmentations: bool = False) -> bool | None:
         """Whether a sweep of this case would decode its stored source whole for every region: the
-        store serves no bounded region read (a gzipped NIfTI). ``None`` when the chain cannot stream;
+        store serves no bounded region read (an NRRD). ``None`` when the chain cannot stream;
         a Save cache still to write lands on a store serving bounded reads, so it never counts."""
         segments = self.manager.sweep_segments(a, apply_augmentations)
         if segments is None:

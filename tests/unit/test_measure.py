@@ -412,8 +412,9 @@ class TestDiceConfusionMatrix:
                 counts[name] = len(caught)
         finally:
             torch.cuda.set_sync_debug_mode("default")
-        # forward + partial_metric: bincount (one sync each) and one .tolist() each, never one per label.
-        assert counts["soft"] <= 8 and counts["hard"] <= 12, counts
+        # forward + partial_metric: bincount (one sync each) and one .tolist() each, never one per label;
+        # the soft route adds its first call's range check, one sync per criterion.
+        assert counts["soft"] <= 10 and counts["hard"] <= 12, counts
 
 
 class TestSaveMaps:
@@ -640,6 +641,33 @@ class TestSSIM:
         with pytest.raises(MeasureError, match="7-voxel window"):
             SSIM(dynamic_range=1.0)(torch.rand(1, 1, 6, 9, 9), torch.rand(1, 1, 6, 9, 9))
 
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_as_a_loss_it_minimises_one_minus_the_metric(self, masked):
+        x, y = self._pair("masked" if masked else "random", (14, 13, 12))
+        output = torch.tensor(np.stack([x, x[::-1].copy()]))[:, None]
+        target = torch.tensor(np.stack([y, y]))[:, None]
+        mask = [torch.ones_like(target, dtype=torch.uint8)] if masked else []
+        if masked:
+            mask[0][1] = 0  # an empty item is skipped, as the metric skips it
+            mask[0][0, :, :4] = 0
+        metric = SSIM(dynamic_range=4095.0)(output, target, *mask)[1]
+        loss_form = SSIM(dynamic_range=4095.0)
+        loss_form.as_loss = True
+
+        loss, value = loss_form(output.requires_grad_(), target, *mask)
+
+        assert loss.requires_grad
+        assert float(value) == pytest.approx(metric, abs=1e-12)
+        assert float(loss.detach()) == pytest.approx(1 - metric, abs=1e-6)
+
+    def test_the_loss_gradient_is_the_derivative_of_the_ssim(self):
+        torch.manual_seed(0)
+        target = torch.rand(1, 8, 8, 9, dtype=torch.float64)
+        mask = torch.rand(1, 8, 8, 9) > 0.3
+        output = (target + 0.1 * torch.randn_like(target)).requires_grad_()
+
+        assert torch.autograd.gradcheck(lambda o: SSIM._differentiable_ssim(o, target, mask, 2.0), (output,))
+
 
 class TestVariance:
     def test_single_channel_reports_zero(self):
@@ -694,13 +722,63 @@ def test_perceptual_loss_forward_unpacks_targets() -> None:
     assert torch.is_tensor(recorded["targets"][0])
 
 
+class _PerceptualFeatures(torch.nn.Module):
+    """The feature network a PerceptualLoss model loader hands over: one weight, loaded from the
+    checkpoint's state dict."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    def get_name(self) -> str:
+        return "Features"
+
+    def load(self, state_dict: dict) -> None:
+        self.weight.data.copy_(state_dict["weight"])
+
+
+class _PerceptualLoader:
+    def get_model(self, **_: object) -> _PerceptualFeatures:
+        return _PerceptualFeatures()
+
+
+class _Payload:
+    """A pickle that creates a file when it is loaded: the witness of a full unpickle."""
+
+    def __init__(self, witness: str) -> None:
+        self.witness = witness
+
+    def __reduce__(self):
+        return (open, (self.witness, "w"))
+
+
+def test_perceptual_loss_loads_a_downloaded_checkpoint_as_weights_only(tmp_path, monkeypatch) -> None:
+    # A checkpoint fetched over https is untrusted (safe_torch_load's rule): a full unpickle of it
+    # runs whatever code the file carries.
+    import pickle
+    import shutil
+
+    witness = tmp_path / "unpickled"
+    payload = tmp_path / "payload.pt"
+    torch.save({"model": _Payload(str(witness))}, payload)
+    monkeypatch.setattr(torch.hub, "_hub_dir", str(tmp_path / "hub"))
+    monkeypatch.setattr(torch.hub, "download_url_to_file", lambda url, dst, *_, **__: shutil.copyfile(payload, dst))
+    monkeypatch.setenv("KONFAI_CONFIG_PATH", "Trainer.PerceptualLoss")
+
+    with pytest.raises(Exception) as refused:
+        PerceptualLoss(model_loader=_PerceptualLoader(), path_model="https://example.invalid/f.pt", modules={})
+
+    assert not witness.exists(), "the downloaded checkpoint was unpickled in full"
+    assert isinstance(refused.value, pickle.UnpicklingError)
+
+
 def test_missing_metric_dependency_raises_actionable_error():
     """Optional criterion deps must surface an actionable MeasureError, not ImportError."""
     with pytest.raises(MeasureError) as excinfo:
-        _require_optional("konfai_definitely_missing_pkg_zzz", criterion="SSIM", extra="ssim")
+        _require_optional("konfai_definitely_missing_pkg_zzz", criterion="LPIPS", extra="lpips")
     message = str(excinfo.value)
-    assert "SSIM" in message
-    assert "konfai[ssim]" in message
+    assert "LPIPS" in message
+    assert "konfai[lpips]" in message
 
 
 class TestImpactRegPCA:
@@ -922,6 +1000,32 @@ def test_accepts_init_flag_lives_on_the_criterion_not_the_attr() -> None:
     assert getattr(CriterionsAttr(), "accepts_init", False) is False
 
 
+def _latent(batch: int = 4, latent_dim: int = 5) -> torch.Tensor:
+    """A ``LatentDistribution.Concat`` output: ``[B, 3, L]`` holding mu, the log-variance and z."""
+    generator = torch.Generator().manual_seed(0)
+    return torch.randn(batch, 3, latent_dim, generator=generator)
+
+
+def test_kl_divergence_is_taken_against_the_configured_prior() -> None:
+    output = _latent()
+    posterior = torch.distributions.Normal(output[:, 0], torch.exp(output[:, 1] / 2))
+    prior = torch.distributions.Normal(torch.tensor(1.0), torch.tensor(2.0))
+    expected = torch.distributions.kl_divergence(posterior, prior).sum(dim=1).mean()
+    assert torch.allclose(KLDivergence(shape=[4], dim=5, mu=1.0, std=2.0)(output), expected, atol=1e-6)
+
+
+def test_kl_divergence_against_the_standard_normal_is_the_closed_form() -> None:
+    output = _latent()
+    mu, log_var = output[:, 0, :], output[:, 1, :]
+    closed_form = torch.mean(-0.5 * torch.sum(1 + log_var - mu**2 - torch.exp(log_var), dim=1), dim=0)
+    assert torch.equal(KLDivergence(shape=[4], dim=5)(output), closed_form)
+
+
+def test_kl_divergence_refuses_a_prior_without_spread() -> None:
+    with pytest.raises(MeasureError, match="std must be positive"):
+        KLDivergence(shape=[4], std=0)
+
+
 class TestSSIMFromHaloPatches:
     """SSIM is reducible from patches read with the window's radius of halo, each scoring the map
     voxels centred in its own grid slot: the streamed sum equals the whole-volume sum to float64
@@ -991,8 +1095,7 @@ class TestSSIMFromHaloPatches:
 
 
 class TestCriterionResult:
-    """The one normalizer of every shape a criterion may return (the boundary a bare numpy float
-    once slipped through, crashing the training-time consumer)."""
+    """The one normalizer of every shape a criterion may return, a bare numpy float included."""
 
     def test_a_bare_tensor_is_the_loss_and_its_detached_value(self):
         loss = torch.tensor(0.5, requires_grad=True) * 2
@@ -1142,6 +1245,32 @@ class TestLPIPSBatch:
         assert float(value) == pytest.approx(float(expected))
         assert float(value) > 0.0  # not just the first (identical) sample
 
+    def test_a_2d_image_is_scored_as_a_volume_of_one_slice(self, monkeypatch):
+        # LPIPS tiles a volume slice by slice with a [1, 320, 320] patch, which a 2-D image (or a
+        # 2-D patch of a volume) has one axis too few for: it was refused with a DatasetManagerError.
+        import sys
+        import types
+
+        from konfai.metric.measure import LPIPS
+
+        stub = types.ModuleType("lpips")
+        stub.LPIPS = lambda net: self._StubLpips()  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "lpips", stub)
+        torch.manual_seed(0)
+        x, y = torch.rand(2, 1, 40, 40), torch.rand(2, 1, 40, 40)
+
+        value = LPIPS()(x, y)[1]
+
+        assert float(value) == pytest.approx(float(LPIPS()(x.unsqueeze(2), y.unsqueeze(2))[1]))
+        assert float(value) > 0.0
+
+    class _AlexNetLayoutStub(_StubLpips):
+        """Takes only what lpips' AlexNet takes: a [B, 3, H, W] pair."""
+
+        def forward(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            assert a.dim() == 4 and a.shape[1] == 3, f"handed {tuple(a.shape)}, not [B, 3, H, W]"
+            return super().forward(a, b)
+
 
 class TestFocalLossAlpha:
     def test_default_alpha_is_uniform_for_any_class_count(self):
@@ -1167,32 +1296,19 @@ class TestFocalLossAlpha:
         assert "alpha" in dict(focal.named_buffers())
 
 
-class TestImpactMaskSniffing:
-    def test_a_non_binary_uint8_target_is_refused(self):
-        from konfai.metric.measure.impact import _sniffed_mask
+@pytest.mark.parametrize("criterion", [MAE(), MSE(), Dice(labels=[1])], ids=["MAE", "MSE", "Dice"])
+def test_a_mask_counts_every_voxel_that_is_not_zero(criterion) -> None:
+    """A mask stored 0/255, as an 8-bit export writes it: any value but 0 is inside, so it scores as
+    its 0/1 twin, and two masks combine as an AND (a uint8 product wraps: 16 x 16 is 0)."""
+    torch.manual_seed(3)
+    labels = isinstance(criterion, Dice)
+    output = (torch.rand(1, 1, 8, 8) > 0.5).long() if labels else torch.rand(1, 1, 8, 8)
+    target = (torch.rand(1, 1, 8, 8) > 0.5).long() if labels else torch.rand(1, 1, 8, 8)
+    mask = (torch.rand(1, 1, 8, 8) > 0.5).to(torch.uint8)
 
-        image = torch.rand(1, 1, 4, 4)
-        eight_bit = (torch.rand(1, 1, 4, 4) * 255).to(torch.uint8)
-
-        with pytest.raises(MeasureError, match="values above 1"):
-            _sniffed_mask((image, eight_bit), eight_bit)
-
-    def test_a_binary_uint8_target_is_the_mask(self):
-        from konfai.metric.measure.impact import _sniffed_mask
-
-        image = torch.rand(1, 1, 4, 4)
-        mask = (torch.rand(1, 1, 4, 4) > 0.5).to(torch.uint8)
-
-        assert _sniffed_mask((image, mask), mask) is mask
-        assert _sniffed_mask((image, image), image) is None  # not uint8: no mask
-
-    def test_the_scored_target_itself_cannot_be_the_mask(self):
-        from konfai.metric.measure.impact import _sniffed_mask
-
-        only = (torch.rand(1, 1, 4, 4) > 0.5).to(torch.uint8)
-
-        with pytest.raises(MeasureError, match="both the scored target and its mask"):
-            _sniffed_mask((only,), only)
+    expected = _scores(criterion, output, target, mask)
+    assert _scores(criterion, output, target, mask * 255) == expected
+    assert _scores(criterion, output, target, mask * 16, torch.full_like(mask, 16)) == expected
 
 
 def test_impact_stats_are_what_the_torchscript_models_read() -> None:
@@ -1207,8 +1323,8 @@ def test_impact_stats_are_what_the_torchscript_models_read() -> None:
 
 
 def test_impact_scores_a_batch_one_sample_at_a_time_with_its_own_statistics() -> None:
-    # A model reads the statistics it is handed only when numel() == 4, so a whole batch at once left
-    # every sample normalized by the batch's min/max (MIND) or mean/std (the MRI TS models).
+    # A model reads the statistics it is handed only when numel() == 4: a sample at a time, each is
+    # normalized by its own min/max (MIND) or mean/std (the MRI TS models), not by the batch's.
     from konfai.metric.measure.impact import ImpactFeatureModel
 
     seen: list[list[float]] = []
@@ -1237,6 +1353,118 @@ def test_psnr_and_ssim_share_the_ct_dynamic_range_default() -> None:
     from konfai.metric.measure import PSNR
 
     assert PSNR()._dynamic_range == SSIM()._dynamic_range == 4095.0
+
+
+def _measure_from_config(tmp_path, monkeypatch, criterions_loader: dict):
+    """The Measure a network builds for ``out`` scored against ``ref`` by ``criterions_loader``, bound from
+    a Config.yml as training binds it, and the config file."""
+    from types import SimpleNamespace
+
+    import yaml
+    from konfai.network.network import Measure, TargetCriterionsLoader
+    from konfai.utils.config import apply_config, strict_config
+
+    config = tmp_path / "Config.yml"
+    targets = {"targets_criterions": {"ref": {"criterions_loader": criterions_loader}}}
+    config.write_text(yaml.safe_dump({"Trainer": {"Model": {"Net": {"outputs_criterions": {"out": targets}}}}}))
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+
+    def net(outputs_criterions: dict[str, TargetCriterionsLoader]) -> dict[str, TargetCriterionsLoader]:
+        return outputs_criterions
+
+    with strict_config("Trainer"):
+        measure = Measure("Net", apply_config("Trainer.Model.Net")(net)())
+    measure.init(SimpleNamespace(named_module_args_dict=lambda: iter([("out", None, None)])), ["ref"])
+    return measure, config
+
+
+def _train_step(measure, output: torch.Tensor, target: torch.Tensor) -> None:
+    from konfai.utils.dataset import Attribute
+
+    measure.update("out", output, {"ref": (target, [Attribute()])}, it=0, nb_patch=1, training=True)
+    sum(measure.get_loss()).backward()
+
+
+def _criterion_yaml(config) -> dict:
+    import yaml
+
+    tree = yaml.safe_load(config.read_text())
+    return tree["Trainer"]["Model"]["Net"]["outputs_criterions"]["out"]["targets_criterions"]["ref"]
+
+
+def test_psnr_listed_without_is_loss_is_a_metric(tmp_path, monkeypatch) -> None:
+    # PSNR rises as the output nears the target: minimising it drives the output away.
+    measure, config = _measure_from_config(tmp_path, monkeypatch, {"PSNR": {"dynamic_range": 1.0}})
+    target = torch.rand(1, 1, 8, 8)
+    output = (target + 0.1 * torch.randn_like(target)).requires_grad_()
+
+    _train_step(measure, output, target)
+
+    assert output.grad is None, (
+        f"PSNR was minimised: grad . (output - target) = {(output.grad * (output - target)).sum()}"
+    )
+    assert list(measure.format_loss(False, 1)) == ["out:ref:PSNR"]
+    assert _criterion_yaml(config)["criterions_loader"]["PSNR"]["is_loss"] is False
+
+
+def test_psnr_as_a_loss_is_refused(tmp_path, monkeypatch) -> None:
+    with pytest.raises(MeasureError, match="PSNR is a metric"):
+        _measure_from_config(tmp_path, monkeypatch, {"PSNR": {"is_loss": True}})
+
+
+def test_ssim_as_a_loss_raises_the_ssim(tmp_path, monkeypatch) -> None:
+    measure, _ = _measure_from_config(tmp_path, monkeypatch, {"SSIM": {"is_loss": True, "dynamic_range": 1.0}})
+    torch.manual_seed(0)
+    target = torch.rand(1, 1, 12, 12, 12)
+    output = (target + 0.2 * torch.randn_like(target)).requires_grad_()
+
+    _train_step(measure, output, target)
+
+    assert output.grad is not None, "SSIM as a loss back-propagated nothing"
+    step = 1e-2 * output.grad / output.grad.norm()
+    assert (
+        SSIM(dynamic_range=1.0)(output.detach() - step, target)[1] > SSIM(dynamic_range=1.0)(output.detach(), target)[1]
+    )
+
+
+def test_a_criterion_listed_without_is_loss_is_still_a_loss(tmp_path, monkeypatch) -> None:
+    measure, config = _measure_from_config(tmp_path, monkeypatch, {"MAE": {}})
+    output = torch.zeros(1, 1, 4, 4, requires_grad=True)
+
+    _train_step(measure, output, torch.ones(1, 1, 4, 4))
+
+    assert output.grad is not None
+    assert _criterion_yaml(config)["criterions_loader"]["MAE"]["is_loss"] is True
+
+
+def _lpips_backend(monkeypatch, backend: str) -> None:
+    """The lpips package LPIPS builds on: the real one, or a stub scoring the mean absolute difference."""
+    import sys
+    import types
+
+    if backend == "lpips":
+        pytest.importorskip("lpips")
+        return
+    stub = types.ModuleType("lpips")
+    stub.LPIPS = lambda net: TestLPIPSBatch._StubLpips()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "lpips", stub)
+
+
+def _lpips_in(measure):
+    (criterion,) = measure.outputs_criterions["out"]["ref"]
+    return criterion
+
+
+@pytest.mark.parametrize(("is_loss", "as_loss"), [({}, True), ({"is_loss": True}, True), ({"is_loss": False}, False)])
+def test_lpips_takes_its_role_from_the_config(tmp_path, monkeypatch, is_loss, as_loss) -> None:
+    # Left out, LPIPS is a loss, as every criterion is but PSNR and SSIM.
+    _lpips_backend(monkeypatch, "stub")
+    measure, config = _measure_from_config(tmp_path, monkeypatch, {"LPIPS": is_loss})
+
+    assert _lpips_in(measure).as_loss is as_loss
+    assert _criterion_yaml(config)["criterions_loader"]["LPIPS"]["is_loss"] is as_loss
 
 
 def test_criterion_result_refuses_a_misshaped_labelled_pair() -> None:
@@ -1316,6 +1544,21 @@ class TestDiceLabelDtypes:
         with pytest.raises(MeasureError, match="2\\^63"):
             Dice()(labels, labels)
 
+    def test_a_one_channel_float_label_map_scores_as_labels(self):
+        labels = torch.tensor([[[[0.0, 1.0], [2.0, float("nan")]]]])
+        reference = torch.tensor([[[[0, 1], [2, 2]]]])
+        assert Dice()(labels, reference)[1] == {1: pytest.approx(1.0), 2: pytest.approx(2 / 3)}
+
+    def test_a_one_channel_probability_map_is_refused(self):
+        # One channel is read as a label map: a sigmoid probability truncated to int64 was nearly all
+        # background, a Dice near 0 and a loss of 1 without gradient, reported as a valid score.
+        reference = torch.tensor([[[[0, 1], [1, 1]]]])
+        probability = torch.tensor([[[[0.1, 0.9], [0.8, 0.7]]]], requires_grad=True)
+        with pytest.raises(MeasureError, match="non-integer"):
+            Dice()(probability, reference)
+        with pytest.raises(MeasureError, match="non-integer"):
+            Dice().partial_metric(probability, reference)
+
 
 def test_checkpoint_preserves_bounded_measure_history_and_plateau_decisions(tmp_path):
     from konfai.network.network import Measure, Network
@@ -1389,3 +1632,82 @@ def test_a_window_learns_while_any_step_of_its_losses_is_finite() -> None:
     assert not measure_of([0.4, nan, nan]).learns(2)  # the window is the last two steps
     assert measure_of([nan]).learns(3)  # a window not yet full is not judged
     assert not measure_of([nan, nan], metrics=[0.9, 0.9]).learns(2)  # a finite metric is no loss
+
+
+@pytest.mark.parametrize(
+    "score",
+    [
+        lambda output: MAE()(output),
+        lambda output: MAE().partial_metric(output),
+        lambda output: SSIM(dynamic_range=1.0)(output),
+    ],
+    ids=["MAE", "MAE-partial", "SSIM"],
+)
+def test_a_criterion_given_no_target_is_a_designed_refusal(score) -> None:
+    """A target group missing from the configuration is reported, not raised as a bare ValueError."""
+    with pytest.raises(MeasureError, match="target"):
+        score(torch.rand(1, 1, 4, 4))
+
+
+def test_impact_synth_given_one_target_is_a_designed_refusal() -> None:
+    from konfai.metric.measure.impact import IMPACTSynth
+
+    with pytest.raises(MeasureError, match="content and the style"):
+        IMPACTSynth.forward(
+            IMPACTSynth.__new__(IMPACTSynth), torch.rand(1, 1, 4, 4), torch.rand(1, 1, 4, 4), attributes=[[]]
+        )
+
+
+def test_dice_refuses_logits_on_its_first_call_and_scores_probabilities() -> None:
+    """A multi-channel output is read as probabilities: logits (no Softmax) are refused by their
+    range on the first call, a softmax passes and is scored."""
+    logits = torch.tensor([[[3.0, -2.0], [-1.0, 4.0]]]).permute(0, 2, 1)  # [1, 2 channels, 2 voxels]
+    target = torch.tensor([[[0, 1]]])
+    with pytest.raises(MeasureError, match="probabilities"):
+        Dice()(logits, target)
+    loss, _ = Dice()(torch.softmax(logits, dim=1), target)
+    assert 0.0 <= float(loss) <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("version", "tagged", "revisions", "said"),
+    [
+        ("1.9.0", True, ["v1.9.0"], "at v1.9.0, commit abc123"),
+        ("1.9.0", False, ["v1.9.0", None], "at main, commit abc123"),
+        ("1.9.1.dev3", True, [None], "at main, commit abc123"),
+    ],
+    ids=["tagged-release", "untagged-release", "development"],
+)
+def test_an_impact_model_is_downloaded_at_the_release_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    version: str,
+    tagged: bool,
+    revisions: list[object],
+    said: str,
+) -> None:
+    """A released konfai scores with the weights published under its own tag when the repository
+    carries it, else with main, and says which commit it took; no network, no Hugging Face cache."""
+    import importlib.metadata
+
+    errors = pytest.importorskip("huggingface_hub.errors")
+    from konfai.metric.measure import impact
+
+    asked: list[object] = []
+
+    class NoSuchRevision(errors.RevisionNotFoundError):
+        def __init__(self) -> None:  # the Hub's error wants a response; the class is what is caught
+            Exception.__init__(self, "no such revision")
+
+    def download(repo_id: str, filename: str, repo_type: str, revision: object) -> str:
+        asked.append(revision)
+        if revision is not None and not tagged:
+            raise NoSuchRevision()
+        return f"/cache/models--x/snapshots/abc123/{filename}"
+
+    monkeypatch.setattr(impact, "_hf_hub_download", lambda criterion: download)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: version)
+
+    assert impact._download_model("IMPACT", "VBoussot/x", "M.pt") == "/cache/models--x/snapshots/abc123/M.pt"
+    assert asked == revisions
+    assert said in capsys.readouterr().out

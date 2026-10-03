@@ -1,6 +1,7 @@
 # Evaluation configuration
 
-Evaluation configuration lives under the `Evaluator` root object.
+Evaluation compares predictions with references. It is configured under the `Evaluator` root, in
+`Evaluation.yml`.
 
 ```yaml
 Evaluator:
@@ -18,30 +19,20 @@ Evaluator:
 
 ## Running it
 
-From the directory that contains `Evaluation.yml`:
-
 ```bash
 konfai EVALUATION -y --config Evaluation.yml
 ```
 
-The output directory is controlled by `Evaluator.train_name` in the YAML and
-`--evaluations-dir` on the CLI.
+The results go to `Evaluations/<train_name>/` (`--evaluations-dir` moves them).
 
-Evaluation persists per case as it goes: each rank appends finished cases to a
-`*.cases.rank<N>.jsonl` file beside the metric JSON, so a rerun after an
-interruption pays only the cases that are not yet recorded.
-
-## Top-level fields
-
-| Field | Type | Default in code | Required | Effect |
-| --- | --- | --- | --- | --- |
-| `metrics` | mapping | default target criterions loader | Yes in practice | Declares what metrics should be computed and between which groups. |
-| `Dataset` | mapping | `DataMetric()` | Yes | Defines how targets and predictions are loaded. |
-| `train_name` | string | `TRAIN_01` | Yes in practice | Names the evaluation output folder. |
+- **Resume.** Each finished case is recorded as it goes, so a rerun only scores the missing cases. A case
+  scored with other metrics than the config now names is scored again.
+- **Unreadable files.** A case whose prediction or reference cannot be read is set aside with a warning; the
+  others are scored, and the results list it under `set_aside`. A split where no case can be read fails.
 
 ## `metrics`
 
-The evaluation structure mirrors `outputs_criterions`, but without the model.
+`metrics` has the shape of `outputs_criterions`, with groups instead of model outputs:
 
 ```yaml
 metrics:
@@ -52,112 +43,59 @@ metrics:
           MAE:
             reduction: mean
           PSNR:
-            dynamic_range: None
+            dynamic_range: 4095
 ```
 
-Structure:
+The key is the group to evaluate (the prediction); `targets_criterions` names the reference groups (joined
+with `;`, here a CT and a mask); `criterions_loader` lists the metrics
+({doc}`../reference/components/losses-metrics`).
 
-- output group → the predicted group to evaluate
-- `targets_criterions` → one or more target groups, optionally composed with `;`
-- `criterions_loader` → one or more metric implementations
+**Same grid.** A prediction and a reference compared voxel by voxel must have the same shape: otherwise the
+case is refused with both shapes. `Dice` and `FocalLoss` resample the reference themselves, and metrics that
+do not compare voxels (`Mean`, `KLDivergence`, `TRE` on landmarks) are not checked. When the shapes match but
+the origin, spacing or direction differ, each voxel is compared with one at another place: the case is scored
+and a warning names the differences. Put both on one grid first, with a `Resample` onto the reference.
 
-Some metrics also accept attributes or write auxiliary datasets. This behavior is
-implemented in `konfai.evaluator.Evaluator.update()` and `konfai.metric.measure`.
+## Fields
 
-## `Evaluator.Dataset`
-
-Evaluation datasets are instantiated through `DataMetric`.
-
-Common fields:
-
-| Field | Type | Effect |
+| Field | Default | Effect |
 | --- | --- | --- |
-| `dataset_filenames` | list[str] | Pairs or merges the datasets needed for evaluation. |
-| `groups_src` | mapping | Defines how the compared tensors are loaded. |
-| `subset` | string / list / null | Restricts evaluated cases: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
-| `validation` | string / list / null | Optional validation selector for a separate JSON report. Supports a case-list file, a list of case names, or a list of case-list files. |
+| `metrics` | | What to compute, between which groups. |
+| `Dataset` | | The predictions and references (below). |
+| `train_name` | `TRAIN_01` | Names the output folder. |
 
-### `memory_budget`: memory-bounded evaluation
+Under `Dataset:`:
 
-Evaluation bounds itself by default: an absent `memory_budget` means `auto`
-(80% of the detected memory), and explicit values (a bare number in GiB,
-`"24GB"`) narrow it. Each run sizes itself from image headers alone: a case that
-fits the budget is evaluated whole, and a case that does not is cut into the largest
-DISJOINT patches that fit. Metrics accumulate running partial sums per patch and
-combine them into the exact whole-case value (never a mean of per-patch values).
-MAE, MSE, ME, PSNR, SSIM and Dice (masked or not) support this, and the SaveMap
-error maps stream region by region into their `dataset` (mha, h5 or omezarr). One
-caveat on the first two: `MAE` and `MSE` are reducible only for `reduction: mean` or
-`sum`, so a `reduction: none` on either forces the whole-volume path for the whole
-run, by the same rule as a non-reducible metric below.
+| Field | Effect |
+| --- | --- |
+| `dataset_filenames` | The datasets to read, usually the references and the predictions joined with `:i:` ({doc}`index`). |
+| `groups_src` | The groups and their transforms. A group without `transforms` is compared as stored. |
+| `subset` | Which cases to score. |
+| `validation` | Cases scored in a separate `Metric_VALIDATION.json`. |
+| `memory_budget` | Memory per case (`auto` by default, 80% of the machine). A case too large is scored in patches. |
+| `num_workers`, `pin_memory`, `prefetch_factor`, `persistent_workers` | DataLoader settings, as in prediction. |
 
-A metric that scores each voxel through a window declares the window's radius as
-its `halo`, and the reader serves it: SSIM (7-voxel window) declares 3, so every
-patch is read 3 voxels past each face of its slot, clamped at the volume's faces,
-and the sizing counts that band in the budget. SSIM sums the map voxels centred
-in the slot, which is exactly the whole-volume map's share of it (the whole-volume
-map is cropped by the same radius at the faces); the metrics without a halo see
-the slot alone, so their values are the ones they had without SSIM in the run.
-A custom metric declares `halo` beside `reducible` and receives `core=` in
-`partial_metric`, the slot's slices within the patch it is handed.
-One metric that cannot recombine (LPIPS, or any custom metric that does not
-declare `reducible`) keeps the whole-volume path for the entire run: correct
-beats bounded. Evaluation streams its data whatever the budget says, one pass,
-a cache is never re-read; in training the same budget also picks cache versus
-streaming.
+Scoring a large case in patches gives the whole-case value (not a mean of patch values) for `MAE`, `MSE`,
+`ME`, `PSNR`, `SSIM` and `Dice`, to float32 rounding. A metric that cannot be split this way (`LPIPS`, a
+custom metric without `reducible`) makes the whole run read cases whole.
 
 ## Output files
 
-Evaluation writes JSON files, not CSV files. The main outputs are:
+- `Metric_TRAIN.json`, and `Metric_VALIDATION.json` when `validation` is set.
+- `case`: the value of each metric for each case.
+- `aggregates`: mean, standard deviation, percentiles, minimum, maximum and count.
+- `directions`: for each metric, whether higher (`max`) or lower (`min`) is better.
+- `set_aside`: the cases that could not be read, with the error, when there are some.
 
-- `Metric_TRAIN.json`
-- optionally `Metric_VALIDATION.json`
+A split that took more than a second ends with one line saying where the time went: loading, and each
+metric.
 
-The JSON structure contains:
+## Common mistakes
 
-- per-case values under `case`
-- aggregated statistics under `aggregates`, such as mean, std, percentiles,
-  min, max, and count
-- `directions`: per metric, `"max"` or `"min"`, emitted whenever a metric declares
-  one so a consumer can rank runs without guessing which way is better
-
-This behavior comes from `konfai.evaluator.Statistics.write()`.
-
-### Where the split's time went
-
-A split that ran for more than a second closes with a line accounting for it,
-phase by phase, in the rank's log:
-
-```text
-[KonfAI] evaluation TRAIN 4.0 s = wait(load) 0.6 + h2d 0.2 + MAE 0.2 + PSNR 0.1 + SSIM 2.5 + map 0.3 + other 0.1
-```
-
-`wait(load)` is the wait for the loader's next case or patch, `h2d` the move to
-the metric device, then one figure per metric name, `map` the error-map writes of
-the SaveMap metrics and `flush` the combination of a streamed case's partial
-states; what the named phases do not account for is `other`, so the sum closes
-exactly. A phase that spent nothing is left out: the run above read its cases
-whole, so it carries no `flush`. On a GPU a metric's figure is the time to
-enqueue its kernels, not to run them: a slow kernel shows up in whatever next
-waits on the device, typically the next `h2d` or a metric that reads a value
-back.
+- The evaluation still points at an old prediction folder.
+- The labels named in the metric do not match those in the data.
 
 ## Examples
 
-See:
-
 - `examples/Segmentation/Evaluation.yml`
 - `examples/Synthesis/Evaluation.yml`
-
-## Troubleshooting
-
-Common evaluation mistakes:
-
-- the evaluation file still points to an old prediction folder
-- label definitions in the metric do not match the dataset encoding
-
-## Next steps
-
-- {doc}`index`: the `dataset_filenames` merge flags and the
-  `validation` selector used here.
-- {doc}`prediction`: to produce the prediction dataset this file scores.

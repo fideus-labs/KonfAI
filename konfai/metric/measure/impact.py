@@ -18,6 +18,7 @@
 """The IMPACT feature criteria over TorchScript extractors."""
 
 import contextlib
+import importlib.metadata
 import json
 import math
 import os
@@ -39,7 +40,7 @@ from konfai.metric.measure.base import CriterionWithAttribute, _require_optional
 from konfai.utils.config import apply_config
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import MeasureError
-from konfai.utils.utils import get_module
+from konfai.utils.utils import get_module, module_attribute
 from konfai.utils.vram import halve_on_oom
 
 
@@ -62,23 +63,45 @@ def no_texpr_fuser() -> Iterator[None]:
         torch._C._jit_set_texpr_fuser_enabled(previous)
 
 
-def _sniffed_mask(targets: tuple[torch.Tensor, ...], candidate: torch.Tensor) -> torch.Tensor | None:
-    """The uint8-mask convention, checked: a target sniffed as a mask must be a {0, 1} map and a
-    tensor of its own, never the scored target itself (an 8-bit intensity target would otherwise be
-    consumed as a mask in silence)."""
-    if candidate.dtype != torch.uint8:
+def _release_tag() -> str | None:
+    """``v<konfai version>`` for a released konfai, the tag its models are published under; ``None``
+    for a development build, which follows ``main``."""
+    try:
+        version = importlib.metadata.version("konfai")
+    except importlib.metadata.PackageNotFoundError:
         return None
-    if candidate is targets[0]:
-        raise MeasureError(
-            "The only target is uint8, so it would be read as both the scored target and its mask.",
-            "Pass the image target first and the {0, 1} uint8 mask last, or cast the image off uint8.",
-        )
-    if bool(torch.any(candidate > 1)):
-        raise MeasureError(
-            "A uint8 target is read as a foreground mask, but it holds values above 1.",
-            "IMPACT masks are {0, 1} uint8 maps; cast an 8-bit intensity target to another dtype.",
-        )
-    return candidate
+    return None if ".dev" in version or "+" in version else f"v{version}"
+
+
+def _download_model(criterion: str, repo_id: str, filename: str) -> str:
+    """``filename`` of the Hugging Face ``repo_id`` at the tag of this konfai release when the
+    repository carries it, else at ``main``. The commit resolved is printed, so a run says which
+    weights it scored with."""
+    download = _hf_hub_download(criterion)
+    errors = _require_optional("huggingface_hub", criterion=criterion, extra="all").errors
+    tag = _release_tag()
+    path = None
+    if tag is not None:
+        try:
+            path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=tag)  # nosec B615
+        except (errors.RevisionNotFoundError, errors.LocalEntryNotFoundError):
+            tag = None  # not published under this release (or not downloaded, offline): main
+    if path is None:
+        path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+    parts = Path(path).parts
+    commit = parts[parts.index("snapshots") + 1] if "snapshots" in parts else "unknown"
+    print(f"[KonfAI] {criterion}: {repo_id}/{filename} at {tag or 'main'}, commit {commit}.", flush=True)
+    return path
+
+
+def _load_frozen(model_path: str) -> torch.nn.Module:
+    """The TorchScript extractor at ``model_path``, on the CPU, in eval mode and with its weights frozen: a fixed
+    feature space, whose weights no optimizer holds, so a gradient for them is never used. A ScriptModule refuses
+    requires_grad_, its parameters do not."""
+    model = torch.jit.load(model_path, map_location="cpu").eval()  # nosec B614
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    return model
 
 
 def _check_feature_model(
@@ -266,14 +289,14 @@ class Distance(torch.nn.Module):
 
     def forward(self, moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         if mask is not None:
-            mask = F.interpolate(mask.float(), size=tuple(moved.shape[2:]), mode="nearest")
+            mask = F.interpolate((mask != 0).float(), size=tuple(moved.shape[2:]), mode="nearest")
         return distance(self.name, moved, fixed, mask, self.kernel)
 
 
 def _feature_mask(mask: torch.Tensor, feature: torch.Tensor) -> torch.Tensor:
-    """The voxels of one sample's feature map a {0,1} mask keeps: the mask nearest-resampled to the map's
+    """The voxels of one sample's feature map a mask keeps (its non-zero voxels): the mask nearest-resampled to the map's
     spatial size, flattened to one boolean per voxel."""
-    return F.interpolate(mask.float(), mode="nearest", size=tuple(feature.shape[2:])).reshape(-1) == 1
+    return F.interpolate(mask.float(), mode="nearest", size=tuple(feature.shape[2:])).reshape(-1) != 0
 
 
 def _patch_views(
@@ -356,7 +379,7 @@ def _masked_feature_loss(
     loss = torch.zeros(1, device=output[0].device, requires_grad=True)
     true_nb = 0
     for output_patch, target_patch, mask_patch in _patch_views(output[0], target[0], mask, patch_shape):
-        if mask_patch is not None and not torch.any(mask_patch == 1):
+        if mask_patch is not None and not torch.any(mask_patch != 0):
             continue
         args = (model, output_patch, target_patch, mask_patch, output[1:], target[1:], weights, loss_function, project)
         if checkpoint:
@@ -827,8 +850,7 @@ class ImpactFeatureModel:
     ) -> "ImpactFeatureModel":
         """The model ``filename`` of the HuggingFace ``repo_id``, probed once on the CPU. ``shape`` is the
         tile, its length the dimension; an entry ``<= 0`` scores the whole tensor instead."""
-        download = _hf_hub_download("IMPACT")
-        model_path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        model_path = _download_model("IMPACT", repo_id, filename)
         tile = shape if all(s > 0 for s in shape) else None
         _check_feature_model(model_path, in_channels, tile or [224] * len(shape), weights)
         return cls(model_path, in_channels, weights, tile, len(shape), denormalize)
@@ -868,7 +890,7 @@ class ImpactFeatureModel:
         """The TorchScript network on ``device``, in float16 there with ``half``; a 2-D one swept over a volume's slices
         along its first spatial axis."""
         if self.model is None:
-            self.model = torch.jit.load(self.model_path, map_location="cpu").eval()  # nosec B614
+            self.model = _load_frozen(self.model_path)
         network = self.model.to(device)
         network = network.half() if self._half(device) else network.float()
         return _SliceSweep(network) if self.dim == 2 else network
@@ -1020,7 +1042,7 @@ class ImpactFeatureModel:
         batch's own min/max (MIND) or mean/std (the MRI TS models), which is another case's intensities.
         """
         if self.model is None:
-            self.model = torch.jit.load(self.model_path, map_location="cpu").eval()  # nosec B614
+            self.model = _load_frozen(self.model_path)
         self.model.to(output.device)
         slices = range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),)
         for sample in range(output.shape[0]):
@@ -1044,6 +1066,9 @@ class IMPACTReg(CriterionWithAttribute):
     voxels; left unset, ``loss`` (a classpath) compares the voxels a mask keeps. Plain torch as well: without
     attributes each image is normalized by its own statistics."""
 
+    batch_mean = True
+    accepts_output_attributes = True
+
     def __init__(
         self,
         name: str = "Reg",
@@ -1063,7 +1088,7 @@ class IMPACTReg(CriterionWithAttribute):
             self.loss = Distance(distance, lncc_kernel)
         else:
             loss_module, loss_class = get_module(loss, "konfai.metric.measure")
-            self.loss = apply_config(os.environ.get("KONFAI_CONFIG_PATH"))(getattr(loss_module, loss_class))()
+            self.loss = apply_config(os.environ.get("KONFAI_CONFIG_PATH"))(module_attribute(loss_module, loss_class))()
         self.pca = int(pca)
         self.model = ImpactFeatureModel.download(model_name, in_channels, weights, shape)
 
@@ -1076,22 +1101,25 @@ class IMPACTReg(CriterionWithAttribute):
         """Both feature maps reduced to their top-``pca`` principal components, fitted on the target (``pca_project``)."""
         return pca_project(output_feature, target_feature, self.pca)
 
-    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
-        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]] | None = None
+    def forward(  # type: ignore[override]  # the added keywords are CriterionWithAttribute's contract
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Attribute]] | None = None,
+        output_attributes: list[Attribute] | None = None,
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
-        mask = _sniffed_mask(targets, targets[-1])
+        # The mask is the target after the image, by position as for every masked criterion (CT;MASK).
+        mask = targets[1] if len(targets) > 1 else None
+        # Plain torch, without attributes: each image is normalized by its own statistics.
         if attributes is None:
-            attributes = [_statistics(output), _statistics(targets[0])]
-        # The prediction and the target share the same intensity space, so a single target attribute
-        # (single-group target such as ``CT``) is reused to normalize both output and target; a second
-        # attribute set is honored when the target is multi-group.
-        target_attributes = attributes[1] if len(attributes) > 1 else attributes[0]
+            attributes, output_attributes = [_statistics(targets[0])], _statistics(output)
+        # An output without statistics of its own (a model output) is read with the target's.
         return _feature_loss_mean(
             self.model.slice_losses(
                 output,
-                attributes[0],
+                attributes[0] if output_attributes is None else output_attributes,
                 targets[0],
-                target_attributes,
+                attributes[0],
                 mask,
                 self.loss,
                 project=self._pca_project if self.pca > 0 else None,
@@ -1100,6 +1128,9 @@ class IMPACTReg(CriterionWithAttribute):
 
 
 class IMPACTSynth(CriterionWithAttribute):
+    batch_mean = True
+    accepts_output_attributes = True
+
     def __init__(
         self,
         model_content_name: str,
@@ -1121,16 +1152,26 @@ class IMPACTSynth(CriterionWithAttribute):
         self.content_loss = torch.nn.MSELoss()
         self.style_loss = Gram()
 
-    def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
-        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    def forward(  # type: ignore[override]  # the added keywords are CriterionWithAttribute's contract
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Attribute]],
+        output_attributes: list[Attribute] | None = None,
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
         if len(targets) < 2:
-            raise ValueError("At least two target tensors are required.")
-        mask = _sniffed_mask(targets, targets[2]) if len(targets) == 3 else None
+            raise MeasureError(
+                "IMPACTSynth compares the output with two targets, the content and the style image.",
+                "Name both groups in its targets_criterions key, content first: 'CT;MR' (a mask may follow).",
+            )
+        mask = targets[2] if len(targets) > 2 else None  # after the content and style images
+        content, style = attributes[0], attributes[1]
+        # An output without statistics of its own (a model output) is read with the content image's.
+        output_content = content if output_attributes is None else output_attributes
         return _feature_loss_mean(
             chain(
-                self.content.slice_losses(output, attributes[0], targets[0], attributes[1], mask, self.content_loss),
-                self.style.slice_losses(output, attributes[2], targets[1], attributes[2], mask, self.style_loss),
+                self.content.slice_losses(output, output_content, targets[0], content, mask, self.content_loss),
+                self.style.slice_losses(output, style, targets[1], style, mask, self.style_loss),
             )
         )
 
@@ -1144,6 +1185,8 @@ class SAM_Perceptual(CriterionWithAttribute):
     applies per-layer ``weights`` (e.g. ``[0, 1, 1, 0]``); a weight of ``0`` skips that layer.
     """
 
+    batch_mean = True
+
     def __init__(
         self,
         train: bool = False,
@@ -1156,14 +1199,13 @@ class SAM_Perceptual(CriterionWithAttribute):
             repo_id, filename = "VBoussot/impact-torchscript-models", f"SAM2.1/{model_name}"
         else:
             repo_id, filename = "VBoussot/ImpactSynth", model_name
-        download = _hf_hub_download("SAM_Perceptual")
-        model_path = download(repo_id=repo_id, filename=filename, repo_type="model", revision=None)  # nosec B615
+        model_path = _download_model("SAM_Perceptual", repo_id, filename)
         self.model = ImpactFeatureModel(model_path, 3, [1.0] * 4 if weights is None else weights, [512, 512], 2)
 
     def forward(  # type: ignore[override]  # the added keyword is CriterionWithAttribute's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
     ) -> tuple[torch.Tensor, float | torch.Tensor]:
-        mask = _sniffed_mask(targets, targets[-1])
+        mask = targets[1] if len(targets) > 1 else None
         # ``targets[0]`` is the reference (e.g. CT), normalized with its own stats; the same stats
         # normalize the prediction since both live in the same intensity space.
         return _feature_loss_mean(

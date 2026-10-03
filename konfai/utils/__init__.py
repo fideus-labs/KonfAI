@@ -33,8 +33,8 @@ class State(Enum):
         return self.value
 
 
-# ``dicom`` and ``ome_zarr`` import pydicom and dask/ngff-zarr at module level; resolved on first
-# attribute access so ``import konfai`` does not pay for them.
+# ``dicom`` and ``ome_zarr`` import pydicom and zarr at module level; resolved on first attribute
+# access so ``import konfai`` does not pay for them.
 _LAZY_SUBMODULES = ("dicom", "ome_zarr")
 
 __all__ = ["State", *_LAZY_SUBMODULES]

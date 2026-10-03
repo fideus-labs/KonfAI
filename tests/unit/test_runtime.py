@@ -29,11 +29,10 @@ import konfai as konfai_module
 import konfai.utils.runtime.distributed as rt_dist
 import konfai.utils.runtime.logging as rt_logg
 import pytest
-import torch
 from konfai.evaluator import Evaluator
 from konfai.predictor import Predictor
 from konfai.trainer import Trainer
-from konfai.utils.errors import EXIT_OUT_OF_MEMORY, ConfigError, KonfAIWarning
+from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -125,6 +124,8 @@ def test_execute_distributed_object_sets_shared_master_port_without_forcing_laun
             return None
 
     class DummyDistributed(DistributedObject):
+        uses_collectives = False  # spawns two ranks on Windows too, which opens no process group
+
         def __init__(self) -> None:
             super().__init__("dummy")
 
@@ -202,6 +203,40 @@ def test_cluster_kwargs_route_the_run_through_submitit_instead_of_spawning(
     assert len(submitted) == 1
 
 
+def test_a_cluster_submission_without_gpus_is_refused_before_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cluster job runs one rank per GPU of each node: without --gpu it has no rank, and it was
+    submitted with zero tasks after setup had already run (and cleared the run's outputs)."""
+    parameters: dict[str, object] = {}
+    setups: list[int] = []
+
+    class Executor:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def update_parameters(self, **kwargs) -> None:
+            parameters.update(kwargs)
+
+        def submit(self, *_args, **_kwargs) -> None:
+            pass
+
+    class Workflow(DistributedObject):
+        def setup(self, world_size: int):
+            setups.append(world_size)
+            self.dataloader = []
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders):
+            raise AssertionError("run_process should not be called on the submitting side")
+
+    monkeypatch.setattr(rt_dist, "Log", lambda *_args, **_kwargs: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *_args, **_kwargs: contextlib.nullcontext())
+    monkeypatch.setitem(sys.modules, "submitit", SimpleNamespace(AutoExecutor=Executor))
+
+    cluster_kwargs = {"name": "job", "memory": 8, "num_nodes": 2, "time_limit": 60}
+    with pytest.raises(ConfigError, match="--gpu"):
+        execute_distributed_object(Workflow("job"), gpu=[], cpu=1, quiet=True, cluster_kwargs=cluster_kwargs)
+    assert setups == [] and parameters == {}
+
+
 def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -221,6 +256,15 @@ def test_get_available_devices_maps_visible_env_ids_to_local_torch_indices(
     assert devices_index == [3, 5]
     assert devices_name == ["GPU0", "GPU1"]
     assert queried_indices == [0, 1]
+
+
+def test_cuda_visible_devices_refuses_a_device_named_by_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A UUID entry (a MIG slice, some containers) has no index ``--gpu`` could name, nor one the
+    launcher could write back."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-3f2a1b4c")
+
+    with pytest.raises(ConfigError, match="CUDA_VISIBLE_DEVICES='GPU-3f2a1b4c'"):
+        konfai_module.cuda_visible_devices()
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +329,7 @@ def test_a_workflow_without_collectives_gets_its_rank_and_no_process_group(monke
     from konfai.transformer import Transformer
 
     assert Transformer.uses_collectives is False
+    assert Predictor.uses_collectives is False
     assert rt_dist.DistributedObject.uses_collectives is True
 
 
@@ -373,6 +418,29 @@ def test_a_multi_node_gloo_world_is_left_to_its_own_interface(monkeypatch):
     assert "GLOO_SOCKET_IFNAME" not in os.environ
 
 
+@pytest.mark.skipif(os.name == "nt", reason="setup_gpu builds no process group on Windows")
+def test_a_multi_node_job_that_cannot_name_its_master_is_refused(monkeypatch):
+    """Without scontrol every node of a cluster job would rendezvous on its own localhost and wait
+    there until the timeout. A single-node job still rendezvous on localhost."""
+    nodes = {"count": 2}
+    monkeypatch.setitem(
+        sys.modules,
+        "submitit",
+        SimpleNamespace(JobEnvironment=lambda: SimpleNamespace(global_rank=2, local_rank=0, num_nodes=nodes["count"])),
+    )
+    monkeypatch.setenv("SLURM_JOB_NODELIST", "node[001-002]")
+    monkeypatch.setattr(rt_dist.shutil, "which", lambda _name: None)
+    initialized = _gloo_rendezvous(monkeypatch)
+
+    with pytest.raises(ConfigError, match="scontrol not found"):
+        rt_dist.setup_gpu(4, None)
+    assert initialized == {}
+
+    nodes["count"] = 1
+    assert rt_dist.setup_gpu(4, None) == (2, 0)
+    assert initialized["init_method"] == "tcp://localhost:29500"
+
+
 def test_synchronize_data_no_dist(monkeypatch):
     """Without an active process group the local data is returned as-is."""
     monkeypatch.setattr(rt_dist.dist, "is_initialized", lambda: False)
@@ -390,7 +458,7 @@ def _run_execute(monkeypatch, obj):
 
 
 def test_execute_seeds_parent_before_setup(monkeypatch):
-    """The parent process (which runs the train/val split) must be seeded."""
+    """The parent process is seeded before ``setup``: two runs with one seed draw the same there."""
 
     recorded = []
 
@@ -688,6 +756,25 @@ def test_record_keeps_detail_in_the_log_without_printing_it(tmp_path, monkeypatc
     assert lines == ["line one", "line two", "printed"]
 
 
+@pytest.mark.parametrize("raised", [ConfigError("'Trainer.Dataset' is empty."), ZeroDivisionError("division by zero")])
+def test_the_run_log_ends_on_why_the_run_failed(tmp_path, monkeypatch, raised: Exception) -> None:
+    """The file ended on the last progress line: the reason a run failed reached the console only."""
+    monkeypatch.setattr(sys, "stdout", _FileLikeMirror())
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+
+    with pytest.raises(type(raised)), rt_dist.Log("RUN", 0):
+        raise raised
+
+    text = (tmp_path / "RUN" / "log_0.txt").read_text()
+    if isinstance(raised, ConfigError):
+        assert text.rstrip().endswith("[Config] 'Trainer.Dataset' is empty.")
+        assert "Traceback" not in text
+    else:
+        assert "Traceback" in text and text.rstrip().endswith("ZeroDivisionError: division by zero")
+
+
 def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path, monkeypatch):
     """A single rank runs inside the launcher's Log on the same file: each line lands there once, and
     KonfAI's warnings and logger records carry the console's own prefix."""
@@ -722,6 +809,61 @@ def test_an_inline_rank_writes_its_log_once_and_warnings_read_as_konfai(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# data_log: the TensorBoard strategies
+# ---------------------------------------------------------------------------
+
+
+def test_data_log_entries_parse_to_a_strategy_and_a_count_per_target() -> None:
+    parsed = rt_logg.DataLog.parse(["CT/IMAGES/5", "Generator:Head:Tanh/VIDEO/2"])
+    assert parsed == {"CT": (rt_logg.DataLog.IMAGES, 5), "Generator.Head.Tanh": (rt_logg.DataLog.VIDEO, 2)}
+
+
+@pytest.mark.parametrize("entry", ["CT/VIDEO", "CT/MOVIE/2", "CT/IMAGES/two"])
+def test_a_malformed_data_log_entry_is_a_config_error_naming_it(entry: str) -> None:
+    with pytest.raises(ConfigError, match=f"'{entry}'") as refusal:
+        rt_logg.DataLog.parse([entry])
+    assert "IMAGES, VIDEO" in str(refusal.value)
+
+
+class _Board:
+    """Keeps what a VIDEO log hands TensorBoard."""
+
+    def add_video(self, name: str, video, it: int) -> None:
+        self.video = video
+
+
+def _normalized(array):
+    return (array - array.min()) / (array.max() - array.min())
+
+
+def test_a_video_log_shows_each_sample_its_own_frames() -> None:
+    """A [B, C, Z, Y, X] layer: one video per sample, a frame per channel, its middle slice in grey."""
+    import numpy as np
+
+    layer = np.random.default_rng(0).random((2, 3, 4, 5, 6))
+    board = _Board()
+    rt_logg.DataLog.VIDEO(board, "CT", layer, 0)
+    assert board.video.shape == (2, 3, 3, 5, 6)
+    for sample in range(2):
+        for frame in range(3):
+            for colour in range(3):
+                np.testing.assert_allclose(board.video[sample, frame, colour], _normalized(layer[sample, frame, 2]))
+
+
+def test_a_video_log_of_three_channels_shows_them_as_the_colours_of_each_frame() -> None:
+    """A [B, T, C, Z, Y, X] layer of three channels: each channel is one colour of its own sample's frame."""
+    import numpy as np
+
+    layer = np.random.default_rng(0).random((2, 2, 3, 4, 5, 6))
+    board = _Board()
+    rt_logg.DataLog.VIDEO(board, "CT", layer, 0)
+    assert board.video.shape == (2, 2, 3, 5, 6)
+    for sample in range(2):
+        for frame in range(2):
+            np.testing.assert_allclose(board.video[sample, frame], _normalized(layer[sample, frame, :, 2]))
+
+
+# ---------------------------------------------------------------------------
 # A single rank runs in this process; more than one still spawns
 # ---------------------------------------------------------------------------
 def _execute_counting(
@@ -740,6 +882,8 @@ def _execute_counting(
     spawned: list[int] = []
 
     class FakeObject(rt_dist.DistributedObject):
+        uses_collectives = False  # spawns several ranks on Windows too, which opens no process group
+
         def __init__(self) -> None:
             super().__init__("fake-inline")
             self.size = size
@@ -806,6 +950,41 @@ def test_the_inline_path_is_the_default(monkeypatch) -> None:
 
     assert ran_here == [0]
     assert spawned == []
+
+
+def test_the_workflow_wrapper_lets_an_interrupt_and_a_refusal_reach_its_caller(monkeypatch) -> None:
+    """The wrapper exits nothing: an in-process caller catches Ctrl+C and a designed refusal as
+    exceptions (the CLI turns them into exit statuses)."""
+    raised: list[BaseException] = []
+
+    def execute(*args, **kwargs):
+        raise raised[-1]
+
+    monkeypatch.setattr(rt_dist, "execute_distributed_object", execute)
+
+    @rt_dist.run_distributed_app
+    def workflow(gpu: list[int] = [], cpu: int = 1):
+        return object()
+
+    for error in (KeyboardInterrupt(), ConfigError("refused")):
+        raised.append(error)
+        with pytest.raises(type(error)):
+            workflow()
+
+
+def test_a_warning_the_build_raises_reaches_an_api_caller(monkeypatch) -> None:
+    """Only the CLI spells a build warning as KonfAI's console does: a Python caller still records it."""
+    import warnings
+
+    monkeypatch.setattr(rt_dist, "execute_distributed_object", lambda *args, **kwargs: None)
+
+    @rt_dist.run_distributed_app
+    def workflow(gpu: list[int] = [], cpu: int = 1):
+        warnings.warn("[Config] Unknown key(s) in the Trainer configuration.", KonfAIWarning, stacklevel=2)
+        return object()
+
+    with pytest.warns(KonfAIWarning, match="Unknown key"):
+        workflow()
 
 
 def _budget_applied(
@@ -938,10 +1117,23 @@ def test_cpu_thread_budget_is_applied_once_per_process(monkeypatch) -> None:
     assert calls == [12]
 
 
-def test_cpu_thread_budget_skips_macos(monkeypatch) -> None:
+def test_cpu_thread_budget_leaves_torch_alone_on_macos(monkeypatch) -> None:
     """On macOS set_num_threads intermittently crashes libomp once any parallel region ran (CI
-    SIGSEGV, whichever workflow called it first); the default stays."""
-    assert _budget_applied(monkeypatch, cores=24, ranks=None, omp=None, platform="darwin") == []
+    SIGSEGV, whichever workflow called it first): torch keeps its default. ITK and zarr, which
+    that crash does not concern, still take the rank's share, or N ranks each use every core."""
+    sitk = pytest.importorskip("SimpleITK")
+    zarr = pytest.importorskip("zarr")
+    before = sitk.ProcessObject.GetGlobalDefaultNumberOfThreads()
+    concurrency = zarr.config.get("async.concurrency") if hasattr(zarr, "config") else None
+    try:
+        assert _budget_applied(monkeypatch, cores=24, ranks="4", omp=None, platform="darwin") == []
+        assert sitk.ProcessObject.GetGlobalDefaultNumberOfThreads() == 6
+        if concurrency is not None:
+            assert zarr.config.get("async.concurrency") == 4
+    finally:
+        sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(before)
+        if concurrency is not None:
+            zarr.config.set({"async.concurrency": concurrency})
 
 
 @pytest.mark.parametrize("cores,expected", [(24, 8), (12, 4), (4, 4), (2, 2), (1, 1)])
@@ -957,6 +1149,42 @@ def test_zarr_keeps_a_small_share_whole(monkeypatch, cores: int, expected: int) 
         assert zarr.config.get("async.concurrency") == expected
     finally:
         zarr.config.set({"async.concurrency": previous})
+
+
+@pytest.mark.parametrize("uses_collectives", [True, False])
+def test_windows_refuses_several_ranks_only_where_they_must_talk(monkeypatch, uses_collectives: bool) -> None:
+    """Windows gets no process group: TRAIN and EVALUATION ranks would each work alone (the metrics
+    counted rank 0's cases only), while ranks that share only the work list still run."""
+    spawned: list[int] = []
+
+    class FakeObject(rt_dist.DistributedObject):
+        def __init__(self) -> None:
+            super().__init__("fake-windows")
+
+        def setup(self, world_size: int) -> None:
+            self.dataloader = [[] for _ in range(world_size)]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            pass
+
+    class WindowsOs:
+        name = "nt"
+
+        def __getattr__(self, attribute: str):
+            return getattr(os, attribute)
+
+    FakeObject.uses_collectives = uses_collectives
+    monkeypatch.setattr(rt_dist, "os", WindowsOs())  # only the runtime sees Windows, not pathlib
+    monkeypatch.setattr(rt_dist, "Log", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist, "TensorBoard", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(rt_dist.mp, "spawn", lambda fn, nprocs, args=(): spawned.append(nprocs))
+
+    if uses_collectives:
+        with pytest.raises(ConfigError, match="Windows"):
+            rt_dist.execute_distributed_object(FakeObject(), cpu=2, quiet=True)
+    else:
+        rt_dist.execute_distributed_object(FakeObject(), cpu=2, quiet=True)
+    assert spawned == ([] if uses_collectives else [2])
 
 
 def test_the_startup_line_takes_the_nested_phases_out_and_closes_on_other() -> None:
@@ -1119,24 +1347,122 @@ def test_run_distributed_app_refuses_a_kwarg_the_entrypoint_does_not_declare() -
         build(command="PREDICTION")
 
 
-def test_run_distributed_app_ends_an_out_of_memory_run_with_its_own_exit_code() -> None:
-    """IMPACT-Reg runs KonfAI as a child and retries smaller on EXIT_OUT_OF_MEMORY: an out-of-memory error must end the
-    process with it, not with a traceback and exit code 1."""
-
-    @rt_dist.run_distributed_app
-    def build(gpu: list[int] | None = None, cpu: int | None = None) -> None:
-        raise torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 4.35 GiB")
-
-    with pytest.raises(SystemExit) as stopped:
-        build()
-    assert stopped.value.code == EXIT_OUT_OF_MEMORY
-
-
 def test_a_seed_makes_cudnn_deterministic_unless_the_run_benchmarks() -> None:
     assert rt_dist.cudnn_flags(None, False) == (True, False)
     assert rt_dist.cudnn_flags(7, False) == (False, True)
     assert rt_dist.cudnn_flags(7, True) == (True, False)
     assert rt_dist.cudnn_flags(None, True) == (True, False)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="SIGKILL is POSIX")
+@pytest.mark.parametrize(
+    ("how", "raised", "message"),
+    [
+        ("refuses", ConfigError, "Rank refuses."),
+        ("is_killed", KonfAIError, "Rank 1 was killed by SIGKILL, the signal the kernel's out-of-memory killer"),
+    ],
+)
+def test_a_spawned_rank_that_refuses_or_is_killed_reaches_the_caller_as_a_konfai_error(
+    monkeypatch, tmp_path, how: str, raised: type, message: str
+) -> None:
+    """Two CPU ranks, the last one refuses or dies by SIGKILL (what the out-of-memory killer sends): the
+    caller catches the rank's own refusal, or a KonfAIError naming the likely cause, not torch's
+    ProcessRaisedException or ProcessExitedException."""
+    from rank_failures import FailingLastRank
+
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    with pytest.raises(raised) as refusal:
+        execute_distributed_object(FailingLastRank(how), cpu=2, quiet=True)
+    assert type(refusal.value) is raised
+    assert message in str(refusal.value)
+
+
+def test_tensorboard_without_its_executable_is_refused_before_the_setup(monkeypatch, tmp_path) -> None:
+    """-tb launches the tensorboard executable: without it the run is refused with the extra to install,
+    before the workflow's setup loads anything."""
+    set_up: list[int] = []
+
+    class Workflow(rt_dist.DistributedObject):
+        def setup(self, world_size: int) -> None:
+            set_up.append(world_size)
+            self.dataloader = [[] for _ in range(world_size)]
+
+        def run_process(self, world_size, global_rank, local_rank, dataloaders) -> None:
+            pass
+
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    monkeypatch.setattr(rt_dist.shutil, "which", lambda name: None)
+    monkeypatch.setattr("konfai.utils.runtime.logging.shutil.which", lambda name: None)
+    with pytest.raises(ConfigError, match=r"pip install konfai\[tensorboard\]"):
+        rt_dist.execute_distributed_object(Workflow("no-tensorboard"), cpu=1, quiet=True, tensorboard=True)
+    assert set_up == []
+
+
+@pytest.mark.parametrize(
+    ("host", "bound", "shown"),
+    [
+        (None, "127.0.0.1", "127.0.0.1"),
+        ("", "127.0.0.1", "127.0.0.1"),
+        ("0.0.0.0", "0.0.0.0", "192.0.2.7"),
+        ("10.1.2.3", "10.1.2.3", "10.1.2.3"),
+        ("::1", "::1", "[::1]"),
+    ],
+)
+def test_tensorboard_binds_loopback_unless_an_address_is_asked_for(
+    monkeypatch, tmp_path, capsys, host: str | None, bound: str, shown: str
+) -> None:
+    """TensorBoard serves the curves and the DataLog images without authentication: -tb binds 127.0.0.1,
+    KONFAI_TENSORBOARD_HOST names another address, and the printed URL is one a browser reaches (the
+    network address for a wildcard bind)."""
+    commands: list[list[str]] = []
+
+    class Process:
+        def __init__(self, command, **_kwargs) -> None:
+            commands.append(command)
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self) -> None:
+            pass
+
+    class Route:
+        """The UDP socket that names this host's address on its default route."""
+
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            pass
+
+        def connect(self, _address) -> None:
+            pass
+
+        def getsockname(self) -> tuple[str, int]:
+            return ("192.0.2.7", 40000)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setenv("KONFAI_STATE", "TRAIN")
+    monkeypatch.setenv("KONFAI_STATISTICS_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("KONFAI_TENSORBOARD_PORT", "6123")
+    if host is None:
+        monkeypatch.delenv("KONFAI_TENSORBOARD_HOST", raising=False)
+    else:
+        monkeypatch.setenv("KONFAI_TENSORBOARD_HOST", host)
+    monkeypatch.setattr(rt_logg.shutil, "which", lambda name: "/opt/bin/tensorboard")
+    monkeypatch.setattr(rt_logg.subprocess, "Popen", Process)
+    monkeypatch.setattr(rt_logg.socket, "socket", Route)
+    with rt_logg.TensorBoard("RUN"):
+        pass
+    assert commands == [["/opt/bin/tensorboard", "--logdir", str(tmp_path / "RUN"), "--port", "6123", "--host", bound]]
+    assert capsys.readouterr().out == f"[KonfAI] Tensorboard : http://{shown}:6123/\n"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="AF_UNIX socket paths are a POSIX limit")

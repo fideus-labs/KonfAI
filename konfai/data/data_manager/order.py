@@ -50,8 +50,9 @@ def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple
 
     A streamed TTA write reduces the copies slab by slab, so it can only advance to the slowest
     copy's frontier: walked copy-major, the first copy would be complete (and fully retained)
-    before the second began. Ordering by each patch's declared first-spatial-axis start bounds that
-    skew at one patch extent, whatever grid each copy was cut on. The sort is total on
+    before the second began. Ordering by each patch's start along its grid's sweep axis bounds that
+    skew at one patch extent, whatever grid each copy was cut on, and keeps each copy's reads in the
+    slab its input streams. The sort is total on
     ``(start, copy, patch)``, so within a copy the order is untouched: per-copy accumulation is
     byte-identical either way, and the whole-volume path reduces at the end whatever the order.
 
@@ -62,7 +63,7 @@ def _interleaved_case_entries(patches: list["DatasetPatch"], entries: list[tuple
 
     def starts(patch: "DatasetPatch") -> list[int] | None:
         try:
-            return [patch.get_patch_slices(copy)[index][0].start for copy, index in entries]
+            return [patch.get_patch_slices(copy)[index][patch.get_sweep_axis(copy)].start for copy, index in entries]
         except (IndexError, KeyError):
             return None
 
@@ -141,8 +142,8 @@ class WindowedCaseSampler(Sampler[int]):
     """Locality-aware training order: shuffle cases, window them, shuffle patches within each window.
 
     ``DatasetIter`` loads each non-streamable case into a FIFO buffer, so a global patch shuffle
-    reloads a volume repeatedly (once per patch that lands after an eviction. Keeping only
-    ``window`` cases in play at a time) their patches shuffled together, emitted before advancing: reads each
+    reloads a volume repeatedly (once per patch that lands after an eviction). Keeping only ``window``
+    cases in play at a time, their patches shuffled together and emitted before advancing, reads each
     volume ~once. ``window`` is the decorrelation knob: ``1`` is perfect locality, and
     ``None`` (default) or ``>= n_cases`` is a single all-cases window, i.e. a plain global shuffle,
     byte for byte.
@@ -161,9 +162,13 @@ class WindowedCaseSampler(Sampler[int]):
         batch_size: int,
         num_workers: int,
         read_order: PatchReadOrder | None = None,
+        padding: int = 0,
     ) -> None:
         self.mapping = mapping
         self.shuffle = shuffle
+        # The last ``padding`` entries keep a validation rank's forwards in step with the others
+        # (``Data._split_validation``): never shuffled in, they stay a batch of their own at the end.
+        self.padding = padding
         # Where the epoch's order is published for the processes that read the patches; a sampler
         # asked for nothing but its order publishes nowhere.
         self.read_order = read_order
@@ -231,7 +236,8 @@ class WindowedCaseSampler(Sampler[int]):
         if not self.shuffle:
             order = torch.arange(len(self.mapping))
         elif self.window is None:
-            order = torch.randperm(len(self.mapping))
+            scored = len(self.mapping) - self.padding
+            order = torch.cat((torch.randperm(scored), torch.arange(scored, len(self.mapping))))
         else:
             order = torch.as_tensor(self._windowed_order(), dtype=torch.int64)
         if self.read_order is not None:

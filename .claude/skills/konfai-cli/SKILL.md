@@ -74,8 +74,9 @@ Segmentation, Synthesis and Registration recipes, and
   paths (configs, `Dataset/`, output dirs, and local `File:Class` classpaths) against the
   current working directory (it prepends CWD to `sys.path`).
 - **Reading a config rewrites it on disk.** A run materialises resolved defaults back into the
-  YAML (`None` becomes the literal `"None"`). Expect a post-run git diff; keep configs under
-  version control. There is no read-only path. (Details:
+  YAML (`None` becomes the literal `"None"`) once its workflow is built; a run whose build fails
+  leaves the file as written (`--init` writes what resolved). Expect a post-run git diff; keep
+  configs under version control. There is no read-only path. (Details:
   [references/workspace-and-runtime.md](references/workspace-and-runtime.md).)
 - **`train_name` is the join key.** `Prediction.yml` and `Evaluation.yml` must use the *same*
   `train_name` as the training run whose checkpoints/predictions they consume: the most common
@@ -118,8 +119,9 @@ are thin task-named wrappers.
 
 The five workflows are also **Python callables** (`konfai.transform` / `plan_transform` /
 `evaluate` / `predict` / `train`), with structured results and a copy-the-caller's-config contract;
-see `docs/source/usage/python-workflows.md` when a script or notebook fits better than the CLI.
+see `docs/source/usage/python-api.md` when a script or notebook fits better than the CLI.
 
 The authoritative user-facing catalogue lives in `docs/source/config_guide/` (`training.md`,
-`prediction.md`, `evaluation.md`, `transform.md`) and `docs/source/reference/cli.md`; `AGENTS.md`
-is the source of truth for framework internals and conventions.
+`prediction.md`, `evaluation.md`, `transform.md`) and `docs/source/reference/cli.md`, and
+`docs/source/reference/glossary.md` defines the words with two meanings (group, fold, worker,
+workspace, bundle); `AGENTS.md` is the source of truth for framework internals and conventions.

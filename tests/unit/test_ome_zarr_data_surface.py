@@ -20,6 +20,7 @@ These cover what a hand-rolled store reader gets wrong, which is never the happy
 source, a pyramid level that does not exist, and a downsampling default that changes the pixels."""
 
 import contextlib
+import json
 from collections.abc import Iterator
 from pathlib import Path, PureWindowsPath
 
@@ -40,6 +41,7 @@ from konfai.data.transform import Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.dataset.ome_zarr_file import _store_chunks
 from konfai.utils.errors import DatasetManagerError
+from konfai.utils.ome_zarr import clear_ome_zarr_cache
 from oracle_support import geometry
 
 
@@ -164,9 +166,9 @@ def test_write_ome_zarr_builds_a_pyramid_by_position(tmp_path: Path) -> None:
 
 def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path) -> None:
     """The konfai sidecar records the geometry the writer was handed: level 0's. Read at ``@1``
-    through the Dataset, it used to win over the level's own scale and translation, and level 1
-    came back with level 0's spacing on an eighth of the voxels (half the samples along each of the
-    three axes): half the extent per axis, for every consumer that registers on the coarse level."""
+    through the Dataset, the level's own scale and translation win over it: from the sidecar, level 1
+    would come back with level 0's spacing on an eighth of the voxels (half the samples along each of
+    the three axes): half the extent per axis, for every consumer that registers on the coarse level."""
     root = tmp_path / "cases"
     store = root / "case_1" / "CT.ome.zarr"
     store.parent.mkdir(parents=True)
@@ -196,16 +198,78 @@ def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path)
         assert [k for k in coarse.keys() if k.startswith(key)] == [f"{key}_0"]
 
 
-def test_default_downsampling_is_a_block_mean_not_a_gaussian(tmp_path: Path) -> None:
-    """The default must not change the pixels: BIN_SHRINK is the block mean a capsule writes by
-    hand, where ngff-zarr's own ITKWASM_GAUSSIAN default smooths and crushes the peak."""
-    volume = _volume()
+def test_a_translation_moved_by_another_ngff_tool_is_the_origin_read(tmp_path: Path) -> None:
+    """The sidecar is written beside the NGFF transforms and only KonfAI keeps it current: a store
+    another tool moved (a new translation, the same scale) is read where that tool put it."""
+    root = tmp_path / "cases"
+    Dataset(str(root), "omezarr").write("CT", "case_1", _volume(), geometry((5.0, 6.0, 7.0)))
+    metadata_path = root / "case_1" / "CT.ome.zarr" / "zarr.json"
+    metadata = json.loads(metadata_path.read_text())
+    for level in metadata["attributes"]["ome"]["multiscales"][0]["datasets"]:
+        for transform in level["coordinateTransformations"]:
+            if transform["type"] == "translation":
+                transform["translation"] = [0.0, 100.0, 200.0, 300.0]  # c, z, y, x
+    metadata_path.write_text(json.dumps(metadata))
+    clear_ome_zarr_cache(root / "case_1" / "CT.ome.zarr")
+
+    _shape, attributes = Dataset(str(root), "omezarr").get_infos("CT", "case_1")
+
+    np.testing.assert_array_equal(attributes.get_np_array("Origin"), [300.0, 200.0, 100.0])
+
+
+@pytest.mark.parametrize("dtype", ["<f4", "<i2", "<u2", "<i4"])
+def test_default_downsampling_is_a_block_mean_not_a_gaussian(tmp_path: Path, dtype: str) -> None:
+    """The default must not change the pixels of an intensity image: BIN_SHRINK is the block mean a
+    capsule writes by hand (integers rounded half up), where ngff-zarr's own ITKWASM_GAUSSIAN default
+    smooths and crushes the peak."""
+    volume = _volume(dtype)
     store = tmp_path / "shrunk.ome.zarr"
     write_ome_zarr(store, volume, spacing=[1.0, 1.0, 1.0], scale_factors=[2])
 
     coarse, _ = read_ome_zarr_data_slice(store, (slice(None),) * 4, level=1)
-    blocks = volume[:, :8, :12, :16].reshape(1, 4, 2, 6, 2, 8, 2)
-    np.testing.assert_allclose(coarse, blocks.mean(axis=(2, 4, 6)), rtol=1e-6)
+    blocks = volume[:, :8, :12, :16].astype(np.float64).reshape(1, 4, 2, 6, 2, 8, 2)
+    mean = blocks.mean(axis=(2, 4, 6))
+    np.testing.assert_allclose(coarse, mean if volume.dtype.kind == "f" else np.floor(mean + 0.5), rtol=1e-6)
+
+
+def _block_majority(volume: np.ndarray, factor: int) -> np.ndarray:
+    """The most frequent value of each aligned ``factor**3`` window, the smallest on a tie, remainder dropped."""
+    shape = (volume.shape[0], *(extent // factor for extent in volume.shape[1:]))
+    majority = np.empty(shape, volume.dtype)
+    for index in np.ndindex(*shape):
+        window = volume[(index[0], *(slice(i * factor, (i + 1) * factor) for i in index[1:]))]
+        values, counts = np.unique(window, return_counts=True)
+        majority[index] = values[np.argmax(counts)]  # np.unique sorts: argmax takes the smallest on a tie
+    return majority
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "int64"])
+@pytest.mark.parametrize("labels", [(1, 3), tuple(range(117))], ids=["two_labels", "117_labels"])
+def test_default_downsampling_of_a_label_map_is_a_block_majority(tmp_path: Path, dtype: str, labels: tuple) -> None:
+    """A block mean of labels {1, 3} writes a 2 no voxel holds. A label dtype (the ones Resample takes
+    nearest for) is reduced to the majority of each window instead, each level from the one above it."""
+    rng = np.random.default_rng(1)
+    weights = np.arange(1, len(labels) + 1, dtype=np.float64) ** 2  # the frequent labels are not the smallest
+    volume = rng.choice(np.asarray(labels, dtype=dtype), size=(1, 9, 13, 18), p=weights / weights.sum())
+    store = tmp_path / "labels.ome.zarr"
+    write_ome_zarr(store, volume, spacing=[1.0, 1.0, 1.0], chunks=(1, 4, 8, 8), scale_factors=[2, 2])
+
+    level1, _ = read_ome_zarr_data_slice(store, (slice(None),) * 4, level=1)
+    level2, _ = read_ome_zarr_data_slice(store, (slice(None),) * 4, level=2)
+    assert level1.dtype == volume.dtype
+    assert set(np.unique(level1).tolist()) <= set(np.unique(volume).tolist())
+    np.testing.assert_array_equal(level1, _block_majority(volume, 2))
+    np.testing.assert_array_equal(level2, _block_majority(level1, 2))
+
+
+def test_a_named_downsample_method_wins_over_the_label_majority(tmp_path: Path) -> None:
+    volume = np.ones((1, 2, 2, 2), dtype=np.uint8)
+    volume[0, 0, 0, :] = 3  # six 1s and two 3s: the majority is 1, the mean 1.5 rounds to 2
+    store = tmp_path / "named.ome.zarr"
+    write_ome_zarr(store, volume, spacing=[1.0, 1.0, 1.0], scale_factors=[2], downsample_method="DASK_BIN_SHRINK")
+
+    level1, _ = read_ome_zarr_data_slice(store, (slice(None),) * 4, level=1)
+    assert level1.tolist() == [[[[2]]]]
 
 
 def test_unknown_downsample_method_names_the_valid_ones(tmp_path: Path) -> None:
@@ -311,7 +375,7 @@ def test_a_reader_that_deviates_from_its_plan_loses_it_and_nothing_else() -> Non
 
 
 def test_forgetting_one_store_leaves_the_others_alone() -> None:
-    """Creating an output store used to drop every input's decoded chunks with it."""
+    """Forgetting a store (an output being created) drops its decoded chunks and keeps every other's."""
     from konfai.utils.ome_zarr import _DecodedChunkCache
 
     cache = _DecodedChunkCache(1 << 20)
@@ -664,7 +728,7 @@ def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_be
     store's footprint, the companion decodes its 61 whatever is declared and the source is what
     the ranking moves: 50 alone, 59 with the companion's future competing for the same slots,
     still under LRU's 65. (A window is served from the decoded hull before the hull is released,
-    so a sparse miss no longer decodes a chunk twice: the counts above are the misses.)"""
+    so a sparse miss decodes a chunk once: the counts above are the misses.)"""
     _two_stores(tmp_path)
 
     def sweep(declared: str) -> dict[str, int]:
@@ -677,7 +741,7 @@ def test_a_declared_companion_shares_a_tight_cache_with_the_source_it_is_read_be
     assert both["Labels"] <= lru["Labels"], "the companion is decoded no more than under LRU"
     if both_is_best:
         assert sum(both.values()) < sum(alone.values()), f"{both} against {alone} with the source alone declared"
-        assert both["Labels"] < alone["Labels"], "the companion is no longer sacrificed to the source's future"
+        assert both["Labels"] < alone["Labels"], "the companion is not sacrificed to the source's future"
     else:
         assert sum(alone.values()) <= sum(both.values()) < sum(lru.values())
 

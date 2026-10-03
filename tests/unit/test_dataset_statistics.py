@@ -16,10 +16,10 @@
 
 """``Dataset.read_data_statistics`` is one fold over ``iter_data_blocks``, whatever the backend.
 
-Each backend used to own its walk (slabs, slices, or the whole volume); those walks are recopied
-here as oracles, and the fold is held against them key by key, next to numpy in float64 on the
-whole volume. Welford in floating point is not associative, and the fold merges in cache-sized
-pieces of its own, so the bound is a few ulp, whatever the backend walked before."""
+The per-backend walks (slabs, slices, or the whole volume) are written out here as oracles, and
+the fold is held against them key by key, next to numpy in float64 on the whole volume. Welford in
+floating point is not associative, and the fold merges in cache-sized pieces of its own, so the
+bound is a few ulp, whatever the oracle walks."""
 
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -162,8 +162,8 @@ def _former_image_whole_pass(directory: Path, name: str, group: str, extension: 
 
 @pytest.mark.parametrize(
     ("extension", "former"),
-    [("mha", _former_image_slab_walk), ("nii.gz", _former_image_whole_pass)],
-    ids=["region reads", "whole read"],
+    [("mha", _former_image_slab_walk), ("nii.gz", _former_image_slab_walk), ("nrrd", _former_image_whole_pass)],
+    ids=["region reads", "region reads of the uncompressed twin", "whole read"],
 )
 @pytest.mark.parametrize("channels", [None, [1]])
 def test_an_image_folds_within_ulps_of_its_former_pass(
@@ -177,7 +177,7 @@ def test_an_image_folds_within_ulps_of_its_former_pass(
     volume = _volume((2, 37, 12, 10))
     dataset = Dataset(tmp_path / "store", extension)
     dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
-    assert dataset.bounded_region_reads("CT", "P0") is (extension == "mha")
+    assert dataset.bounded_region_reads("CT", "P0") is (extension != "nrrd")
 
     got = dataset.read_data_statistics("CT", "P0", channels)
 
@@ -313,7 +313,7 @@ def test_the_fold_reads_a_bounded_store_by_blocks_and_never_whole(
 def test_the_fold_reads_an_unbounded_store_whole_once(
     tmp_path: Path, image_attributes, small_blocks: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dataset = Dataset(tmp_path / "store", "nii.gz")
+    dataset = Dataset(tmp_path / "store", "nrrd")
     dataset.write("CT", "P0", _volume((1, 37, 12, 10)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
     monkeypatch.setattr(Dataset, "read_data_slice", lambda *_: pytest.fail("no region read on an unbounded store"))
     reads: list[str] = []
@@ -451,3 +451,24 @@ def test_an_extrema_only_request_folds_min_and_max_in_the_stored_dtype(tmp_path:
         assert got[key] == full[key]
     got = dataset.read_data_statistics("CT", "P0", [1], keys=["max"])
     assert got["max"] == float(volume[1].max()) and got["min"] == float(volume[1].min())
+
+
+@pytest.mark.parametrize("keys", [None, ["min", "max"]], ids=["moments", "extrema"])
+@pytest.mark.parametrize("plane", [0, 15], ids=["first block", "last block"])
+def test_a_nan_in_the_volume_is_its_min_and_max_as_numpy_says(
+    tmp_path: Path, image_attributes, small_blocks: None, keys: list[str] | None, plane: int
+) -> None:
+    """numpy's min and max of a volume holding a NaN are NaN, as are the per-channel figures of the
+    same fold: the scalars agree whatever block the NaN lands in. The extremes sit beside the NaN,
+    in the piece a fold that skipped it would drop."""
+    volume = _volume((1, 16, 10, 10))
+    volume[0, plane, 3, 4] = np.nan
+    volume[0, plane, 3, 5], volume[0, plane, 3, 6] = -1000.0, 1000.0
+    dataset = Dataset(tmp_path / "store", "mha")
+    dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+
+    got = dataset.read_data_statistics("CT", "P0", keys=keys)
+
+    for key in ("min", "max"):
+        assert np.isnan(got[f"{key}_per_channel"]).all(), got
+        assert np.isnan(got[key]), (key, got[key], float(getattr(np, f"nan{key}")(volume)))

@@ -97,7 +97,7 @@ def _run_job(
                 try:
                     handle.write(f"\n[konfai-mcp] job process terminated by signal {signum}.\n")
                     handle.flush()
-                except Exception:
+                except Exception:  # nosec B110 - the log may be closed already; the signal is re-raised below
                     pass
                 signal.signal(signum, signal.SIG_DFL)
                 os.kill(os.getpid(), signum)
@@ -132,6 +132,11 @@ def _proc_returncode(proc: object) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import psutil
+
+        # os.kill(pid, 0) sends CTRL_C_EVENT there: it succeeds or fails whatever the pid.
+        return bool(psutil.pid_exists(pid))
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -550,15 +555,15 @@ class JobRegistry:
                 # gets no evaluate/refine push: the loop never starts spontaneously.
                 if job.kind in ("evaluate", "pipeline"):
                     # There is a score: rank the trials, re-tune, keep the best.
-                    next_actions.extend(["leaderboard", "compare_runs", "run_app_pipeline", "export_app"])
+                    next_actions.extend(["leaderboard", "compare_runs", "run_app", "export_app"])
                 elif job.kind == "infer" and job.set_parameters:
                     # Already tuning inference parameters: help close the loop toward a score.
-                    next_actions.extend(["run_app_evaluate", "run_app_pipeline", "compare_runs"])
+                    next_actions.extend(["run_app", "compare_runs"])
                 elif job.kind == "finetune":
                     # A fine-tune produces a bundle but keeps its training metrics out of it, so there is
                     # nothing to rank yet: use the bundle, then evaluate it; that evaluation lands where
                     # leaderboard/compare_runs can rank this fine-tune against other training trials.
-                    next_actions.extend(["run_app_infer", "run_app_evaluate"])
+                    next_actions.append("run_app")
             else:
                 # A finished workflow job is a step, not the end: point at the step that actually follows it
                 # (a trained model is worth nothing until it has predicted, a prediction until it is scored),
@@ -846,7 +851,7 @@ class JobRegistry:
                 return self.payload(job, isoformat)
             time.sleep(0.1)
 
-        self.signal(job, signal.SIGKILL)
+        self.signal(job, getattr(signal, "SIGKILL", signal.SIGTERM))  # Windows has no SIGKILL: SIGTERM terminates
         time.sleep(0.1)
         self.refresh(job)
         payload = self.payload(job, isoformat)

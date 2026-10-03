@@ -116,20 +116,3 @@ __all__ = [
     "split_expand",
     "stat_seed_valid",
 ]
-
-
-def __getattr__(name: str):
-    # ``KonfAIInference`` lives in konfai-apps, but published configs spell the bare name, which the
-    # TransformLoader resolves against this package.
-    if name == "KonfAIInference":
-        try:
-            from konfai_apps.transforms import KonfAIInference
-        except ImportError as exc:
-            from konfai.utils.errors import TransformError
-
-            raise TransformError(
-                "KonfAIInference requires the standalone 'konfai-apps' package.",
-                "Install it with 'pip install konfai-apps'.",
-            ) from exc
-        return KonfAIInference
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

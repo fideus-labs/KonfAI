@@ -148,8 +148,8 @@ def test_uncertainty_is_the_spread_of_the_vectors(
 
 
 def test_landmarks_saved_in_ras_score_a_perfect_transform_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The moving landmarks exactly where an affine sends the fixed ones, saved in RAS (Slicer <= 4.10): TRE 0.
-    Read as LPS they were the reflected points, and this TRE came out several mm with exit code 0."""
+    """The moving landmarks exactly where an affine sends the fixed ones, saved in RAS: TRE 0. Read as LPS they
+    were the reflected points, and this TRE came out several mm with exit code 0."""
     transform = sitk.AffineTransform(3)
     transform.SetMatrix(sitk.VersorTransform((0.0, 0.0, 1.0), 0.3).GetMatrix())
     transform.SetTranslation((5.0, -3.0, 2.0))
@@ -158,7 +158,7 @@ def test_landmarks_saved_in_ras_score_a_perfect_transform_zero(tmp_path: Path, m
     moving_ras = np.array([transform.TransformPoint(point) for point in fixed]) * [-1.0, -1.0, 1.0]
     write_landmarks(fixed, tmp_path / "fixed.fcsv")
     rows = "".join(f"{i},{x},{y},{z},0,0,0,1,1,1,0,F-{i},,\n" for i, (x, y, z) in enumerate(moving_ras))
-    (tmp_path / "moving.fcsv").write_text("# Markups fiducial file version = 4.10\n# CoordinateSystem = 0\n" + rows)
+    (tmp_path / "moving.fcsv").write_text("# Markups fiducial file version = 5.6\n# CoordinateSystem = RAS\n" + rows)
     out = tmp_path / "Evaluation"
     code = _main(
         monkeypatch,
@@ -453,9 +453,9 @@ def test_jacobian_read_in_slabs_is_the_whole_fields(tmp_path: Path, monkeypatch:
     assert 0 < whole["Transform:Jacobian:folded_fraction"] < 1
 
 
-def test_a_field_that_cannot_serve_a_region_is_decoded_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A compressed MetaImage decodes the whole volume for any region asked of it: the landmarks and the
-    Jacobian slabs read it once each, not once per landmark or slab (300 landmarks, 300 whole decodes)."""
+def test_a_compressed_field_is_read_by_regions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A compressed MetaImage decoded the whole volume for every region asked of it (300 landmarks, 300 whole
+    decodes): it is read through its uncompressed twin, so the landmarks and the Jacobian slabs read regions."""
     from impact_reg_konfai import impact_reg
     from konfai.utils.dataset import Dataset
 
@@ -471,7 +471,7 @@ def test_a_field_that_cannot_serve_a_region_is_decoded_once(tmp_path: Path, monk
     impact_reg._displace(np.random.default_rng(5).uniform(-5.0, 15.0, (20, 3)), tmp_path / "field.mha", tmp_path / "a")
     impact_reg._jacobian_statistics(tmp_path / "field.mha", tmp_path / "b")
 
-    assert reads == ["read_data", "read_data"]
+    assert reads and set(reads) == {"read_data_slice"}
 
 
 def test_eval_reports_the_jacobian_of_a_field_transform(

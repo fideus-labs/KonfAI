@@ -71,6 +71,70 @@ def test_has_loss_rejects_engine_placeholder() -> None:
     assert _finetune_target_has_loss({"classpath": "Reg", "Reg": placeholder}) is False
 
 
+def _model(criterions_loader: dict) -> dict:
+    targets = {"targets_criterions": {"CT": {"criterions_loader": criterions_loader}}}
+    return {"classpath": "Net", "Net": {"outputs_criterions": {"Head": targets}}}
+
+
+def _measure_has_loss(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: dict) -> bool:
+    """Whether the Measure a RESUME builds from ``model`` trains on at least one of its criteria."""
+    from konfai.network.network import Measure, TargetCriterionsLoader
+    from konfai.utils.config import apply_config, strict_config
+    from ruamel.yaml import YAML
+
+    config = tmp_path / "Config.yml"
+    with open(config, "w") as file:
+        YAML().dump({"Trainer": {"Model": model}}, file)
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+
+    def net(outputs_criterions: dict[str, TargetCriterionsLoader]) -> dict[str, TargetCriterionsLoader]:
+        return outputs_criterions
+
+    with strict_config("Trainer"):
+        measure = Measure("Net", apply_config("Trainer.Model.Net")(net)())
+    return any(
+        attr.is_loss
+        for targets in measure.outputs_criterions.values()
+        for criterions in targets.values()
+        for attr in criterions.values()
+    )
+
+
+@pytest.mark.parametrize(
+    ("criterions_loader", "has_loss"),
+    [
+        ({"MAE": {"is_loss": True}}, True),
+        ({"MAE": {"is_loss": False}}, False),
+        ({"MAE": {}}, True),
+        ({"torch:nn:L1Loss": {}}, True),
+        ({"PSNR": {}}, False),
+        ({"SSIM": {}}, False),
+        ({"SSIM": {"is_loss": None}}, False),
+        ({"SSIM": {"is_loss": True}}, True),
+        ({"SSIM": {}, "MAE": {}}, True),
+    ],
+    ids=[
+        "MAE",
+        "MAE-metric",
+        "MAE-unset",
+        "L1Loss-unset",
+        "PSNR-unset",
+        "SSIM-unset",
+        "SSIM-null",
+        "SSIM-loss",
+        "SSIM+MAE",
+    ],
+)
+def test_has_loss_answers_as_the_measure_a_resume_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, criterions_loader: dict, has_loss: bool
+) -> None:
+    model = _model(criterions_loader)
+    assert _measure_has_loss(tmp_path, monkeypatch, model) is has_loss
+    assert _finetune_target_has_loss(model) is has_loss
+
+
 def _drive_fine_tune(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_body: str) -> list[bool]:
     """Drive ``KonfAIApp.fine_tune`` with every heavy step stubbed, recording whether ``train`` ran."""
     src_ckpt = tmp_path / "CV_0_src.pt"
@@ -127,6 +191,16 @@ _WITH_LOSS_CONFIG = (
 def test_fine_tune_raises_on_lossless_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with pytest.raises(AppRepositoryError, match="attaches no loss"):
         _drive_fine_tune(monkeypatch, tmp_path, _LOSSLESS)
+
+
+def test_fine_tune_raises_on_a_metric_only_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # SSIM listed without is_loss is a metric: the RESUME would train nothing.
+    ssim_only = _WITH_LOSS_CONFIG.replace(
+        "MAE:\n                  is_loss: true\n", "SSIM:\n                  dynamic_range: 2.0\n"
+    )
+    assert "SSIM" in ssim_only
+    with pytest.raises(AppRepositoryError, match="attaches no loss"):
+        _drive_fine_tune(monkeypatch, tmp_path, ssim_only)
 
 
 def test_fine_tune_runs_when_a_loss_is_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

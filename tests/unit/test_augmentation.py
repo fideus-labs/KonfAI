@@ -31,6 +31,7 @@ from konfai.data.augmentation import (
     Elastix,
     Flip,
     Noise,
+    Permute,
     PlacedMask,
     Rotate,
     Translate,
@@ -72,7 +73,7 @@ def test_saturation_matrix_scales_chroma_not_luma() -> None:
 
 
 def test_augmentation_resamples_after_reset_state():
-    """#1 Augmentation parameters must be re-sampled each epoch via reset_state.
+    """Augmentation parameters must be re-sampled each epoch via reset_state.
 
     Within an epoch ``state_init`` caches the per-case draw so every patch shares
     one transform; ``reset_state`` must clear that cache so the next epoch draws
@@ -169,6 +170,18 @@ def _flip_all_axes(vector_field: bool) -> Flip:
     return flip
 
 
+def test_test_time_flips_take_the_distinct_mirrors_in_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In prediction the copies are the distinct mirrors the axes allow, none twice and none the identity."""
+    from konfai.utils.runtime import State
+
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    flip = Flip(f_prob=[0.5, 0.5, 0.5])
+    flip._state_init(0, [[4, 4, 4]] * 7, [Attribute()] * 7)
+    assert sorted(map(tuple, flip.flip[0])) == sorted(
+        combination for size in (1, 2, 3) for combination in itertools.combinations((1, 2, 3), size)
+    )
+
+
 def test_flip_vector_field_round_trip_is_identity() -> None:
     # TTA un-flips the model output with ``_inverse``: on a displacement field the compose of
     # ``_compute`` and ``_inverse`` must be the identity, component signs included.
@@ -261,7 +274,7 @@ def test_flip_default_stays_layout_only_on_vector_data() -> None:
 
 
 def test_rotate_converts_degrees_to_radians():
-    """#6 A 90-degree rotation must yield [[0,-1],[1,0]], not cos/sin of 90 radians."""
+    """A 90-degree rotation must yield [[0,-1],[1,0]], not cos/sin of 90 radians."""
     rot = Rotate(a_min=90.0, a_max=90.0, is_quarter=False)
     rot._state_init(0, [[8, 8]], [Attribute()])
     block = rot.matrix[0][0][0, :2, :2]
@@ -431,6 +444,78 @@ def test_a_regrid_draw_pulls_the_hull_of_its_mapped_corners() -> None:
         assert draw._stream_region_source(0, 0, target, list(full)) == corner_hull(draw.matrix[0][0], target, full)
 
 
+@pytest.mark.parametrize(
+    "spatial, spacing, angle",
+    [
+        ((64, 128), None, 45.0),
+        ((24, 32, 48), None, 30.0),
+        ((64, 64), None, 45.0),
+        ((32, 32, 32), None, 30.0),
+        ((16, 32, 32), (2.5, 0.8, 0.8), 30.0),
+        ((64, 64), (2.0, 1.0), 45.0),
+        ((21, 41, 41), (2.0, 1.0, 1.0), 30.0),
+    ],
+    ids=["2d", "3d", "2d-square", "3d-cubic", "3d-thick-slices", "2d-anisotropic", "3d-cubic-world"],
+)
+def test_a_free_rotate_turns_the_world_about_its_centre(
+    spatial: tuple[int, ...], spacing: tuple[float, ...] | None, angle: float
+) -> None:
+    """A free angle turns the copy about its centre in world units, the header's spacing (a case
+    without one counts voxels): SimpleITK's resample through the drawn rotation. ``affine_grid`` spans
+    [-1, 1] over each extent, so the same matrix applied there shears wherever the world extents
+    differ."""
+    sitk = pytest.importorskip("SimpleITK")
+    rank = len(spatial)
+    steps = (1.0,) * rank if spacing is None else spacing  # array order
+    volume = np.random.default_rng(0).standard_normal(spatial).astype(np.float32)
+    header = Attribute()
+    if spacing is not None:
+        header["Spacing"] = np.array(spacing[::-1])
+    rotate = Rotate(a_min=angle, a_max=angle)
+    rotate._state_init(0, [list(spatial)], [header])
+
+    out = rotate._compute("case", 0, 0, torch.from_numpy(volume)[None])[0].numpy()
+
+    image = sitk.GetImageFromArray(volume)
+    image.SetSpacing(steps[::-1])
+    half = [step * (extent - 1) / 2 for step, extent in zip(steps, spatial, strict=True)]
+    turn = sitk.AffineTransform(rank)
+    turn.SetMatrix(rotate.matrix[0][0][0, :rank, :rank].double().flatten().tolist())
+    turn.SetCenter(half[::-1])
+    expected = sitk.GetArrayFromImage(sitk.Resample(image, image, turn, sitk.sitkLinear, 0.0))
+    # Compared on the inscribed ball, which a turn about the centre keeps inside the grid: neither
+    # side reads past the border, where each pads its own way.
+    offsets = np.meshgrid(
+        *[(np.arange(extent) - (extent - 1) / 2) * step for extent, step in zip(spatial, steps, strict=True)],
+        indexing="ij",
+    )
+    ball = sum(offset**2 for offset in offsets) <= (min(half) - max(steps)) ** 2
+    np.testing.assert_allclose(out[ball], expected[ball], rtol=0, atol=1e-3)
+    if len(set(half)) == 1:  # equal world half extents: the drawn matrix is already the turn, bit for bit
+        assert torch.equal(rotate._grid_matrix(0, 0, list(spatial)), rotate.matrix[0][0])
+
+
+@pytest.mark.parametrize(
+    "draw",
+    [lambda: Permute(prob_permute=[1.0, 1.0]), lambda: Rotate(is_quarter=True)],
+    ids=["Permute", "Rotate-quarter"],
+)
+def test_a_draw_that_swaps_axes_hands_on_the_spacing_along_them(draw) -> None:
+    """The draws after a swap read the spacing of the grid they are handed: each extent keeps the
+    spacing it had, wherever the draw moved it."""
+    torch.manual_seed(0)
+    shape, spacing = [10, 20, 30], np.array([0.8, 1.5, 2.5])  # array order (z, y, x), spacing (x, y, z)
+    headers = [Attribute() for _ in range(8)]
+    for header in headers:
+        header["Spacing"] = spacing
+    augmentation = draw()
+    drawn = augmentation._state_init(0, [list(shape) for _ in headers], headers)
+    assert any(copy != shape for copy in drawn), "no copy swapped an axis"
+    for copy, header in zip(drawn, headers, strict=True):
+        handed = header.get_np_array("Spacing")[::-1]
+        assert sorted(zip(copy, handed, strict=True)) == sorted(zip(shape, spacing[::-1], strict=True))
+
+
 # --------------------------------------------------------------------------------------
 # Translate
 # --------------------------------------------------------------------------------------
@@ -598,8 +683,8 @@ def test_cutout_fraction_binds_through_the_config_and_cuts_its_share(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``cutout_size`` is a FRACTION and must survive the YAML binder as one: 0.34 through
-    apply_config cuts about ``0.34**rank`` of the volume (the ``int`` annotation once bound it to
-    0, a silent no-op, while any integer erased the whole copy)."""
+    apply_config cuts about ``0.34**rank`` of the volume (bound as an ``int`` it would be 0, a
+    silent no-op, and any integer size erases the whole copy)."""
     config = tmp_path / "Config.yml"
     config.write_text(
         "Trainer:\n  Dataset:\n    augmentations:\n      A:\n        nb: 1\n"
@@ -893,3 +978,53 @@ def test_an_affine_draw_keeps_a_float64_volume_s_digits() -> None:
     sampled = EulerTransform._walk(volume.reshape(1, -1), coordinates, [0, 0, 0], list(full), full)
     assert sampled.dtype == torch.float64
     assert torch.equal(sampled, volume)
+
+
+def test_a_permute_given_the_wrong_draw_count_is_refused_at_construction() -> None:
+    """A configuration mistake stops the build, which names the key, rather than the first draw."""
+    with pytest.raises(AugmentationError, match="prob_permute"):
+        Permute(prob_permute=[0.5])
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.float16, torch.float32, torch.float64])
+def test_cutout_keeps_the_dtype_of_the_group_it_cuts(dtype: torch.dtype) -> None:
+    """A label map cut by CutOUT stays a label map: widened to float, the next spatial draw
+    interpolated it linearly and wrote labels that are no class."""
+    labels = torch.zeros(1, 32, 32, dtype=dtype)
+    labels[:, 8:24, 8:24] = 1
+    labels[:, 12:20, 12:20] = 3
+    draw = CutOUT(0.3, 0.0)
+    draw._state_init(0, [[32, 32]], [Attribute()])
+    cut = draw._apply(0, 0, labels, (0, 0), (32, 32))
+    assert cut.dtype == dtype
+    assert torch.equal(cut.double(), torch.where(cut == 0, 0.0, labels.double()))
+
+
+@pytest.mark.parametrize(
+    ("build", "shapes"),
+    [
+        (lambda: Permute(), [[4, 4]]),
+        (lambda: Permute(prob_permute=[0.5]), [[4, 4, 4]]),
+        (lambda: Permute(prob_permute=None), [[4, 4, 4]] * 3),
+    ],
+    ids=["2d", "probabilities", "copies"],
+)
+def test_a_permute_draw_it_cannot_make_is_an_augmentation_error(build, shapes: list[list[int]]) -> None:
+    """The CLI reports a KonfAIError as a message and anything else as a traceback."""
+    with pytest.raises(AugmentationError, match="Permute"):
+        draw = build()
+        draw.load(1.0)
+        draw.state_init(0, shapes, [Attribute() for _ in shapes])
+
+
+def test_a_draw_that_cannot_be_undone_is_an_augmentation_error() -> None:
+    with pytest.raises(AugmentationError, match="Elastix cannot be undone"):
+        Elastix()._inverse(0, 0, torch.zeros(1, 4, 4, 4))
+
+
+def test_the_three_axis_flip_draw_is_refused_by_name_on_a_2d_case() -> None:
+    """``f_prob`` names three axes by default: a 2-D case fell on torch's error at the first copy."""
+    draw = Flip()
+    draw.load(1.0)
+    with pytest.raises(AugmentationError, match="'Flip' draws on 3 axes"):
+        draw.state_init(0, [[5, 6]], [Attribute()])

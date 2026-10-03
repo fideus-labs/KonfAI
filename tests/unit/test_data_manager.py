@@ -48,12 +48,13 @@ from konfai.data.data_manager import (
     concatenate_batches,
     slice_batch,
 )
+from konfai.data.data_manager import samples as samples_module
 from konfai.data.data_manager.samples import _cache_worker_count
 from konfai.data.patching import DatasetManager, DatasetPatch
 from konfai.data.transform import Gradient, Resample, Standardize, TensorCast, Transform, TransformLoader
 from konfai.utils.clock import restart_startup_clock
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import DatasetManagerError
+from konfai.utils.errors import DatasetManagerError, TransformError
 from konfai.utils.runtime import State
 from konfai.utils.utils import split_path_spec
 from oracle_support import geometry
@@ -99,6 +100,46 @@ def test_train_split_single_process_keeps_everything(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
     mapping = [(i, 0, 0) for i in range(5)]
     assert Data._split(mapping, 1) == [mapping]  # world_size == 1 is a no-op
+
+
+@pytest.mark.parametrize(
+    "entries, world_size, batch_size", [(15, 2, 16), (3, 2, 1), (3, 4, 16), (8, 3, 2), (6, 3, 2), (5, 1, 2)]
+)
+def test_the_validation_split_scores_every_entry_once_in_step(
+    monkeypatch: pytest.MonkeyPatch, entries: int, world_size: int, batch_size: int
+) -> None:
+    # Every rank runs as many batches (DDP), yet each entry is scored once: a rank a batch short
+    # ends with one entry of padding, a batch of its own the trainer runs and does not score.
+    monkeypatch.setenv("KONFAI_STATE", str(State.TRAIN))
+    mapping = [(index, 0, 0) for index in range(entries)]
+    shards = Data._split_validation(mapping, world_size, batch_size)
+
+    assert [entry for shard, padding in shards for entry in shard[: len(shard) - padding]] == mapping
+    assert len({-(-len(shard) // batch_size) for shard, _ in shards}) == 1
+    for shard, padding in shards:
+        assert padding in (0, 1)
+        if padding:
+            assert (len(shard) - 1) % batch_size == 0  # the padding opens a batch of its own
+            assert shard[-1] == (shard[0] if len(shard) > 1 else mapping[0])
+
+
+@pytest.mark.parametrize("world_size", [2, 3])
+def test_an_evaluation_validation_keeps_each_case_whole_and_unpadded(
+    monkeypatch: pytest.MonkeyPatch, world_size: int
+) -> None:
+    # EVALUATION scores a case from all its patches on one rank and runs no DDP: its validation is
+    # sharded by case like its training split, never cut inside a case nor padded with a duplicate.
+    monkeypatch.setenv("KONFAI_STATE", str(State.EVALUATION))
+    mapping = [(case, 0, patch) for case in range(3) for patch in range(3)]
+
+    shards = Data._split_validation(mapping, world_size, 16)
+
+    assert shards == [(shard, 0) for shard in Data._split(mapping, world_size)]
+    assert sorted(entry for shard, _ in shards for entry in shard) == mapping
+    owner: dict[int, int] = {}
+    for rank, (shard, _) in enumerate(shards):
+        for entry in shard:
+            assert owner.setdefault(entry[0], rank) == rank, f"case {entry[0]} split across ranks"
 
 
 # --------------------------------------------------------------------------------------
@@ -266,6 +307,38 @@ def test_train_split_shuffle_draws_from_sorted_names(monkeypatch):
     assert data.case_names == ["CASE_003", "CASE_002", "CASE_001"]
 
 
+@pytest.mark.parametrize(
+    ("counts", "share", "held_out"),
+    [
+        ([840, 848, 912, 840, 848], 0.2, 1),  # the Segmentation example: 848 of 4288 entries, not 1688
+        ([100, 100, 100, 101, 100], 0.2, 1),
+        ([100] * 5, 0.2, 1),
+        ([100] * 10, 0.2, 2),
+        ([1] * 10, 0.22, 2),
+        ([1] * 5, 0.3, 2),  # 1.5 cases: a tie goes to validation
+        ([1] * 30, 0.25, 8),  # 7.5 cases: the Registration example
+        ([1] * 4, 0.2, 1),
+        ([1] * 5, 0.05, 1),  # the closest cut is empty: validation keeps one case
+        ([10, 1, 1], 0.5, 2),
+    ],
+)
+def test_a_float_validation_share_cuts_at_the_case_boundary_closest_to_it(
+    counts: list[int], share: float, held_out: int
+) -> None:
+    """A float 'validation' holds out the tail of the run order whose entries come closest to the
+    share: a tie goes to validation, and validation keeps at least one case."""
+    from fractions import Fraction
+
+    target = Fraction(str(share)) * sum(counts)
+    closest = min(range(len(counts), 0, -1), key=lambda size: abs(sum(counts[-size:]) - target))
+    assert closest == held_out  # the table follows the rule it states
+    names = [f"CASE_{index:03d}" for index in range(len(counts))]
+
+    split = DataTrain(augmentations=None, validation=share)._split_train_validation_names(names, counts)
+
+    assert split == (names[:-held_out], names[-held_out:])
+
+
 def test_data_train_validation_accepts_mixed_case_names_and_case_files(tmp_path: Path) -> None:
     validation_file = tmp_path / "validation.txt"
     validation_file.write_text("CASE_001\nCASE_003\n", encoding="utf-8")
@@ -317,10 +390,41 @@ def test_subset_and_validation_accept_the_same_selector_spellings(tmp_path: Path
 
 
 def test_a_negative_slice_end_counts_from_the_end_python_style() -> None:
-    # '0:-2' once clipped to an empty range and blamed the subset as "too restrictive".
+    # '0:-2' is every case but the last two, not an empty range.
     names = [f"CASE_{index:03d}" for index in range(5)]
     assert Subset("0:-2")(names, {}) == {"CASE_000", "CASE_001", "CASE_002"}
     assert Subset("-2:5")(names, {}) == {"CASE_003", "CASE_004"}
+
+
+def _split_by_list(tmp_path: Path, names: list[str], content: str, encoding: str) -> tuple[list[str], list[str]]:
+    listed = tmp_path / "val.txt"
+    listed.write_text(content, encoding=encoding)
+    return DataTrain(augmentations=None, validation=str(listed))._split_train_validation_names(names)
+
+
+def test_a_case_list_with_a_byte_order_mark_keeps_its_first_name(tmp_path: Path) -> None:
+    """Windows editors and PowerShell write UTF-8 with a byte-order mark: kept on the first name, it
+    matched no case, and that validation case was trained on without a word."""
+    train, validation = _split_by_list(
+        tmp_path, ["CASE_000", "CASE_001", "CASE_002", "CASE_003"], "CASE_001\nCASE_003\n", "utf-8-sig"
+    )
+
+    assert validation == ["CASE_001", "CASE_003"]
+    assert train == ["CASE_000", "CASE_002"]
+
+
+@pytest.mark.parametrize("code_page", ["ascii_locale", "latin1_locale"])
+def test_a_utf8_case_list_keeps_its_names_whatever_the_locale(tmp_path: Path, request, code_page: str) -> None:
+    """Read in the locale's encoding, a UTF-8 list lost its non-ASCII names: a code page (cp1252 on
+    Windows, Latin-1 here) decoded 'é' as two other characters, which name no case; ASCII refused the byte."""
+    request.getfixturevalue(code_page)
+
+    train, validation = _split_by_list(
+        tmp_path, ["CASE_000", "CASE_003", "patient_é"], "patient_é\nCASE_003\n", "utf-8"
+    )
+
+    assert validation == ["CASE_003", "patient_é"]
+    assert train == ["CASE_000"]
 
 
 def test_an_unresolvable_validation_selector_is_refused_with_the_accepted_spellings() -> None:
@@ -369,8 +473,8 @@ def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(t
     dataset_path = tmp_path / "Dataset"
     dataset_storage = Dataset(dataset_path, "mha")
     volume = np.arange(1 * 4 * 4, dtype=np.float32).reshape(1, 4, 4)
-    dataset_storage.write("CT", "CASE_000", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
-    dataset_storage.write("CT", "CASE_001", volume, _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    dataset_storage.write("CT", "CASE_000", volume, geometry([0.0, 0.0], [1.0, 1.0]))
+    dataset_storage.write("CT", "CASE_001", volume, geometry([0.0, 0.0], [1.0, 1.0]))
 
     augmentations = DataAugmentationsList(nb=1, data_augmentations={})
     dataset = DataTrain(
@@ -390,6 +494,29 @@ def test_data_train_prepare_skips_validation_augmentation_layout_when_disabled(t
     assert dataset._validation_managers["CT"][0].total_augmentations == 0
 
 
+@pytest.mark.parametrize("root_exists", [False, True])
+def test_a_missing_dataset_root_is_named_where_an_empty_one_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_exists: bool
+) -> None:
+    """A local root that is not there (an example run before its Dataset/ is downloaded) lists as empty:
+    the refusal names it, resolved from the working directory; an empty root that is there is not named."""
+    monkeypatch.chdir(tmp_path)
+    if root_exists:
+        (tmp_path / "Dataset").mkdir()
+    dataset = DataTrain(
+        dataset_filenames=["./Dataset:mha"],
+        groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
+        augmentations=None,
+        patch=None,
+        validation=None,
+    )
+
+    with pytest.raises(DatasetManagerError, match="Group source 'CT' not found in any dataset") as refusal:
+        dataset.prepare()
+    named = f"Dataset root './Dataset' does not exist (resolved: '{tmp_path.resolve() / 'Dataset'}'"
+    assert (named in str(refusal.value)) is not root_exists
+
+
 @pytest.mark.parametrize(("validation_augmentations", "built"), [(True, 20), (False, 24)])
 def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, validation_augmentations: bool, built: int
@@ -405,7 +532,7 @@ def test_a_float_split_builds_each_case_once_and_cuts_the_partitions_from_that_b
     store = Dataset(tmp_path / "Dataset", "mha")
     for name in names:
         for group in ("CT", "SEG"):
-            store.write(group, name, np.zeros((1, 4, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+            store.write(group, name, np.zeros((1, 2, 4, 4), np.float32), geometry([0.0] * 3, [1.0] * 3))
     constructed: list[tuple[str, int]] = []
 
     class CountingManager(DatasetManager):
@@ -463,10 +590,6 @@ def test_cache_worker_count_never_drops_below_one() -> None:
 # --------------------------------------------------------------------------------------
 # B3 - patch streaming must persist TensorCast dtype for the inverse
 # --------------------------------------------------------------------------------------
-
-
-def _image_attributes(origin: list[float], spacing: list[float]) -> Attribute:
-    return geometry(origin, spacing)
 
 
 def test_a_statistic_only_a_pass_can_give_is_measured_once_for_the_run(streaming_dataset_stub) -> None:
@@ -869,13 +992,13 @@ def test_cross_group_patch_count_check_names_the_case_the_groups_and_their_shape
 
 
 def test_destination_groups_with_disagreeing_grids_are_refused_at_prepare(tmp_path: Path) -> None:
-    """Two chains folding a case to different grids used to surface as an IndexError deep in a
-    loader worker (last group counted larger) or as silently unenumerated patches (smaller): the
-    disagreement is a config error and must be refused before a single patch is read."""
+    """Two chains folding a case to different grids are a config error, refused before a single patch
+    is read: let through, they surface as an IndexError deep in a loader worker (last group counted
+    larger) or as silently unenumerated patches (smaller)."""
     pytest.importorskip("SimpleITK")
     store = Dataset(tmp_path / "Dataset", "mha")
-    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
-    store.write("SEG", "CASE_000", np.zeros((1, 8, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
+    store.write("SEG", "CASE_000", np.zeros((1, 8, 4), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     dataset = DataPrediction(
         augmentations=None,
         dataset_filenames=[f"{tmp_path / 'Dataset'}:mha"],
@@ -947,7 +1070,7 @@ def test_a_one_pass_source_holds_two_cases_whatever_its_batch_size(tmp_path: Pat
     batch kept batch_size + 1 whole cases loaded, and a cohort's RAM grew by a case per case."""
     pytest.importorskip("SimpleITK")
     store = Dataset(tmp_path / "Dataset", "mha")
-    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    store.write("CT", "CASE_000", np.zeros((1, 8, 8), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     groups = {"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})}
 
     prediction = DataPrediction(
@@ -1360,7 +1483,7 @@ def test_data_train_enables_worker_prefetch_when_cache_is_disabled() -> None:
 
 
 def test_inline_augmentations_disable_persistent_workers() -> None:
-    # Persistent workers keep a fork-time copy of the dataset and never see the main process's
+    # Persistent workers keep the copy of the dataset they started with and never see the main process's
     # per-epoch reset_augmentation redraw, so inline augmentations would freeze at their first draw.
     # The guard is inline_augmentations AND a non-empty augmentations config, and it overrides an
     # explicit persistent_workers=True.
@@ -1392,27 +1515,39 @@ def test_data_prediction_disables_persistent_workers() -> None:
     assert dataset.dataLoader_args["persistent_workers"] is False
 
 
-def _prepared_prediction(root: Path, file_format: str, **kwargs) -> DataPrediction:
-    """A prediction over two 8x8 cases stored in ``file_format``, its managers built."""
+def _prepared_prediction(
+    root: Path,
+    file_format: str,
+    shapes: tuple[tuple[int, ...], ...] = ((8, 8), (8, 8)),
+    multiple: list[int] | None = None,
+    **kwargs,
+) -> DataPrediction:
+    """A prediction over cases of ``shapes`` (two 8x8 ones) stored in ``file_format``, its managers built."""
     store = Dataset(root, file_format)
-    for name in ("CASE_000", "CASE_001"):
-        store.write("CT", name, np.zeros((1, 8, 8), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0]))
+    for index, shape in enumerate(shapes):
+        attributes = geometry([0.0] * len(shape), [1.0] * len(shape))
+        store.write("CT", f"CASE_{index:03d}", np.zeros((1, *shape), np.float32), attributes)
+    kwargs.setdefault("patch", DatasetPatch(patch_size=[4, 4], overlap=None))
+    kwargs.setdefault("augmentations", None)
     dataset = DataPrediction(
-        augmentations=None,
         dataset_filenames=[f"{root}:{file_format}"],
         groups_src={"CT": Group(groups_dest={"CT": GroupTransform(transforms=None, patch_transforms=None)})},
-        patch=DatasetPatch(patch_size=[4, 4], overlap=None),
         subset=PredictionSubset(),
         **kwargs,
     )
+    dataset.set_free_axis_multiple(multiple)
     dataset.prepare()
     return dataset
 
 
 @pytest.mark.parametrize(
     ("file_format", "spins_workers"),
-    [("mha", False), ("nii.gz", True)],
-    ids=["a region read decodes the region", "a region read decodes the volume"],
+    [("mha", False), ("nii.gz", False), ("nrrd", True)],
+    ids=[
+        "a region read decodes the region",
+        "a compressed region is read from the uncompressed twin",
+        "a region read decodes the volume",
+    ],
 )
 def test_prediction_spins_workers_only_where_a_patch_read_decodes_the_volume(
     tmp_path: Path, file_format: str, spins_workers: bool
@@ -1424,6 +1559,29 @@ def test_prediction_spins_workers_only_where_a_patch_read_decodes_the_volume(
     dataset = _prepared_prediction(tmp_path / file_format, file_format)
 
     assert (dataset.resolved_num_workers > 0) is spins_workers
+
+
+@pytest.mark.parametrize(
+    ("copies", "budget", "loaded"),
+    [(1, 1 << 40, True), (1, 1000, False), (0, 1 << 40, False)],
+    ids=["TTA that fits", "its copies over the budget", "no TTA"],
+)
+def test_a_one_pass_reader_loads_a_tta_case_that_fits_the_budget_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, copies: int, budget: int, loaded: bool
+) -> None:
+    """Loaded, a case's chain runs once for every TTA copy, where a sweep replays it for each. The budget
+    holds the whole-volume pass, every copy and the next case (an 8x8 float case: 512 bytes of pass, 256 per
+    copy, two cases held). Without copies the sweep hides behind the forward, so the case streams."""
+    pytest.importorskip("SimpleITK")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    monkeypatch.setattr(samples_module, "per_rank_budget_bytes", lambda: budget)
+    augmentations = {"DataAugmentation_0": DataAugmentationsList(nb=copies, data_augmentations={})} if copies else None
+    (loaders,), _, _ = _prepared_prediction(tmp_path / "mha", "mha", augmentations=augmentations).get_data(1)
+    samples = loaders[0].dataset
+
+    samples[0]
+
+    assert samples.data["CT"][0].loaded is loaded
 
 
 def test_an_explicit_worker_count_wins_over_the_read_route(tmp_path: Path) -> None:
@@ -1447,20 +1605,35 @@ def test_data_prediction_forwards_its_declared_augmentations() -> None:
     assert dataset.data_augmentations_list == {"DataAugmentation_0": augmentations}
 
 
-def test_data_prediction_disables_workers_for_konfai_inference_transforms() -> None:
+class _MainProcessStage(Transform):
+    """A stage that spawns processes of its own, so it cannot run inside a daemonic loader worker."""
+
+    single_process = True
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        return tensor
+
+
+def test_a_stage_that_must_run_in_the_main_process_turns_the_loader_workers_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stage declares it; the loader reads the declaration on the bound chain, whatever the
+    stage is named and whatever ``num_workers`` asked for."""
+    monkeypatch.setenv("KONFAI_ROOT", "Predictor")
+    monkeypatch.setattr(TransformLoader, "get_transform", lambda *_, **__: _MainProcessStage())
     dataset = DataPrediction(
         augmentations=None,
+        num_workers=2,
         groups_src={
             "Volume_0": Group(
-                groups_dest={
-                    "MASK": GroupTransform(
-                        transforms={"KonfAIInference": TransformLoader()},
-                        patch_transforms=None,
-                    )
-                }
+                groups_dest={"MASK": GroupTransform(transforms={"Nested": TransformLoader()}, patch_transforms=None)}
             )
         },
     )
+    for group_src, group in dataset.groups_src.items():
+        for group_dest, chain in group.items():
+            chain.prepare(group_src, group_dest)
+    dataset._configure_data_loading(use_cache=False)
 
     assert dataset.requires_single_process_loading is True
     assert dataset.dataLoader_args["num_workers"] == 0
@@ -1566,6 +1739,52 @@ def test_collate_still_copies_inside_a_dataloader_worker(monkeypatch: pytest.Mon
     assert batched.data_ptr() != tensor.data_ptr()
 
 
+def test_collate_leaves_an_unreadable_case_out_of_the_tensor_and_lists_it() -> None:
+    """A one-pass loader hands back an empty item for a patch it could not read: the batch holds the
+    others' rows only, in order, and names the case on every group for the consumer to set aside."""
+    readable = [
+        {"CT": DataItem(f"case{i}", torch.full((1, 2, 2), float(i)), Attribute(), i, 0, 0, True)} for i in (0, 2)
+    ]
+    unreadable = {"CT": DataItem("case1", torch.empty(0), Attribute(), 1, 0, 0, True, unreadable="why")}
+
+    batch = collate_konfai([readable[0], unreadable, readable[1]])["CT"]
+    alone = collate_konfai([unreadable])["CT"]
+
+    assert batch.tensor[:, 0, 0, 0].tolist() == [0.0, 2.0] and batch.name == ["case0", "case2"]
+    assert batch.unreadable == [(1, "case1", "why")]
+    assert alone.tensor.shape[0] == 0 and alone.name == [] and alone.unreadable == [(1, "case1", "why")]
+    assert collate_konfai(readable)["CT"].unreadable == []
+
+
+def _set_aside_by(single_pass: bool) -> DatasetIter:
+    loader = object.__new__(DatasetIter)
+    loader.single_pass = single_pass
+    loader._unreadable = {}
+    return loader
+
+
+def test_a_one_pass_loader_sets_aside_a_read_error_and_nothing_else() -> None:
+    """Only a read error of the case's own entries is set aside, wrapped or not; a stage's bug, an
+    out-of-memory, or any error of a training loader is the caller's to raise."""
+    from konfai.utils.errors import CaseReadError
+
+    def wrapped(error: BaseException) -> RuntimeError:
+        try:
+            raise RuntimeError("Error while loading data") from error
+        except RuntimeError as outer:
+            return outer
+
+    read = CaseReadError("The 'CT' entry of case 'case1' in 'Dataset/case1' cannot be read: OSError: eof")
+    loader = _set_aside_by(single_pass=True)
+
+    assert loader._set_aside(1, wrapped(read))
+    assert loader._unreadable == {1: read.args[0]}
+    assert not loader._set_aside(2, ValueError("a stage's bug"))
+    assert not loader._set_aside(3, wrapped(MemoryError()))
+    assert not loader._set_aside(4, torch.cuda.OutOfMemoryError())
+    assert not _set_aside_by(single_pass=False)._set_aside(1, read)
+
+
 def test_one_pass_loaders_mark_their_samples_as_cache_free() -> None:
     # The flag rides the DatasetIter factory: one-pass workflows read each case once, so their
     # items alias no tensor that is read again; training items may alias the cache.
@@ -1604,6 +1823,47 @@ def test_dataset_iter_marks_items_from_its_single_pass_flag() -> None:
 
     assert dataset_iter(single_pass=True)[0]["dest"].aliases_cache is False
     assert dataset_iter(single_pass=False)[0]["dest"].aliases_cache is True
+
+
+class _RefusingTransform(_WholeVolumeTransform):
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        raise TransformError(f"no mask for case '{name}'.")
+
+
+@pytest.mark.parametrize("use_cache", [True, False], ids=["cache-fill", "fifo-load"])
+def test_a_stage_refusal_on_a_loaded_case_arrives_as_its_own_error(use_cache: bool) -> None:
+    # The streamed route raises the stage's KonfAIError as is; the loaded route must raise the same.
+    chain = GroupTransform(transforms=None, patch_transforms=None)
+    chain.transforms = [_RefusingTransform()]
+    manager = DatasetManager(
+        index=0,
+        group_src="src",
+        group_dest="dest",
+        name="case_000",
+        dataset=cast(Dataset, _DummyDataset(np.zeros((1, 2, 2), np.float32))),
+        patch=None,
+        transforms=chain.transforms,
+        data_augmentations_list=[],
+    )
+    dataset_iter = DatasetIter(
+        rank=0,
+        data={"dest": [manager]},
+        mapping=[(0, 0, 0)],
+        groups_src={"src": Group(groups_dest={"dest": chain})},
+        inline_augmentations=False,
+        data_augmentations_list=[],
+        patch_size=None,
+        overlap=None,
+        buffer_size=1,
+        use_cache=use_cache,
+    )
+
+    with pytest.raises(TransformError, match="no mask for case 'case_000'") as refusal:
+        if use_cache:
+            dataset_iter.load("Train")
+        else:
+            dataset_iter[0]
+    assert "Traceback" not in str(refusal.value)
 
 
 # --------------------------------------------------------------------------------------
@@ -1688,7 +1948,7 @@ class InfoCountingDataset:
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         assert group == "CT"
         self.info_calls += 1
-        return [1, 2, 2], _image_attributes([0.0, 0.0], [1.0, 1.0])
+        return [1, 2, 2], geometry([0.0, 0.0], [1.0, 1.0])
 
 
 def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1701,9 +1961,7 @@ def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, m
     store = Dataset(tmp_path / "Dataset", "mha")
     for index in range(4):
         for group in ("CT", "SEG"):
-            store.write(
-                group, f"CASE_{index:03d}", np.zeros((1, 4, 4), np.float32), _image_attributes([0.0, 0.0], [1.0, 1.0])
-            )
+            store.write(group, f"CASE_{index:03d}", np.zeros((1, 4, 4), np.float32), geometry([0.0, 0.0], [1.0, 1.0]))
     counts = {"datasets": 0, "parsed": 0, "cached": 0}
     dataset_init, dataset_get_infos = Dataset.__init__, Dataset.get_infos
 
@@ -1724,7 +1982,9 @@ def test_an_evaluation_keeps_its_roots_across_its_two_resolves(tmp_path: Path, m
         },
     )
     data.prepare()
-    assert counts == {"datasets": 1, "parsed": 8, "cached": 8}
+    # Parsed by the sizing pass; then answered from the cache to the selection, which sets aside a case
+    # whose header does not read, and to the managers.
+    assert counts == {"datasets": 1, "parsed": 8, "cached": 16}
     roots = list(data.datasets.values())
     data.patch = DatasetPatch(patch_size=[2, 2])
     data.replan_patch([4, 4])
@@ -1786,6 +2046,19 @@ def test_split_path_spec_supports_unix_style_dataset_specs() -> None:
     )
 
 
+def test_every_workflow_writes_the_default_dataset_root_with_its_format() -> None:
+    """The default a config without dataset_filenames resolves to, and --init writes, is spelled the
+    same by the four workflows, the format named."""
+    import inspect
+
+    from konfai.data.data_manager import DataMetric, DataTransform
+
+    for workflow in (DataTrain, DataPrediction, DataMetric, DataTransform):
+        assert inspect.signature(workflow).parameters["dataset_filenames"].default == ["default|./Dataset:mha"], (
+            workflow.__name__
+        )
+
+
 def test_split_path_spec_supports_windows_paths_without_breaking_drive_letters() -> None:
     assert split_path_spec(r"C:\Dataset") == (r"C:\Dataset", None, "mha")
     assert split_path_spec(r"C:\Dataset:mha") == (r"C:\Dataset", None, "mha")
@@ -1818,3 +2091,93 @@ def test_a_negative_prediction_batch_is_refused_not_read_as_one() -> None:
     # 0 asks for a measured batch; anything below it is a typo, not a batch of one.
     with pytest.raises(DatasetManagerError, match="batch_size: -2 is negative"):
         DataPrediction(augmentations=None, batch_size=-2)
+
+
+@pytest.mark.parametrize(("visible", "measured"), [("", False), ("0", True)], ids=["cpu", "gpu"])
+def test_a_prediction_left_to_measure_its_batch_batches_one_patch_at_a_time_off_a_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, visible: str, measured: bool
+) -> None:
+    """Left out, the batch is measured on a GPU; on a CPU the loader batches one patch at a time exactly as
+    ``batch_size: 1`` has it, its workers still declaring their reads to the store."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    dataset = _prepared_prediction(tmp_path, "mha")
+    batch_sampler = dataset.get_data(1)[0][0][0].batch_sampler
+
+    assert isinstance(batch_sampler, GrowingBatchSampler) is measured
+    assert batch_sampler.batch_size == 1
+    assert batch_sampler.sampler.read_order._batches_vary is measured
+
+
+@pytest.mark.parametrize(
+    ("shapes", "patch_size", "multiple", "measured"),
+    [
+        (((8, 8), (8, 12)), None, None, False),
+        (((8, 8), (8, 12)), [0, 0], None, False),
+        (((8, 8), (8, 12)), [8, 0], None, False),
+        (((8, 8), (8, 8)), None, None, True),
+        (((8, 8), (8, 8)), [0, 0], None, True),
+        (((8, 8), (12, 8)), [4, 0], None, True),
+        (((8, 8), (8, 12)), [4, 4], None, True),
+        (((8, 6), (8, 8)), [0, 0], [4, 4], True),
+    ],
+    ids=[
+        "whole volumes of two shapes",
+        "free axes of two extents",
+        "a free axis of two extents",
+        "whole volumes of one shape",
+        "free axes of one extent",
+        "two extents on a declared axis only",
+        "a declared patch",
+        "free extents rounded to one size",
+    ],
+)
+def test_a_prediction_measures_its_batch_only_where_its_patches_stack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    shapes: tuple[tuple[int, int], ...],
+    patch_size: list[int] | None,
+    multiple: list[int] | None,
+    measured: bool,
+) -> None:
+    """A batch of several patches stacks them, and a free axis (``0``, or no patch) keeps each case's own
+    extent: two cases of two extents there run one patch per batch, as ``batch_size: 1`` has it, instead of
+    failing to stack at the second forward. A declared axis pads every patch to its size."""
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    patch = None if patch_size is None else DatasetPatch(patch_size=patch_size, overlap=None)
+    dataset = _prepared_prediction(tmp_path, "mha", shapes, multiple, patch=patch)
+    loader = dataset.get_data(1)[0][0][0]
+
+    assert isinstance(loader.batch_sampler, GrowingBatchSampler) is measured
+    if measured:
+        # The measured batch's second forward: every two patches, the two cases' included, stack.
+        loader.batch_sampler.batch_size = 2
+        assert sum(1 for _ in loader) == -(-len(loader.batch_sampler.sampler) // 2)
+
+
+@pytest.mark.parametrize(("patch_size", "measured"), [(None, True), ([0, 0, 0], False)], ids=["no patch", "free axes"])
+def test_a_prediction_measures_its_batch_over_copies_of_another_shape_it_pads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch_size: list[int] | None, measured: bool
+) -> None:
+    """Without a patch, every copy is cut into patches of the case's own shape, a permuted one padded to
+    it, so the copies stack whatever their shapes. Free axes keep each copy's own extent, and those do not."""
+    from konfai.data.augmentation import Permute
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    permute = Permute(prob_permute=[1.0, 0.0])
+    permute.load(1.0)
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={})
+    monkeypatch.setattr(augmentations, "prepare", lambda key: setattr(augmentations, "data_augmentations", [permute]))
+    patch = None if patch_size is None else DatasetPatch(patch_size=patch_size, overlap=None)
+    dataset = _prepared_prediction(
+        tmp_path, "mha", ((4, 8, 8), (4, 8, 8)), patch=patch, augmentations={"DataAugmentation_0": augmentations}
+    )
+    assert [manager.shapes for manager in dataset.managers["CT"]] == [[[4, 8, 8], [8, 4, 8]]] * 2
+    loader = dataset.get_data(1)[0][0][0]
+
+    assert isinstance(loader.batch_sampler, GrowingBatchSampler) is measured
+    if measured:
+        loader.batch_sampler.batch_size = 2
+        assert sum(1 for _ in loader) == -(-len(loader.batch_sampler.sampler) // 2)

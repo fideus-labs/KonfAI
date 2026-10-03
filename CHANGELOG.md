@@ -1,24 +1,16 @@
 # Changelog
 
-Drafted from the commit history by [Commitizen](https://commitizen-tools.github.io/commitizen/), then
-edited. Each version's section is what the GitHub Release for that tag carries.
-
-```bash
-cz changelog --unreleased-version vX.Y.Z --start-rev v1.5.8   # a DRAFT, not the final file
-```
-
-Conventional Commits started at `v1.5.9`; rendering further back produces empty version headings.
-
-The draft is a starting point, not the answer. It sees only commit subjects, so a squash merge
-collapses to one line, a subject with no conventional prefix is dropped entirely, and a subject
-written for a reviewer ("what reviewing the data surface turned up") tells a reader nothing. Take the
-draft, then say what a user of the package gets that they did not have -- and re-read the section
-against the commits that landed *after* you drafted it. Running the command over a section already
-written replaces it.
+Each version's section is the body of its GitHub Release. How a section is written:
+[Cutting a release](docs/source/development.md#cutting-a-release).
 
 ## v1.8.6 (2026-09-23)
 
-### Features
+### 💥 Breaking changes
+
+- The draw that crops a case to a stored mask at a random position is `PlacedMask`, no longer
+  `konfai.data.augmentation.Mask`: a bare `Mask` names the transform alone.
+
+### ✨ Features
 
 - impact-reg: the FireANTs engine reads IMPACT features the way the elastix engine does, in one of two
   modes. `Jacobian` extracts them inside the loss at every optimiser step, as before. `Static` extracts
@@ -37,7 +29,7 @@ written replaces it.
 - ome-zarr: stores are written as NGFF 0.5 in a zarr v3 layout.
 - studio: `compare` fills the pane that was clicked last.
 
-### Bug Fixes
+### 🐛 Bug Fixes
 
 - impact: the IMPACT models were handed their intensity statistics in the wrong order and nested,
   `[min, mean, max, std]` where itk-impact reads a flat `[min, max, mean, sigma]`. Every model that
@@ -70,14 +62,14 @@ written replaces it.
 - runtime: a single rank starts no process group.
 - logging: one line per write and one prefix, so a run log reads.
 
-### Documentation
+### 📝 Documentation
 
 - OME-Zarr: the `Direction` matrix travels in the attributes sidecar, and a store written without one
   reads back axis-aligned; `write_ome_zarr` names its keyword-only arguments.
 
 ## v1.8.5 (2026-09-14)
 
-### Breaking Changes
+### 💥 Breaking changes
 
 - The three app exceptions (`AppRepositoryError` among them) live in `konfai_apps` and no longer
   resolve under `konfai.utils.errors`. SlicerKonfAI carries the one-line import fix; ship it before
@@ -85,7 +77,7 @@ written replaces it.
 - A config naming a built-in model by the pre-1.6.0 absolute path is refused. Write
   `<kind>.<file>:<Class>` or `default|<Name>.yml`.
 
-### Performance
+### ⚡ Performance
 
 - Training on streamed patches with a statistic behind a stage that changes the values (a
   `Standardize` after a `Resample`, a `Clip('min', 'max')`) no longer loads every case whole: the
@@ -101,14 +93,14 @@ written replaces it.
 - Trainer: `cudnn_benchmark` and `torch_compile` knobs; a NaN loss stops the run instead of
   training on.
 
-### Features
+### ✨ Features
 
 - The intensity augmentations medical imaging needs: `GaussianNoise`, `GaussianBlur` (with
   `in_plane`), `SimulateLowResolution`, `Gamma`, `ContrastAroundMean`; `Rotate(in_plane: true)` turns
   a 2.5D stack about its slice axis. Each declares the locality its values need, so the copies stream.
 - impact-reg: `moments_init: none` for a pair the caller centred.
 
-### Bug Fixes
+### 🐛 Bug Fixes
 
 - `Crop` on a case read from a dataset kept the source origin on every route, and its inverse then
   dropped the geometry, so PREDICTION wrote `.npy` instead of `.mha`. The origin moves to the box's
@@ -122,7 +114,7 @@ written replaces it.
 
 ## v1.8.4 (2026-09-09)
 
-### Features
+### ✨ Features
 
 - Python API: `konfai.train_model` and `konfai.predict_model` take any `torch.nn.Module` with a
   dataset root, the groups it reads, a loss and a patch; `konfai.import_bundle` and
@@ -141,7 +133,7 @@ written replaces it.
 - `Predictor.checkpoint_cache_gib`: a bounded checkpoint cache (1 GiB by default) with
   memory-mapped loads for ensembles and folds.
 
-### Bug Fixes
+### 🐛 Bug Fixes
 
 - Checkpoint selection (`BEST`) and `ReduceLROnPlateau` score what each loss minimizes: a Dice
   reporting its coefficient summed with a cross-entropy kept the worst epoch.
@@ -158,7 +150,7 @@ written replaces it.
 - A model YAML named by a relative path is anchored to the config file that names it, on every
   entry point.
 
-### Performance
+### ⚡ Performance
 
 - TRANSFORM sizes regions by price for the first one and by what the last held for the next,
   decides LOAD from the store's read capability, and halves on a CUDA out-of-memory. ExaSPIM
@@ -169,18 +161,18 @@ written replaces it.
   3.9x faster, MRSegmentator at five folds 1.2 to 1.7x, 2 to 5x less host RAM).
 - Training examples default to autocast, `channels_last` on 2D and pinned memory.
 
-### Documentation
+### 📝 Documentation
 
 - The site folds from 63 pages to 37; every old URL redirects to its new home.
 
-### CI
+### 👷 Build, CI, dependencies
 
 - mypy in the pre-commit hook and in CI; representative lanes on pull requests, the full matrix on
   main; one torch thread per test worker (the suite 8x faster on 24 cores).
 
 ## v1.8.3 (2026-09-02)
 
-### Features
+### ✨ Features
 
 - `konfai <COMMAND> --init` generates a resolved default config: the file is created when
   missing (seeded with its root key), every default is bound into it, and the command exits
@@ -215,7 +207,7 @@ written replaces it.
 - konfai-mcp: `fine_tune_app` restored as the one-call tier next to
   `import_app` + `run_resume(weights_only=True)`, proven by an end-to-end fine-tune test.
 
-### Fixed
+### 🐛 Bug Fixes
 
 - Config binder: wrong-shaped YAML (a nested block or list where a scalar is taken) is refused
   with the dotted path instead of silently bound; an explicit `name: null` binds `None`, the
@@ -264,7 +256,7 @@ written replaces it.
   size); `c_prob` deleted.
 - A declared `memory_budget` below 256 MiB warns: the stack cannot honor less.
 
-### Performance
+### ⚡ Performance
 
 - Residual junctions no longer materialize an N-tensor stack; attention runs through SDPA
   (measured max abs diff 7.15e-7 against the MONAI ViT parity pin).
@@ -273,7 +265,7 @@ written replaces it.
 - Remote datasets pay no per-patch path-resolution round trips; H5 read-chunk caches and the
   DICOM plane cache take their slice of the declared budget.
 
-### Build, CI, dependencies
+### 👷 Build, CI, dependencies
 
 - `lxml`, `requests` and `huggingface_hub` are no longer hard dependencies (stdlib XML and
   urllib; `huggingface_hub` moved to the `all` extra for the IMPACT criteria); the orphaned
@@ -286,7 +278,7 @@ written replaces it.
 - New docs job builds the Sphinx site with `-W` on every docs/core change; docs deps unified
   on `docs/requirements.txt`.
 
-### Breaking / migration notes
+### 💥 Breaking changes
 
 - **Python callers of `Network` checkpoints**: `Network.state_dict()` now returns the
   torch-native flat dict; build/unpack KonfAI checkpoints through `network_states()`.
@@ -305,8 +297,13 @@ written replaces it.
   an out-of-tree caller reading `[1]` as a dict must materialize it.
 - **Config generation modes removed**: `KONFAI_CONFIG_MODE=default|interactive|remove` no
   longer exist; use `konfai <COMMAND> --init`.
-- **`validation: <int>`** now selects that position (matching `subset:`) instead of refusing.
+- **`validation` given a Python `int`** (`DataTrain(validation=1)`) now selects that position
+  instead of refusing. A config binds a bare number as a share in TRAIN (`validation: 1` is
+  refused) and as a case name in EVALUATION; positions are written as a list, `validation: [1]`.
 - **`TrainSubset` deleted**: it was an identity subclass; spell `Subset`.
+- **Python 3.11 or later** is required (`requires-python` was `>=3.10`).
+- **OME-Zarr displacement fields written by KonfAI 1.8.2 or earlier are refused**: their component
+  axis is typed but declares no component order. Rewrite them from their source transform.
 - **`konfai` package private re-exports removed**: the nine package `__init__`s no longer
   re-export single-underscore names; import from the defining submodule.
 
@@ -362,8 +359,9 @@ no value.
 
 ### ♻️ Refactoring
 
-- the nine monolithic modules split into packages; `konfai.predictor.Median`, the
-  `Dataset.<Backend>` aliases and `OutSameAsGroupDataset` keep resolving for published configs
+- the nine monolithic modules split into packages; a bare reduction name (`Median`) and
+  `OutSameAsGroupDataset` keep resolving for published configs, and the backends stay
+  addressable as `Dataset.<Backend>`
 
 ## v1.8.1 (2026-08-19)
 
@@ -846,7 +844,7 @@ Several are new refusals: what they refuse was being done before, silently and w
 
 ## v1.6.0 (2026-07-16)
 
-### BREAKING CHANGE
+### 💥 Breaking changes
 
 - fully-qualified references 'konfai.models.<task>.<Module>:<Class>' become
 'konfai.models.python.<task>.<Module>:<Class>' (no compatibility alias).

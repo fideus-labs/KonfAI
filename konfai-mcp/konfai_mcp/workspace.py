@@ -120,15 +120,6 @@ class WorkspaceLayout:
             raise ValueError(f"Unsupported workflow: {workflow}")
         return self.workspace_dir() / filename
 
-    def train_config_path(self) -> Path:
-        return self.config_path("train")
-
-    def prediction_config_path(self) -> Path:
-        return self.config_path("prediction")
-
-    def evaluation_config_path(self) -> Path:
-        return self.config_path("evaluation")
-
     def statistics_log_path(self) -> Path:
         return self.workspace_dir() / "Statistics" / "Log.txt"
 

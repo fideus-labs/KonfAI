@@ -22,6 +22,7 @@ import copy
 import queue
 import warnings
 from collections.abc import Iterable, Iterator, Sequence
+from itertools import pairwise
 from typing import Any, cast
 
 import numpy as np
@@ -81,7 +82,7 @@ from konfai.data.transform import (
     split_expand,
     stat_seed_valid,
 )
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import Attribute, Dataset, decompressed
 from konfai.utils.dataset.statistics import needs_moments
 from konfai.utils.errors import DatasetManagerError, KonfAIWarning, PatchError
 from konfai.utils.runtime import return_freed_heap
@@ -89,6 +90,10 @@ from konfai.utils.utils import env_flag
 
 #: The most a sequential reader's landed slab holds, whatever its rows.
 _SLAB_BYTES = 256 << 20
+
+#: The refusal of a statistic whose input an earlier stage changes: the one a statistic declared on
+#: the stage, a reordered chain or a Save cures.
+STATISTIC_AFTER_A_VALUE_CHANGE = "needs whole-volume statistics, but an earlier stage changes the values"
 
 
 def _covers(region: tuple[slice, ...], target: tuple[slice, ...]) -> bool:
@@ -148,9 +153,11 @@ class DatasetManager:
         for transform_function in self._expand_pre:
             _shape = self._fold_case_state(transform_function, _shape, folding)
         self._adopt_case_facts(folding, cache_attribute)
-        # The grid and case state at the Expand point: what the first per-copy stage is handed.
+        # The grid at the Expand point, the case baseline a copy starts from, and the case state the
+        # first per-copy stage is handed: the stages before the marker may have moved the grid.
         self._shape_at_expand = list(_shape)
         self._attributes_at_expand = Attribute(cache_attribute)
+        self._folding_at_expand = Attribute(folding)
         # The un-augmented landing of the per-copy tail. A draw is the identity here, because copy 0
         # carries none: the real per-copy grids are folded in reset_augmentation, stage by stage.
         for transform_function in self._expand_post:
@@ -271,13 +278,7 @@ class DatasetManager:
         # the draw's own, and a re-draw is a new one. Drop every plan, so the next request replans
         # against the draw the copies actually carry.
         self._records_source = None
-        self._patch_stream_sources.clear()
-        self._stream_refusals.clear()
-        self._stream_ok.clear()
-        self._stream_evolved.clear()
-        self._stream_attributes_persisted.clear()
-        self._landed_slabs.clear()
-        self._block_reads.clear()
+        self._invalidate_stream_plans()
         # A wait is for the draw the plan saw: a pass under the new draw must not answer it.
         self._wanted_measurements.clear()
         self._awaiting_measurement.clear()
@@ -300,7 +301,7 @@ class DatasetManager:
         attributes = [copy.deepcopy(self._attributes_at_expand) for _ in range(expand.nb)]
         # The copies' walk states, apart from the baselines above: the landing fold evolves the
         # geometry, and a streamed replay must start from the case as stored.
-        foldings = [Attribute(attribute) for attribute in attributes]
+        foldings = [Attribute(self._folding_at_expand) for _ in range(expand.nb)]
         drawn: dict[str, int] = {}
         for stage in self._expand_post:
             if _is_draw(stage):
@@ -312,8 +313,15 @@ class DatasetManager:
                 # One draw, every copy at once: state_init IS the per-copy sampler, and it wants the
                 # copies' current grids. Keyed by the case's NAME, not its index: a different
                 # `subset` must not hand a case other copies.
+                before = [list(shape) for shape in shapes]
                 with _drawn_from(expand.draw_seed, self.name, kind, occurrence):
-                    shapes = stage.state_init(self.index, shapes, foldings)
+                    # A copy of the walk state: a draw that swaps axes carries the spacing on what it is
+                    # handed, and the copy's own header follows the swap below.
+                    shapes = stage.state_init(self.index, shapes, [Attribute(folding) for folding in foldings])
+                for index in range(expand.nb):
+                    AugmentedStage(stage, self.index, index, expanded=True).write_stream_cache_attribute(
+                        foldings[index], before[index], self.name
+                    )
                 continue
             for index in range(expand.nb):
                 shapes[index] = self._fold_case_state(stage, shapes[index], foldings[index])
@@ -328,8 +336,9 @@ class DatasetManager:
 
     def _draw_augmentation_lists(self, reset_state: bool) -> None:
         """The training form: copies declared as ``Dataset.augmentations`` lists, applied after the
-        whole chain."""
+        whole chain. A list with a ``draw_seed`` keys each draw as :meth:`_draw_expand_copies` does."""
         i = 1
+        drawn: dict[str, int] = {}
         for data_augmentations in self.data_augmentations_list:
             shape = []
             caches_attribute = []
@@ -344,7 +353,12 @@ class DatasetManager:
             for data_augmentation in data_augmentations.data_augmentations:
                 if reset_state:
                     data_augmentation.reset_state(self.index)
-                shape = data_augmentation.state_init(self.index, shape, foldings)
+                kind = type(data_augmentation).__name__
+                occurrence = drawn.get(kind, 0)
+                drawn[kind] = occurrence + 1
+                seed = data_augmentations.draw_seed
+                with contextlib.nullcontext() if seed is None else _drawn_from(seed, self.name, kind, occurrence):
+                    shape = data_augmentation.state_init(self.index, shape, foldings)
             for it, s in enumerate(shape):
                 self._adopt_case_facts(foldings[it], caches_attribute[it])
                 self.cache_attributes.append(caches_attribute[it])
@@ -539,7 +553,10 @@ class DatasetManager:
             # Copy 0 is the case itself: it carries no draw, so the tail is its transforms alone --
             # the same landing __init__ folds, and what a probe or a header asks for by default.
             return [stage for stage in self._expand_post if not _is_draw(stage)]
-        return [AugmentedStage(stage, self.index, a - 1) if _is_draw(stage) else stage for stage in self._expand_post]
+        return [
+            AugmentedStage(stage, self.index, a - 1, expanded=True) if _is_draw(stage) else stage
+            for stage in self._expand_post
+        ]
 
     def _get_tensor(self, a: int) -> torch.Tensor:
         if a == 0:
@@ -593,7 +610,7 @@ class DatasetManager:
             self._statistics_deferred = False
             self._invalidate_stream_plans()
 
-    def warm_stream_statistics(self, copies: Sequence[int] = (0,), apply_augmentations: bool = True) -> None:
+    def warm_stream_statistics(self, copies: Sequence[int] = (0,), apply_augmentations: bool = True) -> bool:
         """Read now the statistics the copies' streamed plans will want, and resolve those plans, in the
         process that forks the workers.
 
@@ -601,24 +618,25 @@ class DatasetManager:
         for every epoch; but the memo holding it lives on this manager, and a DataLoader worker that
         is not persistent is forked anew for each epoch. Filled before the fork, the scan happens
         once for the run instead of once per worker per epoch. A chain that wants no statistic
-        resolves its plan here and reads nothing.
+        resolves its plan here and reads nothing. Whether a pass read the whole volume and a copy then streams.
         """
         # A probe resolves the plans with the statistics still deferred, so it reads nothing: a case none of
         # whose copies can stream, and that no pass would change, is left alone rather than scanned.
         streams = [self.can_stream_patch(a, apply_augmentations) for a in copies]
         if not any(streams) and not self._awaiting_measurement.intersection(copies):
-            return
+            return False
         # The store's statistics reach the plans before any pass, so a pass runs under the seeds the regions
         # replay.
         self._require_statistics()
         answered = -1
+        passed = False
         while True:
             refused = [a for a in copies if not self.can_stream_patch(a, apply_augmentations)]
             known = len(self._measured_statistics) + len(self._unmeasurable)
             # A case in hand is served whole, and unloading it would take it from under its buffer; a pass
             # that answered nothing new would answer nothing the next time either.
             if not self._awaiting_measurement.intersection(refused) or self.loaded or known == answered:
-                return
+                return passed and len(refused) < len(copies)
             answered = known
             # A stage here wants its own input, which the chain has changed, and only a pass over the volume
             # can say it: one pass for every copy and every stage waiting on it. Nothing a selected draw
@@ -627,6 +645,7 @@ class DatasetManager:
             self.load(self.transforms, self.data_augmentations_list, load_augmentations=apply_augmentations)
             self.unload()
             self.unload_augmentation()
+            passed = True
 
     def _store_seed(
         self,
@@ -750,8 +769,7 @@ class DatasetManager:
                         # A stage seeding itself from the stored volume (a masked bound), or one that records
                         # nothing of its own when it runs whole: only the whole-volume route has its number.
                         return refuse(
-                            f"{label} needs whole-volume statistics, but an earlier stage changes the values, and"
-                            " no whole-volume pass records them for it."
+                            f"{label} {STATISTIC_AFTER_A_VALUE_CHANGE}, and no whole-volume pass records them for it."
                         )
                     elif measured is None:
                         # Planned on without a seed: a stage after it may refuse for a reason no pass settles,
@@ -795,8 +813,8 @@ class DatasetManager:
         if waiting:
             self._wait_for_a_pass(a, stages, localities)
             return refuse(
-                f"{waiting[0]} needs whole-volume statistics, but an earlier stage changes the values: the"
-                " stored volume's statistic is not this stage's input."
+                f"{waiting[0]} {STATISTIC_AFTER_A_VALUE_CHANGE}: the stored volume's statistic is not this"
+                " stage's input."
             )
         return True, tuple(plans), evolved, None
 
@@ -828,7 +846,8 @@ class DatasetManager:
                 else None
             )
             out = self._stage_out_shape(stage, shape, Attribute(evolved))
-            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull)
+            folds_ahead = run_pull is None or not getattr(stage, "measures_from_data", True)
+            plan = _ReadStagePlan(loc.kind, tuple(shape), tuple(out), pull, run_pull, folds_ahead)
         stage.write_stream_cache_attribute(evolved, list(shape), self.name)
         return plan
 
@@ -852,8 +871,7 @@ class DatasetManager:
         left rather than on the stored header: a second ``Resample`` sees the first one's spacing.
         """
         out = self._stage_out_shape(stage, shape, attribute)
-        if isinstance(stage, Transform):
-            stage.write_stream_cache_attribute(attribute, list(shape), self.name)
+        stage.write_stream_cache_attribute(attribute, list(shape), self.name)
         return out
 
     @staticmethod
@@ -1232,10 +1250,7 @@ class DatasetManager:
         # case as STORED. An earlier boundary-based plan wrote the OUTPUT's header into the backup, and
         # a rewrite planned from that geometry re-writes untransformed data over the deliverable.
         self._rewrite_saves = rewrite
-        self._patch_stream_sources.clear()
-        self._stream_refusals.clear()
-        self._stream_ok.clear()
-        self._stream_evolved.clear()
+        self._invalidate_stream_plans()
         self._swept_entries.clear()
         self._sweep_failure = None
         self.cache_attributes_bak = copy.deepcopy(self._cache_attributes_pristine)
@@ -1270,6 +1285,7 @@ class DatasetManager:
         return self._sweep_failure is not None
 
     def _invalidate_stream_plans(self) -> None:
+        """Drop every plan and what the reads under it left: the next request replans."""
         self._landed_slabs.clear()
         self._block_reads.clear()
         # A replan rebuilds each copy's case attribute, and its first region fills it again.
@@ -1370,7 +1386,7 @@ class DatasetManager:
         # Reading ahead means the reading thread must touch no stage of the chain, so the pull maps
         # are folded on this thread, a few regions ahead of the reader. A stage that sizes its window
         # from the data it reads (a displacement field) cannot be folded ahead.
-        folds_ahead = not any(plan.run_pull is not None for plan in source.stage_plans)
+        folds_ahead = all(plan.folds_ahead for plan in source.stage_plans)
         ahead = depth if folds_ahead else 0
         sweeps = {member.key: member.sweep for member in members}
         headers: dict[Any, Attribute] = {}
@@ -1444,6 +1460,7 @@ class DatasetManager:
                             # LAST member is the last reader, so its clone would protect nothing.
                             member_tensor = tensor if position == len(members) - 1 else tensor.clone()
                             scope = Attribute(region_attribute)
+                            restated = set(keys_before)
                             # Dispatched exactly as the stages before the marker are, so a tail stage
                             # reading a companion volume (Mask) or drawing from the voxel's place
                             # (Noise, CutOUT) is told where its block sits.
@@ -1454,13 +1471,14 @@ class DatasetManager:
                                 member_tensor,
                                 scope,
                                 None,
+                                restated,
                             )
                         # Its own phase, not the chain's: on a device the chain only ENQUEUES,
                         # and this is where the run waits for it as well as for the copy home.
                         with SWEEP_CLOCK.phase("fetch"):
                             block = landing.take(member_tensor)
                         if member.key not in headers:
-                            headers[member.key] = _sweep_header(member.evolved, scope, keys_before)
+                            headers[member.key] = _sweep_header(member.evolved, scope, restated)
                         block = _channel_first_block(
                             block,
                             spatial,
@@ -1554,11 +1572,7 @@ class DatasetManager:
     def sweep_block_bytes(
         self, spatial: list[int], channels: int, plans: Sequence["_ReadStagePlan"], tile: list[int], depth: int
     ) -> int:
-        """:meth:`SegmentSizer.sweep_block_bytes` of the whole declared chain against the raw source.
-
-        Public because the sizing holds this figure to the budget and a caller sizing a budget for a
-        decomposition asks for it: one price, not two that drift apart.
-        """
+        """:meth:`SegmentSizer.sweep_block_bytes` of the whole declared chain against the raw source."""
         return self._chain_sizer(spatial, channels, plans).sweep_block_bytes(tile, depth)
 
     def _sweep_shape(self, spatial: list[int], plans: Sequence["_ReadStagePlan"], rows: int) -> list[int]:
@@ -1861,6 +1875,30 @@ class DatasetManager:
             read += float(np.prod([span.stop - span.start for span in spans], dtype=np.float64))
         return read / stored
 
+    def streamed_read_widenings(self, a: int, is_input: bool, apply_augmentations: bool) -> list[str]:
+        """What makes the patches of copy ``a`` read more than their slots, named from the grid and
+        the plans: overlapping slots, the halo and the 2.5D stack a patch is read with, and each stage
+        that pulls a window wider than the region it serves."""
+        widenings = []
+        slots = self.patch.get_patch_slices(a)
+        for axis in range(len(slots[0]) if slots else 0):
+            spans = sorted({(slot[axis].start, slot[axis].stop) for slot in slots})
+            if any(start < stop for (_, stop), (start, _) in pairwise(spans)):
+                widenings.append("overlapping patches")
+                break
+        if self.patch.halo:
+            widenings.append(f"a {self.patch.halo}-voxel halo")
+        if is_input and self.patch.extend_slice:
+            widenings.append(f"a 2.5D stack (extend_slice: {self.patch.extend_slice})")
+        source = self._resolve_patch_stream_source(a, apply_augmentations)
+        if source is not None:
+            widenings += [
+                f"'{_stage_name(stage)}'"
+                for stage, plan in zip(source.stages, source.stage_plans, strict=True)
+                if plan.kind in (LocalityKind.HALO, LocalityKind.REGRID)
+            ]
+        return widenings
+
     def _patch_read_spans(
         self, stream_source: _PatchStreamSource, index: int, a: int, is_input: bool
     ) -> list[list[slice]]:
@@ -1939,13 +1977,20 @@ class DatasetManager:
 
         ``cache_attribute`` is the region's scope, evolved by the chain; ``case_attribute``, when
         given, receives each region stage's case-level geometry. Returns the tensor, the evolved
-        scope, and the keys the scope held before.
+        scope, and the keys the scope held before or that a region stage restated on it: the case
+        state holds those, so none is something the chain added.
         """
         cache_attribute.update(attributes)
         cache_attribute["StatisticsSeeded"] = 1.0  # same contract as the pointwise route above
         keys_before = set(cache_attribute.keys())
         tensor = self._run_streamed_stages(
-            stream_source.stages, stream_source.stage_plans, spans, tensor, cache_attribute, case_attribute
+            stream_source.stages,
+            stream_source.stage_plans,
+            spans,
+            tensor,
+            cache_attribute,
+            case_attribute,
+            keys_before,
         )
         return tensor, cache_attribute, keys_before
 
@@ -1957,11 +2002,14 @@ class DatasetManager:
         tensor: torch.Tensor,
         cache_attribute: Attribute,
         case_attribute: Attribute | None,
+        restated: set[str],
     ) -> torch.Tensor:
         """Walk STAGES over a region already read, each on the region pair the fold computed for it:
         HALO reads the enlarged region and is cropped back, ORIENTATION remaps what it read, a CROP's
         remap is its action (not re-applied), REGRID interpolates to its target extent, a per-voxel
         stage is told where its region sits.
+
+        ``restated`` receives the keys a region stage's case-level geometry adds to the scope.
 
         The one dispatch: a chain read through the store and a member's per-copy tail both come here.
         """
@@ -1989,6 +2037,11 @@ class DatasetManager:
             if case_attribute is not None:
                 stage.write_stream_cache_attribute(case_attribute, list(plan.in_shape), self.name)
                 self._check_region_geometry_reaches_the_case(stage, scoped, cache_attribute)
+            # The stages after it read the geometry this one leaves, as they do on the whole volume
+            # (a Canonical reorients from the Direction a Permute restated).
+            held = set(cache_attribute.keys())
+            stage.write_stream_cache_attribute(cache_attribute, list(plan.in_shape), self.name)
+            restated.update(set(cache_attribute.keys()) - held)
 
         return tensor
 
@@ -2013,6 +2066,14 @@ class DatasetManager:
             "Record the case's answer in write_stream_cache_attribute(): it is given the whole volume's"
             " shape, where a patch's extent cannot say it.",
         )
+
+    def release_case(self) -> None:
+        """Drop what a one-pass reader holds of this case once it has left it: the slabs its patches
+        were cut from, and the uncompressed twins read for it and for its ``Expand`` copies, from any
+        root (a mask, a field, a Save cache of the copies)."""
+        self._landed_slabs.clear()
+        for a in range(1 + (self._expand.nb if self._expand is not None else 0)):
+            decompressed.release(self.copy_entry(a))
 
     def unload(self) -> None:
         self._landed_slabs.clear()

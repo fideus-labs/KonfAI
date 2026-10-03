@@ -19,6 +19,7 @@ one engine. Pins the kwargs recording, the object->tree serialization, the run c
 exit; the process env left as found; one workflow at a time), and byte-identity between the two
 spellings of the same run."""
 
+import json
 import os
 from pathlib import Path
 
@@ -29,9 +30,11 @@ import torch
 sitk = pytest.importorskip("SimpleITK")
 
 from konfai import api  # noqa: E402
+from konfai.data.augmentation import Flip  # noqa: E402
 from konfai.data.reduction import Std  # noqa: E402
-from konfai.data.transform import Clip, Crop, Magnitude, Resample, Save, Write  # noqa: E402
+from konfai.data.transform import Clip, Crop, Expand, Magnitude, Resample, Save, Write  # noqa: E402
 from konfai.metric.measure import MAE, Dice  # noqa: E402
+from konfai.predictor import OutputDataset  # noqa: E402
 from konfai.utils.errors import ConfigError, KonfAIError  # noqa: E402
 
 # --------------------------------------------------------------------------- recording and trees
@@ -177,6 +180,39 @@ def test_the_environment_is_left_as_found(cohort: Path, monkeypatch: pytest.Monk
     assert [key for key in os.environ if key.startswith("KONFAI")] == []
 
 
+@pytest.mark.parametrize("second_budget", [None, "1GiB"])
+def test_a_calls_memory_budget_does_not_reach_the_next_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_budget: str | None
+) -> None:
+    """The per-rank budget a run publishes is process state: the next call's build reads it before
+    that call publishes its own, so it must find what a fresh process finds."""
+    from konfai.utils.budget import per_rank_budget_bytes
+
+    monkeypatch.chdir(tmp_path)
+    volume = np.zeros((24, 28, 32), dtype=np.float32)
+    volume[6:20, 4:22, 10:26] = 1.0
+    _write_case(tmp_path / "Raw" / "P001" / "CT.mha", volume)
+    api.transform(
+        "SMALL",
+        "./Raw:mha",
+        {"CT": {"CT": [Clip(min_value=0.0, max_value=1.0), Write(dataset="./OutSmall:mha")]}},
+        memory_budget="1MiB",
+        transforms_dir=tmp_path / "Transforms",
+        quiet=True,
+    )
+    # The Crop measures its foreground box while the chain is bound, before this call's plan runs.
+    api.transform(
+        "NEXT",
+        "./Raw:mha",
+        {"CT": {"CT": [Crop(inverse=False), Write(dataset="./OutNext:mha")]}},
+        memory_budget=second_budget,
+        transforms_dir=tmp_path / "Transforms",
+        quiet=True,
+    )
+    assert sitk.ReadImage(str(tmp_path / "OutNext" / "P001" / "CT.mha")).GetSize() == (16, 18, 14)
+    assert per_rank_budget_bytes() is None  # the caller's process is left as found
+
+
 def test_a_quiet_run_prints_nothing(
     cohort: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -207,6 +243,65 @@ def test_the_output_is_not_left_open_in_the_callers_process(cohort: Path, monkey
     assert result.outputs[0]["dataset"] == str(cohort / "OutH5") and result.outputs[0]["path"] == str(
         cohort / "OutH5.h5"
     )
+
+
+def test_a_dicom_series_rewritten_between_two_calls_is_read_as_it_now_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another tool re-saves the series in place between two calls: the second call reads the header
+    a fresh process reads, not the one the first call memoised."""
+    pydicom = pytest.importorskip("pydicom")
+    from konfai.utils.dataset import Attribute, Dataset
+
+    monkeypatch.chdir(tmp_path)
+    attributes = Attribute()
+    attributes["Origin"], attributes["Spacing"], attributes["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+    volume = np.arange(4 * 8 * 8, dtype=np.int16).reshape(1, 4, 8, 8)
+    Dataset(tmp_path / "Raw", "dicom").write("CT", "P000", volume, attributes)
+
+    def run(name: str) -> tuple[float, ...]:
+        chains = {"CT": {"CT": [Write(dataset=f"./{name}:mha")]}}
+        api.transform(name, "./Raw:dicom", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+        return sitk.ReadImage(str(tmp_path / name / "P000" / "CT.mha")).GetSpacing()
+
+    assert run("First") == (1.0, 1.0, 1.0)
+    for path in sorted((tmp_path / "Raw" / "P000" / "CT").glob("*.dcm")):
+        dataset = pydicom.dcmread(path)
+        dataset.PixelSpacing = [2.0, 2.0]
+        dataset.save_as(path)
+    from konfai.utils.dicom import read_dicom_series  # the unmemoised read, as a fresh process sees it
+
+    assert tuple(read_dicom_series(tmp_path / "Raw" / "P000" / "CT")[2]) == (2.0, 2.0, 1.0)
+    assert run("Second") == (2.0, 2.0, 1.0)
+
+
+def test_an_ome_zarr_store_replaced_between_two_calls_is_read_as_it_now_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another tool puts a store at the path between two calls: the second call reads the store that
+    is there, not the parse the first call memoised."""
+    pytest.importorskip("zarr")
+    import shutil
+
+    from konfai.utils.dataset import Attribute, Dataset
+
+    monkeypatch.chdir(tmp_path)
+    volume = np.zeros((1, 4, 8, 8), np.float32)
+    for root, spacing in (("Raw", 1.0), ("Other", 2.0)):
+        attributes = Attribute()
+        attributes["Origin"], attributes["Direction"] = np.zeros(3), np.eye(3).flatten()
+        attributes["Spacing"] = np.full(3, spacing)
+        Dataset(tmp_path / root, "omezarr").write("CT", "P000", volume, attributes)
+
+    def run(name: str) -> tuple[float, ...]:
+        chains = {"CT": {"CT": [Write(dataset=f"./{name}:mha")]}}
+        api.transform(name, "./Raw:omezarr", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+        return sitk.ReadImage(str(tmp_path / name / "P000" / "CT.mha")).GetSpacing()
+
+    assert run("First") == (1.0, 1.0, 1.0)
+    shutil.rmtree(tmp_path / "Raw")
+    shutil.copytree(tmp_path / "Other", tmp_path / "Raw")
+    assert run("Second") == (2.0, 2.0, 2.0)
 
 
 def test_one_workflow_at_a_time_per_process(cohort: Path) -> None:
@@ -245,7 +340,12 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
 
 @pytest.mark.parametrize(
     ("stored", "written", "verdict"),
-    [("mhd", "mhd", "WHOLE-VOLUME"), ("nii.gz", "mha", "LOAD"), ("nii.gz", "nii.gz", "LOAD"), ("mha", "mha", "STREAM")],
+    [
+        ("nii.gz", "nii.gz", "STREAM"),  # read from its uncompressed twin, written in slabs
+        ("nrrd", "mha", "LOAD"),
+        ("mhd", "mhd", "WHOLE-VOLUME"),
+        ("mha", "mha", "STREAM"),
+    ],
 )
 def test_a_crop_writes_the_region_of_interest_header_on_every_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stored: str, written: str, verdict: str
@@ -282,9 +382,9 @@ def test_a_crop_writes_the_region_of_interest_header_on_every_route(
 def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An absent ``transforms`` key is not an absent chain: the binder materializes its own default
-    (``Normalize``), and two groups each rescaled to [-1, 1] by their own extrema no longer differ
-    where they did. On a pair related by ``0.9 x + 0.05`` that reported MAE 1.9e-8 for 0.025."""
+    """No chain declared scores the values as stored. Two groups each rescaled to [-1, 1] by their own
+    extrema would lose the difference between them: on a pair related by ``0.9 x + 0.05`` the MAE
+    would read 1.9e-8 for 0.025."""
     monkeypatch.chdir(tmp_path)
     truth = np.linspace(0.0, 1.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)
     prediction = (0.9 * truth + 0.05).astype(np.float32)
@@ -303,6 +403,187 @@ def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     assert result.metrics["TRAIN"]["case"]["sCT:CT:MAE"]["P000"] == pytest.approx(
         float(np.abs(prediction - truth).mean()), rel=1e-5
     )
+
+
+def test_a_local_module_classpath_resolves_from_the_working_directory_as_under_the_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``konfai.main`` puts the working directory on ``sys.path``; a script kept elsewhere and run from the
+    experiment directory has only its own directory there, and ``LocalMetric:OffsetMAE`` raised
+    ModuleNotFoundError through the API where the CLI resolved it."""
+    import sys
+
+    (tmp_path / "LocalMetric.py").write_text(
+        "from konfai.metric.measure import MAE\n\n\nclass OffsetMAE(MAE):\n    pass\n", encoding="utf-8"
+    )
+    truth = np.zeros((6, 7, 8), dtype=np.float32)
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", truth)
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", truth + 2.0)
+    elsewhere = [entry for entry in sys.path if entry not in ("", os.getcwd(), str(tmp_path))]
+    monkeypatch.setattr(sys, "path", elsewhere)
+    monkeypatch.delitem(sys.modules, "LocalMetric", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    result = api.evaluate(
+        "LOCAL_MODULE",
+        "./Raw:mha",
+        {"sCT": {"CT": {"LocalMetric:OffsetMAE": {}}}},
+        evaluations_dir=tmp_path / "Evaluations",
+        quiet=True,
+    )
+
+    assert list(result.metrics["TRAIN"]["case"].values()) == [{"P000": pytest.approx(2.0)}]
+    assert sys.path == elsewhere
+
+
+def test_a_gpu_the_process_does_not_see_is_refused_before_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ids the CLI's --gpu accepts: gpu=[7] under CUDA_VISIBLE_DEVICES='' printed 'Running on cuda:7'
+    and scored on CPU."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", np.zeros((6, 7, 8), dtype=np.float32))
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", np.zeros((6, 7, 8), dtype=np.float32))
+
+    with pytest.raises(ConfigError, match=r"gpu=\[7\] names \[7\].*visible: none"):
+        api.evaluate("HIDDEN_GPU", "./Raw:mha", {"sCT": {"CT": [MAE()]}}, gpu=[7], quiet=True)
+    assert not (tmp_path / "Evaluations").exists()
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
+
+
+def test_an_evaluation_yml_without_transforms_scores_the_stored_values(tmp_path: Path) -> None:
+    """A hand-written Evaluation.yml that leaves out the groups' transforms scores the stored values:
+    a min-max Normalize per group would score a prediction 10 HU off its reference at an MAE of 1e-10."""
+    from konfai.evaluator import evaluate
+
+    truth = np.linspace(-100.0, 100.0, 6 * 7 * 8, dtype=np.float32).reshape(6, 7, 8)
+    _write_case(tmp_path / "Raw" / "P000" / "CT.mha", truth)
+    _write_case(tmp_path / "Raw" / "P000" / "sCT.mha", truth + 10.0)
+    config = tmp_path / "Evaluation.yml"
+    config.write_text(
+        "Evaluator:\n"
+        "  train_name: NO_CHAIN\n"
+        "  metrics:\n"
+        "    sCT:\n"
+        "      targets_criterions:\n"
+        "        CT:\n"
+        "          criterions_loader:\n"
+        "            MAE: {}\n"
+        "  Dataset:\n"
+        f"    dataset_filenames: ['{tmp_path / 'Raw'}:mha']\n"
+        "    groups_src:\n"
+        "      CT:\n"
+        "        groups_dest:\n"
+        "          CT: {}\n"
+        "      sCT:\n"
+        "        groups_dest:\n"
+        "          sCT: {}\n",
+        encoding="utf-8",
+    )
+
+    evaluate(overwrite=True, quiet=True, evaluations_file=config, evaluations_dir=tmp_path / "Evaluations")
+
+    report = json.loads((tmp_path / "Evaluations" / "NO_CHAIN" / "Metric_TRAIN.json").read_text(encoding="utf-8"))
+    assert report["case"]["sCT:CT:MAE"]["P000"] == pytest.approx(10.0, rel=1e-5)
+    assert "Normalize" not in config.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("workflow", ["evaluate", "predict"])
+def test_an_expand_in_a_prediction_or_evaluation_chain_is_refused_before_the_run_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workflow: str
+) -> None:
+    """Only TRANSFORM writes an Expand's copies. Here the run once read the case alone, never ran the
+    draw past the marker and exited 0 on the untransformed input."""
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(3)
+    for case in ("P000", "P001"):
+        for group in ("CT", "sCT"):
+            _write_case(tmp_path / "Raw" / case / f"{group}.mha", rng.normal(0.0, 100.0, (4, 8, 8)).astype(np.float32))
+    transforms = {"CT": [Expand(nb=2), Flip()]}
+
+    with pytest.raises(ConfigError, match="'Expand' changes how many cases"):
+        if workflow == "evaluate":
+            api.evaluate(
+                "EXPAND",
+                "./Raw:mha",
+                {"CT": {"sCT": [MAE()]}},
+                transforms=transforms,
+                evaluations_dir=tmp_path / "Evaluations",
+                quiet=True,
+            )
+        else:
+            api.predict_model(
+                torch.nn.Conv2d(1, 1, 3, padding=1),
+                "./Raw:mha",
+                inputs="CT",
+                patch=[1, 8, 8],
+                output="./Pred:mha",
+                transforms=transforms,
+                name="EXPAND",
+                predictions_dir=tmp_path / "Predictions",
+                quiet=True,
+            )
+    assert not (tmp_path / "Evaluations").exists() and not (tmp_path / "Predictions").exists()
+
+
+_READ_PROBE = """
+import os
+
+from konfai.data.transform import Transform
+
+
+class ReadProbe(Transform):
+    def __call__(self, name, tensor, cache_attribute):
+        with open(os.environ["READ_PROBE_LOG"], "a") as log:
+            log.write(name + "\\n")
+        return tensor
+"""
+
+
+@pytest.mark.parametrize(
+    ("lost_train", "lost_validation"), [(["P001"], []), ([], ["P003"])], ids=["train-row-lost", "validation-row-lost"]
+)
+def test_a_resumed_evaluation_reads_only_the_cases_it_has_not_scored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost_train: list[str], lost_validation: list[str]
+) -> None:
+    """An interrupted run's scored cases are neither read nor transformed again, and each split, a
+    split every case of which was scored included, still writes its report from the rows on disk."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    (tmp_path / "read_probe.py").write_text(_READ_PROBE, encoding="utf-8")
+    monkeypatch.setenv("READ_PROBE_LOG", str(tmp_path / "reads.txt"))
+    rng = np.random.default_rng(5)
+    for case in ("P000", "P001", "P002", "P003"):
+        truth = rng.normal(0.0, 100.0, (4, 5, 6)).astype(np.float32)
+        _write_case(tmp_path / "Raw" / case / "CT.mha", truth)
+        _write_case(tmp_path / "Raw" / case / "sCT.mha", truth + rng.normal(0.0, 10.0, truth.shape).astype(np.float32))
+
+    def run() -> dict[str, dict[str, object]]:
+        return api.evaluate(
+            "RESUMED",
+            "./Raw:mha",
+            {"sCT": {"CT": [MAE()]}},
+            transforms={"CT": {"read_probe:ReadProbe": {}}},
+            dataset_options={"validation": ["P002", "P003"]},
+            evaluations_dir=tmp_path / "Evaluations",
+            quiet=True,
+        ).metrics
+
+    first = run()
+    workspace = tmp_path / "Evaluations" / "RESUMED"
+    for split, lost in (("TRAIN", lost_train), ("VALIDATION", lost_validation)):
+        (workspace / f"Metric_{split}.json").unlink()
+        rows = workspace / f"Metric_{split}.cases.rank0.jsonl"
+        kept = [line for line in rows.read_text().splitlines() if json.loads(line)["name"] not in lost]
+        rows.write_text("".join(f"{line}\n" for line in kept))
+    (tmp_path / "reads.txt").unlink()
+
+    resumed = run()
+
+    assert sorted((tmp_path / "reads.txt").read_text().split()) == lost_train + lost_validation
+    for split in ("TRAIN", "VALIDATION"):
+        assert resumed[split]["case"] == first[split]["case"]
 
 
 # --------------------------------------------------------------------------- uncertainty vocabulary
@@ -359,12 +640,29 @@ def test_list_components_names_the_config_vocabulary() -> None:
 
     assert {"Dice", "MAE"} <= {component.name for component in api.list_components("criteria")}
     assert "Median" in {component.name for component in api.list_components("reductions")}
+    assert "CosineAnnealing" in {component.name for component in api.list_components("schedulers")}
     assert "Flip" in {component.name for component in api.list_components("augmentations")}
     assert "Conv" in {component.name for component in api.list_components("blocks")}
 
     models = {component.config_reference for component in api.list_components("models")}
     assert "default|UNet.yml" in models  # the declarative catalog
     assert "segmentation.UNet.UNet" in models  # the Python catalog, in Model.classpath spelling
+
+
+def test_a_declarative_model_is_listed_with_the_summary_of_its_header() -> None:
+    """``konfai list models`` prints one line per model: a declarative file's summary is its header's
+    first paragraph, not the whole header (up to 67 comment lines)."""
+    docs = {
+        component.config_reference: component.doc
+        for component in api.list_components("models")
+        if component.config_reference.startswith("default|")
+    }
+    assert docs["default|DynUNet.yml"] == "Declarative KonfAI DynUNet (nnU-Net-style dynamic U-Net)."
+    assert docs["default|AttentionUNet.yml"] == (
+        "Declarative KonfAI Attention U-Net (Oktay et al., 2018,"
+        ' "Attention U-Net: Learning Where to Look for the Pancreas", arXiv:1804.03999).'
+    )
+    assert all(doc and len(doc) < 400 for doc in docs.values()), docs
 
 
 def test_list_components_refuses_an_unknown_kind() -> None:
@@ -419,7 +717,10 @@ def test_a_call_releases_its_scratch_config_and_restores_the_callers_rng(
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS
 
     monkeypatch.chdir(cohort)
-    scratch_root = Path(tempfile.gettempdir())
+    # A directory of its own: the system one is shared with the other test workers' scratch configs.
+    scratch_root = cohort / "tmp"
+    scratch_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch_root))
     before = {p.name for p in scratch_root.glob("konfai_transformer_*")}
     random.seed(3)
     torch.manual_seed(5)
@@ -449,8 +750,8 @@ def test_a_third_stage_of_one_class_is_spelled_by_occurrence() -> None:
 
 
 def test_three_clips_run_as_one_chain(cohort: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The third occurrence once refused with 'split the chain'; it binds under Clip#3 and runs in
-    order: three nested clips equal the innermost."""
+    """The third occurrence binds under Clip#3 and runs in order: three nested clips equal the
+    innermost."""
     monkeypatch.chdir(cohort)
     api.transform(
         "THREE",
@@ -573,6 +874,13 @@ def test_plans_and_live_predictions_release_scratch_on_success_and_failure(
     assert torch.equal(torch.get_rng_state(), states[2])
 
 
+@pytest.mark.parametrize("output", ["./Pred", "C:\\out\\Pred", "s3://bucket/pred"])
+def test_predict_model_refuses_an_output_without_its_format(output: str) -> None:
+    """A drive letter and a URI scheme carry a colon that does not name the format."""
+    with pytest.raises(ConfigError, match="must name a dataset root and its format"):
+        api.predict_model(torch.nn.Conv3d(1, 1, 1), "./Dataset:mha", inputs="CT", patch=[4, 4, 4], output=output)
+
+
 def test_released_scratch_does_not_accumulate_exit_callbacks(tmp_path: Path) -> None:
     import atexit
 
@@ -596,9 +904,10 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ten-line path: an ``nn.Module`` with one tensor in and one out, a dataset root, the
-    groups it reads and scores, a loss, a patch. Trained one epoch on the CPU, then predicted twice:
-    from the checkpoint the training wrote, and from the weights the module holds in memory."""
-    from konfai.data.transform import TensorCast
+    groups it reads and scores, a loss, a patch. Trained one epoch on the CPU, then predicted three
+    times: from the checkpoint the training wrote, as logits and as a label map, and from the weights
+    the module holds in memory."""
+    from konfai.data.transform import Argmax, TensorCast
     from konfai.metric.measure import CrossEntropyLoss
 
     monkeypatch.chdir(tmp_path)
@@ -625,8 +934,9 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
         statistics_dir=tmp_path / "Statistics",
         quiet=True,
     )
-    saved = sorted(checkpoints.glob("*.pt"))
-    assert checkpoints == tmp_path / "Checkpoints" / "TEN_LINES" and saved, "one epoch wrote a checkpoint"
+    saved = sorted(checkpoints.glob("[0-9]*.pt"))
+    assert checkpoints == tmp_path / "Checkpoints" / "TEN_LINES"
+    assert len(saved) == 1, "the documented glob matches the one dated checkpoint BEST keeps, not resume_latest.pt"
     record = (tmp_path / "Statistics" / "TEN_LINES" / "Trainer.yml").read_text(encoding="utf-8")
     assert "konfai.api:live_model" in record, (
         "the run record names the live model, as every run keeps its resolved config"
@@ -647,6 +957,23 @@ def test_a_model_built_in_python_trains_and_predicts_in_ten_lines(
     # A relative output root lands under the run's workspace, as it does for every prediction.
     predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Pred" / "P000" / "PRED.mha")))
     assert predicted.shape == (4, 8, 8, 2), "the two logit channels, as a vector image on the case's grid"
+
+    # The documented snippet writes a label map: the logits reduced before the write.
+    labels_workspace = api.predict_model(
+        model,
+        "./Raw:mha",
+        inputs="CT",
+        patch=[1, 8, 8],
+        output="./Labels:mha",
+        checkpoints=saved[-1],
+        final_transforms=[Argmax(), TensorCast(dtype="uint8")],
+        name="TEN_LINES_LABELS",
+        predictions_dir=tmp_path / "Predictions",
+        quiet=True,
+    )
+    labels = sitk.ReadImage(str(labels_workspace / "Labels" / "P000" / "PRED.mha"))
+    assert labels.GetNumberOfComponentsPerPixel() == 1 and labels.GetPixelID() == sitk.sitkUInt8
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(labels), predicted.argmax(-1))
 
     # No checkpoint named: the weights the module holds are what predicts, written as one for the run.
     live_workspace = api.predict_model(
@@ -723,10 +1050,104 @@ def test_a_monai_unet_trains_and_predicts_through_the_same_ten_lines(
         inputs="CT",
         patch=[1, 16, 16],
         output="./Pred:mha",
-        checkpoints=sorted(checkpoints.glob("*.pt"))[-1],
+        checkpoints=sorted(checkpoints.glob("[0-9]*.pt"))[-1],
         name="MONAI",
         predictions_dir=tmp_path / "Predictions",
         quiet=True,
     )
     predicted = sitk.GetArrayFromImage(sitk.ReadImage(str(workspace / "Pred" / "P001" / "PRED.mha")))
     assert predicted.shape == (4, 16, 16, 3)
+
+
+def _wrapped_model_training(tmp_path: Path, model: dict) -> dict:
+    rng = np.random.default_rng(5)
+    for case in ("P000", "P001"):
+        _write_case(tmp_path / "Raw" / case / "CT.mha", rng.normal(0.0, 1.0, (4, 16, 16)).astype(np.float32))
+        _write_case(tmp_path / "Raw" / case / "SEG.mha", rng.integers(0, 2, (4, 16, 16)).astype(np.uint8))
+    groups = {
+        "CT": {"groups_dest": {"CT": {"transforms": None, "patch_transforms": None, "is_input": True}}},
+        "SEG": {
+            "groups_dest": {
+                "SEG": {"transforms": {"TensorCast": {"dtype": "int64"}}, "patch_transforms": None, "is_input": False}
+            }
+        },
+    }
+    dataset = {
+        "dataset_filenames": ["./Raw:mha"],
+        "groups_src": groups,
+        "augmentations": None,
+        "Patch": {"patch_size": [1, 16, 16]},
+        "batch_size": 2,
+        "validation": 0.5,
+    }
+    return {"Trainer": {"train_name": "WRAPPED", "manual_seed": 1, "epochs": 1, "Model": model, "Dataset": dataset}}
+
+
+@pytest.mark.parametrize(("patch", "overlap"), [([16, 16, 16], None), ([8, 8, 8], 0)], ids=["whole", "patches"])
+def test_a_layer_at_half_resolution_is_written_on_its_own_grid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch: list[int], overlap: int | None
+) -> None:
+    """OutputLayerDataset writes an output tied to no input group: a stride-2 layer comes out on a grid half the
+    size, its first voxel on the input's first. A layer that does not fit the memory budget is refused."""
+    monkeypatch.chdir(tmp_path)
+    image = sitk.GetImageFromArray(np.random.default_rng(0).random((16, 16, 16), dtype=np.float32))
+    image.SetSpacing((1.0, 1.0, 2.0))
+    image.SetOrigin((5.0, 5.0, 5.0))
+    (tmp_path / "Dataset" / "CASE_0").mkdir(parents=True)
+    sitk.WriteImage(image, str(tmp_path / "Dataset" / "CASE_0" / "CT.mha"))
+    copy_config = api._config_copy
+
+    def as_layer(tree: dict) -> Path:
+        output = tree["Predictor"]["outputs_dataset"]["Model"]["OutputDataset"]
+        output["name_class"] = "OutputLayerDataset"
+        del output["same_as_group"]
+        return copy_config(tree)
+
+    monkeypatch.setattr(api, "_config_copy", as_layer)
+    torch.manual_seed(0)
+    model = torch.nn.Conv3d(1, 4, 3, stride=2, padding=1)
+
+    api.predict_model(
+        model, "./Dataset:mha", inputs="CT", patch=patch, overlap=overlap, output="./Pred:mha", quiet=True
+    )
+
+    written = sitk.ReadImage(str(next(tmp_path.glob("**/Pred/CASE_0/PRED.mha"))))
+    assert written.GetSize() == (8, 8, 8) and written.GetNumberOfComponentsPerPixel() == 4
+    assert written.GetSpacing() == (2.0, 2.0, 4.0) and written.GetOrigin() == (5.0, 5.0, 5.0)
+    if patch == [16, 16, 16]:
+        with torch.no_grad():
+            expected = model(torch.from_numpy(sitk.GetArrayFromImage(image))[None, None])[0].numpy()
+        # The prediction combines in float16.
+        np.testing.assert_allclose(np.moveaxis(sitk.GetArrayFromImage(written), -1, 0), expected, atol=1e-3)
+
+    # The 8x8x8 grid of four float32 channels, with its weight, is 10 kB; one of its patches is 1.3 kB.
+    monkeypatch.setattr(OutputDataset, "_budget_bytes", lambda self: 5000.0)
+    with pytest.raises(KonfAIError, match="memory budget"):
+        api.predict_model(
+            model, "./Dataset:mha", inputs="CT", patch=patch, overlap=overlap, output="./Big:mha", quiet=True
+        )
+
+
+def test_the_adoption_page_s_monai_model_block_trains_one_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """docs/source/usage/adopting-konfai.md shows a MONAI network named by classpath, with its loss on
+    the wrapped module's output. The block, as printed, trains."""
+    import re
+
+    from ruamel.yaml import YAML
+
+    pytest.importorskip("monai.networks.nets")
+    page = Path(__file__).resolve().parents[2] / "docs" / "source" / "usage" / "adopting-konfai.md"
+    blocks = re.findall(r"```yaml\n(.*?)```", page.read_text(encoding="utf-8"), re.S)
+    block = next(body for body in blocks if "classpath: monai.networks.nets:" in body)
+    monkeypatch.chdir(tmp_path)
+
+    checkpoints = api.train(
+        _wrapped_model_training(tmp_path, YAML(typ="safe").load(block)["Model"]),
+        checkpoints_dir=tmp_path / "Checkpoints",
+        statistics_dir=tmp_path / "Statistics",
+        quiet=True,
+    )
+
+    assert sorted(checkpoints.glob("[0-9]*.pt")), "one epoch wrote a checkpoint"

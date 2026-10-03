@@ -27,11 +27,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from konfai_mcp.experiment_state import (
     MAX_ATTEMPTS,
     STAGE_ACTIONS,
     STAGE_FOCUS,
     STAGES,
+    _dataset_from_config,
     collect_facts,
     derive_stage,
     diagnose,
@@ -137,7 +139,8 @@ def test_the_dataset_is_read_back_from_the_config_without_rewriting_it(tmp_path:
     root = workspace(tmp_path, config=True)
     before = (root / "Config.yml").read_bytes()
     payload = state(root)
-    assert payload["dataset"] == "/data/pelvis"
+    # Rooted without a drive, the config's path names the workspace's drive on Windows.
+    assert payload["dataset"] == str((root / "/data/pelvis").resolve())
     assert payload["groups"] == ["CT", "Label"]
     assert payload["has_reference"] is True
     assert (root / "Config.yml").read_bytes() == before
@@ -278,7 +281,7 @@ def test_the_state_line_is_a_line(tmp_path: Path) -> None:
     root = workspace(tmp_path, config=True, checkpoints=["run_01"], predictions=["run_01"])
     line = state_line(state(root, [job("done", "prediction")]))
     assert line.startswith("stage=prediction")
-    assert "dataset=/data/pelvis" in line and "groups=CT/Label" in line and "run=run_01" in line
+    assert f"dataset={(root / '/data/pelvis').resolve()}" in line and "groups=CT/Label" in line and "run=run_01" in line
     assert "\n" not in line and len(line) < 200
 
 
@@ -337,3 +340,30 @@ def test_a_config_dataset_is_read_against_the_workspace(tmp_path: Path) -> None:
 
     assert facts.dataset == str(workspace / "Dataset")
     assert facts.cases == 1
+
+
+@pytest.mark.parametrize(
+    ("entry", "root"),
+    [
+        ("./Dataset:a:mha", "./Dataset"),
+        ("C:\\data\\Dataset:mha", "C:\\data\\Dataset"),
+        ("C:\\data\\Dataset:i:mha", "C:\\data\\Dataset"),
+        ("s3://bucket/cohort:omezarr@2", "s3://bucket/cohort"),
+    ],
+)
+def test_the_config_dataset_root_is_read_with_the_spec_grammar(tmp_path: Path, entry: str, root: str) -> None:
+    """A drive letter and a URI scheme carry a colon that is not the spec's."""
+    config = tmp_path / "Config.yml"
+    config.write_text(f"Trainer:\n  Dataset:\n    dataset_filenames:\n    - '{entry}'\n", encoding="utf-8")
+
+    assert _dataset_from_config(config)[0] == root
+
+
+def test_a_remote_config_dataset_is_not_read_against_the_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "exp"
+    workspace.mkdir()
+    (workspace / "Config.yml").write_text(
+        "Trainer:\n  Dataset:\n    dataset_filenames:\n    - s3://bucket/cohort:omezarr\n", encoding="utf-8"
+    )
+
+    assert collect_facts(workspace, jobs=[]).dataset == "s3://bucket/cohort"

@@ -29,20 +29,24 @@ import time
 import uuid
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
+from urllib.parse import urlsplit
 
 import konfai as konfai_pkg
 from pydantic import Field
 
 try:
     from fastmcp import FastMCP
+    from fastmcp import settings as fastmcp_settings
     from fastmcp.server.auth import StaticTokenVerifier
     from fastmcp.utilities.types import Image as FastMCPImage
+    from starlette.middleware import Middleware
+    from starlette.responses import PlainTextResponse
 except ImportError as exc:  # pragma: no cover - depends on optional install
     raise RuntimeError(
         "KonfAI MCP requires 'fastmcp'. Install the MCP server with: pip install -e ./konfai-mcp"
     ) from exc
 
-from . import _env_flag
+from . import LOOPBACK_HOSTS, _env_flag
 from .capabilities import describe_config_schema as _describe_config_schema
 from .capabilities import describe_konfai_capabilities as _describe_konfai_capabilities
 from .catalog import COMPONENT_KINDS
@@ -100,7 +104,9 @@ konfai_get_ram = konfai_pkg.get_ram
 konfai_get_vram = konfai_pkg.get_vram
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLES_ROOT = REPO_ROOT / "examples"
+# The wheel carries the examples (setup.py copies them in); a checkout reads them where they are.
+_PACKAGED_EXAMPLES = Path(__file__).resolve().parent / "examples"
+EXAMPLES_ROOT = _PACKAGED_EXAMPLES if _PACKAGED_EXAMPLES.is_dir() else REPO_ROOT / "examples"
 WORKSPACES_ROOT = (
     Path(os.environ.get("KONFAI_MCP_WORKSPACES_ROOT", Path.home() / "KonfAI_Workspaces")).expanduser().resolve()
 )
@@ -116,7 +122,6 @@ _JOBS = JOB_REGISTRY.jobs
 
 
 SESSION = SessionService(
-    repo_root=REPO_ROOT,
     examples_root=EXAMPLES_ROOT,
     workspace_layout=WORKSPACE_LAYOUT,
     job_registry=JOB_REGISTRY,
@@ -153,7 +158,6 @@ def _activate_session_locked(name: str) -> None:
     workspace_layout = WorkspaceLayout(WORKSPACES_ROOT, name)
     job_registry = JobRegistry(ACTIVE_JOB_STATES, workspace_layout=workspace_layout)
     session = SessionService(
-        repo_root=REPO_ROOT,
         examples_root=EXAMPLES_ROOT,
         workspace_layout=workspace_layout,
         job_registry=job_registry,
@@ -225,12 +229,7 @@ def _normalize_string_list(value: str | list[str] | None, *, field_name: str) ->
     return normalized
 
 
-def _build_bearer_auth_provider(
-    bearer_token: str | None,
-    *,
-    host: str | None = None,
-    port: int | None = None,
-) -> StaticTokenVerifier | None:
+def _build_bearer_auth_provider(bearer_token: str | None) -> StaticTokenVerifier | None:
     token = (bearer_token or "").strip()
     if not token:
         return None
@@ -247,16 +246,34 @@ def _build_bearer_auth_provider(
 def _configure_transport_auth(
     transport: Literal["stdio", "sse", "streamable-http"],
     *,
-    host: str | None = None,
-    port: int | None = None,
     bearer_token: str | None = None,
 ) -> StaticTokenVerifier | None:
     if transport == "stdio":
         mcp.auth = None
         return None
-    auth_provider = _build_bearer_auth_provider(bearer_token, host=host, port=port)
+    auth_provider = _build_bearer_auth_provider(bearer_token)
     mcp.auth = auth_provider
     return auth_provider
+
+
+class _LoopbackHostsOnly:
+    """ASGI gate of an HTTP server bound to loopback with no bearer token: only a loopback Host reaches it,
+    since a DNS-rebound page sends its own name as Host."""
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        host = dict(scope.get("headers", [])).get(b"host") if scope["type"] == "http" else None
+        try:
+            allowed = host is None or urlsplit(f"//{host.decode('latin-1')}").hostname in LOOPBACK_HOSTS
+        except ValueError:
+            allowed = False
+        if allowed:
+            await self._app(scope, receive, send)
+            return
+        refusal = "unknown host: connect through 127.0.0.1 or localhost, or start the server with a bearer token"
+        await PlainTextResponse(refusal, status_code=400)(scope, receive, send)
 
 
 _DEFAULT_TRANSPORT = os.environ.get("KONFAI_MCP_TRANSPORT", "stdio")
@@ -590,10 +607,6 @@ def _runtime_capabilities() -> dict[str, Any]:
     devices, vram_warnings = _gpu_devices(devices_index, devices_name)
     warnings.extend(vram_warnings)
 
-    # Aggregate VRAM (kept for backward compatibility) derived from the per-device breakdown.
-    totals = [device["vram_total_gb"] for device in devices if device["vram_total_gb"] is not None]
-    useds = [device["vram_used_gb"] for device in devices if device["vram_used_gb"] is not None]
-
     return {
         "konfai_version": KONFAI_VERSION,
         "gpu": {
@@ -601,10 +614,6 @@ def _runtime_capabilities() -> dict[str, Any]:
             "visible_indices": devices_index,
             "visible_names": devices_name,
             "count": len(devices_index),
-            "vram_gb": {
-                "used": _round_gb(sum(useds)) if useds else None,
-                "total": _round_gb(sum(totals)) if totals else None,
-            },
             "devices": devices,
         },
         "ram_gb": {"used": _round_gb(ram_used_gb), "total": _round_gb(ram_total_gb)},
@@ -1186,7 +1195,7 @@ def list_components(
         ),
     ],
 ) -> dict[str, Any]:
-    """Enumerate the available KonfAI components of one kind (loss/metric/transform/augmentation/scheduler/model/block)."""
+    """Enumerate the available KonfAI components of one kind (loss/metric/transform/augmentation/reduction/scheduler/model/block)."""
     return {**_catalog_list_components(kind), "session": WORKSPACE_LAYOUT.current_session}
 
 
@@ -1328,6 +1337,13 @@ def export_app(
     force_update: Annotated[
         bool, Field(description="Re-download the app files instead of reusing the local cache.")
     ] = False,
+    overwrite: Annotated[
+        bool,
+        Field(
+            description="Replace files of the same name already in the destination folder (default False: the "
+            "export is refused and names them)."
+        ),
+    ] = False,
 ) -> dict[str, Any]:
     """Save a resolved app (optionally with tuned parameters) as a local, editable bundle."""
     return APP_SERVICE.export_app(
@@ -1336,6 +1352,7 @@ def export_app(
         display_name=display_name,
         config_overrides=_config_overrides(set_parameters),
         force_update=force_update,
+        overwrite=overwrite,
     )
 
 
@@ -1372,7 +1389,7 @@ def import_app(
     )
 
 
-# Parameter descriptions shared by the app-execution tools below (one wording, five tools).
+# Parameter descriptions shared by the app-execution tools below (one wording, two tools).
 _APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
@@ -1393,99 +1410,146 @@ _APP_SET_PARAMETERS_DESC = "Model tuning NAME->VALUE overrides (e.g. {'iteration
 _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_infer"]))
-def run_app_infer(
+# What each run_app action reads beyond ref, inputs, output and the device and trust parameters.
+_APP_ACTION_PARAMETERS: dict[str, set[str]] = {
+    "infer": {
+        "tta",
+        "ensemble",
+        "ensemble_models",
+        "patch_size",
+        "max_voxels",
+        "batch_size",
+        "set_parameters",
+        "uncertainty",
+    },
+    "evaluate": {"gt", "mask", "evaluation_file"},
+    "uncertainty": {"uncertainty_file"},
+    "pipeline": {
+        "gt",
+        "mask",
+        "tta",
+        "ensemble",
+        "ensemble_models",
+        "patch_size",
+        "batch_size",
+        "set_parameters",
+        "uncertainty",
+    },
+}
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app"]))
+def run_app(
     ref: Annotated[str, Field(description=_APP_REF_DESC)],
+    action: Annotated[
+        Literal["infer", "evaluate", "uncertainty", "pipeline"],
+        Field(
+            description="infer: predictions; evaluate: score the inputs against gt with the app's evaluation config; "
+            "uncertainty: maps from multi-channel inference stacks; pipeline: infer, then evaluate when gt is given, "
+            "then uncertainty."
+        ),
+    ],
     inputs: Annotated[
         list[list[str]],
         Field(
-            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
+            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory "
+            "paths, paired by order across groups (evaluate: the predictions; uncertainty: the inference stacks)."
         ),
     ],
     output: Annotated[
         str | None,
         Field(
-            description="Output directory for the reassembled predictions (default: a unique dir under the session workspace AppOutputs/)."
+            description="Output directory inside the session workspace (default: a unique directory under "
+            "AppOutputs/, AppEvaluations/, AppUncertainties/ or AppPipelines/)."
         ),
     ] = None,
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    tta: Annotated[int, Field(description=_APP_TTA_DESC)] = 0,
-    ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
-    ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
-    patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
-    max_voxels: Annotated[int | None, Field(description=_APP_MAX_VOXELS_DESC)] = None,
-    batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
-    set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
+    gt: Annotated[
+        list[list[str]] | None,
+        Field(description="evaluate, pipeline: ground-truth volumes as GROUPS, paired with inputs by order."),
+    ] = None,
+    mask: Annotated[list[list[str]] | None, Field(description="evaluate, pipeline: " + _APP_MASK_DESC)] = None,
+    tta: Annotated[int | None, Field(description="infer, pipeline: " + _APP_TTA_DESC)] = None,
+    ensemble: Annotated[int | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_DESC)] = None,
+    ensemble_models: Annotated[
+        list[str] | None, Field(description="infer, pipeline: " + _APP_ENSEMBLE_MODELS_DESC)
+    ] = None,
+    patch_size: Annotated[list[int] | None, Field(description="infer, pipeline: " + _APP_PATCH_SIZE_DESC)] = None,
+    max_voxels: Annotated[int | None, Field(description="infer: " + _APP_MAX_VOXELS_DESC)] = None,
+    batch_size: Annotated[int | None, Field(description="infer, pipeline: " + _APP_BATCH_SIZE_DESC)] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None, Field(description="infer, pipeline: " + _APP_SET_PARAMETERS_DESC)
+    ] = None,
     uncertainty: Annotated[
-        bool,
-        Field(description="Keep the multi-channel inference stacks that run_app_uncertainty consumes (default False)."),
-    ] = False,
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Run a published KonfAI app on the user's data as a tracked inference job (local / HuggingFace)."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_infer(
-            ref=ref,
-            inputs=inputs,
-            output=output,
-            gpu=gpu,
-            cpu=cpu,
-            tta=tta,
-            ensemble=ensemble,
-            ensemble_models=ensemble_models,
-            patch_size=patch_size,
-            max_voxels=max_voxels,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            uncertainty=uncertainty,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_evaluate"]))
-def run_app_evaluate(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    inputs: Annotated[
-        list[list[str]],
+        bool | None,
         Field(
-            description="Prediction volumes as GROUPS (one inner list per group, each a list of file/dir paths, paired by order)."
-        ),
-    ],
-    gt: Annotated[list[list[str]], Field(description="Ground-truth volumes as GROUPS, paired with inputs by order.")],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the metric JSON (default: a unique dir under the session workspace AppEvaluations/)."
+            description="infer: keep the multi-channel inference stacks an uncertainty action consumes (default "
+            "False); pipeline: run the uncertainty stage (default True)."
         ),
     ] = None,
-    mask: Annotated[list[list[str]] | None, Field(description=_APP_MASK_DESC)] = None,
     evaluation_file: Annotated[
-        str, Field(description="Which evaluation config of the app to run (default 'Evaluation.yml').")
-    ] = "Evaluation.yml",
+        str | None, Field(description="evaluate: which evaluation config of the app to run (default 'Evaluation.yml').")
+    ] = None,
+    uncertainty_file: Annotated[
+        str | None,
+        Field(description="uncertainty: which uncertainty config of the app to run (default 'Uncertainty.yml')."),
+    ] = None,
     gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
     cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
     allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
     force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
 ) -> dict[str, Any]:
-    """Score predictions vs ground truth with a published app's own evaluation config, as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_evaluate(
-            ref=ref,
-            inputs=inputs,
-            gt=gt,
-            output=output,
-            mask=mask,
-            evaluation_file=evaluation_file,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
+    """Run a published KonfAI app on the user's data, as published, as a tracked job (local / HuggingFace)."""
+    given = {
+        "gt": gt,
+        "mask": mask,
+        "tta": tta,
+        "ensemble": ensemble,
+        "ensemble_models": ensemble_models,
+        "patch_size": patch_size,
+        "max_voxels": max_voxels,
+        "batch_size": batch_size,
+        "set_parameters": set_parameters,
+        "uncertainty": uncertainty,
+        "evaluation_file": evaluation_file,
+        "uncertainty_file": uncertainty_file,
+    }
+    stray = {name for name, value in given.items() if value is not None} - _APP_ACTION_PARAMETERS[action]
+    if stray:
+        raise ValueError(
+            f"run_app action '{action}' does not read {', '.join(sorted(stray))}; it reads "
+            f"{', '.join(sorted(_APP_ACTION_PARAMETERS[action]))}."
         )
-    )
+    common: dict[str, Any] = {
+        "ref": ref,
+        "inputs": inputs,
+        "output": output,
+        "gpu": gpu,
+        "cpu": cpu,
+        "allow_untrusted_code": allow_untrusted_code,
+        "force_update": force_update,
+    }
+    if action == "evaluate":
+        spec = APP_SERVICE.prepare_evaluate(
+            **common, gt=gt or [], mask=mask, evaluation_file=evaluation_file or "Evaluation.yml"
+        )
+    elif action == "uncertainty":
+        spec = APP_SERVICE.prepare_uncertainty(**common, uncertainty_file=uncertainty_file or "Uncertainty.yml")
+    else:
+        model: dict[str, Any] = {
+            "tta": tta or 0,
+            "ensemble": ensemble or 0,
+            "ensemble_models": ensemble_models,
+            "patch_size": patch_size,
+            "batch_size": batch_size,
+            "config_overrides": _config_overrides(set_parameters),
+        }
+        if action == "infer":
+            spec = APP_SERVICE.prepare_infer(**common, **model, max_voxels=max_voxels, uncertainty=bool(uncertainty))
+        else:
+            spec = APP_SERVICE.prepare_pipeline(
+                **common, **model, gt=gt, mask=mask, uncertainty=uncertainty is not False
+            )
+    return _launch_app_job(spec)
 
 
 _REG_CASES = " One path per case, paired by order with the other lists (or one used for every case)."
@@ -1496,7 +1560,7 @@ def run_registration_evaluate(
     transforms: Annotated[
         list[str] | None,
         Field(
-            description="The registration's Transform.h5 (from run_app_infer's output, <case>/Transform.h5)."
+            description="The registration's Transform.h5 (from run_app's infer output, <case>/Transform.h5)."
             + _REG_CASES
             + " Omit it to score the pair as it is: the misalignment before registration."
         ),
@@ -1537,99 +1601,6 @@ def run_registration_evaluate(
             output=output,
             gpu=gpu,
             cpu=cpu,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_uncertainty"]))
-def run_app_uncertainty(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Multi-channel inference stacks as GROUPS (typically produced by run_app_infer with uncertainty=True)."
-        ),
-    ],
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the uncertainty maps (default: a unique dir under the session workspace AppUncertainties/)."
-        ),
-    ] = None,
-    uncertainty_file: Annotated[
-        str, Field(description="Which uncertainty config of the app to run (default 'Uncertainty.yml').")
-    ] = "Uncertainty.yml",
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Run a published app's uncertainty estimation on inference stacks, as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_uncertainty(
-            ref=ref,
-            inputs=inputs,
-            output=output,
-            uncertainty_file=uncertainty_file,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
-        )
-    )
-
-
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app_pipeline"]))
-def run_app_pipeline(
-    ref: Annotated[str, Field(description=_APP_REF_DESC)],
-    inputs: Annotated[
-        list[list[str]],
-        Field(
-            description="Input GROUPS: one inner list per input channel/modality, each a list of file or directory paths, paired by order across groups."
-        ),
-    ],
-    gt: Annotated[
-        list[list[str]] | None,
-        Field(description="Ground-truth volumes as GROUPS; providing them enables the evaluation stage."),
-    ] = None,
-    output: Annotated[
-        str | None,
-        Field(
-            description="Output directory for the Predictions/Evaluations/Uncertainties subdirs (default: a unique dir under the session workspace AppPipelines/)."
-        ),
-    ] = None,
-    mask: Annotated[list[list[str]] | None, Field(description=_APP_MASK_DESC)] = None,
-    tta: Annotated[int, Field(description=_APP_TTA_DESC)] = 0,
-    ensemble: Annotated[int, Field(description=_APP_ENSEMBLE_DESC)] = 0,
-    ensemble_models: Annotated[list[str] | None, Field(description=_APP_ENSEMBLE_MODELS_DESC)] = None,
-    patch_size: Annotated[list[int] | None, Field(description=_APP_PATCH_SIZE_DESC)] = None,
-    batch_size: Annotated[int | None, Field(description=_APP_BATCH_SIZE_DESC)] = None,
-    set_parameters: Annotated[dict[str, Any] | None, Field(description=_APP_SET_PARAMETERS_DESC)] = None,
-    uncertainty: Annotated[bool, Field(description="Run the uncertainty stage (default True).")] = True,
-    gpu: Annotated[list[int] | None, Field(description=_APP_GPU_DESC)] = None,
-    cpu: Annotated[int | None, Field(description=_APP_CPU_DESC)] = None,
-    allow_untrusted_code: Annotated[bool, Field(description=_APP_TRUST_DESC)] = False,
-    force_update: Annotated[bool, Field(description=_APP_FORCE_UPDATE_DESC)] = False,
-) -> dict[str, Any]:
-    """Run a published app's full infer -> evaluate -> uncertainty pipeline as a tracked job."""
-    return _launch_app_job(
-        APP_SERVICE.prepare_pipeline(
-            ref=ref,
-            inputs=inputs,
-            gt=gt,
-            output=output,
-            mask=mask,
-            tta=tta,
-            ensemble=ensemble,
-            ensemble_models=ensemble_models,
-            patch_size=patch_size,
-            batch_size=batch_size,
-            config_overrides=_config_overrides(set_parameters),
-            uncertainty=uncertainty,
-            gpu=gpu,
-            cpu=cpu,
-            allow_untrusted_code=allow_untrusted_code,
-            force_update=force_update,
         )
     )
 
@@ -1900,7 +1871,11 @@ def initialize_session(
     workflows: Annotated[
         str | list[str] | None,
         Field(
-            description="Workflow files to seed from the example: train/prediction/evaluation (string or list; default: train only)."
+            description=(
+                "Workflow files to seed from the example: train/prediction/evaluation/transform (string or list). "
+                "Default: train, or every workflow config of an example that has no training config. A workflow "
+                "the example has no config for is refused."
+            )
         ),
     ] = None,
     include_support_files: Annotated[
@@ -1911,6 +1886,8 @@ def initialize_session(
     ] = False,
 ) -> dict[str, Any]:
     """Create or reset the current session workspace, optionally seeded from one example template."""
+    template = template_dir(EXAMPLES_ROOT, from_example) if from_example is not None else None
+    selected_workflows = SESSION.seeded_workflows(template, workflows) if template is not None else []
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
     if workspace.exists() and any(workspace.iterdir()):
         if not overwrite:
@@ -1926,11 +1903,10 @@ def initialize_session(
 
     copied_files: list[str] = []
     skipped_python: list[str] = []
-    selected_workflows = SESSION.normalize_requested_workflows(workflows) if from_example else []
-    if from_example is not None:
+    if template is not None:
         copied_files, skipped_python = copy_template_subset(
             workspace,
-            template_dir(EXAMPLES_ROOT, from_example),
+            template,
             overwrite,
             include_python=include_support_files,
             workflows=selected_workflows,
@@ -2043,7 +2019,7 @@ def import_experiment(
     include_artifacts: Annotated[
         Literal["link", "copy", "none"],
         Field(
-            description="How artifact dirs (Checkpoints/Predictions/...) are imported: 'link' symlinks (default), 'copy' copies, 'none' imports configs/code only."
+            description="How artifact dirs (Checkpoints/Predictions/...) are imported: 'link' symlinks (default; copies where the link is refused), 'copy' copies, 'none' imports configs/code only."
         ),
     ] = "link",
     overwrite: Annotated[
@@ -2060,6 +2036,7 @@ def import_experiment(
     artifact_dirs = {"Checkpoints", "Predictions", "Evaluations", "Statistics", "Dataset", "Cluster"}
     copied: list[str] = []
     linked: list[str] = []
+    copied_instead_of_linked: list[str] = []
     skipped: list[str] = []
     for path in sorted(source.iterdir(), key=lambda entry: entry.name):
         target = workspace / path.name
@@ -2077,16 +2054,21 @@ def import_experiment(
                 skipped.append(path.name)
                 continue
             if include_artifacts == "link":
-                os.symlink(path, target, target_is_directory=True)
-                linked.append(path.name)
-            else:
-                shutil.copytree(path, target)
-                copied.append(path.name)
+                try:
+                    os.symlink(path, target, target_is_directory=True)
+                except OSError:  # Windows without developer mode (WinError 1314), or a filesystem without links
+                    copied_instead_of_linked.append(path.name)
+                else:
+                    linked.append(path.name)
+                    continue
+            shutil.copytree(path, target)
+            copied.append(path.name)
     return {
         "session": WORKSPACE_LAYOUT.current_session,
         "source": str(source),
         "copied": copied,
         "linked": linked,
+        "copied_instead_of_linked": copied_instead_of_linked,
         "skipped": skipped,
         "next_actions": [
             "read_session_file",
@@ -2116,7 +2098,7 @@ def write_session_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content.rstrip() + "\n", encoding="utf-8")
     return {
-        "written": str(path.relative_to(WORKSPACE_LAYOUT.workspace_dir())),
+        "written": path.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "path": str(path),
         "bytes": path.stat().st_size,
         "next_actions": ["inspect_object_signature", "review_config_semantics", "validate_config_semantics"],
@@ -2136,7 +2118,7 @@ def read_session_file(
     payload = read_text_range(resolved, max_chars=max_chars, offset=offset)
     return {
         **payload,
-        "relative_path": str(resolved.relative_to(WORKSPACE_LAYOUT.workspace_dir())),
+        "relative_path": resolved.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "session": WORKSPACE_LAYOUT.current_session,
         "next_actions": ["write_session_file", "write_workflow_config", "review_config_semantics"],
     }
@@ -2252,8 +2234,7 @@ def export_run_record(
     manifest: dict[str, Any] = {}
     if job.manifest_path is not None and job.manifest_path.exists():
         manifest = json.loads(read_text(job.manifest_path))
-    # Bounded previews, each with what the bound cut: a 50,000-character config once came back as
-    # 40,000 with nothing saying so. The path is where the whole artifact is.
+    # Bounded previews, each saying whether the bound cut it; the path is where the whole artifact is.
     previews = {
         name: read_text_range(Path(path), max_chars=40000)
         for name, path in (manifest.get("config_snapshots") or {}).items()
@@ -2492,7 +2473,7 @@ def delete_run(
             raise ValueError("Refused: the resolved path escapes the session workspace.")
         if target.is_dir():
             shutil.rmtree(target)
-            removed.append(str(target.relative_to(base)))
+            removed.append(target.relative_to(base).as_posix())
     return {"run_name": cleaned, "kind": kind, "deleted": removed}
 
 
@@ -2976,7 +2957,7 @@ def generate_folds(
         raise ValueError(f"Only {len(cases)} case directories found; cannot make k={k} folds.")
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()  # a setup step: create the session if needed
     shuffled = list(cases)
-    random.Random(seed).shuffle(shuffled)
+    random.Random(seed).shuffle(shuffled)  # nosec B311 - a seeded fold split, not a secret
     folds_dir = workspace / "folds"
     folds_dir.mkdir(exist_ok=True)
     folds: dict[str, Any] = {}
@@ -3280,7 +3261,8 @@ def request_validation(
     job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job(kind)
     if job is None or job.status not in ACTIVE_JOB_STATES:
         return {"ok": False, "detail": "No running training job to validate."}
-    delivered = JOB_REGISTRY.notify(job, signal.SIGUSR1)
+    sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
+    delivered = sigusr1 is not None and JOB_REGISTRY.notify(job, sigusr1)
     return {
         "ok": delivered,
         "job_id": job.job_id,
@@ -3490,16 +3472,17 @@ def main(
             "stateless_http and json_response only apply to the 'streamable-http' transport "
             "(stdio is inherently per-process and the deprecated SSE transport requires sessions)."
         )
-    _configure_transport_auth(
-        transport,
-        host=host,
-        port=port,
-        bearer_token=bearer_token or os.environ.get("KONFAI_MCP_BEARER_TOKEN"),
+    auth_provider = _configure_transport_auth(
+        transport, bearer_token=bearer_token or os.environ.get("KONFAI_MCP_BEARER_TOKEN")
     )
     transport_kwargs: dict[str, Any] = {}
     if transport == "stdio":
         if log_level is not None:
             transport_kwargs["log_level"] = log_level
+        if threading.current_thread() is threading.main_thread():
+            # stdin is read by a worker thread no cancellation interrupts, and the loop waits for it before it
+            # can stop: a Ctrl+C would wait for the client's next line. Exit at once, with the interrupted status.
+            signal.signal(signal.SIGINT, lambda _signum, _frame: os._exit(130))
     else:
         if host is not None:
             transport_kwargs["host"] = host
@@ -3512,6 +3495,8 @@ def main(
         if transport == "streamable-http":
             transport_kwargs["stateless_http"] = stateless_http
             transport_kwargs["json_response"] = json_response
+        if auth_provider is None and (host if host is not None else fastmcp_settings.host) in LOOPBACK_HOSTS:
+            transport_kwargs["middleware"] = [Middleware(_LoopbackHostsOnly)]
     # MCP stdio transports must keep stdout protocol-clean for the client.
     mcp.run(transport, show_banner=False, **transport_kwargs)
 

@@ -23,6 +23,7 @@ import ast
 import copy
 import functools
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,8 @@ def _attribute_text(value: Any) -> str:
     """
     if type(value) is str:
         return value.replace("\n", "")
+    if type(value) in (int, float, bool):
+        return str(value)  # a Python scalar prints its shortest exact form, as the path below would
     if isinstance(value, torch.Tensor):
         # A tensor from any device: attributes are host-side strings.
         value = value.detach().cpu().numpy()
@@ -75,8 +78,8 @@ def _array_text(dtype: str, shape: tuple[int, ...], data: bytes) -> str:
 
 def _vector_text(value: np.ndarray) -> str | None:
     """numpy's positional print of a short float64 vector (a region's origin, drawn anew for every
-    region a streamed read serves, and 35 us through numpy's printer), or ``None`` where numpy would
-    wrap the line or switch to exponents: past 1e8, under 1e-4, or a thousandfold spread."""
+    region a streamed read serves), or ``None`` where numpy would wrap the line or switch to
+    exponents: past 1e8, under 1e-4, or a thousandfold spread."""
     if value.dtype != np.float64 or value.ndim != 1 or not 0 < value.size <= 16 or not np.isfinite(value).all():
         return None
     magnitudes = np.abs(value[value != 0])
@@ -112,6 +115,33 @@ def region_geometry(
     start_xyz = np.asarray([item.start for item in reversed(spatial_slices)], dtype=np.float64)
     step_xyz = np.asarray([item.step for item in reversed(spatial_slices)], dtype=np.float64)
     return origin + matrix @ (start_xyz * spacing), spacing * step_xyz
+
+
+def record_region(attributes: Attribute, shape: Sequence[int], slices: tuple[slice, ...]) -> Attribute:
+    """A whole entry's record as a read of the region ``slices`` of it returns it: the region's origin
+    pushed on top, and its spacing where a step scales it, as the SimpleITK backend records one.
+
+    A record without image geometry, or a selection that is not one slice per axis of ``shape``, is
+    handed back as it is.
+    """
+    if (
+        not is_an_image(attributes)
+        or len(slices) != len(shape)
+        or not all(isinstance(item, slice) for item in slices)
+        or len(attributes.get_np_array("Spacing")) != len(shape) - 1
+    ):
+        return attributes
+    normalized = tuple(slice(*item.indices(int(extent))) for item, extent in zip(slices[1:], shape[1:], strict=True))
+    origin, spacing = region_geometry(
+        attributes.get_np_array("Origin"),
+        attributes.get_np_array("Spacing"),
+        attributes.get_np_array("Direction"),
+        normalized,
+    )
+    attributes["Origin"] = origin
+    if any(item.step != 1 for item in normalized):
+        attributes["Spacing"] = spacing
+    return attributes
 
 
 class Attribute(dict[str, Any]):
@@ -173,8 +203,11 @@ class Attribute(dict[str, Any]):
 
     @staticmethod
     def _parse_array(text: str) -> np.ndarray:
-        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``."""
-        return np.fromstring(text[1:-1].replace(",", " "), sep=" ", dtype=np.double)
+        """Both printed forms of a sequence: NumPy's ``[1.5 1.5 2.]`` and Python's ``[1.5, 1.5, 2.0]``,
+        and a scalar, printed bare (``12.5``)."""
+        if text[:1] in ("[", "("):
+            text = text[1:-1]
+        return np.fromstring(text.replace(",", " "), sep=" ", dtype=np.double)
 
     @staticmethod
     def _parsed_array(key: str, text: str) -> np.ndarray:
@@ -235,6 +268,11 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
     if data.dtype == np.float16:
         # ITK has no half-float pixel type; the streamed .mha writer widens the same way.
         data = data.astype(np.float32)
+    if data.dtype == np.bool_:
+        raise DatasetManagerError(
+            "SimpleITK has no bool pixel type: a boolean volume cannot become an image.",
+            "Cast it to uint8, or write it as h5 or omezarr, which keep bool.",
+        )
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
     else:
@@ -268,6 +306,18 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
     return image_to_data(transform.GetDisplacementField())
 
 
+def push_geometry(attributes: Attribute, key: str, value: Any) -> None:
+    """Record ``value`` as the latest ``key`` of the geometry stack unless it already is.
+
+    A header KonfAI wrote carries the stack it was written with, ending on the geometry the header
+    holds: read back, the stack is the one written, where pushing the header's geometry again would
+    grow it by one entry each write and read. A header another tool changed pushes its geometry."""
+    array = Attribute._parse_array(value) if isinstance(value, str) else np.asarray(value, dtype=np.float64)
+    if key in attributes and _same_values(attributes.get_np_array(key), array):
+        return
+    attributes[key] = value
+
+
 def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     """Convert a SimpleITK image into a channel-first NumPy array and attributes."""
     attributes = Attribute()
@@ -275,11 +325,10 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
         # ``ITK_*`` keys are the reader's own bookkeeping, not the volume's metadata.
         if not k.startswith("ITK_"):
             attributes[k] = image.GetMetaData(k)
-    # After the metadata import: the metadata may carry a stale geometry stack, and the header must
-    # land as its latest version.
-    attributes["Origin"] = np.asarray(image.GetOrigin())
-    attributes["Spacing"] = np.asarray(image.GetSpacing())
-    attributes["Direction"] = np.asarray(image.GetDirection())
+    # After the metadata import: the header's geometry lands as the stack's latest version.
+    push_geometry(attributes, "Origin", np.asarray(image.GetOrigin()))
+    push_geometry(attributes, "Spacing", np.asarray(image.GetSpacing()))
+    push_geometry(attributes, "Direction", np.asarray(image.GetDirection()))
     if image.GetNumberOfComponentsPerPixel() == 1:
         return np.expand_dims(sitk.GetArrayFromImage(image), 0), attributes
     # One contiguous channel-first copy off ITK's interleaved buffer. np.array and not
@@ -287,13 +336,20 @@ def image_to_data(image: sitk.Image) -> tuple[np.ndarray, Attribute]:
     return np.array(np.moveaxis(sitk.GetArrayViewFromImage(image), -1, 0), order="C"), attributes
 
 
+def _same_values(recorded: np.ndarray, level: np.ndarray) -> bool:
+    """Whether a sidecar value is the level's own, up to single precision: the rounding of a unit conversion
+    or of a header that stores float32, far below a voxel's move at any coordinate."""
+    return recorded.shape == level.shape and np.array_equal(recorded.astype(np.float32), level.astype(np.float32))
+
+
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
 
     The store's konfai sidecar carries the Direction matrix, which NGFF cannot express, and every
     other key it recorded; Direction defaults to identity without it. The sidecar describes one
-    level, the finest: its Spacing and Origin are trusted only where its Spacing is this level's
-    scale, and any other level takes both from its own transforms.
+    level, the finest, as KonfAI wrote it: its Spacing and Origin are trusted only where they are
+    this level's scale and translation. Any other level, or a store another tool has moved, takes
+    both from its own transforms.
 
     Spacing and Origin come out in MILLIMETRES, whatever the store declares: they are handed to
     SimpleITK, written into NIfTI headers and composed with other volumes' frames, none of which
@@ -312,9 +368,10 @@ def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     level_spacing = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes]) * factors
     level_origin = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes]) * factors
     if "Spacing" in attributes:
-        recorded = attributes.get_np_array("Spacing")
-        if recorded.shape != level_spacing.shape or not np.allclose(recorded, level_spacing, rtol=1e-6, atol=0.0):
-            # Another level than the sidecar's. Popped then set, so the key keeps its place in the stack.
+        recorded_spacing = attributes.get_np_array("Spacing")
+        recorded_origin = attributes.get_np_array("Origin") if "Origin" in attributes else level_origin
+        if not (_same_values(recorded_spacing, level_spacing) and _same_values(recorded_origin, level_origin)):
+            # Not the grid the sidecar recorded. Popped then set, so the key keeps its place in the stack.
             attributes.pop("Spacing")
             attributes["Spacing"] = level_spacing
             if "Origin" in attributes:
@@ -355,11 +412,11 @@ def _transform_codec() -> list[tuple[type, str, Any]]:
     ]
 
 
-def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> list[np.ndarray]:
+def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> np.ndarray:
     """Serialize a (possibly composite) transform: record each leaf's type tag and fixed parameters
-    into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the per-leaf
-    parameter arrays, in application order. A 3-D linear leaf the codec has no tag for (a translation, a versor,
-    a similarity) is stored as the affine map it is, exactly."""
+    into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the leaves'
+    parameters, one row per leaf in application order, the shorter rows padded with NaN. A 3-D linear leaf the
+    codec has no tag for (a translation, a versor, a similarity) is stored as the affine map it is, exactly."""
     from konfai.utils.ITK import _linear_map
 
     datas: list[np.ndarray] = []
@@ -375,7 +432,8 @@ def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: A
         attributes[f"{i}:FixedParameters"] = leaf.GetFixedParameters()
 
         datas.append(np.asarray(leaf.GetParameters()))
-    return datas
+    longest = max((len(row) for row in datas), default=0)
+    return np.asarray([np.pad(row, (0, longest - len(row)), constant_values=np.nan) for row in datas])
 
 
 def _decode_transform(transform_type: str, name: str) -> sitk.Transform:

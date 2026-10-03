@@ -50,8 +50,8 @@ physical geometry. ``CASE_003`` is held out during training.
 The three YAML files are short and complete enough to adapt:
 
 * ``Config.yml``: a 2D UNet from the installed catalog, two output channels,
-  cross entropy and foreground Dice losses, twenty epochs (about seven seconds
-  on one CPU core).
+  cross entropy and foreground Dice losses, twenty epochs (a few seconds on one
+  CPU core).
 * ``Prediction.yml``: the same model parameters and CT normalization, with
   the ``Argmax`` head written as the label image ``PRED.mha``.
 * ``Evaluation.yml``: ``PRED`` against ``SEG``, foreground label ``[1]``.
@@ -98,6 +98,30 @@ Twenty epochs on procedural shapes reach a Dice of about 0.98, the held-out
 case included. The check passes on any Dice that agrees with the written files:
 it verifies the workflow, not accuracy on medical images.
 
+What the run leaves
+-------------------
+
+Each command writes under a directory named after ``train_name``
+(``CT_TWO_CLASSES``):
+
+* ``Checkpoints/CT_TWO_CLASSES/``: the dated ``BEST`` model and
+  ``resume_latest.pt``.
+* ``Statistics/CT_TWO_CLASSES/``: the resolved ``Config.yml`` the run read,
+  ``Seed.txt`` (the split seed RESUME reads back), ``Train_0.txt`` and
+  ``Validation_0.txt`` (the case names of each split), ``log_0.txt`` (the
+  console log), and ``tb/`` when TensorBoard is installed.
+* ``Predictions/CT_TWO_CLASSES/``: ``Dataset/<case>/PRED.mha``, a copy of
+  ``Prediction.yml``, ``log_0.txt`` and ``checkpoints.json`` (which checkpoint
+  wrote each case, so a rerun with the same checkpoint skips the cases already
+  written).
+* ``Evaluations/CT_TWO_CLASSES/``: ``Metric_TRAIN.json``,
+  ``Metric_TRAIN.cases.rank0.jsonl`` (the per-case values, so an interrupted
+  evaluation resumes), a copy of ``Evaluation.yml`` and ``log_0.txt``.
+
+With ``[itk]`` alone, TRAIN prints ``TensorBoard is not installed: no curves or
+images will be logged``. The run is complete without it;
+``python -m pip install "konfai[tensorboard]"`` adds the curves under ``tb/``.
+
 Adapt it to your CT and labels
 ------------------------------
 
@@ -111,11 +135,8 @@ structure to ``1`` and background to ``0``. Then change:
   divides intensities by 300; choose normalization appropriate for your data.
 * Model parameters in **both** configs. A different class count also requires
   matching training/evaluation ``Dice.labels``.
-* ``patch_transforms: None`` on every group and the two
-  ``*_reduction_transforms: None`` on the output: an absent key defaults to a
-  ``Normalize`` to ``[-1, 1]``.
 
-The verifier knows these four cases; for your dataset, give it your case
-names. :doc:`examples/segmentation` describes the larger
-41-class pelvis example and its notebook; :doc:`config_guide/index` explains
-the configuration engine.
+The verifier knows these four cases: for your dataset, edit ``CASES`` at the
+top of ``quickstart.py``, and ``RUN`` when you change ``train_name``.
+:doc:`examples/segmentation` describes the larger 41-class pelvis example and
+its notebook; :doc:`config_guide/index` explains the configuration engine.

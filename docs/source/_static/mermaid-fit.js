@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Mermaid stamps width="100%" on the <svg>, and the extension's stylesheet pins a
 // 500px height, so a narrow diagram is stretched to the column and a tall one is
 // squashed. Natural size is the ceiling here: shrink to fit, never stretch.

@@ -31,7 +31,7 @@ try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
-from konfai.utils.dataset.attribute import Attribute, _attribute_text, region_geometry
+from konfai.utils.dataset.attribute import Attribute, _attribute_text, push_geometry, region_geometry
 from konfai.utils.dataset.stream import _MHA_ELEMENT_TYPES, _NIFTI_DATATYPES
 
 #: NumPy dtype of each element type the raw-block route reads (the inverses of the writers' tables).
@@ -71,8 +71,8 @@ class _PixelBlock(NamedTuple):
     metadata: Attribute  # the header's own keys, as image_to_data imports them
     probe: Any  # a one-voxel sitk.Image carrying the header's geometry: ITK's own index-to-world arithmetic
     # Origin / Spacing / Direction as an attribute holds them, printed once for the file: every region
-    # of a volume records the same spacing and direction, and printing a float array costs 24 us for
-    # three elements and 30 us for nine (measured), against 0.04 us to hand text through the same door.
+    # of a volume records the same spacing and direction, and numpy's printer costs far more than
+    # handing the printed text over.
     geometry_text: dict[str, str]
 
     @property
@@ -88,8 +88,9 @@ class _PixelBlock(NamedTuple):
         return np.asarray(self.probe.GetDirection())
 
 
-def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
-    """Where an uncompressed local-data MetaImage keeps its pixels and how; ``None`` for any other."""
+def _mha_header(path: str) -> tuple[dict[str, str], int] | None:
+    """A MetaImage header's fields in order, up to ``ElementDataFile`` (MetaIO's last), and the offset
+    its local data starts at; ``None`` when no such field is within the probe."""
     with open(path, "rb") as file:
         head = file.read(_MHA_HEADER_PROBE_BYTES)
     fields: dict[str, str] = {}
@@ -102,6 +103,15 @@ def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
         position = end + 1
         if separator:
             fields[key.strip()] = value.strip()
+    return fields, position
+
+
+def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
+    """Where an uncompressed local-data MetaImage keeps its pixels and how; ``None`` for any other."""
+    header = _mha_header(path)
+    if header is None:
+        return None
+    fields, position = header
     dtype = _MHA_DTYPES.get(fields.get("ElementType", ""))
     if (
         dtype is None
@@ -254,12 +264,12 @@ def _pixel_block_attributes(block: _PixelBlock, spatial_slices: tuple[slice, ...
     attributes = Attribute(block.metadata)
     stepped = spatial_slices is not None and any(item.step != 1 for item in spatial_slices)
     if spatial_slices is None or stepped:
-        attributes["Origin"] = block.geometry_text["Origin"]
+        push_geometry(attributes, "Origin", block.geometry_text["Origin"])
     else:
         index_xyz = [item.start for item in reversed(spatial_slices)]
-        attributes["Origin"] = np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz))
-    attributes["Spacing"] = block.geometry_text["Spacing"]
-    attributes["Direction"] = block.geometry_text["Direction"]
+        push_geometry(attributes, "Origin", np.asarray(block.probe.TransformIndexToPhysicalPoint(index_xyz)))
+    push_geometry(attributes, "Spacing", block.geometry_text["Spacing"])
+    push_geometry(attributes, "Direction", block.geometry_text["Direction"])
     if spatial_slices is not None:
         origin, spacing = region_geometry(block.origin, block.spacing, block.direction, spatial_slices)
         attributes["Origin"] = origin
@@ -268,7 +278,6 @@ def _pixel_block_attributes(block: _PixelBlock, spatial_slices: tuple[slice, ...
     return attributes
 
 
-@functools.cache
 def _nifti_extract_aborts(path: str) -> bool:
     """Whether an ITK region read of ``path`` would take the process down.
 
@@ -277,6 +286,13 @@ def _nifti_extract_aborts(path: str) -> bool:
     or corruption``, no exception, nothing to catch (measured with the SimpleITK this ships with,
     compressed or not). Such a file is read whole and sliced here.
     """
+    info = os.stat(path)
+    return _nifti_extract_aborts_at(path, (info.st_mtime_ns, info.st_size))
+
+
+@functools.lru_cache(maxsize=4096)
+def _nifti_extract_aborts_at(path: str, stamp: tuple[int, int]) -> bool:
+    del stamp  # part of the key: a file rewritten with another channel count gets its own answer
     if sitk.ImageFileReader.GetImageIOFromFileName(path) != "NiftiImageIO":
         return False
     reader = sitk.ImageFileReader()

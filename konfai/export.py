@@ -25,6 +25,7 @@ external weight data so the ``.onnx`` is a single self-contained file.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
@@ -99,6 +100,77 @@ def list_output_modules(model: torch.nn.Module, example_input: torch.Tensor) -> 
     return outputs
 
 
+def _cut_by(
+    graph: ModuleArgsDict, prefix: str, inputs: list[str], counts: Counter[str], runs: int, patched: bool = True
+) -> list[tuple[str, str]]:
+    """What ``graph.named_forward`` yields, by name relative to ``graph``, each with the network whose
+    ModelPatch left that tensor one patch of several ("" when it holds the whole input).
+
+    It follows ``named_forward`` without running it: the patch pass and its assembly, then the branch
+    routing, gates included. ``inputs`` holds the same for the inputs, ``counts`` how often the example
+    pass yielded each full name (``prefix`` is ``graph``'s), and ``graph`` ran ``runs`` times.
+    """
+    from konfai.network.network.base import accumulator_owner, mark_accumulated, strip_accumulated
+    from konfai.network.network.network import ModuleArgsDict
+
+    if patched and getattr(graph, "patch", None):
+        marked = prefix + mark_accumulated("")
+        patches = min((n for name, n in counts.items() if name.startswith(marked)), default=runs)
+        owner = (accumulator_owner(marked) or "the root network") if patches > runs else ""
+        per_patch = _cut_by(graph, marked, inputs, counts, patches, patched=False)
+        assembled = {name.split(".")[0]: cut for name, cut in per_patch}
+        return [(mark_accumulated(name), cut or owner) for name, cut in per_patch] + [
+            (name, cut) for name, cut in assembled.items() if graph._modulesArgs[name]._isEnd
+        ]
+    if not inputs:
+        return []
+    branches = {str(i): cut for i, cut in enumerate(inputs)}
+    out, yielded = inputs[0], []
+    for name, module in graph.items():
+        args = graph._modulesArgs[name]
+        if module is None or not graph._runs(name):
+            continue
+        reads = [branches.setdefault(branch, inputs[0]) for branch in args.in_branch]
+        if isinstance(module, ModuleArgsDict) and not args.isCheckpoint:
+            inner = _cut_by(module, f"{prefix}{name}.", reads, counts, runs)
+            written = set()
+            for key, out in inner:
+                matched = set(args.out_branch) & set(
+                    module._modulesArgs[strip_accumulated(key.split(".")[0])].out_branch
+                )
+                branches.update(dict.fromkeys(matched, out))
+                written |= matched
+            branches.update(dict.fromkeys(set(args.out_branch) - written, out))
+            yielded += [(f"{name}.{key}", cut) for key, cut in inner]
+        else:
+            out = next((cut for cut in reads if cut), "")
+            branches.update(dict.fromkeys(args.out_branch, out))
+            yielded.append((name, out))
+    return yielded
+
+
+def _refuse_one_patch_of_several(model: torch.nn.Module, outputs: list[tuple[str, tuple[int, ...]]], head: str) -> None:
+    """Refuse an export whose ``head`` would see one patch of several (``outputs`` from
+    :func:`list_output_modules`).
+
+    A ModelPatch that cuts the example into several patches yields each per-patch output once per
+    patch under one name, and the export keeps the last. A network assembles its patches only once
+    the model is bound (as Trainer and Predictor bind it), and the root never does, so the head sees
+    the last patch when it is a per-patch output or reads one through the branches.
+    """
+    from konfai.network.network.network import ModuleArgsDict
+
+    if not isinstance(model, ModuleArgsDict):  # no ModelPatch outside a routed graph
+        return
+    owner = dict(_cut_by(_routed(model), "", [""], Counter(name for name, _ in outputs), 1)).get(head, "")
+    if owner:
+        raise PredictorError(
+            f"The ModelPatch of {owner} cuts the example input into several patches; "
+            f"the exported head '{head}' would see the last patch only.",
+            "Export with an example input of one patch, or without the ModelPatch (the runtime tiles the volume).",
+        )
+
+
 def select_inference_head(model: torch.nn.Module, example_input: torch.Tensor) -> str:
     """Pick the head to export: the last **floating-point** output in execution order.
 
@@ -146,7 +218,8 @@ def export_to_onnx(
         Directory to write ``model.onnx`` and ``manifest.json`` into.
     example_input:
         A fixed-shape example patch ``[N, C, (Z), Y, X]``; the ONNX is exported at
-        this exact shape (no dynamic axes).
+        this exact shape (no dynamic axes). When a ModelPatch of the graph cuts it into
+        several patches, an export whose head would see only the last one is refused.
     output_module:
         Dotted name of the inference head to export (see :func:`list_output_modules`).
         When omitted, :func:`select_inference_head` picks the terminal floating-point head.
@@ -167,7 +240,6 @@ def export_to_onnx(
     _require("onnxscript")  # required by the torch dynamo ONNX exporter
 
     out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = out_dir / model_filename
 
     model.eval()
@@ -180,7 +252,9 @@ def export_to_onnx(
         raise PredictorError(
             f"output_module '{output_module}' not found in the graph. Available outputs (last few): {names[-8:]}",
         )
+    _refuse_one_patch_of_several(model, available, output_module)
     output_shape = matches[-1]
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     wrapper = _NamedHead(model, output_module, fold_pre=fold_pre).eval()
     with torch.no_grad():

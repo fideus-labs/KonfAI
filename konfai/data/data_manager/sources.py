@@ -18,20 +18,21 @@
 """The data sources of each workflow: training, prediction, evaluation, dataset preparation."""
 
 import itertools
-import math
 import os
 import random
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
+from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+import torch
 from torch.utils.data import DataLoader, Sampler
 
-from konfai import konfai_state
+from konfai import cuda_visible_devices, konfai_state
 from konfai.data.augmentation import DataAugmentation, DataAugmentationsList
 from konfai.data.data_manager.groups import Group, GroupMetric, GroupOut, _chains
 from konfai.data.data_manager.order import (
@@ -47,8 +48,10 @@ from konfai.data.transform import (
     Expand,
     Reduce,
     Save,
+    Transform,
     Write,
 )
+from konfai.utils import uri
 from konfai.utils.budget import (
     MemoryBudget,
     format_bytes,
@@ -56,12 +59,15 @@ from konfai.utils.budget import (
     resolve_memory_budget,
 )
 from konfai.utils.clock import startup_clock
-from konfai.utils.config import config
+from konfai.utils.config import config, is_initializing
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.dataset.attribute import is_an_image, region_geometry
-from konfai.utils.errors import DatasetManagerError, KonfAIWarning, TransformerError
+from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
-from konfai.utils.utils import SUPPORTED_FORMATS, resolve_patch, split_path_spec
+from konfai.utils.utils import SUPPORTED_FORMATS, concretize_patch_size, resolve_patch, split_path_spec
+
+#: The workflows that read each case once, sharded by case across ranks.
+_ONE_PASS_STATES = (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM))
 
 
 def _patch_misplacement(reference: DatasetManager, manager: DatasetManager, a: int) -> str | None:
@@ -194,7 +200,8 @@ class DataSources(ABC):
             raise DatasetManagerError(
                 "At least one group must be defined with 'is_input: true' to provide input to the network."
             )
-
+        if is_initializing():
+            return  # --init resolves the configuration; the run reads the data
         self._prepare_datasets()
 
     def _prepare_datasets(self) -> None:
@@ -257,8 +264,16 @@ class DataSources(ABC):
 
         for group_src in self.groups_src:
             if group_src not in datasets:
+                # A local root that is not there lists as empty: named, it is not taken for an empty cohort.
+                missing = [
+                    f"Dataset root '{filename}' does not exist (resolved: '{Path(dataset.store_root).resolve()}',"
+                    f" working directory: '{Path.cwd()}')."
+                    for filename, dataset in self.datasets.items()
+                    if not uri.is_uri(dataset.store_root) and not dataset.exists_on_disk()
+                ]
                 raise DatasetManagerError(
                     f"Group source '{group_src}' not found in any dataset.",
+                    *missing,
                     f"Dataset filenames provided: {self.dataset_filenames}",
                     f"Available groups across all datasets: "
                     f"{[f'{f} {d.get_group()}' for f, d in self.datasets.items()]}\n"
@@ -282,10 +297,6 @@ class DataSources(ABC):
             {} if subset_requires_infos else None
         )
         empty_infos: dict[str, tuple[list[int], Attribute]] = {}
-        if requested is None and os.environ.get("KONFAI_VERBOSE", "True") == "True":
-            # Printed while the workflow is built, before the run's log captures (and quiets) the console.
-            roots = sorted({filename for entries in datasets.values() for filename, _ in entries})
-            print(f"[KonfAI] listing every case of {', '.join(sorted(datasets))} under {', '.join(roots)}")
         cohort: dict[str, set[str]] = {}
         # Seeded from the first group, whatever it holds: an empty first group empties the intersection.
         names: set[str] | None = None
@@ -315,6 +326,19 @@ class DataSources(ABC):
             raise DatasetManagerError(
                 f"No data was found for groups {list(self.groups_src.keys())}: although each group contains data "
                 "from a dataset, there are no common dataset names shared across all groups, the intersection is empty."
+            )
+        # A case some group lacks is left out of the run: say which, and which group lacks it.
+        lacking = {group: sorted(set().union(*cohort.values()) - held) for group, held in cohort.items()}
+        if any(lacking.values()):
+            warnings.warn(
+                f"{len(set().union(*lacking.values()))} case(s) are left out, missing from a group: "
+                + "; ".join(
+                    f"'{group}' lacks {', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}"
+                    for group, missing in lacking.items()
+                    if missing
+                ),
+                KonfAIWarning,
+                stacklevel=2,
             )
 
         subset_names: set[str] | None = None
@@ -430,27 +454,15 @@ class Data(DataSources):
     hold the first partition (the training cases); the validation split has its own.
     """
 
-    @staticmethod
-    def _configured_transform_requires_single_process(classpath: str) -> bool:
-        for transform_name in classpath.split("|"):
-            candidate = transform_name.split(":")[-1].split(".")[-1].split("/")[0]
-            if candidate == "KonfAIInference":
-                return True
-        return False
-
-    @classmethod
-    def _groups_require_single_process_loading(cls, groups_src: Mapping[str, Group | GroupMetric | GroupOut]) -> bool:
-        for group in groups_src.values():
-            for group_transform in group.values():
-                for configured_transforms in (group_transform._transforms, group_transform._patch_transforms):
-                    if configured_transforms is None:
-                        continue
-                    if any(
-                        cls._configured_transform_requires_single_process(classpath)
-                        for classpath in configured_transforms
-                    ):
-                        return True
-        return False
+    @property
+    def requires_single_process_loading(self) -> bool:
+        """Whether a bound stage must run in the main process (:attr:`Transform.single_process`).
+        ``False`` until ``prepare`` binds the chains."""
+        return any(
+            isinstance(stage, Transform) and stage.single_process
+            for _group_src, _group_dest, chain in _chains(self.groups_src)
+            for stage in (*chain.transforms, *chain.patch_transforms)
+        )
 
     @abstractmethod
     def __init__(
@@ -469,7 +481,7 @@ class Data(DataSources):
         persistent_workers: bool | None,
         data_augmentations_list: dict[str, DataAugmentationsList] | None = None,
         inline_augmentations: bool = False,
-        validation_augmentations: bool = True,
+        validation_augmentations: bool = False,
     ) -> None:
         super().__init__(dataset_filenames, groups_src, subset, memory_budget)
         self.patch = patch
@@ -478,7 +490,6 @@ class Data(DataSources):
         self.data_augmentations_list = data_augmentations_list or {}
         self.batch_size = batch_size
         self.inline_augmentations = inline_augmentations
-        self.requires_single_process_loading = self._groups_require_single_process_loading(groups_src)
 
         # A window keeps ``shuffle_window`` cases resident, so the FIFO buffer must be at least that
         # large or a window would evict its own cases before their patches are consumed. Unwindowed,
@@ -492,16 +503,24 @@ class Data(DataSources):
         self._pin_memory = pin_memory
         self._prefetch_factor = prefetch_factor
         self._persistent_workers = persistent_workers
-        # ``memory_budget`` may later override ``use_cache`` in ``get_data``; one builder for both.
-        self._configure_data_loading(use_cache)
+        #: The run's seed, set by the workflow. A loader then draws its workers' base seed from a
+        #: generator of its own, and the global one, which draws the order, sees the same draws in
+        #: every worker regime.
+        self.manual_seed: int | None = None
+        # ``memory_budget`` may later override ``use_cache`` in ``get_data``; one builder for both. The
+        # chains are not bound yet, so nothing is said of the workers here: ``prepare`` decides them.
+        self._configure_data_loading(use_cache, bound=False)
         self.data: list[list[dict[str, list[DatasetManager]]]] = []
         self.mapping: list[list[list[tuple[int, int, int]]]] = []
         self._validation_managers: dict[str, list[DatasetManager]] = {}
         self._prepared_mapping: list[tuple[int, int, int]] = []
         self._prepared_validation_mapping: list[tuple[int, int, int]] = []
         self._validation_names: list[str] = []
+        #: A one-pass workflow's cases whose header cannot be read, and why: the training (first)
+        #: and the validation partition's, each set aside before its managers are built.
+        self.unreadable: tuple[dict[str, str], dict[str, str]] = ({}, {})
 
-    def _configure_data_loading(self, use_cache: bool) -> None:
+    def _configure_data_loading(self, use_cache: bool, bound: bool = True) -> None:
         """Build the loader from the cache regime: the DatasetIter factory and the worker settings.
 
         Called from ``__init__`` with the declared ``use_cache``, from ``prepare`` once the managers
@@ -532,14 +551,14 @@ class Data(DataSources):
         }
         if resolved_num_workers > 0:
             self.dataLoader_args["prefetch_factor"] = 2 if self._prefetch_factor is None else self._prefetch_factor
-            # Persistent workers hold a fork-time copy of the dataset and never see the per-epoch
+            # Persistent workers keep the copy of the dataset they started with and never see the per-epoch
             # redraw, so inline augmentations freeze; an explicit persistent_workers=True cannot win.
             inline_augmentation_active = self.inline_augmentations and len(self.data_augmentations_list) > 0
             if inline_augmentation_active:
-                if self._persistent_workers:
+                if self._persistent_workers and bound:
                     warnings.warn(
                         "persistent_workers=True is dropped: inline augmentations redraw once per epoch and a"
-                        " persistent worker holds a fork-time copy that never sees the redraw. Set"
+                        " persistent worker keeps the copy it started with, which never sees the redraw. Set"
                         " inline_augmentations=False to keep the workers alive across epochs.",
                         KonfAIWarning,
                         stacklevel=2,
@@ -564,9 +583,10 @@ class Data(DataSources):
 
     def _patch_read_decodes_the_volume(self) -> bool:
         """Whether reading one patch costs a whole-volume decode, on any case of any group: only
-        where the patches are read from the store one by one AND the store cannot serve a region (a
-        compressed MetaImage, an NRRD, a gzipped NIfTI). ``False`` before ``prepare``."""
-        if self._managers is None:
+        where the patches are read from the store one by one AND the store cannot serve a region (an
+        NRRD, a compressed file with no uncompressed twin). ``False`` before ``prepare``, and with no
+        patch, where the one read of a case is the volume."""
+        if self._managers is None or self.patch is None:
             return False
         return any(
             manager.can_stream_patch(0) and not manager.dataset.bounded_region_reads(manager.group_src, manager.name)
@@ -714,6 +734,17 @@ class Data(DataSources):
     def _get_nb_augmentation(data_augmentations_list: list[DataAugmentationsList]) -> int:
         return max(int(np.sum([data_augmentation.nb for data_augmentation in data_augmentations_list]) + 1), 1)
 
+    def leave_out(self, training: Collection[str], validation: Collection[str]) -> None:
+        """Drop the named cases of each partition from its mapping before :meth:`get_data` shards it:
+        the cases a resumed run already finished, which are then never read. A partition this leaves
+        empty is still walked."""
+        self._prepared_mapping = [
+            entry for entry in self._prepared_mapping if self.case_names[entry[0]] not in training
+        ]
+        self._prepared_validation_mapping = [
+            entry for entry in self._prepared_validation_mapping if self._validation_names[entry[0]] not in validation
+        ]
+
     def _get_validation_mapping(self) -> list[tuple[int, int, int]]:
         if self.validation_augmentations:
             return self._prepared_validation_mapping
@@ -743,10 +774,35 @@ class Data(DataSources):
             managers = self._build_managers(names, dataset_name, self.patch, self._get_data_augmentations(True))
             counts = self._case_entry_counts(managers)
         self.case_names, self._validation_names = self._split_train_validation_names(names, counts)
+        if self._reads_each_case_once:
+            # After the split, so a validation named by index keeps the cases it names.
+            self.case_names = self._readable(self.case_names, dataset_name, self.unreadable[0])
+            self._validation_names = self._readable(self._validation_names, dataset_name, self.unreadable[1])
         split = len(self.case_names)
         if managers is not None and (self.case_names, self._validation_names) != (names[:split], names[split:]):
             managers = None  # not a cut of the run order: the built indices would not follow the partitions
         self._build_partitions(dataset_name, managers)
+
+    def _readable(
+        self, names: list[str], dataset_name: dict[str, dict[str, list[str]]], set_aside: dict[str, str]
+    ) -> list[str]:
+        """``names`` whose every entry's header reads, from the first root that holds it; each other
+        case is recorded in ``set_aside`` with why, and named at once."""
+        held = {group: [(root, set(cases)) for root, cases in roots.items()] for group, roots in dataset_name.items()}
+        kept = []
+        for name in names:
+            try:
+                for group, roots in held.items():
+                    root = next(root for root, cases in roots if name in cases)
+                    self.datasets[root].get_infos(group, name)
+            except CaseReadError as error:
+                set_aside[name] = str(error.args[0])
+                warnings.warn(
+                    f"Case '{name}' is set aside, the others go on: {error.args[0]}", KonfAIWarning, stacklevel=2
+                )
+                continue
+            kept.append(name)
+        return kept
 
     def _build_partitions(
         self, dataset_name: dict[str, dict[str, list[str]]], managers: dict[str, list[DatasetManager]] | None = None
@@ -836,12 +892,15 @@ class Data(DataSources):
         grouped = list(managers.items())
         if len(grouped) < 2:
             return
+        # An evaluation pairs the same voxels whole or in patches and warns of another geometry itself.
+        placed = os.environ.get("KONFAI_STATE") != str(State.EVALUATION)
         reference_group, reference_managers = grouped[0]
         for group, group_managers in grouped[1:]:
             for reference, manager in zip(reference_managers, group_managers, strict=True):
                 for a in range(nb_augmentation):
                     if reference.get_size(a) == manager.get_size(a):
-                        misplaced = _patch_misplacement(reference, manager, a) if reference.get_size(a) > 1 else None
+                        patched = placed and reference.get_size(a) > 1
+                        misplaced = _patch_misplacement(reference, manager, a) if patched else None
                         if misplaced is None:
                             continue
                         raise DatasetManagerError(
@@ -890,12 +949,15 @@ class Data(DataSources):
                 )
             if case_entry_counts is None:
                 raise DatasetManagerError("Internal error: missing case entry counts for float validation split.")
-            threshold = math.floor(sum(case_entry_counts) * (1 - self.validation))
-            cumulative = 0
-            for dataset_index, count in enumerate(case_entry_counts):
-                cumulative += count
-                if cumulative > threshold:
-                    return list(range(dataset_index, len(subset_names)))
+            # Validation takes the tail whose entries come closest to the share, as written (0.2 is 1/5).
+            # A tie goes to validation, which keeps at least one case.
+            target = Fraction(str(self.validation)) * sum(case_entry_counts)
+            tail = 0
+            for size, count in enumerate(reversed(case_entry_counts), start=1):
+                shorter, tail = tail, tail + count
+                if tail >= target:
+                    held = size - 1 if size > 1 and target - shorter < tail - target else size
+                    return list(range(len(subset_names) - held, len(subset_names)))
             return []
         if isinstance(self.validation, list) and all(isinstance(item, int) for item in self.validation):
             return cast(list[int], self.validation)
@@ -981,7 +1043,7 @@ class Data(DataSources):
         mappings: list[list[tuple[int, int, int]]] = []
         # One-pass workflows shard by CASE; the TRAIN branch below pads duplicates for DDP, which
         # would hand the same case to two ranks, two concurrent writers of one per-case output.
-        if konfai_state() in (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM)):
+        if konfai_state() in _ONE_PASS_STATES:
             mapping_by_index: dict[int, list[tuple[int, int, int]]] = {}
             for entry in mapping:
                 mapping_by_index.setdefault(entry[0], []).append(entry)
@@ -1008,6 +1070,28 @@ class Data(DataSources):
         return mappings
 
     @staticmethod
+    def _split_validation(
+        mapping: list[tuple[int, int, int]], world_size: int, batch_size: int
+    ) -> list[tuple[list[tuple[int, int, int]], int]]:
+        """Contiguous shards, each with the padding it ends with: every entry is scored once, on one
+        rank. DDP needs the same number of forwards on every rank, and the shards differ by one entry
+        at most, so a shard a batch short (its length a multiple of the batch) takes one entry more,
+        its head or the mapping's: a batch of its own at the end, run and never scored. A one-pass
+        workflow runs no DDP and scores a case from all its patches: its shards are ``_split``'s."""
+        if konfai_state() in _ONE_PASS_STATES:
+            return [(shard, 0) for shard in Data._split(mapping, world_size)]
+        size = len(mapping)
+        shards = [
+            mapping[(size * rank) // world_size : (size * (rank + 1)) // world_size] for rank in range(world_size)
+        ]
+        batch_size = max(1, batch_size)
+        batches = max(-(-len(shard) // batch_size) for shard in shards)
+        return [
+            (shard + (shard or mapping)[:1], 1) if -(-len(shard) // batch_size) < batches else (shard, 0)
+            for shard in shards
+        ]
+
+    @staticmethod
     def _remap_dataset_indices(mapping_tmp: list[tuple[int, int, int]]) -> tuple[list[int], list[tuple[int, int, int]]]:
         """Compress sparse dataset indices into local contiguous indices for one loader shard."""
         local_indices: list[int] = []
@@ -1030,14 +1114,17 @@ class Data(DataSources):
         self.data = []
         self.mapping = []
         train_mappings = Data._split(self._prepared_mapping, world_size)
-        validate_mappings = Data._split(self._get_validation_mapping(), world_size)
-        for i, (train_mapping, validate_mapping) in enumerate(zip(train_mappings, validate_mappings, strict=False)):
+        validate_shards = Data._split_validation(self._get_validation_mapping(), world_size, self.batch_size)
+        # Every rank walks the validation split, an empty shard included: its gather is collective. A
+        # split whose every case was set aside at selection, or left out, is walked too, so it is reported.
+        has_validation = bool(self._validation_names) or bool(self.unreadable[1])
+        for i, (train_mapping, (validate_mapping, _)) in enumerate(zip(train_mappings, validate_shards, strict=False)):
             self.data.append([])
             self.mapping.append([])
             train_indices, train_remapped_mapping = self._remap_dataset_indices(train_mapping)
             self.data[i].append({k: [v[it] for it in train_indices] for k, v in self._managers.items()})
             self.mapping[i].append(train_remapped_mapping)
-            if len(validate_mapping):
+            if has_validation:
                 validation_indices, validation_remapped_mapping = self._remap_dataset_indices(validate_mapping)
                 self.data[i].append(
                     {k: [v[it] for it in validation_indices] for k, v in self._validation_managers.items()}
@@ -1067,9 +1154,17 @@ class Data(DataSources):
                     self.batch_size,
                     self.resolved_num_workers,
                     dataset_iter.read_order,
+                    padding=validate_shards[i][1] if loader_index else 0,
                 )
+                # A loader draws its workers' base seed at each fresh iterator: once for a persistent
+                # pool, once per epoch otherwise.
+                generator = None
+                if self.manual_seed is not None:
+                    generator = torch.Generator().manual_seed(self.manual_seed * world_size + i)
                 data_loaders[i].append(
-                    DataLoader(dataset=dataset_iter, **self._batching(sampler), **self.dataLoader_args)
+                    DataLoader(
+                        dataset=dataset_iter, **self._batching(sampler), **self.dataLoader_args, generator=generator
+                    )
                 )
         return data_loaders, self.case_names, self._validation_names
 
@@ -1098,14 +1193,14 @@ class DataTrain(Data):
         self,
         dataset_filenames: list[str] = ["default|./Dataset:mha"],
         groups_src: dict[str, Group] = {"default|Labels": Group()},
-        augmentations: dict[str, DataAugmentationsList] | None = {"DataAugmentation_0": DataAugmentationsList()},
+        augmentations: dict[str, DataAugmentationsList] | None = None,
         inline_augmentations: bool = False,
         patch: DatasetPatch | None = DatasetPatch(),
         memory_budget: str | float | None = None,
         subset: Subset = Subset(),
         batch_size: int = 1,
         validation: float | str | list[int] | list[str] | None = 0.2,
-        validation_augmentations: bool = True,
+        validation_augmentations: bool = False,
         num_workers: int | None = None,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
@@ -1140,13 +1235,13 @@ class DataPrediction(Data):
 
     def __init__(
         self,
-        dataset_filenames: list[str] = ["default|./Dataset"],
+        dataset_filenames: list[str] = ["default|./Dataset:mha"],
         groups_src: dict[str, Group] = {"default": Group()},
-        augmentations: dict[str, DataAugmentationsList] | None = {"DataAugmentation_0": DataAugmentationsList()},
+        augmentations: dict[str, DataAugmentationsList] | None = None,
         patch: DatasetPatch | None = DatasetPatch(),
         memory_budget: str | float | None = None,
         subset: PredictionSubset = PredictionSubset(),
-        batch_size: int = 1,
+        batch_size: int = 0,
         num_workers: int | None = None,
         pin_memory: bool = False,
         prefetch_factor: int | None = None,
@@ -1176,10 +1271,32 @@ class DataPrediction(Data):
         self.measures_batch = batch_size == 0
 
     def _batching(self, sampler: Sampler[int]) -> dict[str, Any]:
-        if not self.measures_batch:
+        # Off a GPU nothing measures, nor where two patches may not stack: one patch per batch, as
+        # batch_size: 1 has it.
+        if not self.measures_batch or not cuda_visible_devices() or not self.patches_stack():
             return super()._batching(sampler)
         # One patch, then two, then the measured batch: the predictor sets the size as it measures.
         return {"batch_sampler": GrowingBatchSampler(sampler, 1)}
+
+    def patches_stack(self) -> bool:
+        """Whether the patches of each group share one shape, as a batch of several stacks them: a declared
+        patch axis pads every patch to its size, a free one (``0``, or no patch) keeps each case's extent
+        until the predictor pins it to the largest. Without a patch, every copy is cut into patches of the
+        case's shape, so only that shape counts."""
+        patch_size = self.patch.patch_size if self.patch is not None else None
+        multiple = self.patch.free_axis_multiple if self.patch is not None else None
+        copies = slice(None) if self.patch is not None else slice(1)
+
+        def extents(shape: list[int]) -> tuple[int, ...]:
+            if patch_size is None or len(shape) != len(patch_size):
+                return tuple(shape)
+            sizes = concretize_patch_size(patch_size, shape, multiple)
+            return tuple(size if declared == 0 else declared for size, declared in zip(sizes, patch_size, strict=True))
+
+        return all(
+            len({extents(shape) for manager in managers for shape in manager.shapes[copies]}) <= 1
+            for managers in (self._managers or {}).values()
+        )
 
 
 @config("Dataset")
@@ -1189,9 +1306,9 @@ class DataMetric(Data):
     Evaluation never exposes a patch: each run sizes its own from ``memory_budget`` (a missing key
     means ``"auto"``). A case that fits the budget is evaluated whole; one that does not is cut into
     the largest DISJOINT patches that fit (overlap 0, no padding) and the reducible metrics combine
-    their running partials into the exact whole-case value. A metric scoring through a window
-    declares a halo, and every patch is read that much wider than its slot. The sizing is disabled
-    when any metric is not reducible.
+    their running partials into the whole-case value, to float32 rounding. A metric scoring through
+    a window declares a halo, and every patch is read that much wider than its slot. The sizing is
+    disabled when any metric is not reducible.
     """
 
     _reads_each_case_once = True
@@ -1219,7 +1336,10 @@ class DataMetric(Data):
             for filename, _append in entries:
                 dataset = self.datasets[filename]
                 for name in dataset.select_names(group, requested):
-                    shape, _ = dataset.get_infos(group, name)
+                    try:
+                        shape, _ = dataset.get_infos(group, name)
+                    except CaseReadError:
+                        continue  # set aside, and named, as the cases are selected
                     channels_by_name[name] = channels_by_name.get(name, 0) + int(shape[0])
                     spatial = [int(s) for s in shape[1:]]
                     known = spatial_by_name.setdefault(name, spatial)
@@ -1269,7 +1389,7 @@ class DataMetric(Data):
         print(
             f"[KonfAI] memory_budget: worst case '{worst}' "
             f"({channels_by_name[worst]}ch x {extent}) exceeds the budget -> "
-            f"evaluating in disjoint patches of {core} (overlap 0){read}, metrics combined exactly."
+            f"evaluating in disjoint patches of {core} (overlap 0){read}, metrics combined from running sums."
         )
 
     def prepare(self) -> None:

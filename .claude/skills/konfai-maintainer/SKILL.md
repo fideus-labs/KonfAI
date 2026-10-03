@@ -33,10 +33,10 @@ actually bitten**, and the **release gate**. Use it to decide whether a framewor
 ## What a green suite does *not* prove
 
 The test suite covers the **single-network bundle happy-path** thoroughly and little else. A change can be
-green and still break: composite/GAN models, RESUME of a model with nested Networks, augmentation
-determinism across epochs, multi-GPU (DDP) train/predict, `overlap > 0` end to end, and the shipped
-example `Prediction.yml` files. If your change touches any of those, **add the missing test**: a passing
-CI is not coverage. See the confirmed-trap watchlist in the checklist reference.
+green and still break: composite/GAN models, multi-GPU (DDP) train/predict, `overlap > 0` end to end, and
+the shipped example `Prediction.yml` files. If your change touches any of those, **add the missing test**: a
+passing CI is not coverage. See the confirmed-trap watchlist in the checklist reference (RESUME of nested
+Networks and the per-epoch augmentation redraws are pinned there).
 
 Two things that look like proof but are not: a green `validate_config_semantics` at default level runs **no
 train step** (only `level='train_step'` does a forward+backward), and a byte-identity test on a config that
@@ -58,19 +58,21 @@ Performance is a correctness concern here (memory decides whether a case even ru
 
 ## Preparing a release
 
-Versions are **tag-derived** (`setuptools_scm`) for all three packages, never hand-edit a version. Before
-tagging, run the gate in [references/perf-and-release.md](references/perf-and-release.md). Its non-negotiable
-step: **the wheel is what users get, so test the wheel, not the source tree.** An editable install hides
-PEP 420 (`konfai/models/python` has no `__init__.py`) and `package-data` (the 14 catalog `.yml`) breakage.
-Run:
+Versions are **tag-derived** (`setuptools_scm`) for every package (AGENTS.md §6b), never hand-edit a
+version. Before tagging, run the gate in [references/perf-and-release.md](references/perf-and-release.md).
+Its non-negotiable step: **the wheel is what users get, so test the wheel, not the source tree.** An editable
+install hides PEP 420 (`konfai/models/python` has no `__init__.py`) and `package-data` (the catalog `.yml`)
+breakage. The wheel tests are the slow ones of `tests/unit/test_packaging.py` (`pixi run test` runs them, and
+CI's build job runs them on the wheel it built):
 
 ```bash
-python scripts/check_release_ready.py        # from the skill dir; builds+installs the wheel in a clean venv
+pytest tests/unit/test_packaging.py -m slow   # KONFAI_WHEEL=dist/ tests a wheel already built
 ```
 
-It asserts a clean-venv `import konfai`, the CLI entry point, that `default|UNet.yml` resolves, that
-`konfai.models.python.*` imports, that the wheel ships ≥16 `models/python` files + 14 catalog `.yml`, and
-that no hyphenated sibling (`konfai-apps`) leaked in.
+They check that the wheel ships every `konfai/models/python/*.py` and catalog `.yml` of the source tree,
+`py.typed`, no sibling package and no generated `__init__.py` in the namespace packages; then they install
+it non-editable in a fresh venv and check that `konfai` and `konfai.models.python` import from the venv, that
+the installed catalog equals the source tree's, and that `konfai --version` reports the wheel's version.
 
 ## Public-API / ecosystem compatibility
 
@@ -88,5 +90,4 @@ Some symbols are consumed by **external** repos and break silently if renamed:
 - [references/review-checklist.md](references/review-checklist.md): per-subsystem invariant + the confirmed-trap watchlist.
 - [references/perf-and-release.md](references/perf-and-release.md): the A/B perf protocol and the release gate steps.
 - [references/bundles-and-publishing.md](references/bundles-and-publishing.md): assemble → validate → HF upload → keep Slicer working (no external repo cloned or hard-coded).
-- `scripts/check_release_ready.py`: deterministic clean-wheel install + catalog-resolution check.
 - `scripts/check_env_doc_parity.py`: flags `KONFAI_*` env vars used in code but missing from the docs.

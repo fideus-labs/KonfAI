@@ -20,11 +20,12 @@
 import inspect
 import logging
 import os
+import warnings
 from abc import ABC
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import torch
@@ -45,8 +46,9 @@ from konfai.network.network.loaders import LRSchedulersLoader, OptimizerLoader, 
 from konfai.network.network.measure import Measure
 from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIWarning
 from konfai.utils.runtime import State, get_device, get_gpu_memory
+from konfai.utils.utils import env_flag
 
 if TYPE_CHECKING:
     from konfai.utils.pretrained import PretrainedFrom
@@ -126,9 +128,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             self.in_branch = in_branch
             self.out_branch = out_branch
             self.in_channels: int | None = None
-            self.in_is_channel: bool = True
             self.out_channels: int | None = None
-            self.out_is_channel: bool = True
             self.requires_grad = requires_grad
             self.isCheckpoint = False
             self.isGPU_Checkpoint = False
@@ -160,26 +160,19 @@ class ModuleArgsDict(torch.nn.Module, ABC):
 
         child_lines = []
 
-        def is_simple_branch(x):
-            return len(x) > 1 or x[0] != 0
-
         for key, module in self._modules.items():
             mod_str = repr(module)
 
             mod_str = self._addindent(mod_str, 2)
             desc = ""
-            if is_simple_branch(self._modulesArgs[key].in_branch) or is_simple_branch(
-                self._modulesArgs[key].out_branch
-            ):
+            if self._modulesArgs[key].in_branch != ["0"] or self._modulesArgs[key].out_branch != ["0"]:
                 desc += f", {self._modulesArgs[key].in_branch}->{self._modulesArgs[key].out_branch}"
             if not self._modulesArgs[key].pretrained:
                 desc += ", pretrained=False"
             if self._modulesArgs[key].alias:
                 desc += f", alias={self._modulesArgs[key].alias}"
             desc += f", in_channels={self._modulesArgs[key].in_channels}"
-            desc += f", in_is_channel={self._modulesArgs[key].in_is_channel}"
             desc += f", out_channels={self._modulesArgs[key].out_channels}"
-            desc += f", out_is_channel={self._modulesArgs[key].out_is_channel}"
             desc += f", is_end={self._modulesArgs[key]._isEnd}"
             desc += f", isInCheckpoint={self._modulesArgs[key].isCheckpoint}"
             desc += f", isInGPU_Checkpoint={self._modulesArgs[key].isGPU_Checkpoint}"
@@ -238,7 +231,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
     def get_mapping(self):
         results: dict[str, str] = {}
         for name, module_args in self._modulesArgs.items():
-            module = self[name]
+            module = self._modules[name]
+            if module is None:  # an absent child (a NONE norm) holds no weight to map
+                continue
             if isinstance(module, ModuleArgsDict):
                 if len(module_args.alias):
                     count = dict.fromkeys(set(module.get_mapping().values()), 0)
@@ -300,6 +295,54 @@ class ModuleArgsDict(torch.nn.Module, ABC):
             if module is not None:
                 ModuleArgsDict.init_func(module, init_type, init_gain)
 
+    def _runs(self, name: str) -> bool:
+        """Whether the module ``name`` runs in this graph's state: a ``training`` flag gates it to one."""
+        training = self._modulesArgs[name].training
+        return training is None or (
+            not (training and self._training == NetState.PREDICTION)
+            and not (not training and self._training == NetState.TRAIN)
+        )
+
+    def _resolve_reads(
+        self,
+        name: str,
+        module: torch.nn.Module | None,
+        branchs: dict[str, torch.Tensor],
+        inputs: tuple[torch.Tensor, ...],
+    ) -> list[str]:
+        """The branches module ``name`` reads, each one in ``branchs`` once this returns.
+
+        A named branch nobody produced is refused. A numeric one falls back to the first input inside
+        a block (extra indices are legitimate scratch wiring, an attention gate), but at a network's
+        own level it is a missing input: refused, unless the module is itself a network and the
+        missing inputs are its last ones, which it is then called without (its own graph applies this
+        same rule to what it reads)."""
+        reads = list(self._modulesArgs[name].in_branch)
+        missing = [ib for ib in reads if ib not in branchs]
+        for ib in missing:
+            if not ib.lstrip("-").isdigit():
+                raise ConfigError(
+                    f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
+                    f"Known branches here: {sorted(branchs)}. A named branch must be written "
+                    "(out_branch) by a module that runs earlier; check the label for a typo "
+                    "and the producer's training gate.",
+                )
+        absent = [ib for ib in missing if isinstance(self, Network) and int(ib) >= len(inputs)]
+        if absent:
+            trailing = reads[len(reads) - len(absent) :] == absent
+            if not (isinstance(module, Network) and trailing and len(absent) < len(reads)):
+                raise ConfigError(
+                    f"Module '{name}' of '{type(self).__name__}' reads input {absent[0]}, and the network was"
+                    f" given {len(inputs)} input(s).",
+                    "Give the network every input its graph reads (one group per input in the config), or"
+                    " gate the module to the state that has it (training).",
+                )
+            reads = reads[: len(reads) - len(absent)]
+        for ib in missing:
+            if ib not in absent:
+                branchs[ib] = inputs[0]
+        return reads
+
     def named_forward(
         self, *inputs: torch.Tensor, attributes: list[list[Attribute]] | None = None
     ) -> Iterator[tuple[str, torch.Tensor]]:
@@ -320,26 +363,13 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                 # Reset per module: ``tmp`` tracks out_branches a nested sibling already filled via
                 # inner-match. Kept across siblings, a later sibling's output would be silently dropped.
                 tmp = []
-                if self._modulesArgs[name].training is None or (
-                    not (self._modulesArgs[name].training and self._training == NetState.PREDICTION)
-                    and not (not self._modulesArgs[name].training and self._training == NetState.TRAIN)
-                ):
+                if self._runs(name):
                     requires_grad = self._modulesArgs[name].requires_grad
                     if requires_grad is not None and module:
                         module.requires_grad_(requires_grad)
                     target_gpu = self._modulesArgs[name].gpu
-                    for ib in self._modulesArgs[name].in_branch:
-                        if ib not in branchs:
-                            # Numeric branches fall back to the network input (branch '0' = input; extra
-                            # indices are legitimate scratch wiring). A NAMED branch nobody produced is refused.
-                            if not ib.lstrip("-").isdigit():
-                                raise ConfigError(
-                                    f"Module '{name}' reads branch '{ib}', which no earlier module has produced.",
-                                    f"Known branches here: {sorted(branchs)}. A named branch must be written "
-                                    "(out_branch) by a module that runs earlier; check the label for a typo "
-                                    "and the producer's training gate.",
-                                )
-                            branchs[ib] = inputs[0]
+                    reads = self._resolve_reads(name, module, branchs, inputs)
+                    for ib in reads:
                         if target_gpu != "cpu" and str(branchs[ib].device) != f"cuda:{target_gpu}":
                             branchs[ib] = branchs[ib].to(
                                 int(target_gpu),
@@ -351,7 +381,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                             torch.Tensor,
                             checkpoint(
                                 module,
-                                *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                *[branchs[i] for i in reads],
                                 use_reentrant=False,
                             ),
                         )
@@ -361,9 +391,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     else:
                         if isinstance(module, ModuleArgsDict):
                             for k, out in module.named_forward(
-                                *[branchs[i] for i in self._modulesArgs[name].in_branch],
+                                *[branchs[i] for i in reads],
                                 attributes=(
-                                    [attribute_branchs.get(i, [Attribute()]) for i in self._modulesArgs[name].in_branch]
+                                    [attribute_branchs.get(i, [Attribute()]) for i in reads]
                                     if attribute_branchs
                                     else None
                                 ),
@@ -379,14 +409,11 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                         elif isinstance(module, torch.nn.Module):
                             if getattr(module, "accepts_attributes", False):
                                 out = module(
-                                    *[branchs[i] for i in self._modulesArgs[name].in_branch],
-                                    attributes=[
-                                        attribute_branchs.get(i, [Attribute()])
-                                        for i in self._modulesArgs[name].in_branch
-                                    ],
+                                    *[branchs[i] for i in reads],
+                                    attributes=[attribute_branchs.get(i, [Attribute()]) for i in reads],
                                 )
                             else:
-                                out = module(*[branchs[i] for i in self._modulesArgs[name].in_branch])
+                                out = module(*[branchs[i] for i in reads])
                             for ob in self._modulesArgs[name].out_branch:
                                 branchs[ob] = out
                             yield name, out
@@ -403,7 +430,7 @@ class ModuleArgsDict(torch.nn.Module, ABC):
         metadata where ``named_parameters`` does not: a module gated off by ``training=False`` is
         skipped, and ``pretrained=True`` keeps only the modules declared ``pretrained=False``."""
         for name, module_args in self._modulesArgs.items():
-            module = self[name]
+            module = self._modules[name]
             if isinstance(module, ModuleArgsDict):
                 for k, v in module.graph_parameters(pretrained=pretrained):
                     yield name + "." + k, v
@@ -478,6 +505,14 @@ class OutputsGroup(list):
         self.layers.clear()
 
 
+@cache
+def _takes_key_and_root(function: Callable) -> tuple[bool, bool]:
+    """Whether a function ``Network._apply_network`` runs takes ``key`` and ``root``: a property of the
+    function, read once, where every network of every step would otherwise read its signature."""
+    parameters = inspect.signature(function).parameters
+    return "key" in parameters, "root" in parameters
+
+
 class Network(ModuleArgsDict, ABC):
     """Base class for KonfAI networks participating in a routed model graph."""
 
@@ -519,10 +554,10 @@ class Network(ModuleArgsDict, ABC):
                     **kwargs,
                 ).items():
                     results.update({name_function(self) + "." + k: v})
-        param_names = {param.name for param in inspect.signature(function).parameters.values()}
-        if "key" in param_names:
+        takes_key, takes_root = _takes_key_and_root(function)
+        if takes_key:
             function = partial(function, key=key)
-        if "root" in param_names:
+        if takes_root:
             function = partial(function, root=root)
 
         results[name_function(self)] = function(self, *args, **kwargs)
@@ -730,7 +765,15 @@ class Network(ModuleArgsDict, ABC):
             value = state_dict[name]
             model_state_dict_tmp: dict[str, torch.Tensor] = {}
             if isinstance(value, dict):
-                model_state_dict_tmp = {k.split(".")[-1]: v for k, v in value.items()}[self.get_name()]
+                by_name = {k.split(".")[-1]: v for k, v in value.items()}
+                if self.get_name() not in by_name:
+                    raise ConfigError(
+                        f"The checkpoint holds no weights for the network '{self.get_name()}': "
+                        f"its networks are {sorted(value)}.",
+                        "A checkpoint entry is keyed by the network's name: the class name of a Python model, "
+                        "the 'name' (else the file name) of a YAML model. Load it into the model that wrote it.",
+                    )
+                model_state_dict_tmp = by_name[self.get_name()]
             modules_name = self.get_mapping()
             model_state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
 
@@ -788,11 +831,8 @@ class Network(ModuleArgsDict, ABC):
             yield name if occurrence == 1 else f"{name}#{occurrence}", scheduler
 
     def schedule_states(self) -> dict[str, Any]:
-        """This network's scheduler/scaler state, with a distinct identity for each occurrence. Version 1
-        keyed every scheduler by class alone: its single-class entries remain readable, ambiguous repeated
-        ones fall back to the update count with a warning."""
+        """This network's scheduler/scaler state, with a distinct identity for each occurrence."""
         states: dict[str, Any] = {
-            "version": 2,
             "schedulers": {name: scheduler.state_dict() for name, scheduler in self._named_schedulers()},
         }
         scaler = getattr(self, "scaler", None)
@@ -810,11 +850,7 @@ class Network(ModuleArgsDict, ABC):
             return restored
         saved = states.get("schedulers", {})
         named = list(self._named_schedulers())
-        ambiguous = {type(scheduler).__name__ for name, scheduler in named if "#" in name}
-        legacy = states.get("version", 1) < 2
         for name, scheduler in named:
-            if legacy and type(scheduler).__name__ in ambiguous:
-                continue  # the old entry cannot identify which occurrence's state survived
             state = saved.get(name)
             if state is not None:
                 scheduler.load_state_dict(state)
@@ -822,7 +858,7 @@ class Network(ModuleArgsDict, ABC):
         missing = [name for name, scheduler in named if scheduler not in restored]
         if missing:
             _log.warning(
-                "Checkpoint '%s' holds no unambiguous state for scheduler(s) %s: resumed from the update count, "
+                "Checkpoint '%s' holds no state for scheduler(s) %s: resumed from the update count, "
                 "which places a step schedule but not a plateau's history.",
                 state_key,
                 missing,
@@ -840,10 +876,8 @@ class Network(ModuleArgsDict, ABC):
         gradient_checkpoints: list[str] | None,
         gpu_checkpoints: list[str] | None,
         name: str | None = None,
-        in_is_channel: bool = True,
         out_channels: int | None = None,
-        out_is_channel: bool = True,
-    ) -> tuple[int, bool, int | None, bool]:
+    ) -> tuple[int, int | None]:
 
         for k1, v1 in module.items():
             if isinstance(v1, ModuleArgsDict):
@@ -871,36 +905,20 @@ class Network(ModuleArgsDict, ABC):
                     module._modulesArgs[k].isGPU_Checkpoint = True
 
             module._modulesArgs[k].in_channels = in_channels
-            module._modulesArgs[k].in_is_channel = in_is_channel
 
             if isinstance(v, ModuleArgsDict):
-                in_channels, in_is_channel, out_channels, out_is_channel = self._compute_channels_trace(
-                    v,
-                    in_channels,
-                    gradient_checkpoints,
-                    gpu_checkpoints,
-                    key,
-                    in_is_channel,
-                    out_channels,
-                    out_is_channel,
+                in_channels, out_channels = self._compute_channels_trace(
+                    v, in_channels, gradient_checkpoints, gpu_checkpoints, key, out_channels
                 )
-
-            if v.__class__.__name__ == "ToChannels":
-                out_is_channel = True
-
-            if v.__class__.__name__ == "ToFeatures":
-                out_is_channel = False
 
             out_channels = getattr(v, "out_channels", None) or out_channels
             out_channels = getattr(v, "out_features", None) or out_channels
 
             module._modulesArgs[k].out_channels = out_channels
-            module._modulesArgs[k].out_is_channel = out_is_channel
 
             in_channels = out_channels if out_channels is not None else in_channels
-            in_is_channel = out_is_channel
 
-        return in_channels, in_is_channel, out_channels, out_is_channel
+        return in_channels, out_channels
 
     def downsampling_factor(self) -> list[int] | None:
         """Per-axis factor the input spatial size must be a multiple of, or ``None`` if the graph never
@@ -1016,6 +1034,22 @@ class Network(ModuleArgsDict, ABC):
                     break
         return found
 
+    def _compiled_walk(self, inputs: list[torch.Tensor], wanted: tuple[str, ...]) -> list[tuple[str, torch.Tensor]]:
+        """The compiled walk, or the eager one from the first compilation that fails (no Triton, an operation
+        the backend lacks): the run goes on as without ``torch_compile``, and says so once."""
+        from torch._dynamo.exc import TorchDynamoException
+
+        try:
+            return cast(Callable, self._walk)(inputs, wanted)
+        except TorchDynamoException as error:
+            warnings.warn(
+                f"torch_compile could not compile the model ({type(error).__name__}): it runs uncompiled.",
+                KonfAIWarning,
+                stacklevel=2,
+            )
+            self._walk = None
+            return self._requested_outputs(inputs, wanted)
+
     def get_layers(
         self,
         inputs: list[torch.Tensor],
@@ -1026,25 +1060,18 @@ class Network(ModuleArgsDict, ABC):
         output_layer_accumulator: dict[str, Accumulator] = {}
         output_layer_patch_indexed: dict[str, PatchIndexed] = {}
         it = 0
-        debug = "KONFAI_DEBUG" in os.environ
+        debug = env_flag("KONFAI_DEBUG", False)
         walk = (
-            self._walk(inputs, tuple(layers_name))
+            self._compiled_walk(inputs, tuple(layers_name))
             if self._walk is not None and not debug
             else self.named_forward(*inputs, attributes=attributes)
         )
         for name_tmp, output_layer in walk:
             name = strip_accumulated(name_tmp)
             if debug:
-                if "KONFAI_DEBUG_LAST_LAYER" in os.environ:
-                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
-                        f"{os.environ['KONFAI_DEBUG_LAST_LAYER']}|{name}:"
-                        f"{get_gpu_memory(output_layer.device)}:"
-                        f"{str(output_layer.device).replace('cuda:', '')}"
-                    )
-                else:
-                    os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
-                        f"{name}:{get_gpu_memory(output_layer.device)}:{str(output_layer.device).replace('cuda:', '')}"
-                    )
+                os.environ["KONFAI_DEBUG_LAST_LAYER"] = (
+                    f"{name}:{get_gpu_memory(output_layer.device)}:{str(output_layer.device).replace('cuda:', '')}"
+                )
             it += 1
             if name in layers_name or name_tmp in layers_name:
                 if is_accumulated(name_tmp):
@@ -1107,14 +1134,41 @@ class Network(ModuleArgsDict, ABC):
         criteria and patch, the output groups the measures address, and the channel trace the
         checkpoints are placed on."""
         self.init(autocast, state, group_dest)
-        if state != State.PREDICTION and all(network.optimizer is None for network in self.get_networks().values()):
-            # A graph with no optimizer would run an epoch with the backward skipped: name the key.
+        if state != State.PREDICTION:
+            # A graph with no optimizer or no loss would run every epoch without a step: name the key.
             root = os.environ.get("KONFAI_ROOT", "Trainer")
-            raise ConfigError(
-                f"No optimizer resolved for '{self.get_name()}': nothing would train.",
-                f"Give '{root}.Model.{self.get_name()}.optimizer' (for instance "
-                "'optimizer: {name: AdamW}'), or remove the key to take the default.",
-            )
+            networks = self.get_networks().values()
+            if all(network.optimizer is None for network in networks):
+                raise ConfigError(
+                    f"No optimizer resolved for '{self.get_name()}': nothing would train.",
+                    f"Give '{root}.Model.{self.get_name()}.optimizer' (for instance "
+                    "'optimizer: {name: AdamW}'), or remove the key to take the default.",
+                )
+            losses = [
+                network
+                for network in networks
+                if network.measure is not None
+                and any(
+                    attr.is_loss
+                    for targets in network.measure.outputs_criterions.values()
+                    for criteria in targets.values()
+                    for attr in criteria.values()
+                )
+            ]
+            if not losses:
+                raise ConfigError(
+                    f"'{self.get_name()}' attaches no training loss: no criterion has 'is_loss: true', "
+                    "so no weight would change.",
+                    f"Declare one under '{root}.Model.{self.get_name()}.outputs_criterions.<output>"
+                    ".targets_criterions.<target>.criterions_loader.<Criterion>' with 'is_loss: true'.",
+                )
+            # A network steps on its own losses with its own optimizer (_backward).
+            if all(network.optimizer is None for network in losses):
+                raise ConfigError(
+                    f"No network of '{self.get_name()}' holds both an optimizer and a training loss: nothing would"
+                    " train.",
+                    "Give the optimizer and the 'is_loss: true' criterion to the same network.",
+                )
         self.init_outputs_group()
         self._compute_channels_trace(self, self.in_channels, gradient_checkpoints, gpu_checkpoints)
 
@@ -1126,8 +1180,11 @@ class Network(ModuleArgsDict, ABC):
                 outputs_group = OutputsGroup(network)
                 outputs_group.append(output_name)
                 for targets_group in network.measure.outputs_criterions[output_name].keys():
-                    if ":" in targets_group:
-                        outputs_group.append(targets_group.replace(":", "."))
+                    # Each model output a target group names, once: the group completes when every
+                    # name it lists has run.
+                    for target in targets_group.split(";"):
+                        if ":" in target and target.replace(":", ".") not in outputs_group:
+                            outputs_group.append(target.replace(":", "."))
 
                 self.outputsGroup.append(outputs_group)
 
@@ -1322,29 +1379,6 @@ class Network(ModuleArgsDict, ABC):
                 submodule._channels_last = True
         return module
 
-    @staticmethod
-    def to(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):  # type: ignore[override]  # a placement over the routed graph, not Module.to
-        # `_counter` is a single-element box holding the next GPU index, shared by reference through the
-        # recursion so model-parallel `isGPU_Checkpoint` splits advance it, fresh at `device` per call.
-        if _counter is None:
-            _counter = [device]
-        for k, v in module.items():
-            if module._modulesArgs[k].gpu == "cpu":
-                if module._modulesArgs[k].isGPU_Checkpoint:
-                    _counter[0] += 1
-                module._modulesArgs[k].gpu = str(get_device(_counter[0]))
-                if isinstance(v, ModuleArgsDict):
-                    v = Network.to(v, _counter[0], _counter)
-                elif v is not None:
-                    v = v.to(get_device(_counter[0]))
-        if isinstance(module, Network):
-            if module.optimizer is not None:
-                for state in module.optimizer.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor):
-                            state[k] = v.to(get_device(_counter[0]))
-        return module
-
     def get_name(self) -> str:
         return self.name
 
@@ -1356,6 +1390,32 @@ class Network(ModuleArgsDict, ABC):
         for module in self.modules():
             if isinstance(module, ModuleArgsDict):
                 module._training = state
+
+
+def place_graph(module: ModuleArgsDict, device: int, _counter: list[int] | None = None):
+    """Place each module of the routed graph on its GPU, starting at ``device``: a model-parallel
+    ``gpu_checkpoints`` split moves the rest of the graph to the next index. A function, not a ``Network``
+    method, so no child name is reserved and ``Network.to`` stays torch's."""
+    # `_counter` is a single-element box holding the next GPU index, shared by reference through the
+    # recursion so model-parallel `isGPU_Checkpoint` splits advance it, fresh at `device` per call.
+    if _counter is None:
+        _counter = [device]
+    for k, v in module.items():
+        if module._modulesArgs[k].gpu == "cpu":
+            if module._modulesArgs[k].isGPU_Checkpoint:
+                _counter[0] += 1
+            module._modulesArgs[k].gpu = str(get_device(_counter[0]))
+            if isinstance(v, ModuleArgsDict):
+                place_graph(v, _counter[0], _counter)
+            elif v is not None:
+                v.to(get_device(_counter[0]))
+    if isinstance(module, Network):
+        if module.optimizer is not None:
+            for state in module.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(get_device(_counter[0]))
+    return module
 
 
 class MinimalModel(Network):
@@ -1380,7 +1440,7 @@ class MinimalModel(Network):
         self,
         model: Network,
         optimizer: OptimizerLoader = OptimizerLoader(),
-        schedulers: dict[str, LRSchedulersLoader] = {"default|StepLR": LRSchedulersLoader(0)},
+        schedulers: dict[str, LRSchedulersLoader] | None = None,
         outputs_criterions: dict[str, TargetCriterionsLoader] = {"default": TargetCriterionsLoader()},
         patch: ModelPatch | None = None,
         dim: int = 3,

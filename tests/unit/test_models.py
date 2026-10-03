@@ -16,6 +16,10 @@
 
 """Tests for the built-in model definitions in ``konfai.models``."""
 
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
 import torch
 from konfai.models.python.classification.convNeXt import ConvNeXt, LayerScaler
@@ -30,7 +34,10 @@ from konfai.models.python.segmentation.NestedUNet import NestedUNet
 from konfai.models.python.segmentation.residualencoderunet import ResidualEncoderUNet
 from konfai.models.python.segmentation.UNet import UNet
 from konfai.models.python.segmentation.unetplusplus import UNetPlusPlus
+from konfai.network.network import Measure, ModelLoader
+from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
+from konfai.utils.runtime import State
 
 # --------------------------------------------------------------------------------------
 # UNet
@@ -75,7 +82,7 @@ def test_unet_attention_forwards_without_branch_collision() -> None:
 
 
 def test_linear_vae_is_parameterized_and_variational():
-    """#17 LinearVAE must be parameterized (no hardcoded dims) and sample a latent."""
+    """LinearVAE must be parameterized (no hardcoded dims) and sample a latent."""
     model = LinearVAE(in_features=32, hidden_features=16, latent_dim=4)
     x = torch.randn(2, 32)
     outputs = dict(model.named_forward(x))
@@ -90,7 +97,7 @@ def test_linear_vae_is_parameterized_and_variational():
 
 
 def test_cyclegan_discriminator_initialized_no_keyerror():
-    """#CycleGan: initialized() must not index a missing 'Sample' submodule on load."""
+    """CycleGanDiscriminator.initialized() must not index a missing 'Sample' submodule on load."""
     model = CycleGanDiscriminator()
     # Must not raise KeyError('Sample').
     model.initialized()
@@ -102,11 +109,54 @@ def test_cyclegan_discriminator_initialized_no_keyerror():
 
 
 def test_adaptation_sets_requires_grad_at_construction():
-    """#18 Adaptation must configure requires_grad in __init__, not on every forward."""
+    """Adaptation must configure requires_grad in __init__, not on every forward."""
     adaptation = Adaptation()
     # State is correct immediately after construction, before any forward pass.
     assert all(not p.requires_grad for p in adaptation.Encoder_1.parameters())
     assert all(p.requires_grad for p in adaptation.FCT_1.parameters())
+
+
+_TRIPLET_CONFIG = """\
+Trainer:
+  Model:
+    Representation:
+      outputs_criterions:
+        Model:Anchor:
+          targets_criterions:
+            Model:Positive;Model:Negative:
+              criterions_loader:
+                torch:nn:TripletMarginLoss: {}
+"""
+
+
+def test_representation_trains_one_step_under_torch_triplet_loss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The embeddings are three named outputs: torch's TripletMarginLoss attaches to the anchor, takes
+    the positive and the negative as its targets, and one step moves the projection head only."""
+    config = tmp_path / "Config.yml"
+    config.write_text(_TRIPLET_CONFIG, encoding="utf-8")
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    torch.manual_seed(0)
+    model = ModelLoader("representation.representation.Representation").get_model(train=True)
+    model.bind(False, State.TRAIN, ["A", "P", "N"])
+    before = {name: parameter.detach().clone() for name, parameter in model.named_parameters()}
+
+    batch = {
+        group: SimpleNamespace(tensor=torch.randn(2, 1, 8, 8, 8), is_input=True, attribute=[Attribute()])
+        for group in ("A", "P", "N")
+    }
+    model.forward(batch)
+    (loss,) = cast(Measure, model.measure).get_loss()
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    gradients = torch.autograd.grad(loss.sum(), trainable, retain_graph=True, allow_unused=True)
+    assert torch.isfinite(loss).all() and all(g is not None and g.abs().sum() > 0 for g in gradients)
+    model.backward(model)
+
+    moved = {name for name, parameter in model.named_parameters() if not torch.equal(parameter, before[name])}
+    assert moved and all(".FCT_1." in name for name in moved), moved  # the encoder stays frozen
 
 
 # --------------------------------------------------------------------------------------
@@ -280,6 +330,31 @@ def test_documented_model_constructs_and_forwards(model_name: str) -> None:
         for _, tensor in model.named_forward(*[torch.randn(*shape) for shape in input_shapes]):
             output = tensor
     assert output is not None
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [name for name, (_, shapes) in DOCUMENTED_MODEL_SPECS.items() if shapes is not None],
+)
+def test_documented_model_takes_a_training_step(model_name: str) -> None:
+    """Train mode with autograd, on a batch of two so a batch norm has statistics to take: every
+    parameter still trainable after the walk gets a finite gradient."""
+    builder, input_shapes = DOCUMENTED_MODEL_SPECS[model_name]
+    torch.manual_seed(0)
+    model = builder()
+    model.train()
+
+    outputs = [
+        tensor
+        for _, tensor in model.named_forward(*[torch.randn(2, *shape[1:]) for shape in input_shapes])
+        if tensor.requires_grad
+    ]
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not parameters:
+        pytest.skip("a weightless model has no step to take")
+    torch.stack([output.float().mean() for output in outputs]).sum().backward()
+
+    assert all(p.grad is not None and bool(torch.isfinite(p.grad).all()) for p in parameters)
 
 
 def test_gan_default_builds_fresh_unshared_subnetworks() -> None:

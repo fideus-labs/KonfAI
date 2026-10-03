@@ -34,6 +34,7 @@ LabelSums = dict[int, tuple[float, float, float, bool]]
 
 class Dice(Criterion):
     maximize = True  # reported value is the Dice coefficient (higher-is-better); DiceSaveMap inherits it
+    resamples_target = True  # a target of another shape is put on the output's grid (on_grid)
 
     @staticmethod
     def on_grid(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -135,6 +136,13 @@ class Dice(Criterion):
         for a label its reference lacks still reaches the whole-case ratio in ``combine_metric``;
         only the labels the reference holds are scored.
         """
+        # A float map is binned by truncation: a probability would read as background.
+        if output.is_floating_point() and bool(torch.frac(output.detach()).nan_to_num_().any()):
+            raise MeasureError(
+                "Dice reads a one-channel output as a label map, and this one holds non-integer values.",
+                "Give a probability map one channel per label (background and foreground), "
+                "or threshold it to labels before Dice scores it.",
+            )
         (predicted_labels, reference_labels), offset, nan_bin, minlength = Dice._bins([output, target], labels)
         counts = [
             torch.bincount(reference_labels[reference_labels == predicted_labels], minlength=minlength),
@@ -218,9 +226,9 @@ class Dice(Criterion):
         axis sits before the target's channels, so a reference of any channel count broadcasts against
         a gathered channel exactly as a per-label ``target == label`` did.
 
-        A slice per label cost a gradient write into the whole logits tensor each: 10.2 ms of the
-        28.2 ms of GPU time of a training step of ``examples/Segmentation``. With no gradient to build
-        it is the label count that peaks (6 to 180 MiB), and ``_soft_sums`` is the frugal route.
+        One gathered slice, because the gradient of a slice writes into the whole logits tensor, once
+        per slice. Its peak grows with the label count, so without a gradient to build ``_soft_sums``
+        is the route.
 
         The reference's own mass is the voxel count ``_reference_counts`` already holds. The per-label
         dices leave as a ``LabelledValues`` read off the device lazily (``Measure._materialize``),
@@ -266,22 +274,39 @@ class Dice(Criterion):
         super().__init__()
         self._labels = labels
         self.loss = partial(Dice._loss, labels)
+        self._probabilities_checked = False
+
+    def _check_probabilities(self, output: torch.Tensor) -> None:
+        """Refuse, on the first call, a multi-channel output outside [0, 1]: Dice reads it as
+        probabilities, and logits (a Conv head with no Softmax) would score outside [0, 1] without a
+        word. One synchronisation, then none."""
+        if self._probabilities_checked or output.shape[1] < 2 or not output.is_floating_point():
+            return
+        low, high = torch.stack(torch.aminmax(output.detach())).tolist()
+        if not -1e-3 <= low <= high <= 1 + 1e-3:  # NaN fails every comparison
+            raise MeasureError(
+                f"Dice reads a {output.shape[1]}-channel output as probabilities, and this one spans"
+                f" [{low:.3g}, {high:.3g}].",
+                "Attach Dice to the output of a Softmax (or Sigmoid), not to the logits before it.",
+            )
+        self._probabilities_checked = True
 
     @staticmethod
     def _masked(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
         """The pair with every voxel outside the mask sent to the background, when a mask is given.
-        A bool mask multiplies in each tensor's own dtype: ``torch.where(mask == 1, 1, 0)`` was
-        8 B/voxel of int64 for the same product."""
+        The bool mask multiplies in each tensor's own dtype: an int64 ``torch.where`` was 8 B/voxel
+        for the same product."""
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return output, targets[0]
-        mask = mask == 1
         return output * mask, targets[0] * mask
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        self._check_probabilities(output)
         return self.loss(*self._masked(output, targets))
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
+        self._check_probabilities(output)
         output, target = self._masked(output, targets)
         if tuple(target.shape[2:]) != tuple(output.shape[2:]):
             raise MeasureError(
@@ -332,6 +357,7 @@ class DiceSaveMap(Dice):
         return self._map(*self._masked(output, targets))
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        self._check_probabilities(output)
         output, target = self._masked(output, targets)
         loss, true_loss = self.loss(output, target)
         return loss, true_loss, self._map(output, target)

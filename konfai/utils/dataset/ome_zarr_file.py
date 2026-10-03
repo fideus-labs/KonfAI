@@ -29,6 +29,10 @@ from typing import Any
 import numpy as np
 
 try:
+    from zarrista.exceptions import ZarristaError
+except ImportError:  # no omezarr extra: nothing raises it
+    ZarristaError = OSError  # type: ignore[assignment,misc]
+try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
@@ -40,6 +44,7 @@ from konfai.utils.dataset.attribute import (
     displacement_field_to_data,
     image_to_data,
     ome_zarr_attributes,
+    push_geometry,
     region_geometry,
 )
 from konfai.utils.dataset.staging import _recover_orphaned_backup, _retire_dead_debris, publish
@@ -82,7 +87,8 @@ def _divisor_tile(extent: int, cap: int) -> int:
 
 
 #: Where each entry's store was resolved on disk, keyed by ``(root, entry)``. A write through this
-#: backend forgets the memo; a store replaced at the same path keeps its resolution.
+#: backend forgets the memo, an existence probe resolves its entry again; a store replaced at the
+#: same path keeps its resolution.
 _resolved_store_paths: dict[tuple[str, str], str] = {}
 
 
@@ -141,6 +147,8 @@ class OmeZarrFile(AbstractFile):
     reads_remote = True  # a store is addressed by key, so fsspec serves a URI root
     writes_pyramid = True  # the one format with levels
     lists_case_entries = True  # a case is a directory of stores this backend enumerates
+    # zarr's errors are ValueError or OSError, a chunk the codec cannot decode is zarrista's.
+    read_errors = (OSError, ValueError, KeyError, RuntimeError, ZarristaError)
 
     @classmethod
     def can_stream(cls, file_format: str, attributes: Attribute) -> bool:
@@ -239,8 +247,8 @@ class OmeZarrFile(AbstractFile):
             attributes.get_np_array("Direction"),
             normalized[1:],
         )
-        attributes["Origin"] = origin
-        attributes["Spacing"] = spacing
+        push_geometry(attributes, "Origin", origin)
+        push_geometry(attributes, "Spacing", spacing)
         return data, attributes
 
     def bounded_region_reads(self, name: str) -> bool:
@@ -358,8 +366,11 @@ class OmeZarrFile(AbstractFile):
         return sorted(groups)
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
+        entry = f"{group}/{name}" if name else group
+        # Asked of disk: a store deleted since it was resolved is absent.
+        _resolved_store_paths.pop((self.filename, entry), None)
         try:
-            self._path(f"{group}/{name}" if name else group)
+            self._path(entry)
             return True
         except DatasetManagerError:
             return False

@@ -23,17 +23,19 @@ see ``record_given_arguments``), the equivalent mapping, or a tree loaded from a
 
 The contract:
 
-- A designed refusal raises ``KonfAIError``; only the CLI catches and exits.
+- A designed refusal raises ``KonfAIError``; only the ``konfai`` and ``konfai-apps`` CLIs catch it and exit.
 - Results come back structured, read from the run's own record (``outputs.json``, ``Metric_*.json``).
-- The ``KONFAI_*`` environment is restored around every call; one workflow runs at a time per
-  process, a second concurrent call is refused.
+- The ``KONFAI_*`` environment and the published per-rank memory budget are restored around every
+  call; one workflow runs at a time per process, a second concurrent call is refused.
 - Every call materializes the resolved YAML in the run's workspace, the record of the experiment.
 """
 
+import hashlib
 import importlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -65,7 +67,11 @@ _ACTIVE = threading.Lock()
 def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
     """Serialize workflows within the process and leave the environment as found. Two in-process runs
     would corrupt the process-wide ``KONFAI_*`` state, so a second is refused. ``ranks`` is exported
-    as ``KONFAI_LOCAL_RANKS`` for build-time budget sizing."""
+    as ``KONFAI_LOCAL_RANKS`` for build-time budget sizing. The per-rank memory budget a run publishes
+    is process state too: the call starts without one, as a fresh process does, and the caller's is
+    restored with the environment."""
+    from konfai.utils.budget import per_rank_budget_bytes, set_per_rank_budget
+
     if not _ACTIVE.acquire(blocking=False):
         raise ConfigError(
             "A KonfAI workflow is already running in this process.",
@@ -74,6 +80,8 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
             " corrupt each other.",
         )
     saved = {key: value for key, value in os.environ.items() if key.startswith("KONFAI")}
+    saved_budget = per_rank_budget_bytes()
+    set_per_rank_budget(None)
     os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, ranks))
     try:
         yield
@@ -88,18 +96,43 @@ def _one_workflow_at_a_time(ranks: int) -> Iterator[None]:
                 if key not in saved:
                     del os.environ[key]
             os.environ.update(saved)
+            set_per_rank_budget(saved_budget)
             _ACTIVE.release()
 
 
 @contextmanager
+def _working_directory_importable() -> Iterator[None]:
+    """A ``module:Class`` classpath finds a local ``.py`` in the working directory, as under the CLI
+    (``konfai.main`` puts it on ``sys.path``). Held for the whole call: spawned ranks import the
+    workflow's classes through the ``sys.path`` they copy from this process. Searched last, so a module
+    that already resolves keeps resolving to the same file."""
+    try:
+        cwd: str | None = os.getcwd()
+    except OSError:  # a deleted working directory holds no module to import
+        cwd = None
+    if cwd is None or cwd in sys.path:
+        yield
+        return
+    sys.path.append(cwd)
+    try:
+        yield
+    finally:
+        if cwd in sys.path:
+            sys.path.remove(cwd)
+
+
+@contextmanager
 def _workflow_scope(ranks: int) -> Iterator[None]:
-    """Own build-time RNG draws and scratch files until execution and result extraction finish."""
-    from konfai.utils.runtime.distributed import preserved_rng
+    """Own build-time RNG draws, scratch files and the resident peak until execution and result
+    extraction finish."""
+    from konfai.utils.budget import run_peak_scope
+    from konfai.utils.runtime.distributed import forget_earlier_workflows, preserved_rng
     from konfai.utils.runtime.environment import _SCRATCH_CONFIGS, release_scratch_configs
 
-    with _one_workflow_at_a_time(ranks), preserved_rng():
+    with _one_workflow_at_a_time(ranks), preserved_rng(), run_peak_scope(), _working_directory_importable():
         mark = len(_SCRATCH_CONFIGS)
         try:
+            forget_earlier_workflows()
             yield
         finally:
             release_scratch_configs(mark)
@@ -120,6 +153,7 @@ def _launch(
     from konfai.utils.clock import restart_startup_clock
     from konfai.utils.runtime import execute_distributed_object
 
+    _check_gpu_ids(gpu)
     with _workflow_scope(ranks):
         # The build lists the cohort before the run's log captures the console, so it reads quiet here too;
         # the lock restores the variable on the way out.
@@ -128,6 +162,23 @@ def _launch(
             workflow = build()
         execute_distributed_object(workflow, gpu=list(gpu or []), cpu=cpu, overwrite=overwrite, quiet=quiet)
         return finish(workflow)
+
+
+def _check_gpu_ids(gpu: Sequence[int] | None) -> None:
+    """The ids ``CUDA_VISIBLE_DEVICES`` lists, as the CLI's ``--gpu`` takes. The launcher writes the chosen
+    ids into it, so any other id unmasks a GPU the caller hid, or runs on CPU. Unset, nothing is checked:
+    counting the devices initializes CUDA, which fixes the visible set before the launcher narrows it."""
+    if not gpu or "CUDA_VISIBLE_DEVICES" not in os.environ:
+        return
+    from konfai import cuda_visible_devices
+
+    visible = cuda_visible_devices()
+    unknown = [device for device in gpu if device not in visible]
+    if unknown:
+        raise ConfigError(
+            f"gpu={list(gpu)} names {unknown}, which this process does not see (visible: {visible or 'none'}).",
+            "Pick among the ids CUDA_VISIBLE_DEVICES lists, as the CLI's --gpu does, or leave gpu out to run on CPU.",
+        )
 
 
 def _yaml_safe(value: object, where: str) -> object:
@@ -235,8 +286,8 @@ def _stage_sequence(stages: object, where: str) -> Sequence[object]:
 def list_components(kind: str) -> "list[Component]":
     """Enumerate the shipped components of one kind, spelled as a YAML config references them.
 
-    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``model`` or ``block``
-    (plural spellings accepted). Records carry ``name``, ``config_reference``, ``module`` and ``doc``.
+    ``kind`` is ``transform``, ``augmentation``, ``criterion``, ``reduction``, ``scheduler``, ``model`` or
+    ``block`` (plural spellings accepted). Records carry ``name``, ``config_reference``, ``module`` and ``doc``.
     """
     from konfai.utils.catalog import list_components as _list_components
 
@@ -419,8 +470,6 @@ def evaluate(
     )
     groups_src: dict[str, object] = {}
     for group in groups:
-        # An undeclared chain is spelled None, never left out: the binder materializes its own default
-        # (Normalize) for an absent key, which erases the difference the metrics measure.
         declared = None if transforms is None else transforms.get(group)
         chain: object = "None" if declared is None else _chain_tree(declared, _STAGE_MODULES, f"transforms.{group}")
         groups_src[group] = {"groups_dest": {group: {"transforms": chain}}}
@@ -536,8 +585,22 @@ def live_model(token: str) -> object:
 
 @contextmanager
 def _registered_live_model(model: object) -> Iterator[str]:
-    """The token the run's config names, registered for the run only."""
-    token = f"{type(model).__name__}-{id(model):x}"
+    """The token the run's config names, registered for the run only. It names the model's recipe, less
+    its weights, which a resumed prediction compares apart: the structure torch.nn prints, when every
+    module is torch.nn's own, so an equal model built again resumes. A class of the caller's may run any
+    forward, so its instance is its only identity, and a rerun recomputes (--overwrite)."""
+    import torch
+
+    modules = list(model.modules()) if isinstance(model, torch.nn.Module) else [model]
+    name = f"{type(model).__module__}:{type(model).__qualname__}"
+    if all(type(module).__module__.startswith("torch.nn.") for module in modules):
+        base = f"{name}-{hashlib.sha256(repr(model).encode()).hexdigest()[:16]}"
+    else:
+        base = f"{name}-{id(model):x}"
+    token, occurrence = base, 1
+    while token in _LIVE_MODELS:
+        occurrence += 1
+        token = f"{base}-{occurrence}"
     _LIVE_MODELS[token] = model
     try:
         yield token
@@ -742,11 +805,13 @@ def predict_model(
     unless absolute; the prediction lands under ``group`` with the input's geometry. One rank, inline.
     """
     from konfai.predictor import build_predict
+    from konfai.predictor.workflow import checkpoint_sources
     from konfai.utils.runtime.environment import register_scratch_config
+    from konfai.utils.utils import split_path_spec
 
     _one_rank_inline(gpu)
     with _registered_live_model(model) as token:
-        root, _, file_format = str(output).rpartition(":")
+        root, _, file_format = split_path_spec(str(output), default_format="")
         if not root or not file_format:
             raise ConfigError(
                 f"'output' must name a dataset root and its format, as the YAML does: './Pred:mha' (got {output!r}).",
@@ -782,7 +847,7 @@ def predict_model(
                                 if final_transforms is None
                                 else _chain_tree(final_transforms, _STAGE_MODULES, "final_transforms")
                             ),
-                            "dataset_filename": f"{root}:{file_format}",
+                            "dataset_filename": str(output),
                             "group": group,
                             "same_as_group": f"{inputs}:{inputs}",
                             "reduction": "Mean",
@@ -799,12 +864,10 @@ def predict_model(
             if checkpoints is None:
                 scratch = Path(tempfile.mkdtemp(prefix="konfai_live_"))
                 register_scratch_config(scratch)
-                sources = [_live_checkpoint(model, scratch)]
+                sources: list[Path | str] = [_live_checkpoint(model, scratch)]
             else:
-                sources = (
-                    [Path(checkpoints)]
-                    if isinstance(checkpoints, (str, Path))
-                    else [Path(entry) for entry in checkpoints]
+                sources = checkpoint_sources(
+                    [checkpoints] if isinstance(checkpoints, (str, Path)) else list(checkpoints)
                 )
             return build_predict(models=sources, prediction_file=_config_copy(tree), predictions_dir=predictions_dir)
 
@@ -855,14 +918,16 @@ def predict(
     ``config`` is a ``Prediction.yml`` path or the same tree as a dict.
     """
     from konfai.predictor import build_predict
+    from konfai.predictor.workflow import checkpoint_sources
 
     # A bare str is a Sequence[str]: "best.pt" would expand per character.
     if isinstance(models, (str, Path)):
         models = [models]
+    checkpoints = checkpoint_sources(list(models))  # one pass: a generator (Path.glob) is read once
     return _launch(
         len(gpu or []) or cpu,
         lambda: build_predict(
-            models=[Path(model) for model in models],
+            models=checkpoints,
             prediction_file=_config_copy(config),
             predictions_dir=predictions_dir,
         ),

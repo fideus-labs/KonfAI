@@ -15,15 +15,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-
+from konfai.data.transform import LocalityKind, Transform
 from konfai.utils.dataset import Attribute
-from konfai.data.transform import Transform
 
 
 class UnNormalize(Transform):
+    # Per voxel: a prediction's patches or slabs go through it without the whole volume.
+    locality = LocalityKind.POINTWISE
 
     def __init__(self) -> None:
         super().__init__()
+        # The CT Clip bounds of Config.yml, which its Normalize mapped to [-1, 1]: keep them equal.
         self.v_min = -1024
         self.v_max = 3071
 

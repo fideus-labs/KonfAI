@@ -26,6 +26,7 @@ from typing import Any, Protocol, TypeGuard, cast
 import torch
 
 from konfai.data.augmentation import DataAugmentation
+from konfai.data.augmentation.spatial import _restate_swapped_header
 from konfai.data.transform import (
     LocalityKind,
     PatchLocality,
@@ -115,6 +116,8 @@ class AugmentedStage:
     augmentation: DataAugmentation
     index: int
     a: int
+    #: Bound to a copy an ``Expand`` writes as a case of its own, whose header follows its draw.
+    expanded: bool = False
 
     @property
     def selected(self) -> bool:
@@ -147,6 +150,23 @@ class AugmentedStage:
         del name
         return self.augmentation.stream_region_source(self.index, self.a, target_slices, source_spatial_shape)
 
+    @property
+    def measures_at_run(self) -> bool:
+        return self.augmentation.measures_at_run
+
+    #: A draw's run pull is computed from the draw alone, never from the data: it folds ahead.
+    measures_from_data = False
+
+    def measured_region_source(
+        self,
+        name: str,
+        target_slices: tuple[slice, ...],
+        source_spatial_shape: list[int],
+        cache_attribute: Attribute,
+    ) -> list[slice]:
+        del name, cache_attribute
+        return self.augmentation.measured_region_source(self.index, self.a, target_slices, source_spatial_shape)
+
     def stream_region(
         self, name: str, tensor: torch.Tensor, context: RegionContext, cache_attribute: Attribute
     ) -> torch.Tensor:
@@ -158,13 +178,19 @@ class AugmentedStage:
     def write_stream_cache_attribute(
         self, cache_attribute: Attribute, source_spatial_shape: list[int], name: str = ""
     ) -> None:
-        """An augmentation draws a copy of the case rather than restating its geometry: nothing to record."""
+        """A copy an ``Expand`` writes follows a draw that swaps axes with its header, every voxel on its
+        world point. Any other draw, and a training copy, keep the case's."""
+        del name
+        remap = self.augmentation.axis_remap(self.index, self.a) if self.expanded else None
+        if remap is not None:
+            _restate_swapped_header(cache_attribute, remap, source_spatial_shape)
 
     def stream_shape(self, shape: list[int]) -> list[int]:
         """The spatial shape this copy's draw produces from ``shape`` (its slot in the shape fold)."""
         return self.augmentation.stream_shape(self.index, self.a, shape)
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        self.write_stream_cache_attribute(cache_attribute, list(tensor.shape[1:]), name)
         return self.augmentation.compute(name, self.index, self.a, tensor, cache_attribute)
 
 
@@ -209,13 +235,15 @@ class _ReadStagePlan:
     of its input it is computed from, bound to the case state the stages before it left.
 
     ``run_pull``, when set, is the pull the RUN walks instead; ``pull`` stays headers-only for the
-    plan's pricing: the estimator must never read a voxel."""
+    plan's pricing: the estimator must never read a voxel. ``folds_ahead`` says whether the run pull
+    may be folded ahead of the reader, which one that reads data (a field) may not."""
 
     kind: LocalityKind
     in_shape: tuple[int, ...]
     out_shape: tuple[int, ...]
     pull: Callable[[tuple[slice, ...]], list[slice]] | None
     run_pull: Callable[[tuple[slice, ...]], list[slice]] | None = None
+    folds_ahead: bool = True
     #: The statistics this stage is seeded with: what a whole-volume pass measured on its own input, or
     #: the store's when they still describe it.
     measured: tuple[tuple[str, str], ...] = ()

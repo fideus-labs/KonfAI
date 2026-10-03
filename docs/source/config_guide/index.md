@@ -1,35 +1,17 @@
 # Configuration
 
-KonfAI is a configuration-driven object builder. A YAML file does not pass
-values into a fixed script: it decides which Python classes are instantiated
-and how they are connected, and reading it resolves every default back into
-the file, so a run leaves a complete record of the experiment. This page is
-the engine behind every `Trainer`, `Predictor`, `Evaluator` and `Transformer`,
-the binding rules, where a bare name resolves, and the `Dataset` conventions
-the four workflow pages share. Read it when a key is not binding the way you
-expect, or before you expose a custom class to YAML.
-
-```{note}
-Reading a config **mutates it**: loading a run resolves every default and
-rewrites the YAML file in place, so the file on disk becomes the fully-resolved
-record of the experiment. One consequence: a `None` value round-trips as the
-literal string `"None"`: it is written back as `"None"` and reparsed to
-`None` on the next read. An explicit `name: null` (or an empty `name:`) also
-binds `None`: null is the disabled spelling and is never replaced by the
-default.
-```
+A KonfAI config is YAML that says which Python objects to build and how they connect.
 
 ## Four files, four commands
 
-The root key of a YAML file selects the workflow object, and one command reads
-each file:
+Each workflow has one file with one root key:
 
-| Command | File | Root key | Class | Writes |
-| --- | --- | --- | --- | --- |
-| `konfai TRAIN` / `RESUME` | `Config.yml` | `Trainer:` | `konfai.trainer.Trainer` | `Checkpoints/<train_name>/`, `Statistics/<train_name>/` |
-| `konfai PREDICTION` | `Prediction.yml` | `Predictor:` | `konfai.predictor.Predictor` | `Predictions/<train_name>/` |
-| `konfai EVALUATION` | `Evaluation.yml` | `Evaluator:` | `konfai.evaluator.Evaluator` | `Evaluations/<train_name>/Metric_*.json` |
-| `konfai TRANSFORM` | `Transform.yml` | `Transformer:` | `konfai.transformer.Transformer` | wherever each `Write:` points, plus `Transforms/<name>/outputs.json` |
+| Command | File | Root key | Writes |
+| --- | --- | --- | --- |
+| `konfai TRAIN` / `RESUME` | `Config.yml` | `Trainer:` | `Checkpoints/<train_name>/`, `Statistics/<train_name>/` |
+| `konfai PREDICTION` | `Prediction.yml` | `Predictor:` | `Predictions/<train_name>/` |
+| `konfai EVALUATION` | `Evaluation.yml` | `Evaluator:` | `Evaluations/<train_name>/Metric_*.json` |
+| `konfai TRANSFORM` | `Transform.yml` | `Transformer:` | wherever each `Write:` points; logs in `Transforms/<name>/` |
 
 ```{mermaid}
 flowchart LR
@@ -45,36 +27,13 @@ flowchart LR
 
 ```
 
-One root key per file, one command per file. The same reflection engine builds
-each one: only the root key changes what it builds. The model workflows write
-into a single workspace keyed by `train_name`, so the `train_name` in each
-config file must name the run you intend to touch. `TRANSFORM` is the
-exception: it is keyed by `name`, and only its log, its plan and a copy of its
-config land in the workspace (`Transforms/<name>/`): the data goes wherever
-each `Write:` stage says, which that run directory records in `outputs.json`.
+The model workflows share a workspace named by `train_name`, so use the same `train_name` in the files of
+one experiment. Read {doc}`training` first; {doc}`transform` can be read on its own.
 
-Each page of this guide starts with the commands that run its workflow. Read
-{doc}`training` first: it introduces the structures (`Model`, `Dataset`,
-`outputs_criterions`) the other pages reuse. Then {doc}`prediction` and
-{doc}`evaluation` as you reach those workflows. {doc}`transform` stands apart:
-dataset preparation has no `Model:` block, so it is the one page you can read
-on its own if you only process data. The pages focus on the fields that are
-stable and visible in the codebase and the shipped examples; for built-in
-models, transforms and metrics, the exact available parameters depend on the
-selected classpath, and {ref}`config-discover` says how to get the exhaustive
-list.
+## How YAML becomes objects
 
-## How YAML becomes Python objects
-
-This behavior is implemented by `konfai.utils.config.Config`, `config()`, and
-`apply_config()`.
-
-In practice, the mapping is straightforward:
-
-1. a class or function is optionally annotated with `@config("...")`
-2. `apply_config()` inspects the constructor signature
-3. YAML fields are matched against constructor parameter names
-4. nested objects are recursively instantiated from nested mappings
+Each YAML key is a constructor argument. KonfAI reads the class's signature, takes each argument from the
+key of the same name, and builds nested objects the same way:
 
 ```{mermaid}
 flowchart TB
@@ -91,268 +50,78 @@ flowchart TB
 
 ```
 
-The write-back is the last arrow, and it is why reading a config changes the file:
-whatever the signature defaulted is now spelled out in it.
+```{note}
+**Running a config rewrites it.** Every default is written into the file, so after a run the file is the
+complete record of the experiment. A run that fails while building leaves the file as it was; `--init`
+writes it on purpose. The file keeps its line endings and permissions.
+```
 
-This is why KonfAI configuration keys should generally:
+So keys are the constructor's argument names, in `snake_case`. The values are converted to the argument's
+type: a number, a string, a list, a nested object. A few rules:
 
-- use **snake_case**
-- match the actual Python constructor arguments
-- stay close to the shipped examples when you introduce a custom class
+- **A missing key takes its default.** `konfai <COMMAND> --init` writes every default into the file for you
+  to edit.
+- **`null` (or an empty value) means `None`**, which turns a feature off. It is never replaced by the default.
+  `Trainer: {}` (not an empty `Trainer:`) takes every default.
+- **A required key must be written**: the error names it (`missing required key '...OneHot.num_classes'`).
+- **A value of the wrong shape is refused**, with its path: a block where a number is expected, `2.5` for an
+  integer, a list for a single object.
+- **A key nothing reads is reported** with the closest valid name. `TRANSFORM` refuses it; the other
+  workflows warn, and refuse it when its value would be lost (`epoch: 20` beside `epochs`).
 
-One important detail about models: the nesting is the same with or without a
-decorator. `@config()` defaults to the class name, and an *undecorated* class gets
-its class name appended by the model loader, so `classpath: Model:UNetpp5` reads
-from `Trainer.Model.UNetpp5` either way. A decorator only *renames* that subtree; it
-never removes it. `examples/Synthesis` shows the shape: `Model.py` decorates
-`UNetpp5` with `@config()`, and `Config.yml` nests its parameters under
-`Trainer.Model.UNetpp5`.
+(config-discover)=
+## Finding a component's arguments
 
-## Runtime environment variables
+The tables in this documentation give the main arguments. For the complete list:
 
-Two environment variables drive configuration loading at runtime. Both are read
-directly from `os.environ` by `konfai.utils.config.Config`:
-
-| Variable | Meaning |
-| --- | --- |
-| `KONFAI_config_file` | Path to the active YAML config file. `Config.__init__` reads it directly, so it must be set before any configurable object is built. |
-| `KONFAI_CONFIG_MODE` | Controls what happens when the config file or individual keys are missing. See **Config modes** below. |
-
-The KonfAI CLI sets both variables for you from the `--config` argument. You only
-need to set them by hand when you call configurable classes directly: for
-example from a test or a notebook (see the testing notes in `AGENTS.md`).
-
-## The `apply_config` decorator and `Config` context manager
-
-Two cooperating pieces implement YAML → Python binding:
-
-- **`Config(key)`** is a context manager. On `__enter__` it loads the YAML file
-  named by `KONFAI_config_file`, walks down the dot-separated `key` to the
-  matching subtree, and exposes it. On `__exit__` it merges the visited subtree
-  back into the file, so a run that materializes defaults also *records* them in
-  the YAML for reproducibility.
-- **`apply_config("Root.Path")`** is a decorator placed on a configurable class
-  or function. When the decorated object is called, it opens a `Config` for its
-  subtree and binds arguments from the YAML before the callable runs.
-
-A class additionally annotated with `@config("Name")` overrides the YAML key it
-binds to; without it, the key defaults to the object's own name.
-
-### How YAML keys map to arguments via reflection
-
-`apply_config` does not hard-code any field names. It inspects the target with
-`inspect.signature()` and, for each parameter, reads a value from the active YAML
-subtree using the parameter's **type annotation** to decide how to convert it:
-
-- `int`, `float`, `bool`, `str`, `torch.Tensor`: cast directly from the YAML scalar
-- `Literal[...]`: validated against the allowed set (an invalid value raises `ConfigError`)
-- `pathlib.Path`: wrapped as a `Path`; a non-existent path only logs a warning
-- `list[...]` / `dict[str, ...]`: parsed element-wise
-- a nested configurable class: instantiated recursively by re-entering
-  `apply_config` on the nested subtree
-
-Scalar conversion also applies inside typed lists and dictionaries, including
-container alternatives of a union. For example, quoted `"false"` becomes
-`False` in `bool`, `list[bool]`, `dict[str, bool]`, and `list[bool] | str`.
-A union first preserves a matching value and its element types: `0.25` stays
-a float in `int | float`, and `["001"]` stays a string list in
-`list[int] | list[str]`. Invalid elements are reported with their key or index.
-String sentinels such as `auto` remain strings when the union permits them;
-`None` remains available for optional values. Explicit YAML values remain in
-the resolved record and bind the same way when read again.
-
-Because the parameter *names* are the YAML keys, configuration keys should use
-the exact constructor argument names (typically `snake_case`). A missing key
-falls back to the parameter default, or to a `default|...` marker when one is
-provided (see below).
-
-## Keys nothing reads
-
-The binder reads a key when a parameter names it and materializes the default
-when none does, so a key nothing reads (a typo, a parameter an older version
-had) is carried along and the default used in its place. Each workflow builder
-reads its file inside `konfai.utils.config.strict_config(root)`, which records,
-level by level, what the file holds against what the binder read, and reports
-the difference by path with the keys read at that level: `TRANSFORM` refuses
-(its config is the deliverable), `TRAIN`/`PREDICTION`/`EVALUATION` warn, since
-files written back by earlier versions carry such keys. The check closes when
-the builder returns, so everything a workflow reads from its file is bound at
-construction.
-
-## Config modes
-
-`KONFAI_CONFIG_MODE` selects how KonfAI reacts to a missing file:
-
-| Mode | Behavior |
-| --- | --- |
-| `Done` | Normal run mode. The config file must already exist; values are read and the visited subtree is written back. A missing file raises `ConfigError` naming `konfai <COMMAND> --init` as the way to generate one. |
-| `Import` | Skip config binding entirely. The decorated object is called with the arguments it was given, without reading the YAML: used when importing or constructing classes outside the config-driven flow. |
-
-An *unknown* value behaves like `Done`. An **unset** `KONFAI_CONFIG_MODE` is
-different: `apply_config` binds nothing at all (as under `Import`), and using
-`Config` directly raises `KeyError` on exit. Tests that build configurable objects
-directly must therefore set **both** variables explicitly.
-
-**Generating a config is a CLI verb, not a mode**: `konfai <COMMAND> --init`
-creates the file when missing (seeded with its root key), binds the workflow
-once so every default resolves into it, and exits without running. The former
-generation modes (`default`, `interactive`, `remove`) are gone.
-
-Two binding rules worth knowing:
-
-- **An explicit null stays null.** `name:` (empty) or `name: null` binds
-  `None`, the disabled spelling, exactly like the string `"None"`. The default
-  is not substituted: that would silently reactivate the very thing the line
-  was written to suppress.
-- **A wrong-shaped value is refused, by dotted path.** A key given a nested
-  block or a list where its parameter takes a scalar raises `ConfigError`
-  naming the path (`Parameter 'Trainer.Dataset.batch_size' was given a nested
-  block, but it takes a int.`) instead of binding something silently.
+- run `konfai <COMMAND> --init`: the config is filled with every argument and its default;
+- run `konfai list <kind>` for the exact names;
+- or read the class's `__init__`.
 
 ## `classpath`
 
-Many configurable components are selected dynamically through a `classpath`
-string. The exact resolution logic is implemented by
-`konfai.utils.utils.get_module()`.
-
-Typical examples:
+A `classpath` picks the class to build:
 
 ```yaml
 Model:
   classpath: segmentation.UNet.UNet
 ```
 
-```yaml
-Model:
-  classpath: Model:UNetpp5
-```
-
-The two main styles are:
-
-- `package.module.ClassName`-style references resolved relative to a KonfAI namespace
-- `module:ClassName` references for explicit imports, often used for local files next to the YAML
-
-Use the second form when you add custom files inside an example or project
-directory. It is usually the least ambiguous option.
-
-### How a name is resolved
-
-Most component names in a config are resolved by `konfai.utils.utils.get_module` in
-one of two ways. Three kinds do **not** go through it: loss-weight schedulers and
-optimizers are looked up directly inside `konfai.metric.schedulers` and `torch.optim`
-(so `module:Class` is not accepted for them), and a storage backend is never named at
-all, you pick a format token in `dataset_filenames`.
-
 | Form | Example | Resolves to |
 | --- | --- | --- |
-| **bare name** | `Dice`, `Standardize`, `Flip` | inside that kind's package (`konfai.metric.measure`, `konfai.data.transform`, `konfai.data.augmentation`, …) |
-| **`module:Class`** | `torch:nn:L1Loss`, `monai.losses:DiceLoss`, `Loss:MyWrapper` | *any* importable module: an installed library **or** a local `.py` file next to your config (the current working directory is on `sys.path`) |
+| bare name | `Dice`, `Standardize`, `Flip` | KonfAI's package for that kind |
+| `module:Class` | `torch:nn:L1Loss`, `monai.losses:DiceLoss`, `Model:UNetpp5` | any importable module, including a `.py` file in the directory you run from |
+| `default\|<Name>.yml` | `default\|UNet.yml` | a model of KonfAI's YAML catalog |
 
-So the component pages list the **bare name** for built-ins; you are never limited
-to them: any importable class that satisfies the same contract works via the
-`module:Class` form. The binding rules above are the full resolution rules;
-{doc}`../usage/custom-models` says how to write your own.
+Where a bare name is looked up:
 
-(config-discover)=
-### How to discover a component's parameters
+| Kind | Package |
+| --- | --- |
+| criteria | `konfai.metric.measure` |
+| transforms | `konfai.data.transform`, then `konfai.data.augmentation` |
+| augmentations | `konfai.data.augmentation` |
+| models | `konfai.models.python` |
+| learning-rate schedulers | `torch.optim.lr_scheduler`, then `konfai.metric.schedulers` |
+| loss-weight schedulers | `konfai.metric.schedulers` |
+| `patch_combine` | `konfai.data.patching` |
+| reductions (`combine`, `Reduce`) | `konfai.data.reduction` |
 
-The tables give the **key** constructor arguments and defaults, but the exact,
-always-current parameter set is whatever the class's `__init__` declares: the
-reflection engine binds YAML keys directly to constructor parameter names. Two
-ways to get the exhaustive list for any component:
+Optimizers are `torch.optim` classes, named by `name`. A model's arguments go under its class name
+(`Trainer.Model.UNetpp5`); `@config("Key")` on a class moves them to `Key`. `examples/Synthesis` shows a
+local model (`Model.py`) and transform (`UnNormalize.py`). {doc}`../usage/custom-models` explains how to
+write your own.
 
-1. **Let KonfAI materialise the defaults.** Reference the component in a config
-   and run `konfai <COMMAND> --init` (or the workflow itself). KonfAI writes
-   every resolved default back into the YAML file, giving you a complete,
-   fully-expanded subtree to edit. (This is the same
-   [config-mutation behaviour](#configuration) that surprises
-   new users: here it is a feature.) `konfai list <kind>` prints every
-   component's exact YAML spelling.
-2. **Read the signature.** Where a bare name is looked up depends on the kind:
-
-   | Kind | Bare name resolves in |
-   | --- | --- |
-   | criteria | `konfai/metric/measure/` |
-   | transforms | `konfai/data/transform/` (one module per family), then `konfai/data/augmentation/` |
-   | augmentations | `konfai/data/augmentation/` |
-   | models | `konfai/models/python/**` |
-   | learning-rate schedulers | `torch.optim.lr_scheduler` **first**, then `konfai/metric/schedulers.py` |
-   | loss-weight schedulers | `konfai/metric/schedulers.py` only |
-   | patch blending (`patch_combine`) | `konfai/data/patching/blend.py` |
-   | reduction operators (a prediction's copies *and* a cohort's cases) | `konfai/data/reduction.py` |
-
-   So a bare `StepLR` resolves *outside* KonfAI, in torch.
-
-## `default|...` values
-
-The `default|...` prefix is an important KonfAI convention. Its behavior is
-inferred directly from `konfai.utils.config.Config._get_input_default()`.
-
-It is used to express a fallback value that can still be overridden by the
-config, and it is what `--init` materialises into a generated file. Examples
-from the codebase include:
-
-- `train_name: str = "default|TRAIN_01"`
-- `classpath: str = "default|segmentation.UNet.UNet"`
-- default dictionary keys such as `default|Labels`
-
-In practice, you can read it as:
-
-- **use the value after the pipe if nothing else is provided**
-
-## Configuration is recursive
-
-Because nested constructors are instantiated recursively, the shape of the YAML
-mirrors the shape of the Python object graph. For example, a training config can
-nest:
-
-- `Trainer`
-- `Model`
-- a chosen model class
-- `optimizer`
-- `schedulers`
-- `outputs_criterions`
-
-This is why KonfAI examples are such a good source of truth: they show real
-constructor trees that the framework accepts.
-
-## Practical mapping rules
-
-When a config does not behave as expected, check these rules first:
-
-- the YAML root must match the workflow you are launching
-- nested section names must match constructor parameters or any explicit
-  `@config("...")` keys you chose
-- local `classpath` modules must be importable from the current working directory
-- the YAML shape should mirror the Python object graph, not just the names you
-  want conceptually
-
-## When to use local Python modules
-
-Use a local module when you need:
-
-- a custom model architecture
-- a custom transform
-- a project-specific helper that is not part of the built-in package
-
-The `examples/Synthesis` workflow is the clearest repository example:
-
-- `Model.py` defines local model classes
-- `UnNormalize.py` defines a local transform
-- the YAML references them with `Model:...` and `UnNormalize:...`
+A value written `default|...` in the code is a default the config can override: `train_name` defaults to
+`default|TRAIN_01`, meaning `TRAIN_01` unless you write another name.
 
 ## The `Dataset` block
 
-Every workflow reads its data through a `Dataset:` block, and four conventions
-are shared by all of them: the on-disk layout, the `groups_src` mapping, the
-`dataset_filenames` selectors and the `subset` / `validation` grammar. The
-per-workflow keys (`batch_size`, `memory_budget`, `Patch`, augmentations) are
-on each workflow's page; patch extraction and the memory regimes are explained
-on {doc}`../usage/large-images`.
+Every workflow reads its data through a `Dataset:` block. The keys below are shared; each workflow page lists
+its own (`batch_size`, `Patch`, `memory_budget`).
 
-### Expected layout
+### Layout
 
-Typical layouts in the repository look like this:
+One folder per case, one file per group:
 
 ```text
 Dataset/
@@ -364,37 +133,18 @@ Dataset/
     └── SEG.mha
 ```
 
-```text
-Dataset/
-├── CASE_001/
-│   ├── MR.mha
-│   ├── CT.mha
-│   └── MASK.mha
-└── CASE_002/
-    ├── MR.mha
-    ├── CT.mha
-    └── MASK.mha
-```
+A DICOM series is a folder (`CASE_001/CT/*.dcm`), an OME-Zarr store a folder too (`CASE_001/CT.ome.zarr/`).
+Any format of {doc}`../reference/components/storage-backends` works.
 
-The concrete file extension is not restricted to `.mha`. KonfAI supports the
-extensions listed in `konfai.utils.utils.SUPPORTED_EXTENSIONS`. A spec may also
-name a format that is a **backend rather than a suffix** (`:itktransform`, whose
-entries are `<group>.h5`): those live in `SUPPORTED_BACKEND_FORMATS`, and
-`SUPPORTED_FORMATS` is the union a `path[:flag]:format` spec is checked against.
+### `dataset_filenames`
 
-Directory-backed formats use the same case/group model:
+A list of `path`, `path:format` or `path:flag:format`:
 
-```text
-DicomDataset/CASE_001/CT/*.dcm
-OmeDataset/CASE_001/CT.ome.zarr/
-```
+- `./Dataset:mha`, `./DicomDataset:dicom`, `./OmeDataset:omezarr`;
+- the flag `a` adds a dataset's cases to the others (union), `i` keeps only the cases present in all
+  (intersection): `./Predictions/TRAIN_01/Dataset:i:mha`.
 
 ### `groups_src` and `groups_dest`
-
-Each workflow describes how on-disk groups should be loaded through the
-`Dataset.groups_src` mapping.
-
-Example:
 
 ```yaml
 Dataset:
@@ -412,79 +162,41 @@ Dataset:
           is_input: true
 ```
 
-Conceptually:
+`groups_src` names the groups read from disk. Each gives one or more tensors in `groups_dest`, each with its
+own `transforms`. `is_input: true` marks the model's inputs.
 
-- `groups_src` identifies what must exist on disk
-- `groups_dest` identifies how the loaded tensors are exposed to the workflow
-- `is_input: true` marks tensors that are fed into the model
+### `subset` and `validation`
 
-The logic lives in `konfai.data.data_manager.GroupTransform` and the `Data*`
-dataset classes.
+Both take the same selectors:
 
-### Dataset file selectors
+- a slice, `0:10` (`0:-2` counts from the end);
+- a case name, or a list of names;
+- a text file listing case names, one per line;
+- `~file.txt` to exclude the cases it lists;
+- a list mixing these.
 
-The `dataset_filenames` field accepts strings in the form:
+`subset` picks the cases to use, `validation` the ones held out for validation. `validation` also takes a
+share, such as `0.2`: the last cases of the run order, at least one. `null` keeps all cases, or disables
+the split.
 
-- `path`
-- `path:format`
-- `path:flag:format`
+Case-list files are read in UTF-8. With non-ASCII case names, run under a UTF-8 locale
+(`LC_ALL=C.UTF-8`).
 
-This behavior is implemented in `konfai.data.data_manager.DataSources._resolve_dataset_sources()`,
-which delegates the parsing to `konfai.utils.utils.split_path_spec()`.
+## When a key does not bind as expected
 
-The most important conventions are:
+- The root key must match the command (`Trainer:` for `TRAIN`).
+- Keys must be the constructor's argument names.
+- A local `classpath` module must be importable from the directory you run from.
+- The YAML nesting must follow the objects: a model's arguments under its class name.
 
-- `a` means “append / union”
-- `i` means “intersection / keep only common cases”
+## Environment variables
 
-Examples:
-
-- `./Dataset:a:mha`
-- `./Predictions/TRAIN_01/Dataset:i:mha`
-- `./DicomDataset:a:dicom`
-- `./OmeDataset:a:omezarr`
-
-### Training subsets and validation
-
-KonfAI supports several ways to define subsets and validation sets.
-
-From the dataset code, `subset` may be:
-
-- `None`
-- a slice string such as `0:10`
-- a path to a text file listing case names
-- a `~path.txt` exclusion file
-- a list of indices
-- a list of case names
-- a list of case-list files
-
-From the dataset code, `validation` may be:
-
-- `None`
-- a float such as `0.2`
-- a slice string such as `0:10` (a negative end counts from the end,
-  Python-style: `0:-2`)
-- a path to a text file listing case names
-- a `~path.txt` exclusion file
-- a list of indices
-- a list of case names
-- a list mixing case names and case-list files
-
-Three semantics are worth remembering:
-
-- `subset: None` keeps the full dataset;
-- `validation: None` disables the split;
-- `subset` and `validation` accept the same selector spellings (slices, names,
-  files, `~` exclusion): one grammar, implemented by `Subset`.
-
-The `subset` object is applied before validation splitting and can exclude or
-include items.
+The CLI sets `KONFAI_config_file` (the config path) and `KONFAI_CONFIG_MODE` (`Done` to bind from the file,
+`Import` to build objects without reading it). Set both yourself only to build configurable classes
+outside the CLI, from a notebook or a test.
 
 ## Next steps
 
-- {doc}`training`: every `Config.yml` key the training workflow reads.
-- {doc}`../reference/components/models`: how `Model` sections address named
-  module outputs for losses, metrics and exported predictions.
-- {doc}`../usage/custom-models`: exposing a class of your own to YAML.
-- {doc}`../usage/python-api`: the same workflows as Python callables, with the
-  config tree as a dict.
+- {doc}`training`: every key of `Config.yml`.
+- {doc}`../reference/components/models`: how model outputs are named for losses and metrics.
+- {doc}`../usage/python-api`: the same workflows from Python, with the config as a dictionary.

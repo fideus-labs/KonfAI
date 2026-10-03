@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
@@ -40,6 +41,7 @@ from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
     SUPPORTED_FORMATS,
     directory_volume_form,
+    get_module,
     is_dicom_file,
     split_format_level,
     split_path_spec,
@@ -50,6 +52,9 @@ from ruamel.yaml import YAML
 from .app_repository import LocalAppRepository, get_app_repository_info
 from .errors import AppRepositoryError, KonfAIAppClientError
 from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
+
+# Marks the ``./Dataset`` directories konfai-apps staged: the only ones it may delete from a caller's workspace.
+_STAGED_MARKER = ".konfai-apps-staged"
 
 
 class CancelProcess(RuntimeError):
@@ -115,6 +120,35 @@ def ensure_finally_on_signals():
         signal.signal(signal.SIGTERM, old_term)
 
 
+# The janitor blocks on its stdin, a pipe whose write end only the process that started it (and the children
+# that process forks) holds: the read returns once they are all gone, whatever ended them.
+_WORKSPACE_JANITOR = "import os, shutil, sys\nos.read(0, 1)\nshutil.rmtree(sys.argv[1], ignore_errors=True)\n"
+
+
+def _start_workspace_janitor(workspace_dir: Path) -> subprocess.Popen[bytes] | None:
+    """Start a process that removes ``workspace_dir`` once this one has ended.
+
+    A SIGTERM or a SIGKILL ends the process without running the ``finally`` that removes the workspace. A
+    signal handler would not do: it runs between bytecodes only, so it would hold a SIGTERM back for as long
+    as a C call lasts. The janitor has a session of its own, so a signal sent to this process group spares
+    it; the ``finally`` kills it once it has cleaned up. POSIX only; when it cannot start, the ``finally``
+    alone cleans up.
+    """
+    if os.name != "posix" or not sys.executable:
+        return None
+    try:
+        return subprocess.Popen(  # nosec B603
+            [sys.executable, "-S", "-c", _WORKSPACE_JANITOR, str(workspace_dir)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd="/",
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+
+
 def run_distributed_app(
     func: Callable[..., None],
 ) -> Callable[..., None]:
@@ -127,7 +161,7 @@ def run_distributed_app(
     - Adds that directory to `sys.path` (so local imports work)
     - Executes the wrapped function inside a minimal logging context (`MinimalLog`)
     - Restores the user's original working directory
-    - Deletes the temporary directory if it was created automatically
+    - Deletes the temporary directory if it was created automatically, also when a signal ends the process
 
     The decorated function may declare a `tmp_dir` argument. If provided, that
     directory is used and NOT automatically deleted (unless it lives under the
@@ -149,10 +183,7 @@ def run_distributed_app(
 
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> None:
-        params = sig.parameters
-        kwargs_fun = {k: v for k, v in kwargs.items() if k in params}
-
-        bound = sig.bind_partial(*args, **kwargs_fun)
+        bound = sig.bind_partial(*args, **kwargs)
         bound.apply_defaults()
 
         tmp_dir = bound.arguments.get("tmp_dir")
@@ -163,19 +194,22 @@ def run_distributed_app(
             workspace_dir = Path(cast(str | os.PathLike[str], tmp_dir))
         workspace_dir = workspace_dir.resolve()
         user_dir = os.getcwd()
-        # Resolve every caller-supplied path against the caller's directory before chdir'ing
-        # into the workspace: a relative path would otherwise be interpreted inside the
-        # (possibly auto-created and then deleted) temporary workspace.
-        if bound.arguments.get("output") is not None:
-            bound.arguments["output"] = Path(bound.arguments["output"]).resolve()
-        for key in ("inputs", "gt", "mask"):
-            value = bound.arguments.get(key)
-            if value is not None:
-                bound.arguments[key] = [[Path(p).resolve() for p in group] for group in value]
-        if bound.arguments.get("dataset") is not None:
-            bound.arguments["dataset"] = Path(bound.arguments["dataset"]).resolve()
         added_to_syspath = False
+        janitor = None
         try:
+            if auto_created:
+                janitor = _start_workspace_janitor(workspace_dir)
+            # Resolve every caller-supplied path against the caller's directory before chdir'ing
+            # into the workspace: a relative path would otherwise be interpreted inside the
+            # (possibly auto-created and then deleted) temporary workspace.
+            if bound.arguments.get("output") is not None:
+                bound.arguments["output"] = Path(bound.arguments["output"]).resolve()
+            for key in ("inputs", "gt", "mask"):
+                value = bound.arguments.get(key)
+                if value is not None:
+                    bound.arguments[key] = [[Path(p).resolve() for p in group] for group in value]
+            if bound.arguments.get("dataset") is not None:
+                bound.arguments["dataset"] = Path(bound.arguments["dataset"]).resolve()
             os.makedirs(workspace_dir, exist_ok=True)
             os.chdir(str(workspace_dir))
             cwd = os.getcwd()
@@ -194,6 +228,9 @@ def run_distributed_app(
                 os.chdir(user_dir)
             if auto_created:
                 shutil.rmtree(str(workspace_dir), ignore_errors=True)
+            if janitor is not None:
+                janitor.kill()
+                janitor.communicate()  # reaps it and closes the pipe
 
     return wrapper
 
@@ -205,10 +242,21 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
     runs forward-only, updates no weights, yet still writes back a checkpoint identical to its input. Scan
     every ``outputs_criterions`` in the subtree (a nested sub-network (a GAN) carries its own one level
     deeper) and accept on the first real loss: a concrete criterion (not the ``default|a|b|c`` placeholder
-    key) whose ``is_loss`` is not ``false``. Optimizer presence is not required: nested GANs and inference
+    key) whose ``is_loss`` is not ``false``, or, when the config leaves it unset, whose own role is a loss
+    (``CriterionsAttr.settle_role``). Optimizer presence is not required: nested GANs and inference
     engines legitimately omit it, so it is no trainability signal.
     """
     found = False
+
+    def is_loss(classpath: str, attrs: dict) -> bool:
+        if attrs.get("is_loss") not in (None, "None"):
+            return attrs["is_loss"] is not False
+        try:
+            module, name = get_module(classpath, "konfai.metric.measure")
+            criterion = getattr(module, name)
+        except Exception:
+            return True  # the RESUME reports what it cannot resolve
+        return bool(getattr(criterion, "loss_capable", True) and getattr(criterion, "default_is_loss", True))
 
     def scan_criterions(node: Any, in_criterions_loader: bool) -> None:
         nonlocal found
@@ -218,8 +266,7 @@ def _finetune_target_has_loss(model_subtree: Any) -> bool:
             if found:
                 return
             if in_criterions_loader and "|" not in str(key):
-                attrs = value if isinstance(value, dict) else {}
-                if attrs.get("is_loss", True) is not False:
+                if is_loss(str(key), value if isinstance(value, dict) else {}):
                     found = True
                     return
             scan_criterions(value, key == "criterions_loader")
@@ -260,6 +307,16 @@ def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
             (key, value if isinstance(value, tuple) else (os.path.basename(getattr(value, "name", key)), value))
         )
     return MultipartEncoder(fields=fields)
+
+
+def _link_or_copy(src: str | Path, dst: str | Path) -> None:
+    """A hard link to ``src`` where the filesystem makes one (same volume, no privilege needed on
+    Windows), else a copy. A link given as ``src`` is followed, as the copy does: a hard link to the
+    link itself would resolve a relative target from ``dst``."""
+    try:
+        os.link(os.path.realpath(src), dst)
+    except OSError:
+        shutil.copy2(src, dst)
 
 
 class AbstractKonfAIApp:
@@ -353,11 +410,8 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         continue
                     if line.startswith("data: "):
                         msg = line[6:]
-                        if msg == "__DONE__":
-                            return
-                        if msg.startswith("__ERROR__"):
-                            detail = msg[len("__ERROR__") :].strip()
-                            raise RuntimeError(f"Remote job failed: {detail}" if detail else "Remote job failed")
+                        if msg == "__DONE__" or msg.startswith("__ERROR__"):
+                            return  # the result says how the job ended
                         print(msg, flush=True)
 
         except requests.exceptions.ReadTimeout as e:
@@ -478,6 +532,14 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     if r.status_code == 202:
                         time.sleep(poll_interval)
                         continue
+                    if r.status_code in (422, 500):
+                        try:
+                            error = str(r.json().get("error") or "").strip()
+                        except (ValueError, AttributeError):  # a proxy's page, not the server's answer
+                            error = r.text.strip()
+                        if r.status_code == 422:
+                            raise KonfAIAppClientError(f"The server refused job {job_id}:", error)
+                        raise RuntimeError(f"Remote job failed: {error}" if error else "Remote job failed")
 
                     r.raise_for_status()
                     with open(zip_path, "wb") as f:
@@ -796,6 +858,8 @@ class KonfAIApp(AbstractKonfAIApp):
         - LocalAppRepositoryFromHF
         - LocalAppRepositoryFromDirectory
         """
+        #: The cases the last `infer` predicted, ``None`` when it was interrupted.
+        self._predicted: list[str] | None = None
         self.app_repository: LocalAppRepository
         # `download` means "make sure the bundle is here", `force_update` means "refresh it from the Hub".
         # Folding the first into the second made every app job revalidate the cache file by file against
@@ -872,23 +936,28 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Raises
         ------
-        FileNotFoundError
+        AppRepositoryError
             If a path does not exist, or contains no supported files.
         """
         files = []
         for path in paths:
             if not path.exists():
-                raise FileNotFoundError(f"Path does not exist: '{path}'")
+                raise AppRepositoryError(
+                    f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
+                )
 
             if path.is_file():
                 if KonfAIApp._match_supported(path):
                     files.append(path)
                 else:
-                    raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
+                    raise AppRepositoryError(
+                        f"'{path}' is not a supported image format.",
+                        "Give a volume KonfAI reads (.mha, .nii.gz, .nrrd, DICOM, OME-Zarr...).",
+                    )
             else:
                 files.extend(sorted(f for f in path.rglob("*") if f.is_file() and KonfAIApp._match_supported(f)))
                 if not files:
-                    raise FileNotFoundError(f"No supported files found in directory: '{path}'.")
+                    raise AppRepositoryError(f"No supported volume found in '{path}'.")
         return files
 
     @staticmethod
@@ -919,7 +988,7 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Raises
         ------
-        FileNotFoundError
+        AppRepositoryError
             If a path does not exist, is an unsupported file, or yields no volume.
         """
         units: list[tuple[Path, str]] = []
@@ -950,13 +1019,18 @@ class KonfAIApp(AbstractKonfAIApp):
 
         for path in paths:
             if not path.exists():
-                raise FileNotFoundError(f"Path does not exist: '{path}'")
+                raise AppRepositoryError(
+                    f"Input path does not exist: '{path}'.", "Check the path given to -i, --gt or --mask."
+                )
             if path.is_file() and not KonfAIApp._match_supported(path):
-                raise FileNotFoundError(f"No supported file found: '{path.name}' is not a supported format.")
+                raise AppRepositoryError(
+                    f"'{path}' is not a supported image format.",
+                    "Give a volume KonfAI reads (.mha, .nii.gz, .nrrd, DICOM, OME-Zarr...).",
+                )
             before = len(units)
             walk(path)
             if len(units) == before:
-                raise FileNotFoundError(f"No supported inputs found in: '{path}'.")
+                raise AppRepositoryError(f"No supported volume found in '{path}'.")
         return units
 
     @staticmethod
@@ -1003,6 +1077,7 @@ class KonfAIApp(AbstractKonfAIApp):
         backend = KonfAIApp._unit_backend(suffix)
         root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
         KonfAIApp.link_entry(source, root / case / f"{entry}{suffix}")
+        (root / _STAGED_MARKER).touch()  # konfai-apps' own root: _clear_dataset may delete it
 
     @staticmethod
     def _declare_dataset_roots(config_file: str) -> None:
@@ -1062,9 +1137,9 @@ class KonfAIApp(AbstractKonfAIApp):
         - files are unlinked
 
         On platforms or filesystems that do not support symlinks (Windows without
-        Developer Mode raises OSError WinError 1314), this falls back to copying:
-        - directories via copytree
-        - files via copy2
+        Developer Mode raises OSError WinError 1314), each file is hard-linked where
+        the filesystem allows it (same volume) and copied otherwise; a directory is
+        rebuilt around its files.
 
         Parameters
         ----------
@@ -1087,9 +1162,9 @@ class KonfAIApp(AbstractKonfAIApp):
         except OSError:
             # Windows without Developer Mode (WinError 1314), or a filesystem without symlink support.
             if src.is_dir():
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, copy_function=_link_or_copy)
             else:
-                shutil.copy2(src, dst)
+                _link_or_copy(src, dst)
 
     def _write_inputs_to_dataset(self, inputs: list[list[Path]]) -> None:
         """
@@ -1110,12 +1185,29 @@ class KonfAIApp(AbstractKonfAIApp):
         inputs : list[list[Path]]
             Nested list of paths. Each inner list is scanned for supported files.
         """
-        KonfAIApp._clear_dataset()
-        units = [KonfAIApp._list_input_units(input_path) for input_path in inputs]
-        primary = KonfAIApp._unit_backend(units[0][0][1]) if units else "mha"
-        for i, group in enumerate(units):
-            for idx, (source, suffix) in enumerate(group):
-                KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"Volume_{i}", primary)
+        KonfAIApp._stage_dataset()
+        KonfAIApp._stage_groups(inputs, "Volume")
+
+    @staticmethod
+    def _stage_groups(groups: list[list[Path]], prefix: str) -> None:
+        """Link each group's volumes as ``P{idx}/{prefix}_{i}`` (``_stage``: in the root of their backend). The idx-th
+        volume of every group is case idx, so each group must list one volume per staged case (the first input group
+        sets them)."""
+        listed = [KonfAIApp._list_input_units(group) for group in groups]
+        staged = {case.name for root in KonfAIApp._dataset_roots() for case in root.iterdir() if case.is_dir()}
+        cases = len(staged) or (len(listed[0]) if listed else 0)
+        if prefix == "Volume":
+            primary = KonfAIApp._unit_backend(listed[0][0][1]) if listed and listed[0] else "mha"
+        else:
+            primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
+        for i, units in enumerate(listed):
+            if len(units) != cases:
+                raise AppRepositoryError(
+                    f"{prefix} group {i} lists {len(units)} volume(s) for {cases} case(s): cases pair by position.",
+                    "Give every group one volume per case, in the same order.",
+                )
+            for idx, (source, suffix) in enumerate(units):
+                KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"{prefix}_{i}", primary)
 
     @staticmethod
     def _dataset_level(prediction_file: str, dataset_dir: Path) -> int:
@@ -1232,12 +1324,10 @@ class KonfAIApp(AbstractKonfAIApp):
 
         Raises
         ------
-        FileNotFoundError
+        AppRepositoryError
             If a provided input is not multi-channel (single-component).
         """
-        dataset_path = Path("./Dataset/")
-        if dataset_path.exists():
-            shutil.rmtree(dataset_path)
+        dataset_path = KonfAIApp._stage_dataset()
         for i, input_path in enumerate(inputs):
             for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
                 reader = sitk.ImageFileReader()
@@ -1248,9 +1338,9 @@ class KonfAIApp(AbstractKonfAIApp):
                     suffix = KonfAIApp._supported_suffix(file)
                     KonfAIApp.link_entry(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
                 else:
-                    raise FileNotFoundError(
-                        "Invalid input volume for inference: a multi-channel volume stack is required, "
-                        "but a single-channel volume was provided."
+                    raise AppRepositoryError(
+                        f"'{file}' has one channel: uncertainty reads an inference stack, one channel per inference.",
+                        "Give the InferenceStack.mha an inference with -uncertainty wrote.",
                     )
 
     def _write_gt_to_dataset(self, gt: list[list[Path]]) -> None:
@@ -1265,10 +1355,7 @@ class KonfAIApp(AbstractKonfAIApp):
         gt : list[list[Path]]
             Ground truth file paths grouped similarly to inputs.
         """
-        primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
-        for i, gt_path in enumerate(gt):
-            for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(gt_path)):
-                KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"Reference_{i}", primary)
+        KonfAIApp._stage_groups(gt, "Reference")
 
     def _write_mask_or_default(self, mask: list[list[Path]] | None) -> None:
         """
@@ -1293,10 +1380,7 @@ class KonfAIApp(AbstractKonfAIApp):
                     shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
                     KonfAIApp.write_constant(dataset, "Mask_0", name, shape, attr, 1)
         else:
-            primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
-            for i, mask_path in enumerate(mask):
-                for idx, (source, suffix) in enumerate(KonfAIApp._list_input_units(mask_path)):
-                    KonfAIApp._stage(source, suffix, f"P{idx:03d}", f"Mask_{i}", primary)
+            KonfAIApp._stage_groups(mask, "Mask")
 
     @staticmethod
     def _stage_result_dir(output: Path, tmp_dir: Path | None, name: str) -> Path:
@@ -1314,13 +1398,28 @@ class KonfAIApp(AbstractKonfAIApp):
         """Drop the ``./Dataset`` staging (and its ``./Dataset_<backend>`` siblings).
 
         The auto-created temp workspace is deleted wholesale, so this only matters when the caller owns
-        the workspace (``tmp_dir`` set): there ``output`` must keep the results alone, not the inputs.
+        the workspace (``tmp_dir`` set): there ``output`` must keep the results alone, not the inputs. A
+        ``Dataset`` konfai-apps did not stage there is the user's data (a project run with ``-o .``).
         """
         for link in KonfAIApp._dataset_roots():
-            if link.is_symlink() or link.is_file():
+            if link.is_symlink():
                 link.unlink()
-            elif link.is_dir():
+            elif not (link / _STAGED_MARKER).is_file():
+                raise AppRepositoryError(
+                    f"'{link.resolve()}' was not staged by konfai-apps, and this workspace stages its inputs there.",
+                    "Nothing was deleted. Move it, or choose another --output (fine-tune) or --tmp-dir.",
+                )
+            else:
                 shutil.rmtree(link, ignore_errors=True)
+
+    @staticmethod
+    def _stage_dataset() -> Path:
+        """An empty ``./Dataset`` for the inputs, marked as konfai-apps' own."""
+        KonfAIApp._clear_dataset()
+        dataset = Path("./Dataset")
+        dataset.mkdir()
+        (dataset / _STAGED_MARKER).touch()
+        return dataset
 
     @staticmethod
     def _collect_result(output: Path, tmp_dir: Path | None, name: str) -> None:
@@ -1343,6 +1442,26 @@ class KonfAIApp(AbstractKonfAIApp):
             if result.exists() and result != target and target not in result.parents and result not in target.parents:
                 shutil.copytree(result, target, dirs_exist_ok=True)
             KonfAIApp._clear_dataset()
+
+    @staticmethod
+    def _case_volumes(root: Path, cases: list[str]) -> dict[str, list[Path]]:
+        """The volumes under ``root`` of each of ``cases``, in their order: a destination an earlier run
+        wrote to keeps files of cases this run does not own. A directory that is itself one volume (a DICOM
+        series, an OME-Zarr store) is one volume, not its slices or chunks."""
+        found: dict[str, list[Path]] = {case: [] for case in cases}
+
+        def walk(path: Path, case: str | None) -> None:
+            case = path.name if path.name in found else case
+            if path.is_file() or KonfAIApp._directory_volume_suffix(path) is not None:
+                if case is not None and (path.is_dir() or KonfAIApp._match_supported(path)):
+                    found[case].append(path)
+            elif path.is_dir():
+                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
+                    walk(child, case)
+
+        if root.exists():
+            walk(root, None)
+        return found
 
     @run_distributed_app
     def infer(
@@ -1402,7 +1521,7 @@ class KonfAIApp(AbstractKonfAIApp):
         # first imported, so a host that imports it before this chdir'd workspace (e.g. the konfai-mcp
         # job runner) would silently write predictions outside ./Predictions and break collection below.
         result_dir = self._stage_result_dir(output, tmp_dir, "Predictions")
-        predict(
+        predictor = predict(
             models_path,
             True,
             gpu,
@@ -1412,7 +1531,10 @@ class KonfAIApp(AbstractKonfAIApp):
             Path(prediction_file).resolve(),
             predictions_dir=result_dir,
         )
+        self._predicted = getattr(predictor, "predicted", None)
         self._collect_result(output, tmp_dir, "Predictions")
+        for case, volumes in KonfAIApp._case_volumes(output, self._predicted or []).items():
+            print(f"[KonfAI-Apps] {case}: {', '.join(str(volume) for volume in volumes)}")
 
     @run_distributed_app
     def evaluate(
@@ -1555,24 +1677,21 @@ class KonfAIApp(AbstractKonfAIApp):
             quiet=quiet,
             tmp_dir=tmp_dir,
         )
-        outputs: list[Path] = []
-        inference_stacks: list[Path] = []
-
-        def _collect(path: Path) -> None:
-            # Treat a directory that is itself one volume (DICOM series / OME-Zarr store) as a single
-            # output unit instead of descending into its slices/chunks.
-            if path.is_file():
-                if KonfAIApp._match_supported(path):
-                    (inference_stacks if path.name == "InferenceStack.mha" else outputs).append(path)
-            elif KonfAIApp._directory_volume_suffix(path) is not None:
-                outputs.append(path)
-            else:
-                for child in sorted(path.iterdir(), key=lambda entry: entry.name):
-                    _collect(child)
-
         predictions_dir = output / "Predictions"
-        if predictions_dir.exists():
-            _collect(predictions_dir)
+        # The stages below stage the predictions by position: a case the prediction set aside would put
+        # every later prediction on the next case's reference, or score what an earlier run left in its place.
+        staged = [f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))]
+        volumes = [volume for files in KonfAIApp._case_volumes(predictions_dir, staged).values() for volume in files]
+        outputs = [volume for volume in volumes if volume.name != "InferenceStack.mha"]
+        inference_stacks = [volume for volume in volumes if volume.name == "InferenceStack.mha"]
+        missing = [case for case in staged if self._predicted is not None and case not in self._predicted]
+        if (gt is not None or uncertainty) and missing:
+            raise AppRepositoryError(
+                f"Case(s) {', '.join(missing)} have no prediction: their inputs could not be"
+                " read, and evaluation and uncertainty pair each prediction with its case by position.",
+                f"Fix or leave out those inputs and run the pipeline again; the other predictions are in"
+                f" '{predictions_dir}'.",
+            )
         if gt is not None:
             self.evaluate([outputs], gt, output / "Evaluations", mask, evaluation_file, gpu, cpu, quiet, tmp_dir)
         if uncertainty:
@@ -1641,10 +1760,14 @@ class KonfAIApp(AbstractKonfAIApp):
         gpu = cuda_visible_devices() if gpu is None else gpu
         import torch
 
+        staged = Path("./Dataset")
+        KonfAIApp._clear_dataset()  # before the install writes into the workspace
         selected_models = self.app_repository.install_fine_tune(
             config_file, Path("./"), name, epochs, it_validation, models, config_overrides, batch_size=batch_size
         )
-        KonfAIApp.symlink(dataset, Path("./Dataset").absolute())
+        KonfAIApp.symlink(dataset, staged.absolute())
+        if staged.is_dir() and not staged.is_symlink():  # the copy fallback is konfai-apps' own to delete
+            (staged / _STAGED_MARKER).touch()
 
         from konfai.trainer import train
 

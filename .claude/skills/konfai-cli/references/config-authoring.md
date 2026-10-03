@@ -7,13 +7,14 @@ experiment**, and a finished run leaves a fully-resolved config on disk.
 The fastest way to author a config is to **copy a runnable template from `examples/`**
 (Segmentation or Synthesis) and adapt it, rather than writing from a blank file.
 
-## The three files and their root keys
+## The four files and their root keys
 
 | Command | File (by convention) | Root key | Holds |
 |---|---|---|---|
 | `TRAIN` / `RESUME` | `Config.yml` | `Trainer:` | model + dataset + losses + augmentations + optimizer/schedulers + patch + training params |
 | `PREDICTION` | `Prediction.yml` | `Predictor:` | model load(s), patch/TTA/ensemble inference, output post-processing |
 | `EVALUATION` | `Evaluation.yml` | `Evaluator:` | predictions vs ground truth → per-case + aggregate metric JSON |
+| `TRANSFORM` | `Transform.yml` | `Transformer:` | dataset preparation: read a dataset, run a chain per case, `Write` the result |
 
 The root key is mandatory and load-bearing: a `Prediction.yml` must open with `Predictor:`.
 
@@ -21,8 +22,9 @@ The root key is mandatory and load-bearing: a `Prediction.yml` must open with `P
 
 `apply_config` reads a callable's signature and fills its arguments from the YAML subtree it
 owns (`@config("Key")`), recursing into nested `@config` objects. **Resolved defaults are
-written back to the file**, so every `konfai` run rewrites its config in place, materialising
-defaults. Consequences for a CLI user:
+written back to the file**, so every `konfai` run that builds its workflow rewrites its config in
+place, materialising defaults; a run whose build fails leaves the file as written. Consequences for a
+CLI user:
 
 - After a run, the on-disk YAML is the fully-resolved snapshot: commit it as the record of
   the experiment; a re-run is reproducible from it.
@@ -53,9 +55,9 @@ Component kinds: `loss`/`metric` (both → a `Criterion`), `transform`, `augment
 `scheduler`, `model`, `block`. To discover what exists, read the runnable `examples/`, the
 authoritative config catalogue under `docs/source/config_guide/`
 (`training.md` = `Trainer:`, `prediction.md` = `Predictor:`, `evaluation.md` = `Evaluator:`,
-`patterns.md` = `dataset_filenames`/`groups_src`/`subset`/`validation` conventions), and the
-base classes in `konfai/` (e.g. `konfai/metric/measure.py` for criteria,
-`konfai/data/augmentation.py` for augmentations). The CLI is documented at
+`transform.md` = `Transformer:`, `index.md` = the `dataset_filenames`/`groups_src`/`subset`/`validation`
+conventions), and the base classes in `konfai/` (e.g. `konfai/metric/measure/` for criteria,
+`konfai/data/augmentation/` for augmentations). The CLI is documented at
 `docs/source/reference/cli.md`.
 
 ## The shape of each file (top-level keys)

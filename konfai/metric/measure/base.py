@@ -26,7 +26,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from konfai.network.network import Network
 from konfai.network.network.measure import CriterionOutput as CriterionOutput
 from konfai.network.network.measure import CriterionResult as CriterionResult
 from konfai.network.network.measure import CriterionValue as CriterionValue
@@ -34,8 +33,6 @@ from konfai.network.network.measure import LabelledValues as LabelledValues
 from konfai.utils.config import record_given_arguments
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import MeasureError
-
-models_register: dict[str, Network] = {}
 
 
 def _require_optional(module: str, *, criterion: str, extra: str) -> ModuleType:
@@ -68,14 +65,33 @@ class Criterion(torch.nn.Module, ABC):
     # never per-patch final values), so evaluation may feed it disjoint patches instead of the whole
     # volume. Default ``False``: an unknown metric evaluates whole: a wrong ``True`` would corrupt
     # the reported value, so only a metric whose ``partial_metric``/``combine_metric`` reproduce
-    # ``forward`` exactly may set it.
+    # ``forward`` to float32 rounding may set it.
     reducible: bool = False
+
+    # ``True`` declares that the reported value and the loss are each the mean of one value per patch
+    # of the batch (patch = the output's first axis): a mean over batches then weighs each batch by
+    # its patch count, so a partial last batch, or the validation split over several ranks, scores
+    # every patch alike (a masked mean runs over the patches the mask reaches: alike when each holds
+    # a mask voxel). Default ``False``: each batch weighs one, which is all a value pooled over the
+    # batch (a sum, a norm, the log of a pooled mean, a class-weighted mean) allows.
+    batch_mean: bool = False
 
     # Voxels of context a partial state needs past a patch's faces on every spatial axis (a window's
     # radius). A reducible metric declaring one is handed patches read that much wider than their
     # grid slot, clamped at the volume's faces, and ``partial_metric`` receives ``core=``, the slot's
     # slices within the patch: it scores the core through the context and nothing outside it.
     halo: int = 0
+
+    # The role the criterion takes when its training config writes no ``is_loss``. A score whose loss
+    # form must be asked for (SSIM) or does not exist (PSNR) is a metric unless the config says otherwise.
+    default_is_loss: bool = True
+
+    # ``False`` for a score with no loss form (PSNR): ``is_loss: true`` on it is refused.
+    loss_capable: bool = True
+
+    # Set from the resolved ``is_loss`` when training builds the criterion: a criterion whose loss form
+    # costs more than its value (SSIM keeps a gradient) computes it only then.
+    as_loss: bool = False
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         # A metric is config-built like a stage: record its constructor arguments as given, so
@@ -94,7 +110,7 @@ class Criterion(torch.nn.Module, ABC):
         raise NotImplementedError(f"{self.get_name()} is not reducible: it has no partial state.")
 
     def combine_metric(self, states: list[Any]) -> Any:
-        """Combine per-patch states into exactly what ``forward`` returns on the whole volume."""
+        """Combine per-patch states into what ``forward`` returns on the whole volume, to float32 rounding."""
         raise NotImplementedError(f"{self.get_name()} is not reducible: it cannot combine states.")
 
     @abstractmethod
@@ -116,7 +132,13 @@ class CriterionWithInit(Criterion):
 
 
 class CriterionWithAttribute(Criterion):
+    """A criterion handed the per-sample attributes of its targets: ``attributes[i]`` belongs to
+    ``targets[i]``, in the order of the target group, in training and in evaluation alike. A subclass
+    that also reads the output's own declares ``accepts_output_attributes`` and takes an
+    ``output_attributes`` keyword, ``None`` in training (a model output has none)."""
+
     accepts_attributes = True
+    accepts_output_attributes = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -138,15 +160,21 @@ class MaskedLoss(Criterion):
         self.loss = loss
         self.mode_image_masked = mode_image_masked
 
+    def _require_target(self, targets: tuple[torch.Tensor, ...]) -> None:
+        if not targets:
+            raise MeasureError(
+                f"{self.get_name()} compares the output with a target and was handed none.",
+                "Name the target group under its targets_criterions.",
+            )
+
     @staticmethod
     def get_mask(targets: list[torch.Tensor]) -> torch.Tensor | None:
+        """The voxels inside every mask, as bool: a mask counts a voxel in when it is not 0."""
         if len(targets) == 0:
             return None
-
-        mask = targets[0]
+        mask = targets[0] != 0
         for target in targets[1:]:
-            mask = mask * target
-
+            mask = mask & (target != 0)
         return mask
 
     def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
@@ -180,9 +208,7 @@ class MaskedLoss(Criterion):
         *targets: torch.Tensor,
     ) -> CriterionOutput:
 
-        if len(targets) == 0:
-            raise ValueError("MaskedLoss expects at least one target tensor.")
-
+        self._require_target(targets)
         target = targets[0]
         mask = self.get_mask(list(targets[1:]))
 
@@ -194,7 +220,7 @@ class MaskedLoss(Criterion):
             return loss_b, loss_b.detach()
 
         target = target.to(device=output.device)
-        mask = mask.to(device=output.device) == 1
+        mask = mask.to(device=output.device)
 
         kernel = None if self.mode_image_masked else self._kernel(output.float(), target.float())
         if kernel is not None:
@@ -207,22 +233,21 @@ class MaskedLoss(Criterion):
             if not scored[batch]:
                 continue
 
-            mask_b = mask[batch, ...]
-            output_b = output[batch, ...].float()
-            target_b = target[batch, ...].float()
-
             if self.mode_image_masked:
-                mask_f = mask_b.to(dtype=output_b.dtype)
+                # The item keeps its batch axis: the loss takes [B, C, ...] masked or not.
+                item = slice(batch, batch + 1)
+                mask_f = mask[item].float()
 
                 loss_b = self.loss(
-                    output_b * mask_f,
-                    target_b * mask_f,
+                    output[item].float() * mask_f,
+                    target[item].float() * mask_f,
                 )
 
             else:
+                mask_b = mask[batch, ...]
                 loss_b = self.loss(
-                    torch.masked_select(output_b, mask_b),
-                    torch.masked_select(target_b, mask_b),
+                    torch.masked_select(output[batch, ...].float(), mask_b),
+                    torch.masked_select(target[batch, ...].float(), mask_b),
                 )
 
             loss = loss + loss_b
@@ -237,7 +262,7 @@ class MaskedLoss(Criterion):
     # . Streamed-evaluation hooks -------------------------------------------------------------------
     # A subclass whose ``loss`` reduces to a running sum provides its sufficient statistic and its
     # finisher, and declares itself ``reducible``; the generic partial/combine below then reproduces
-    # ``forward`` exactly from disjoint patches (masked and unmasked paths alike).
+    # ``forward`` from disjoint patches, to float32 rounding (masked and unmasked paths alike).
 
     def _stat(self, x: torch.Tensor, y: torch.Tensor) -> float:
         """Sum-contribution of one (output, target) pair to this loss's running total."""
@@ -251,8 +276,7 @@ class MaskedLoss(Criterion):
         raise NotImplementedError()
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
-        if len(targets) == 0:
-            raise ValueError("MaskedLoss expects at least one target tensor.")
+        self._require_target(targets)
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
         if mask is None:
@@ -261,7 +285,7 @@ class MaskedLoss(Criterion):
         mask = mask.to(device=output.device)
         items = []
         for batch in range(output.shape[0]):
-            mask_b = mask[batch, ...] == 1
+            mask_b = mask[batch, ...]
             if not torch.any(mask_b):
                 items.append((0.0, 0, False))
                 continue

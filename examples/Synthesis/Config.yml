@@ -1,7 +1,7 @@
 Trainer:
   Model:
-    classpath: Model:UNetpp5  # The baseline generator in Python form (Model.py). Same model as UNetpp.yml
-    # classpath: UNetpp.yml   # ...its declarative YAML form (weight-identical; exposes the same Head:Tanh)
+    classpath: Model:UNetpp5  # The baseline generator in Python form (Model.py). Same model as UNetpp5.yml
+    # classpath: UNetpp5.yml  # ...its declarative YAML form (same layers and Head:Tanh; other state names, checkpoints do not cross)
     UNetpp5:
       outputs_criterions:
         Head:Tanh: # Model output layer used for loss computation
@@ -35,7 +35,7 @@ Trainer:
                   - 1
                   - 1
                   - 1
-                torch:nn:L1Loss:
+                torch:nn:L1Loss: # The same term as MAE above (an unmasked MAE is torch's L1Loss): the L1 weighs 2 against SAM_Perceptual's 1
                   size_average: None
                   reduce: None
                   reduction: mean
@@ -81,7 +81,6 @@ Trainer:
           gamma: 0.75
           last_epoch: -1
           nb_step: 0
-      dim: 2
       ModelPatch: None
   Dataset:
     groups_src: # Mapping between dataset modalities and how they are used by the model
@@ -145,7 +144,7 @@ Trainer:
       - 1
       - 320
       - 320
-      overlap: None # Overlap between patches (None = no overlap)
+      overlap: None # Overlap between patches (None = the fewest patches that cover each axis, overlapping by what they leave)
       pad_value: -1 # Value used when padding outside image boundaries
       extend_slice: 4 # Number of neighboring slices used as context (2 above and 2 below for 2.5D input)
     subset: None  # Use the full dataset (or give a case-list file / list of files; prefix entries with ~ to exclude cases)

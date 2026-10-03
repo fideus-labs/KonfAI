@@ -18,8 +18,10 @@
 indistinguishable from a whole-volume ``write``, remove partial entries on failure, and refuse formats
 that cannot serve region writes."""
 
+import multiprocessing
 import os
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -540,7 +542,7 @@ def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels
 
 def test_replacing_an_h5_entry_keeps_the_old_one_until_the_new_is_in_place(tmp_path, monkeypatch):
     """A rewrite moves the old entry aside, publishes, then drops it: at no instant is the entry
-    absent from the file, which is what a crash between the two steps used to leave."""
+    absent from the file, not even for a crash between the two steps."""
     h5py = pytest.importorskip("h5py")
 
     dataset = Dataset(tmp_path / "store", "h5")
@@ -599,6 +601,44 @@ def test_a_backup_orphaned_by_a_killed_writer_is_served_again(tmp_path: Path, fi
         recovered, _ = fresh.read_data("CT", "CASE_001")
     np.testing.assert_array_equal(recovered, volume)
     assert Dataset(tmp_path / "store", file_format).is_dataset_exist("CT", "CASE_001")  # and it stays back
+
+
+def _rewrite_and_die_before_the_publish(root: str, volume: np.ndarray) -> None:
+    """Rewrite an OME-Zarr entry and die, as a hard kill does, once the old store is moved aside."""
+    original_rename = Path.rename
+
+    def rename(self: Path, target):
+        if self.name.endswith(".tmp"):  # the staged store about to be published
+            os._exit(0)
+        return original_rename(self, target)
+
+    Path.rename = rename  # type: ignore[method-assign]
+    Dataset(root, "omezarr").write("CT", "CASE_001", volume, _image_attributes())
+
+
+def test_a_whole_write_killed_before_its_publish_leaves_a_backup_that_is_served_again(tmp_path: Path) -> None:
+    """The whole-volume OME-Zarr write moves the old store aside before publishing its own; a writer
+    killed between the two leaves the previous version under a name the recovery must know."""
+    _skip_unavailable("omezarr")
+    root = str(tmp_path / "store")
+    before = _volume()
+    Dataset(root, "omezarr").write("CT", "CASE_001", before, _image_attributes())
+
+    child = multiprocessing.get_context("spawn").Process(
+        target=_rewrite_and_die_before_the_publish, args=(root, before + 100)
+    )
+    child.start()
+    child.join(120)
+    assert child.exitcode == 0, "the writer process failed; the assertion below would prove nothing"
+    assert not (tmp_path / "store" / "CASE_001" / "CT.ome.zarr").exists(), "the kill did not land mid-replacement"
+
+    fresh = Dataset(root, "omezarr")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        present = fresh.is_dataset_exist("CT", "CASE_001")
+    assert present, sorted(path.name for path in (tmp_path / "store" / "CASE_001").iterdir())
+    assert any("killed between moving the entry aside" in str(warning.message) for warning in caught)
+    np.testing.assert_array_equal(fresh.read_data("CT", "CASE_001")[0], before)
 
 
 def test_the_chunk_grain_of_a_recovered_h5_entry_is_answered(tmp_path: Path, monkeypatch) -> None:

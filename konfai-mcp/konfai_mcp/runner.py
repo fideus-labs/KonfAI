@@ -33,12 +33,10 @@ from queue import Empty
 from typing import Any, cast
 from uuid import uuid4
 
-from konfai import cuda_visible_devices
-from konfai.evaluator import build_evaluate
-from konfai.predictor import build_predict
-from konfai.trainer import build_train
-from konfai.transformer import build_transform
-from konfai.utils.runtime import State, execute_distributed_object
+from konfai.utils.errors import KonfAIError
+from konfai.utils.utils import env_flag
+
+from .workspace import WORKFLOW_CONFIG_FILES
 
 
 def _subprocess_entry(queue: Any, target: str, kwargs: dict[str, Any], output_path: str = "") -> None:
@@ -211,9 +209,8 @@ _OUTPUT_TAIL = 4000  # enough for a traceback and the lines around it, short eno
 
 
 def _tail(output: Path) -> str:
-    """The tail of the child's captured stdio: read from near the end of the file, never whole (a
-    verbose failing child once handed the parent its entire output to keep 4,000 characters of it).
-    '' when it printed nothing."""
+    """The tail of the child's captured stdio, read from near the end of the file so that a verbose child's
+    output is never loaded whole. '' when it printed nothing."""
     try:
         with output.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -277,6 +274,13 @@ def _build_workflow(
     model: str | None = None,
     lr: float | None = None,
 ):
+    # The builders import torch: the server process imports this module and never builds.
+    from konfai.evaluator import build_evaluate
+    from konfai.predictor import build_predict
+    from konfai.trainer import build_train
+    from konfai.transformer import build_transform
+    from konfai.utils.runtime import State
+
     resolved_config = Path(config).resolve()
     if command in ("TRAIN", "RESUME"):
         resume_model: Path | str | None = None
@@ -343,6 +347,8 @@ def run_workflow_api(
     cwd: str | None = None,
 ) -> None:
     """Child entrypoint that runs one KonfAI workflow (TRAIN/RESUME/PREDICTION/EVALUATION/TRANSFORM)."""
+    from konfai.utils.runtime import execute_distributed_object
+
     with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
         _ensure_local_imports()
         if single_process:
@@ -483,6 +489,8 @@ def run_registration_api(
     where it must, registers a pair too large for the device in native tiles and records the run: the same
     output as its CLI and SlicerImpactReg (``P000/Transform.h5``, ``P000/Moved``, ``register.json``).
     """
+    from konfai import cuda_visible_devices
+
     with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
         _ensure_local_imports()
         app = _impact_reg_app(repo)(download=True, force_update=force_update)
@@ -519,6 +527,8 @@ def run_registration_evaluate_api(
 ) -> None:
     """Child entrypoint that scores a registration through ``impact-reg-konfai eval``: MAE, Dice, TRE and the
     field's Jacobian, the moving side warped through the transform (none: the pair as it is)."""
+    from konfai import cuda_visible_devices
+
     with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
         _ensure_local_imports()
         _impact_reg_app()().evaluate(
@@ -625,11 +635,7 @@ def import_app_api(
     destination = Path(target).resolve()
     filenames = info.download_bundle(destination, display_name=display_name, config_overrides=config_overrides)
     checkpoints = sorted(name for name in filenames if name.endswith(".pt"))
-    configs = {
-        key: name
-        for key, name in (("train", "Config.yml"), ("prediction", "Prediction.yml"), ("evaluation", "Evaluation.yml"))
-        if (destination / name).is_file()
-    }
+    configs = {key: name for key, name in WORKFLOW_CONFIG_FILES.items() if (destination / name).is_file()}
     return {"files": filenames, "checkpoints": checkpoints, "configs": configs}
 
 
@@ -646,7 +652,7 @@ def _collect_model_outputs(workflow_object: Any, workflow: str) -> dict[str, lis
         if not hasattr(value, "named_module_args_dict") and hasattr(value, "get_model"):
             try:
                 probe(attr, value.get_model(train=workflow == "train"))
-            except Exception:  # a loader that cannot build outside setup is simply skipped
+            except Exception:  # nosec B112 - a loader that cannot build outside setup is simply skipped
                 continue
     return {
         label: [
@@ -791,7 +797,7 @@ def _check_worker_spawn_picklability(workflow_object: Any, requested_num_workers
     result: dict[str, Any] = {"requested_num_workers": requested_num_workers, "checked": False}
     if requested_num_workers <= 0:
         return result
-    import pickle
+    import pickle  # nosec B403 - dumps only: it probes what a DataLoader worker would receive
 
     datasets: list[Any] = []
     for group in getattr(workflow_object, "dataloader", []) or []:
@@ -939,6 +945,12 @@ def validate_workflow_api(
     then removed; a single-file store (h5) is created if it was not already there. ``plan_transform``
     is the tool for a plan.
     """
+    from konfai.evaluator import build_evaluate
+    from konfai.predictor import build_predict
+    from konfai.trainer import build_train
+    from konfai.transformer import build_transform
+    from konfai.utils.runtime import State
+
     resolved_validate_root = (
         Path(validate_root).resolve()
         if validate_root is not None
@@ -1031,7 +1043,18 @@ def validate_workflow_api(
             if level == "train_step" and workflow == "train":
                 payload["train_step"] = _run_one_train_step(workflow_object)
             return payload
-        except Exception as exc:  # pragma: no cover - error shape tested through caller
+        except KonfAIError as exc:
+            # A designed refusal names what to change; the traceback would only bury it, except under
+            # KONFAI_DEBUG=1, as on the CLI. The binder also wraps any exception raised while building
+            # an object: that crash keeps its trace.
+            refusal: dict[str, Any] = {"ok": False, "error_type": type(exc).__name__, "error": str(exc).strip()}
+            cause = exc.__cause__
+            while isinstance(cause, KonfAIError):
+                cause = cause.__cause__
+            if cause is not None or env_flag("KONFAI_DEBUG", False):
+                refusal["traceback"] = traceback.format_exc()
+            return refusal
+        except Exception as exc:
             return {
                 "ok": False,
                 "error_type": type(exc).__name__,

@@ -26,6 +26,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from konfai.utils.errors import ConfigError
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
@@ -66,7 +67,7 @@ def test_validation_reads_a_scratch_copy_beside_the_original(tmp_path: Path, mon
         config_path.write_bytes(authored + b"  epochs: 3\r\n")  # an edit landing meanwhile
         return object()
 
-    monkeypatch.setattr(runner, "build_train", build)
+    monkeypatch.setattr("konfai.trainer.build_train", build)
     payload = runner.validate_workflow_api(
         workflow="train",
         level="instantiate",
@@ -79,6 +80,49 @@ def test_validation_reads_a_scratch_copy_beside_the_original(tmp_path: Path, mon
     assert config_path.read_bytes() == authored + b"  epochs: 3\r\n"  # the edit, not the write-back
     assert seen and not seen[0].exists()  # the copy is gone
     assert [entry.name for entry in tmp_path.iterdir() if entry.name.startswith(".")] == []
+
+
+def _bound(cause: Exception) -> ConfigError:
+    """The refusal the binder raises around what building an object raised (``raise ... from exc``)."""
+    refusal = ConfigError(f"Failed to instantiate settings, error {cause}")
+    refusal.__cause__ = cause
+    return refusal
+
+
+@pytest.mark.parametrize(
+    ("raised", "error", "traced"),
+    [
+        (ConfigError("EarlyStopping.mode must be 'min' or 'max'.", "Set it to one of them."), "[Config] ", False),
+        (_bound(ConfigError("EarlyStopping.mode must be 'min' or 'max'.")), "[Config] Failed", False),
+        (_bound(ZeroDivisionError("division by zero")), "[Config] Failed", True),
+        (ZeroDivisionError("division by zero"), "division by zero", True),
+    ],
+)
+def test_a_validation_refusal_is_its_message_and_a_crash_keeps_its_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raised: Exception, error: str, traced: bool
+) -> None:
+    """A designed refusal already says what to change: a traceback would bury it. A crash needs its
+    trace, also when the binder wrapped it in a refusal (a bug in a user's nested settings object)."""
+    monkeypatch.delenv("KONFAI_DEBUG", raising=False)
+    config_path = tmp_path / "Config.yml"
+    config_path.write_text("Trainer:\n  train_name: X\n", encoding="utf-8")
+
+    def build(**kwargs: Any) -> object:
+        raise raised
+
+    monkeypatch.setattr("konfai.trainer.build_train", build)
+    payload = runner.validate_workflow_api(
+        workflow="train",
+        level="instantiate",
+        workspace_dir=str(tmp_path),
+        config=str(config_path),
+        validate_root=str(tmp_path / "validate"),
+    )
+
+    assert payload["ok"] is False and payload["error_type"] == type(raised).__name__
+    assert payload["error"].startswith(error)
+    assert ("traceback" in payload) is traced
+    assert not traced or "ZeroDivisionError: division by zero" in payload["traceback"]
 
 
 def test_a_scratch_copy_a_killed_child_left_is_swept_by_the_parent(tmp_path: Path) -> None:
@@ -182,3 +226,16 @@ def test_smoke_test_non_differentiable_loss_is_not_ok(tmp_path: Path) -> None:
     assert result["backward_ok"] is False
     assert result["ok"] is False
     assert "backward" in result.get("error", "").lower()
+
+
+def test_the_server_process_lists_its_tools_without_importing_torch() -> None:
+    """Studio counts the tools by importing the server: the workflow builders, which bring torch and
+    SimpleITK, belong to the spawn children that build."""
+    import subprocess
+
+    probe = (
+        "import asyncio, sys; from konfai_mcp.server import mcp; n = len(asyncio.run(mcp.list_tools())); "
+        "print(n, 'torch' in sys.modules, 'SimpleITK' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.split()
+    assert int(out[0]) > 0 and out[1:] == ["False", "False"]

@@ -82,10 +82,6 @@ class ChatRequest(BaseModel):
     session: str = "default"
 
 
-class NewSession(BaseModel):
-    name: str = ""
-
-
 class DatasetPath(BaseModel):
     path: str
 
@@ -260,7 +256,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 title = await suggest_title(req.message, _reg.brain())
                 _reg.set_title(name, title)
                 yield _sse({"type": "title", "session": name, "title": title})
-            except Exception:
+            except Exception:  # nosec B110 - the title is cosmetic: the session keeps its default one
                 pass
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -333,10 +329,10 @@ async def set_session_dataset(req: SessionDataset) -> dict[str, Any]:
 
 
 @app.post("/api/sessions")
-async def create_session(req: NewSession) -> dict[str, Any]:
-    """Start a new experiment. With no name, allocate a fresh id the LLM titles later; a supplied
-    name is honoured (legacy). The agent spins up lazily on the first message."""
-    name = _sane_session(req.name) if req.name.strip() else _reg.new_experiment()
+async def create_session() -> dict[str, Any]:
+    """Start a new experiment under a fresh id the LLM titles later. The agent spins up lazily on the
+    first message."""
+    name = _reg.new_experiment()
     _reg.register(name)
     return {"sessions": _reg.names(), "current": name, "titles": _reg.titles()}
 
@@ -505,7 +501,8 @@ def _load_credentials() -> None:
 
 def _save_credentials(values: dict[str, str]) -> None:
     """Persist what the user typed and apply it now. Created 0600: it holds API keys, and a write
-    followed by chmod would leave them readable under the umask in between."""
+    followed by chmod would leave them readable under the umask in between. On Windows a mode sets
+    only the read-only flag: the file takes the permissions of the folder it is in."""
     path = _credentials_file()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
@@ -825,17 +822,6 @@ async def run_config_diff(
     return {"ok": True, "run_a": run_a, "run_b": run_b, "identical": not diff, "diff": "\n".join(diff)}
 
 
-@app.get("/api/curves")
-async def curves(session: str = Query("default"), run: str = Query(...), q: str = Query("")) -> dict[str, Any]:
-    """A run's full training curves (the complete downsampled TensorBoard history, not the live tail): konfai-mcp's ``read_training_curves``, optionally filtered to tags containing ``q``. Powers clicking a
-    live chart to expand it into its whole history."""
-    args: dict[str, Any] = {"run_name": run, "max_points": 2000}
-    if q:
-        args["tags"] = [q]
-    ok, _text, data = await _mcp_json(_sane_session(session), "read_training_curves", args)
-    return {"ok": ok, "curves": data.get("curves", {}) if ok and isinstance(data, dict) else {}}
-
-
 class ConfigSave(BaseModel):
     session: str
     name: str
@@ -919,7 +905,7 @@ def _experiment_info(session: str) -> dict[str, Any]:
     if not root.is_dir():
         return {"checkpoints": [], "predictions": [], "jobs": [], "bundlable": False, "exportable": False}
     # "**/Checkpoints" / "**/Predictions" so isolated app outputs (<app_output>-<hash>/…) count too.
-    checkpoints = sorted(str(p.relative_to(root)) for p in root.glob("**/Checkpoints/**/*.pt"))
+    checkpoints = sorted(p.relative_to(root).as_posix() for p in root.glob("**/Checkpoints/**/*.pt"))
     predictions = sorted(
         {p.name for pred in root.glob("**/Predictions") if pred.is_dir() for p in pred.iterdir() if p.is_dir()}
     )
@@ -1046,7 +1032,8 @@ async def quit_server(request: Request) -> dict[str, bool]:
 
     async def _after_reply() -> None:
         await asyncio.sleep(0.3)  # let this response leave before the shutdown begins
-        os.kill(os.getpid(), signal.SIGTERM)
+        # Raised in the process, it reaches uvicorn's handler; os.kill would be TerminateProcess on Windows.
+        signal.raise_signal(signal.SIGTERM)
 
     # Held: the loop keeps only a weak reference and would collect the task mid-sleep.
     _SHUTDOWN_TASKS.add(task := asyncio.get_running_loop().create_task(_after_reply()))
@@ -1058,11 +1045,20 @@ async def quit_server(request: Request) -> dict[str, bool]:
 async def app_icon(ref: str = Query(...)) -> FileResponse:
     """The app's own bundle icon (its ``icon.png`` / ``app.json``-declared icon file)."""
     try:
-        from konfai_apps.app_repository import AppRepositoryError, get_app_repository_info
+        from konfai_apps.app_repository import (
+            AppRepositoryError,
+            get_app_repository_info,
+            get_downloaded_apps_on_hf_repo,
+        )
     except ImportError as exc:  # pragma: no cover - konfai-apps not installed
         raise HTTPException(503, "konfai-apps is not installed") from exc
     try:
-        icon_path = get_app_repository_info(ref, force_update=False).get_icon_path()
+        resolved: str | None = ref
+        repo, _, name = ref.partition(":")
+        if ref.count(":") == 1 and "/" in repo and not Path(ref).expanduser().exists():
+            # A Hugging Face app, as the catalogue downloaded it: never read from the Hub in this route.
+            resolved = get_downloaded_apps_on_hf_repo(repo).get(name)
+        icon_path = get_app_repository_info(resolved, force_update=False).get_icon_path() if resolved else None
     except (AppRepositoryError, FileNotFoundError, OSError, ValueError) as exc:
         raise HTTPException(404, f"app '{ref}' has no icon") from exc
     if icon_path is None or not Path(icon_path).is_file():
@@ -1198,7 +1194,14 @@ async def index() -> FileResponse:
     keeps loading the previous build's assets: an updated Studio silently serving the old front until
     someone thinks to hard-reload.
     """
-    return FileResponse(WEB_DIR / "index.html", headers={"Cache-Control": "no-cache, must-revalidate"})
+    index_html = WEB_DIR / "index.html"
+    if not index_html.is_file():
+        raise HTTPException(
+            503,
+            "the front is not built: run `npm --prefix konfai-studio/frontend install` then "
+            "`npm --prefix konfai-studio/frontend run build`",
+        )
+    return FileResponse(index_html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/konfai-logo.png")
@@ -1255,7 +1258,7 @@ def _slicer_exec(code: str) -> bool:
         f"http://127.0.0.1:{_SLICER_WEBSERVER_PORT}/slicer/exec", data=code.encode(), method="POST"
     )
     try:
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with urllib.request.urlopen(request, timeout=3) as response:  # nosec B310 - a fixed http://127.0.0.1 URL
             response.read()
         return True
     except (OSError, urllib.error.URLError):
@@ -1289,9 +1292,9 @@ async def slicer_open(req: SlicerOpen) -> dict[str, Any]:
             "ok": False,
             "detail": "3D Slicer not found: put `Slicer` on PATH or set KONFAI_STUDIO_SLICER to the executable.",
         }
-    import subprocess
+    import subprocess  # nosec B404
 
-    subprocess.Popen(
+    subprocess.Popen(  # nosec B603 - an argv list, no shell: the user's Slicer on the paths they chose
         [executable, *map(str, volumes)],
         start_new_session=True,
         stdout=subprocess.DEVNULL,

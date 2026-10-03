@@ -1,6 +1,7 @@
 Trainer:
   Model:
     classpath: UNet.yml  # The declarative model graph; `Model:UNet` in Model.py builds the same network
+    # (Model:UNet takes dim, channels and nb_class directly under UNet, not under parameters)
     UNet:
       parameters:
         dim: 2  # 2D: the network sees one slice at a time
@@ -112,7 +113,7 @@ Trainer:
     - ./Dataset:a:mha
     inline_augmentations: true
     batch_size: 8
-    validation: 0.2  # Hold out 20% of the cases for validation
+    validation: 0.2  # Hold out the cases closest to 20% of the patches for validation (1 case of 5)
     validation_augmentations: true
     shuffle_window: None
     memory_budget: None

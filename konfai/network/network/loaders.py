@@ -26,9 +26,9 @@ import torch
 from konfai import konfai_root
 from konfai.metric.schedulers import Scheduler
 from konfai.network.network.base import batched_step
-from konfai.utils.config import apply_config, config
-from konfai.utils.errors import TrainerError
-from konfai.utils.utils import get_module
+from konfai.utils.config import _escape_key_component, apply_config, config, write_back
+from konfai.utils.errors import MeasureError, TrainerError
+from konfai.utils.utils import get_module, module_attribute
 
 
 @config("optimizer")
@@ -94,7 +94,7 @@ def build_configured_criterions(
         if configure_attr is not None:
             configure_attr(module_classpath, criterions_attr)
         criterions[
-            apply_config(f"{config_key_prefix}.criterions_loader.{module_classpath}")(getattr(module, name))()
+            apply_config(f"{config_key_prefix}.criterions_loader.{module_classpath}")(module_attribute(module, name))()
         ] = criterions_attr
     return criterions
 
@@ -105,19 +105,39 @@ class CriterionsAttr:
     def __init__(
         self,
         schedulers: dict[str, LossSchedulersLoader] = {"default|Constant": LossSchedulersLoader(0)},
-        is_loss: bool = True,
+        is_loss: bool | None = None,
         group: int = 0,
         start: int = 0,
         stop: int | None = None,
         accumulation: bool = False,
     ) -> None:
         self.schedulersLoader = schedulers
-        self.is_loss = is_loss
+        # ``None`` leaves the role to the criterion (``Criterion.default_is_loss``): ``settle_role`` decides
+        # it once the criterion is built.
+        self.is_loss = True if is_loss is None else is_loss
+        self._role_given = is_loss is not None
         self.start = start
         self.stop = stop
         self.group = group
         self.accumulation = accumulation
         self.schedulers: dict[Scheduler, int] = {}
+
+    def settle_role(self, criterion: torch.nn.Module, key: str) -> None:
+        """Take the criterion's own role when the config at ``key`` wrote no ``is_loss``, and write it back;
+        refuse ``is_loss: true`` on a criterion that has no loss form."""
+        loss_capable = getattr(criterion, "loss_capable", True)
+        if not self._role_given:
+            self.is_loss = loss_capable and getattr(criterion, "default_is_loss", True)
+            self._role_given = True
+            write_back(key, "is_loss", self.is_loss)
+        elif self.is_loss and not loss_capable:
+            name = criterion.__class__.__name__
+            raise MeasureError(
+                f"{name} is a metric, not a loss: 'is_loss: true' at '{key}' would train the network to lower it.",
+                f"Write 'is_loss: false' there, or leave 'is_loss' out: {name} is a metric by default.",
+            )
+        if hasattr(criterion, "as_loss"):
+            setattr(criterion, "as_loss", self.is_loss)  # noqa: B010 -- Module.__setattr__ is Tensor-typed
 
 
 class CriterionsLoader:
@@ -147,14 +167,16 @@ class CriterionsLoader:
                     )
                 ] = schedulers.nb_step
 
-        return build_configured_criterions(
-            self.criterions_loader,
-            (
-                f"{konfai_root()}.Model.{model_classname}.outputs_criterions."
-                f"{output_group}.targets_criterions.{target_group}"
-            ),
-            configure_attr=configure_attr,
+        key = (
+            f"{konfai_root()}.Model.{model_classname}.outputs_criterions."
+            f"{output_group}.targets_criterions.{target_group}"
         )
+        criterions = build_configured_criterions(self.criterions_loader, key, configure_attr=configure_attr)
+        for (module_classpath, criterions_attr), criterion in zip(
+            self.criterions_loader.items(), criterions, strict=True
+        ):
+            criterions_attr.settle_role(criterion, f"{key}.criterions_loader.{_escape_key_component(module_classpath)}")
+        return criterions
 
 
 class TargetCriterionsLoader:

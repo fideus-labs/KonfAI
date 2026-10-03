@@ -66,6 +66,18 @@ class AbstractFile(ABC):
     #: the case), rather than plain files the dataset walks.
     lists_case_entries: bool = False
 
+    #: What the backend's library raises on an entry it cannot open or decode (a truncated or
+    #: corrupt file): the one-pass workflows set such a case aside, where anything else stops them.
+    read_errors: tuple[type[Exception], ...] = (OSError,)
+
+    #: The entry a directory dataset opened this case file for (a case, or an ``Expand`` copy's
+    #: entry, whatever its depth): what the SimpleITK backend files an uncompressed twin under.
+    case: str = ""
+
+    #: Where that dataset keeps the file each entry resolved to, until it writes: the SimpleITK
+    #: backend probes an entry's sidecar suffixes once instead of at every read.
+    resolved_paths: dict[str, str] | None = None
+
     @abstractmethod
     def __init__(self, filename: str, read: bool) -> None:
         pass
@@ -114,8 +126,9 @@ class AbstractFile(ABC):
 
         The base answers ``False``, which only costs speed: a store that decodes the whole volume
         once per slab is planned as one ordered LOAD rather than a streamed route. A compressed ITK
-        stream (``.mha`` zlib, ``.nii.gz``) decodes forward from the start, so a region costs its
-        end offset; blocked compression (Zarr, HDF5) serves the region alone.
+        stream (``.mha`` zlib, ``.nii.gz``) decodes forward from the start, so the SimpleITK backend
+        serves its regions from an uncompressed twin decompressed once per run; blocked compression
+        (Zarr, HDF5) serves the region alone.
         """
         del name
         return False

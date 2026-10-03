@@ -17,6 +17,7 @@
 
 """The prediction sink: patches blended per case and copy, reduced, written whole or streamed by slabs."""
 
+import copy
 import os
 import queue
 import threading
@@ -24,6 +25,7 @@ import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from fractions import Fraction
 from types import EllipsisType
 from typing import cast
 
@@ -45,8 +47,9 @@ from konfai.data.patching import (
     blend_overlap,
 )
 from konfai.data.patching.stage import _halo_radii, _HaloPull, _RemapPull
-from konfai.data.reduction import Mean, Median, Reduction
+from konfai.data.reduction import Concat, Reduction
 from konfai.data.transform import (
+    InferenceStack,
     LocalityKind,
     PatchLocality,
     RegionContext,
@@ -54,7 +57,7 @@ from konfai.data.transform import (
     TransformInverse,
     TransformLoader,
 )
-from konfai.utils.budget import node_local_ranks, resolve_memory_budget
+from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
 from konfai.utils.dataset import Attribute, Dataset, DataStream
@@ -62,7 +65,7 @@ from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
 )
-from konfai.utils.utils import env_flag, get_module, split_path_spec
+from konfai.utils.utils import env_flag, get_module, module_attribute, split_path_spec
 
 #: This rank's prediction loop, phase by phase, summed over the cases it ran (see ``_prediction_report``).
 PREDICTION_CLOCK = SweepClock()
@@ -222,12 +225,12 @@ class OutputDataset(Dataset, NeedDevice):
 
     def __init__(
         self,
-        same_as_group: str = "default",
+        same_as_group: str = "default:default",
         dataset_filename: str = "default|./Dataset:mha",
         group: str = "default",
-        before_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
-        after_reduction_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
-        final_transforms: dict[str, TransformLoader] = {"default|Normalize": TransformLoader()},
+        before_reduction_transforms: dict[str, TransformLoader] | None = None,
+        after_reduction_transforms: dict[str, TransformLoader] | None = None,
+        final_transforms: dict[str, TransformLoader] | None = None,
         patch_combine: str | None = None,
         reduction: str = "Mean",
         attributes: list[str] | None = None,
@@ -278,6 +281,11 @@ class OutputDataset(Dataset, NeedDevice):
         else:
             self._async_writes = None  # decided at the first write, once the device is placed
         self._writer: _AsyncWriter | None = None
+        if same_as_group.count(":") != 1:
+            raise PredictorError(
+                f"same_as_group '{same_as_group}' names no input group: it is '<group_src>:<group_dest>'.",
+                "Name the input group the output takes its geometry from, e.g. same_as_group: CT:CT.",
+            )
         self.group_src, self.group_dest = same_as_group.split(":")
         # Slab streaming has no config knob: applied per case whenever it is byte-identical to the
         # assembled path (``_plan_stream``). ``KONFAI_STREAMED_WRITES=0`` is a global kill-switch.
@@ -292,7 +300,7 @@ class OutputDataset(Dataset, NeedDevice):
         self._aligners: dict[int, SlabAligner] = {}
 
     def set_memory_budget(self, budget_bytes: float | None) -> None:
-        """The per-rank budget the streamed-vs-assembled route is priced against."""
+        """This output's share of the per-rank budget, which its routes and guards are priced against."""
         self._per_rank_budget_bytes = budget_bytes
 
     def _torch_device(self) -> torch.device:
@@ -374,12 +382,12 @@ class OutputDataset(Dataset, NeedDevice):
         # The overlap needs an owner whether or not a combine is declared: Trim keeps each patch's
         # central band and never averages.
         module, name = get_module(self._patch_combine or "Trim", "konfai.data.patching")
-        self.patch_combine = apply_config(konfai_args)(getattr(module, name))()
+        self.patch_combine = apply_config(konfai_args)(module_attribute(module, name))()
 
-        module, name = get_module(self.reduction_classpath, "konfai.predictor")
+        module, name = get_module(self.reduction_classpath, "konfai.data.reduction")
         # The classpath is one key, dots and all: escaped so the dotted path is not split through it.
         subtree = f"{konfai_args}.{_escape_key_component(self.reduction_classpath)}"
-        self.reduction = apply_config(subtree)(getattr(module, name))()
+        self.reduction = apply_config(subtree)(module_attribute(module, name))()
 
     def set_datasets(self, datasets: list[Dataset]) -> None:
         for transform in self.before_reduction_transforms:
@@ -463,7 +471,7 @@ class OutputDataset(Dataset, NeedDevice):
                 index_dataset, index_augmentation, layer, dataset, attribute, number_of_channels_per_model
             )
             attributes = self.attributes[index_dataset][index_augmentation]
-            for transform in self._patch_inverses(dataset):
+            for transform in self._inverses(dataset, patch=True):
                 layer = transform.inverse(self.names[index_dataset], layer, attributes[index_patch])
             accumulator = self.output_layer_accumulator[index_dataset][index_augmentation]
             slabs = self._blend_patch(index_dataset, index_patch, layer, accumulator)
@@ -497,7 +505,8 @@ class OutputDataset(Dataset, NeedDevice):
         # The declared attributes are applied over the inherited ones; an empty value drops a key.
         for key, value in self._attributes.items():
             if value == "":
-                source_attribute.pop(key, None)
+                while key in source_attribute:  # the whole stack: an earlier entry must not resurface
+                    source_attribute.pop(key)
             else:
                 source_attribute[key] = value
         if index_dataset not in self.output_layer_accumulator:
@@ -515,13 +524,24 @@ class OutputDataset(Dataset, NeedDevice):
                 else None
             )
             self._stream_plans[index_dataset] = plan
-            if self._streaming_enabled and (plan is None or not plan.to_sink):
-                path = "whole-volume" if plan is None else "buffered (the prefix streams, the tail runs whole-volume)"
+            if self._streaming_enabled and plan is None:
+                reason = (
+                    self._stream_refusal(dataset, index_dataset, source_attribute, layer)
+                    if sweeps_first_axis
+                    else "its patch grid is swept along another axis than the first, the one slabs are written along"
+                )
+                self._report_once(
+                    f"whole-volume: {reason}",
+                    f"streaming: case '{input_dataset.name}' takes the whole-volume path: {reason}."
+                    " Reported once per reason.",
+                )
+            elif plan is not None and not plan.to_sink:
+                path = "buffered (the prefix streams, the tail runs whole-volume)"
                 self._report_once(path, f"streaming: case '{input_dataset.name}' takes the {path} path.")
         # Everything past this point reads the header at index 0; a patch-level inverse reads one copy
         # per patch, taken before any inverse ran.
         attributes = self.attributes[index_dataset][index_augmentation] = {0: source_attribute}
-        if self._patch_inverses(dataset):
+        if self._inverses(dataset, patch=True):
             for i in range(1, len(input_dataset.patch.get_patch_slices(index_augmentation))):
                 attributes[i] = Attribute(source_attribute)
 
@@ -534,11 +554,13 @@ class OutputDataset(Dataset, NeedDevice):
             sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
         )
 
-    def _patch_inverses(self, dataset: DatasetIter) -> list[TransformInverse]:
-        """The patch-level transforms of the mirrored group each patch is passed back through, last first."""
+    def _inverses(self, dataset: DatasetIter, patch: bool) -> list[TransformInverse]:
+        """The transforms of the mirrored group the output is passed back through, last first: its patch
+        transforms for each patch, its case transforms for the reduced volume."""
+        group = dataset.groups_src[self.group_src][self.group_dest]
         return [
             transform
-            for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].patch_transforms)
+            for transform in reversed(group.patch_transforms if patch else group.transforms)
             if isinstance(transform, TransformInverse) and transform.apply_inverse
         ]
 
@@ -640,11 +662,41 @@ class OutputDataset(Dataset, NeedDevice):
                 stacklevel=2,
             )
             fraction = _STREAM_WORTH_MIN_FRACTION
-        # The config's budget, never the machine's free memory.
-        budget = self._per_rank_budget_bytes
-        if budget is None:
-            budget = resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
-        return assembled >= fraction * budget
+        return assembled >= fraction * self._budget_bytes()
+
+    def _budget_bytes(self) -> float:
+        """This rank's memory budget: the config's, never the machine's free memory."""
+        if self._per_rank_budget_bytes is not None:
+            return self._per_rank_budget_bytes
+        return resolve_memory_budget(None).per_rank_bytes(node_local_ranks())
+
+    def _stream_refusal(
+        self, dataset: DatasetIter, index: int, attribute: Attribute, layer: torch.Tensor | None = None
+    ) -> str | None:
+        """Why this case cannot stream at all, or ``None`` when a plan can be drawn for it."""
+        if self.nb_data_augmentation < 1:
+            return "no copy of the case is planned"
+        if not self.reduction.voxel_local:
+            return f"the reduction {type(self.reduction).__name__} is not voxel-local"
+        if layer is not None and not self._worth_streaming(dataset, index, layer):
+            return (
+                "the case is too light for slab streaming to pay, its output being under"
+                f" KONFAI_STREAM_WORTH_THRESHOLD (default {_STREAM_WORTH_MIN_FRACTION}) of the per-rank memory budget"
+            )
+        if self.nb_data_augmentation != 1:
+            try:
+                streamable = self._tta_streamable(dataset, index, attribute)
+            except Exception as error:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
+                return f"a TTA copy's un-augment could not be probed ({type(error).__name__}: {error})"
+            if not streamable:
+                return "a TTA copy's un-augment does not act slab by slab (it moves the slab axis)"
+        for transform in self.before_reduction_transforms:
+            locality = transform.patch_locality(Attribute(attribute))
+            # A SLAB before-reduction transform streams through ``stream_slab``; any other
+            # non-voxel-local one refuses outright.
+            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
+                return f"the before-reduction transform {type(transform).__name__} is not voxel-local"
+        return None
 
     def _plan_stream(
         self,
@@ -660,22 +712,11 @@ class OutputDataset(Dataset, NeedDevice):
         streaming cannot honour becomes a whole-volume TAIL run once on a post-reduction buffer, as does
         a destination that cannot serve region writes. Refused outright: a reduction that is not
         voxel-local, a non-voxel-local before-reduction transform, a TTA copy whose un-augment does not
-        act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``).
+        act slab by slab (``_tta_streamable``), or a case too light to pay (``_worth_streaming``): see
+        ``_stream_refusal``.
         """
-        if self.nb_data_augmentation < 1:
+        if self._stream_refusal(dataset, index, attribute, layer) is not None:
             return None
-        if not self.reduction.voxel_local:
-            return None
-        if layer is not None and not self._worth_streaming(dataset, index, layer):
-            return None
-        if self.nb_data_augmentation != 1 and not self._tta_streamable(dataset, index, attribute):
-            return None
-        for transform in self.before_reduction_transforms:
-            locality = transform.patch_locality(Attribute(attribute))
-            # A SLAB before-reduction transform streams through ``stream_slab``; any other
-            # non-voxel-local one refuses outright.
-            if not self._voxel_local(locality, attribute) and locality.kind is not LocalityKind.SLAB:
-                return None
         stages = [
             *(_FinalizeStage(transform, False) for transform in self.after_reduction_transforms),
             *(
@@ -741,32 +782,29 @@ class OutputDataset(Dataset, NeedDevice):
         A POINTWISE draw does; an ORIENTATION draw does when its declared region remap fixes the slab
         axis row for row and its shape fold keeps the slab extent. Any other kind refuses outright.
         """
-        try:
-            input_dataset = dataset.get_dataset_from_index(self.group_dest, index)
-            case = input_dataset.index
-            for index_augmentation in range(1, self.nb_data_augmentation):
-                draw = self._copy_draw(dataset, index_augmentation)
-                if draw is None:
+        input_dataset = dataset.get_dataset_from_index(self.group_dest, index)
+        case = input_dataset.index
+        for index_augmentation in range(1, self.nb_data_augmentation):
+            draw = self._copy_draw(dataset, index_augmentation)
+            if draw is None:
+                continue
+            augmentations, a = draw
+            shape = [int(extent) for extent in input_dataset.shapes[0]]
+            for augmentation in augmentations:
+                locality = augmentation.patch_locality(case, a, Attribute(attribute))
+                if locality.kind is LocalityKind.POINTWISE:
                     continue
-                augmentations, a = draw
-                shape = [int(extent) for extent in input_dataset.shapes[0]]
-                for augmentation in augmentations:
-                    locality = augmentation.patch_locality(case, a, Attribute(attribute))
-                    if locality.kind is LocalityKind.POINTWISE:
-                        continue
-                    if locality.kind is not LocalityKind.ORIENTATION:
+                if locality.kind is not LocalityKind.ORIENTATION:
+                    return False
+                out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
+                if out_shape[0] != shape[0]:
+                    return False
+                plane = tuple(slice(0, extent) for extent in out_shape[1:])
+                for row in range(out_shape[0]):
+                    source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
+                    if (source[0].start, source[0].stop) != (row, row + 1):
                         return False
-                    out_shape = [int(extent) for extent in augmentation.stream_shape(case, a, list(shape))]
-                    if out_shape[0] != shape[0]:
-                        return False
-                    plane = tuple(slice(0, extent) for extent in out_shape[1:])
-                    for row in range(out_shape[0]):
-                        source = augmentation.stream_region_source(case, a, (slice(row, row + 1), *plane), shape)
-                        if (source[0].start, source[0].stop) != (row, row + 1):
-                            return False
-                    shape = out_shape
-        except Exception:  # nosec B110 - an unprobeable draw keeps the case on the whole-volume path
-            return False
+                shape = out_shape
         return True
 
     def _consume_slabs(
@@ -880,7 +918,9 @@ class OutputDataset(Dataset, NeedDevice):
                     pull_fns.append(lambda target: list(target))
                     shapes.append(list(shape))
                     probe = stage.stream_region(name, probe, _corner_context(shape), walking)
-        except Exception:  # nosec B110 - an unplannable pipe just keeps the case on the buffered path
+        except Exception as error:  # nosec B110 - an unplannable pipe keeps the case on the buffered path
+            reason = f"its region pipe could not be planned ({type(error).__name__}: {error})"
+            self._report_once(reason, f"streaming: case '{name}' takes the buffered path: {reason}.")
             return None
 
         state = _RegionState(shapes)
@@ -1091,13 +1131,29 @@ class OutputDataset(Dataset, NeedDevice):
         self._reduce_device.clear()
         self._pin_buffer = None
 
-    def _close_stream(self, index: int) -> None:
-        """Finalize the case's sink and drop its bookkeeping (``is_done`` then reports nothing left)."""
+    def discard(self, index: int) -> None:
+        """Drop a case set aside before its last patch: its accumulation, and the streamed entry it
+        began, which the backend removes, so no partial output is left for a rerun to skip."""
+        if index not in self.output_layer_accumulator:
+            return
+        plan = self._stream_plans.get(index)
+        if plan is not None:
+            for position in plan.slab_stages:
+                with suppress(Exception):
+                    plan.stages[position].transform.stream_abort(self.names[index])
+        self._close_stream(index, PredictorError(f"case '{self.names[index]}' set aside"))
+        self.names.pop(index, None)
+
+    def _close_stream(self, index: int, error: BaseException | None = None) -> None:
+        """Finalize the case's sink, or abort it with ``error``, and drop its bookkeeping (``is_done``
+        then reports nothing left)."""
 
         def operation() -> None:
             sink = self._stream_sinks.pop(index, None)
-            if sink is not None:
+            if sink is not None and error is None:
                 sink.close()
+            elif sink is not None:
+                sink.abort(error)
 
         self._submit_write(operation)
         self._stream_plans.pop(index, None)
@@ -1135,11 +1191,11 @@ class OutputDataset(Dataset, NeedDevice):
         """The cross-copy reduction, identical for a slab and a whole volume.
 
         Mixed devices (a mid-case OOM fallback) reconcile on the host. Reduce, then drop the singleton
-        stack axis; Mean/Median also drop the singleton model axis, Concat keeps ``[M, C, ...]``."""
+        stack axis; a fold also drops the singleton model axis, Concat keeps ``[M, C, ...]``."""
         if len({copy.device for copy in copies}) > 1:
             copies = [copy.cpu() if copy.device.type != "cpu" else copy for copy in copies]
         result = self.reduction(copies).squeeze(0)
-        if isinstance(self.reduction, Mean | Median):
+        if not isinstance(self.reduction, Concat):
             result = result.squeeze(0)
         return result
 
@@ -1181,9 +1237,20 @@ class OutputDataset(Dataset, NeedDevice):
         device = torch.device("cuda", self.device) if isinstance(self.device, int) else self.device
         if device.type != "cuda":
             return torch.device("cpu")
-        # Every transformed chunk is parked on the reduce device until the final stack: budget all of
-        # them plus a same-size working temp per chunk and one stack copy.
-        needed = chunk.numel() * chunk.element_size() * (2 * max(1, nb_chunks) + 1)
+        # Every copy parks its transformed chunks here until the cross-copy fold, which then holds its
+        # own working buffers and output (a Concat's is every copy again), and the after-reduction
+        # transforms work on that output: budget the whole case, plus one copy's working temp.
+        copies = max(1, self.nb_data_augmentation)
+        if self._copy_fold() is not None:
+            # The copies are folded as they come: one in flight, the running total, and what the
+            # after-reduction transforms that follow the fold work with on it.
+            rest = max((transform.working_multiple for transform in self.after_reduction_transforms[1:]), default=0.0)
+            parked, fold = 1, 1.0 + rest
+        else:
+            folded = self.reduction.output_channels(1, copies)
+            after = max((transform.working_multiple for transform in self.after_reduction_transforms), default=0.0)
+            parked, fold = copies, self.reduction.working_multiple_for(copies) + folded * (1 + after)
+        needed = chunk.numel() * chunk.element_size() * max(1, nb_chunks) * (parked + 1 + fold)
         try:
             free = _free_vram(device, needed)
         except Exception:  # nosec B110 - any CUDA query failure just keeps the reduction on CPU
@@ -1227,16 +1294,32 @@ class OutputDataset(Dataset, NeedDevice):
             return torch.device("cpu")
         return device if needed < free * self._ACCUMULATE_MARGIN else torch.device("cpu")
 
+    def _copy_fold(self) -> InferenceStack | None:
+        """The first after-reduction transform when it folds a Concat's copies one at a time (``fold_copies``)."""
+        first = self.after_reduction_transforms[0] if self.after_reduction_transforms else None
+        if isinstance(self.reduction, Concat) and isinstance(first, InferenceStack) and first.folds_copies:
+            return first
+        return None
+
     def get_output(self, index: int, number_of_channels_per_model: list[int], dataset: DatasetIter) -> torch.Tensor:
-        results = [
-            self._get_output(index, index_augmentation, number_of_channels_per_model, dataset).unsqueeze(0)
-            for index_augmentation in self.output_layer_accumulator[index].keys()
-        ]
+        accumulators = self.output_layer_accumulator[index]
+
+        def copies() -> Iterator[torch.Tensor]:
+            for index_augmentation in list(accumulators):
+                yield self._get_output(index, index_augmentation, number_of_channels_per_model, dataset)
+                del accumulators[index_augmentation]  # the copy is out: its accumulator is spent
+
+        # The finalize runs where the volume was blended; only the final result returns to the host.
+        after_reduction = self.after_reduction_transforms
+        fold = self._copy_fold()
+        if fold is not None:
+            result = fold.fold_copies(self.names[index], copies(), len(accumulators), self.attributes[index][0][0])
+            after_reduction = after_reduction[1:]
+        else:
+            result = self._reduce_copies([copy.unsqueeze(0) for copy in copies()])
         self.output_layer_accumulator.pop(index)
         self._accum_device.pop(index, None)
         self._reduce_device.pop(index, None)
-        # The finalize runs where the volume was blended; only the final result returns to the host.
-        result = self._reduce_copies(results)
         # combine = aggregation across models (M), reduce = aggregation across TTA copies (T):
         #   Mean/Median at both levels : [M, C, ...] -> [C, ...], then [T, C, ...] -> [C, ...]
         #   combine Concat, reduce Mean : [T, M, C, ...] -> [M, C, ...]
@@ -1244,12 +1327,11 @@ class OutputDataset(Dataset, NeedDevice):
         #   Concat at both levels       : [M * T, C, ...]
         # With a Concat at either level, the first ``after_reduction_transforms`` entry must be
         # ``InferenceStack`` or ``Sum`` so a ``[C, ...]`` follows.
-        for transform in self.after_reduction_transforms:
+        for transform in after_reduction:
             result = transform(self.names[index], result, self.attributes[index][0][0])
 
-        for transform in reversed(dataset.groups_src[self.group_src][self.group_dest].transforms):
-            if isinstance(transform, TransformInverse) and transform.apply_inverse:
-                result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
+        for transform in self._inverses(dataset, patch=False):
+            result = transform.inverse(self.names[index], result, self.attributes[index][0][0])
 
         for transform in self.final_transforms:
             result = transform(self.names[index], result, self.attributes[index][0][0])
@@ -1257,8 +1339,119 @@ class OutputDataset(Dataset, NeedDevice):
         return result.cpu() if result.device.type != "cpu" else result
 
 
-# ``name_class: OutSameAsGroupDataset`` is what published Prediction.yml carry.
-OutSameAsGroupDataset = OutputDataset
+class OutputLayerDataset(OutputDataset):
+    """Writes a model output as it comes out, on its own grid: an intermediate layer at another resolution than
+    the input (features, a bottleneck) included. It is tied to no input group: no input transform is inverted.
+    The output keeps the case's origin, its first voxel on the input's first as a strided convolution places it,
+    with the spacing scaled to the layer's size. Overlapping patches are blended by ``patch_combine``, rescaled
+    to the layer's grid. The layer is assembled whole, within the memory budget."""
+
+    def __init__(
+        self,
+        dataset_filename: str = "default|./Dataset:mha",
+        group: str = "default",
+        before_reduction_transforms: dict[str, TransformLoader] | None = None,
+        after_reduction_transforms: dict[str, TransformLoader] | None = None,
+        final_transforms: dict[str, TransformLoader] | None = None,
+        patch_combine: str | None = None,
+        reduction: str = "Mean",
+        attributes: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            dataset_filename=dataset_filename,
+            group=group,
+            before_reduction_transforms=before_reduction_transforms,
+            after_reduction_transforms=after_reduction_transforms,
+            final_transforms=final_transforms,
+            patch_combine=patch_combine,
+            reduction=reduction,
+            attributes=attributes,
+        )
+        self._streaming_enabled = False
+
+    def setup(self, datasets: list[Dataset], groups: dict[str, list[str]]):
+        # The case's name and geometry come from the first input group; nothing else is read from it.
+        self.group_src = next(iter(groups))
+        self.group_dest = groups[self.group_src][0]
+        super().setup(datasets, groups)
+
+    def _inverses(self, dataset: DatasetIter, patch: bool) -> list[TransformInverse]:
+        return []
+
+    def _ensure_case_state(
+        self,
+        index_dataset: int,
+        index_augmentation: int,
+        layer: torch.Tensor,
+        dataset: DatasetIter,
+        attribute: Attribute | None,
+        number_of_channels_per_model: list[int] | None,
+    ) -> None:
+        if index_augmentation in self.output_layer_accumulator.get(index_dataset, {}):
+            return
+        input_dataset = dataset.get_dataset_from_index(self.group_dest, index_dataset)
+        slots = input_dataset.patch.get_patch_slices(index_augmentation)
+        extent = [s.stop - s.start for s in slots[0]]
+        ratio = [Fraction(int(size), int(source)) for size, source in zip(layer.shape[1:], extent, strict=True)]
+        try:
+            scaled = [tuple(_scaled(s, r) for s, r in zip(slot, ratio, strict=True)) for slot in slots]
+        except ValueError as error:
+            raise PredictorError(
+                f"Output '{self.group}' of case '{input_dataset.name}' is {list(layer.shape[1:])} for a patch of"
+                f" {extent}: {error}.",
+                "A layer at another resolution needs patches whose positions scale to whole voxels: use one"
+                " patch per case (patch_size of 0), or patch sizes and overlaps divisible by the scale.",
+            ) from None
+        header = Attribute(attribute) if attribute is not None else Attribute(input_dataset.cache_attributes[0])
+        _scale_geometry(header, ratio)
+        for key, value in self._attributes.items():
+            if value == "":
+                while key in header:  # the whole stack: the case's own spacing must not resurface
+                    header.pop(key)
+            else:
+                header[key] = value
+        if index_dataset not in self.output_layer_accumulator:
+            # Every copy's accumulator is held until the case is written: its result and weight, per copy.
+            voxels = int(np.prod([max(slot[axis].stop for slot in scaled) for axis in range(len(scaled[0]))]))
+            held = (layer.shape[0] + 1) * voxels * layer.element_size() * max(1, self.nb_data_augmentation)
+            if held > self._budget_bytes():
+                raise PredictorError(
+                    f"Output '{self.group}' of case '{input_dataset.name}' needs {format_bytes(held)} to assemble,"
+                    f" over the memory budget of {format_bytes(self._budget_bytes())}.",
+                    "A layer is assembled whole: write a coarser layer or fewer channels, or raise memory_budget.",
+                )
+        self.output_layer_accumulator.setdefault(index_dataset, {})
+        self.attributes.setdefault(index_dataset, {})[index_augmentation] = {0: header}
+        self.names[index_dataset] = input_dataset.name
+        self._stream_plans[index_dataset] = None
+        window = self.patch_combine
+        if window is not None and any(r != 1 for r in ratio):
+            window = copy.deepcopy(window)
+            window.set_patch_config(
+                [int(len(axis) * r) if len(axis) > 1 else 1 for axis, r in zip(window.windows_1d, ratio, strict=True)],
+                [int(overlap * r) for overlap, r in zip(window.overlaps, ratio, strict=True)],
+            )
+        self.output_layer_accumulator[index_dataset][index_augmentation] = Accumulator(
+            scaled, [int(size) for size in layer.shape[1:]], window, batch=False
+        )
+
+
+def _scaled(window: slice, ratio: Fraction) -> slice:
+    """``window`` of the input grid on a grid ``ratio`` times as large; refused unless it lands on whole voxels."""
+    start, stop = window.start * ratio, window.stop * ratio
+    if start.denominator != 1 or stop.denominator != 1:
+        raise ValueError(f"the patch at {window.start}:{window.stop} lands at {float(start)}:{float(stop)}")
+    return slice(int(start), int(stop))
+
+
+def _scale_geometry(header: Attribute, ratio: list[Fraction]) -> None:
+    """Rescale the case's spacing by ``ratio`` (array order); the origin stays, the layer's first voxel on the
+    input's first."""
+    if "Spacing" not in header:
+        return
+    spacing = header.get_np_array("Spacing")
+    if len(spacing) == len(ratio) and any(r != 1 for r in ratio):
+        header["Spacing"] = spacing / np.array([float(r) for r in reversed(ratio)])
 
 
 @config("OutputDataset")
@@ -1271,4 +1464,4 @@ class OutputDatasetLoader:
 
     def get_output_dataset(self, layer_name: str) -> OutputDataset:
         module, name = get_module(self.name_class, "konfai.predictor")
-        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(getattr(module, name))()
+        return apply_config(f"Predictor.outputs_dataset.{layer_name}")(module_attribute(module, name))()

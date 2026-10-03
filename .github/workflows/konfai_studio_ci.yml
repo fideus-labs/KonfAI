@@ -1,7 +1,7 @@
 name: konfai_studio_ci
 
-# konfai/** is here for the same reason konfai_mcp_ci.yml lists it: Studio's tests guard the wiring
-# between Studio and the workflows, so a change confined to konfai/ is exactly what breaks them.
+# konfai/** and konfai-apps/** are here for the same reason konfai_mcp_ci.yml lists them: Studio's tests
+# guard the wiring between Studio and the workflows, so a change confined to either is what breaks them.
 on:
   push:
     branches: [main]
@@ -9,6 +9,7 @@ on:
       - ".github/workflows/konfai_studio_ci.yml"
       - "konfai-studio/**"
       - "konfai-mcp/**"
+      - "konfai-apps/**"
       - "konfai/**"
       - "pyproject.toml"
   pull_request:
@@ -16,13 +17,26 @@ on:
       - ".github/workflows/konfai_studio_ci.yml"
       - "konfai-studio/**"
       - "konfai-mcp/**"
+      - "konfai-apps/**"
       - "konfai/**"
       - "pyproject.toml"
+  schedule:
+    - cron: "17 3 * * 1" # Windows and macOS lanes, weekly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only a pull request's runs share a group: a newer push cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   front:
     # Built once: the React front does not change with the Python version the lanes below test.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -53,12 +67,21 @@ jobs:
           if-no-files-found: error
 
   konfai_studio_ci:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     needs: front
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        # Pull requests run Linux; a push to main, the weekly schedule and a manual run add Windows and
+        # macOS, whose code paths (process groups, paths, signals) the Linux lanes never take.
+        include: >-
+          ${{ fromJSON(github.event_name == 'pull_request' && '[]' || '[{"os": "windows-latest", "python-version": "3.12"}, {"os": "macos-latest", "python-version": "3.12"}]') }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -89,7 +112,7 @@ jobs:
         # CPU-only runner never uses.
         run: |
           python -m pip install -U pip
-          pip install -e ".[dev]" --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]" ${{ runner.os == 'Linux' && '--extra-index-url https://download.pytorch.org/whl/cpu' || '' }}
 
       - name: Install standalone apps package
         run: |
@@ -119,6 +142,13 @@ jobs:
         run: |
           ruff check konfai-studio/konfai_studio
           ruff format --check konfai-studio/konfai_studio
+
+      - name: Type-check with the Studio stack installed
+        # The same command as the pixi `typecheck` task. konfai_ci's typecheck job installs neither
+        # fastmcp nor fastapi, so their APIs are Any there. One lane, the typecheck job's 3.12: mypy
+        # analyses as the interpreter it runs on.
+        if: matrix.python-version == '3.12' && runner.os == 'Linux'
+        run: python -m mypy konfai konfai-apps/konfai_apps konfai-mcp/konfai_mcp konfai-studio/konfai_studio
 
       - name: Run studio tests
         run: |

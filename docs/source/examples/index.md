@@ -5,7 +5,7 @@ fetches its own data, runs the real `konfai` commands, and ends by showing the
 result, from a fresh environment, Google Colab included.
 
 **Five run a published model**: no training, no YAML, a real result in about a
-minute. Start there to see what KonfAI produces before learning how it is
+minute. They show what KonfAI produces before you learn how it is
 configured. They are KonfAI {doc}`Apps <../usage/apps>`.
 
 | Run a published model | Task | |
@@ -16,12 +16,9 @@ configured. They are KonfAI {doc}`Apps <../usage/apps>`.
 | `ImpactSynth` | synthetic CT from MR or CBCT | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactSynth/ImpactSynth_demo.ipynb) |
 | `ImpactReg` | register two *different* patients, scored on their reference labels | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fideus-labs/KonfAI/blob/main/examples/ImpactReg/register_demo.ipynb) |
 
-**The other three are the framework itself**: a YAML config, the `konfai` CLI,
-and nothing else. They are what you copy for your own experiment, and the pages
-below document them. Their training runs are deliberately short, so the scores
-demonstrate the pipeline rather than the method. A fourth,
-[Bring your model](#bring-your-model), is the same engine without the YAML: a MONAI `UNet`
-trained and run through `konfai.train_model` and `konfai.predict_model`.
+**The others use the framework itself**: a YAML config and the `konfai` CLI. Copy them for your own
+experiment. Their training runs are short on purpose: the scores show the pipeline, not the method.
+[Bring your model](#bring-your-model) does the same from Python, without YAML.
 
 Both tiers use the public demo data on Hugging Face: `VBoussot/konfai-demo` ships
 a `Segmentation/` subset (pelvis CT, 41-label reference: also the source
@@ -76,7 +73,7 @@ that produce these transforms are in {doc}`registration`.
 
 ## Choosing an example
 
-Start with **Segmentation** when you want the smallest conservative baseline:
+Pick **Segmentation** when you want the smallest conservative baseline:
 
 - one input group (`CT`)
 - one label-map target (`SEG`)
@@ -84,7 +81,7 @@ Start with **Segmentation** when you want the smallest conservative baseline:
 - training with `CrossEntropyLoss` and `Dice`
 - final evaluation with Dice
 
-Start with **Synthesis** when you want to understand more of KonfAI's
+Pick **Synthesis** when you want to understand more of KonfAI's
 configuration model:
 
 - custom local Python modules loaded through `classpath` (needs `pip install "konfai[smp]"`)
@@ -95,10 +92,12 @@ configuration model:
 
 ```{warning}
 The preprocessing in `Prediction.yml` must mirror `Config.yml` exactly. Standardizing a group
-differently in the two files feeds the network a scale it never trained on, and nothing warns you, on this example that single mismatch cost 4x on MAE.
+differently in the two files feeds the network a scale it never trained on, and the run still
+succeeds: on this example that single mismatch cost 4x on MAE (see
+[preprocessing must match training](../config_guide/prediction.md#preprocessing-must-match-training)).
 ```
 
-Start with **Registration** when you want to learn the two-input spatial
+Pick **Registration** when you want to learn the two-input spatial
 workflow:
 
 - `FIXED` / `MOVING` pairs built from real CT slices with a known displacement field
@@ -114,65 +113,31 @@ A good adoption pattern is:
 
 ## Working from the repository
 
-**All example commands in this documentation assume you are running from the
-example directory itself**, for example:
-
-```bash
-cd examples/Segmentation
-```
-
-or:
-
-```bash
-cd examples/Registration
-```
-
-or:
-
-```bash
-cd examples/Synthesis
-```
-
-That matters because the shipped YAML files refer to local modules and dataset
-paths relative to the current working directory.
+Run each example's commands from its own folder (`cd examples/Segmentation`): the YAML files name local
+modules and datasets relative to it.
 
 ```{include} ../../../examples/BringYourModel/README.md
 :heading-offset: 1
 ```
 
-The three framework examples are YAML configs run by the `konfai` CLI. This one
-is the other spelling: a model that already exists in Python (MONAI's `UNet`,
-built as MONAI builds it) goes through `konfai.train_model` and
-`konfai.predict_model`, and everything else is the same engine: the patch
-sampling, the overlap-blended reassembly, the streamed writes, the checkpoint
-format and the run record (`Statistics/MONAI_UNET/Trainer.yml`, the resolved
-config the run would have read). The calls are documented in
-{doc}`../usage/adopting-konfai` (Bring your model) and {doc}`../usage/python-api`;
-`tests/unit/test_api.py` runs the same two calls on a synthetic cohort and on a
-MONAI UNet, so the notebook's claim is pinned by a test.
-
-A live model runs on one rank, in the process that built it: several GPUs, and
-a RESUME from another process, need the model spelled as a classpath
-(`monai.networks.nets:UNet`) in a `Config.yml`, which is the {doc}`segmentation`
-route. `Statistics/MONAI_UNET/Trainer.yml` is a starting point for that file:
-it is the config the ten lines built.
+This one uses no YAML: a MONAI `UNet` built in Python goes through `konfai.train_model` and
+`konfai.predict_model`, with the same patching, blending, checkpoints and run record
+(`Statistics/MONAI_UNET/Trainer.yml`). It runs on one GPU and cannot be resumed from another process; for
+that, name the model by classpath in a `Config.yml`, starting from that `Trainer.yml`
+({doc}`../usage/adopting-konfai`).
 
 ```{include} ../../../examples/LargeImages/README.md
 :heading-offset: 1
 ```
 
-The other examples fetch their data first. This one reads a 2.4 GB volume that
-stays on a public S3 bucket: the pyramid's metadata, a coarse level as an
-overview, one native-resolution window (one chunk), then a `TRANSFORM` that
-streams a level to a local HDF5 under a memory budget, region by region along
-the chunk grid. It is the {doc}`../usage/large-images` guide run for real, on a
-store anyone can reach, with `FSSPEC_S3_ANON=true` standing in for credentials;
-{doc}`../reference/components/storage-backends` documents the `:omezarr`
-backend, its selectors and its URI support.
+This one reads a 2.4 GB volume that stays on a public S3 bucket: its metadata, a coarse overview, one window
+at full resolution, then a `TRANSFORM` that streams a level to a local HDF5 under a memory budget
+({doc}`../usage/large-images`).
 
 ## Next steps
 
-- {doc}`segmentation`: the smallest end-to-end run; start here
+- {doc}`../quickstart`: the smallest end-to-end run, on one CPU; start here
+- {doc}`segmentation`: 41 classes on real pelvis CT, and its notebook
 - {doc}`registration`: train, materialise, and evaluate a fixed/moving image workflow
 - {ref}`gallery-registration`: inspect a separate real IMPACT-Reg App execution
 - {doc}`../config_guide/index`: understand the YAML the examples are built from

@@ -28,12 +28,36 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from konfai.data.augmentation import Brightness, CutOUT, Flip, Noise, Permute, Rotate, Scale
+from konfai.data.augmentation import (
+    Brightness,
+    CutOUT,
+    DataAugmentationsList,
+    Elastix,
+    Flip,
+    Noise,
+    Permute,
+    Rotate,
+    Scale,
+)
+from konfai.data.data_manager import GroupTransform, GroupTransformMetric, GroupTransformOut
 from konfai.data.materialize import CaseMaterializer, Regime, Verdict
 from konfai.data.patching import DatasetManager
-from konfai.data.transform import Clip, Expand, Mask, Resample, Save, TensorCast, Transform, Write, split_expand
+from konfai.data.transform import (
+    Clip,
+    Expand,
+    Mask,
+    Reduce,
+    Resample,
+    Save,
+    TensorCast,
+    Transform,
+    TransformLoader,
+    Write,
+    split_expand,
+)
+from konfai.data.transform import Permute as PermuteAxes
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import PatchError, TransformError
+from konfai.utils.errors import ConfigError, PatchError, TransformError
 from oracle_support import geometry, manager
 
 pytest.importorskip("SimpleITK")
@@ -86,6 +110,26 @@ def test_expand_refuses_a_cardinality_below_one() -> None:
 def test_expand_is_never_applied_as_an_ordinary_transform() -> None:
     with pytest.raises(TransformError, match="expands nothing"):
         Expand()("CASE_000", torch.zeros(1, 2, 2, 2), Attribute())
+
+
+@pytest.mark.parametrize("marker", [Expand(nb=2), Reduce(operator="Mean", output="MEAN")], ids=["expand", "reduce"])
+def test_a_cardinality_marker_outside_transform_is_refused_when_the_chain_is_bound(
+    marker: Transform, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the TRANSFORM engine runs a marker; another workflow refuses it from the config, not
+    at the first case its loader reads."""
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    monkeypatch.setattr(TransformLoader, "get_transform", lambda *_, **__: marker)
+    for chain in (
+        GroupTransform(transforms={"Marker": TransformLoader()}),
+        GroupTransformMetric({"Marker": TransformLoader()}),
+    ):
+        with pytest.raises(ConfigError, match=f"'{type(marker).__name__}' changes how many cases"):
+            chain.prepare("CT", "CT")
+
+    transform_chain = GroupTransformOut({"Marker": TransformLoader()})
+    transform_chain.prepare("CT", "CT")
+    assert transform_chain.transforms == [marker]
 
 
 def test_split_expand_is_the_chain_around_its_marker() -> None:
@@ -640,13 +684,18 @@ def test_interleaved_patch_reads_of_two_copies_each_keep_their_own_grid(tmp_path
     base = torch.from_numpy(source.read_data("CT", "CASE_000")[0].copy())
 
     def truth(a: int) -> torch.Tensor:
-        drawn = permute.compute("CASE_000", 0, a - 1, base.clone())
-        return Resample(shape=[6, 6, 6])(f"GT_{a}", drawn, _image_attributes())
+        # The draw restates the copy's header, which the Resample after it reads.
+        attribute = _image_attributes()
+        drawn = manager._expand_tail(a)[0]("CASE_000", base.clone(), attribute)
+        return Resample(shape=[6, 6, 6])(f"GT_{a}", drawn, attribute)
 
     for index, a in [(0, 1), (0, 2), (0, 1), (1, 2), (1, 1)]:
         got = manager.get_data(index, a, [], True)
         expected = manager.patch.get_data(truth(a), index, a, True)
-        assert torch.equal(got, expected), f"patch {index} of copy {a} returned another copy's sampling"
+        # A streamed resample under a permuted direction rounds a float32 ulp away from the whole volume.
+        torch.testing.assert_close(
+            got, expected, rtol=0, atol=1e-5, msg=f"patch {index} of copy {a} returned another copy's sampling"
+        )
 
 
 # ------------------------------------------------- other destinations, other draws
@@ -767,3 +816,178 @@ def test_a_copy_s_records_are_refolded_once_per_change_of_copy_not_per_patch(tmp
     manager._apply_chain(base, [Resample(shape=[6, 6, 6])], _image_attributes(), "CASE_000")
     manager.get_data(0, 1, [], True)
     assert len(folds) == 5 * 2
+
+
+# ------------------------------------------------------------ the grid a draw is made on
+
+#: A thick-slice case in array order (z, y, x), and the same grid with its first two axes swapped.
+_THICK_SHAPE, _THICK_PITCH, _SWAPPED_PITCH = (32, 80, 80), (2.5, 0.8, 0.8), (0.8, 2.5, 0.8)
+
+
+def _world_offsets(shape: tuple[int, ...], pitch: tuple[float, ...]) -> list[np.ndarray]:
+    """Each voxel's offset from the grid's centre, in world units, per array axis."""
+    return np.meshgrid(
+        *[(np.arange(extent) - (extent - 1) / 2) * step for extent, step in zip(shape, pitch, strict=True)],
+        indexing="ij",
+    )
+
+
+def _anisotropy(volume: np.ndarray, pitch: tuple[float, ...], keep: float = 19.0) -> float:
+    """The ratio of the extreme eigenvalues of the covariance of a centred shape, in world units,
+    within ``keep`` of the centre: 1 for a sphere, whatever rigid turn it went through."""
+    offsets = _world_offsets(volume.shape, pitch)
+    inside = (volume > 0.5) & (sum(offset**2 for offset in offsets) <= keep**2)
+    eigenvalues = np.linalg.eigvalsh(np.cov(np.stack([offset[inside] for offset in offsets])))
+    return float(eigenvalues.max() / eigenvalues.min())
+
+
+#: How the copy reaches its draw: the transforms before it, the stages between it and the marker,
+#: whether it is an Expand copy (and streamed), and the spacing of the grid the draw is handed, in
+#: array order.
+_DRAW_ROUTES = {
+    "augmentation": ([], [], None, _THICK_PITCH),
+    "augmentation-after-resample": ([lambda: Resample(spacing=[1.0, 1.0, 1.0])], [], None, (1.0, 1.0, 1.0)),
+    "augmentation-after-a-permute-draw": ([], [lambda: Permute(prob_permute=[1.0, 0.0])], None, _SWAPPED_PITCH),
+    "expand": ([], [], "whole", _THICK_PITCH),
+    "expand-streamed": ([], [], "streamed", _THICK_PITCH),
+    "expand-after-resample": ([lambda: Resample(spacing=[1.0, 1.0, 1.0])], [], "whole", (1.0, 1.0, 1.0)),
+    "expand-after-resample-streamed": (
+        [lambda: Resample(spacing=[1.0, 1.0, 1.0])],
+        [],
+        "streamed",
+        (1.0, 1.0, 1.0),
+    ),
+    "expand-after-permute": ([lambda: PermuteAxes(dims="1|0|2")], [], "whole", _SWAPPED_PITCH),
+    "expand-after-a-permute-draw": ([], [lambda: Permute(prob_permute=[1.0, 0.0])], "whole", _SWAPPED_PITCH),
+    "expand-after-a-permute-draw-streamed": (
+        [],
+        [lambda: Permute(prob_permute=[1.0, 0.0])],
+        "streamed",
+        _SWAPPED_PITCH,
+    ),
+    # A draw that swaps axes restates the copy's header, so a transform after it reads the spacing of
+    # the swapped grid.
+    "expand-a-permute-draw-then-resample": (
+        [],
+        [lambda: Permute(prob_permute=[1.0, 0.0]), lambda: Resample(spacing=[1.0, 1.0, 1.0])],
+        "whole",
+        (1.0, 1.0, 1.0),
+    ),
+    "expand-a-permute-draw-then-resample-keeping-z": (
+        [],
+        [lambda: Permute(prob_permute=[1.0, 0.0]), lambda: Resample(spacing=[0.5, 0.5, 0.0])],
+        "whole",
+        (0.8, 0.5, 0.5),
+    ),
+    "expand-a-permute-draw-then-a-permute": (
+        [],
+        [lambda: Permute(prob_permute=[1.0, 0.0]), lambda: PermuteAxes(dims="1|0|2")],
+        "whole",
+        _THICK_PITCH,
+    ),
+}
+
+
+def _drawn_manager(tmp_path: Path, route: str, draw) -> DatasetManager:
+    """A thick-slice case holding a sphere of radius 15 about its centre, with ``draw`` made on the
+    copy ``route`` hands it."""
+    before, earlier, expand, _pitch = _DRAW_ROUTES[route]
+    source = Dataset(tmp_path / "source", "mha")
+    sphere = (sum(offset**2 for offset in _world_offsets(_THICK_SHAPE, _THICK_PITCH)) <= 15.0**2).astype(np.float32)
+    source.write("CT", "CASE_000", sphere[None], geometry((0.0, 0.0, 0.0), _THICK_PITCH[::-1]))
+    draws = [stage if isinstance(stage, Transform) else _draw(stage) for stage in (build() for build in earlier)]
+    draws.append(_draw(draw))
+    if expand is not None:
+        return _manager(
+            source,
+            [
+                *(build() for build in before),
+                Expand(nb=1, pattern="{name}_r{a:02d}"),
+                *draws,
+                Write(f"{tmp_path / 'out'}:h5"),
+            ],
+        )
+    augmentations = DataAugmentationsList(nb=1, data_augmentations={})
+    augmentations.data_augmentations = draws
+    return DatasetManager(
+        index=0,
+        group_src="CT",
+        group_dest="CT",
+        name="CASE_000",
+        dataset=source,
+        patch=None,
+        transforms=[build() for build in before],
+        data_augmentations_list=[augmentations],
+    )
+
+
+@pytest.mark.parametrize("route", list(_DRAW_ROUTES))
+def test_a_free_rotate_turns_the_grid_it_is_handed_rigidly_on_every_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """A free angle turns the world of the grid it is handed: a sphere stays a sphere, in the spacing
+    that grid really has. The header read at the draw must be that grid's: after a transform before
+    the marker it is not the stored one, and after a draw that swaps axes the spacing swaps with them."""
+    monkeypatch.setattr("konfai.data.patching.budget.SWEEP_SLAB_ROWS", 8)
+    _before, _earlier, expand, pitch = _DRAW_ROUTES[route]
+    manager = _drawn_manager(tmp_path, route, Rotate(a_min=30.0, a_max=30.0))
+    if expand is None:
+        manager.load([*manager.transforms], manager.data_augmentations_list)
+        copy = manager._get_tensor(1)[0].numpy()
+    else:
+        if expand == "streamed":
+            assert CaseMaterializer(manager).materialize_copies([1]) == {1: (Verdict.STREAM, Regime.SOLO)}
+        else:
+            CaseMaterializer(manager)._assemble_and_write(1)
+        copy = Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000_r01")[0][0]
+    assert _anisotropy(copy, pitch) < 1.06
+
+
+@pytest.mark.parametrize("route", [route for route in _DRAW_ROUTES if not route.endswith("streamed")])
+def test_an_elastic_draw_is_made_on_the_grid_it_warps_on_every_route(tmp_path: Path, route: str) -> None:
+    """``grid_spacing`` and ``max_displacement`` are world units of the grid the draw warps."""
+    elastix = Elastix(grid_spacing=16, max_displacement=4)
+    manager = _drawn_manager(tmp_path, route, elastix)
+    _stage, grid = elastix.draws[0][0]
+    assert list(grid.size_zyx) == manager.shapes[1]
+    # A resample to 1 mm fits the extent, so its spacing is 1 mm to within a voxel over the case.
+    np.testing.assert_allclose(grid.spacing_xyz, _DRAW_ROUTES[route][3][::-1], rtol=1e-2)
+
+
+# ------------------------------------------------------------ the header a copy is written with
+
+
+@pytest.mark.parametrize("route", ["whole", "streamed"])
+@pytest.mark.parametrize(
+    "draw", [lambda: Permute(prob_permute=[1.0, 0.0]), lambda: Rotate(is_quarter=True)], ids=["Permute", "Rotate"]
+)
+def test_a_copy_drawn_by_swapping_axes_is_written_on_its_own_header(tmp_path: Path, draw, route: str) -> None:
+    """A draw that swaps axes restates the copy's header as the Permute transform does: every voxel
+    keeps its world point, so the written copy lies on the case in the world (SimpleITK oracle)."""
+    sitk = pytest.importorskip("SimpleITK")
+    shape = (12, 10, 8)  # array order (z, y, x), 0.8 x 0.8 x 2.5 mm
+    header = geometry((10.0, -20.0, 30.0), (0.8, 0.8, 2.5), [[1.0, 0.3, 0.0], [0.0, 1.0, 0.0], [0.0, 0.2, 1.0]])
+    source = Dataset(tmp_path / "source", "mha")
+    source.write("CT", "CASE_000", 1.0 + np.arange(np.prod(shape), dtype=np.float32).reshape(1, *shape), header)
+    augmentation = _draw(draw())
+    manager = _manager(
+        source,
+        [Expand(nb=4, pattern="{name}_r{a:02d}"), augmentation, Write(f"{tmp_path / 'out'}:mha")],
+    )
+    if route == "streamed":
+        assert set(CaseMaterializer(manager).materialize_copies([1, 2, 3, 4]).values()) == {
+            (Verdict.STREAM, Regime.SOLO)
+        }
+    else:
+        for a in (1, 2, 3, 4):
+            CaseMaterializer(manager)._assemble_and_write(a)
+    case = sitk.ReadImage(str(tmp_path / "source" / "CASE_000" / "CT.mha"))
+    swapped = 0
+    for a in (1, 2, 3, 4):
+        copy = sitk.ReadImage(str(tmp_path / "out" / f"CASE_000_r{a:02d}" / "CT.mha"))
+        if list(copy.GetSize()[::-1]) == list(shape):
+            continue  # a turn that swaps no axis keeps the case's header, as before
+        swapped += 1
+        back = sitk.Resample(copy, case, sitk.Transform(), sitk.sitkNearestNeighbor, 0.0)
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(back), sitk.GetArrayFromImage(case))
+    assert swapped

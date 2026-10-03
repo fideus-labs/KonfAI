@@ -73,7 +73,9 @@ pip install konfai-mcp
 ```
 
 Add `pip install "konfai[imaging]"` if the agent will read `.mha`/`.nii` data or
-run training. This gives you the MCP entrypoint, `konfai-mcp`.
+run training. This gives you the MCP entrypoint, `konfai-mcp`. The wheel carries
+the repository's `examples/`, the templates a session starts from
+(`templates://list`); run from a checkout, the server reads them in place.
 
 ### From the KonfAI repository
 
@@ -230,11 +232,12 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
 
 1. **Use an app as-is**, no training. Discover with `list_apps`, read each
    candidate's manifest with `describe_app` (judge fit from the app's own
-   description and its declared inputs/outputs), then run it **as published**:
-   - `run_app_infer`: inference on the user's data
-   - `run_app_evaluate`: score predictions with the app's own metrics
-   - `run_app_uncertainty`: uncertainty maps
-   - `run_app_pipeline`: infer → evaluate → uncertainty in one call
+   description and its declared inputs/outputs), then run it **as published**
+   with `run_app`, whose `action` picks what runs:
+   - `infer`: inference on the user's data
+   - `evaluate`: score predictions with the app's own metrics
+   - `uncertainty`: uncertainty maps
+   - `pipeline`: infer → evaluate → uncertainty in one job
    - `list_app_parameters` / `set_parameters`: read tunable parameters (with
      their constraints) and override them per run
    - `import_app`: only when the app must be **modified** first. It copies the
@@ -248,7 +251,7 @@ The `solve_task` prompt frames the entry decision as a three-way fork:
    `package_app_from_session` turns the trained model into a bundle too.
 
 Both training paths therefore **end at the same reusable artifact, a bundle**,
-which `describe_app` / `run_app_infer` can then consume, and `export_app` can
+which `describe_app` / `run_app` can then consume, and `export_app` can
 snapshot (with tuned parameters baked in) as the reproducibility record a
 challenge submission wants. (A remote `host:port:name` app keeps its code on the
 user's own server; it is not runnable from the MCP server. Drive it with
@@ -339,16 +342,16 @@ entrypoint is the package command, not an ad hoc wrapper script.
 Run the full MCP test suite:
 
 ```bash
-pytest -q konfai-mcp/tests
+pytest konfai-mcp/tests
 ```
 
 Useful subsets:
 
 ```bash
-pytest -q konfai-mcp/tests/test_mcp_server.py
-pytest -q konfai-mcp/tests/test_mcp_server_pipeline.py
-pytest -q konfai-mcp/tests/test_mcp_server_segmentation_pipeline.py
-pytest -q konfai-mcp/tests/test_mcp_server_reliability.py
+pytest konfai-mcp/tests/test_mcp_server.py
+pytest konfai-mcp/tests/test_mcp_server_pipeline.py
+pytest konfai-mcp/tests/test_mcp_server_segmentation_pipeline.py
+pytest konfai-mcp/tests/test_mcp_server_reliability.py
 ```
 
 The `test_mcp_server_segmentation_pipeline.py` end-to-end test drives a full
@@ -364,7 +367,7 @@ which:
 - lints and format-checks `konfai_mcp`
 - builds the standalone MCP package
 - smoke-imports `konfai_mcp`
-- runs `pytest -q konfai-mcp/tests`
+- runs `pytest konfai-mcp/tests`
 
 ## Current Scope and Limitations
 

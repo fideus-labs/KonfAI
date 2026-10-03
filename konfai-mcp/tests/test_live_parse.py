@@ -111,3 +111,11 @@ def test_core_host_stat_emitters_parse_as_host_stats() -> None:
     if gpu_line:
         gpu_stats = parse_host_stats(f"Training : Loss (x : 0.1) {gpu_line} | {environment.get_memory_info()}: 1/10")
         assert {"memory_gpu_gb", "memory_gpu_percent"} <= set(gpu_stats)
+
+
+def test_a_repeated_criterion_keeps_its_occurrence_name() -> None:
+    # Two criteria of one class on one output and target log as Dice and Dice#2.
+    line = "Training : Loss (UNet(0.001000) : Dice(1.00) : 0.300000 Dice#2(1.00) : 0.400000) :  1% 1/100"
+    entry = parse_live_metric_line(line)
+    assert entry is not None
+    assert entry["flat_metrics"] == {"UNet:Dice": 0.3, "UNet:Dice#2": 0.4}

@@ -112,6 +112,13 @@ export KONFAI_STUDIO_MODEL=qwen2.5:14b
 konfai-studio
 ```
 
+A key or an endpoint typed in Studio's LLM panel instead is saved in
+`.konfai_studio/credentials.json` under the workspace root
+(`KONFAI_MCP_WORKSPACES_ROOT`, `~/KonfAI_Workspaces` by default) and read back at
+the next start, where a variable set in the environment wins over it. On Linux
+and macOS only you can read that file. On Windows it takes the permissions of
+the workspace root, so keep that root in your own profile.
+
 ## What a session looks like
 
 In practice you keep one conversation going. You point Studio at a dataset and
@@ -134,3 +141,8 @@ unless you set an access token. To reach it over a network, set
 single-operator deployment guide (token auth, TLS with Caddy or nginx, a systemd
 unit, and the threat model) is in
 [`konfai-studio/docs/REMOTE.md`](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/docs/REMOTE.md).
+
+Without a token, a Studio bound to loopback answers only to `127.0.0.1`, `localhost`
+and `::1`: a request under any other name, such as a web page that points its own
+domain at your machine, gets a 400. Serving Studio under another name, through a
+proxy or a forwarded port, needs `KONFAI_STUDIO_TOKEN`.

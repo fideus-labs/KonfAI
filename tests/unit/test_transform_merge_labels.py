@@ -16,7 +16,7 @@
 
 import pytest
 import torch
-from konfai.data.transform import MergeLabels
+from konfai.data.transform import MergeLabels, Sum
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
 
@@ -104,3 +104,13 @@ def test_merge_labels_preserves_dtype_with_the_production_suffixed_key() -> None
 
     assert out.dtype == torch.uint8
     assert out.tolist() == [0, 26, 0]
+
+
+def test_sum_adds_a_concat_stack_as_any_other_and_drops_its_channel_counts() -> None:
+    """A Concat stack (an ensemble's label maps, TTA copies) is summed as asked, never shifted by the
+    per-model channel counts, which the sum consumes; the input is left as it was."""
+    stack = torch.tensor([[1, 2, 0, 0], [0, 3, 0, 1]])
+    attribute = _attr([3, 4])
+    assert Sum(0)("case", stack, attribute).tolist() == [1, 5, 0, 1]
+    assert "number_of_channels_per_model" not in attribute
+    assert stack.tolist() == [[1, 2, 0, 0], [0, 3, 0, 1]]

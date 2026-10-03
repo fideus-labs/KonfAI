@@ -99,8 +99,8 @@ class ReductionPlan:
     #: blocks, so below one stored block this is the same figure at every height: charged flat,
     #: never divided by the rows.
     read_bytes: int = 0
-    #: Members read from a store that cannot serve a bounded region read (a gzipped NIfTI, a
-    #: compressed MetaImage, NRRD), by name, with the store's format: every region asked of such a
+    #: Members read from a store that cannot serve a bounded region read (NRRD, a compressed file
+    #: with no uncompressed twin), by name, with the store's format: every region asked of such a
     #: member decodes its whole volume, so the fold reads it once per region rather than once.
     unbounded: dict[str, str] = field(default_factory=dict)
     refusal: str | None = None
@@ -111,7 +111,8 @@ class ReductionPlan:
 
     @property
     def regions(self) -> int:
-        """Output regions the fold walks: slabs of ``slab_rows`` along the first spatial axis."""
+        """Output regions the fold walks at the starting height: slabs of ``slab_rows`` along the first
+        spatial axis. Regions grown taller after the first make the run walk fewer."""
         return max(1, -(-int(self.spatial[0]) // max(1, self.slab_rows)))
 
     @property
@@ -121,7 +122,7 @@ class ReductionPlan:
 
     @property
     def read_factor(self) -> float:
-        """How many times a member's source is read in full, priced from the plan alone.
+        """How many times a member's source is read in full at the starting height, priced from the plan alone.
 
         A store serving bounded region reads is read once per pass; one that cannot, once per region
         and per pass. The figure of the worst member; ``unbounded`` names the members it applies to.
@@ -190,7 +191,7 @@ class ReductionPlan:
             lines.append(
                 f"reads: {len(self.unbounded)} of {len(self.cases)} member(s) sit on {formats}, which decodes"
                 f" the whole volume behind every region read: {self.read_factor:g} decodes per member ({per}),"
-                f" {self.read_factor * len(self.unbounded):g} in all"
+                f" {self.read_factor * len(self.unbounded):g} in all, at the starting height"
             )
             lines.append("put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first")
         return lines
@@ -659,6 +660,8 @@ class CaseReduction:
 
         with SWEEP_CLOCK.phase("sweep"):
             self._write_folds(plan)
+        for manager in self.managers:
+            manager.release_case()
         return True
 
     def _write_folds(self, plan: ReductionPlan) -> None:

@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The tutorial pair: a head and neck CT (fixed) and the MRI of the same patient (moving), from the public
 SynthRAD2025 cases of the KonfAI demo dataset, at 2 mm. The MRI is moved by a known transform, a rigid one and a smooth
 deformation of up to about 8 mm, so every tutorial can check its result: label maps and landmarks are written for both

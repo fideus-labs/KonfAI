@@ -48,7 +48,7 @@ def _require_monai() -> Any:
         import monai.bundle
     except ImportError as error:
         raise ConfigError("MONAI Bundles need MONAI.", "pip install konfai[monai] (or: pip install monai)") from error
-    return monai.bundle
+    return monai
 
 
 @dataclass
@@ -92,7 +92,7 @@ class BundleImport:
             block["dim"] = self.spatial_dims
         if "in_channels" not in block:
             block["in_channels"] = 1
-        del patch  # a Patch block belongs to the Dataset, not the model; kept for the signature's future
+        del patch  # a Patch block belongs to the Dataset, not the model: the argument is ignored
         return {"classpath": self.classpath, self.name: block}
 
 
@@ -122,16 +122,16 @@ def import_bundle(
     ``config`` is the bundle config holding the network (``configs/inference.json`` by
     convention); ``network_key`` its entry; ``weights`` the state dict to convert. The checkpoint
     is written to ``out`` (default: ``<bundle>/models/konfai_model.pt``) in the format
-    ``Network.load`` reads for a wrapped foreign class. Nothing of the bundle is modified.
+    ``Network.load`` reads for a wrapped foreign class. The files the bundle ships are left as they are.
     """
-    monai_bundle = _require_monai()
+    monai = _require_monai()
     root = Path(bundle)
     config_path = root / config
     if not config_path.is_file():
         raise ConfigError(
             f"'{config_path}' is not in the bundle.", "A MONAI Bundle keeps its inference config under configs/."
         )
-    parser = monai_bundle.ConfigParser()
+    parser = monai.bundle.ConfigParser()
     parser.read_config(str(config_path))
     parser["bundle_root"] = str(root)
     classpath, arguments = _resolve_network(parser, network_key)
@@ -179,18 +179,20 @@ def export_bundle(
     output in execution order unless ``output_module`` names one. The bundle carries
     ``models/model.ts``, a ``metadata.json`` and a ``configs/inference.json`` that loads the traced
     module. Preprocessing is not exported; the traced module expects what the KonfAI chain fed the
-    network, which the bundle's metadata states.
+    network, which the bundle's metadata states. When a ModelPatch of the graph cuts ``example_input``
+    into several patches, an export whose head would see only the last one is refused.
     """
-    import monai
     import numpy
 
-    from konfai.export import _NamedHead, select_inference_head
+    from konfai.export import _NamedHead, _refuse_one_patch_of_several, list_output_modules, select_inference_head
 
+    monai = _require_monai()
+    model = model.eval()
+    head = output_module or select_inference_head(model, example_input)
+    _refuse_one_patch_of_several(model, list_output_modules(model, example_input), head)
     root = Path(out)
     (root / "models").mkdir(parents=True, exist_ok=True)
     (root / "configs").mkdir(parents=True, exist_ok=True)
-    model = model.eval()
-    head = output_module or select_inference_head(model, example_input)
     wrapped = _NamedHead(model, head).eval()
     with torch.no_grad():
         traced = torch.jit.trace(wrapped, example_input)

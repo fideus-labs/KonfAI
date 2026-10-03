@@ -24,12 +24,16 @@ import importlib.metadata
 import json
 import os
 import shutil
+import sys
 import textwrap
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from konfai import RemoteServer
+from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
+from konfai.utils.utils import env_flag
 
 from . import app as app_module
 from .app_repository import (
@@ -44,6 +48,33 @@ from .options import add_device, add_tmp_dir
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
+
+
+#: Where a designed refusal also writes its message, when set: the app server reads it back to answer
+#: the job's result with the refusal (422) rather than a bare exit code.
+REFUSAL_FILE_ENV = "KONFAI_APPS_REFUSAL_FILE"
+
+
+@contextmanager
+def _exit_on_refusal() -> Iterator[None]:
+    """A designed refusal (the app layer's or a workflow's it runs) prints its message and exits 1, as the
+    konfai CLI does; the traceback only under KONFAI_DEBUG=1."""
+    try:
+        yield
+    except KonfAIError as error:
+        if env_flag("KONFAI_DEBUG", False):
+            raise
+        message = str(error).strip()
+        print(message, file=sys.stderr)
+        if refusal_file := os.environ.get(REFUSAL_FILE_ENV):
+            Path(refusal_file).write_text(message + "\n", encoding="utf-8")
+        sys.exit(1)
+    except RuntimeError as error:  # torch.cuda.OutOfMemoryError, named without importing torch here
+        if type(error).__name__ != "OutOfMemoryError":
+            raise
+        # Not a designed refusal but one a caller acts on: IMPACT-Reg re-plans smaller on this exit code.
+        print(f"[KonfAI] out of GPU memory: {(str(error).splitlines() or ['CUDA'])[0]}", file=sys.stderr)
+        sys.exit(EXIT_OUT_OF_MEMORY)
 
 
 def _package_version() -> str:
@@ -105,21 +136,32 @@ def _resolved_path(value: str) -> Path:
     return Path(value).resolve()
 
 
-def _add_app_io(parser: argparse.ArgumentParser) -> None:
-    """Add the input/output/device options shared by every app operation."""
+def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> None:
+    """Add the input/output/device options shared by every app operation. Fine-tuning reads a dataset
+    instead of inputs and works in its output directory, so it takes no temporary directory."""
+    if fine_tune:
+        parser.add_argument(
+            "-d", "--dataset", type=_resolved_path, required=True, help="Dataset directory to fine-tune on."
+        )
+    else:
+        parser.add_argument(
+            "-i",
+            "--inputs",
+            type=_resolved_path,
+            nargs="+",
+            action="append",
+            required=True,
+            help="Input path(s): one or multiple volume files, or a dataset directory.",
+        )
     parser.add_argument(
-        "-i",
-        "--inputs",
+        "-o",
+        "--output",
         type=_resolved_path,
-        nargs="+",
-        action="append",
-        required=True,
-        help="Input path(s): one or multiple volume files, or a dataset directory.",
+        default=Path("./Output").resolve(),
+        help="Output directory: each case's files are listed when the run ends.",
     )
-    parser.add_argument(
-        "-o", "--output", type=_resolved_path, default=Path("./Output").resolve(), help="Output directory / file."
-    )
-    add_tmp_dir(parser)
+    if not fine_tune:
+        add_tmp_dir(parser)
     add_device(parser)
 
 
@@ -389,6 +431,7 @@ def build_app_cli(
     knobs = add_infer_knobs or (lambda parser: None)
     infer_kwargs = resolve_infer or (lambda args: {})
 
+    @_exit_on_refusal()
     def main() -> None:
         parser = argparse.ArgumentParser(
             prog=prog,
@@ -567,6 +610,7 @@ def run_download_cli(kwargs: dict[str, Any]) -> None:
             print(f"[KonfAI-Apps] {filename} is ready.")
 
 
+@_exit_on_refusal()
 def main_apps() -> None:
     """Entry point for the `konfai-apps` command-line interface."""
     parser = argparse.ArgumentParser(
@@ -585,36 +629,7 @@ def main_apps() -> None:
             default=os.environ.get("KONFAI_API_TOKEN"),
             help="Bearer token (or use KONFAI_API_TOKEN env var)",
         )
-
-        if not is_fine_tune:
-            parser.add_argument(
-                "-i",
-                "--inputs",
-                type=lambda x: Path(x).resolve(),
-                nargs="+",
-                action="append",
-                required=True,
-                help="Input path(s): provide one or multiple volume files, or a dataset directory.",
-            )
-        else:
-            parser.add_argument(
-                "-d",
-                "--dataset",
-                type=lambda x: Path(x).resolve(),
-                required=True,
-                help="dataset path(s): provide a dataset directory.",
-            )
-        parser.add_argument(
-            "-o",
-            "--output",
-            type=lambda x: Path(x).resolve(),
-            default=Path("./Output").resolve(),
-            help="Output directory / file",
-        )
-
-        if not is_fine_tune:
-            add_tmp_dir(parser)
-        add_device(parser)
+        _add_app_io(parser, fine_tune=is_fine_tune)
 
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
     add_common_args(infer_p)
@@ -628,7 +643,9 @@ def main_apps() -> None:
         help="Explicit list of model identifiers/paths to use.",
     )
     infer_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations")
-    infer_p.add_argument("--mc", type=int, default=0, help="Monte Carlo dropout samples")
+    infer_p.add_argument(
+        "--mc", type=int, default=0, help="Monte Carlo dropout: not implemented, any value but 0 is refused."
+    )
     _add_patch_overrides(infer_p)
     _add_config_overrides(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
@@ -642,21 +659,8 @@ def main_apps() -> None:
 
     eval_p = subparsers.add_parser("eval", help="Evaluate a KonfAI App using ground-truth labels.")
     add_common_args(eval_p)
-    eval_p.add_argument(
-        "--gt",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
-    )
-    eval_p.add_argument(
-        "--mask",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
-    )
+    _add_gt(eval_p, required=True)
+    _add_mask(eval_p)
     eval_p.add_argument(
         "--evaluation-file",
         "--evaluation_file",
@@ -689,7 +693,9 @@ def main_apps() -> None:
         help="Explicit list of model identifiers/paths to use.",
     )
     pipe_p.add_argument("--tta", type=int, default=0, help="Number of Test-Time Augmentations.")
-    pipe_p.add_argument("--mc", type=int, default=0, help="Number of Monte Carlo dropout samples.")
+    pipe_p.add_argument(
+        "--mc", type=int, default=0, help="Monte Carlo dropout: not implemented, any value but 0 is refused."
+    )
     _add_patch_overrides(pipe_p)
     _add_config_overrides(pipe_p)
     pipe_p.add_argument(
@@ -699,21 +705,8 @@ def main_apps() -> None:
         default="Prediction.yml",
         help="Optional prediction config filename",
     )
-    pipe_p.add_argument(
-        "--gt",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        required=True,
-        help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
-    )
-    pipe_p.add_argument(
-        "--mask",
-        type=lambda x: Path(x).resolve(),
-        nargs="+",
-        action="append",
-        help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
-    )
+    _add_gt(pipe_p, required=False)
+    _add_mask(pipe_p)
     pipe_p.add_argument(
         "--evaluation-file",
         "--evaluation_file",
@@ -899,7 +892,13 @@ def _configure_server_auth_env(auth: str, token: str | None, token_env: str) -> 
 
 def main_apps_server() -> None:
     """Entry point for launching the KonfAI Apps FastAPI server."""
-    import uvicorn
+    try:
+        import fastapi  # noqa: F401  # the server app imports it
+        import uvicorn
+    except ModuleNotFoundError as error:
+        raise SystemExit(
+            f"konfai-apps-server needs the server extra ({error.name} is missing): pip install 'konfai-apps[server]'"
+        ) from None
 
     parser = argparse.ArgumentParser(description="KonfAI apps server", allow_abbrev=False)
     parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -915,7 +914,11 @@ def main_apps_server() -> None:
         action="store_true",
         help="Pre-download all apps listed in --apps into the local cache before starting the server.",
     )
-    parser.add_argument("--check", action="store_true", help="Validate all apps listed in --apps (no download).")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate all apps listed in --apps (no download) and exit; with --download, download and serve.",
+    )
 
     args = parser.parse_args()
 
@@ -944,6 +947,8 @@ def main_apps_server() -> None:
             raise SystemExit("One or more apps are invalid:\n" + "\n".join(f"  - {a}: {err}" for a, err in errors))
 
         print("[KonfAI-Apps] All apps validated successfully.")
+        if not args.download:
+            return
 
     if args.download:
         for app in apps:

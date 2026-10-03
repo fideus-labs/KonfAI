@@ -19,6 +19,7 @@ from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
+from konfai_mcp.experiment_state import job_diagnosis
 from konfai_mcp.live_parse import parse_host_stats, parse_live_metric_line, parse_live_progress, progress_label
 
 from .paths import _sane_session, _session_dir, _session_jobs_dir
@@ -114,6 +115,11 @@ def _pid_alive(pid: Any) -> bool:
         return False
     if value <= 0:
         return False
+    if os.name == "nt":
+        import psutil
+
+        # No /proc, and os.kill(pid, 0) sends CTRL_C_EVENT: it succeeds or fails whatever the pid.
+        return bool(psutil.pid_exists(value))
     # A crashed job whose parent-reaper died leaves a zombie: it has exited but still owns a pid, so both
     # os.kill(0) and psutil see it as "alive". On Linux read the state directly and treat 'Z' as dead.
     try:
@@ -246,7 +252,9 @@ def _tail_lines(path: Path, pos: int, buf: str, limit: int = _TICK_BYTES) -> tup
         part if len(part) <= _MAX_LOG_LINE else _TRUNCATED_LINE + part[-(_MAX_LOG_LINE - len(_TRUNCATED_LINE)) :]
         for part in parts
     ]
-    return parts[:-1], pos, parts[-1]  # last element is the (possibly empty) incomplete remainder
+    # A log written on Windows ends its lines with \r\n; a \r inside a line is a progress bar's redraw.
+    lines = [part.removesuffix("\r") for part in parts[:-1]]
+    return lines, pos, parts[-1]  # last element is the (possibly empty) incomplete remainder
 
 
 def _phase_stage(label: str) -> str:
@@ -362,7 +370,7 @@ def _transform_outputs(session: str, base: str) -> list[dict[str, str]]:
         if not isinstance(path, str) or not path:  # a manifest is data: a non-string path is not one
             path = dataset
         with suppress(ValueError):
-            path = str(Path(path).relative_to(_session_dir(session)))
+            path = Path(path).relative_to(_session_dir(session)).as_posix()
         found.append(
             {
                 **{key: str(entry.get(key) or "") for key in ("group_src", "group_dest", "group", "format")},
@@ -422,7 +430,7 @@ def _discover_session_runs(
         else:  # nothing claims this log: how recently it was written is all there is to go on
             status = "running" if (time.time() - mtime) < _MTIME_LIVE_WINDOW else "done"
         try:
-            base = str(log.parent.relative_to(base_root))
+            base = log.parent.relative_to(base_root).as_posix()
         except ValueError:
             base = log.parent.name
         found.append((log, run_name, kind, status, base, mtime))
@@ -571,6 +579,12 @@ async def live(session: str = Query("default")) -> StreamingResponse:
                             # Only a new job's console starts empty. Clearing on a status change too
                             # would drop a crashed run's traceback the instant it turned red.
                             "console_reset": fresh_console,
+                            # A failed job's recorded error and konfai-mcp's reading of it (the cause and
+                            # the fix), so the user reads those rather than the raw log.
+                            "error": latest.get("error"),
+                            "diagnosis": job_diagnosis(
+                                {"status": status, "error": latest.get("error")}, Path(latest["log_path"])
+                            ),
                         }
                     )
             if cpath is not None:

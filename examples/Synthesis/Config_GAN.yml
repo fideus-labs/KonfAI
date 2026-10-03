@@ -70,7 +70,7 @@ Trainer:
                     - 1
                     - 1
                     - 1
-                  torch:nn:L1Loss:
+                  torch:nn:L1Loss: # The same term as MAE above (an unmasked MAE is torch's L1Loss): with MAE's weight 10, the L1 weighs 11
                     size_average: None
                     reduce: None
                     reduction: mean

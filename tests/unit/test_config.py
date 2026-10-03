@@ -21,7 +21,8 @@ Covers ``Config`` file handling and error messages, ``apply_config`` type bindin
 keys), and the config env-var bookkeeping.
 """
 
-import functools
+import _pyio
+import contextlib
 import os
 import sys
 import threading
@@ -31,8 +32,9 @@ from typing import Literal
 
 import pytest
 import ruamel.yaml
-from konfai.utils.config import Config, _load_tree, _write_tree, apply_config, config, strict_config
+from konfai.utils.config import Config, _load_tree, _write_tree, apply_config, config, initializing, strict_config
 from konfai.utils.errors import ConfigError
+from konfai.utils.utils import OverlapSpec
 
 
 def _fail_input(_: str) -> str:
@@ -283,30 +285,6 @@ def test_apply_config_rejects_unknown_boolean_string(write_config) -> None:
         apply_config("Root")(Root)()
 
 
-def test_predictor_binds_check_training_transforms_from_the_file(write_config, monkeypatch) -> None:
-    """``check_training_transforms: false`` under ``Predictor:`` reaches the constructor.
-
-    The key silences the warning a prediction raises when a model input is not preprocessed the way
-    its checkpoint trained on it; bound off ``Predictor``'s own signature here, so a rename of the
-    parameter shows up as a key that no longer binds. The body is captured rather than run: what is
-    at stake is the binding, not the workflow.
-    """
-    from konfai.predictor import Predictor
-
-    write_config("Predictor:\n  check_training_transforms: false\n")
-    bound: dict[str, object] = {}
-
-    @functools.wraps(Predictor.__init__)
-    def capture(_self, **kwargs) -> None:
-        bound.update(kwargs)
-
-    monkeypatch.setattr(Predictor, "__init__", capture)
-
-    apply_config()(Predictor)()
-
-    assert bound["check_training_transforms"] is False
-
-
 def test_apply_config_instantiates_dict_of_nested_objects(write_config) -> None:
     write_config("Root:\n  children:\n    left:\n      value: 3\n    right:\n      value: 7\n")
 
@@ -351,7 +329,7 @@ def test_apply_config_converts_sequence_of_union_scalars(write_config) -> None:
 
 
 def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_config) -> None:
-    # A value whose YAML type already matches a union member must bind unchanged: coercing in
+    # Patch.overlap's union. A value whose YAML type already matches a member must bind unchanged: coercing in
     # declaration order turns ``overlap: 0.25`` into ``int(0.25) == 0`` (silent no overlap),
     # lets ``str`` swallow a list, and never reaches a ``list[...]`` member at all.
     write_config("Root:\n  frac: 0.25\n  voxels: 8\n  percent: '20%'\n  per_axis:\n    - 10\n    - 20\n    - 0\n")
@@ -359,10 +337,10 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     class Root:
         def __init__(
             self,
-            frac: int | float | str | list[int] | None = None,
-            voxels: int | float | str | list[int] | None = None,
-            percent: int | float | str | list[int] | None = None,
-            per_axis: int | float | str | list[int] | None = None,
+            frac: OverlapSpec = None,
+            voxels: OverlapSpec = None,
+            percent: OverlapSpec = None,
+            per_axis: OverlapSpec = None,
         ) -> None:
             self.frac = frac
             self.voxels = voxels
@@ -377,23 +355,33 @@ def test_apply_config_union_keeps_the_value_type_over_lossy_coercion(write_confi
     assert list(root.per_axis) == [10, 20, 0] and isinstance(root.per_axis, list)  # not the string "[10, 20, 0]"
 
 
-def test_apply_config_refuses_a_fraction_for_an_integer(write_config) -> None:
-    # int(300.7) == 300: a fractional value given to an integer knob (iterations, a grid spacing)
-    # was silently truncated. A whole float still binds, as YAML writes 300.0 for 300.
+@pytest.mark.parametrize(
+    ("key", "yaml_value", "expected"),
+    [
+        ("count", "1.5", None),
+        ("count", "3.0", 3),
+        ("count", "1e3", 1000),
+        ("shape", "[0.8, 0.8, 0.8]", None),
+        ("shape", "[4.0, 8]", [4, 8]),
+        ("size", "[1, 2.5]", None),
+        ("size", "2.0", 2),
+    ],
+)
+def test_apply_config_refuses_a_fraction_under_an_int(write_config, key: str, yaml_value: str, expected) -> None:
+    # int(0.8) binds 0, and 0 is Resample's keep-this-axis sentinel: `shape: [0.8, 0.8, 0.8]` ran as a
+    # no-op, exit 0. A whole float still binds (3.0, 1e3); a fraction is refused with its key, whether
+    # the parameter is an int, a list of them or a union holding one.
+    write_config(f"Root:\n  {key}: {yaml_value}\n")
+
     class Root:
-        def __init__(self, iterations: int = 0, scales: list[int] | None = None) -> None:
-            self.iterations = iterations
-            self.scales = scales
+        def __init__(self, count: int = 1, shape: list[int] = [1], size: int | list[int] = 1) -> None:
+            self.values = {"count": count, "shape": shape, "size": size}
 
-    write_config("Root:\n  iterations: 300.0\n  scales: [4.0, 2, 1]\n")
-    root = apply_config("Root")(Root)()
-    assert root.iterations == 300 and isinstance(root.iterations, int)
-    assert root.scales == [4, 2, 1]
-
-    for bad in ("  iterations: 300.7\n", "  scales: [4.5, 2, 1]\n"):
-        write_config("Root:\n" + bad)
-        with pytest.raises(ConfigError):
+    if expected is None:
+        with pytest.raises(ConfigError, match=key):
             apply_config("Root")(Root)()
+    else:
+        assert apply_config("Root")(Root)().values[key] == expected
 
 
 def test_apply_config_binds_a_bare_tensor_parameter_as_a_value(write_config) -> None:
@@ -582,7 +570,7 @@ def test_config_write_back_is_atomic_when_the_rename_fails(write_config, monkeyp
         replace_calls.append((str(src), str(dst)))
         raise RuntimeError("crash at rename")
 
-    # A non-OSError: OSError is the Windows in-place fallback, pinned separately below.
+    # A non-OSError: an OSError is retried, then refused, pinned separately below.
     monkeypatch.setattr("konfai.utils.config.os.replace", failing_replace)
 
     with pytest.raises(RuntimeError, match="crash at rename"):
@@ -591,6 +579,27 @@ def test_config_write_back_is_atomic_when_the_rename_fails(write_config, monkeyp
     assert replace_calls, "the write-back must land through os.replace, never a bare open(target, 'w')"
     assert config_path.read_bytes() == original  # a concurrent reader never sees a truncated config
     assert list(config_path.parent.glob("*.tmp")) == []  # the temp file is removed on failure
+
+
+@pytest.mark.parametrize(("ending", "platform_ending"), [(b"\n", "\r\n"), (b"\r\n", "\n")])
+def test_config_write_back_keeps_the_files_line_ending(write_config, monkeypatch, ending, platform_ending) -> None:
+    """A config keeps its line ending on a platform whose text files use the other one: an LF file
+    checked out on Windows is not rewritten CRLF by its first run."""
+    config_path = write_config("")
+    config_path.write_bytes(b"Root:\n  count: 3\n".replace(b"\n", ending))
+    # The pure-Python text layer reads os.linesep, the translation the C one does on Windows.
+    monkeypatch.setattr(os, "linesep", platform_ending)
+    monkeypatch.setattr("konfai.utils.config.open", _pyio.open, raising=False)
+
+    class Root:
+        def __init__(self, count: int = 0, added: int = 5) -> None:
+            self.count = count
+
+    apply_config("Root")(Root)()
+
+    written = config_path.read_bytes()
+    assert b"added: 5" in written
+    assert written == written.replace(b"\r\n", b"\n").replace(b"\n", ending)
 
 
 def test_config_write_back_retries_a_denied_rename_and_never_writes_in_place(write_config, monkeypatch) -> None:
@@ -625,6 +634,45 @@ def test_config_write_back_retries_a_denied_rename_and_never_writes_in_place(wri
     with pytest.raises(ConfigError, match="atomically"):
         apply_config("Root")(Root)()
     assert config_path.read_text(encoding="utf-8") == before  # the file was left unchanged
+    assert list(config_path.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+@pytest.mark.parametrize("mode", [0o600, 0o660, 0o444], ids=["private", "group-shared", "read-only"])
+def test_config_write_back_keeps_the_file_permissions(write_config, mode: int) -> None:
+    """The write-back replaces the file with a new one: it keeps the permissions the file had, not the
+    ones the umask gives a new file (a private config would become readable, a shared one read-only)."""
+    config_path = write_config("Root:\n  count: 3\n")
+    config_path.chmod(mode)
+
+    class Root:
+        def __init__(self, count: int = 0, rate: float = 0.5) -> None:
+            self.count = count
+
+    apply_config("Root")(Root)()
+    assert "rate: 0.5" in config_path.read_text(encoding="utf-8")
+    assert config_path.stat().st_mode & 0o7777 == mode
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX directory permissions, not as root")
+def test_config_write_back_in_a_read_only_directory_is_a_config_error(write_config) -> None:
+    """The temporary file of the write-back lives beside the config: a directory that refuses it is a
+    refusal naming the config, not a PermissionError on a file the user never created."""
+    config_path = write_config("Root:\n  count: 3\n")
+    before = config_path.read_bytes()
+
+    class Root:
+        def __init__(self, count: int = 0) -> None:
+            self.count = count
+
+    config_path.parent.chmod(0o555)
+    try:
+        with pytest.raises(ConfigError, match="Could not write the resolved config") as refusal:
+            apply_config("Root")(Root)()
+    finally:
+        config_path.parent.chmod(0o755)
+    assert str(config_path) in str(refusal.value)
+    assert config_path.read_bytes() == before
     assert list(config_path.parent.glob("*.tmp")) == []
 
 
@@ -759,11 +807,55 @@ class _ShapeRoot:
 
 
 def test_a_scalar_where_an_object_block_is_expected_refuses(write_config) -> None:
-    # `Engine: AdamW` instead of a block once bound the object to None: the run then proceeded
-    # without it (an optimizer that never steps), silently.
+    # `Engine: AdamW` instead of a block is refused: bound to None, the run would proceed without
+    # the object (an optimizer that never steps), silently.
     write_config("Root:\n  Engine: AdamW\n")
     with pytest.raises(ConfigError, match="where a block is expected"):
         apply_config("Root.Engine")(_Engine)()
+
+
+@config("Optimizer")
+class _NestedOptimizer:
+    def __init__(self, mode: Literal["a", "b"] = "a", overlap: float | str | None = None, lr: float = 0.1) -> None:
+        if lr < 0:
+            raise ConfigError("A negative learning rate descends nothing.", "Write a positive lr.")
+        if lr > 1:
+            raise ValueError("lr above 1 diverges")
+
+
+@config("Child")
+class _NestedChild:
+    def __init__(self, optimizer: _NestedOptimizer = _NestedOptimizer()) -> None:
+        self.optimizer = optimizer
+
+
+class _NestedRoot:
+    def __init__(self, child: _NestedChild = _NestedChild(), mode: Literal["a", "b"] = "a") -> None:
+        self.child, self.mode = child, mode
+
+
+@pytest.mark.parametrize(
+    ("block", "located"),
+    [
+        ("mode: null", "for parameter 'Root.mode' expected one of"),
+        ("Child:\n    Optimizer:\n      mode: c", "for parameter 'Root.Child.Optimizer.mode' expected one of"),
+        ("Child:\n    Optimizer:\n      overlap:\n        x: 1", "Parameter 'Root.Child.Optimizer.overlap' was given"),
+        ("Child:\n    Optimizer: AdamW", "'Root.Child.Optimizer' holds the value 'AdamW'"),
+        ("Child:\n    Optimizer:\n      lr: -1", "at 'Root.Child.Optimizer': A negative learning rate"),
+        ("Child:\n    Optimizer:\n      lr: 2", "at 'Root.Child.Optimizer': lr above 1 diverges"),
+    ],
+)
+def test_a_nested_refusal_names_its_full_key_path_once(write_config, block: str, located: str) -> None:
+    """A Literal or union refusal names the key with its section; a refusal nested two blocks deep reads
+    once, located at the innermost block (a constructor's own refusal keeps its hint)."""
+    write_config(f"Root:\n  {block}\n")
+    with pytest.raises(ConfigError) as refusal:
+        apply_config("Root")(_NestedRoot)()
+    message = str(refusal.value)
+    assert located in message
+    assert message.count("[Config]") == 1
+    if "negative" in located:
+        assert "→\tWrite a positive lr." in message
 
 
 def test_an_explicit_none_at_an_object_key_still_binds_none(write_config) -> None:
@@ -809,6 +901,33 @@ def test_an_explicit_null_binds_none_instead_of_reactivating_the_default(write_c
     root = apply_config("Root")(_ShapeRoot)()
     assert root.name is None
     assert "name: None" in config_path.read_text(encoding="utf-8")
+
+
+class _Required:
+    def __init__(
+        self, count: int, sizes: list[int], loose, maybe: int | None, engine: _Engine, mode: Literal["a", "b"]
+    ) -> None:
+        self.count, self.loose, self.maybe, self.engine, self.mode = count, loose, maybe, engine, mode
+
+
+def test_a_required_key_the_file_lacks_is_refused_with_its_path(write_config) -> None:
+    """A parameter with no default bound None when the file lacked it, and wrote ``None`` back: the
+    run failed later on a TypeError that named no key, and the next run read the written null."""
+    path = write_config("Root:\n  sizes: [1]\n")
+    with pytest.raises(ConfigError, match=r"missing required key 'Root\.count'"):
+        apply_config("Root")(_Required)()
+    assert "count" not in path.read_text(encoding="utf-8")
+
+
+def test_a_shipped_stage_without_its_required_key_is_refused(write_config) -> None:
+    from konfai.data.transform import InferenceStack, OneHot, Save
+
+    write_config("Root:\n  OneHot: {}\n  Save: {}\n  InferenceStack: {}\n")
+    with pytest.raises(ConfigError, match=r"missing required key 'Root\.OneHot\.num_classes'"):
+        apply_config("Root.OneHot")(OneHot)()
+    # A bare Save or InferenceStack falls back to the manager's dataset, as documented.
+    assert apply_config("Root.Save")(Save)().dataset is None
+    assert apply_config("Root.InferenceStack")(InferenceStack)().dataset is None
 
 
 # --------------------------------------------------------------------------------------
@@ -888,13 +1007,109 @@ def test_strict_config_refuses_a_missing_root_before_anything_binds(write_config
         raise AssertionError("refused before anything binds")
 
 
+@pytest.mark.parametrize("refuse", [True, False])
+def test_strict_config_refuses_a_misspelled_root_without_writing_whatever_refuse_says(
+    write_config, refuse: bool
+) -> None:
+    """``Trainee:`` under TRAIN was only warned: a full default ``Trainer:`` block was appended beside it
+    (137 -> 254 lines), the run failed on an unrelated dataset error, and fixing the spelling then left
+    a duplicate ``Trainer`` key in the file."""
+    content = "Rot:\n  kept: 2\n"
+    path = write_config(content)
+    with pytest.raises(ConfigError, match="declares no 'Root' root"), strict_config("Root", refuse=refuse):
+        apply_config("Root")(_StrictRoot)()
+    assert path.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("refuse", [True, False])
+@pytest.mark.parametrize("content", ["Root:\n", "Root: null\n", "Root: None\n"])
+def test_strict_config_refuses_an_empty_root_whatever_refuse_says(write_config, content: str, refuse: bool) -> None:
+    """An empty root binds the workflow to None: TRAIN then failed on ``'NoneType' object has no
+    attribute 'set_lr'``, and a validation build of EVALUATION or TRANSFORM reported success."""
+    path = write_config(content)
+    with pytest.raises(ConfigError, match="empty 'Root' root"), strict_config("Root", refuse=refuse):
+        apply_config("Root")(_StrictRoot)()
+    assert path.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize("spelling", ["", " null", " None"])
+@pytest.mark.parametrize(
+    ("root", "key"),
+    [
+        ("Trainer", "Dataset"),
+        ("Trainer", "Model"),
+        ("Predictor", "Dataset"),
+        ("Predictor", "Model"),
+        ("Evaluator", "Dataset"),
+        ("Transformer", "Dataset"),
+    ],
+)
+def test_an_emptied_dataset_or_model_under_a_workflow_root_is_refused(
+    write_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: str, key: str, spelling: str
+) -> None:
+    """An emptied block bound the workflow's dataset or model to None, and the workflow then failed
+    on a raw AttributeError ('patch', 'get_model', 'manual_seed') that named no key."""
+    import importlib
+
+    module_name, class_name, state, path_env = _WORKFLOWS[root]
+    write_config(f"{root}:\n  {key}:{spelling}\n")
+    monkeypatch.setenv("KONFAI_ROOT", root)
+    monkeypatch.setenv("KONFAI_STATE", state)
+    for name in path_env:
+        monkeypatch.setenv(name, str(tmp_path / name))
+    workflow = getattr(importlib.import_module(module_name), class_name)
+    with pytest.raises(ConfigError, match=rf"'{root}\.{key}' is empty"), strict_config(root, refuse=False):
+        apply_config()(workflow)()
+
+
 def test_strict_config_can_warn_instead_of_refusing(write_config) -> None:
     """The legacy workflows' setting: existing files carry keys older versions wrote back, so the
     reader is told and the run goes on."""
-    write_config("Root:\n  kep: 2\n")
-    with pytest.warns(UserWarning, match=r"'Root\.kep'.*Did you mean 'kept'"), strict_config("Root", refuse=False):
+    write_config("Root:\n  written_by_1_7: 2\n")
+    with pytest.warns(UserWarning, match=r"'Root\.written_by_1_7'"), strict_config("Root", refuse=False):
         root = apply_config("Root")(_StrictRoot)()
     assert root.kept == 0
+
+
+@pytest.mark.parametrize("initializing_", [False, True])
+def test_a_warning_strict_block_refuses_a_key_whose_value_the_default_would_take(
+    write_config, initializing_: bool
+) -> None:
+    """`epoch: 20` beside `epochs`, which took its default: the run would train 100 epochs on a warning.
+    Refused, and the file left as written."""
+    config_path = write_config("Root:\n  kep: 2\n")
+    before = config_path.read_bytes()
+    with (
+        initializing() if initializing_ else contextlib.nullcontext(),
+        pytest.raises(ConfigError, match=r"value would be lost[\s\S]*'Root\.kep': did you mean 'kept'"),
+        strict_config("Root", refuse=False),
+    ):
+        apply_config("Root")(_StrictRoot)()
+    assert config_path.read_bytes() == before
+
+
+class _Pair:
+    def __init__(self, pair: str = "default") -> None:
+        self.source, self.dest = pair.split(":")
+
+
+@pytest.mark.parametrize("refuse", [True, False])
+def test_a_misspelling_that_fails_the_build_is_named_on_the_error(write_config, refuse: bool) -> None:
+    """A misspelt key leaves its parameter to a default the build may fail on: the error that goes up
+    names the key, and only a key beside one that took its default in its place."""
+    write_config("Root:\n  pare: CT:CT\n  other: 1\n")
+    with pytest.raises(ValueError) as raised, strict_config("Root", refuse=refuse):
+        apply_config("Root")(_Pair)()
+    notes = "\n".join(getattr(raised.value, "__notes__", []))
+    assert "'Root.pare'" in notes and "did you mean 'pair'?" in notes
+    assert "other" not in notes
+
+
+@config("Stage")
+class _Stage:
+    def __init__(self, width: int = 1) -> None:
+        if width > 1:
+            raise ValueError("the first stage fails")
 
 
 def test_outside_strict_config_the_binder_records_nothing_and_refuses_nothing(write_config) -> None:
@@ -1054,13 +1269,41 @@ def test_a_strict_block_that_refuses_leaves_the_file_untouched(write_config) -> 
     assert config_path.read_text(encoding="utf-8") == before
 
 
+def _failing_build(kept: int = 0, leaf: _Leaf = _Leaf(), nested: _Nested = _Nested()) -> None:
+    raise ValueError("the build failed after binding")
+
+
+@pytest.mark.parametrize("refuse", [True, False])
+def test_a_strict_block_that_fails_leaves_the_file_as_it_was(write_config, refuse: bool) -> None:
+    """A build that fails leaves the file byte-identical: TRAIN, PREDICTION and EVALUATION wrote what
+    resolved before the error back into it (+4 lines on each failing CLI probe of the audit)."""
+    config_path = write_config("Root:\n  kept: 1\n")
+    before = config_path.read_bytes()
+    with pytest.raises(ValueError, match="failed after binding"), strict_config("Root", refuse=refuse):
+        apply_config("Root")(_failing_build)()
+    assert config_path.read_bytes() == before
+
+
+def test_under_initializing_a_strict_block_that_fails_writes_what_resolved(write_config) -> None:
+    """--init keeps what resolved before the error, for the author to complete."""
+    config_path = write_config("Root:\n  kept: 1\n")
+    with (
+        pytest.raises(ValueError, match="failed after binding"),
+        initializing(),
+        strict_config("Root", refuse=False),
+    ):
+        apply_config("Root")(_failing_build)()
+    written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    assert written["Root"] == {"kept": 1, "depth": 1, "Nested": {"width": 2}}
+
+
 def test_a_warning_strict_block_still_writes_the_resolved_file(write_config) -> None:
     """refuse=False (TRAIN/PREDICTION/EVALUATION): the run proceeds, so the resolved file is kept."""
-    config_path = write_config("Root:\n  kep: 2\n")
+    config_path = write_config("Root:\n  written_by_1_7: 2\n")
     with pytest.warns(UserWarning, match="Unknown key"), strict_config("Root", refuse=False):
         apply_config("Root")(_StrictRoot)()
     written = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
-    assert written["Root"] == {"kep": 2, "depth": 1, "kept": 0, "Nested": {"width": 2}}
+    assert written["Root"] == {"written_by_1_7": 2, "depth": 1, "kept": 0, "Nested": {"width": 2}}
 
 
 def test_a_strict_block_does_not_create_a_file_a_context_refused(tmp_path: Path, monkeypatch) -> None:
@@ -1111,23 +1354,52 @@ _WORKFLOWS = {
 }
 
 
-def _shipped_workflow_configs() -> list[str]:
-    """Every shipped config whose first key names a workflow.
+#: The directories a run of an example writes beside it (git-ignored): the config snapshots they
+#: hold name files that exist only in that run.
+_RUN_OUTPUTS = frozenset({"Dataset", "Checkpoints", "Statistics", "Predictions", "Evaluations", "Transforms", "Output"})
+
+
+def _shipped_workflow_configs(examples: Path = _EXAMPLES) -> list[str]:
+    """Every shipped config whose first key names a workflow, at any depth (Segmentation/TwoClasses),
+    outside the run outputs a run of an example leaves beside it.
 
     This feeds a parametrize, so it runs at collection: an example that is empty (no mapping at
     all) or opens on a sequence is not one of these files, and must not take the module's
     collection down with it."""
     relatives = []
-    for path in _EXAMPLES.glob("*/*.yml"):
+    for path in examples.glob("**/*.yml"):
+        relative = path.relative_to(examples)
+        if _RUN_OUTPUTS.intersection(relative.parts[:-1]):
+            continue
         tree = ruamel.yaml.YAML().load(path.read_text(encoding="utf-8"))
         if isinstance(tree, Mapping) and next(iter(tree), None) in _WORKFLOWS:
-            relatives.append(str(path.relative_to(_EXAMPLES)))
+            relatives.append(relative.as_posix())
     return sorted(relatives)
 
 
-def _bind_shipped_config(relative: str, workdir: Path, strict: bool, monkeypatch: pytest.MonkeyPatch) -> bytes:
+def test_the_shipped_configs_leave_out_what_a_run_of_an_example_wrote(tmp_path: Path) -> None:
+    """A checkout where an example was run holds the config snapshots of that run; they are not
+    shipped configs, and binding one fails on files only that run had."""
+    shipped = ["Seg/Config.yml", "Seg/TwoClasses/Prediction.yml"]
+    written = [
+        "Seg/Statistics/RUN/Config_0_0.yml",
+        "Seg/Predictions/RUN/Prediction.yml",
+        "Seg/TwoClasses/Evaluations/RUN/Evaluation.yml",
+        "App/Output/App/Prediction.yml",
+    ]
+    for relative in shipped + written:
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("Predictor:\n  a: 1\n", encoding="utf-8")
+    assert _shipped_workflow_configs(tmp_path) == shipped
+
+
+def _bind_shipped_config(
+    relative: str, workdir: Path, strict: bool, monkeypatch: pytest.MonkeyPatch, classpath: str | None = None
+) -> bytes:
     """Bind a shipped example config on a copy under WORKDIR, over a synthetic cohort holding every
-    group the config names, the way its workflow builder does (STRICT) or one context at a time."""
+    group the config names, the way its workflow builder does (STRICT, a key nothing reads refused)
+    or one context at a time.
+    CLASSPATH, when given, replaces the config's model classpath (the alternative a comment offers)."""
     import importlib
 
     import numpy as np
@@ -1141,8 +1413,12 @@ def _bind_shipped_config(relative: str, workdir: Path, strict: bool, monkeypatch
         if entry.suffix in (".yml", ".py"):
             (workdir / entry.name).write_bytes(entry.read_bytes())
     config_path = workdir / Path(relative).name
-    tree = ruamel.yaml.YAML().load(config_path.read_text(encoding="utf-8"))
+    yaml = ruamel.yaml.YAML()
+    tree = yaml.load(config_path.read_text(encoding="utf-8"))
     root = next(iter(tree))
+    if classpath is not None:
+        tree[root]["Model"]["classpath"] = classpath
+        yaml.dump(tree, config_path)
     attribute = Attribute()
     attribute["Origin"], attribute["Spacing"], attribute["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
     monkeypatch.chdir(workdir)
@@ -1162,7 +1438,7 @@ def _bind_shipped_config(relative: str, workdir: Path, strict: bool, monkeypatch
         monkeypatch.delitem(sys.modules, local, raising=False)
     workflow = getattr(importlib.import_module(module_name), class_name)
     if strict:
-        with strict_config(root, refuse=False):
+        with strict_config(root):
             apply_config()(workflow)()
     else:
         apply_config()(workflow)()
@@ -1175,8 +1451,9 @@ def test_a_shipped_config_resolves_to_the_same_bytes_under_the_block_as_per_cont
     relative: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every shipped workflow config, built as its workflow builds it (one strict block) and one
-    context at a time: the resolved file is byte-identical. Two of them gain keys the write-back
-    appends (Config_GAN.yml, Transform.yml), which is where the order of the appends shows."""
+    context at a time: every key of it is read, and the resolved file is byte-identical. Some gain
+    keys the write-back appends (Config_GAN.yml, Transform.yml), which is where the order of the
+    appends shows."""
     pytest.importorskip("SimpleITK")
     if Path(relative).parent.name == "Synthesis":
         # Its Model.py imports segmentation_models_pytorch, an extra the example declares and the
@@ -1202,7 +1479,7 @@ class _Coerced:
 @pytest.mark.parametrize(
     ("yaml", "expected"),
     [
-        ("flag: 'false'", {"flag": False}),  # bool("false") once bound True through the union path
+        ("flag: 'false'", {"flag": False}),  # parsed as text: bool("false") would be True
         ("flag: 'true'", {"flag": True}),
         ("flag: 3", {"flag": 3}),
         ("flag: '3'", {"flag": 3}),
@@ -1242,6 +1519,42 @@ def test_a_chain_spelled_as_a_list_binds_under_occurrence_keys(write_config) -> 
     assert "_Engine#3:" in resolved and "- _Engine" not in resolved
 
 
+def test_a_chain_entry_written_with_nothing_under_it_binds_every_default(write_config) -> None:
+    """``Canonical:`` is how a stage without arguments reads in YAML, and the list form already bound it
+    so. In the mapping form it bound None, and the chain fell on an AttributeError naming no key."""
+    path = write_config("Root:\n  engines:\n    first:\n    second: {rate: 2.0}\n")
+    bound = apply_config("Root")(_Engines)()
+    assert [engine.rate for engine in bound.engines.values()] == [0.5, 2.0]
+    assert _load_tree(path)["Root"]["engines"]["first"] == {"rate": 0.5}
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        ["_Engine: {rate: 1.0}", "_Engine#2: {rate: 2.0}", "_Engine: {rate: 3.0}"],
+        ["_Engine: {rate: 1.0}", "_Engine: {rate: 2.0}", "_Engine#2: {rate: 3.0}"],
+    ],
+)
+def test_a_list_item_whose_occurrence_key_is_already_taken_is_refused(write_config, items: list[str]) -> None:
+    """An explicit ``Name#2`` item and the second bare ``Name`` bind under the same key: one of the
+    two stages was dropped without a word."""
+    write_config("Root:\n  engines:\n" + "".join(f"    - {item}\n" for item in items))
+    with pytest.raises(ConfigError, match=r"Entries 1 and 2 of 'Root\.engines' both bind under '_Engine#2'"):
+        apply_config("Root")(_Engines)()
+
+
+@pytest.mark.parametrize("value", ["[]", "[SGD]"])
+def test_a_list_at_the_key_of_one_object_is_refused(write_config, value: str) -> None:
+    """The list form spells a chain. At the key of one object it was read as a chain: ``[]`` bound
+    every default without a word, and ``[SGD]`` bound the defaults too, SGD taken for a key."""
+    path = write_config(f"Root:\n  Nested: {value}\n")
+    with pytest.raises(ConfigError, match=r"'Root\.Nested' holds a list where a block is expected") as raised:
+        apply_config("Root")(_StrictRoot)()
+    assert "'Nested: {}'" in str(raised.value)
+    # The file keeps the list as written, not a chain mapping filled with defaults.
+    assert _load_tree(path)["Root"]["Nested"] == ruamel.yaml.YAML().load(value)
+
+
 def test_a_list_item_that_is_not_one_stage_is_refused(write_config) -> None:
     write_config("Root:\n  engines:\n    - _Engine: {rate: 1.0}\n      Other: {}\n")
     with pytest.raises(ConfigError, match=r"Entry [01] of 'Root\.engines'"):
@@ -1255,6 +1568,48 @@ def test_an_occurrence_suffix_is_dropped_when_the_class_is_resolved() -> None:
     assert name == "Clip" and hasattr(module, "Clip")
     module, name = get_module("konfai.data.transform:Clip#12", "konfai.data.augmentation")
     assert name == "Clip" and module.__name__ == "konfai.data.transform"
+
+
+@pytest.mark.parametrize(
+    ("classpath", "refusal"),
+    [
+        (
+            "segmentation.UNett.UNet",
+            "names module 'konfai.models.python.segmentation.UNett', which does not exist (closest: 'UNet')",
+        ),
+        ("no_such_package_xyz.losses:Dice", "and there is no package 'no_such_package_xyz'"),
+    ],
+)
+def test_a_classpath_whose_module_does_not_exist_is_refused_by_name(classpath: str, refusal: str) -> None:
+    from konfai.utils.utils import get_module
+
+    with pytest.raises(ConfigError) as refused:
+        get_module(classpath, "konfai.models.python")
+    assert refusal in str(refused.value)
+    assert f"Classpath '{classpath}'" in str(refused.value)
+
+
+def test_a_dependency_the_classpaths_module_lacks_keeps_its_own_error(tmp_path: Path, monkeypatch) -> None:
+    """The module a classpath names exists and imports one that does not: the error names that
+    dependency, not the classpath."""
+    from konfai.utils.utils import get_module
+
+    (tmp_path / "needs_a_dependency.py").write_text("import no_such_dependency_xyz\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    with pytest.raises(ModuleNotFoundError) as missing:
+        get_module("needs_a_dependency:Net", "konfai.models.python")
+    assert missing.value.name == "no_such_dependency_xyz"
+
+
+def test_a_classpath_whose_class_does_not_exist_is_refused_with_the_closest_names(monkeypatch) -> None:
+    from konfai.network.network import ModelLoader
+
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    with pytest.raises(
+        ConfigError, match=r"Module 'konfai\.models\.python\.segmentation\.UNet' has no 'UNett'"
+    ) as refused:
+        ModelLoader(classpath="segmentation.UNet.UNett").get_model()
+    assert "(closest: 'UNet'" in str(refused.value)
 
 
 @pytest.mark.parametrize(
@@ -1331,3 +1686,18 @@ def test_a_tuple_annotation_binds_a_tuple(write_config, annotation, literal, exp
     write_config(f"Root:\n  value: {literal}\n")
     bound = apply_config("Root")(receive)()
     assert bound == expected and type(bound) is type(expected)
+
+
+def test_a_prediction_dataset_without_batch_size_measures_its_batch(write_config) -> None:
+    """A ``Predictor.Dataset`` that leaves ``batch_size`` out binds 0, written back: the batch is measured on
+    a GPU and runs one patch at a time on a CPU. A written value keeps its meaning."""
+    from konfai.data.data_manager import DataPrediction
+
+    path = write_config("Predictor:\n  Dataset:\n    num_workers: 0\n")
+    dataset = apply_config("Predictor")(DataPrediction)()
+    assert dataset.measures_batch
+    assert ruamel.yaml.YAML().load(path.read_text(encoding="utf-8"))["Predictor"]["Dataset"]["batch_size"] == 0
+
+    write_config("Predictor:\n  Dataset:\n    num_workers: 0\n    batch_size: 1\n")
+    dataset = apply_config("Predictor")(DataPrediction)()
+    assert (dataset.batch_size, dataset.measures_batch) == (1, False)

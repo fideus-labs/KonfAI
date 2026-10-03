@@ -181,6 +181,15 @@ class Accumulator:
             windows, totals = self._weight_geometry()
             window = windows[dim][self._position(dim, start)]
             share = window[:extent] / totals[dim][start : start + extent]
+            # A bool share is True wherever the weight is not zero, so a bool layer blends as a union.
+            truncates = not (data.dtype.is_floating_point or data.dtype.is_complex or data.dtype == torch.bool)
+            if truncates and not torch.equal(share, share.round()):
+                raise PatchError(
+                    f"'{type(self.patch_combine).__name__}' weights overlapping patches, and this output is "
+                    f"{data.dtype}: a fractional weight cast to an integer is 0, which would erase the overlap band.",
+                    "Set 'patch_combine: Trim' (each voxel keeps one patch's value), or blend the "
+                    "floating-point output the integer one is taken from (the Softmax before the Argmax).",
+                )
             share = share.to(device=data.device, dtype=data.dtype)
             self._shares[key] = None if torch.equal(share, torch.ones_like(share)) else share
         return self._shares[key]

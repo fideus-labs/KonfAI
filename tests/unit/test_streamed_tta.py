@@ -23,6 +23,7 @@ per-copy head and reduction call as the whole-volume ``get_output``: which is wh
 output must equal the assembled one bit for bit, for every reduction (Mean, Median, Concat), blend,
 and dtype. A draw that moves the slab axis (a z-flip) must refuse and fall back, transparently."""
 
+from pathlib import Path
 from typing import ClassVar, cast
 
 import numpy as np
@@ -32,22 +33,16 @@ from konfai.data.augmentation import Brightness, DataAugmentationsList, Flip, Pe
 from konfai.data.data_manager import DatasetIter
 from konfai.data.data_manager.order import _interleaved_case_entries
 from konfai.data.patching import DatasetPatch, Gaussian, SlabAligner
+from konfai.data.reduction import Concat, Mean, Median
 from konfai.data.transform import Flip as FlipTransform
 from konfai.data.transform import InferenceStack, LocalityKind, Sum
-from konfai.predictor import Concat, Mean, Median, OutputDataset
+from konfai.predictor import OutputDataset
 from konfai.utils.dataset import Attribute, Dataset
+from oracle_support import geometry
 
 SHAPE = [6, 4, 3]
 PATCH_SIZE = [2, 4, 3]
 OVERLAP = 1
-
-
-def _geometry_attribute() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.zeros(3)
-    attribute["Spacing"] = np.ones(3)
-    attribute["Direction"] = np.eye(3).flatten()
-    return attribute
 
 
 def _augmentations(
@@ -90,6 +85,16 @@ def test_streamed_tta_flip_matches_whole_volume(
     )
     assert whole_volume
     assert streamed.dtype == reference.dtype
+    assert torch.equal(streamed, reference)
+
+
+def test_streamed_tta_vector_field_flip_matches_whole_volume(tmp_path, monkeypatch, drive_tta) -> None:
+    # A displacement field's un-flip negates the mirrored components voxel by voxel, which a slab does
+    # on its own: three components on a 3-D grid, so the negation fires.
+    kwargs = {"augmentation": Flip(f_prob=[0, 1, 1], vector_field=True), "channels": 3}
+    streamed, whole_volume = drive_tta(tmp_path / "streamed", monkeypatch, streamed=True, **kwargs)
+    assert not whole_volume, "the TTA case should have streamed"
+    reference, _ = drive_tta(tmp_path / "reference", monkeypatch, streamed=False, **kwargs)
     assert torch.equal(streamed, reference)
 
 
@@ -168,7 +173,7 @@ def _gate(augmentation, nb: int = 1) -> bool:
     output_dataset = OutputDataset.__new__(OutputDataset)
     output_dataset.nb_data_augmentation = nb + 1
     output_dataset.group_dest = "dest"
-    return output_dataset._tta_streamable(cast(DatasetIter, DummyDatasetIter()), 0, _geometry_attribute())
+    return output_dataset._tta_streamable(cast(DatasetIter, DummyDatasetIter()), 0, geometry())
 
 
 def test_gate_reads_the_draw_declarations() -> None:
@@ -381,15 +386,40 @@ def test_streamed_inference_stack_aborts_its_sink_when_the_case_dies(monkeypatch
     assert not stack._stack_buffers
 
 
-def test_interleaved_case_entries_order_copies_by_slab_start() -> None:
-    patch = DatasetPatch(patch_size=list(PATCH_SIZE), overlap=OVERLAP)
-    patch.load(list(SHAPE), 0)
-    patch.load(list(SHAPE), 1)
+@pytest.mark.parametrize("streamed", [True, False], ids=["region sink", "buffered"])
+@pytest.mark.parametrize("mode", ["Seg", "mean"])
+def test_inference_stack_folds_copies_one_at_a_time_as_their_concatenation(
+    tmp_path: Path, mode: str, streamed: bool
+) -> None:
+    """Folding the TTA copies as they come writes the stack and returns the mean the call over their
+    concatenation does, through a region sink or, where the destination has none, a buffer."""
+    copies = [torch.randn(1, 3 if mode == "Seg" else 1, 4, 5) for _ in range(4)]
+    whole = InferenceStack(f"{tmp_path}/whole.h5:h5", "stack", mode=mode)
+    folded = InferenceStack(f"{tmp_path}/folded.h5:h5", "stack", mode=mode)
+    if not streamed:
+        folded.dataset.open_data_stream = lambda *args, **kwargs: None  # type: ignore[union-attr,method-assign]
+
+    expected = whole("CASE", torch.cat(copies), Attribute())
+    got = folded.fold_copies("CASE", iter(copies), len(copies), Attribute())
+
+    torch.testing.assert_close(got, expected)
+    read = [
+        Dataset(f"{tmp_path}/{name}.h5", "h5").read_data("InferenceStack", "CASE")[0] for name in ("whole", "folded")
+    ]
+    np.testing.assert_array_equal(read[1], read[0])
+
+
+@pytest.mark.parametrize(("shape", "patch_size"), [(SHAPE, PATCH_SIZE), ([3, 4, 6], [3, 4, 2])], ids=["z", "x"])
+def test_interleaved_case_entries_order_copies_by_slab_start(shape: list[int], patch_size: list[int]) -> None:
+    """The copies advance together along the axis the grid sweeps, the one the input streams its slabs on."""
+    patch = DatasetPatch(patch_size=list(patch_size), overlap=OVERLAP)
+    patch.load(list(shape), 0)
+    patch.load(list(shape), 1)
     entries = [(a, p) for a in range(2) for p in range(patch.get_size(0))]
     ordered = _interleaved_case_entries([patch, patch], entries)
     assert sorted(ordered) == sorted(entries), "the interleave must be a permutation of the case"
-    starts = [patch.get_patch_slices(a)[p][0].start for a, p in ordered]
-    assert starts == sorted(starts), "arrival must be non-decreasing along the slab axis"
+    starts = [patch.get_patch_slices(a)[p][patch.get_sweep_axis(a)].start for a, p in ordered]
+    assert starts == sorted(starts), "arrival must be non-decreasing along the sweep axis"
     for a in range(2):
         within_copy = [p for entry_a, p in ordered if entry_a == a]
         assert within_copy == sorted(within_copy), "within a copy the patch order must be untouched"

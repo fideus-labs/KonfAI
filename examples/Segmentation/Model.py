@@ -19,10 +19,13 @@
 KonfAI accepts a model as a declarative ``.yml`` graph (``classpath: UNet.yml``) or as a
 Python ``network.Network`` built with ``add_module`` (``classpath: Model:UNet``). This file
 is the second form: the same architecture (channels ``[1,32,64,128,256]``, max-pool
-downsampling, ``Conv->ReLU`` blocks, deep-supervision heads), so swapping the ``classpath``
-in ``Config.yml`` trains the same network. Use the YAML form for a no-code, shareable model;
-reach for the Python form when a model needs a custom ``forward`` or logic a declarative graph
-cannot express (see the Synthesis example).
+downsampling, ``Conv->ReLU`` blocks, deep-supervision heads) under the same state names, so
+swapping the ``classpath`` in ``Config.yml`` trains the same network and a checkpoint loads
+into either form. This class takes ``dim``, ``channels`` and ``nb_class`` as its own
+arguments, where ``UNet.yml`` reads them under ``parameters``: move them when you swap.
+Use the YAML form for a no-code, shareable model; reach for the Python form when a model
+needs a custom ``forward`` or logic a declarative graph cannot express (see the Synthesis
+example).
 """
 
 import torch
@@ -47,23 +50,24 @@ class Head(network.ModuleArgsDict):
 
 
 class UNetBlock(network.ModuleArgsDict):
-    """One resolution level, recursively nesting the next (coarser) one.
+    """One resolution level, recursively nesting the next (coarser) one as ``UNetBlock_<level + 1>``.
 
     Non-top levels max-pool down on entry and transpose-conv + skip-concat back on exit; the
     coarsest level (two channel entries) has no nested block. Levels above the bottleneck emit
-    a deep-supervision ``Head`` (a terminal ``out_branch=[-1]`` output).
+    a deep-supervision ``Head`` (a terminal ``out_branch=[-1]`` output). The level names are
+    ``UNet.yml``'s, so both forms hold the same state names and a checkpoint loads into either.
     """
 
-    def __init__(self, channels: list[int], nb_class: int, dim: int, is_top: bool = True) -> None:
+    def __init__(self, channels: list[int], nb_class: int, dim: int, level: int = 0) -> None:
         super().__init__()
-        if not is_top:
+        if level:
             self.add_module("MAXPOOL", blocks.get_torch_module("MaxPool", dim)(kernel_size=2, stride=2))
         self.add_module("DownConvBlock", _conv_block(channels[0], channels[1], dim))
         if len(channels) > 2:
-            self.add_module("UNetBlock", UNetBlock(channels[1:], nb_class, dim, is_top=False))
+            self.add_module(f"UNetBlock_{level + 1}", UNetBlock(channels[1:], nb_class, dim, level + 1))
             self.add_module("UpConvBlock", _conv_block(channels[1] * 2, channels[1], dim))
             self.add_module("Head", Head(channels[1], nb_class, dim), out_branch=[-1])
-        if not is_top:
+        if level:
             self.add_module(
                 "CONV_TRANSPOSE",
                 blocks.get_torch_module("ConvTranspose", dim)(channels[1], channels[0], kernel_size=2, stride=2),

@@ -278,7 +278,7 @@ human MRI/CT, CBCT/CT, CT/CT and MRI/MRI pairs, on nine public datasets: [the pr
 - Multiple presets can be provided in one command; their displacement fields are averaged into a single field.
 - The wrapper orchestrates the preset KonfAI apps (model inference), then ensembles, evaluates, and estimates uncertainty on their outputs.
 - [SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg) runs the same `register` from 3D Slicer, and KonfAI
-  Studio from its assistant: konfai-mcp's `run_app_infer` on a preset runs `register`, and
+  Studio from its assistant: konfai-mcp's `run_app` (action `infer`) on a preset runs `register`, and
   `run_registration_evaluate` runs `eval`.
 
 ---

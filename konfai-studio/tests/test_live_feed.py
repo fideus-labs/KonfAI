@@ -25,9 +25,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -39,7 +43,7 @@ from konfai_studio.agent import with_volume_events
 def job_record(session: Path, **fields: Any) -> None:
     job_dir = session / ".konfai_mcp" / "jobs" / str(fields.get("job_id", "job-1"))
     job_dir.mkdir(parents=True, exist_ok=True)
-    payload = {"job_id": "job-1", "status": "running", "created_at": 1.0, "pid": 1}
+    payload = {"job_id": "job-1", "status": "running", "created_at": 1.0, "pid": os.getpid()}
     (job_dir / "job.json").write_text(json.dumps({**payload, **fields}), encoding="utf-8")
 
 
@@ -314,6 +318,32 @@ def test_a_run_that_died_says_so_even_though_it_was_announced_first(
     assert [(event["run"], event["status"]) for event in terminal] == [("MR2CT", "error")]
 
 
+@pytest.mark.parametrize("console", [True, False])
+def test_on_windows_a_job_whose_process_is_gone_reads_as_error(monkeypatch: pytest.MonkeyPatch, console: bool) -> None:
+    """Windows has no /proc, and its os.kill(pid, 0) is CTRL_C_EVENT: from a console it succeeds for any
+    pid, so a crashed job stayed 'running'; without one it raises for every pid, and the feed, the chat
+    and the task list raised with it while a record read 'running'."""
+    import konfai_studio.jobs as jobs
+
+    def kill(pid: int, sig: int) -> None:
+        assert sig in (0, 1), "only a probe is expected"
+        if not console:
+            raise OSError(22, "The handle is invalid")
+
+    windows_os = ModuleType("os")
+    windows_os.__dict__.update(vars(os), name="nt", kill=kill)
+    monkeypatch.setattr(jobs, "os", windows_os)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert jobs._live_status({"status": "running", "pid": gone.pid}) == "error"
+        assert jobs._live_status({"status": "running", "pid": live.pid}) == "running"
+    finally:
+        live.kill()
+        live.wait()
+
+
 def test_a_run_relaunched_outside_studio_reads_as_live_not_as_the_job_that_ended(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -466,7 +496,7 @@ def test_the_result_pair_wins_over_the_input_the_run_was_given(tmp_path: Path) -
 
     events = volume_events(
         [
-            {"type": "tool_call", "name": "run_app_infer", "input": {"input_path": str(mr)}},
+            {"type": "tool_call", "name": "run_app", "input": {"input_path": str(mr)}},
             {"type": "text", "text": f"sCT: {sct}\nreal CT: {ct}"},
             {"type": "done"},
         ]
@@ -577,7 +607,7 @@ def test_the_pane_follows_the_last_pair_named_however_it_is_streamed(tmp_path: P
 
     events = volume_events(
         [
-            {"type": "tool_call", "name": "run_app_uncertainty", "input": {"inputs": [str(stack)]}},
+            {"type": "tool_call", "name": "run_app", "input": {"inputs": [str(stack)]}},
             {"type": "text", "text": f"Carte d'incertitude : {unc}"},
             {"type": "text", "text": f"\nsCT synthétique : {sct}"},
             {"type": "done"},
@@ -597,7 +627,7 @@ def test_a_run_input_can_be_half_of_the_comparison_that_follows(tmp_path: Path) 
 
     events = volume_events(
         [
-            {"type": "tool_call", "name": "run_app_infer", "input": {"fixed": str(ct), "moving": str(mr)}},
+            {"type": "tool_call", "name": "run_app", "input": {"fixed": str(ct), "moving": str(mr)}},
             {"type": "text", "text": f"IRM recalée : {moved}"},
             {"type": "text", "text": f"\nCT (référence) : {ct}"},
             {"type": "done"},
@@ -650,7 +680,13 @@ def test_a_status_change_re_announces_the_job_without_wiping_its_console(
                     if line.startswith("data: ") and json.loads(line[6:]).get("type") == "job":
                         announcements.append(json.loads(line[6:]))
                 if len(announcements) == 1:  # the run dies, on the log the console is already following
-                    job_record(session, **running, status="error", finished_at=time.time())
+                    job_record(
+                        session,
+                        **running,
+                        status="error",
+                        finished_at=time.time(),
+                        error="[Config] 'Trainer.Dataset' is empty.",
+                    )
                 elif len(announcements) >= 2:
                     break
 
@@ -666,6 +702,10 @@ def test_a_status_change_re_announces_the_job_without_wiping_its_console(
 
     assert [event["status"] for event in announcements] == ["running", "error"]
     assert [event["console_reset"] for event in announcements] == [True, False]
+    # The failed job carries its error and its reading, the cause and the fix, not the raw log alone.
+    assert announcements[0]["diagnosis"] is None
+    assert announcements[1]["error"] == "[Config] 'Trainer.Dataset' is empty."
+    assert {"kind", "summary", "fix"} <= set(announcements[1]["diagnosis"])
 
 
 def test_a_metric_that_is_not_a_number_still_leaves_valid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

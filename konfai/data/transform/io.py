@@ -19,7 +19,7 @@
 
 import torch
 
-from konfai.data.transform.base import Transform
+from konfai.data.transform.base import LocalityKind, PatchLocality, Transform
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
@@ -32,17 +32,17 @@ class Save(Transform):
     a quarter of the extent per axis, ``[4, 4]`` a level 2 at a sixteenth, ``auto`` halves each entry's grid down to
     about 256 voxels along its longest axis. A pyramid is indexed by
     position (``:omezarr@1`` is the second entry), 0 finest. ``downsample_method`` names how the
-    coarse levels are derived; its default is ``DASK_BIN_SHRINK`` (block averaging), not ngff-zarr's
-    own ``ITKWASM_GAUSSIAN``.
+    coarse levels are derived, each from the one above it over aligned windows of the factor. Left
+    unnamed, a label dtype (uint8, int64, bool) takes the majority of each window, the smallest value
+    on a tie, and every other dtype takes the block mean ``DASK_BIN_SHRINK``, not ngff-zarr's own
+    ``ITKWASM_GAUSSIAN``.
     """
 
     working_multiple = 0.0
 
-    alters_values = False
-
     def __init__(
         self,
-        dataset: str,
+        dataset: str | None = None,
         group: str | None = None,
         scale_factors: list[int] | str | None = None,
         downsample_method: str | None = None,
@@ -64,8 +64,10 @@ class Save(Transform):
         self.downsample_method = downsample_method
         self._destination: Dataset | None = None
 
-    # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
-    # source boundary, and an unsatisfied one with a streamable prefix is materialized slab by slab.
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        # WHOLE_VOLUME by declaration, yet the case may still stream: a Save whose cache exists is a
+        # source boundary, and an unsatisfied one with a streamable prefix is materialized slab by slab.
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="it cannot write its output region by region here")
 
     @property
     def spec(self) -> tuple[str, str] | None:

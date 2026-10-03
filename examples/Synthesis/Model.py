@@ -18,14 +18,12 @@ from functools import partial
 
 import segmentation_models_pytorch as smp
 import torch
-
 from konfai.data.patching import ModelPatch
 from konfai.network import blocks, network
 from konfai.utils.config import config
 
 
 class Head(network.ModuleArgsDict):
-
     def __init__(self):
         super().__init__()
         self.add_module("Tanh", torch.nn.Tanh())
@@ -33,12 +31,11 @@ class Head(network.ModuleArgsDict):
 
 @config()
 class UNetpp5(network.Network):
-
     def __init__(
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         patch: ModelPatch | None = None,
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
@@ -61,9 +58,7 @@ class UNetpp5(network.Network):
 
 @config()
 class Discriminator(network.Network):
-
     class DiscriminatorNLayers(network.ModuleArgsDict):
-
         def __init__(self, channels: list[int], strides: list[int], dim: int) -> None:
             super().__init__()
             block_config = partial(
@@ -74,14 +69,13 @@ class Discriminator(network.Network):
                 activation=partial(torch.nn.LeakyReLU, negative_slope=0.2, inplace=False),
                 norm_mode=blocks.NormMode.SYNCBATCH,
             )
-            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides)):
+            for i, (in_channels, out_channels, stride) in enumerate(zip(channels, channels[1:], strides, strict=False)):
                 self.add_module(
                     f"Layer_{i}",
                     blocks.ConvBlock(in_channels, out_channels, [block_config(stride=stride)], dim),
                 )
 
     class DiscriminatorHead(network.ModuleArgsDict):
-
         def __init__(self, channels: int, dim: int) -> None:
             super().__init__()
             self.add_module(
@@ -99,7 +93,7 @@ class Discriminator(network.Network):
         self,
         optimizer: network.OptimizerLoader = network.OptimizerLoader(),
         schedulers: dict[str, network.LRSchedulersLoader] = {
-            "default:ReduceLROnPlateau": network.LRSchedulersLoader(0)
+            "default|ReduceLROnPlateau": network.LRSchedulersLoader(0)
         },
         outputs_criterions: dict[str, network.TargetCriterionsLoader] = {"default": network.TargetCriterionsLoader()},
         nb_batch_per_step: int = 1,
@@ -122,7 +116,6 @@ class Discriminator(network.Network):
 
 @config()
 class Gan(network.Network):
-
     def __init__(
         self,
         generator: UNetpp5 = UNetpp5(),

@@ -38,9 +38,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
 
+from konfai.utils.uri import is_uri
 from ruamel.yaml.error import YAMLError
 
 from .config_io import YAML_SAFE
+from .workflows import WORKFLOW_SPECS
 from .workspace import WORKFLOW_CONFIG_FILES, WORKFLOW_ROOT_KEYS
 
 Stage = Literal[
@@ -102,7 +104,7 @@ STAGE_FOCUS: dict[str, str] = {
 STAGE_ACTIONS: dict[str, list[str]] = {
     "dataset_inspection": ["inspect_dataset", "browse_dataset", "design_config_strategy", "initialize_session"],
     "action_selection": ["list_apps", "fine_tune_app", "design_config_strategy", "run_train"],
-    "app_selection": ["describe_app", "run_app_infer", "fine_tune_app", "list_app_parameters"],
+    "app_selection": ["describe_app", "run_app", "fine_tune_app", "list_app_parameters"],
     "configuration": ["validate_config_semantics", "review_config_semantics", "run_train", "write_workflow_config"],
     "running": ["wait_for_job", "read_live_metrics", "get_job_status", "cancel_job"],
     "failed": ["read_job_log", "validate_config_semantics", "get_job_status"],
@@ -116,12 +118,7 @@ STAGE_ACTIONS: dict[str, list[str]] = {
 # Which config file each launcher needs, so an action is never offered for a workflow this session has
 # not written. Without the gate, a session holding only a Transform.yml is told to "run train": an
 # action naming a file that is not there, while the workflow it could run is offered by nothing.
-_LAUNCHER_CONFIG: dict[str, str] = {
-    "run_train": "Config.yml",
-    "run_prediction": "Prediction.yml",
-    "run_evaluation": "Evaluation.yml",
-    "run_transform": "Transform.yml",
-}
+_LAUNCHER_CONFIG: dict[str, str] = {spec.retry_tool: spec.config_file for spec in WORKFLOW_SPECS.values()}
 
 # The dry run that must precede a launcher, where one exists. A transform writes a dataset, so its plan
 # comes first: it is what says how much, how, and whether the run would refuse before writing a byte.
@@ -415,9 +412,11 @@ def _dataset_from_config(path: Path, workflow: str = "train") -> tuple[str, list
     dataset = root.get("Dataset") if isinstance(root, dict) else None
     if not isinstance(dataset, dict):
         return "", []
+    from konfai.utils.utils import split_path_spec  # local: keeps this module free of numpy
+
     entries = [e for e in dataset.get("dataset_filenames") or [] if isinstance(e, str) and e not in {"", "None"}]
-    # A dataset entry is "<path>:<flags>:<extension>": the path is the part before those two fields.
-    first = entries[0].rsplit(":", 2)[0] if entries else ""
+    # A drive letter and a URI scheme carry colons of their own: the spec grammar tells them apart.
+    first = split_path_spec(entries[0], allowed_flags={"a", "i"})[0] if entries else ""
     groups = dataset.get("groups_src")
     return first, sorted(groups)[:12] if isinstance(groups, dict) else []
 
@@ -454,7 +453,7 @@ def collect_facts(
         # A config writes the dataset for the cwd the job runs in, which is the workspace ("./Dataset").
         # Kept relative it resolves against whoever is asking instead: the scan below found nothing, so
         # the state reported 0 cases, and the path it handed on opened for no tool that received it.
-        if dataset and not Path(dataset).expanduser().is_absolute():
+        if dataset and not is_uri(dataset) and not Path(dataset).expanduser().is_absolute():
             dataset = str((workspace / dataset).resolve())
         groups = groups or config_groups
     if dataset and not groups:  # a path is not knowledge of the data: read its structure

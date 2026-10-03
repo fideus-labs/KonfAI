@@ -28,18 +28,28 @@ from __future__ import annotations
 
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
 DOCS_ROOT = REPO / "docs" / "source"  # a var documented ANYWHERE in the docs counts (env vars split across pages)
-CODE_DIRS = [REPO / "konfai", REPO / "konfai-apps" / "konfai_apps", REPO / "konfai-mcp" / "konfai_mcp"]
+CODE_DIRS = [
+    REPO / "konfai",
+    REPO / "konfai-apps" / "konfai_apps",
+    REPO / "konfai-mcp" / "konfai_mcp",
+    REPO / "konfai-studio" / "konfai_studio",
+]
 
 VAR = re.compile(r"KONFAI_[A-Z_]+")
 # Lowercase KONFAI_config_file is a real runtime var set by the wrappers; include it explicitly.
 KNOWN_LOWER = {"KONFAI_config_file"}
+# An f-string's literal text is its own token type from Python 3.12.
+_STRING_TOKENS = {tokenize.STRING, getattr(tokenize, "FSTRING_MIDDLE", tokenize.STRING)}
 
 
 def vars_in(paths: list[Path]) -> set[str]:
+    """The names in the code's string literals: a variable is read by its name as a string, while a module
+    constant such as ``KONFAI_VERSION`` or ``_KONFAI_DEPS`` is an identifier."""
     found: set[str] = set()
     for root in paths:
         if not root.exists():
@@ -47,7 +57,10 @@ def vars_in(paths: list[Path]) -> set[str]:
         for py in root.rglob("*.py"):
             if "/build/" in py.as_posix():
                 continue
-            found |= set(VAR.findall(py.read_text(encoding="utf-8", errors="ignore")))
+            with tokenize.open(py) as source:
+                for token in tokenize.generate_tokens(source.readline):
+                    if token.type in _STRING_TOKENS:
+                        found |= set(VAR.findall(token.string))
     return found
 
 

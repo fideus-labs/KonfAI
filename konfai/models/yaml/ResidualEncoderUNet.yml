@@ -10,7 +10,7 @@
 # into this KonfAI model through the execution-order bridge
 # `konfai.utils.pretrained.transfer_weights_by_execution_order`, and the KonfAI
 # logits are `torch.allclose` with the reference output (see
-# tests/unit/test_residualencoderunet_yaml.py, which transfers the parametric
+# tests/unit/test_models_yaml.py, which transfers the parametric
 # ResidualEncoderUNet's weights in and checks maxdiff < 1e-4).
 #
 # It is authored at the STAGE level from two generic, registry-backed composite

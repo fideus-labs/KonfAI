@@ -17,13 +17,16 @@
 """The patch/overlap and storage-format grammar shared by every workflow: patch sizing and overlap
 resolution, the supported-extension and ``path:spec`` vocabulary, and the classpath importer."""
 
+import difflib
 import importlib
 import itertools
 import os
+import pkgutil
 import re
 from math import prod
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import numpy as np
 
@@ -48,8 +51,8 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     A ``:`` separates the module from the name: everything before the last one is the module, so
     ``torch:nn:L1Loss`` and ``torch.nn:L1Loss`` name the same class. Without one the name comes from the
     kind's own package, dots leading into its subpackages (``segmentation.UNet.UNet``)."""
-    # A chain spelled as a list binds its stages under occurrence keys (`Clip#2`): the suffix is the
-    # stage's identity in the config, not part of the class it names.
+    # A repeated stage is keyed by occurrence (`Clip#2`): the suffix is the stage's identity in the
+    # config, not part of the class it names.
     classpath = classpath.rsplit("#", 1)[0] if _OCCURRENCE.search(classpath) else classpath
     if len(classpath.split(":")) > 1:
         module_name = ".".join(classpath.split(":")[:-1])
@@ -61,12 +64,47 @@ def get_module(classpath: str, default_classpath: str) -> tuple[ModuleType, str]
     os.environ["KONFAI_CONFIG_MODE"] = "Import"
     try:
         module = importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        # Only the classpath's own module or a package above it: a dependency it imports keeps its own error.
+        if error.name is None or not f"{module_name}.".startswith(f"{error.name}."):
+            raise
+        missing = "which does not exist" if error.name == module_name else f"and there is no package '{error.name}'"
+        raise ConfigError(
+            f"Classpath '{classpath}' names module '{module_name}', {missing}{_closest_submodules(error.name)}.",
+            f"A bare name resolves in '{default_classpath}'; 'module:Class' imports any module on the path.",
+        ) from error
     finally:
         if previous_mode is None:
             os.environ.pop("KONFAI_CONFIG_MODE", None)
         else:
             os.environ["KONFAI_CONFIG_MODE"] = previous_mode
-    return module, name.split("/")[0]
+    return module, name
+
+
+def _closest(name: str, candidates: list[str]) -> str:
+    close = difflib.get_close_matches(name, candidates, n=3)
+    return f" (closest: {', '.join(repr(match) for match in close)})" if close else ""
+
+
+def _closest_submodules(missing: str) -> str:
+    """The modules beside ``missing`` in its package closest to its last component; empty at the top level."""
+    package_name, _, leaf = missing.rpartition(".")
+    package = importlib.import_module(package_name) if package_name else None
+    paths = getattr(package, "__path__", None)
+    return _closest(leaf, [module.name for module in pkgutil.iter_modules(paths)]) if paths else ""
+
+
+def module_attribute(module: ModuleType, name: str) -> Any:
+    """``getattr(module, name)`` for the name a classpath gave: one the module does not hold is a
+    ConfigError naming the closest ones."""
+    try:
+        return getattr(module, name)
+    except AttributeError:
+        public = [attribute for attribute in dir(module) if not attribute.startswith("_")]
+        raise ConfigError(
+            f"Module '{module.__name__}' has no '{name}'{_closest(name, public)}.",
+            "Check the class name the classpath ends with.",
+        ) from None
 
 
 def best_sweep_axis(patch_size: list[int], shape: list[int]) -> int:
@@ -93,7 +131,7 @@ def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice
 #: Default overlap on tiled axes when a free-axis patch does not say otherwise: 20 % of the patch.
 DEFAULT_OVERLAP_FRACTION = 0.2
 
-OverlapSpec = int | float | str | list["int | float | str"] | None
+OverlapSpec = int | float | str | list[int | float | str] | None
 
 
 def concretize_patch_size(
@@ -282,11 +320,8 @@ def get_patch_slices_from_shape(
                 if s > 1:
                     tmp[i] = np.mod(patch_size[i] - np.mod(shape[i], patch_size[i]), patch_size[i]) // (size[i] - 1)
             overlap = tmp
-    elif isinstance(overlap_tmp, int):
-        # Plain int: the same voxel overlap on every axis whose patch is > 1.
-        overlap = [overlap_tmp if size > 1 else 0 for size in patch_size]
     else:
-        # Rich spec: a fraction, a "20%" string, or a per-axis list mixing forms.
+        # Voxels, a fraction, a "20%" string, or a per-axis list mixing forms.
         overlap = resolve_overlap(overlap_tmp, patch_size, shape)
 
     for dim in range(len(shape)):
@@ -408,16 +443,42 @@ def directory_volume_form(path: Path) -> str | None:
     form = storage_form(path)
     if form.lower() in _STORE_FORMS:
         return form
-    entries = sorted(path.iterdir(), key=lambda entry: entry.name)
+    with os.scandir(path) as listing:
+        return listed_volume_form(list(listing))
+
+
+def listed_volume_form(entries: list[os.DirEntry], sniffed: int | None = None) -> str | None:
+    """:func:`directory_volume_form` of a directory not named as a store, from its listing: every file is
+    read for the DICOM magic, or the first ``sniffed`` of them by name."""
+    entries = sorted(entries, key=lambda entry: entry.name)
     if {entry.name for entry in entries} & {".zgroup", ".zattrs", "zarr.json"}:
         return ".ome.zarr"
-    files = [entry for entry in entries if entry.is_file()]
-    if any(file.suffix.lower() in (".dcm", ".dicom") for file in files):
+    # A series holds hundreds of files: they are told apart by the listing, not by a stat or a Path each.
+    files = [entry for entry in entries if is_file_entry(entry)]
+    suffixes = (entry.name.lower().rpartition(".") for entry in files)
+    if any(stem and extension in ("dcm", "dicom") for stem, _, extension in suffixes):
         return ""
-    # A non-DICOM file may sort first, so probe every file, not only the first one.
-    if any(is_dicom_file(file) for file in files):
-        return ""
-    return None
+    # A non-DICOM file may sort first, so probe more than the first one; hidden files (macOS "._" twins
+    # sort before the slices they shadow) are read last.
+    sniffed_files = sorted(files, key=lambda entry: entry.name.startswith("."))[:sniffed]
+    return "" if any(is_dicom_file(Path(entry.path)) for entry in sniffed_files) else None
+
+
+def is_dir_entry(entry: os.DirEntry) -> bool:
+    """``Path.is_dir`` for a listing entry, read off the listing unless the entry is a link: a link is
+    followed, and one that cannot be followed is no directory."""
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
+def is_file_entry(entry: os.DirEntry) -> bool:
+    """``Path.is_file`` for a listing entry, as :func:`is_dir_entry` answers ``Path.is_dir``."""
+    try:
+        return entry.is_file()
+    except OSError:
+        return False
 
 
 def format_token(form: str, *, directory: bool = False) -> str:

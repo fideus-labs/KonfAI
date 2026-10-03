@@ -20,13 +20,22 @@ backends (modes, locking, transforms, path resolution), and ``get_infos`` shape 
 import multiprocessing
 import os
 import stat
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
-from konfai.utils.dataset import Attribute, Dataset, get_infos, image_to_data
+from konfai.utils.dataset import (
+    Attribute,
+    Dataset,
+    get_infos,
+    image_to_data,
+    is_staging_entry,
+    read_landmarks,
+)
 from konfai.utils.dataset import raw_block as raw_block_module
 from konfai.utils.dataset.h5 import _get_h5_file_lock
 from konfai.utils.errors import DatasetManagerError
@@ -151,8 +160,8 @@ def test_attribute_prints_random_float_vectors_as_numpy_prints_them() -> None:
 
 def test_attribute_names_the_key_whose_value_does_not_parse_back_flat() -> None:
     """A >= 2-D value is stored as a nested print (Crop's ``box`` is read back through its own
-    parser, so the write door cannot refuse the rank), and reading it back as an array used to be
-    an anonymous ``ValueError`` deep in numpy: the refusal now names the key and the remedy."""
+    parser, so the write door cannot refuse the rank), and reading it back as an array is refused
+    with the key and the remedy named, not an anonymous ``ValueError`` deep in numpy."""
     attribute = Attribute()
     attribute["MyMatrix"] = np.eye(3)
     with pytest.raises(DatasetManagerError, match=r"'MyMatrix'.*flat"):
@@ -191,6 +200,24 @@ def test_h5_missing_group_raises_the_designed_refusal_not_attributeerror(tmp_pat
         ):
             with pytest.raises(DatasetManagerError, match="is not in"):
                 read()
+
+
+@pytest.mark.parametrize("file_format", ["h5", "itktransform"])
+def test_an_h5_backed_entry_writes_and_reads_back_without_simpleitk(tmp_path: Path, file_format: str) -> None:
+    """``konfai[hdf5]`` alone: an array is written by h5py, so no SimpleITK type check may run."""
+    script = f"""
+import sys
+sys.modules["SimpleITK"] = None
+import numpy as np
+from konfai.utils.dataset import Attribute, Dataset
+attributes = Attribute()
+attributes["Origin"], attributes["Spacing"], attributes["Direction"] = np.zeros(3), np.ones(3), np.eye(3).ravel()
+field = np.arange(3 * 4 * 5 * 6, dtype=np.float32).reshape(3, 4, 5, 6)
+dataset = Dataset({str(tmp_path / "out")!r}, {file_format!r})
+dataset.write("Field", "CASE_000", field, attributes)
+assert np.array_equal(dataset.read_data("Field", "CASE_000")[0], field)
+"""
+    subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
 
 
 def test_h5_read_chunk_cache_takes_its_slice_of_the_declared_budget() -> None:
@@ -341,6 +368,107 @@ def test_supported_transform_types_round_trip(tmp_path: Path) -> None:
 
     assert isinstance(restored, sitk.Euler3DTransform)
     np.testing.assert_allclose(restored.GetParameters(), (0.1, 0.2, 0.3, 4.0, 5.0, 6.0))
+
+
+@pytest.mark.parametrize("file_format", ["h5", "itk.txt"])
+def test_a_composite_of_leaves_with_different_parameter_counts_round_trips(tmp_path: Path, file_format: str) -> None:
+    """Euler (6 parameters) then BSpline (375): the leaves' parameter rows differ in length, and
+    every backend stores them as one array padded with NaN."""
+    euler = sitk.Euler3DTransform()
+    euler.SetParameters((0.1, 0.2, 0.3, 1.0, 2.0, 3.0))
+    spline = sitk.BSplineTransformInitializer(sitk.Image([8, 8, 8], sitk.sitkFloat32), [2, 2, 2])
+    spline.SetParameters(tuple(np.linspace(-1.0, 1.0, spline.GetNumberOfParameters())))
+    composite = sitk.CompositeTransform([euler, spline])
+    dataset = Dataset(tmp_path / "Transforms", file_format)
+
+    dataset.write("T", "CASE_000", composite, Attribute())
+    restored = dataset.read_transform("T", "CASE_000")
+
+    for point in [(1.0, 2.0, 3.0), (4.5, 0.5, 6.0), (7.0, 7.0, 0.0)]:
+        np.testing.assert_allclose(restored.TransformPoint(point), composite.TransformPoint(point))
+
+
+# --------------------------------------------------------------------------------------
+# Landmarks: a fiducial file is read in LPS whatever coordinate system its header declares
+# --------------------------------------------------------------------------------------
+
+
+def _fiducial_file(path: Path, coordinate_system: str | None) -> Path:
+    """One point (1, 2, 3) in a Slicer fiducial file, with or without the CoordinateSystem line."""
+    header = ["# Markups fiducial file version = 4.10"]
+    if coordinate_system is not None:
+        header.append(f"# CoordinateSystem = {coordinate_system}")
+    header.append("# columns = id,x,y,z,ow,ox,oy,oz,vis,sel,lock,label,desc,associatedNodeID")
+    path.write_text("\n".join([*header, "vtkMRMLMarkupsFiducialNode_0,1,2,3,0,0,0,1,1,1,0,F-1,,"]) + "\n")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("coordinate_system", "expected"),
+    [
+        ("RAS", [-1.0, -2.0, 3.0]),
+        ("0", [1.0, 2.0, 3.0]),
+        ("1", [1.0, 2.0, 3.0]),
+        ("LPS", [1.0, 2.0, 3.0]),
+        (None, [1.0, 2.0, 3.0]),
+    ],
+)
+def test_read_landmarks_returns_lps_points(
+    tmp_path: Path, coordinate_system: str | None, expected: list[float]
+) -> None:
+    """KonfAI's physical space is LPS: an RAS point has its x and y negated. '0' is ambiguous (RAS
+    in 3D Slicer before 4.11, LPS in KonfAI up to 1.5.3) and stays LPS."""
+    points = read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
+
+    np.testing.assert_array_equal(points, [expected])
+
+
+@pytest.mark.parametrize("coordinate_system", ["2", "IJK"])
+def test_read_landmarks_refuses_a_coordinate_system_other_than_ras_or_lps(
+    tmp_path: Path, coordinate_system: str
+) -> None:
+    with pytest.raises(DatasetManagerError, match="CoordinateSystem"):
+        read_landmarks(_fiducial_file(tmp_path / "points.fcsv", coordinate_system))
+
+
+_POINTS = np.array([[1.5, -2.25, 3.0], [4.0, 5.0, -6.125]])
+
+
+def test_landmarks_round_trip_through_a_dataset(tmp_path: Path) -> None:
+    """An (N, 3) array is written as a Slicer fiducial file and read back as the same LPS points."""
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+
+    dataset.write("Points", "CASE_000", _POINTS, Attribute())
+
+    assert (tmp_path / "Dataset" / "CASE_000" / "Points.fcsv").is_file()
+    data, _ = dataset.read_data("Points", "CASE_000")
+    np.testing.assert_array_equal(data, _POINTS)
+
+
+def test_a_polydata_round_trips_through_a_dataset(tmp_path: Path) -> None:
+    vtk = pytest.importorskip("vtk")
+    points = vtk.vtkPoints()
+    for point in _POINTS:
+        points.InsertNextPoint(*point)
+    polydata = vtk.vtkPolyData()
+    polydata.SetPoints(points)
+    dataset = Dataset(tmp_path / "Dataset", "mha")
+
+    dataset.write("Mesh", "CASE_000", polydata, Attribute())
+
+    assert (tmp_path / "Dataset" / "CASE_000" / "Mesh.vtk").is_file()
+    data, _ = dataset.read_data("Mesh", "CASE_000")
+    np.testing.assert_array_equal(data, _POINTS)
+
+
+def test_a_vtk_entry_without_vtk_names_the_extra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    case = tmp_path / "Dataset" / "CASE_000"
+    case.mkdir(parents=True)
+    (case / "Mesh.vtk").write_text("# vtk DataFile Version 5.1\n")
+    monkeypatch.setitem(sys.modules, "vtk", None)  # an import of vtk now fails as on a bare install
+
+    with pytest.raises(DatasetManagerError, match=r"pip install konfai\[vtk\]"):
+        Dataset(tmp_path / "Dataset", "mha").read_data("Mesh", "CASE_000")
 
 
 # --------------------------------------------------------------------------------------
@@ -518,6 +646,210 @@ def test_autodetect_plain_files_return_none(tmp_path: Path) -> None:
     assert Dataset._detect_directory_store_format(str(root)) is None
 
 
+class _Listing:
+    """What ``os.scandir`` hands back, over entries in a chosen order."""
+
+    def __init__(self, entries: list[os.DirEntry]) -> None:
+        self._entries = iter(entries)
+
+    def __iter__(self) -> "_Listing":
+        return self
+
+    def __next__(self) -> os.DirEntry:
+        return next(self._entries)
+
+    def __enter__(self) -> "_Listing":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _list_by_name(monkeypatch: pytest.MonkeyPatch, reverse: bool) -> None:
+    """Every directory listing in name order, or in reverse: a filesystem may list in any order."""
+    scandir = os.scandir
+
+    def listed(path: str = ".") -> _Listing:
+        with scandir(path) as entries:
+            return _Listing(sorted(entries, key=lambda entry: entry.name, reverse=reverse))
+
+    monkeypatch.setattr(os, "scandir", listed)
+
+
+def _store_cases(root: Path, names: list[str]) -> None:
+    for name in names:
+        (root / name / "CT.ome.zarr").mkdir(parents=True)
+
+
+def _file_cases(root: Path, names: list[str]) -> None:
+    for name in names:
+        (root / name).mkdir(parents=True)
+        (root / name / "CT.mha").write_bytes(b"")
+
+
+def _put(path: Path, data: bytes = b"") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+def _cases(prefix: str, count: int = 20) -> list[str]:
+    return [f"{prefix}_{index:03d}" for index in range(count)]
+
+
+def _atlas_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("CASE"))
+    _put(root / "Atlas" / "atlas.nii.gz")
+
+
+def _qc_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("patient"))
+    _put(root / "QC" / "overview.png")
+
+
+def _trash_beside_files(root: Path) -> None:
+    _file_cases(root, _cases("CASE"))
+    _put(root / ".Trash-1000" / "files" / "deleted.dcm")
+    (root / ".Trash-1000" / "info").mkdir()
+
+
+def _trash_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("CASE"))
+    _put(root / ".Trash-1000" / "files" / "deleted.dcm")
+
+
+def _git_beside_stores(root: Path) -> None:
+    _store_cases(root, _cases("CASE"))
+    _put(root / ".git" / "HEAD", b"ref: refs/heads/main\n")
+    _put(root / ".git" / "hooks" / "pre-commit.sample", b"#!/bin/sh\n")
+    (root / ".git" / "objects" / "ab").mkdir(parents=True)
+
+
+def _checkpoints_beside_files(root: Path) -> None:
+    _file_cases(root, _cases("CASE"))
+    _put(root / ".ipynb_checkpoints" / "labels-checkpoint.xml")
+
+
+def _one_store(root: Path) -> None:
+    _store_cases(root, ["CASE_000"])
+
+
+def _unreadable_in_every_store_case(root: Path) -> None:
+    _store_cases(root, _cases("CASE", 3))
+    for case in _cases("CASE", 3):
+        (root / case / ".private").mkdir(mode=0)
+
+
+@pytest.mark.parametrize(
+    ("layout", "token", "backend", "cases"),
+    [
+        (_atlas_beside_stores, "mha", "omezarr", 20),
+        (_qc_beside_stores, "mha", "omezarr", 20),
+        (_trash_beside_files, "mha", "mha", 20),
+        (_trash_beside_stores, "omezarr", "omezarr", 20),
+        (_git_beside_stores, "mha", "omezarr", 20),
+        (_checkpoints_beside_files, "mha", "mha", 20),
+        (_one_store, "mha", "omezarr", 1),
+        (_unreadable_in_every_store_case, "mha", "omezarr", 3),
+        (_unreadable_in_every_store_case, "omezarr", "omezarr", 3),
+    ],
+)
+def test_the_cases_decide_the_store_form_whatever_sits_beside_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout, token: str, backend: str, cases: int
+) -> None:
+    """A directory beside the cases (an atlas, a QC folder, a trash, a repository, a notebook's
+    checkpoints) or one a case holds and nobody may read never decides a root's store form, whatever
+    the filesystem's listing order: the form the cases hold does, and every case is listed."""
+    root = tmp_path / "ds"
+    layout(root)
+    found = []
+    try:
+        for reverse in (False, True):
+            _list_by_name(monkeypatch, reverse)
+            dataset = Dataset(f"{root}/", token)
+            found.append((dataset.file_format, len(dataset.get_names("CT"))))
+    finally:
+        for private in root.glob("*/.private"):
+            private.chmod(0o755)
+    assert found == [(backend, cases)] * 2
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads every directory")
+@pytest.mark.skipif(os.name == "nt", reason="chmod does not take away reading a directory on Windows")
+def test_a_root_none_of_whose_cases_can_be_read_is_refused_not_read_as_empty(tmp_path: Path) -> None:
+    """With no case readable, nothing was seen to decide the store form: the permission error is raised,
+    not a guess that would list no case."""
+    root = tmp_path / "ds"
+    _store_cases(root, _cases("CASE", 3))
+    for case in root.iterdir():
+        case.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            Dataset(f"{root}/", "mha")
+    finally:
+        for case in root.iterdir():
+            case.chmod(0o755)
+
+
+def test_a_large_root_is_probed_on_a_bounded_sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """At most 16 of a root's directories vote, and at most 16 sub-directories of each that hold something
+    are opened: a cohort of thousands, flat or grouped in folders, costs a few listings to probe."""
+    flat, nested = tmp_path / "flat", tmp_path / "nested"
+    _file_cases(flat, _cases("CASE", 40))
+    for fold in ("fold_0", "fold_1"):
+        _file_cases(nested / fold, _cases("CASE", 40))
+    scandir = os.scandir
+    listed: list[str] = []
+    monkeypatch.setattr(os, "scandir", lambda path=".": (listed.append(str(path)), scandir(path))[1])
+
+    assert Dataset._detect_directory_store_format(f"{flat}/") is None
+    assert len(listed) <= 1 + 16
+    listed.clear()
+    assert Dataset._detect_directory_store_format(f"{nested}/") is None
+    assert len(listed) <= 1 + 2 * (1 + 16)
+
+
+def test_a_series_beside_its_macos_twins_is_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An extensionless series extracted from a macOS archive holds a ``._`` twin per slice: the twins sort
+    first, yet the slices are the files read for the DICOM magic."""
+    root = tmp_path / "ds"
+    for case in _cases("CASE", 4):
+        for index in range(20):
+            _put(root / case / "CT" / f"IM{index:02d}", b"\0" * 128 + b"DICM")
+            _put(root / case / "CT" / f"._IM{index:02d}", b"\0" * 4096)
+
+    detected = []
+    for reverse in (False, True):
+        _list_by_name(monkeypatch, reverse)
+        detected.append(Dataset._detect_directory_store_format(f"{root}/"))
+    assert detected == ["dicom", "dicom"]
+
+
+class _Entry:
+    """A listing entry that records every link it is asked to follow."""
+
+    def __init__(self, entry: os.DirEntry, followed: list[str]) -> None:
+        self._entry, self._followed = entry, followed
+        self.name, self.path = entry.name, entry.path
+
+    def _follows(self, follow_symlinks: bool) -> None:
+        if follow_symlinks and self._entry.is_symlink():
+            self._followed.append(self.name)
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        self._follows(follow_symlinks)
+        return self._entry.is_dir(follow_symlinks=follow_symlinks)
+
+    def is_file(self, *, follow_symlinks: bool = True) -> bool:
+        self._follows(follow_symlinks)
+        return self._entry.is_file(follow_symlinks=follow_symlinks)
+
+    def is_symlink(self) -> bool:
+        return self._entry.is_symlink()
+
+
 def test_init_overrides_mha_token_for_ome_zarr_store(tmp_path: Path) -> None:
     root = _make_case(tmp_path / "ds", "Volume_0.ome.zarr")
     # the token says mha, but the store on disk is OME-Zarr -> the read backend follows the disk
@@ -651,6 +983,19 @@ def test_a_group_written_through_another_dataset_object_is_seen(tmp_path: Path) 
     assert reader.is_dataset_exist("MASK", "P002")
 
 
+@pytest.mark.parametrize("file_format", ["mha", "nii.gz", "mhd", "hdr", "img"])
+def test_a_group_whose_name_holds_a_dot_is_listed_whole(tmp_path: Path, image_attributes, file_format: str) -> None:
+    """A dot in the stem belongs to the name (``CT.contrast.nii.gz`` is the group ``CT.contrast``):
+    the listing names the groups every lookup answers for (Resample and the Evaluator's maps pick
+    their group from it)."""
+    dataset = Dataset(tmp_path / "ds", file_format)
+    dataset.write("CT.contrast", "case1", np.zeros((1, 2, 2, 2), np.float32), image_attributes([0, 0, 0], [1, 1, 1]))
+    dataset.write("MASK", "case1", np.zeros((1, 2, 2, 2), np.uint8), image_attributes([0, 0, 0], [1, 1, 1]))
+
+    assert sorted(dataset.get_group()) == ["CT.contrast", "MASK"]
+    assert all(dataset.is_dataset_exist(group, "case1") for group in dataset.get_group())
+
+
 def test_membership_is_asked_of_disk_not_of_the_listing(tmp_path: Path) -> None:
     """``get_names`` is a planning-time enumeration; asking it whether ONE case exists answers from a
     snapshot. A hit may come from the memo (an entry never disappears mid-run), but a miss must be
@@ -702,10 +1047,9 @@ def _write_mask_in_child_h5(root: str, case: str) -> None:
 
 
 def test_membership_sees_an_h5_entry_written_by_another_process(tmp_path: Path) -> None:
-    """A single store answers the same way a directory does. The pooled read handle used to keep serving
-    the view it opened on, and reopening alone would not have helped: HDF5 shares a file's metadata state
-    across the handles one process holds, so a second handle inherits the first's. The pool now closes a
-    handle whose store changed underneath it."""
+    """A single store answers the same way a directory does: the pool closes a handle whose store
+    changed underneath it. Opening a second handle beside it is not enough: HDF5 shares a file's metadata
+    state across the handles one process holds, so a second handle inherits the first's view."""
     pytest.importorskip("h5py")
     root = str(tmp_path / "ds") + "/"
     Path(root).mkdir()
@@ -760,6 +1104,63 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
         holder.join(120)
 
     assert dataset.is_dataset_exist("MASK", "P001")
+
+
+@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm", "nrrd.gz"])
+def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, image_attributes, file_format: str) -> None:
+    """A format SimpleITK has no writer for, or whose writer refuses this volume, answered with ITK's
+    trace and the name of a staging file the user never asked for."""
+    pytest.importorskip("SimpleITK")
+    dataset = Dataset(tmp_path / "store", file_format)
+    volume = np.ones((1, 4, 5, 6), np.float32)
+    with pytest.raises(DatasetManagerError, match=f"as '{file_format}'") as refusal:
+        dataset.write("CT", "CASE_001", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
+    assert ".tmp" not in str(refusal.value)
+
+
+def test_a_dicom_write_that_fails_keeps_itks_error(tmp_path: Path, image_attributes, monkeypatch) -> None:
+    """GDCM reports every failed write, a full disk included, as a component type it does not support:
+    that phrase says nothing about the format, so it is not read as a refusal."""
+    sitk = pytest.importorskip("SimpleITK")
+
+    def full_disk(image, path, *args, **kwargs):
+        raise RuntimeError(
+            "itkGDCMImageIO.cxx:1400:\nITK ERROR: GDCMImageIO(0x1): DICOM does not support this component type"
+        )
+
+    monkeypatch.setattr(sitk, "WriteImage", full_disk)
+    dataset = Dataset(tmp_path / "store", "dcm")
+    with pytest.raises(RuntimeError, match="component type") as error:
+        dataset.write("CT", "CASE_001", np.ones((1, 1, 5, 6), np.uint8), image_attributes([0.0] * 3, [1.0] * 3))
+    assert not isinstance(error.value, DatasetManagerError)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX directory permissions, not as root")
+@pytest.mark.parametrize("file_format", ["mha", "nii.gz"])
+def test_a_write_that_fails_on_the_disk_keeps_itks_error(tmp_path: Path, image_attributes, file_format: str) -> None:
+    """A format that holds the volume but a directory that refuses it: ITK's error, not a format refusal."""
+    pytest.importorskip("SimpleITK")
+    case = tmp_path / "store" / "CASE_001"
+    case.mkdir(parents=True)
+    case.chmod(0o555)
+    try:
+        with pytest.raises(RuntimeError):
+            Dataset(tmp_path / "store", file_format).write(
+                "CT", "CASE_001", np.ones((1, 4, 5, 6), np.float32), image_attributes([0.0] * 3, [1.0] * 3)
+            )
+    finally:
+        case.chmod(0o755)
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nii.gz", "nrrd"])
+def test_a_boolean_volume_is_refused_by_name_where_simpleitk_writes_it(
+    tmp_path: Path, image_attributes, file_format: str
+) -> None:
+    """SimpleITK has no boolean pixel type: its TypeError named no entry and no way out."""
+    pytest.importorskip("SimpleITK")
+    dataset = Dataset(tmp_path / "store", file_format)
+    with pytest.raises(DatasetManagerError, match="bool"):
+        dataset.write("MASK", "CASE_001", np.ones((1, 4, 5, 6), bool), image_attributes([0.0] * 3, [1.0] * 3))
 
 
 @pytest.mark.parametrize("file_format", ["mha", "h5", "nii.gz"])
@@ -1093,11 +1494,9 @@ def test_a_stepped_region_off_the_raw_block_reads_as_itk_reads_it_whole(tmp_path
 
 
 def test_a_stepped_region_carries_the_same_geometry_record_whatever_the_backend(tmp_path: Path) -> None:
-    """The same stepped read of the same logical volume used to answer three different geometry
-    records depending on the file format it was stored in: SitkFile kept the volume's origin and
-    un-scaled spacing where OME-Zarr and DICOM returned the region's. One shared helper now
-    computes the record everywhere: the first kept sample's world position, the step-scaled
-    spacing."""
+    """The same stepped read of the same logical volume answers one geometry record whatever the
+    file format it was stored in: the region's, the first kept sample's world position and the
+    step-scaled spacing, not the volume's origin and un-scaled spacing."""
     pytest.importorskip("zarr")
     pytest.importorskip("pydicom")
     volume = np.arange(1 * 6 * 8 * 10, dtype=np.int16).reshape(1, 6, 8, 10)
@@ -1154,6 +1553,101 @@ def test_the_raw_block_header_is_read_once_and_follows_a_rewrite(tmp_path: Path,
     assert reads["header"] == 2
 
 
+@pytest.mark.parametrize("file_format", ["mhd", "hdr", "img"])
+def test_a_detached_format_publishes_both_its_files_under_the_entry_name(tmp_path: Path, file_format: str) -> None:
+    """MetaImage .mhd and Analyze .hdr/.img keep the header and the pixels in two files, the header
+    naming the pixels. Both land under the entry's own name: no part of the case looks like a
+    writer's staging, and a copy of its visible files reads back."""
+    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(1, 2, 3, 4)
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([1.0, 2.0, 3.0])
+    attributes["Spacing"] = np.asarray([0.5, 1.5, 2.0])
+    attributes["Direction"] = np.eye(3).flatten()
+    Dataset(tmp_path / "written", file_format).write("CT", "case1", volume, attributes)
+
+    case = tmp_path / "written" / "case1"
+    names = sorted(path.name for path in case.iterdir())
+    assert not any(name.startswith(".") or is_staging_entry(name) for name in names), names
+    copy = tmp_path / "copied" / "case1"
+    copy.mkdir(parents=True)
+    for name in names:
+        (copy / name).write_bytes((case / name).read_bytes())
+    data, _ = Dataset(tmp_path / "copied", file_format).read_data("CT", "case1")
+    np.testing.assert_array_equal(data, volume)
+
+
+def test_a_writer_killed_while_staging_a_detached_format_leaves_no_group(tmp_path: Path) -> None:
+    """A .mhd is staged as a hidden directory holding both files under their final names. A writer
+    killed before moving them in leaves that directory behind: the listing must not descend into it,
+    and the entry it was replacing still reads. Run in a child, since the failure is a hard kill."""
+    script = f"""
+import os
+import shutil
+import numpy as np
+import SimpleITK as sitk
+from konfai.utils.dataset import Attribute, Dataset
+attributes = Attribute()
+attributes["Origin"] = np.zeros(3)
+attributes["Spacing"] = np.ones(3)
+attributes["Direction"] = np.eye(3).flatten()
+dataset = Dataset({str(tmp_path)!r}, "mhd")
+dataset.write("MASK", "c1", np.zeros((1, 2, 3, 4), np.float32), attributes)
+dataset.write("CT", "c2", np.zeros((1, 2, 3, 4), np.float32), attributes)
+write = sitk.WriteImage
+def killed(*args, **kwargs):
+    write(*args, **kwargs)
+    os._exit(9)
+sitk.WriteImage = killed
+dataset.write("CT", "c2", np.ones((1, 2, 3, 4), np.float32), attributes)
+"""
+    run = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert run.returncode == 9, run.stderr[-2000:]
+    assert any(path.is_dir() and is_staging_entry(path.name) for path in (tmp_path / "c2").iterdir())
+
+    dataset = Dataset(tmp_path, "mhd")
+    assert sorted(dataset.get_group()) == ["CT", "MASK"]
+    data, _ = dataset.read_data("CT", "c2")
+    np.testing.assert_array_equal(data, np.zeros((1, 2, 3, 4), np.float32))
+
+
+def test_a_metaimage_write_interrupted_before_its_header_leaves_the_old_pair(tmp_path: Path, monkeypatch) -> None:
+    """A .mhd header names its pixels: the new pixels land beside the old ones and the header swaps to them in
+    one replace, so a write that fails before that replace leaves the old pair whole, and one that succeeds
+    leaves no old pixels behind."""
+    attributes = Attribute()
+    attributes["Origin"] = np.zeros(3)
+    attributes["Direction"] = np.eye(3).flatten()
+    dataset = Dataset(tmp_path, "mhd")
+    attributes["Spacing"] = np.ones(3)
+    dataset.write("CT", "c1", np.ones((1, 4, 4, 4), np.float32), attributes)
+    replace = os.replace
+
+    def failing(source: str, target: str) -> None:
+        if str(target).endswith(".mhd"):
+            raise OSError("interrupted")
+        replace(source, target)
+
+    monkeypatch.setattr(os, "replace", failing)
+    attributes["Spacing"] = np.full(3, 2.0)
+    with pytest.raises(OSError, match="interrupted"):
+        dataset.write("CT", "c1", np.full((1, 4, 4, 4), 9, np.float32), attributes)
+    data, read = Dataset(tmp_path, "mhd").read_data("CT", "c1")
+    assert (data == 1).all() and list(read.get_np_array("Spacing")) == [1.0, 1.0, 1.0]
+
+    monkeypatch.setattr(os, "replace", replace)
+    dataset.write("CT", "c1", np.full((1, 4, 4, 4), 9, np.float32), attributes)
+    data, _ = Dataset(tmp_path, "mhd").read_data("CT", "c1")
+    assert (data == 9).all() and len(list((tmp_path / "c1").glob("CT*.raw"))) == 1
+
+    # A header naming pixels that are not the entry's own (shared, or elsewhere): a rewrite leaves them.
+    header = next((tmp_path / "c1").glob("CT.mhd"))
+    shared = tmp_path / "c1" / "shared.raw"
+    shared.write_bytes(next((tmp_path / "c1").glob("CT.*.raw")).read_bytes())
+    header.write_text(header.read_text().replace(next((tmp_path / "c1").glob("CT.*.raw")).name, "shared.raw"))
+    dataset.write("CT", "c1", np.ones((1, 4, 4, 4), np.float32), attributes)
+    assert shared.exists()
+
+
 def test_an_h5_sidecar_is_read_once_per_pooled_handle_and_dropped_with_it(tmp_path: Path, monkeypatch) -> None:
     """A patch read costs one hyperslab: the entry's attributes are read off the handle on its first
     read and copied after, and a write of the entry (which drops the handle) brings the new ones."""
@@ -1179,10 +1673,12 @@ def test_an_h5_sidecar_is_read_once_per_pooled_handle_and_dropped_with_it(tmp_pa
     _, whole = dataset.read_data("CT", "P0")
 
     assert opens["attribute"] == len(attributes)
-    assert all(dict(record) == dict(attributes) for record in records)
+    # The sidecar, with the region's origin on top: (1, 2, 3) + (2, 0, 1) * (0.5, 1.5, 2.0), in (x, y, z).
+    assert all({key: record[key] for key in attributes} == dict(attributes) for record in records)
+    assert all(record.get_np_array("Origin").tolist() == [2.0, 2.0, 5.0] for record in records)
     assert dict(whole) == dict(attributes)
     records[0]["Origin"] = np.asarray([9.0, 9.0, 9.0])  # a copy: the caller's edits stay the caller's
-    assert dataset.read_data_slice("CT", "P0", region)[1]["Origin"] == attributes["Origin"]
+    assert dataset.read_data_slice("CT", "P0", region)[1]["Origin"] == records[1]["Origin"]
 
     attributes["Study"] = "rewritten"
     dataset.write("CT", "P0", volume + 1, attributes)
@@ -1328,6 +1824,48 @@ def test_image_to_data_owns_the_vector_image_bytes_whatever_its_size() -> None:
 
     assert data.flags.owndata and data.shape == (3, 1, 1, 1)
     np.testing.assert_array_equal(data.reshape(-1), [1.0, 2.0, 3.0])
+
+
+@pytest.mark.parametrize("file_format", ["nii", "nii.gz", "mha"])
+def test_a_write_the_disk_cut_short_is_refused_and_leaves_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_format: str
+) -> None:
+    """ITK's NIfTI writer does not check its writes: on a full disk it leaves a short file and no
+    error. MetaImage raises. Either way nothing is published and no staging file is left behind."""
+    sitk = pytest.importorskip("SimpleITK")
+    write_image = sitk.WriteImage
+
+    def full_disk(image, path, *args, **kwargs):
+        write_image(image, path, *args, **kwargs)
+        with open(path, "r+b") as file:
+            file.truncate(os.path.getsize(path) // 2)
+        if file_format == "mha":
+            raise RuntimeError("ITK ERROR: MetaImageIO: File cannot be written")
+
+    monkeypatch.setattr(sitk, "WriteImage", full_disk)
+    image = sitk.GetImageFromArray(np.random.default_rng(0).random((8, 16, 16)).astype(np.float32))
+    with pytest.raises((DatasetManagerError, RuntimeError), match=r"stopped short|cannot be written"):
+        Dataset(tmp_path / "Dataset", file_format).write("CT", "case", image)
+    assert [name for _, _, names in os.walk(tmp_path) for name in names] == []
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nrrd", "omezarr"])
+def test_the_geometry_stack_reads_back_as_it_was_written(tmp_path: Path, file_format: str) -> None:
+    """A header carries the geometry stack it was written with: read back, the stack is the one
+    written, where it grew by one Origin, Spacing and Direction a cycle."""
+    if file_format == "omezarr":
+        pytest.importorskip("ngff_zarr")
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([1.0, 2.0, 3.0])
+    attributes["Spacing"] = np.asarray([1.0, 1.0, 2.0])
+    attributes["Direction"] = np.eye(3).flatten()
+    data = np.zeros((1, 4, 5, 6), np.float32)
+    for cycle in range(4):
+        Dataset(tmp_path / str(cycle), file_format).write("CT", "case", data, attributes)
+        data, attributes = Dataset(tmp_path / str(cycle), file_format).read_data("CT", "case")
+    keys = [key for key in dict.keys(attributes) if key.split("_")[0] in ("Origin", "Spacing", "Direction")]
+    assert sorted(keys) == ["Direction_0", "Origin_0", "Spacing_0"]
+    assert attributes.get_np_array("Origin").tolist() == [1.0, 2.0, 3.0]
 
 
 def test_a_metaimage_entry_keeps_its_pixels_through_its_transfers_and_an_interrupted_replacement(

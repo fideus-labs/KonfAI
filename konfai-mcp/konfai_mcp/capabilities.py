@@ -34,6 +34,7 @@ import inspect
 import types
 from typing import Any, Union, get_args, get_origin
 
+from konfai_mcp.catalog import COMPONENT_KINDS
 from konfai_mcp.classpaths import public_classpath
 from konfai_mcp.workflows import WORKFLOW_SPECS
 
@@ -61,7 +62,7 @@ def describe_konfai_capabilities() -> dict[str, Any]:
             "schema_tool": "describe_config_schema(workflow)",
         },
         "components": {
-            "kinds": ["criterion (loss/metric)", "transform", "augmentation", "scheduler", "model", "block"],
+            "kinds": list(COMPONENT_KINDS),
             "discover": "list_components(kind)",
             "inspect": "inspect_object_signature(classpath)",
         },
@@ -74,7 +75,7 @@ def describe_konfai_capabilities() -> dict[str, Any]:
         "apps": {
             "principle": "When the user wants a RESULT, check published apps FIRST: cheapest fit wins: "
             "use an app as-is, else fine-tune one, else train from scratch.",
-            "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> run_app_infer / run_app_pipeline "
+            "use_dont_train": "list_apps -> describe_app -> list_app_parameters -> run_app (action infer or pipeline) "
             "(runs the app as published); import_app copies it into the session when it must be MODIFIED first",
             "fine_tune": "fine_tune_app (one call: weights-only warm start on the user's dataset -> runnable "
             "bundle), or import_app -> run_resume(weights_only=True) for full control (custom losses, config "

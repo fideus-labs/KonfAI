@@ -16,6 +16,8 @@
 
 """Unit tests for konfai/utils/dicom.py and konfai/utils/ome_zarr.py."""
 
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +37,29 @@ from oracle_support import geometry
 
 def _image_attributes() -> Attribute:
     return geometry((10.0, 20.0, 30.0), (0.5, 1.5, 2.0))
+
+
+# Writes a 4-slice series to <root>/<case>/CT and dies (no cleanup runs) as it saves the third slice.
+_KILLED_AT_THE_THIRD_SLICE = """
+import os, sys
+import numpy as np
+import pydicom.dataset
+from konfai.utils.dataset import Attribute, Dataset
+
+save_as = pydicom.dataset.FileDataset.save_as
+saved = []
+
+def dying_save_as(self, *args, **kwargs):
+    if len(saved) == 2:
+        os._exit(9)
+    saved.append(self)
+    return save_as(self, *args, **kwargs)
+
+pydicom.dataset.FileDataset.save_as = dying_save_as
+attributes = Attribute()
+attributes["Origin"], attributes["Spacing"], attributes["Direction"] = np.zeros(3), np.ones(3), np.eye(3).flatten()
+Dataset(sys.argv[1], "dicom").write("CT", sys.argv[2], np.full((1, 4, 8, 6), 3, dtype=np.int16), attributes)
+"""
 
 
 def test_flatten_transforms_recurses_into_nested_composites() -> None:
@@ -176,12 +201,114 @@ class TestDicomExtractGeometry:
         with pytest.raises(DatasetManagerError, match="not uniformly spaced"):
             dicom.extract_geometry(slices)
 
+    def test_rejects_a_slice_without_orientation(self) -> None:
+        """Its position falls back to its InstanceNumber, which is no distance: with two slices there
+        is no second gap to disagree with, and that number became the spacing."""
+        from konfai.utils import dicom
+
+        ds0 = self._make_ds([0.0, 0.0, 0.0])
+        ds1 = MagicMock(spec=["ImagePositionPatient", "PixelSpacing", "SliceThickness", "InstanceNumber"])
+        ds1.ImagePositionPatient, ds1.PixelSpacing, ds1.SliceThickness = [0.0, 0.0, 3.0], [0.5, 0.5], 1.0
+        ds1.InstanceNumber = 2
+        with pytest.raises(DatasetManagerError, match="ImageOrientationPatient"):
+            dicom.extract_geometry([ds0, ds1])
+
     def test_accepts_uniform_multi_slice_spacing(self) -> None:
         from konfai.utils import dicom
 
         slices = [self._make_ds([0.0, 0.0, z]) for z in (0.0, 3.0, 6.0)]
         _, spacing, _ = dicom.extract_geometry(slices)
         assert spacing[2] == pytest.approx(3.0)
+
+
+def _write_dicom_slice(
+    path: Path,
+    pixels: np.ndarray,
+    position: tuple[float, float, float],
+    orientation: tuple[float, ...] = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+) -> None:
+    """One slice of series ``1.2.3``, as a scanner exports it; a ``(Y, X, 3)`` array is an RGB slice."""
+    from pydicom.dataset import FileDataset, FileMetaDataset
+    from pydicom.uid import ExplicitVRLittleEndian, SecondaryCaptureImageStorage, generate_uid
+
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = SecondaryCaptureImageStorage
+    meta.MediaStorageSOPInstanceUID = generate_uid()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds = FileDataset(str(path), {}, file_meta=meta, preamble=b"\0" * 128)
+    ds.SOPClassUID = SecondaryCaptureImageStorage
+    ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+    ds.StudyInstanceUID = "1.2"
+    ds.SeriesInstanceUID = "1.2.3"
+    ds.Rows, ds.Columns = pixels.shape[:2]
+    ds.SamplesPerPixel = 3 if pixels.ndim == 3 else 1
+    ds.PhotometricInterpretation = "RGB" if pixels.ndim == 3 else "MONOCHROME2"
+    if pixels.ndim == 3:
+        ds.PlanarConfiguration = 0
+    ds.BitsAllocated = ds.BitsStored = pixels.dtype.itemsize * 8
+    ds.HighBit = ds.BitsStored - 1
+    ds.PixelRepresentation = 0
+    ds.PixelSpacing = [1.0, 1.0]
+    ds.SliceThickness = 2.0
+    ds.ImageOrientationPatient = list(orientation)
+    ds.ImagePositionPatient = list(position)
+    ds.PixelData = pixels.tobytes()
+    ds.save_as(str(path), enforce_file_format=True)
+
+
+class TestDicomSeriesTheReaderRefuses:
+    """Series whose slices do not make one scalar volume on one grid: every route refuses them by name."""
+
+    @staticmethod
+    def _series(root: Path, slices: list[tuple[np.ndarray, tuple[float, float, float], tuple[float, ...]]]) -> Path:
+        series = root / "CASE_001" / "CT"
+        series.mkdir(parents=True)
+        for index, (pixels, position, orientation) in enumerate(slices):
+            _write_dicom_slice(series / f"{index:03d}.dcm", pixels, position, orientation)
+        return series
+
+    @staticmethod
+    def _assert_refused(root: Path, match: str) -> None:
+        from konfai.utils import dicom
+
+        dicom.forget_series()
+        dataset = Dataset(root, "dicom")
+        with pytest.raises(DatasetManagerError, match=match):
+            dataset.get_infos("CT", "CASE_001")
+        with pytest.raises(DatasetManagerError, match=match):
+            dataset.read_data("CT", "CASE_001")
+
+    def test_a_colour_series_is_refused(self, tmp_path: Path) -> None:
+        """Three samples per pixel read as a 5-D array while the header route announced ``[1, Z, Y, X]``."""
+        pytest.importorskip("pydicom")
+        axial = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        rgb = np.full((4, 5, 3), 7, dtype=np.uint8)
+        self._series(tmp_path, [(rgb, (0.0, 0.0, 2.0 * z), axial) for z in range(3)])
+
+        self._assert_refused(tmp_path, "SamplesPerPixel")
+
+    def test_slices_sharing_one_position_are_refused(self, tmp_path: Path) -> None:
+        """Four frames at one location (a cine) stacked along z with a spacing of 0 mm."""
+        pytest.importorskip("pydicom")
+        axial = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        pixels = np.arange(20, dtype=np.uint16).reshape(4, 5)
+        self._series(tmp_path, [(pixels, (0.0, 0.0, 0.0), axial) for _ in range(4)])
+
+        self._assert_refused(tmp_path, "share one position")
+
+    def test_a_series_mixing_orientations_is_refused(self, tmp_path: Path) -> None:
+        """A sagittal slice between two axial ones, at evenly spaced positions along each slice's own
+        normal: stacked as one axial volume under the first slice's direction."""
+        pytest.importorskip("pydicom")
+        axial = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+        sagittal = (0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        pixels = np.arange(20, dtype=np.uint16).reshape(4, 5)
+        self._series(
+            tmp_path,
+            [(pixels, (0.0, 0.0, 0.0), axial), (pixels, (2.0, 0.0, 2.0), sagittal), (pixels, (0.0, 0.0, 4.0), axial)],
+        )
+
+        self._assert_refused(tmp_path, "orientation")
 
 
 class TestDicomReadVolume:
@@ -286,9 +413,9 @@ class TestDicomRegionDecode:
         assert sorts["count"] == 0
 
     def test_overlapping_region_reads_decode_each_plane_once(self, tmp_path: Path, monkeypatch) -> None:
-        """A series stores one file per plane, and every region read touching a z index used to
-        re-parse and re-decode that file whole: overlapping regions of a sweep paid one full
-        ``dcmread`` per touched slice per region. The plane cache decodes each file once per pass."""
+        """A series stores one file per plane, and a region read touching a z index decodes that
+        file whole. The plane cache decodes each file once per pass, so overlapping regions of a sweep
+        do not pay one full ``dcmread`` per touched slice per region."""
         pydicom = pytest.importorskip("pydicom")
         from konfai.utils import dicom
 
@@ -336,12 +463,12 @@ class TestDicomRegionDecode:
         assert dataset.read_granularity("CT", "CASE_001") == (1, 1, 6, 5)
 
     def test_the_series_info_memo_is_unbounded_and_a_write_clears_it(self, tmp_path: Path) -> None:
-        """A miss re-reads every slice header twice; a bound of 64 series missed on every patch of a
+        """A miss re-reads every slice header; a bound of 64 series missed on every patch of a
         cohort read in any order but case by case. A write of a series is what changes a directory."""
         pytest.importorskip("pydicom")
         from konfai.utils import dicom
 
-        assert dicom.get_dicom_info.cache_info().maxsize is None
+        assert dicom._dicom_info.cache_info().maxsize is None
         root = tmp_path / "CT"
         dicom.write_dicom_series(root, np.zeros((1, 3, 4, 4), dtype=np.int16), origin=(0.0,) * 3, spacing=(1.0,) * 3)
         assert dicom.get_dicom_info(root)["shape"] == [1, 3, 4, 4]
@@ -358,7 +485,7 @@ class TestOmeZarrRequireZarr:
     def test_raises_without_zarr(self) -> None:
         from konfai.utils import ome_zarr
 
-        with patch.object(ome_zarr, "_ZARR_AVAILABLE", False):
+        with patch.object(ome_zarr, "_zarr_available", lambda: False):
             with pytest.raises(DatasetManagerError, match="zarr is required"):
                 ome_zarr._require_zarr()
 
@@ -475,6 +602,46 @@ class TestDatasetImagingBackends:
         # The series was written, but the unrelated DICOM file was not deleted.
         assert unrelated.exists()
         assert sorted(p.name for p in root.glob("[0-9]*.dcm")) == ["000001.dcm", "000002.dcm", "000003.dcm"]
+
+    def test_a_dicom_writer_killed_mid_series_leaves_the_previous_series_or_no_case(self, tmp_path: Path) -> None:
+        """A writer killed at its third slice: a series it was replacing is still the previous one,
+        whole, and a first write that died is no case, so a resume writes it again."""
+        pytest.importorskip("pydicom")
+        root = tmp_path / "DICOM"
+        previous = np.full((1, 4, 8, 6), 7, dtype=np.int16)
+        Dataset(root, "dicom").write("CT", "CASE_001", previous, _image_attributes())
+        for case in ("CASE_001", "CASE_002"):
+            child = subprocess.run(
+                [sys.executable, "-c", _KILLED_AT_THE_THIRD_SLICE, str(root), case], capture_output=True, text=True
+            )
+            assert child.returncode == 9, child.stderr
+
+        fresh = Dataset(root, "dicom")
+        back, _ = fresh.read_data("CT", "CASE_001")
+        np.testing.assert_array_equal(back, previous)
+        assert fresh.get_infos("CT", "CASE_001")[0] == [1, 4, 8, 6]
+        assert not fresh.is_dataset_exist("CT", "CASE_002")
+        assert fresh.get_names("CT") == ["CASE_001"]
+        assert fresh.get_group() == ["CT"]
+
+    @pytest.mark.parametrize(
+        ("dtype", "outside"), [(np.int64, 2**31 + 5), (np.int64, -(2**31) - 5), (np.uint64, 2**32 + 5)]
+    )
+    def test_a_dicom_write_refuses_integers_its_pixels_cannot_hold(
+        self, tmp_path: Path, dtype: type, outside: int
+    ) -> None:
+        """A slice stores at most 32 bits: a 64-bit value past that range was cast down and wrapped."""
+        pytest.importorskip("pydicom")
+        dataset = Dataset(tmp_path / "DICOM", "dicom")
+        inside = np.full((1, 2, 3, 3), 1000, dtype=dtype)
+        dataset.write("CT", "CASE_001", inside, _image_attributes())
+        np.testing.assert_array_equal(dataset.read_data("CT", "CASE_001")[0], inside)
+
+        volume = inside.copy()
+        volume[0, 1, 2, 2] = outside
+        with pytest.raises(DatasetManagerError, match="do not fit"):
+            dataset.write("CT", "CASE_002", volume, _image_attributes())
+        assert not dataset.is_dataset_exist("CT", "CASE_002")
 
     @pytest.mark.parametrize("file_format", ["omezarr", "ome-zarr", "ome_zarr", "zarr"])
     def test_ome_zarr_format_aliases(self, tmp_path: Path, file_format: str) -> None:

@@ -17,9 +17,11 @@
 """WORKFLOW_SPECS is the single source of workflow-kind identity: the static Literal aliases and
 every derived registry must match it, so adding a kind cannot silently miss a map."""
 
+from pathlib import Path
 from typing import get_args
 
-from konfai_mcp import capabilities, server, server_support
+import pytest
+from konfai_mcp import capabilities, experiment_state, runner, server, server_support
 from konfai_mcp.workflows import (
     APP_JOB_KINDS,
     JOB_KINDS,
@@ -43,6 +45,29 @@ def test_derived_registries_come_from_the_table() -> None:
     assert server.WORKFLOWS == set(WORKFLOW_SPECS)
     assert capabilities._WORKFLOW_ROOTS == {k: (s.root_key, s.module, s.class_name) for k, s in WORKFLOW_SPECS.items()}
     assert set(JOB_RETRY_TOOLS) == set(JOB_KINDS)
+    assert experiment_state._LAUNCHER_CONFIG == {s.retry_tool: s.config_file for s in WORKFLOW_SPECS.values()}
+
+
+def test_an_example_holding_every_workflow_config_loads_every_workflow(tmp_path: Path) -> None:
+    template = tmp_path / "Everything"
+    template.mkdir()
+    for spec in WORKFLOW_SPECS.values():
+        (template / spec.config_file).write_text(f"{spec.root_key}: {{}}\n", encoding="utf-8")
+
+    assert set(server_support.load_template_configs(tmp_path, "Everything")) == set(WORKFLOW_SPECS)
+
+
+def test_every_workflow_command_builds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for module, builder in (
+        ("konfai.trainer", "build_train"),
+        ("konfai.predictor", "build_predict"),
+        ("konfai.evaluator", "build_evaluate"),
+        ("konfai.transformer", "build_transform"),
+    ):
+        monkeypatch.setattr(f"{module}.{builder}", lambda builder=builder, **_: builder)
+
+    for spec in WORKFLOW_SPECS.values():
+        assert runner._build_workflow(spec.command, str(tmp_path / spec.config_file)).startswith("build_")
 
 
 def test_table_values_pin_the_konfai_contract() -> None:

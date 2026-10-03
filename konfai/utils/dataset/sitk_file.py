@@ -22,11 +22,15 @@ from __future__ import annotations
 import contextlib
 import functools
 import glob
+import gzip
 import os
 import re
+import secrets
+import shutil
+import struct
 import warnings
 import xml.etree.ElementTree as ET  # nosec B405 - the sidecar is the user's own dataset entry, same trust as lxml before
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,6 +40,7 @@ try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
+from konfai.utils.dataset import decompressed
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
     Attribute,
@@ -47,12 +52,18 @@ from konfai.utils.dataset.attribute import (
 )
 from konfai.utils.dataset.landmarks import read_landmarks, write_landmarks
 from konfai.utils.dataset.raw_block import (
+    _mha_header,
     _nifti_extract_aborts,
     _pixel_block,
     _pixel_block_attributes,
     _pixel_block_region,
 )
-from konfai.utils.dataset.staging import _recover_orphaned_backup, _retire_dead_debris, is_staging_entry
+from konfai.utils.dataset.staging import (
+    _REPLACED_MARKER,
+    _recover_orphaned_backup,
+    _retire_dead_debris,
+    is_staging_entry,
+)
 from konfai.utils.dataset.stream import (
     _MHA_ELEMENT_TYPES,
     _NIFTI_DATATYPES,
@@ -84,6 +95,85 @@ def _require_sitk(path: str, action: str = "read") -> None:
         )
 
 
+#: What ITK says when it has no image writer for the extension, or when its writer refuses the
+#: volume's pixel type or dimension.
+_UNWRITABLE_VOLUME = (
+    "Unable to determine ImageIO writer",
+    "supports unsigned",  # PNG, JPEG, BMP, TIFF
+    "can only write 2-dimensional",  # JPEG
+    "cannot write images with a dimension",  # BMP
+    "stored pixel type was not specified",  # DICOM, a floating point volume
+)
+
+
+def _mhd_pixels(header: str) -> str | None:
+    """The pixel file a detached MetaImage header names, when it is the entry's own: a file beside it, named
+    after it, as KonfAI writes it. A pixel file shared with other headers or kept elsewhere is not the
+    entry's to remove."""
+    fields = _mha_header(header) if os.path.exists(header) else None
+    pixels = fields[0].get("ElementDataFile") if fields else None
+    stem = os.path.basename(header)[: -len(".mhd")]
+    if pixels is None or os.path.basename(pixels) != pixels or not pixels.startswith(f"{stem}."):
+        return None
+    return pixels
+
+
+def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> None:
+    """``sitk.WriteImage`` of the entry published as ``final``: a format with no writer for this
+    volume is refused by name, not by ITK's trace naming the staging file. Any other failure (a
+    permission, a full disk) keeps ITK's error."""
+    try:
+        sitk.WriteImage(image, path)
+    except RuntimeError as error:
+        message = str(error)
+        if not any(refusal in message.replace(path, "") for refusal in _UNWRITABLE_VOLUME):
+            raise
+        # ITK's first line is its source location; the reason follows.
+        reason = " ".join(message.splitlines()[1:]).replace(path, final) or message
+        raise DatasetManagerError(
+            f"SimpleITK cannot write the {image.GetDimension()}-D {image.GetPixelIDTypeAsString()} volume"
+            f" '{final}' as '{file_format}': {reason}",
+            "Write it as mha, nrrd, h5 or omezarr, which hold any.",
+        ) from error
+
+
+def _nifti_declared_bytes(path: str) -> int | None:
+    """The uncompressed size a single-file NIfTI-1 header declares (ITK writes no NIfTI-2): where its
+    pixels start plus the pixels. ``None`` when the head is short or not such a header."""
+    try:
+        with (gzip.open if path.endswith(".gz") else open)(path, "rb") as file:
+            head = file.read(348)
+    except (OSError, EOFError):
+        return None
+    order = next((order for order in "<>" if len(head) == 348 and struct.unpack(f"{order}i", head[:4])[0] == 348), None)
+    if order is None:
+        return None
+    dims = struct.unpack(f"{order}8h", head[40:56])
+    bitpix = struct.unpack(f"{order}h", head[72:74])[0]
+    offset = int(struct.unpack(f"{order}f", head[108:112])[0])
+    return offset + int(np.prod(dims[1 : dims[0] + 1], dtype=np.int64)) * bitpix // 8
+
+
+def _check_nifti_written(path: str, final: str) -> None:
+    """Refuse a NIfTI that holds fewer bytes than its header declares. ITK's NIfTI writer does not
+    check its writes, so a full disk leaves a short file and no error. A gzip file ends on the size of
+    what it compressed, modulo 2**32: the check reads its header and its last four bytes."""
+    declared = _nifti_declared_bytes(path)
+    if path.endswith(".gz"):
+        with open(path, "rb") as file:
+            file.seek(-4, os.SEEK_END)
+            written = struct.unpack("<I", file.read(4))[0]
+        complete = declared is not None and written == declared % 2**32
+    else:
+        complete = declared is not None and os.path.getsize(path) == declared
+    if not complete:
+        free = shutil.disk_usage(os.path.dirname(os.path.abspath(path))).free
+        raise DatasetManagerError(
+            f"The write of '{final}' stopped short: the file holds less than its header declares.",
+            f"The disk may be full ({free / 2**30:.1f} GiB free there). Free space and run again.",
+        )
+
+
 def _warn_unstreamed_region_read(path: str) -> None:
     """Warn that `path`'s format decodes the whole volume for every patch region read from it.
 
@@ -95,10 +185,10 @@ def _warn_unstreamed_region_read(path: str) -> None:
         return
     _unstreamed_formats_warned.add(suffix)
     warnings.warn(
-        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region "
-        "(NRRD, or any compressed file), so every patch decodes the whole volume again: many times "
-        "the cost of one read. Convert the dataset to a chunked format (OME-Zarr or HDF5), which KonfAI "
-        "streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
+        f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region, "
+        "so every patch decodes the whole "
+        "volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr "
+        "or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
         KonfAIWarning,
         stacklevel=2,
     )
@@ -114,6 +204,9 @@ _STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
 
 
 class SitkFile(AbstractFile):
+    # SimpleITK raises RuntimeError; the npy, fcsv and xml sidecars ValueError, EOFError or ParseError.
+    read_errors = (OSError, RuntimeError, ValueError, EOFError, SyntaxError)
+
     def __init__(self, filename: str, read: bool, file_format: str) -> None:
         self.filename = filename
         self.read = read
@@ -141,7 +234,7 @@ class SitkFile(AbstractFile):
     @staticmethod
     def _normalize_slices(slices: tuple[slice, ...], shape: list[int]) -> tuple[slice, ...]:
         if len(slices) != len(shape):
-            raise ValueError(f"Expected {len(shape)} slices, got {len(slices)}.")
+            raise DatasetManagerError(f"Expected {len(shape)} slices, got {len(slices)}.")
 
         normalized = []
         for item, size in zip(slices, shape, strict=False):
@@ -193,27 +286,40 @@ class SitkFile(AbstractFile):
         [200, 64, 64] one held 79 against 78.1, and a full-plane [8, 320, 320] held its own 3.
         One step along the banded axis, everything below it whole: that is what this says.
 
-        ``None`` where ITK decodes instead of mapping (a compressed stream), where the whole
-        volume is the cost and the streaming refusal already says so.
+        A compressed file answers for the twin its regions are read from (:mod:`.decompressed`),
+        before that twin exists. ``None`` where ITK decodes instead of mapping (an NRRD, a compressed
+        file whose twin cannot be written), where the whole volume is the cost and the streaming
+        refusal already says so.
         """
         path = self._resolve_data_path(name)
         if path is not None:
             _require_sitk(path)
-        block = _pixel_block(path) if path is not None else None
+        block = (_pixel_block(path) or decompressed.servable(path)) if path is not None else None
         if block is None:
             return None
         shape = [int(extent) for extent in block.shape]
         # The order the map sees, which is the order the region read reorders into: MetaIO's
         # channel axis is the fastest, so an interleaved block is spatial-first with the channel
         # last. The band narrows the first axis of THAT order carrying more than one element,
-        # and every axis after it is mapped whole.
-        order = [*range(1, len(shape)), 0] if block.interleaved else list(range(len(shape)))
+        # and every axis after it is mapped whole. NIfTI keeps each component's volume whole,
+        # one after the other, so a region touches the same band in each component volume it
+        # spans: the channel axis sits above the band.
+        order = [*range(1, len(shape)), 0] if block.interleaved else list(range(1, len(shape)))
         banded = next((axis for axis in order if shape[axis] > 1), order[-1])
         whole = set(order[order.index(banded) + 1 :])
         return tuple(shape[axis] if axis in whole else 1 for axis in range(len(shape)))
 
     def _resolve_data_path(self, name: str) -> str | None:
         base = f"{self.filename}{name}"
+        memo = self.resolved_paths
+        path = memo.get(base) if memo is not None else None
+        if path is None:
+            path = self._probe_data_path(base)
+            if memo is not None and path is not None:  # an absent entry stays a fresh question
+                memo[base] = path
+        return path
+
+    def _probe_data_path(self, base: str) -> str | None:
         for suffix in (".itk.txt", ".fcsv", ".xml", ".vtk", ".npy"):
             candidate = f"{base}{suffix}"
             if os.path.exists(candidate):
@@ -234,13 +340,33 @@ class SitkFile(AbstractFile):
         )
         return matches[0] if matches else None
 
+    @staticmethod
+    def _spans(normalized: tuple[slice, ...], shape: Sequence[int]) -> bool:
+        """Whether a region is the whole volume at unit step, whatever its channels."""
+        return normalized[1:] == tuple(slice(0, extent, 1) for extent in shape[1:])
+
     def _file_to_image_slice(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         _require_sitk(path)
+        found = decompressed.layout(path)
+        if found is not None:
+            # A region that is the whole volume decodes it once either way: it takes a twin already there
+            # and makes none, which would only add a write and a read of the volume.
+            whole = self._spans(self._normalize_slices(slices, list(found.shape)), found.shape)
+            # Filed under the entry it is read for: a one-pass reader leaving the case removes it,
+            # whichever root holds it.
+            twin = decompressed.twin(path, self.case, make=not whole)
+            if twin is not None:
+                # A one-pass reader removes the twin as it leaves the case: a read losing that race to
+                # another reader of the entry takes the compressed file, as it would without a twin.
+                with contextlib.suppress(OSError, RuntimeError):
+                    return self._image_region(name, twin, slices)
+        return self._image_region(name, path, slices)
+
+    def _image_region(self, name: str, path: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         block = _pixel_block(path)
         if block is not None:
-            # The region's bytes off the file, where ITK's streaming reader decodes them through
-            # its pipeline: 3.5 ms against 0.09 ms for a 64^3 region of an uncompressed 256^3
-            # .mha, the same bytes. The record ITK's route leaves is kept, key for key.
+            # The region's bytes off the file, the same bytes ITK's streaming reader decodes
+            # through its whole pipeline. The record ITK's route leaves is kept, key for key.
             normalized = self._normalize_slices(slices, list(block.shape))
             if all(item.step > 0 for item in normalized):
                 try:
@@ -274,7 +400,9 @@ class SitkFile(AbstractFile):
                 attributes["Spacing"] = spacing
             return data[normalized], attributes
 
-        if not self._supports_region_read(path):
+        # A compressed file that got no twin was reported with the reason (decompressed._warn_untwinned).
+        unstreamed = not self._supports_region_read(path) and decompressed.layout(path) is None
+        if unstreamed and not self._spans(normalized, data_shape):
             _warn_unstreamed_region_read(path)
 
         extract_index_xyz = [item.start for item in reversed(normalized[1:])]
@@ -300,9 +428,7 @@ class SitkFile(AbstractFile):
         attributes = Attribute()
         if path.endswith(".itk.txt"):
             _require_sitk(path)
-            datas = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
-            max_len = max(len(v) for v in datas)
-            data = np.array([np.pad(v, (0, max_len - len(v)), constant_values=np.nan) for v in datas])
+            data = _encode_transform_leaves(sitk.ReadTransform(path), name, attributes)
         elif path.endswith(".fcsv"):
             data = cast(np.ndarray, read_landmarks(Path(path)))
         elif path.endswith(".xml"):
@@ -316,7 +442,12 @@ class SitkFile(AbstractFile):
             text = (node.text or "").strip()
             data = np.fromstring(text, sep=",", dtype=np.float64) if text else np.asarray([], dtype=np.float64)
         elif path.endswith(".vtk"):
-            import vtk
+            try:
+                import vtk
+            except ImportError as error:
+                raise DatasetManagerError(
+                    f"vtk is required to read '{path}'.", "Install it with: pip install konfai[vtk]."
+                ) from error
 
             vtk_reader = vtk.vtkPolyDataReader()
             vtk_reader.SetFileName(path)
@@ -356,7 +487,10 @@ class SitkFile(AbstractFile):
             return False
         if path.endswith(".npy"):
             return True  # np.load(mmap) reads the slice off the map
-        return not path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")) and self._supports_region_read(path)
+        if path.endswith((".itk.txt", ".fcsv", ".xml", ".vtk")):
+            return False
+        # A compressed file is read by region from its uncompressed twin, decompressed once.
+        return self._supports_region_read(path) or decompressed.servable(path) is not None
 
     def is_vtk_polydata(self, obj) -> bool:
         try:
@@ -389,8 +523,49 @@ class SitkFile(AbstractFile):
             # so a reader must never meet the entry while it is being written.
             final = f"{self.filename}{name}.{self.file_format}"
             staging = DataStream.staging_path(final)
-            sitk.WriteImage(data, staging)
-            os.replace(staging, final)
+            if self.file_format in ("mhd", "hdr", "img"):
+                # Header and pixels are two files, written in a staging directory and moved in, the header
+                # last. A MetaImage header names its pixels, so they land under a name of their own and the
+                # header swaps to them in one replace: interrupted, the entry is the old pair or the new one.
+                # Analyze names its pixels after its header, so its pair has no such swap.
+                while True:  # a writer killed under a reused pid may have left this very name
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(staging)
+                        break
+                    staging = DataStream.staging_path(final)
+                header = os.path.basename(final)
+                written = (
+                    f"{header[: -len('.mhd')]}.{secrets.token_hex(4)}.mhd" if self.file_format == "mhd" else header
+                )
+                old_pixels = _mhd_pixels(final) if self.file_format == "mhd" else None
+                moved: list[str] = []
+                try:
+                    _write_image(data, os.path.join(staging, written), final, self.file_format)
+                    for part in sorted(os.listdir(staging), key=lambda part: part == written):
+                        target = os.path.join(os.path.dirname(final), header if part == written else part)
+                        os.replace(os.path.join(staging, part), target)
+                        moved.append(target)
+                except BaseException:
+                    if self.file_format == "mhd":  # the header never swapped: the new pixels belong to no entry
+                        for target in moved:
+                            with contextlib.suppress(OSError):
+                                os.remove(target)
+                    raise
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
+                if old_pixels is not None:
+                    with contextlib.suppress(OSError):
+                        os.remove(os.path.join(os.path.dirname(final), old_pixels))
+            else:
+                try:
+                    _write_image(data, staging, final, self.file_format)
+                    if self.file_format in ("nii", "nii.gz"):
+                        _check_nifti_written(staging, final)
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.remove(staging)
+                    raise
+                os.replace(staging, final)
             with contextlib.suppress(Exception):
                 _retire_dead_debris(Path(final))  # past the publish: housekeeping cannot fail the write
         elif sitk is not None and isinstance(data, sitk.Transform):
@@ -412,7 +587,6 @@ class SitkFile(AbstractFile):
             if os.path.exists(f"{self.filename}{name}.xml"):
                 with open(f"{self.filename}{name}.xml", "rb") as xml_file:
                     root = ET.parse(xml_file).getroot()  # nosec B314 - user-owned sidecar
-                    xml_file.close()
             else:
                 root = ET.Element(name)
             node = root
@@ -435,7 +609,6 @@ class SitkFile(AbstractFile):
                 # cleanly instead of accumulating blank lines.
                 ET.indent(root)
                 f.write(ET.tostring(root, encoding="utf-8"))
-                f.close()
         else:
             np.save(f"{self.filename}{name}.npy", data)
 
@@ -470,12 +643,20 @@ class SitkFile(AbstractFile):
         if any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS):
             return True
         # A writer killed mid-replacement left the previous entry under its backup name, which
-        # every listing hides: it is the entry, and it goes back under it. Then the question is
-        # asked of disk again, because the recovery may have declined to a publish that landed
-        # meanwhile -- and that publish is an entry too.
-        for ext in SUPPORTED_EXTENSIONS:
-            _recover_orphaned_backup(Path(f"{base}.{ext}"))
-        return any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
+        # every listing hides: it is the entry, and it goes back under it. One listing of the folder
+        # finds the backups of every extension. Then the question is asked of disk again, because
+        # the recovery may have declined to a publish that landed meanwhile -- and that publish is
+        # an entry too.
+        folder, leaf = os.path.split(base)
+        try:
+            siblings = os.listdir(folder)
+        except OSError:
+            return False
+        backed_up = {sibling.split(_REPLACED_MARKER)[0] for sibling in siblings if _REPLACED_MARKER in sibling}
+        finals = [f"{base}.{ext}" for ext in SUPPORTED_EXTENSIONS if f"{leaf}.{ext}" in backed_up]
+        for final in finals:
+            _recover_orphaned_backup(Path(final))
+        return bool(finals) and any(os.path.exists(base + "." + ext) for ext in SUPPORTED_EXTENSIONS)
 
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         attributes = Attribute()

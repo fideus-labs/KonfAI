@@ -14,6 +14,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -38,19 +39,24 @@ jobs:
 
       - name: Install standalone apps package
         run: |
-          pip install -e ./konfai-apps
+          pip install -e "./konfai-apps[server]"
 
       - name: Install standalone MCP package
         run: |
           pip install -e ./konfai-mcp
 
       - name: Run konfai tests
+        # The environment of konfai_ci's pytest step, which this gate repeats: one torch thread per
+        # xdist worker, and every thread's Python stack on a native crash.
+        env:
+          OMP_NUM_THREADS: "1"
+          PYTHONFAULTHANDLER: "1"
         run: |
-          pytest -q -n auto --dist loadfile tests
+          pytest -n auto --dist loadfile tests
 
       - name: Run konfai-apps tests
         run: |
-          python -m pytest -q konfai-apps/tests
+          python -m pytest konfai-apps/tests
 
       - name: Install app bundles
         run: |
@@ -64,7 +70,7 @@ jobs:
 
       - name: Run konfai-mcp tests
         run: |
-          python -m pytest -q konfai-mcp/tests
+          python -m pytest konfai-mcp/tests
 
       - name: Install standalone Studio package
         run: |
@@ -91,6 +97,7 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -99,8 +106,11 @@ jobs:
             pkg: "."
           - name: konfai-apps
             pkg: "konfai-apps"
+          # The wheel carries the repository's examples, copied in at build time (setup.py): built
+          # directly, since the sdist holds no examples to copy.
           - name: konfai-mcp
             pkg: "konfai-mcp"
+            build_args: "--wheel"
           - name: impact-synth-konfai
             pkg: "apps/impact_synth"
           - name: impact-seg-konfai
@@ -152,16 +162,27 @@ jobs:
           cd "${{ matrix.pkg }}"
           python -m build ${{ matrix.build_args }}
 
+      - name: Verify the konfai-mcp wheel ships the examples
+        if: matrix.name == 'konfai-mcp'
+        run: |
+          python -c "
+          import glob, sys, zipfile
+          names = set(zipfile.ZipFile(glob.glob('konfai-mcp/dist/*.whl')[0]).namelist())
+          sys.exit(0 if 'konfai_mcp/examples/Segmentation/Config.yml' in names else 'no examples in the wheel')
+          "
+
       - name: Verify the studio wheel ships the built front
         # web/ is non-Python payload swept in by package-data at build time: a setuptools or glob
         # regression would publish a wheel whose UI is an empty directory, and nothing else fails.
+        # THIRD_PARTY_LICENSES.md is the notice of the bundled npm packages (vite.config.ts).
         if: matrix.name == 'konfai-studio'
         run: |
           python -c "
           import glob, sys, zipfile
           names = zipfile.ZipFile(glob.glob('konfai-studio/dist/*.whl')[0]).namelist()
-          ok = 'konfai_studio/web/index.html' in names and any(n.startswith('konfai_studio/web/assets/') for n in names)
-          sys.exit(0 if ok else 'the studio wheel is missing konfai_studio/web/index.html or assets/')
+          ok = {'konfai_studio/web/index.html', 'konfai_studio/web/THIRD_PARTY_LICENSES.md'} <= set(names)
+          ok = ok and any(n.startswith('konfai_studio/web/assets/') for n in names)
+          sys.exit(0 if ok else 'the studio wheel is missing web/index.html, web/THIRD_PARTY_LICENSES.md or assets/')
           "
 
       - name: Upload dist
@@ -173,6 +194,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write
@@ -199,6 +221,7 @@ jobs:
   github_release:
     needs: publish
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write  # to create the release
 
@@ -250,6 +273,7 @@ jobs:
   publish_docker:
     needs: publish
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
 
@@ -303,7 +327,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and publish Docker image
+      - name: Build the Docker image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: konfai:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Nothing is pushed unless the image carries the CUDA build of torch and torchvision it was built
+      # for: pip would take a newer PyPI release built for another CUDA without a word.
+      - name: Smoke-test the Docker image
+        run: |
+          docker run --rm --entrypoint python konfai:smoke -c "
+          import konfai, konfai_apps, torch, torchvision
+          versions = (torch.__version__, torchvision.__version__)
+          assert all(version.endswith('+cu128') for version in versions), versions
+          print(*versions)
+          "
+
+      - name: Publish the Docker image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .

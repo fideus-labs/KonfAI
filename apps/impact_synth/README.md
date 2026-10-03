@@ -2,7 +2,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/impact_synth_konfai.svg?color=blue)](https://pypi.org/project/impact_synth_konfai/)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![CI](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml/badge.svg)](https://github.com/fideus-labs/KonfAI/actions/workflows/konfai_ci.yml)
-[![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://arxiv.org/abs/2510.21358)
+[![Paper](https://img.shields.io/badge/📌%20Paper-KonfAI-blue)](https://arxiv.org/abs/2508.09823)
 
 <p align="center">
   <img src="Logo.png" alt="IMPACT-Synth logo" width="220">
@@ -24,6 +24,7 @@ They build upon the research presented in **“Why Registration Quality Matters:
 These models are trained on **carefully aligned MR–CT pairs**, where alignment is optimized through the **IMPACT-Reg loss** to minimize spatial bias. Their training further integrates the **IMPACT-Synth loss**, a **perceptual loss derived from semantic representations of segmentation networks**. Together, **precise spatial alignment** and **semantic perceptual supervision** reinforce **anatomical fidelity** and **realistic tissue contrast** in the synthesized CT images.  
 
 The official **IMPACT-Synth models** are available on [Hugging Face](https://huggingface.co/VBoussot/ImpactSynth) and can be executed directly through this CLI.
+This CLI is Apache-2.0; the model weights are CC BY-NC 4.0, the terms of their training data (see the [model card](https://huggingface.co/VBoussot/ImpactSynth)).
 
 ---
 
@@ -52,7 +53,7 @@ The CLI is organised into sub-commands, mirroring the KonfAI Apps operations:
 |---|---|
 | `synthesize` | Generate the synthetic CT (inference). |
 | `eval` | Evaluate a synthetic CT against a reference CT. |
-| `uncertainty` | Estimate uncertainty (TTA / MC-dropout / ensemble spread). |
+| `uncertainty` | Estimate uncertainty (TTA / ensemble spread). |
 | `pipeline` | Run synthesis, then evaluation and uncertainty in one command. |
 
 Generate a synthetic CT:
@@ -77,7 +78,6 @@ impact-synth-konfai pipeline CBCT -i patient01.nii.gz --gt ct.nii.gz -o patient0
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--ensemble` | Number of models to ensemble (`synthesize` / `pipeline`) | `0` |
 | `--tta` | Number of test-time augmentations (`synthesize` / `pipeline`) | `0` |
-| `--mc` | Monte Carlo dropout samples (`synthesize` / `pipeline`) | `0` |
 | `-uncertainty` | Also write the inference stack (`synthesize` / `pipeline`) | `False` |
 | `--gt` | Reference CT(s): required by `eval`, optional in `pipeline` | *unset* |
 | `--mask` | Evaluation mask(s) (`eval` / `pipeline`) | *unset* |

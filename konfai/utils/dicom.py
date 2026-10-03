@@ -27,24 +27,26 @@ Reading one requires:
    columns plus their cross product for the z-axis).
 4. **CT intensity rescale**: RescaleSlope and RescaleIntercept convert stored pixel values to
    Hounsfield Units, mandatory for CT and absent or identity for MR.
-5. **Error handling**: missing tags, inconsistent slice spacing and unsupported transfer syntaxes
-   are reported. A single-slice series takes ``SliceThickness``, or 1.0 mm when it carries none,
-   and non-square pixels are read as they are.
+5. **Error handling**: missing tags, inconsistent slice spacing, colour slices, mixed orientations,
+   repeated positions and unsupported transfer syntaxes are reported. A single-slice series takes
+   ``SliceThickness``, or 1.0 mm when it carries none, and non-square pixels are read as they are.
 
 Optional dependency: ``pydicom`` (``pip install konfai[dicom]``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shutil
 import threading
 from collections import OrderedDict
 from collections.abc import Sequence
 from datetime import datetime
 from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
@@ -54,8 +56,11 @@ from konfai.utils.errors import DatasetManagerError
 # Zero-padded slice filenames produced by :func:`write_dicom_series` (e.g. ``000001.dcm``).
 _SLICE_FILENAME_RE = re.compile(r"^\d{6}\.dcm$")
 
-if TYPE_CHECKING:
-    pass
+#: How far the direction cosines of two slices of one series may differ (rounding in the header).
+_ORIENTATION_TOLERANCE = 1e-4
+
+#: Two slices closer than this along the normal sit at one position (float noise, not a spacing).
+_COINCIDENT_POSITION_MM = 1e-6
 
 try:
     import pydicom
@@ -85,20 +90,26 @@ def discover_series(directory: str | Path) -> dict[str, list[Path]]:
     ``directory`` is scanned recursively for .dcm files. Raises ``DatasetManagerError`` when
     ``pydicom`` is not installed or the directory contains no DICOM.
     """
+    return {uid: [path for path, _ in members] for uid, members in _discover_headers(directory).items()}
+
+
+def _discover_headers(directory: str | Path) -> dict[str, list[tuple[Path, DicomDataset]]]:
+    """:func:`discover_series` with the header each file was grouped by (no pixel data), which the
+    slice sort reads as well."""
     _require_pydicom()
 
     root = Path(directory)
     if not root.is_dir():
         raise DatasetManagerError(f"DICOM directory '{root}' does not exist or is not a directory.")
 
-    series: dict[str, list[Path]] = {}
+    series: dict[str, list[tuple[Path, DicomDataset]]] = {}
     for dirpath, _, filenames in os.walk(root):
         for fname in filenames:
             fpath = Path(dirpath) / fname
             try:
                 ds = pydicom.dcmread(str(fpath), stop_before_pixels=True)
                 uid = str(ds.SeriesInstanceUID)
-                series.setdefault(uid, []).append(fpath)
+                series.setdefault(uid, []).append((fpath, ds))
             except Exception:  # nosec B112
                 # Skip unreadable or non-DICOM files; discovery must not crash on stray content.
                 continue
@@ -144,8 +155,9 @@ def sort_series(files: list[Path], *, stop_before_pixels: bool = False) -> list[
     return datasets
 
 
-def _select_series_files(directory: str | Path, series_uid: str | None = None) -> tuple[str, list[Path]]:
-    all_series = discover_series(directory)
+def _select_series(directory: str | Path, series_uid: str | None = None) -> tuple[str, list[tuple[Path, DicomDataset]]]:
+    """The series ``series_uid`` names, or the folder's only one: its UID, and its files with their headers."""
+    all_series = _discover_headers(directory)
     if series_uid is not None:
         if series_uid not in all_series:
             raise DatasetManagerError(
@@ -193,6 +205,12 @@ def extract_geometry(
             f"The series declares NumberOfFrames={number_of_frames}.",
             "KonfAI expects one frame per file (classic single-frame DICOM).",
         )
+    samples = sorted({int(getattr(ds, "SamplesPerPixel", 1) or 1) for ds in datasets})
+    if samples != [1]:
+        raise DatasetManagerError(
+            f"DICOM series with SamplesPerPixel={samples} (colour) is not supported.",
+            "KonfAI reads a series as one scalar volume: one sample per pixel.",
+        )
 
     # Origin = ImagePositionPatient of first slice
     try:
@@ -217,7 +235,25 @@ def extract_geometry(
     # Slice spacing: the first computed inter-slice gap (matching SimpleITK's geometry), with the
     # whole series checked for uniform spacing so an irregular one fails instead of skewing z.
     if len(datasets) > 1:
+        try:
+            cosines = np.asarray([[float(x) for x in ds.ImageOrientationPatient] for ds in datasets])
+        except AttributeError as exc:
+            raise DatasetManagerError(
+                "DICOM tag 'ImageOrientationPatient' is missing on a slice.",
+                "This tag is required on every slice to place it along the series.",
+            ) from exc
+        if not np.allclose(cosines, cosines[0], rtol=0.0, atol=_ORIENTATION_TOLERANCE):
+            raise DatasetManagerError(
+                "DICOM slices of one series have different orientations (ImageOrientationPatient).",
+                "KonfAI reads a series as one volume on one grid: every slice must lie in the same plane.",
+            )
         gaps = np.abs(np.diff([_slice_position(ds) for ds in datasets]))
+        if float(gaps.min()) <= _COINCIDENT_POSITION_MM:
+            raise DatasetManagerError(
+                "DICOM slices of one series share one position.",
+                "KonfAI reads a series as one volume: a series that repeats a location (a cine, several "
+                "phases or echoes) is not supported.",
+            )
         slice_spacing_mm = float(gaps[0])
         tolerance = max(1e-2, 1e-2 * slice_spacing_mm)
         if float(np.ptp(gaps)) > tolerance:
@@ -370,9 +406,10 @@ def plane_cache_held_bytes() -> int:
     return _plane_cache.held_bytes
 
 
-def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
+def _decoded_plane(path: Path, keep: bool = True) -> tuple[np.ndarray, float, float]:
     """One slice file's whole decoded plane and its rescale tags, parsed and decoded once per file
-    per pass."""
+    per pass. ``keep=False`` serves a cached plane but caches none: a whole read touches each plane
+    once."""
     stamp = os.stat(path)
     key = (str(path), stamp.st_mtime_ns, stamp.st_size)
     cached = _plane_cache.get(key)
@@ -383,18 +420,21 @@ def _decoded_plane(path: Path) -> tuple[np.ndarray, float, float]:
     plane.flags.writeable = False  # shared across every region that hits the cache
     slope = float(getattr(ds, "RescaleSlope", 1.0))
     intercept = float(getattr(ds, "RescaleIntercept", 0.0))
-    _plane_cache.put(key, plane, slope, intercept)
+    if keep:
+        _plane_cache.put(key, plane, slope, intercept)
     return plane, slope, intercept
 
 
-def _decode_cached_planes(files: list[Path], window: tuple[slice, slice], apply_rescale: bool) -> np.ndarray:
+def _decode_cached_planes(
+    files: list[Path], window: tuple[slice, slice], apply_rescale: bool, keep: bool = True
+) -> np.ndarray:
     """:func:`_decode_slices` off the plane cache: the same values, the same refusals, each plane
     parsed and decoded at most once per pass instead of once per touching region."""
     volume: np.ndarray | None = None
     expected_shape: tuple[int, ...] | None = None
     for i, path in enumerate(files):
         try:
-            plane, slope, intercept = _decoded_plane(path)
+            plane, slope, intercept = _decoded_plane(path, keep)
         except Exception as exc:
             raise DatasetManagerError(
                 f"Cannot read pixel data from DICOM slice {i}.",
@@ -418,7 +458,6 @@ def _decode_cached_planes(files: list[Path], window: tuple[slice, slice], apply_
     return volume
 
 
-@cache
 def get_dicom_info(
     directory: str | Path,
     *,
@@ -426,12 +465,28 @@ def get_dicom_info(
 ) -> dict[str, Any]:
     """Read DICOM series shape and geometry without decoding pixel data.
 
-    Memoised per directory and unbounded: input DICOM is read-only for a run, and a cohort read case
-    by case would miss on every patch past a bound. ``write_dicom_series`` clears it. Callers that
-    mutate the result must copy it first.
+    Memoised per directory and unbounded: a cohort read case by case would miss on every patch past a
+    bound. A series another process republished or added a slice to, in the directory or one below it, is
+    read again: the memo is keyed by the inode and modification time of every directory it walks.
+    ``write_dicom_series`` and :func:`forget_series` clear it. Callers that mutate the result must copy it
+    first.
     """
-    selected_uid, files = _select_series_files(directory, series_uid)
-    datasets = sort_series(files, stop_before_pixels=True)
+    state = []
+    for walked, _, _ in os.walk(directory):
+        with contextlib.suppress(OSError):
+            status = os.stat(walked)
+            state.append((status.st_ino, status.st_mtime_ns))
+    # A missing directory has no state: _discover_headers refuses it by name.
+    return _dicom_info(str(directory), series_uid, tuple(state))
+
+
+@cache
+def _dicom_info(directory: str, series_uid: str | None, _state: tuple[tuple[int, int], ...]) -> dict[str, Any]:
+    selected_uid, members = _select_series(directory, series_uid)
+    # The headers the discovery parsed, in the order sort_series puts them in: a stable sort on the
+    # slice position.
+    ordered = sorted(members, key=lambda member: _slice_position(member[1]))
+    datasets = [header for _, header in ordered]
     origin, spacing, direction = extract_geometry(datasets)
     first = datasets[0]
     try:
@@ -439,16 +494,21 @@ def get_dicom_info(
         columns = int(first.Columns)
     except AttributeError as exc:
         raise DatasetManagerError("DICOM Rows/Columns tags are required to determine the volume shape.") from exc
-    by_name = {str(path): path for path in files}  # the discovery's own Path objects, once each
     return {
         "series_uid": selected_uid,
-        "files": files,
-        "sorted_files": [by_name[ds.filename] for ds in datasets],
+        "files": [path for path, _ in members],
+        "sorted_files": [path for path, _ in ordered],
         "shape": [1, len(datasets), rows, columns],
         "origin": origin,
         "spacing": spacing,
         "direction": direction,
     }
+
+
+def forget_series() -> None:
+    """Drop every memoised series header and decoded plane: the next read sees the disk as it is."""
+    _dicom_info.cache_clear()
+    _plane_cache.clear()
 
 
 def read_dicom_series_slice(
@@ -501,10 +561,23 @@ def _encode_pixels(data: np.ndarray) -> tuple[np.ndarray, float, float]:
         stored = np.rint((np.nan_to_num(data, nan=minimum) - intercept) / slope).clip(-32768, 32767).astype(np.int16)
         return stored, slope, intercept
     if np.issubdtype(data.dtype, np.signedinteger):
-        return data.astype(np.int32 if data.dtype.itemsize > 2 else np.int16), 1.0, 0.0
+        return _narrowed(data, np.dtype(np.int32 if data.dtype.itemsize > 2 else np.int16)), 1.0, 0.0
     if np.issubdtype(data.dtype, np.unsignedinteger):
-        return data.astype(np.uint32 if data.dtype.itemsize > 2 else np.uint16), 1.0, 0.0
+        return _narrowed(data, np.dtype(np.uint32 if data.dtype.itemsize > 2 else np.uint16)), 1.0, 0.0
     raise DatasetManagerError(f"Unsupported DICOM pixel dtype '{data.dtype}'.")
+
+
+def _narrowed(data: np.ndarray, stored: np.dtype) -> np.ndarray:
+    """``data`` as the integer pixels a slice stores; values the cast would wrap are refused."""
+    if not np.can_cast(data.dtype, stored) and data.size:
+        low, high = int(data.min()), int(data.max())
+        bounds = np.iinfo(stored)
+        if low < bounds.min or high > bounds.max:
+            raise DatasetManagerError(
+                f"Integer values from {low} to {high} do not fit the {stored} pixels a DICOM slice stores.",
+                "Write a floating-point volume (stored with a rescale) or bring the values into that range.",
+            )
+    return data.astype(stored)
 
 
 def write_dicom_series(
@@ -521,6 +594,8 @@ def write_dicom_series(
     from pydicom.dataset import FileDataset, FileMetaDataset
     from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
+    from konfai.utils.dataset.staging import _recover_orphaned_backup, _replaced_name, _retire_dead_debris
+
     data = np.asarray(volume)
     if data.ndim == 3:
         data = data[np.newaxis]
@@ -536,14 +611,21 @@ def write_dicom_series(
     if origin_array.shape != (3,) or spacing_array.shape != (3,):
         raise DatasetManagerError("DICOM origin and spacing must each contain exactly three values.")
 
-    root = Path(directory)
+    # Written beside the series and renamed over it: a writer killed mid-series leaves the previous
+    # series whole, or no series, never a shorter one.
+    root = Path(directory).resolve()
+    _recover_orphaned_backup(root)  # a killed writer's backup is the series to start from
     root.mkdir(parents=True, exist_ok=True)
-    get_dicom_info.cache_clear()  # what this directory holds is about to change
-    _plane_cache.clear()
-    # Remove only slices this function wrote (its zero-padded NNNNNN.dcm naming).
-    for existing in root.glob("*.dcm"):
-        if _SLICE_FILENAME_RE.match(existing.name):
-            existing.unlink()
+    staging = root.with_name(f"{root.name}.{os.getpid()}.tmp")
+    shutil.rmtree(staging, ignore_errors=True)
+    # Everything but the slices this function wrote (its NNNNNN.dcm naming) stays with the series.
+    shutil.copytree(
+        root,
+        staging,
+        symlinks=True,
+        ignore=lambda folder, names: [name for name in names if folder == str(root) and _SLICE_FILENAME_RE.match(name)],
+        copy_function=_link_or_copy,
+    )
 
     metadata = dict(metadata or {})
     study_uid = str(metadata.get("StudyInstanceUID", generate_uid()))
@@ -563,7 +645,7 @@ def write_dicom_series(
         file_meta.MediaStorageSOPInstanceUID = sop_uid
         file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
         file_meta.ImplementationClassUID = generate_uid()
-        path = root / f"{index + 1:06d}.dcm"
+        path = staging / f"{index + 1:06d}.dcm"
         dataset = FileDataset(str(path), {}, file_meta=file_meta, preamble=b"\0" * 128)
         dataset.SOPClassUID = CTImageStorage
         dataset.SOPInstanceUID = sop_uid
@@ -598,7 +680,31 @@ def write_dicom_series(
         dataset.RescaleIntercept = float(intercept)
         dataset.PixelData = pixels.tobytes()
         dataset.save_as(str(path), enforce_file_format=True)
+
+    # A directory is renamed over an empty one only: the previous series steps aside for the rename.
+    backup = root.with_name(_replaced_name(root.name))
+    shutil.rmtree(backup, ignore_errors=True)
+    root.rename(backup)
+    try:
+        staging.rename(root)
+    except BaseException:
+        if not root.exists():
+            backup.rename(root)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+    forget_series()  # this directory holds another series now
+    with contextlib.suppress(Exception):
+        _retire_dead_debris(root)  # housekeeping: it cannot fail the write
     return series_uid
+
+
+def _link_or_copy(source: str, target: str) -> None:
+    """Carry a file into the staged series under a second name, or as a copy where links are refused."""
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
 
 
 # High-level convenience function
@@ -623,8 +729,8 @@ def read_dicom_series(
     """
     _require_pydicom()
 
-    _selected_uid, files = _select_series_files(directory, series_uid)
-    datasets = sort_series(files)
+    _selected_uid, members = _select_series(directory, series_uid)
+    datasets = sort_series([path for path, _ in members])
     origin, spacing, direction = extract_geometry(datasets)
     volume = read_volume(datasets, apply_rescale=apply_rescale)
     return volume, origin, spacing, direction

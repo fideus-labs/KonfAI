@@ -252,6 +252,17 @@ modules:
         with pytest.raises(ConfigError):
             build_model_from_yaml(yaml_str="modules: [unclosed\n")
 
+    def test_yaml_nested_deeper_than_the_parser_goes_raises_config_error(self) -> None:
+        deep = "modules:\n" + "".join("  " * i + "- modules:\n" for i in range(600)) + "  " * 600 + "- type: Identity\n"
+
+        with pytest.raises(ConfigError, match="Invalid YAML"):
+            build_model_from_yaml(yaml_str=deep)
+
+    @pytest.mark.parametrize("name", ["a.b", "Head:Conv", "x;accu;y"], ids=["dot", "colon", "patch-marker"])
+    def test_a_module_name_no_config_path_can_address_is_refused(self, name: str) -> None:
+        with pytest.raises(ConfigError, match="Invalid module name"):
+            build_model_from_yaml(yaml_str=f"modules:\n  - name: '{name}'\n    type: Identity\n")
+
     def test_unknown_module_spec_key_raises_config_error(self) -> None:
         yaml_str = "modules:\n  - type: Identity\n    argz: {}\n"
 

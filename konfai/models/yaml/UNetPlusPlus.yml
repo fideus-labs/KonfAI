@@ -8,7 +8,7 @@
 # leaves execute in exactly the same sequence as the reference, a REAL smp checkpoint of this
 # topology loads straight into this KonfAI model through the execution-order bridge
 # `konfai.utils.pretrained.transfer_weights_by_execution_order`, and the KonfAI logits are
-# `torch.allclose` with the reference output (see tests/unit/test_unetplusplus_yaml.py, which
+# `torch.allclose` with the reference output (see tests/unit/test_models_yaml.py, which
 # transfers the parametric UNetPlusPlus's weights in and checks maxdiff < 1e-4).
 #
 # It is authored at the BLOCK level from two generic, registry-backed composite blocks -- so the

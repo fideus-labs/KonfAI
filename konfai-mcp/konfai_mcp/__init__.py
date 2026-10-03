@@ -27,6 +27,9 @@ _TRANSPORT_CHOICES = ("stdio", "sse", "streamable-http")
 
 _ENV_FLAG_TRUE = {"1", "true", "yes", "on"}
 
+#: The bind addresses an HTTP server with no bearer token may take.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 
 def _env_flag(name: str) -> bool:
     """Interpret an environment variable as a boolean flag."""
@@ -78,6 +81,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--bearer-token",
         default=os.environ.get("KONFAI_MCP_BEARER_TOKEN"),
         help="Optional bearer token required for SSE or streamable HTTP transports.",
+    )
+    parser.add_argument(
+        "--i-know-this-is-insecure",
+        action="store_true",
+        help="Bind a non-loopback address with no bearer token, which lets anyone on the network run jobs here.",
     )
     parser.add_argument(
         "--stateless-http",
@@ -139,6 +147,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             "--stateless-http and --json-response only apply to the 'streamable-http' transport "
             "(stdio is inherently per-process and the deprecated SSE transport requires sessions)."
         )
+    if args.transport != "stdio" and not (args.bearer_token or "").strip() and not args.i_know_this_is_insecure:
+        import fastmcp
+
+        host = args.host if args.host is not None else fastmcp.settings.host
+        if host not in LOOPBACK_HOSTS:
+            # The server runs jobs and reads host files: unauthenticated on a network, it is a remote shell.
+            parser.error(
+                f"refusing to bind {host} with no bearer token: set --bearer-token (or KONFAI_MCP_BEARER_TOKEN), "
+                "or pass --i-know-this-is-insecure."
+            )
     _apply_cli_environment(args)
 
     from .server import main as server_main

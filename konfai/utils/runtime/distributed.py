@@ -21,6 +21,7 @@ import ctypes
 import inspect
 import multiprocessing.util
 import os
+import pickle  # nosec B403
 import random
 import shutil
 import socket
@@ -31,9 +32,10 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from functools import wraps
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 import torch
@@ -52,7 +54,7 @@ from konfai import (
 )
 from konfai.utils.budget import available_cpus, node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import StartupClock, restart_startup_clock, startup_clock
-from konfai.utils.errors import EXIT_OUT_OF_MEMORY, ConfigError, KonfAIError
+from konfai.utils.errors import ConfigError, KonfAIError
 from konfai.utils.runtime.environment import ClusterKwargs
 from konfai.utils.runtime.logging import Log, TensorBoard
 from konfai.utils.utils import env_flag
@@ -84,6 +86,21 @@ def preserved_rng() -> Iterator[None]:
         torch.set_rng_state(states[2])
         if cuda_states is not None:
             torch.cuda.set_rng_state_all(cuda_states)
+
+
+def forget_earlier_workflows() -> None:
+    """Forget what an earlier workflow of this process left behind: the DICOM series and OME-Zarr stores
+    it memoised (a workflow reads its inputs as they are when it starts, and another tool may have
+    rewritten them in place since) and the streaming explanations it gave, which every run gives once."""
+    dicom = sys.modules.get("konfai.utils.dicom")  # a process that never read DICOM memoised none
+    if dicom is not None:
+        dicom.forget_series()
+    samples = sys.modules.get("konfai.data.data_manager.samples")  # nor explained a case
+    if samples is not None:
+        samples.forget_explanations()
+    ome_zarr = sys.modules.get("konfai.utils.ome_zarr")
+    if ome_zarr is not None:
+        ome_zarr.clear_ome_zarr_cache()
 
 
 #: The longest temporary directory the run's sockets fit under: an AF_UNIX path holds 107 bytes, and Python's
@@ -145,7 +162,7 @@ def cudnn_flags(manual_seed: int | None, benchmark: bool) -> tuple[bool, bool]:
 
 
 class DistributedObject(ABC):
-    """Base class for trainer, predictor, and evaluator distributed workflows."""
+    """Base class for the trainer, predictor, evaluator and transformer distributed workflows."""
 
     #: Whether the ranks talk to each other (DDP, gathers). A workflow whose ranks only share the
     #: work list sets it False and runs without a process group: no rendezvous port, no gloo/NCCL.
@@ -154,12 +171,20 @@ class DistributedObject(ABC):
     def __init__(self, name: str) -> None:
         self.dataloader: list[list[DataLoader]]
         self.manual_seed: int | None = None
+        #: The seed the run's draws come from when it is not ``manual_seed``: one the workflow drew and
+        #: recorded, so that ``manual_seed: <it>`` replays the run. cuDNN's flags follow ``manual_seed``.
+        self.drawn_seed: int | None = None
         #: Whether cuDNN benchmarks its kernels under ``manual_seed`` too (:func:`cudnn_flags`).
         self.cudnn_benchmark = False
         self.name = name
         self.size = 1
         #: The launcher's clock, handed over before the ranks start; rank 0 reports it.
         self.startup_clock: StartupClock | None = None
+
+    @property
+    def run_seed(self) -> int | None:
+        """What the run seeds its draws with: ``manual_seed``, else the seed the workflow drew."""
+        return self.manual_seed if self.manual_seed is not None else self.drawn_seed
 
     @abstractmethod
     def setup(self, world_size: int):
@@ -191,34 +216,34 @@ class DistributedObject(ABC):
         sync: bool = True,
     ) -> dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]]:
         """Per network, its loss and metric tables: criterion -> (weight, reported value, minimized value),
-        averaged over the ranks."""
-        data: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
+        each value the mean over every rank's patches (``Measure.format_totals``)."""
+        data: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         for label, model in models.items():
             for name, network in model.get_networks().items():
                 if network.measure is not None:
                     data[f"{name}{label}"] = (
-                        network.measure.format_loss(True, n),
-                        network.measure.format_loss(False, n),
+                        network.measure.format_totals(True, n),
+                        network.measure.format_totals(False, n),
                     )
         # `sync=False` skips the cross-rank all_gather: prediction shards have unequal batch counts, and a
         # per-batch collective would hang.
         outputs: list[Any] = synchronize_data(world_size, gpu, data) if sync else [data]
         result: dict[str, tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]] = {}
         if global_rank == 0:
+            totals: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
             for output in outputs:
                 for k, tables in output.items():
-                    if k not in result:
-                        result[k] = ({}, {})
-                    for table, entries in zip(result[k], tables, strict=True):
-                        for u, entry in entries.items():
-                            triple = cast(tuple[float, float, float], entry)
-                            weight, reported, minimized = table.get(u, (triple[0], 0.0, 0.0))
-                            table[u] = (
-                                weight,
-                                reported + triple[1] / world_size,
-                                minimized + triple[2] / world_size,
-                            )
+                    for table, entries in zip(totals.setdefault(k, ({}, {})), tables, strict=True):
+                        for u, (weight, values, losses) in entries.items():
+                            weight, summed_values, summed_losses = table.get(u, (weight, (0.0, 0), (0.0, 0)))
+                            table[u] = (weight, _add(summed_values, values), _add(summed_losses, losses))
+            result = {k: (_means(losses), _means(metrics)) for k, (losses, metrics) in totals.items()}
         return result
+
+    def outputs(self) -> list[Path]:
+        """Where a finished run left what it wrote, which the CLI names once the run ends; empty for a
+        run that reports it itself."""
+        return []
 
     @property
     def world_size(self) -> int:
@@ -227,6 +252,31 @@ class DistributedObject(ABC):
 
     def rank_dataloaders(self, global_rank: int) -> "list[DataLoader]":
         return self.dataloader[global_rank]
+
+    def launch_ranks(self, world_size: int) -> None:
+        """Run the ranks on this machine and return once they all ended: here when a single rank runs
+        inline, else one spawned process each."""
+        if _runs_inline(world_size):
+            self(0)
+            return
+        with tempfile.TemporaryDirectory(prefix="konfai_ranks_") as refusals:
+            try:
+                mp.spawn(_run_rank, args=(self, refusals), nprocs=world_size)
+            except mp.ProcessRaisedException as error:
+                refusal = _kept_refusal(Path(refusals) / f"{error.error_index}.pickle")
+                if refusal is None:
+                    raise
+                raise refusal from error
+            except mp.ProcessExitedException as error:
+                if error.signal_name != "SIGKILL":
+                    raise
+                raise KonfAIError(
+                    "Runtime",
+                    f"Rank {error.error_index} was killed by SIGKILL, the signal the kernel's out-of-memory killer"
+                    " sends: the run most likely ran out of RAM.",
+                    "Give each rank less to hold (fewer ranks or DataLoader workers, a smaller memory_budget);"
+                    " the kernel log (dmesg) names an out-of-memory kill.",
+                ) from error
 
     def _bound_chunk_cache(self, world_size: int) -> None:
         """Bound the decoded-chunk cache by this rank's share of the memory budget. Set on the rank: a
@@ -258,11 +308,14 @@ class DistributedObject(ABC):
         apply_cpu_thread_budget(world_size)
         self._bound_chunk_cache(world_size)
         self._bound_allocator()
-        with Log(self.name, global_rank):
+        from konfai.utils.dataset.decompressed import run_scope
+
+        # The launcher's scope when it has one; a cluster task has none, and scopes its loader workers here.
+        with run_scope(), Log(self.name, global_rank):
             if torch.cuda.is_available() and _PYNVML_AVAILABLE:
                 pynvml.nvmlInit()
-            if self.manual_seed is not None:
-                seed_all(self.manual_seed * world_size + global_rank)
+            if self.run_seed is not None:
+                seed_all((self.run_seed * world_size + global_rank) % 2**32)
             torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = cudnn_flags(
                 self.manual_seed, self.cudnn_benchmark
             )
@@ -281,15 +334,38 @@ class DistributedObject(ABC):
                     pynvml.nvmlShutdown()
 
 
+def _run_rank(rank: int, workflow: DistributedObject, refusals: str) -> None:
+    """One spawned rank. mp.spawn hands the launcher only the text of a rank's traceback: a designed
+    refusal is also kept, pickled, for the launcher to raise as itself."""
+    try:
+        workflow(rank)
+    except KonfAIError as refusal:
+        with suppress(Exception), open(Path(refusals) / f"{rank}.pickle", "wb") as file:
+            pickle.dump(refusal, file)
+        raise
+
+
+def _kept_refusal(path: Path) -> KonfAIError | None:
+    """The refusal a rank kept at PATH, or None when it kept none (or none the launcher can load)."""
+    try:
+        with open(path, "rb") as file:
+            refusal = pickle.load(file)  # nosec B301 - written by this run's own ranks
+    except Exception:
+        return None
+    return refusal if isinstance(refusal, KonfAIError) else None
+
+
 def run_distributed_app(
     func: Callable[..., DistributedObject],
-) -> Callable[..., None]:
-    """Wrap a workflow factory so it executes with KonfAI runtime conventions."""
+) -> Callable[..., DistributedObject]:
+    """Wrap a workflow factory so it executes with KonfAI runtime conventions; the wrapper returns
+    the workflow it ran. A designed refusal raises ``KonfAIError`` and Ctrl+C ``KeyboardInterrupt``:
+    the CLI turns them into a message and an exit status, an in-process caller catches them."""
 
     sig = inspect.signature(func)
 
     @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> None:
+    def wrapper(*args: Any, **kwargs: Any) -> DistributedObject:
         params = sig.parameters
         # A kwarg the entrypoint does not declare is refused. Tolerated beside the signature: the cluster
         # kwargs (read from the raw kwargs below) and 'command', which only the TRAIN/RESUME entrypoint declares.
@@ -311,6 +387,7 @@ def run_distributed_app(
         previous_local_ranks = os.environ.get("KONFAI_LOCAL_RANKS")
         os.environ["KONFAI_LOCAL_RANKS"] = str(max(1, local_ranks))
         try:
+            forget_earlier_workflows()
             with restart_startup_clock().phase("build"):
                 workflow = func(*args, **kwargs_fun)
             execute_distributed_object(
@@ -331,19 +408,7 @@ def run_distributed_app(
                     else None
                 ),
             )
-        except KeyboardInterrupt:
-            print("\n[KonfAI] Manual interruption (Ctrl+C)")
-        except KonfAIError as error:
-            # A designed refusal: the message alone, the traceback only under KONFAI_DEBUG=1.
-            if env_flag("KONFAI_DEBUG", False):
-                raise
-            print(str(error).strip(), file=sys.stderr)
-            sys.exit(1)
-        except torch.cuda.OutOfMemoryError as error:
-            # Not a designed refusal but one a caller can act on: IMPACT-Reg re-plans smaller on this exit code. The
-            # traceback is already in the run's log.
-            print(f"[KonfAI] out of GPU memory: {(str(error).splitlines() or ['CUDA'])[0]}", file=sys.stderr)
-            sys.exit(EXIT_OUT_OF_MEMORY)
+            return workflow
         finally:
             if previous_local_ranks is None:
                 os.environ.pop("KONFAI_LOCAL_RANKS", None)
@@ -395,6 +460,16 @@ def execute_distributed_object(
     cpu_workers = 1 if cpu is None else int(cpu)
     if cpu_workers < 1:
         raise ConfigError(f"cpu={cpu!r} is not a rank count.", "Pass cpu=1 or more (the CLI refuses it the same way).")
+    if tensorboard and shutil.which("tensorboard") is None:
+        raise ConfigError(
+            "TensorBoard was asked for (-tb), and no 'tensorboard' executable is on PATH.",
+            "Install it with `pip install konfai[tensorboard]`, or run without -tb.",
+        )
+    if cluster_kwargs is not None and not gpu_ids:
+        raise ConfigError(
+            "A cluster job runs one rank per GPU of each node, and no GPU was given: it would submit zero tasks.",
+            "Pass the GPU ids each node uses, e.g. --gpu 0 1 for two GPUs per node.",
+        )
 
     managed_env = [
         "CUDA_VISIBLE_DEVICES",
@@ -428,8 +503,8 @@ def execute_distributed_object(
             clock = startup_clock()
             with distributed_object as configured_object:
                 with Log(configured_object.name, 0):
-                    if configured_object.manual_seed is not None:
-                        seed_all(configured_object.manual_seed)
+                    if configured_object.run_seed is not None:
+                        seed_all(configured_object.run_seed)
                     if cluster_config is not None:
                         with clock.phase("setup"):
                             configured_object.setup(len(gpu_ids) * cluster_config["num_nodes"])
@@ -454,6 +529,13 @@ def execute_distributed_object(
                     world_size = len(gpu_ids)
                     if world_size == 0:
                         world_size = cpu_workers
+                    if os.name == "nt" and world_size > 1 and configured_object.uses_collectives:
+                        # setup_gpu opens no process group on Windows.
+                        raise ConfigError(
+                            f"{world_size} processes need a process group, and KonfAI opens none on Windows:"
+                            " each rank would train or score only its own share.",
+                            "Run with one process on Windows (--cpu 1, or a single --gpu).",
+                        )
                     if not quiet:
                         # One line naming the resolved devices: omitting --gpu runs on CPU.
                         device_line = (
@@ -462,18 +544,20 @@ def execute_distributed_object(
                             else f"CPU ({cpu_workers} worker{'s' if cpu_workers > 1 else ''})"
                         )
                         print(f"[KonfAI] Running on {device_line}")
-                    with clock.phase("setup"):
-                        configured_object.setup(world_size)
-                    # Share tensors through /dev/shm files instead of one file descriptor per tensor, or a
-                    # worker pickling a loaded model can exhaust the open-file limit.
-                    mp.set_sharing_strategy("file_system")
-                    clock.launch()
-                    configured_object.startup_clock = clock
-                    with TensorBoard(configured_object.name):
-                        if _runs_inline(world_size):
-                            configured_object(0)
-                        else:
-                            mp.spawn(configured_object, nprocs=world_size)
+                    from konfai.utils.dataset.decompressed import run_scope
+
+                    # The uncompressed twins of compressed entries: shared by the ranks and their loader
+                    # workers, removed when the run ends, however it ends.
+                    with run_scope():
+                        with clock.phase("setup"):
+                            configured_object.setup(world_size)
+                        # Share tensors through shared-memory files, not one file descriptor per tensor (Linux's
+                        # default), or a worker pickling a loaded model can exhaust the open-file limit.
+                        mp.set_sharing_strategy("file_system")
+                        clock.launch()
+                        configured_object.startup_clock = clock
+                        with TensorBoard(configured_object.name):
+                            configured_object.launch_ranks(world_size)
         finally:
             for key, value in previous_env.items():
                 if value is None:
@@ -585,18 +669,18 @@ def apply_cpu_thread_budget(world_size: int | None = None) -> None:
     12; ITK's takes the share whole; zarr's async concurrency takes a third of it (at least min(cores, 4)).
     An explicit ``OMP_NUM_THREADS`` keeps authority over all of them.
 
-    Applied once per process, and never on macOS, where ``torch.set_num_threads`` after a parallel region
-    can crash libomp with SIGSEGV.
+    Applied once per process. On macOS torch's pool keeps its default: ``torch.set_num_threads`` after a
+    parallel region can crash libomp with SIGSEGV there.
     """
     global _cpu_budget_applied
-    if sys.platform == "darwin" or _cpu_budget_applied:
+    if _cpu_budget_applied:
         return
     explicit = os.environ.get("OMP_NUM_THREADS")
     cores = rank_cpu_share(world_size)
     # The cap is torch's alone: ITK's resampler keeps scaling to the whole share.
     share = int(explicit) if explicit else min(cores, 12)
     itk_share = cores
-    if not explicit:
+    if not explicit and sys.platform != "darwin":
         torch.set_num_threads(share)
     try:
         import SimpleITK as sitk
@@ -641,12 +725,14 @@ def pin_gloo_to_loopback(local: bool) -> Iterator[None]:
 
 def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = True) -> tuple[int | None, int | None]:
     """Resolve the rank and, with ``process_group``, initialize torch distributed on it."""
+    num_nodes = 1
     if rank is None:
         import submitit
 
         job_env = submitit.JobEnvironment()
         global_rank = job_env.global_rank
         local_rank = job_env.local_rank
+        num_nodes = job_env.num_nodes
     else:
         global_rank = rank
         local_rank = rank
@@ -669,7 +755,14 @@ def setup_gpu(world_size: int, rank: int | None = None, process_group: bool = Tr
             .strip()
             .splitlines()[0]
         )
-    except Exception:
+    except Exception as error:
+        if num_nodes > 1:
+            # localhost would put every node's ranks on a rendezvous of their own, waiting until the timeout.
+            raise ConfigError(
+                f"This {num_nodes}-node job cannot name its rendezvous host: {error}",
+                "Make scontrol reachable on the job's PATH (a container needs the host's Slurm client),"
+                " or run on one node.",
+            ) from error
         host_name = "localhost"
     port = os.environ.get("KONFAI_MASTER_PORT")
     if not port:
@@ -707,6 +800,19 @@ def cleanup():
     """Destroy the active torch distributed process group when present."""
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def _add(total: tuple[float, int], more: tuple[float, int]) -> tuple[float, int]:
+    return total[0] + more[0], total[1] + more[1]
+
+
+def _ratio(total: tuple[float, int]) -> float:
+    return total[0] / total[1] if total[1] else float("nan")
+
+
+def _means(table: dict[str, Any]) -> dict[str, tuple[float, float, float]]:
+    """(weight, reported, minimized) from (weight, reported total, minimized total)."""
+    return {u: (weight, _ratio(values), _ratio(losses)) for u, (weight, values, losses) in table.items()}
 
 
 def synchronize_data(world_size: int, gpu: int, data: Any) -> list[Any]:

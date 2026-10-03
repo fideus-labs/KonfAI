@@ -16,6 +16,8 @@
 
 """The shipped YAML model catalog: 'default|<Name>.yml' resolution and catalog health."""
 
+import re
+
 import pytest
 from konfai.network.network import ModelLoader, Network
 from konfai.utils.errors import ConfigError
@@ -45,19 +47,6 @@ def test_default_catalog_name_cannot_escape_the_shipped_directory(name: str) -> 
         ModelLoader(classpath=name)._yaml_path()
 
 
-def test_the_pre_1_6_absolute_model_classpath_is_refused_by_name(monkeypatch) -> None:
-    # The path is gone, and ModuleNotFoundError would say only that a module is missing: the refusal
-    # names both spellings that work, since a config written before 1.6.0 is what reaches this.
-    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
-    old = "konfai.models.segmentation.UNet:UNet"
-
-    with pytest.raises(ConfigError, match=r"before 1\.6\.0") as refusal:
-        ModelLoader(classpath=old).get_model()
-
-    assert "konfai.models.python.segmentation.UNet:UNet" in str(refusal.value)
-    assert "segmentation.UNet:UNet" in str(refusal.value)
-
-
 def test_every_catalog_entry_builds() -> None:
     entries = sorted(CATALOG.glob("*.yml"))
     assert entries, "the shipped catalog must not be empty"
@@ -72,3 +61,14 @@ def test_catalog_unet_stays_in_sync_with_the_example_copy() -> None:
     example = (REPO / "examples" / "Segmentation" / "UNet.yml").read_text(encoding="utf-8")
     catalog = (CATALOG / "UNet.yml").read_text(encoding="utf-8")
     assert example == catalog
+
+
+def test_every_test_file_a_catalog_entry_cites_exists() -> None:
+    # `konfai list models` shows these headers: a citation must lead to the test that backs the claim.
+    missing = {
+        f"{entry.name}: {path}"
+        for entry in CATALOG.glob("*.yml")
+        for path in re.findall(r"tests/[\w/]+\.py", entry.read_text(encoding="utf-8"))
+        if not (REPO / path).is_file()
+    }
+    assert not missing

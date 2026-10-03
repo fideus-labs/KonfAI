@@ -17,7 +17,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -93,8 +93,8 @@ SYSTEM_PROMPT = (
     "name (list_app_parameters shows them); any OTHER config key needs its full dotted path from the config "
     "root ({'Trainer.Dataset.num_workers': 2}): a bare config key is refused as an unknown model "
     "parameter.\n\n"
-    "Registering (an app whose task is 'registration', such as the VBoussot/ImpactReg presets): run_app_infer "
-    "with [[fixed], [moving]] writes P000/Transform.h5 and P000/Moved. Surface the fixed image and Moved together "
+    "Registering (an app whose task is 'registration', such as the VBoussot/ImpactReg presets): run_app "
+    "(action 'infer') with [[fixed], [moving]] writes P000/Transform.h5 and P000/Moved. Surface the fixed image and Moved together "
     "so the user compares them, then score with run_registration_evaluate twice, without the transform (where "
     "the pair started) and with it, and report both.\n\n"
     "A job whose status is 'killed' was stopped ON PURPOSE: usually the user pressing Stop in the panel "
@@ -140,8 +140,21 @@ SYSTEM_PROMPT = (
 # A tool executor: given (name, arguments) run the MCP tool, return (ok, text_preview).
 ToolFn = Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]]
 
-# Absolute NIfTI / MHA volume paths NAMED by the assistant -> auto-load in NiiVue.
-_VOLUME_RE = re.compile(r"(/[^\s\"'`|,)\]]+\.(?:nii\.gz|nii|mha|mhd|nrrd))")
+# Absolute NIfTI / MHA volume paths NAMED by the assistant -> auto-load in NiiVue. A server on Windows
+# names them from a drive.
+_VOLUME_RE = re.compile(r"((?:[A-Za-z]:[\\/]|/)[^\s\"'`|,)\]]+\.(?:nii\.gz|nii|mha|mhd|nrrd))")
+
+
+def _strings_in(value: Any) -> Iterator[str]:
+    """Every string a tool's arguments carry, nested ones included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings_in(item)
+    elif isinstance(value, list | tuple):
+        for item in value:
+            yield from _strings_in(item)
 
 
 def _detect_volumes(text: str) -> list[str]:
@@ -261,7 +274,8 @@ async def with_volume_events(events: AsyncIterator[dict[str, Any]]) -> AsyncIter
             event["text"] = visible
             volumes = _detect_volumes(visible)
         elif event["type"] == "tool_call":
-            volumes = _detect_volumes(json.dumps(event.get("input"), default=str))
+            # The arguments as written: their JSON spells a Windows path with doubled backslashes.
+            volumes = _detect_volumes(" ".join(_strings_in(event.get("input"))))
         elif event["type"] == "tool_result":
             full = event.get("preview", "")
             actions = _next_actions(full)
@@ -539,7 +553,7 @@ class StudioAgent:
         await self._client.__aexit__(*exc)
 
     async def send(self, user_message: str) -> AsyncIterator[dict[str, Any]]:
-        assert self._backend is not None, "agent must be entered before use"
+        assert self._backend is not None, "agent must be entered before use"  # nosec B101 - type narrowing
         async for event in with_volume_events(self._backend.send(user_message)):
             yield event
         if self._history_file:  # persist after each turn so a restart continues the conversation

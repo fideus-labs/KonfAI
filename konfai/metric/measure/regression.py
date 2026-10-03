@@ -17,6 +17,7 @@
 
 """Pointwise, structural and information criteria over intensities."""
 
+import math
 from collections.abc import Iterator
 from functools import partial
 from typing import Any
@@ -32,7 +33,8 @@ from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
 from konfai.utils.errors import MeasureError
 
-#: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share.
+#: The 12-bit CT convention, -1024..3071 HU: the one default dynamic range PSNR and SSIM share, written
+#: into a resolved config as a number, and what a ``dynamic_range: None`` in a published config names.
 CT_DYNAMIC_RANGE = 4095.0
 
 
@@ -45,6 +47,7 @@ class MSE(MaskedLoss):
         super().__init__(partial(MSE._loss, reduction), False)
         self._reduction = reduction
         self.reducible = reduction in ("mean", "sum")
+        self.batch_mean = reduction == "mean"
 
     def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
         return (output - target).pow(2) if self.reducible else None
@@ -65,6 +68,7 @@ class MAE(MaskedLoss):
         super().__init__(partial(MAE._loss, reduction), False)
         self._reduction = reduction
         self.reducible = reduction in ("mean", "sum")
+        self.batch_mean = reduction == "mean"
 
     def _kernel(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor | None:
         return (output - target).abs() if self.reducible else None
@@ -78,6 +82,7 @@ class MAE(MaskedLoss):
 
 class ME(MaskedLoss):
     reducible = True
+    batch_mean = True
 
     @staticmethod
     def _loss(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -115,7 +120,7 @@ class MAESaveMap(MAE):
         mask = MaskedLoss.get_mask(list(targets[1:]))
         if mask is None:
             return difference, None
-        mask = mask.to(device=output.device) == 1
+        mask = mask.to(device=output.device)
         return difference.mul_(mask), mask
 
     @staticmethod
@@ -167,6 +172,7 @@ class MAESaveMap(MAE):
 class PSNR(MaskedLoss):
     reducible = True
     maximize = True  # reported value is the peak signal-to-noise ratio in dB (higher-is-better)
+    loss_capable = False  # a metric: minimising it would push the output away from the target
 
     @staticmethod
     def _loss(dynamic_range: float, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -174,7 +180,7 @@ class PSNR(MaskedLoss):
         psnr = 10 * torch.log10(dynamic_range**2 / mse)
         return psnr
 
-    def __init__(self, dynamic_range: float | None = None) -> None:
+    def __init__(self, dynamic_range: float | None = CT_DYNAMIC_RANGE) -> None:
         dynamic_range = CT_DYNAMIC_RANGE if dynamic_range is None else dynamic_range
         super().__init__(partial(PSNR._loss, dynamic_range), False)
         self._dynamic_range = float(dynamic_range)
@@ -193,17 +199,21 @@ class PSNR(MaskedLoss):
 class SSIM(MaskedLoss):
     """Structural similarity as ``skimage.metrics.structural_similarity`` computes it with its
     defaults: a 7-wide uniform window, K1 0.01, K2 0.03, the sample covariance, the mean over the
-    map cropped by the window's radius, one map per channel (``channel_axis=0``) all averaged. In
-    torch on the tensors' device, where skimage's numpy route was single-threaded and pulled the
-    volumes back to the host. The map is built slab by slab along the first spatial axis, so the
+    map cropped by the window's radius, one map per channel (``channel_axis=0``) all averaged, in
+    torch on the tensors' device. The map is built slab by slab along the first spatial axis, so the
     five window statistics it needs hold a few MiB at a time whatever the case.
 
     A voxel's window reaches the window's radius past a patch's faces: reducible from patches read
     with that radius of halo, each scoring the map voxels centred in its own grid slot.
+
+    A metric unless its training config writes ``is_loss: true``; the loss is then ``1 - SSIM``, with
+    its gradient, and the reported value stays the SSIM.
     """
 
     maximize = True  # reported value is the structural similarity index (higher-is-better)
+    default_is_loss = False
     reducible = True
+    batch_mean = True
     window = 7
     halo = (window - 1) // 2
     k1 = 0.01
@@ -214,7 +224,7 @@ class SSIM(MaskedLoss):
     #: against 0.15 s at 2 MiB.
     slab_bytes = 8 << 20
 
-    def __init__(self, dynamic_range: float | None = None) -> None:
+    def __init__(self, dynamic_range: float | None = CT_DYNAMIC_RANGE) -> None:
         dynamic_range = CT_DYNAMIC_RANGE if dynamic_range is None else dynamic_range
         super().__init__(partial(SSIM._loss, dynamic_range), True)
         self._dynamic_range = float(dynamic_range)
@@ -262,6 +272,20 @@ class SSIM(MaskedLoss):
         return s.sum(dtype=torch.float64), s.numel()
 
     @staticmethod
+    def _map(x: torch.Tensor, y: torch.Tensor, data_range: float) -> torch.Tensor:
+        """The map ``_map_sum`` sums, out of place so autograd can differentiate it."""
+        window = SSIM.window
+        voxels = window ** (x.dim() - 1)
+        cov_norm = voxels / (voxels - 1)
+        c1, c2 = (SSIM.k1 * data_range) ** 2, (SSIM.k2 * data_range) ** 2
+        ux = SSIM._box_sum(x, window) / voxels
+        uy = SSIM._box_sum(y, window) / voxels
+        vx = (SSIM._box_sum(x * x, window) / voxels - ux * ux) * cov_norm
+        vy = (SSIM._box_sum(y * y, window) / voxels - uy * uy) * cov_norm
+        vxy = (SSIM._box_sum(x * y, window) / voxels - ux * uy) * cov_norm
+        return (2 * ux * uy + c1) * (2 * vxy + c2) / ((ux * ux + uy * uy + c1) * (vx + vy + c2))
+
+    @staticmethod
     @torch.no_grad()
     def _map_sum_over(
         x: torch.Tensor,
@@ -303,25 +327,38 @@ class SSIM(MaskedLoss):
         return float(total), count
 
     @staticmethod
-    def _ssim(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float) -> float:
-        """The SSIM of one ``[C, *spatial]`` pair: the mean of its map over the cropped extent."""
+    def _check_extent(x: torch.Tensor) -> None:
         if any(size < SSIM.window for size in x.shape[1:]):
             raise MeasureError(
                 f"SSIM needs every spatial extent to be at least its {SSIM.window}-voxel window.",
                 f"Got a {tuple(x.shape[1:])} volume.",
             )
+
+    @staticmethod
+    def _ssim(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float) -> float:
+        """The SSIM of one ``[C, *spatial]`` pair: the mean of its map over the cropped extent."""
+        SSIM._check_extent(x)
         total, count = SSIM._map_sum_over(x, y, mask, data_range, None)
         return total / count
+
+    @staticmethod
+    def _differentiable_ssim(
+        x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float
+    ) -> torch.Tensor:
+        """``_ssim`` with its gradient: the whole map at once, which autograd keeps for the backward."""
+        SSIM._check_extent(x)
+        if mask is not None:
+            x, y = torch.where(mask, x, 0.0), torch.where(mask, y, 0.0)
+        return SSIM._map(x.double(), y.double(), data_range).mean()
 
     def _pairs(
         self, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None]:
         """Per batch item, the float pair and its bool mask; ``None`` for an item its mask empties."""
-        if len(targets) == 0:
-            raise ValueError("SSIM expects at least one target tensor.")
+        self._require_target(targets)
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
-        mask = None if mask is None else mask.to(device=output.device) == 1
+        mask = None if mask is None else mask.to(device=output.device)
         for batch in range(output.shape[0]):
             mask_b = None if mask is None else mask[batch, ...]
             if mask_b is not None and not torch.any(mask_b):
@@ -333,12 +370,19 @@ class SSIM(MaskedLoss):
         self,
         output: torch.Tensor,
         *targets: torch.Tensor,
-    ) -> tuple[torch.Tensor, float]:
-        values = [SSIM._ssim(*pair, self._dynamic_range) for pair in self._pairs(output, targets) if pair is not None]
+    ) -> tuple[torch.Tensor, float | torch.Tensor]:
+        pairs = (pair for pair in self._pairs(output, targets) if pair is not None)
+        if self.as_loss and torch.is_grad_enabled():
+            ssims = [SSIM._differentiable_ssim(*pair, self._dynamic_range) for pair in pairs]
+            if not ssims:
+                return output.new_tensor(0.0), np.nan
+            ssim = torch.stack(ssims).mean()
+            return (1 - ssim).float(), ssim.detach()
+        values = [SSIM._ssim(*pair, self._dynamic_range) for pair in pairs]
         if not values:
             return output.new_tensor(0.0), np.nan
         value = float(np.mean(values))
-        return output.new_tensor(value), value
+        return output.new_tensor(1 - value if self.as_loss else value), value
 
     def partial_metric(
         self, output: torch.Tensor, *targets: torch.Tensor, core: tuple[slice, ...] | None = None
@@ -360,22 +404,44 @@ class SSIM(MaskedLoss):
 
 
 class LPIPS(MaskedLoss):
+    """Learned perceptual distance (``lpips`` package), tiled a slice at a time.
+
+    The output and the target are each rescaled to [-1, 1] with their own min and max, taken over the
+    whole batch: in training one image's value depends on the other images of its batch, and a batch
+    of one is rescaled per image. The rescaling removes any global gain and offset of intensity. A
+    constant output or target (a background patch in a batch of one) has no range: as a metric it
+    scores NaN, which the averages skip; as a loss it is rescaled to 0, so its value and gradient stay
+    finite. Under a mask the voxels outside it are set to 0 in both, and each image of the batch is
+    rescaled and scored on its own.
+    """
+
     @staticmethod
-    def normalize(tensor: torch.Tensor) -> torch.Tensor:
-        return (tensor - torch.min(tensor)) / (torch.max(tensor) - torch.min(tensor)) * 2 - 1
+    def normalize(tensor: torch.Tensor, finite: bool = False) -> torch.Tensor:
+        """``tensor`` rescaled to [-1, 1]; a constant one is NaN, or 0 when ``finite``."""
+        shifted = tensor - torch.min(tensor)
+        span = torch.max(tensor) - torch.min(tensor)
+        if finite:
+            # A safe denominator, not a NaN branch masked out: its gradient would still be NaN.
+            flat = span == 0
+            return torch.where(flat, 0.0, shifted / torch.where(flat, 1.0, span) * 2 - 1)
+        return shifted / span * 2 - 1
 
     @staticmethod
     def preprocessing(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.repeat((1, 3, 1, 1))
 
     @staticmethod
-    def _loss(loss_fn_alex, dataset_patch: ModelPatch, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def _loss(
+        loss_fn_alex, dataset_patch: ModelPatch, x: torch.Tensor, y: torch.Tensor, finite: bool = False
+    ) -> torch.Tensor:
         # Follow the input's device (the DDP rank's GPU, or CPU) instead of a hardcoded device 0.
         loss_fn_alex = loss_fn_alex.to(x.device)
+        if x.dim() == 4:  # a 2-D image is tiled as a volume of one slice
+            x, y = x.unsqueeze(2), y.unsqueeze(2)
         dataset_patch.load(list(x.shape[2:]))
 
         loss = x.new_tensor(0.0)
-        for patch_input in dataset_patch.disassemble(LPIPS.normalize(x), LPIPS.normalize(y)):
+        for patch_input in dataset_patch.disassemble(LPIPS.normalize(x, finite), LPIPS.normalize(y, finite)):
             real, fake = LPIPS.preprocessing(patch_input[0]), LPIPS.preprocessing(patch_input[1])
             # One distance per batch sample: the mean scores them all, where ``.flatten()[0]``
             # silently kept only the first.
@@ -385,10 +451,17 @@ class LPIPS(MaskedLoss):
     def __init__(self, model: str = "alex") -> None:
         lpips = _require_optional("lpips", criterion="LPIPS", extra="lpips")
 
-        super().__init__(partial(LPIPS._loss, lpips.LPIPS(net=model), ModelPatch([1, 320, 320])), True)
+        super().__init__(self._distance, True)
+        self._score = partial(LPIPS._loss, lpips.LPIPS(net=model), ModelPatch([1, 320, 320]))
+
+    def _distance(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # As a loss a constant image must stay finite: a NaN gradient reaches the optimizer.
+        return self._score(x, y, finite=self.as_loss)
 
 
 class TRE(Criterion):
+    batch_mean = True
+
     def __init__(self) -> None:
         super().__init__()
 
@@ -437,6 +510,9 @@ class GradientImages(Criterion):
 
 
 class BCE(Criterion):
+    batch_mean = True
+    any_target_grid = True  # scores the output against a constant, never a target
+
     def __init__(self, target: float = 0) -> None:
         super().__init__()
         self.loss = torch.nn.BCEWithLogitsLoss()
@@ -448,13 +524,18 @@ class BCE(Criterion):
 
 
 class KLDivergence(CriterionWithInit):
+    batch_mean = True
+    any_target_grid = True  # scores the output's latent distribution, never a target
+
     def __init__(self, shape: list[int], dim: int = 100, mu: float = 0, std: float = 1) -> None:
+        """``mu`` and ``std`` are the mean and standard deviation of the Gaussian prior."""
         super().__init__()
+        if std <= 0:
+            raise MeasureError(f"KLDivergence: the prior's std must be positive, got {std}.")
         self.latent_dim = dim
-        self.mu = torch.Tensor([mu])
-        self.std = torch.Tensor([std])
+        self.prior_mu = float(mu)
+        self.prior_var = float(std) ** 2
         self.shape = shape
-        self.loss = torch.nn.KLDivLoss()
 
     def init(self, model: torch.nn.Module, output_group: str, target_group: str) -> str:
         if not isinstance(model, Network):
@@ -476,9 +557,17 @@ class KLDivergence(CriterionWithInit):
         return ".".join(output_group.split(".")[:-1]) + ".LatentDistribution.Concat"
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
+        # The LatentDistribution channels: mu, then the log-variance (its module is named log_std).
         mu = output[:, 0, :]
-        log_std = output[:, 1, :]
-        return torch.mean(-0.5 * torch.sum(1 + log_std - mu**2 - torch.exp(log_std), dim=1), dim=0)
+        log_var = output[:, 1, :]
+        kl = (
+            1
+            + log_var
+            - math.log(self.prior_var)
+            - (mu - self.prior_mu) ** 2 / self.prior_var
+            - torch.exp(log_var) / self.prior_var
+        )
+        return torch.mean(-0.5 * torch.sum(kl, dim=1), dim=0)
 
 
 class Accuracy(Criterion):
@@ -489,10 +578,15 @@ class Accuracy(Criterion):
         # train and validation. Accumulating n/corrects on the instance instead would report one lifetime
         # fraction that blends every epoch and both splits.
         predicted = torch.argmax(torch.softmax(output, dim=1), dim=1)
-        return (predicted == targets[0]).float().mean()
+        target = targets[0]
+        if target.dim() == output.dim():  # the dataset's channel axis, which the argmax removed
+            target = target.squeeze(1)
+        return (predicted == target).float().mean()
 
 
 class FocalLoss(Criterion):
+    resamples_target = True  # a target of another shape is put on the output's grid (Dice.on_grid)
+
     def __init__(
         self,
         gamma: float = 2.0,
@@ -508,6 +602,7 @@ class FocalLoss(Criterion):
         self.register_buffer("alpha", alpha_tensor)
         self.gamma = gamma
         self.reduction = reduction
+        self.batch_mean = reduction == "mean"
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         target = Dice.on_grid(output, targets[0]).long()
@@ -540,12 +635,17 @@ class CrossEntropyLoss(Criterion):
     def __init__(self, weight: list[float] | None = None, reduction: str = "mean") -> None:
         super().__init__()
         self.loss = torch.nn.CrossEntropyLoss(weight=torch.tensor(weight) if weight else None, reduction=reduction)
+        # Class weights normalize by the batch's own weight sum.
+        self.batch_mean = reduction == "mean" and not weight
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         return self.loss(output, targets[0].squeeze(1))
 
 
 class Variance(Criterion):
+    batch_mean = True
+    any_target_grid = True  # scores the output alone
+
     def __init__(self, name: str = "Variance") -> None:
         super().__init__()
         self.name = name
@@ -563,6 +663,9 @@ class Variance(Criterion):
 
 
 class Mean(Criterion):
+    batch_mean = True
+    any_target_grid = True  # scores the output alone
+
     def __init__(self, name: str = "Mean") -> None:
         super().__init__()
         self.name = name

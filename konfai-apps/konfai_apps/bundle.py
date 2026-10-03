@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import shutil
 import sys
 from collections.abc import Callable
@@ -61,7 +62,7 @@ def derive_requirements(py_files: list[str | Path]) -> list[str]:
     stdlib = set(sys.stdlib_module_names)
     found: set[str] = set()
     for py_file in py_files:
-        for node in ast.walk(ast.parse(Path(py_file).read_text())):
+        for node in ast.walk(ast.parse(Path(py_file).read_bytes())):
             if isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
@@ -91,22 +92,23 @@ def _find_inference_patch(node: Any) -> dict[str, Any] | None:
 
 
 def _derive_overlap(patch: dict[str, Any], patch_size: list[int]) -> list[int] | None:
-    """The inference ``Patch.overlap`` as a per-kept-axis list: a scalar broadcasts; a full-rank list
-    drops the same 2.5D singleton axes ``patch_size`` dropped."""
+    """The inference ``Patch.overlap`` in voxels per kept axis, read by KonfAI's own ``resolve_overlap``:
+    a scalar broadcasts; a full-rank list drops the same 2.5D singleton axes ``patch_size`` dropped."""
+    from konfai.utils.utils import resolve_overlap
+
     raw = patch.get("overlap")
-    if isinstance(raw, bool) or raw is None:
+    if isinstance(raw, bool) or _clean(raw) is None:
         return None
-    if isinstance(raw, (int, float)):
-        return [int(raw)] * len(patch_size)
-    if isinstance(raw, list):
-        vals = [int(v) for v in raw]
-        if len(vals) == len(patch_size):
-            return vals
+    if isinstance(raw, list) and len(raw) != len(patch_size):
         dims = [int(d) for d in patch.get("patch_size", [])]
-        if len(vals) == len(dims):  # full-rank overlap incl. the singleton slice axis: keep dim>1 axes
-            kept = [v for v, d in zip(vals, dims, strict=True) if d > 1]
-            return kept or vals
-    return None
+        if len(raw) != len(dims):
+            return None
+        # full-rank overlap incl. the singleton slice axis: keep dim>1 axes
+        raw = [v for v, d in zip(raw, dims, strict=True) if d > 1] or raw
+    elif not isinstance(raw, (int, float, str, list)):
+        return None
+    # An extent past the patch: the overlap of an axis the runtime tiles.
+    return resolve_overlap(raw, patch_size, [size + 1 for size in patch_size])
 
 
 def _derive_blend(config: dict[str, Any], root: str) -> str | None:
@@ -173,13 +175,21 @@ def _derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | 
     return patch_size, in_channels, extend_slice, pad_value
 
 
-# KonfAI transform name -> runtime op. A transform outside this curated map is refused by the export.
+# KonfAI transform name -> runtime op. A transform outside this curated map is refused by the export. The
+# export reads the raw config, so an unset parameter takes the default the core stage binds.
 def _op_cast(p: dict[str, Any]) -> dict[str, Any]:
     return {"op": "cast", "dtype": str(p.get("dtype", "float32"))}
 
 
 def _op_resample(p: dict[str, Any]) -> dict[str, Any]:
-    return {"op": "resample", "spacing": [float(s) for s in p["spacing"]], "inverse": bool(p.get("inverse", False))}
+    step = {"op": "resample", "spacing": [float(s) for s in p["spacing"]], "inverse": bool(p.get("inverse", True))}
+    return _with_fill(step, p)
+
+
+def _with_fill(step: dict[str, Any], p: dict[str, Any]) -> dict[str, Any]:
+    """``step`` with the stage's ``fill``, the value it writes outside the source, unless it is the default 0."""
+    fill = float(_clean(p.get("fill")) or 0.0)
+    return {**step, "fill": fill} if fill else step
 
 
 def _clean(value: Any) -> Any:
@@ -200,7 +210,11 @@ def _op_normalize(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def _op_unnormalize(p: dict[str, Any]) -> dict[str, Any]:
-    return {"op": "unnormalize", "min_value": float(p["min_value"]), "max_value": float(p["max_value"])}
+    return {
+        "op": "unnormalize",
+        "min_value": float(p.get("min_value", -1024)),
+        "max_value": float(p.get("max_value", 3071)),
+    }
 
 
 def _op_clip(p: dict[str, Any]) -> dict[str, Any]:
@@ -215,8 +229,8 @@ _OP_MAP = {
     "TensorCast": _op_cast,
     "Clip": _op_clip,
     "Resample": _op_resample,
-    # Canonical reorients from the volume's own direction cosines at runtime; the manifest op is just the inverse flag.
-    "Canonical": lambda p: {"op": "canonical", "inverse": bool(p.get("inverse", True))},
+    # Canonical reorients from the volume's own direction cosines at runtime; the op carries its inverse flag and fill.
+    "Canonical": lambda p: _with_fill({"op": "canonical", "inverse": bool(p.get("inverse", True))}, p),
     "Standardize": _op_standardize,
     "Normalize": _op_normalize,
     "UnNormalize": _op_unnormalize,
@@ -225,30 +239,59 @@ _OP_MAP = {
 }
 
 
-# Transforms compiled into PROGRAM steps (cross-buffer, or a buffer produced by a nested model), never
-# per-buffer manifest pipeline ops: the multi-model program handles them, so `_pipeline` skips them.
-_PROGRAM_TRANSFORMS = {"Mask", "KonfAIInference", "Dilate", "Save", "InferenceStack"}
+# Transforms never compiled into per-buffer manifest pipeline ops. `_pipeline` skips `Save` and
+# `InferenceStack` wherever they sit. The others are PROGRAM steps (cross-buffer, or a buffer produced by
+# a nested model): the program applies a `Mask` only by an auxiliary group it produces, and `Dilate` /
+# `KonfAIInference` only in that group's own chain, so anywhere else `_pipeline` refuses them.
+_SKIPPED_TRANSFORMS = {"Save", "InferenceStack"}
+_PROGRAM_TRANSFORMS = {"Mask", "KonfAIInference", "Dilate"}
 
 
 def _input_group_transforms(config: dict[str, Any], root: str) -> dict[str, Any] | None:
-    """The transform chain of the ``is_input: true`` dest group: the model's actual input pipeline.
-    A config may carry auxiliary groups (a mask, a conditioning image) whose transforms are NOT the
-    model preprocessing; falls back to the first ``transforms`` block for single-group configs."""
+    """The transform chain of the input dest group (``is_input``, true when unset as in the core): the
+    model's actual input pipeline. A config may carry auxiliary groups (a mask, a conditioning image)
+    whose transforms are NOT the model preprocessing, so an input group without a chain has none. Falls
+    back to the first ``transforms`` block when the config names no input group."""
     dataset = config.get(root, {}).get("Dataset", {})
-    for src in (dataset.get("groups_src") or {}).values():
-        if not isinstance(src, dict):
-            continue
-        for group in (src.get("groups_dest") or {}).values():
-            if isinstance(group, dict) and group.get("is_input") and isinstance(group.get("transforms"), dict):
-                return group["transforms"]
-    return _find_transforms(dataset, "transforms")
+    groups = [
+        group
+        for src in (dataset.get("groups_src") or {}).values()
+        if isinstance(src, dict)
+        for group in (src.get("groups_dest") or {}).values()
+        if isinstance(group, dict)
+    ]
+    # An explicit ``is_input: true`` ahead of a group that leaves it to the default.
+    inputs = [g for g in groups if g.get("is_input")] + [g for g in groups if "is_input" not in g]
+    if not inputs:
+        return _find_transforms(dataset, "transforms")
+    return next((chain for group in inputs if (chain := _chain(group.get("transforms"))) is not None), None)
+
+
+def _chain(node: Any) -> dict[str, Any] | None:
+    """A chain as the core binds it: a mapping, or a YAML list under its occurrence keys (``Clip#2``)."""
+    if isinstance(node, list):
+        from konfai.utils.config import _occurrence_mapping
+
+        return _occurrence_mapping(node, "chain")
+    return node if isinstance(node, dict) else None
+
+
+def _base(name: str) -> str:
+    """The KonfAI stage a chain key names. ``Clip#2`` (the key a list chain binds a repeat under) and
+    ``konfai.data.transform:Clip`` (a repeat in a mapping) are ``Clip``; a class of another module keeps
+    its classpath, so it is never taken for the KonfAI stage of the same name."""
+    classpath = re.sub(r"#\d+$", "", name).split("/", 1)[0]
+    module, _, cls_name = classpath.rpartition(":")
+    module = module.replace(":", ".")
+    stage_modules = ("konfai.data.transform", "konfai_apps.transforms")
+    return cls_name if module in stage_modules or module.startswith("konfai.data.transform.") else classpath
 
 
 def _find_transforms(node: Any, key: str) -> dict[str, Any] | None:
-    """First ``key`` sub-dict of a mapping value (the input ``transforms`` / output ``final_transforms``)."""
+    """First ``key`` chain of a mapping value (the input ``transforms`` / output ``final_transforms``)."""
     if isinstance(node, dict):
-        found = node.get(key)
-        if isinstance(found, dict):
+        found = _chain(node.get(key))
+        if found is not None:
             return found
         for value in node.values():
             nested = _find_transforms(value, key)
@@ -269,7 +312,7 @@ def _try_fold(name: str, params: Any) -> Callable[[Any], Any] | None:
     from konfai.utils.dataset import Attribute
     from konfai.utils.utils import get_module
 
-    base = name.split("/", 1)[0]  # drop the ``/N`` uniqueness suffix a repeated transform carries
+    base = _base(name)
     try:
         module, cls_name = get_module(base, "konfai.data.transform")
         cls = getattr(module, cls_name)
@@ -288,17 +331,23 @@ def _try_fold(name: str, params: Any) -> Callable[[Any], Any] | None:
 
 
 def _pipeline(
-    transforms: dict[str, Any] | None, *, fold: bool = False
+    transforms: dict[str, Any] | None, *, fold: bool = False, masks: frozenset[str] = frozenset()
 ) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]]]:
     """Map an ordered KonfAI transform chain to runtime ops. With ``fold=True``, a POINTWISE + torch
     transform not in the registry is baked into the ONNX graph. Folds must form a SUFFIX: a runtime
-    op after a fold is refused."""
+    op after a fold is refused. ``masks`` are the groups the program masks the output by."""
     steps: list[dict[str, Any]] = []
     folds: list[Callable[[Any], Any]] = []
     for name, params in (transforms or {}).items():
-        base = name.split("/", 1)[0]
+        base = _base(name)
+        if base in _SKIPPED_TRANSFORMS or (base == "Mask" and isinstance(params, dict) and params.get("path") in masks):
+            continue  # a side effect, or a step the program compiles; never a per-buffer pipeline op
         if base in _PROGRAM_TRANSFORMS:
-            continue  # compiled into a program step, not a per-buffer pipeline op
+            raise AppMetadataError(
+                f"transform '{name}' would be skipped by the portable runtime: its program applies a Mask only "
+                "in before_reduction_transforms, by a group a nested KonfAIInference model produces, and a "
+                "Dilate or KonfAIInference only in that group's chain. Remove it from the inference config."
+            )
         if _clean(params) is None and base not in _OP_MAP:
             continue
         if base in _OP_MAP:
@@ -327,7 +376,10 @@ def _transform_manifest(config: dict[str, Any], root: str) -> tuple[dict[str, An
     pre, folds = _pipeline(_input_group_transforms(config, root), fold=True)
     # Post is `before_reduction_transforms` (disjoint ensemble: argmax per fold before merge) or
     # `final_transforms` (same-class ensemble: runs once after the mean); read both.
-    before, _ = _pipeline(_find_transforms(section.get("outputs_dataset"), "before_reduction_transforms"))
+    before, _ = _pipeline(
+        _find_transforms(section.get("outputs_dataset"), "before_reduction_transforms"),
+        masks=frozenset(_aux_mask_groups(config, root)),
+    )
     final, _ = _pipeline(_find_transforms(section.get("outputs_dataset"), "final_transforms"))
     return {"preprocessing": pre, "postprocessing": before + final}, folds
 
@@ -517,7 +569,7 @@ def assemble_bundle(
     references are not recursively inferred. The manifest records the expanded managed files.
     Returns the bundle directory.
     """
-    metadata: dict[str, Any] = json.loads(Path(app_json).read_text())
+    metadata: dict[str, Any] = json.loads(Path(app_json).read_text(encoding="utf-8"))
     missing = [key for key in REQUIRED_APP_JSON_KEYS if key not in metadata]
     if missing:
         raise AppMetadataError(f"app.json is missing required keys: {', '.join(missing)}")
@@ -587,7 +639,7 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
         return
     previous: list[str] = []
     try:
-        old_metadata = json.loads((bundle / "app.json").read_text())
+        old_metadata = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
         previous = [str(m) for m in old_metadata.get("models", [])] + [
             str(path) for path in old_metadata.get("support_files", [])
         ]
@@ -635,9 +687,9 @@ def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
     ``MergeLabels`` (models with disjoint label spaces) -> ``merge_labels``; ``InferenceStack``
     (same-class probability ensemble) -> ``mean``. ``None`` when the config declares no reduction."""
     after = _find_transforms(config.get(root, {}).get("outputs_dataset"), "after_reduction_transforms") or {}
-    if "MergeLabels" in {name.split("/", 1)[0] for name in after}:
+    if "MergeLabels" in {_base(name) for name in after}:
         return "merge_labels"
-    stack = next((p for name, p in after.items() if name.split("/", 1)[0] == "InferenceStack"), None)
+    stack = next((p for name, p in after.items() if _base(name) == "InferenceStack"), None)
     if stack is not None:
         return "median" if isinstance(stack, dict) and stack.get("mode") == "median" else "mean"
     return None
@@ -658,7 +710,7 @@ def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
     rng = random.Random(int(predictor.get("manual_seed") or 0))  # nosec B311 - TTA sampling, not security
     passes: list[list[int]] = [[]]  # the identity pass is always present
     for aug in augmentations.values():
-        chain = aug.get("data_augmentations") if isinstance(aug, dict) else None
+        chain = _chain(aug.get("data_augmentations")) if isinstance(aug, dict) else None
         # Only Flip has a portable runtime op; other augmentations are skipped (the TTA is a bit lighter,
         # never wrong) rather than blocking the export: extend the runtime registry to add them.
         f_prob = next(
@@ -680,11 +732,12 @@ def _aux_mask_groups(config: dict[str, Any], root: str) -> dict[str, dict[str, A
     groups: dict[str, dict[str, Any]] = {}
     for src in (dataset.get("groups_src") or {}).values():
         for name, group in (src.get("groups_dest") or {}).items() if isinstance(src, dict) else []:
-            if not isinstance(group, dict) or group.get("is_input") or not isinstance(group.get("transforms"), dict):
+            transforms = _chain(group.get("transforms")) if isinstance(group, dict) else None
+            if transforms is None or group.get("is_input"):
                 continue
             inference, ops = None, []
-            for tname, params in group["transforms"].items():
-                base = tname.split("/", 1)[0]
+            for tname, params in transforms.items():
+                base = _base(tname)
                 if base == "KonfAIInference":
                     inference = params
                 elif base == "Resample":
@@ -703,7 +756,7 @@ def _mask_specs(config: dict[str, Any], root: str) -> list[dict[str, Any]]:
     return [
         {"group": params.get("path"), "value_outside": float((params or {}).get("value_outside", 0))}
         for name, params in before.items()
-        if name.split("/", 1)[0] == "Mask" and isinstance(params, dict)
+        if _base(name) == "Mask" and isinstance(params, dict)
     ]
 
 
@@ -847,7 +900,7 @@ def export_portable_into_bundle(
     if not config_path.exists():
         raise AppMetadataError(f"prediction config '{prediction_config}' not found in bundle {bundle}")
 
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     try:
         classpath = config[root]["Model"]["classpath"]
     except (KeyError, TypeError) as exc:
@@ -875,7 +928,7 @@ def export_portable_into_bundle(
     # the single-model masked/TTA program, which has nothing to combine.
     ensemble_reduction = reduction or "mean"
 
-    config_snapshot = config_path.read_text()
+    config_snapshot = config_path.read_bytes()
     env_keys = ("KONFAI_config_file", "KONFAI_CONFIG_MODE", "KONFAI_ROOT", "KONFAI_STATE")
     env_backup = {key: os.environ.get(key) for key in env_keys}
     sys.path.insert(0, str(bundle))
@@ -963,7 +1016,7 @@ def export_portable_into_bundle(
         return _declare_portable_assets(bundle, program_path, portable_assets)
     finally:
         sys.path.remove(str(bundle))
-        config_path.write_text(config_snapshot)
+        config_path.write_bytes(config_snapshot)
         for key, value in env_backup.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -982,7 +1035,7 @@ def _declare_portable_assets(bundle: Path, artifact: Path, produced: set[Path]) 
         return artifact
     portable = {path.resolve().relative_to(bundle.resolve()).as_posix() for path in produced if path.is_file()}
     try:
-        metadata = json.loads(metadata_path.read_text())
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return artifact
     declared = [str(name) for name in metadata.get("portable_assets", [])]

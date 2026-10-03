@@ -36,6 +36,7 @@ from konfai.utils.utils import (
     free_axis_rounding,
     get_module,
     get_patch_slices_from_shape,
+    module_attribute,
 )
 
 
@@ -215,7 +216,8 @@ class Patch(ABC):
         if self.pad_value is not None:
             return F.pad(data, padding, "constant", self.pad_value)
         padded = F.pad(data, padding, "constant", 0)
-        lowest = data.min()
+        # torch has no min for uint16/uint32; int64 holds both exactly.
+        lowest = (data.to(torch.int64) if data.dtype in (torch.uint16, torch.uint32) else data).min()
         for pair, (before, after) in enumerate(zip(padding[::2], padding[1::2], strict=True)):
             dim = padded.dim() - 1 - pair
             if before:
@@ -303,7 +305,7 @@ class ModelPatch(Patch):
     def init(self, key: str):
         if self._patch_combine is not None:
             module, name = get_module(self._patch_combine, "konfai.data.patching")
-            self.patch_combine = apply_config(key)(getattr(module, name))()
+            self.patch_combine = apply_config(key)(module_attribute(module, name))()
         if self.patch_size is not None and self.overlap is not None:
             if self.patch_combine is not None:
                 kept = blend_axes(self.patch_size)

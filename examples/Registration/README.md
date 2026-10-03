@@ -29,7 +29,7 @@ check exact.
 
 > For registration between **two different patients**, a genuine anatomical difference with no
 > ground-truth field at all, scored by propagating one patient's reference labels, see
-> [`examples/ImpactReg`](../ImpactReg/).
+> [`examples/ImpactReg`](https://github.com/fideus-labs/KonfAI/tree/main/examples/ImpactReg).
 
 ## What you will find in this folder
 
@@ -72,8 +72,8 @@ which the declarative YAML builder (a feed-forward `add_module` graph over curat
 types) cannot express. Custom-`forward` models (registration warps, diffusion samplers,
 adversarial loops) stay in Python; standard feed-forward graphs can be YAML.
 
-> `VoxelMorph` currently supports `dim: 2` only (its warping components are 2D-hardcoded),
-> so this example is slice-wise. Keep `shape` equal to the `(Y, X)` size of the training patch.
+> This example is slice-wise (`dim: 2`); `VoxelMorph` also registers volumes with `dim: 3` and a
+> three-axis `shape`. Keep `shape` equal to the spatial size of the training patch, `(Y, X)` here.
 
 ## Dataset
 
@@ -81,13 +81,15 @@ adversarial loops) stay in Python; standard feed-forward graphs can be YAML.
 (`VBoussot/konfai-demo`, cached by the Hub after the first run), windows them to `[0, 1]`, and crops
 each to `256x256` around the body.
 
-It needs `scipy` to apply the displacement field, which no KonfAI extra pulls in: `pip install scipy`. (`huggingface_hub`, which fetches the CT, is a core dependency.)
+It reads and writes `.mha` through SimpleITK (the `itk` extra), fetches the CT with `huggingface_hub` and
+applies the displacement field with `scipy`; the base install carries none of the three. `../..[itk]`
+installs KonfAI from this checkout, so the package and the example are the same revision.
 
 Run all commands from this directory:
 
 ```bash
 cd examples/Registration
-pip install scipy
+python -m pip install "../..[itk]" huggingface_hub scipy
 python make_dataset.py
 ```
 
@@ -109,7 +111,8 @@ examples/Registration/
 - `MOVING`: the same slice pushed through a known smooth field of up to `AMPLITUDE` voxels (default 8)
 
 The crop size is also the `shape` `VoxelMorph` is built with and the training patch size, so change one
-and you change all three.
+and you change all three, in both `Config.yml` and `Prediction.yml`. A mismatch surfaces as a
+`state_dict` load error at PREDICTION, not as a configuration error.
 
 ## Quick start
 
@@ -124,7 +127,8 @@ konfai TRAIN -y --gpu 0 --config Config.yml
 
 If you do not have a GPU available, use `--cpu 1` instead of `--gpu 0`.
 
-This creates:
+It trains 400 epochs (`StepLR` with `step_size: 150` to match) and holds out 25% of the 30 cases for
+validation. This creates:
 
 - `Checkpoints/REG_BASELINE/`
 - `Statistics/REG_BASELINE/`
@@ -132,13 +136,15 @@ This creates:
 ### 2. Predict
 
 Checkpoints are named after the moment they were written, and this example keeps only the best one, so
-a glob resolves to exactly one file:
+a glob on the date resolves to exactly one file (`resume_latest.pt` beside it is a training continuation,
+not a model to predict with):
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/REG_BASELINE/*.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/REG_BASELINE/[0-9]*.pt
 ```
 
-This creates `Predictions/REG_BASELINE/`, where each case now has a `MOVED.mha` (the registered image).
+This creates `Predictions/REG_BASELINE/Dataset/`, where each case now has a `MOVED.mha` (the registered
+image). `Prediction.yml` declares `same_as_group: FIXED:FIXED`, so it is written on the geometry of `FIXED`.
 
 ### 3. Evaluate
 

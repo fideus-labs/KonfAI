@@ -52,17 +52,20 @@ from konfai import (
     statistics_directory,
 )
 from konfai.data.data_manager import BatchSample, DatasetIter, DataTrain
-from konfai.network.network import Model, ModelLoader, NetState, Network
+from konfai.data.data_manager.subset import case_list_encoding
+from konfai.network.network import Measure, Model, ModelLoader, NetState, Network, place_graph
 from konfai.utils import vram
 from konfai.utils.clock import SweepClock, startup_clock
 from konfai.utils.config import apply_config, config, strict_config
-from konfai.utils.errors import ConfigError, TrainerError
+from konfai.utils.errors import ConfigError, KonfAIWarning, TrainerError
 from konfai.utils.live_control import LiveControl
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
     NullSummaryWriter,
+    ProgressBar,
     State,
+    checkpoint_source,
     clear_directory_except_logs,
     configure_workflow_environment,
     confirm_overwrite_or_raise,
@@ -178,6 +181,21 @@ class EarlyStopping(EarlyStoppingBase):
         self.mode = mode
         self.counter = 0
         self.best_score: float | None = None
+        #: The run stopped for another reason than the patience (the learning rate at zero, no finite loss).
+        self.stopped_otherwise = False
+
+    def stop(self) -> None:
+        self.stopped_otherwise = self.stopped_otherwise or not self.early_stop
+        super().stop()
+
+    def restore(self, state: dict[str, Any]) -> None:
+        """Take back a RESUME cursor's state. A stop the patience made is decided again under this
+        patience, so a RESUME with a larger one trains on; a stop for another reason stands."""
+        self.counter = state["counter"]
+        self.best_score = state["best_score"]
+        # A cursor that does not record why it stopped keeps its stop.
+        self.stopped_otherwise = state.get("stopped_otherwise", state["early_stop"])
+        self.early_stop = self.stopped_otherwise or (state["early_stop"] and self.counter >= self.patience)
 
     def get_score(self, values: dict[str, float]):
         if len(self.monitor) == 0:
@@ -262,9 +280,45 @@ class _CheckpointWriter:
             raise error
 
 
+def _listed(names: set[str], shown: int = 10) -> str:
+    """``names`` sorted, the first ``shown`` of them spelled out."""
+    ordered = sorted(names)
+    more = f" and {len(ordered) - shown} more" if len(ordered) > shown else ""
+    return ", ".join(ordered[:shown]) + more
+
+
 def _ema_network(model_ema: AveragedModel) -> Network:
     """The ``Network`` an EMA averages: ``AveragedModel`` types its copy as a bare ``Module``."""
     return cast(Network, model_ema.module)
+
+
+def _traced_interventions(snapshot: Path) -> list[Any]:
+    """The ``Interventions`` trace of a run's config snapshot, empty when it holds none."""
+    data = YAML().load(snapshot.read_text(encoding="utf-8")) if snapshot.is_file() else None
+    trace = data.get("Interventions") if isinstance(data, dict) else None
+    return list(trace) if isinstance(trace, list) else []
+
+
+def _record_interventions(snapshot: Path, entries: list[Any], it_validation: int | None = None) -> None:
+    """Append ``entries`` to the snapshot's ``Interventions`` trace, once per iteration and key, and
+    record ``it_validation`` under ``Trainer`` when given. Atomic."""
+    if not snapshot.is_file():
+        return
+    yaml = YAML()
+    with open(snapshot, encoding="utf-8") as file:
+        data = yaml.load(file)
+    if not isinstance(data, dict):
+        return
+    existing = data.get("Interventions")
+    existing = list(existing) if isinstance(existing, list) else []
+    seen = {(e.get("it"), e.get("key")) for e in existing if isinstance(e, dict)}
+    data["Interventions"] = existing + [e for e in entries if (e.get("it"), e.get("key")) not in seen]
+    if it_validation is not None and isinstance(data.get("Trainer"), dict):
+        data["Trainer"]["it_validation"] = it_validation
+    tmp = snapshot.with_name(f"{snapshot.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as file:
+        yaml.dump(data, file)
+    os.replace(tmp, snapshot)
 
 
 class _Trainer:
@@ -306,7 +360,7 @@ class _Trainer:
         self.global_rank = global_rank
         self.local_rank = local_rank
         self.size = size
-        self._validate_now = False  # set by SIGUSR1 to request an on-demand validation (see run())
+        self._validate_now = False  # set by SIGUSR1 to request an on-demand validation (see __enter__)
         self.save_checkpoint_mode = save_checkpoint_mode
         self.train_name = train_name
         self.epochs = epochs
@@ -326,13 +380,10 @@ class _Trainer:
             "reason": "The epoch has not completed; its sample cursor and pending gradients were not saved.",
         }
         if resume_state is not None:
-            if resume_state["world_size"] != world_size:
-                raise TrainerError("RESUME requires the same number of training ranks as its epoch checkpoint.")
             if resume_state["batches_per_epoch"] != len(dataloader_training):
                 raise TrainerError("RESUME requires the same number of training batches per epoch.")
             if isinstance(self.early_stopping, EarlyStopping) and resume_state.get("early_stopping"):
-                for key, value in resume_state["early_stopping"].items():
-                    setattr(self.early_stopping, key, value)
+                self.early_stopping.restore(resume_state["early_stopping"])
 
         self.it_validation = len(dataloader_training) if it_validation is None else it_validation
         self.it_lr_update = len(dataloader_training) if it_lr_update is None else it_lr_update
@@ -351,6 +402,8 @@ class _Trainer:
                     " (pip install konfai[tensorboard] to keep them)."
                 )
             self.tb: Any = NullSummaryWriter()
+        elif self.global_rank != 0:
+            self.tb = NullSummaryWriter()  # rank 0 alone writes the curves
         else:
             self.tb = SummaryWriter(log_dir=statistics_directory() / self.train_name / "tb")
         self._best_checkpoint_path: Path | None = None
@@ -366,6 +419,12 @@ class _Trainer:
         self.data_log = DataLog.parse(data_log)
 
     def __enter__(self):
+        # SIGUSR1 requests an on-demand validation, consumed at a poll boundary (_poll_live_requests). Inline,
+        # this is the caller's process: its handler is back at exit.
+        self._previous_sigusr1 = None
+        if (sigusr1 := getattr(signal, "SIGUSR1", None)) is not None:  # absent on Windows
+            with suppress(ValueError, OSError):  # signals only install on the main thread
+                self._previous_sigusr1 = signal.signal(sigusr1, lambda *_: setattr(self, "_validate_now", True))
         return self
 
     def __exit__(self, exc_type, value, traceback):
@@ -374,22 +433,35 @@ class _Trainer:
         An exit at the last save's iteration and the auto-patch OOM restart add nothing; a failure
         that advanced keeps its crash-save.
         """
-        if self.tb is not None:
-            self.tb.close()
-        oom_restart = self._auto_patched and exc_type is not None and issubclass(exc_type, torch.cuda.OutOfMemoryError)
-        if not oom_restart and self.it != self._saved_at_it:
-            self.checkpoint_save(None, crash=exc_type is not None)
-        self._checkpoint_writer.join()
+        try:
+            if self.tb is not None:
+                self.tb.close()
+            oom_restart = (
+                self._auto_patched and exc_type is not None and issubclass(exc_type, torch.cuda.OutOfMemoryError)
+            )
+            if not oom_restart and self.it != self._saved_at_it:
+                self.checkpoint_save(None, crash=exc_type is not None)
+            self._checkpoint_writer.join()
+        finally:
+            if self._previous_sigusr1 is not None:
+                signal.signal(signal.SIGUSR1, self._previous_sigusr1)
+
+    def _measures(self) -> list[Measure]:
+        """Every measure the logs read: the model's networks', then the EMA copy's."""
+        models = [self.model.module] + ([_ema_network(self.model_ema)] if self.model_ema is not None else [])
+        return [
+            network.measure
+            for model in models
+            for network in model.get_networks().values()
+            if network.measure is not None
+        ]
 
     def _declare_measure_window(self) -> None:
         """The widest window the logs read from a criterion's history: the training window or the
         validation pass. Everything older is only read as a running mean (ReduceLROnPlateau)."""
         validation = len(self.dataloader_validation) if self.dataloader_validation is not None else 0
-        models = [self.model.module] + ([_ema_network(self.model_ema)] if self.model_ema is not None else [])
-        for model in models:
-            for network in model.get_networks().values():
-                if network.measure is not None:
-                    network.measure.set_window(max(self.it_validation, validation))
+        for measure in self._measures():
+            measure.set_window(max(self.it_validation, validation))
 
     def _initialize_best_checkpoint_state(self) -> None:
         """Bootstrap BEST-checkpoint tracking once, including on resume.
@@ -441,11 +513,6 @@ class _Trainer:
 
     def run(self) -> None:
         """Run the training loop one epoch at a time, with early stopping and augmentation resets."""
-        # SIGUSR1 requests an on-demand validation; the flag is consumed at a poll boundary (_poll_live_requests).
-        sigusr1 = getattr(signal, "SIGUSR1", None)  # absent on Windows
-        if sigusr1 is not None:
-            with suppress(ValueError, OSError):  # signals only install on the main thread
-                signal.signal(sigusr1, lambda *_: setattr(self, "_validate_now", True))
         _dataset(self.dataloader_training).load("Train")
         if self.dataloader_validation is not None:
             _dataset(self.dataloader_validation).load("Validation")
@@ -483,7 +550,7 @@ class _Trainer:
         if self.early_stopping.is_stopped():
             return
 
-        with tqdm.tqdm(
+        with ProgressBar(
             iterable=range(self.epoch, self.epochs),
             leave=False,
             total=self.epochs,
@@ -575,7 +642,10 @@ class _Trainer:
                 ),
                 "replay_limits": self._replay_limits(),
                 "early_stopping": (
-                    {key: getattr(self.early_stopping, key) for key in ("counter", "best_score", "early_stop")}
+                    {
+                        key: getattr(self.early_stopping, key)
+                        for key in ("counter", "best_score", "early_stop", "stopped_otherwise")
+                    }
                     if isinstance(self.early_stopping, EarlyStopping)
                     else None
                 ),
@@ -600,7 +670,7 @@ class _Trainer:
         clock = SweepClock()
         with (
             clock.phase("epoch"),
-            tqdm.tqdm(
+            ProgressBar(
                 iterable=clock.waiting("wait(data)", enumerate(self.dataloader_training)),
                 desc=f"Training : {description(self.model, self.model_ema)}",
                 total=len(self.dataloader_training),
@@ -726,20 +796,34 @@ class _Trainer:
             _ema_network(self.model_ema).set_state(NetState.PREDICTION)
 
         batch_sample: BatchSample = {}
-        with tqdm.tqdm(
-            iterable=enumerate(self.dataloader_validation),
-            desc=f"Validation : {description(self.model, self.model_ema)}",
-            total=len(self.dataloader_validation),
-            leave=False,
-            ncols=0,
-        ) as batch_iter:
-            for i, batch_sample in batch_iter:
-                self.model(batch_sample)
-                if self.model_ema is not None:
-                    self.model_ema.module(batch_sample)
+        # A rank's padding is its last batch (``Data._split_validation``): run, so every rank runs as
+        # many forwards, and recorded weighing nothing.
+        scored = len(self.dataloader_validation) - (
+            1 if getattr(self.dataloader_validation.sampler, "padding", 0) else 0
+        )
+        measures = self._measures()
+        try:
+            with ProgressBar(
+                iterable=enumerate(self.dataloader_validation),
+                desc=f"Validation : {description(self.model, self.model_ema)}",
+                total=len(self.dataloader_validation),
+                leave=False,
+                ncols=0,
+            ) as batch_iter:
+                for i, batch_sample in batch_iter:
+                    for measure in measures:
+                        measure.scored = i < scored
+                    self.model(batch_sample)
+                    if self.model_ema is not None:
+                        self.model_ema.module(batch_sample)
 
-                if i % self._LIVE_POLL_INTERVAL == 0:
-                    batch_iter.set_description(f"Validation : {description(self.model, self.model_ema)}", refresh=False)
+                    if i % self._LIVE_POLL_INTERVAL == 0:
+                        batch_iter.set_description(
+                            f"Validation : {description(self.model, self.model_ema)}", refresh=False
+                        )
+        finally:
+            for measure in measures:
+                measure.scored = True
         _dataset(self.dataloader_validation).reset_augmentation("Validation")
         if dist.is_initialized():
             # Named, or NCCL warns that it guesses the device.
@@ -815,26 +899,8 @@ class _Trainer:
         return None
 
     def _record_interventions(self) -> None:
-        """Append the intervention audit trail and the current it_validation to the config snapshot.
-        Rank 0, atomic."""
-        target = self._config_snapshot
-        if not target.is_file():
-            return
-        yaml = YAML()
-        with open(target) as file:
-            data = yaml.load(file)
-        if not isinstance(data, dict):
-            return
-        existing = data.get("Interventions")
-        existing = list(existing) if isinstance(existing, list) else []
-        seen = {(e.get("it"), e.get("key")) for e in existing if isinstance(e, dict)}
-        data["Interventions"] = existing + [e for e in self._interventions if (e.get("it"), e.get("key")) not in seen]
-        if isinstance(data.get("Trainer"), dict):
-            data["Trainer"]["it_validation"] = self.it_validation
-        tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
-        with open(tmp, "w") as file:
-            yaml.dump(data, file)
-        os.replace(tmp, target)
+        """Append the intervention audit trail and the current it_validation to the config snapshot. Rank 0."""
+        _record_interventions(self._config_snapshot, self._interventions, self.it_validation)
 
     def checkpoint_save(self, loss: float | None, crash: bool = False) -> None:
         """Save model and optimizer states, keeping all checkpoints or only the best one.
@@ -938,7 +1004,7 @@ class _Trainer:
 
         Args:
             type_log (str): "Training" or "Validation".
-            batch_item (dict): Dictionary of BatchItem from current batch.
+            batch_sample (BatchSample): The current batch, one item per destination group.
 
         Returns:
             dict[str, float]: Aggregated losses and metrics on rank 0; empty on the other ranks.
@@ -1074,6 +1140,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         it_validation (int | None): Validation interval.
         it_lr_update (int | None): Learning rate update interval.
         autocast (bool): Enable AMP training.
+        channels_last (bool): Lay the convolution weights and inputs out channels-last; cuDNN then picks other
+            kernels, faster or slower depending on the model.
         cudnn_benchmark (bool): Let cuDNN benchmark its kernels under ``manual_seed``: faster, no bit-for-bit replay.
         torch_compile (bool): Compile the graph walk with torch.compile; the first steps pay the compilation.
         gradient_checkpoints (list[str] | None): Modules to use gradient checkpointing on.
@@ -1108,7 +1176,11 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             raise ConfigError("Trainer requires KONFAI_CONFIG_MODE='Done' before initialization.")
         super().__init__(train_name)
         self.manual_seed = manual_seed
+        # Without manual_seed, a seed is drawn (read back on RESUME) and every draw of the run comes
+        # from it, as from a configured one: manual_seed set to the recorded Seed.txt replays the run.
+        self.drawn_seed = self._resolve_seed(State[konfai_state()])
         self.dataset = dataset
+        self.dataset.manual_seed = self.run_seed
         self._capture_vram_patch_template(dataset.patch)
         self.autocast = autocast
         self.channels_last = channels_last
@@ -1122,6 +1194,8 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         self.it = 0
         self.it_validation = it_validation
         self.it_lr_update = it_lr_update
+        # A weight the load(init=True) of a TRAIN does not redraw (an Embedding) keeps the draw made here.
+        seed_all(self.drawn_seed)
         with startup_clock().phase("model"):
             self.model = model.get_model(train=True)
         self.ema_decay = ema_decay
@@ -1138,10 +1212,9 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         state = State[konfai_state()]
         # The model's downsampling multiple is final before init(); each case's free axis rounds up to it.
         self.dataset.set_free_axis_multiple(self.model.downsampling_factor())
-        # The split is drawn on the launcher before spawn, from a concrete seed (configured, recorded,
-        # or fresh): an unseeded split would be redrawn on RESUME and leak validation cases into training.
-        self._split_seed = self._resolve_split_seed(state)
-        seed_all(self._split_seed)
+        # The split is drawn on the launcher before spawn, from the run's seed: an unseeded split would be
+        # redrawn on RESUME and leak validation cases into training.
+        seed_all(self.drawn_seed)
         self.dataset.prepare()
         self.model.bind(
             self.autocast, state, self.dataset.get_groups_dest(), self.gradient_checkpoints, self.gpu_checkpoints
@@ -1149,23 +1222,26 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         # The per-axis multiple a free patch axis rounds up to, read off the model's downsampling graph.
         self._downsampling_factor = self.model.downsampling_factor()
 
-    def _resolve_split_seed(self, state: State) -> int:
-        """The seed every draw in ``prepare()`` comes from: the configured ``manual_seed``, else the seed
-        the TRAIN run recorded (RESUME rebuilds the split the checkpoint trained on), else a fresh draw
-        recorded by ``setup`` for the next RESUME."""
+    def _resolve_seed(self, state: State) -> int:
+        """The seed every draw of the run comes from: the configured ``manual_seed``, else the seed the
+        TRAIN run recorded (RESUME rebuilds the split the checkpoint trained on), else a fresh draw
+        recorded by ``setup`` for the next RESUME and for a replay."""
         if self.manual_seed is not None:
             return self.manual_seed
         if state == State.RESUME:
-            recorded = self._recorded_split_seed()
+            recorded = self._recorded_seed()
             if recorded is not None:
                 return recorded
         return int.from_bytes(os.urandom(4), "little")
 
-    def _recorded_split_seed(self) -> int | None:
+    def _recorded_seed(self) -> int | None:
         try:
             return int((statistics_directory() / self.name / "Seed.txt").read_text().strip())
         except (OSError, ValueError):
             return None
+
+    def outputs(self) -> list[Path]:
+        return [checkpoints_directory() / self.name, statistics_directory() / self.name]
 
     def setup(self, world_size: int):
         """Initialize the training environment: clear previous outputs unless resuming, build the model
@@ -1193,26 +1269,75 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         with startup_clock().phase("checkpoint"):
             if state != State.TRAIN:
                 state_dict = self._load()
+                # Refused here, on the launcher, before the run writes into its statistics directory.
+                if self._resume_state is not None and self._resume_state["world_size"] != world_size // self.size:
+                    raise TrainerError(
+                        "RESUME requires the same number of training ranks as its epoch checkpoint: it was"
+                        f" written by {self._resume_state['world_size']}, this run has {world_size // self.size}.",
+                        f"Relaunch RESUME on {self._resume_state['world_size']} training rank(s).",
+                    )
             self.model.load(state_dict, init=True, ema=False, override_lr=self.override_lr)
             if self.ema_decay > 0:
                 self.model_ema = AveragedModel(self.model, **self._ema_update())
-                if state_dict is not None:
-                    _ema_network(self.model_ema).load(state_dict, init=False, ema=True)
-                    if "Model_EMA_n_averaged" in state_dict:
-                        self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
+                _ema_network(self.model_ema).load(state_dict, init=False, ema=True)
+                if "Model_EMA_n_averaged" in state_dict:
+                    self.model_ema.n_averaged.fill_(cast(int, state_dict["Model_EMA_n_averaged"]))
 
         (statistics_directory() / self.name).mkdir(exist_ok=True)
+        # The snapshot traces the run's live changes, which a RESUME continues: the trace outlives the copy.
+        traced = _traced_interventions(self.config_namefile) if state == State.RESUME else []
         shutil.copyfile(self.config_path_src, self.config_namefile)
+        if traced:
+            _record_interventions(self.config_namefile, traced)
 
         self.dataloader, train_names, validation_names = self.dataset.get_data(world_size // self.size)
-        with open(statistics_directory() / self.name / f"Train_{self.it}.txt", "w") as f:
-            for name in train_names:
-                f.write(name + "\n")
-        with open(statistics_directory() / self.name / f"Validation_{self.it}.txt", "w") as f:
-            for name in validation_names:
-                f.write(name + "\n")
-        # The split seed, where _resolve_split_seed reads it on RESUME; written after the clearing above.
-        (statistics_directory() / self.name / "Seed.txt").write_text(f"{self._split_seed}\n")
+        # A checkpoint of weights alone (no cursor, iteration 0) starts a new training: no split to keep.
+        if state == State.RESUME and (self._resume_state is not None or self.it > 0):
+            self._report_split_drift(train_names, validation_names)
+        for split, names in (("Train", train_names), ("Validation", validation_names)):
+            # Written as a subset or validation list reads it back.
+            path = statistics_directory() / self.name / f"{split}_{self.it}.txt"
+            path.write_text("".join(f"{name}\n" for name in names), encoding=case_list_encoding())
+        # The run's seed, where _resolve_seed reads it on RESUME; written after the clearing above.
+        (statistics_directory() / self.name / "Seed.txt").write_text(f"{self.drawn_seed}\n")
+
+    def _report_split_drift(self, train_names: list[str], validation_names: list[str]) -> None:
+        """Warn when the split RESUME redrew is not the one the run recorded last.
+
+        The split is redrawn from the seed on the cases found today: a case added, removed or renamed
+        since moves others between training and validation, and validation may then score cases the
+        checkpoint trained on. The run goes on with the redrawn split.
+        """
+        directory = statistics_directory() / self.name
+        recorded = [
+            int(it)
+            for it in (path.stem.removeprefix("Train_") for path in directory.glob("Train_*.txt"))
+            if it.isdigit() and (directory / f"Validation_{it}.txt").is_file()
+        ]
+        if not recorded:
+            return
+        it = max(recorded)
+        encoding = case_list_encoding()
+        trained = set((directory / f"Train_{it}.txt").read_text(encoding=encoding).split("\n")) - {""}
+        validated = set((directory / f"Validation_{it}.txt").read_text(encoding=encoding).split("\n")) - {""}
+        training, validation = set(train_names), set(validation_names)
+        changes = {
+            "Trained before, validated now": trained & validation,
+            "Validated before, trained now": validated & training,
+            "New": (training | validation) - trained - validated,
+            "Gone": (trained | validated) - training - validation,
+        }
+        lines = [f"{label} ({len(names)}): {_listed(names)}." for label, names in changes.items() if names]
+        if not lines:
+            return
+        message = TrainerError(
+            "RESUME redrew the train/validation split on the cases found today, and it is not the one"
+            f" recorded in Train_{it}.txt and Validation_{it}.txt ({directory}):",
+            *lines,
+            "The run goes on with the redrawn split. To change a cohort on purpose, give 'validation' by"
+            " case names (a list or a case-list file): a named case keeps its side.",
+        )
+        warnings.warn(str(message), KonfAIWarning, stacklevel=2)
 
     def set_model(self, path_to_model: str | Path) -> None:
         self.path_to_model = str(path_to_model)
@@ -1226,10 +1351,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         Returns:
             dict: State dictionary loaded from checkpoint.
         """
-        if self.path_to_model.startswith("https://") or Path(self.path_to_model).exists():
-            state_dict = safe_torch_load(self.path_to_model, torch.device("cpu"))
-        else:
-            raise ValueError(f"Invalid model path entry: {self.path_to_model}")
+        state_dict = safe_torch_load(checkpoint_source(self.path_to_model, TrainerError), torch.device("cpu"))
 
         self._resume_state = None
         if "resume" in state_dict:
@@ -1278,7 +1400,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
             local_rank (int): Local rank within the node.
             dataloaders (list[DataLoader]): Training and validation dataloaders.
         """
-        model = Network.to(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
+        model = place_graph(self.model, local_rank * self.size) if len(cuda_visible_devices()) else self.model
         if self.channels_last:
             Network.set_channels_last(model)
         if self.torch_compile:
@@ -1290,7 +1412,7 @@ class Trainer(vram.VramAutoPatchMixin, DistributedObject):
         else:
             model = Model(model)
         if self.model_ema is not None:
-            self.model_ema.module = Network.to(_ema_network(self.model_ema), local_rank * self.size)
+            self.model_ema.module = place_graph(_ema_network(self.model_ema), local_rank * self.size)
             if self.channels_last:
                 Network.set_channels_last(_ema_network(self.model_ema))
         device = local_rank * self.size if len(cuda_visible_devices()) else None
@@ -1371,8 +1493,8 @@ def build_train(
         ``State.TRAIN`` or ``State.RESUME``.
     model : Path | str | None, optional
         Checkpoint path used when resuming training.
-    config : Path | str, optional
-        Training configuration file.
+    config : Path | str | dict, optional
+        The training configuration: its file, or the config tree itself (``{"Trainer": {...}}``).
     checkpoints_dir : Path | str, optional
         Output directory for checkpoints.
     statistics_dir : Path | str, optional
@@ -1386,6 +1508,12 @@ def build_train(
     DistributedObject
         Configured trainer, executed by the runtime wrapper.
     """
+    if command == State.RESUME and model is None:
+        raise TrainerError(
+            "RESUME continues from a checkpoint, and none was given.",
+            "Pass model= the checkpoint to resume from (the CLI's --model), such as"
+            " Checkpoints/<train_name>/resume_latest.pt.",
+        )
     configure_workflow_environment(
         config_path=config,
         root="Trainer",

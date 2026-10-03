@@ -17,7 +17,6 @@
 """Tests for ``konfai.data.transform``: Clip, Dilate, Norm, Crop, Standardize, Padding,
 Resample, and InferenceStack."""
 
-import builtins
 from pathlib import Path
 
 import numpy as np
@@ -25,10 +24,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 from konfai.data.transform import (
+    Argmax,
     Canonical,
     Clip,
     Crop,
     Dilate,
+    Flip,
     InferenceStack,
     LocalityKind,
     Mask,
@@ -40,12 +41,15 @@ from konfai.data.transform import (
     Reduce,
     RegionContext,
     Resample,
+    SegmentationDisagreement,
     SelectLabel,
     Squeeze,
     StandardDeviation,
     Standardize,
     Statistics,
+    Sum,
     TensorCast,
+    Transform,
     Variance,
 )
 from konfai.utils.dataset import Attribute, Dataset
@@ -73,6 +77,22 @@ def test_onehot_inverse_argmaxes_the_class_axis_batched_and_unbatched() -> None:
     assert torch.equal(decoded_b, batched.argmax(1).unsqueeze(1))
 
 
+def test_onehot_refuses_a_label_map_of_several_channels() -> None:
+    # Its output is [num_classes, *spatial], which leaves no axis for a second label map's classes.
+    with pytest.raises(TransformError, match="2 channels"):
+        OneHot(num_classes=3)("seg", torch.zeros(2, 4, 5, 6), Attribute())
+
+
+@pytest.mark.parametrize(
+    "stage", [Argmax(0), Argmax(1), Argmax(-1), Sum(0), Sum(2), Sum(-3)], ids=lambda s: f"{type(s).__name__}({s.dim})"
+)
+def test_an_axis_reduction_predicts_the_spatial_shape_it_leaves(stage: Transform) -> None:
+    tensor = torch.rand(3, 4, 5, 6)
+    # A reduction over the channels leaves the spatial extent: the stripped channel axis is folded.
+    expected = [4, 5, 6] if stage.dim == 0 else list(stage("case", tensor, Attribute()).shape[1:])
+    assert stage.transform_shape("group", "case", [4, 5, 6], Attribute()) == expected
+
+
 @pytest.mark.parametrize("cls", [Variance, StandardDeviation])
 def test_ensemble_dispersion_keeps_member_axis_for_single_member(cls) -> None:
     # The N>1 branch does .var/.std(0).unsqueeze(0) -> [1, C, *spatial]; the single-member branch must
@@ -82,6 +102,16 @@ def test_ensemble_dispersion_keeps_member_axis_for_single_member(cls) -> None:
     single = transform("x", torch.randn(1, 2, 4, 4), Attribute())
     assert single.ndim == multi.ndim
     assert tuple(single.shape) == tuple(multi.shape)
+
+
+@pytest.mark.parametrize(
+    ("ignore_background", "want"), [(False, [0.0, 1 / 3, 2 / 3, 0.0]), (True, [0.0, 0.0, 0.5, 0.0])]
+)
+def test_segmentation_disagreement_is_one_minus_the_majority_share(ignore_background: bool, want: list[float]) -> None:
+    members = torch.tensor([[[3, 3, 1, 0]], [[3, 0, 2, 0]], [[3, 3, 0, 0]]], dtype=torch.int16)
+    got = SegmentationDisagreement(ignore_background)("case", members, Attribute())
+    assert tuple(got.shape) == (1, 1, 4)
+    torch.testing.assert_close(got[0, 0], torch.tensor(want), rtol=0, atol=1e-7)
 
 
 def test_clip_resolves_min_and_percentile_bounds() -> None:
@@ -278,6 +308,48 @@ def test_crop_finds_its_box_without_holding_the_volume(tmp_path: Path, monkeypat
     assert quantile_calls == [0.05], "one scan per volume, shared by every chain"
 
 
+@pytest.mark.parametrize("before", ["Resample", "Padding", "Canonical"])
+def test_a_crop_behind_a_stage_that_moves_the_grid_is_refused_before_it_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before: str
+) -> None:
+    """Crop measures its box on the stored volume, which is its input only while the stages before it
+    leave the stored grid alone. Behind a Resample, a Padding or a Canonical that mirrors the case, that
+    box lands on another grid, so the chain is refused as it is planned, before a voxel is written. The
+    mirror keeps the extent: only the geometry tells its grid from the stored one."""
+    sitk = pytest.importorskip("SimpleITK")
+    from konfai import api
+    from konfai.data.transform import Write
+
+    monkeypatch.chdir(tmp_path)
+    volume = np.zeros((24, 28, 32), dtype=np.float32)
+    volume[6:20, 4:22, 10:26] = 1.0
+    image = sitk.GetImageFromArray(volume)
+    (tmp_path / "Raw" / "P000").mkdir(parents=True)
+    sitk.WriteImage(image, str(tmp_path / "Raw" / "P000" / "CT.mha"))
+    if before == "Resample":
+        stage: Transform = Resample(spacing=[0.5, 0.5, 0.5], interpolation="nearest", inverse=False)
+        handed = sitk.Resample(image, [64, 56, 48], sitk.Transform(), sitk.sitkNearestNeighbor, [-0.25] * 3, [0.5] * 3)
+    elif before == "Padding":
+        stage = Padding(padding=[2] * 6, inverse=False)
+        handed = sitk.ConstantPad(image, [2, 2, 2], [2, 2, 2], 0.0)
+    else:
+        # The identity direction is LPS, which Canonical mirrors along x and y onto RAS.
+        stage = Canonical(inverse=False)
+        handed = sitk.Flip(image, [True, True, False])
+    # What Crop is handed, cut to its own foreground box.
+    z, y, x = np.nonzero(sitk.GetArrayFromImage(handed))
+    expected = sitk.RegionOfInterest(handed, [int(np.ptp(a)) + 1 for a in (x, y, z)], [int(a.min()) for a in (x, y, z)])
+    chains = {"CT": {"CT": [stage, Crop(inverse=False), Write(dataset="./Out:mha")]}}
+
+    with pytest.raises(TransformError, match="'Crop' measures its box on the stored volume"):
+        api.transform("CROP", "./Raw:mha", chains, transforms_dir=tmp_path / "Transforms", quiet=True)
+        # Reached only when nothing refused: the written volume must then be that region.
+        written = sitk.ReadImage(str(tmp_path / "Out" / "P000" / "CT.mha"))
+        assert written.GetSize() == expected.GetSize()
+        np.testing.assert_array_equal(sitk.GetArrayFromImage(written), sitk.GetArrayFromImage(expected))
+    assert not (tmp_path / "Out").exists()
+
+
 def test_crop_moves_a_read_cases_origin_to_its_box_near_corner(tmp_path: Path) -> None:
     """A read stacks the header as ``Origin_0``/``Spacing_0``/``Direction_0``. The whole-volume call and
     the hook the region routes call must both write ITK's ``RegionOfInterest`` header, and the inverse
@@ -349,12 +421,64 @@ def test_crop_inverse_pads_back_a_case_without_geometry() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Permute / Flip: geometry
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stage, oracle, spatial",
+    [
+        (Permute("1|0|2"), lambda sitk, image: sitk.PermuteAxes(image, [0, 2, 1]), (4, 5, 6)),
+        (Permute("2|0|1"), lambda sitk, image: sitk.PermuteAxes(image, [1, 2, 0]), (4, 5, 6)),
+        (Flip("0"), lambda sitk, image: sitk.Flip(image, [False, False, True]), (4, 5, 6)),
+        (Flip("1|2"), lambda sitk, image: sitk.Flip(image, [True, True, False]), (4, 5, 6)),
+        (Permute("1|0"), lambda sitk, image: sitk.PermuteAxes(image, [1, 0]), (5, 6)),
+        (Flip("0"), lambda sitk, image: sitk.Flip(image, [False, True]), (5, 6)),
+    ],
+    ids=["permute-yz", "permute-cycle", "flip-z", "flip-xy", "permute-2d", "flip-2d"],
+)
+def test_permute_and_flip_keep_every_voxel_where_it_sits_in_the_world(stage, oracle, spatial) -> None:
+    """A reorientation changes the order voxels are stored in, not where they are: the header it
+    records is SimpleITK's, on the whole-volume call and on the hook the region routes call, and the
+    inverse hands the stored one back."""
+    sitk = pytest.importorskip("SimpleITK")
+    rank = len(spatial)
+    image = sitk.GetImageFromArray(np.arange(np.prod(spatial), dtype=np.float32).reshape(spatial))
+    image.SetOrigin((0.5, -1.0, 2.5)[:rank])
+    image.SetSpacing((1.05, 0.95, 1.15)[:rank])
+    # Sheared, so a column mixed up with a row or a sign on the wrong axis shows.
+    sheared = np.asarray([[1.0, 0.3, 0.0], [0.0, 1.0, 0.0], [0.0, 0.2, 1.0]])[:rank, :rank]
+    image.SetDirection(tuple(sheared.reshape(-1)))
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(image.GetOrigin())
+    attribute["Spacing"] = np.asarray(image.GetSpacing())
+    attribute["Direction"] = np.asarray(image.GetDirection())
+    stored = Attribute(attribute)
+    volume = torch.from_numpy(sitk.GetArrayFromImage(image))[None]
+
+    streamed = Attribute(attribute)
+    stage.write_stream_cache_attribute(streamed, list(spatial), "case")
+    out = stage("case", volume, attribute)
+
+    expected = oracle(sitk, image)
+    np.testing.assert_array_equal(out[0].numpy(), sitk.GetArrayFromImage(expected))
+    for header in (attribute, streamed):
+        np.testing.assert_allclose(header.get_np_array("Origin"), expected.GetOrigin(), rtol=0, atol=1e-9)
+        np.testing.assert_allclose(header.get_np_array("Spacing"), expected.GetSpacing(), rtol=0, atol=1e-12)
+        np.testing.assert_allclose(header.get_np_array("Direction"), expected.GetDirection(), rtol=0, atol=1e-12)
+
+    back = stage.inverse("case", out, attribute)
+    assert torch.equal(back, volume)
+    assert attribute == stored
+
+
+# --------------------------------------------------------------------------------------
 # Standardize
 # --------------------------------------------------------------------------------------
 
 
 def test_standardize_explicit_scalar_stats():
-    """#5 Standardize with explicit scalar mean/std must not crash."""
+    """Standardize with explicit scalar mean/std must not crash."""
     t = Standardize(lazy=False, mean=[10.0], std=[2.0])
     x = torch.arange(24, dtype=torch.float32).reshape(1, 2, 3, 4)
     out = t("c", x.clone(), Attribute())
@@ -362,13 +486,18 @@ def test_standardize_explicit_scalar_stats():
 
 
 def test_standardize_explicit_per_channel_stats():
-    """#5 Per-channel mean/std broadcast over the channel axis."""
+    """Per-channel mean/std broadcast over the channel axis."""
     t = Standardize(lazy=False, mean=[10.0, 20.0], std=[2.0, 4.0])
     x = torch.zeros(2, 3, 4)
     x[0] = 10.0
     x[1] = 20.0
     out = t("c", x.clone(), Attribute())
     assert torch.allclose(out, torch.zeros_like(out), atol=1e-6)
+
+
+# --------------------------------------------------------------------------------------
+# HistogramMatching
+# --------------------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------------------
@@ -462,7 +591,7 @@ def test_resample_to_shape_transform_shape_dimension_mismatch_message():
 
 
 def test_resample_to_shape_does_not_mutate_config():
-    """#9 transform_shape must not write resolved dims back into the shared instance config."""
+    """transform_shape must not write resolved dims back into the shared instance config."""
     resampler = Resample(shape=[0, 16, 16])
     attributes = Attribute()
     attributes["Spacing"] = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
@@ -536,33 +665,43 @@ def test_inference_stack_super_init_enables_dataset_fallback():
     assert torch.allclose(out, torch.full((1, 2, 2), 4.0))
 
 
-def test_konfai_inference_bare_name_resolves_from_konfai_apps() -> None:
-    """Published bundles (ImpactSynth) spell the bare name ``KonfAIInference:``; the package must
-    keep handing the class over, now imported from konfai-apps."""
-    pytest.importorskip("konfai_apps")
-    import konfai.data.transform as transform_package
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: TensorCast("foo"),
+        lambda: TensorCast("nn"),
+        lambda: Clip(5.0, 1.0),
+        lambda: Clip("MIN", 1.0),
+        lambda: Clip(0.0, "percentile:x"),
+        lambda: Clip("percentile:150", 1.0),
+        lambda: Normalize(min_value=1, max_value=0),
+        lambda: Dilate(-1),
+        lambda: Dilate(1)("case", torch.zeros(1, 8), Attribute()),
+    ],
+    ids=[
+        "dtype",
+        "not-a-dtype",
+        "clip-range",
+        "clip-string",
+        "clip-percentile",
+        "clip-percentile-range",
+        "normalize-range",
+        "dilate",
+        "rank",
+    ],
+)
+def test_a_configuration_error_is_a_transform_error(build) -> None:
+    """The CLI reports a KonfAIError as a message and anything else as a traceback."""
+    with pytest.raises(TransformError):
+        build()
 
-    cls = transform_package.KonfAIInference
-    assert cls.__name__ == "KonfAIInference"
-    assert cls.__module__ == "konfai_apps.transforms"
 
-
-def test_konfai_inference_without_konfai_apps_names_the_install(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without konfai-apps the resolution refuses with the install command, not an AttributeError
-    the loader would turn into 'no transform is named KonfAIInference'."""
-    import konfai.data.transform as transform_package
-
-    real_import = builtins.__import__
-
-    def import_without_konfai_apps(name, *args, **kwargs):
-        if name.split(".")[0] == "konfai_apps":
-            raise ImportError("konfai_apps unavailable")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", import_without_konfai_apps)
-
-    with pytest.raises(TransformError, match="pip install konfai-apps"):
-        _ = transform_package.KonfAIInference
+def test_a_mask_off_the_grid_it_masks_is_refused_by_name(tmp_path: Path) -> None:
+    sitk = pytest.importorskip("SimpleITK")
+    path = tmp_path / "mask.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((3, 3), dtype=np.uint8)), str(path))
+    with pytest.raises(TransformError, match=r"shape \[1, 3, 3\], where the tensor it masks has \[1, 4, 4\]"):
+        Mask(str(path))("case", torch.zeros(1, 4, 4), Attribute())
 
 
 # --------------------------------------------------------------------------------------
@@ -639,6 +778,9 @@ _OBLIQUE = np.asarray(
         [0.0, 0.0, 1.0],
     ]
 )
+# 60 degrees about y: nearer a swap of physical x and z than the identity, so the grid it is resampled
+# onto takes the swapped extents, as _PERMUTING's does.
+_OBLIQUE_SWAPPING = np.asarray([[0.5, 0.0, np.sqrt(0.75)], [0.0, 1.0, 0.0], [-np.sqrt(0.75), 0.0, 0.5]])
 # A direction is orthonormal by definition, not by construction. None of these is, so none of them
 # is a bijection on the voxels, and each wears one half of a signed permutation's disguise.
 # Mixes two axes at unit weight: the column sums to 1 exactly as a permutation's does, and only its
@@ -697,7 +839,8 @@ def test_an_oblique_canonical_keeps_an_int64_label_past_float32() -> None:
     out = Canonical()("case", volume, _canonical_attributes(_OBLIQUE))
 
     assert out.dtype == torch.int64
-    assert torch.equal(out, torch.full_like(out, 2**24 + 1))
+    # The label where the rotated grid meets the source, the zero fill where it does not.
+    assert torch.unique(out).tolist() == [0, 2**24 + 1]
 
 
 @pytest.mark.parametrize(("dtype", "blended"), [(torch.int64, False), (torch.bool, False), (torch.int16, True)])
@@ -711,6 +854,117 @@ def test_an_oblique_canonical_picks_labels_by_dtype(dtype: torch.dtype, blended:
 
     assert out.dtype == dtype
     assert (len(torch.unique(out)) > 2) is blended
+
+
+def _image_of(volume: torch.Tensor, attributes: Attribute):
+    import SimpleITK as sitk
+
+    image = sitk.GetImageFromArray(volume[0].numpy())
+    image.SetOrigin(attributes.get_np_array("Origin").tolist())
+    image.SetSpacing(attributes.get_np_array("Spacing").tolist())
+    image.SetDirection(attributes.get_np_array("Direction").tolist())
+    return image
+
+
+def _resampled_onto(image, attributes: Attribute, shape: tuple[int, ...]) -> np.ndarray:
+    import SimpleITK as sitk
+
+    onto = sitk.Resample(
+        image,
+        list(reversed(shape)),
+        sitk.Transform(),
+        sitk.sitkLinear,
+        attributes.get_np_array("Origin").tolist(),
+        attributes.get_np_array("Spacing").tolist(),
+        attributes.get_np_array("Direction").tolist(),
+        0.0,
+        sitk.sitkFloat32,
+    )
+    return sitk.GetArrayFromImage(onto)
+
+
+@pytest.mark.parametrize(
+    "direction, shape",
+    [(_OBLIQUE, _CANONICAL_SPATIAL), (_OBLIQUE_SWAPPING, (11, 10, 9))],
+    ids=["about-z", "about-y"],
+)
+@pytest.mark.parametrize("sampler", ["itk", "walk"])
+def test_an_oblique_canonical_is_sitk_resample_onto_the_grid_it_writes(
+    direction: np.ndarray, shape: tuple[int, ...], sampler: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resampled onto the geometry it records, both ways, as ``sitk.Resample`` does, on an anisotropic,
+    non-cubic grid where index space and world space part. The grid takes the extents of the signed
+    permutation nearest the direction. ``walk`` is the sampler off the host."""
+    pytest.importorskip("SimpleITK")
+    if sampler == "walk":
+        monkeypatch.setattr("konfai.data.transform.shape._resample_with_sitk", lambda *args: None)
+    attributes = _canonical_attributes(direction)
+    source = Attribute(attributes)
+    # A smooth field of the WORLD position, so the oracle's interpolation error stays negligible.
+    index = np.stack(np.meshgrid(*[np.arange(n) for n in reversed(_CANONICAL_SPATIAL)], indexing="ij"), -1)
+    world = (index * np.asarray([1.5, 1.75, 2.0])) @ direction.T + np.asarray([-3.0, 5.0, 11.0])
+    field = np.sin(0.4 * world[..., 0]) + np.cos(0.3 * world[..., 1]) + 0.5 * np.sin(0.5 * world[..., 2])
+    volume = torch.from_numpy(field.transpose(2, 1, 0).astype(np.float32))[None]
+    transform = Canonical()
+
+    out = transform("case", volume, attributes)
+
+    assert tuple(out.shape[1:]) == shape
+    expected = _resampled_onto(_image_of(volume, source), attributes, shape)
+    np.testing.assert_allclose(out[0].numpy(), expected, rtol=0, atol=1e-4)
+    canonical = Attribute(attributes)
+    assert transform.inverse_transform_shape(list(shape), attributes) == list(_CANONICAL_SPATIAL)
+    back = transform.inverse("case", out, attributes)
+    expected = _resampled_onto(_image_of(out, canonical), source, _CANONICAL_SPATIAL)
+    np.testing.assert_allclose(back[0].numpy(), expected, rtol=0, atol=1e-4)
+
+
+@pytest.mark.parametrize("sampler", ["itk", "walk"])
+def test_an_oblique_canonical_fills_the_corners_it_uncovers_with_fill(
+    sampler: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The corners a turn uncovers take ``fill`` (air, for a CT), every other voxel the value it takes
+    without one. The inverse reads a prediction back, not the source, so it keeps zero there."""
+    if sampler == "walk":
+        monkeypatch.setattr("konfai.data.transform.shape._resample_with_sitk", lambda *args: None)
+    # No zero anywhere in the source, so a zero in the default run is a voxel the source does not reach.
+    volume = torch.from_numpy(np.random.default_rng(0).uniform(1.0, 100.0, (1, *_CANONICAL_SPATIAL)).astype(np.float32))
+    zero_filled, attributes = Canonical(), _canonical_attributes(_OBLIQUE)
+    default = zero_filled("case", volume, attributes)
+    uncovered = default == 0
+    assert bool(uncovered.any()) and not bool(uncovered.all())
+    filled, filled_attributes = Canonical(fill=-1024.0), _canonical_attributes(_OBLIQUE)
+
+    out = filled("case", volume, filled_attributes)
+
+    assert bool((out[uncovered] == -1024.0).all())
+    assert torch.equal(out[~uncovered], default[~uncovered])
+    assert torch.equal(
+        filled.inverse("case", default, filled_attributes), zero_filled.inverse("case", default, attributes)
+    )
+
+
+@pytest.mark.parametrize("angle", [1e-6, np.deg2rad(3.0)], ids=["rounding", "3-degrees"])
+def test_an_oblique_sagittal_canonical_keeps_its_field_of_view(angle: float) -> None:
+    """A sagittal case a little off its axes, as most MR is, is resampled onto the extents its world
+    axes carry, as the exact permutation lays them out: only the corners the turn moves out are lost.
+    On the source's own array extents, half of this case would fall outside the grid."""
+    sagittal = np.asarray([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    turn = np.asarray([[1.0, 0.0, 0.0], [0.0, np.cos(angle), -np.sin(angle)], [0.0, np.sin(angle), np.cos(angle)]])
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray([-20.0, -150.0, -140.0])
+    attributes["Spacing"] = np.asarray([2.0, 2.0, 2.0])
+    attributes["Direction"] = (turn @ sagittal).reshape(-1)
+    volume = torch.from_numpy(np.random.default_rng(0).integers(1, 256, (1, 12, 24, 20), dtype=np.uint8))
+    transform = Canonical()
+
+    out = transform("case", volume, attributes)
+    back = transform.inverse("case", out, attributes)
+
+    # Physical x, y and z are read from the source's z, x and y.
+    assert list(out.shape[1:]) == [24, 20, 12]
+    assert float((out != 0).float().mean()) > 0.95
+    assert float((back != 0).float().mean()) > 0.95
 
 
 @pytest.mark.parametrize("direction", [_RAS, _LPS, _PERMUTING], ids=["RAS", "LPS", "permuting"])
@@ -792,10 +1046,12 @@ def test_canonical_permuting_records_the_grid_the_remap_lands_on() -> None:
         (_RAS, list(_CANONICAL_SPATIAL)),
         # Swapping physical x and z transposes the extents they carry: array (9, 10, 11) -> (11, 10, 9).
         (_PERMUTING, [11, 10, 9]),
-        # An oblique direction is resampled onto the input's own grid, so it keeps its extent.
+        # An oblique direction is resampled onto the grid of the signed permutation nearest it: a turn
+        # of 20 degrees about z keeps the extents, 60 degrees about y swaps those of x and z.
         (_OBLIQUE, list(_CANONICAL_SPATIAL)),
+        (_OBLIQUE_SWAPPING, [11, 10, 9]),
     ],
-    ids=["LPS", "RAS", "permuting", "oblique"],
+    ids=["LPS", "RAS", "permuting", "oblique", "oblique-swapping"],
 )
 def test_canonical_folds_the_patch_grid_onto_the_extent_it_produces(direction: np.ndarray, expected: list[int]) -> None:
     # The patch grid is folded from transform_shape, so a permuting case's patches are cut on the grid
@@ -1021,14 +1277,21 @@ def test_inference_stack_median_picks_the_same_element_whatever_the_dtype(dtype:
     assert torch.equal(reduced, expected)
 
 
+@pytest.mark.parametrize("mode", ["Median", "max", "seg"])
+def test_inference_stack_refuses_a_mode_it_does_not_know(mode: str) -> None:
+    """Any mode other than 'median' and 'Seg' reduced by the mean: 'Median' averaged in silence."""
+    with pytest.raises(TransformError, match="'mean', 'median' or 'Seg'"):
+        InferenceStack(dataset="", name="pred", mode=mode)
+
+
 def test_gradient_keeps_the_axis_dimension_apart_from_the_channels() -> None:
     """The differences are ``(C, rank, *spatial)`` and the axis dimension is its own.
 
-    It used to be dropped with ``squeeze(0)``, which only fires when the case has ONE channel: a
-    multi-channel case then took its norm across the CHANNELS instead of across the axes and handed
-    the writer a rank-5 array (measured on a 3-channel case: [1, 3, 128, 256, 256], refused by
-    OME-Zarr). Every case here is four-dimensional, and the channel count is the one the stage
-    declares -- a plan sizes its regions from that declaration.
+    Dropped with ``squeeze(0)``, which only fires when the case has ONE channel, a multi-channel
+    case would take its norm across the CHANNELS instead of across the axes and hand the writer a
+    rank-5 array (on a 3-channel case: [1, 3, 128, 256, 256], refused by OME-Zarr). Every case here
+    is four-dimensional, and the channel count is the one the stage declares -- a plan sizes its
+    regions from that declaration.
     """
     from konfai.data.transform import Gradient
 
@@ -1091,6 +1354,29 @@ def test_an_ambiguous_bare_name_warns_with_the_winner_and_the_qualified_loser(
     assert clip.plan_note("G", "case", [4, 4, 4], Attribute()) is None
 
 
+def test_a_repeated_stage_binds_by_occurrence(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repeated stage is keyed ``Name``, ``Name#2``: each key binds its own block and resolves to
+    the class."""
+    from konfai.data.transform import Clip, TensorCast, TransformLoader
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text(
+        "T:\n  transforms:\n"
+        "    TensorCast: {dtype: float16}\n"
+        "    Clip: {min_value: -1024, max_value: 5000}\n"
+        "    TensorCast#2: {dtype: int16}\n"
+        "    Clip#2: {min_value: 0, max_value: 10}\n"
+    )
+    monkeypatch.setenv("KONFAI_config_file", str(config))
+    monkeypatch.setenv("KONFAI_CONFIG_MODE", "Done")
+
+    keys = ("TensorCast", "Clip", "TensorCast#2", "Clip#2")
+    stages = {key: TransformLoader().get_transform(key, "T.transforms") for key in keys}
+    assert [type(stage) for stage in stages.values()] == [TensorCast, Clip, TensorCast, Clip]
+    assert [stages[key].dtype for key in ("TensorCast", "TensorCast#2")] == [torch.float16, torch.int16]
+    assert [(stages[key].min_value, stages[key].max_value) for key in ("Clip", "Clip#2")] == [(-1024, 5000), (0, 10)]
+
+
 def test_mask_is_the_transform_alone(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The mask draw is PlacedMask: `Mask` names one class, so its bare name resolves without an
     ambiguity warning, before an Expand marker and past it."""
@@ -1127,3 +1413,27 @@ def test_normalize_never_writes_into_the_tensor_it_is_handed() -> None:
     before = channels.clone()
     Normalize(channels=[0])("CASE", channels, Attribute())
     assert torch.equal(channels, before)
+
+
+def test_normalize_yields_a_floating_tensor_from_an_integer_case() -> None:
+    """A constant integer case (an MR clipped flat) must reach the network as floats, like any other case."""
+    import torch
+    from konfai.data.transform import Normalize
+    from konfai.utils.dataset import Attribute
+
+    constant = torch.full((1, 4, 4), 5000, dtype=torch.int16)
+    out = Normalize(min_value=-1, max_value=1)("CASE", constant, Attribute())
+    assert out.dtype == torch.float32 and torch.equal(out, torch.full((1, 4, 4), -1.0))
+
+    ramp = torch.arange(32, dtype=torch.int16).reshape(2, 4, 4)
+    out = Normalize(channels=[0], min_value=-1, max_value=1)("CASE", ramp, Attribute())
+    assert out.dtype == torch.float32 and out[0].min() == -1 and out[0].max() == 1 and -1 < out[0, 0, 1] < 1
+
+
+@pytest.mark.parametrize("stage", [Flip(), Permute()], ids=["flip", "permute"])
+def test_the_three_axis_default_is_refused_by_name_on_a_2d_case(stage) -> None:
+    """``Flip()`` and ``Permute()`` name three axes by default: a 2-D case fell on torch's error."""
+    with pytest.raises(TransformError, match="axes"):
+        stage.transform_shape("CT", "P0", [5, 6], Attribute())
+    with pytest.raises(TransformError, match="axes"):
+        stage("P0", torch.zeros(1, 5, 6), Attribute())

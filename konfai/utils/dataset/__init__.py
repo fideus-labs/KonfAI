@@ -37,6 +37,7 @@ from konfai.utils.dataset.backend import BACKENDS as BACKENDS
 from konfai.utils.dataset.backend import File as File
 from konfai.utils.dataset.backend import backend_for as backend_for
 from konfai.utils.dataset.core import Dataset as Dataset
+from konfai.utils.dataset.core import refuse_shared_single_file as refuse_shared_single_file
 from konfai.utils.dataset.dicom_file import DicomFile as DicomFile
 from konfai.utils.dataset.h5 import H5File as H5File
 from konfai.utils.dataset.h5 import h5py as h5py
@@ -74,6 +75,7 @@ __all__ = [
     "is_staging_entry",
     "ome_zarr_attributes",
     "read_landmarks",
+    "refuse_shared_single_file",
     "region_geometry",
     "release_read_handles",
     "staged_entry",

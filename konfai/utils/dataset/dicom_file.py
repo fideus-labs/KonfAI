@@ -30,6 +30,7 @@ except ImportError:
     sitk = None  # type: ignore[assignment]
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import Attribute, image_to_data
+from konfai.utils.dataset.staging import is_staging_entry
 from konfai.utils.errors import DatasetManagerError
 
 
@@ -38,6 +39,7 @@ class DicomFile(AbstractFile):
 
     concurrent_write_safe = False  # a series shares its directory and info memo across entries
     lists_case_entries = True  # a case is a directory of series this backend enumerates
+    read_errors = (OSError, RuntimeError)  # SimpleITK's series reader
 
     def __init__(self, filename: str, read: bool) -> None:
         self.filename = filename if filename.endswith("/") else f"{filename}/"
@@ -62,13 +64,16 @@ class DicomFile(AbstractFile):
         return attributes
 
     def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
-        from konfai.utils.dicom import read_dicom_series
+        from konfai.utils.dicom import _decode_cached_planes, get_dicom_info
 
-        data, origin, spacing, direction = read_dicom_series(self._path(name))
+        # Off the memoised header read; no plane is cached, since a whole read touches each once.
+        info = get_dicom_info(self._path(name))
+        whole = (slice(None), slice(None))
+        data = _decode_cached_planes(info["sorted_files"], whole, apply_rescale=True, keep=False)[np.newaxis]
         attributes = Attribute()
-        attributes["Origin"] = origin
-        attributes["Spacing"] = spacing
-        attributes["Direction"] = direction
+        attributes["Origin"] = np.asarray(info["origin"])
+        attributes["Spacing"] = np.asarray(info["spacing"])
+        attributes["Direction"] = np.asarray(info["direction"])
         return data, attributes
 
     def bounded_region_reads(self, name: str) -> bool:
@@ -135,7 +140,11 @@ class DicomFile(AbstractFile):
         root = Path(self.filename)
         if not root.is_dir():
             return []
-        return sorted(path.name for path in root.iterdir() if path.is_dir() and self.is_exist(path.name))
+        return sorted(
+            path.name
+            for path in root.iterdir()
+            if path.is_dir() and not is_staging_entry(path.name) and self.is_exist(path.name)
+        )
 
     def is_exist(self, group: str, name: str | None = None) -> bool:
         from konfai.utils.dicom import get_dicom_info

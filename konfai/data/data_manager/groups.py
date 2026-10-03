@@ -23,6 +23,7 @@ from konfai import konfai_root, konfai_state
 from konfai.data.transform import (
     Expand,
     LocalityKind,
+    Reduce,
     Transform,
     TransformInverse,
     TransformLoader,
@@ -128,17 +129,29 @@ def _check_patch_transform_invertible(
     )
 
 
+def _refuse_cardinality_marker(transform: Transform, group_src: str, group_dest: str) -> None:
+    """Refuse an ``Expand`` or ``Reduce`` outside TRANSFORM from the config, before any case is read."""
+    name = type(transform).__name__
+    location = f"{konfai_root()}.Dataset.groups_src.{group_src}.groups_dest.{group_dest}.transforms"
+    raise ConfigError(
+        f"{location}: '{name}' changes how many cases the chain produces, which only the TRANSFORM workflow does.",
+        f"Run the chain with '{name}' in a Transform.yml (konfai TRANSFORM) to write its result as a dataset,"
+        " then read that dataset here.",
+    )
+
+
 class GroupTransform:
-    """Collection of transforms attached to one source-to-destination group path."""
+    """Collection of transforms attached to one source-to-destination group path. No chain by default:
+    an absent key leaves the tensor as stored."""
+
+    #: Whether the chain may hold an ``Expand`` or ``Reduce`` marker: only the TRANSFORM engine turns
+    #: one into copies or a fold; any other workflow would hand it a tensor, which it refuses.
+    takes_cardinality_markers = False
 
     def __init__(
         self,
-        transforms: dict[str, TransformLoader] | None = {
-            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
-        },
-        patch_transforms: dict[str, TransformLoader] | None = {
-            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
-        },
+        transforms: dict[str, TransformLoader] | None = None,
+        patch_transforms: dict[str, TransformLoader] | None = None,
         is_input: bool = True,
     ) -> None:
         self._transforms = transforms
@@ -165,6 +178,8 @@ class GroupTransform:
                     # (Flip, Permute) is the draw there, the transform before it.
                     prefer_augmentation=any(isinstance(stage, Expand) for stage in self.transforms),
                 )
+                if isinstance(transform, (Expand, Reduce)) and not self.takes_cardinality_markers:
+                    _refuse_cardinality_marker(transform, group_src, group_dest)
                 self.transforms.append(transform)
         if self._patch_transforms is not None:
             for classpath, transform_loader in self._patch_transforms.items():
@@ -199,14 +214,10 @@ class GroupTransform:
 
 
 class GroupTransformMetric(GroupTransform):
-    """Metric-specific group transform that omits patch-time transforms."""
+    """Metric-specific group transform that omits patch-time transforms. No chain by default: a metric
+    compares the values as stored, and a rescale per group would erase the difference it measures."""
 
-    def __init__(
-        self,
-        transforms: dict[str, TransformLoader] = {
-            "default|Normalize|Standardize|Unsqueeze|TensorCast|ResampleIsotropic|ResampleResize": TransformLoader()
-        },
-    ):
+    def __init__(self, transforms: dict[str, TransformLoader] = {}):
         super().__init__(transforms, {})
 
 
@@ -215,12 +226,9 @@ class GroupTransformOut(GroupTransform):
 
     Every group of a dataset-preparation workflow is an input."""
 
-    def __init__(
-        self,
-        transforms: dict[str, TransformLoader] = {
-            "default|Normalize|Standardize|TensorCast|ResampleIsotropic|Write": TransformLoader()
-        },
-    ):
+    takes_cardinality_markers = True
+
+    def __init__(self, transforms: dict[str, TransformLoader] | None = None):
         super().__init__(transforms, {})
 
 

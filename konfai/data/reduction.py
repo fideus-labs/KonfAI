@@ -113,9 +113,9 @@ class Mean(Reduction):
         if self._total is None:
             self._total, self._dtype = tensor.to(torch.float32, copy=True), tensor.dtype
         else:
-            # Promoted inside the add kernel: the same bits as float(), without the float32 copy of
-            # the member beside the total. A member wider than float32 would be added at its own
-            # width and rounded after, so it is narrowed first.
+            # Promoted by the add, to the same bits as float(); on the CPU the kernel still casts an
+            # integer member through a float32 copy of it. A member wider than float32 would be added
+            # at its own width and rounded after, so it is narrowed first.
             promoted = torch.promote_types(torch.float32, tensor.dtype) is torch.float32
             self._total.add_(tensor if promoted else tensor.float())
         self._count += 1
@@ -193,14 +193,18 @@ class Median(Reduction):
 
     voxel_local = True
     # THE MIDDLE IS SELECTED, NEVER SORTED. A selection network of element-wise min/max holds a
-    # window of the k+1 smallest members seen so far, in the averaging dtype: no stack, no int64
-    # indices, and the members stay in the dtype they arrived in. The attribute is the worst case
-    # the plan may see; :meth:`working_multiple_for` prices the network for the count it is handed.
+    # window of the k+1 smallest members seen so far: no stack, no int64 indices, and the members
+    # stay in the dtype they arrived in. The attribute is the worst case the plan may see;
+    # :meth:`working_multiple_for` prices the network for the count it is handed.
     working_multiple = 2.5
     #: What the hand-written networks (three to five) hold beside the members they are handed.
     _NETWORK_MULTIPLE: ClassVar[dict[int, float]] = {1: 1.0, 2: 1.5, 3: 1.0, 4: 2.5, 5: 1.5}
     #: Past five, the window: k+1 float32 buffers for k = count // 2, and the two it blends.
     _WINDOW_MULTIPLE = 1.8
+    #: Integer dtypes no wider than float32 that torch takes an element-wise min/max of on every device.
+    _SELECTED_AS_STORED: ClassVar[frozenset[torch.dtype]] = frozenset(
+        {torch.uint8, torch.int8, torch.int16, torch.int32}
+    )
 
     def working_multiple_for(self, cases: int) -> float:
         if cases > 5:
@@ -215,15 +219,25 @@ class Median(Reduction):
         dtype = _averaged_dtype(tensors[0].dtype)
         if len(tensors) == 1:
             return tensors[0].to(dtype)
-        # The members are widened one at a time as the network takes them: torch has no integer
-        # min/max kernel on the CPU.
-        low, high = self._middle_pair(tensors, dtype)
-        return low if low is high else torch.lerp(low, high, 0.5)
+        # A cast to the averaging dtype is monotone, so it commutes with min/max: members of one dtype
+        # torch selects in are selected as stored and only the middle pair is widened, without a
+        # float32 copy of every member. Any other cohort is widened first (torch has no uint16 or
+        # uint32 min/max kernel on the CPU).
+        stored = tensors[0].dtype
+        as_stored = stored in self._SELECTED_AS_STORED and all(tensor.dtype == stored for tensor in tensors)
+        low, high = self._middle_pair(tensors, stored if as_stored else dtype)
+        if low is high:
+            return low.to(dtype)
+        # Widened one after the other: the stored pair and both widened copies are never held at once.
+        low = low.to(dtype)
+        high = high.to(dtype)
+        return torch.lerp(low, high, 0.5)
 
     def _middle_pair(self, members: list[torch.Tensor], dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         """The one middle member of an odd fold (the same tensor twice), or the two an even fold
         averages: by a hand-written network up to five members, by the insertion window past it.
-        ``dtype`` is what the network computes in; the members are widened to it as they enter."""
+        ``dtype`` is what the network computes in: up to five members are widened to it together,
+        past that one at a time as the window takes them."""
         minimum, maximum = torch.minimum, torch.maximum
         count = len(members)
         if count > 5:

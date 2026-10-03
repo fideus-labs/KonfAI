@@ -1,469 +1,293 @@
 # CLI reference
 
-This page lists the main command-line entrypoints used in the repository. Use
-it as the quick map of "which command should I run?".
-
-KonfAI ships six command-line entrypoints, across four packages:
-
 | Command | Package | Purpose |
 | --- | --- | --- |
 | `konfai` | `konfai` | run a YAML workflow: train, predict, evaluate, transform |
-| `konfai-cluster` | `konfai` (submission needs the `cluster` extra) | submit those workflows to SLURM |
-| `konfai-apps` | `konfai-apps` | run a packaged App |
-| `konfai-apps-server` | `konfai-apps` | serve Apps over HTTP |
+| `konfai-cluster` | `konfai` (needs the `cluster` extra to submit) | submit those workflows to SLURM |
+| `konfai-apps` | `konfai-apps` | run a packaged app |
+| `konfai-apps-server` | `konfai-apps` | serve apps over HTTP |
 | `konfai-mcp` | `konfai-mcp` | expose KonfAI to an LLM agent |
 | `konfai-studio` | `konfai-studio` | the web UI over `konfai-mcp` |
 
 ## `konfai`
 
-Low-level workflow runner for training, prediction, evaluation, and transformation.
+| Command | Purpose | Default config | Root key |
+| --- | --- | --- | --- |
+| `TRAIN` | train a model | `./Config.yml` | `Trainer:` |
+| `RESUME` | continue training from a checkpoint | `./Config.yml` | `Trainer:` |
+| `PREDICTION` | run inference with one or more checkpoints | `./Prediction.yml` | `Predictor:` |
+| `EVALUATION` | compute metrics on saved outputs | `./Evaluation.yml` | `Evaluator:` |
+| `TRANSFORM` | prepare a dataset | `./Transform.yml` | `Transformer:` |
+| `list` | print the components a config can name | | |
 
-Use `konfai` when you are still designing a workflow directly from YAML.
+A run writes the resolved defaults back into its config file. A run that fails while building its workflow
+leaves the file as you wrote it ({doc}`../config_guide/index`).
 
-### Commands
-
-| Command | Purpose |
-| --- | --- |
-| `TRAIN` | Train a model from scratch. |
-| `RESUME` | Resume training from a checkpoint. |
-| `PREDICTION` | Run inference using one or more checkpoints. |
-| `EVALUATION` | Compute metrics on saved outputs. |
-| `TRANSFORM` | Prepare a dataset: apply a transform chain and write the result. |
-| `list` | Print the components a YAML config can reference (see below). |
-
-### Common options
-
-These apply to `TRAIN`, `RESUME`, `PREDICTION`, and `EVALUATION`. `TRANSFORM`
-builds its own parser: it takes `-c`, `-y`, `--gpu`, `--cpu` and `-q` with the
-meanings noted below, and has **no** `-tb`.
+### Options
 
 | Option | Meaning |
 | --- | --- |
-| `-c`, `--config` | YAML file to use. |
-| `-y`, `--overwrite` | Overwrite existing outputs without prompting. Under `TRANSFORM`: recompute cases whose output exists, without it such a case is skipped, and nothing prompts. |
-| `--gpu` | One or more GPU ids. |
-| `--cpu` | Number of CPU worker processes when no `--gpu` is given; the run stays on CPU unless `--gpu` is passed. Under `TRANSFORM`: shard the cases over N worker processes (default 1). |
-| `-q`, `--quiet` | Reduce console output. |
-| `-tb`, `--tensorboard` | Launch TensorBoard. Not accepted by `TRANSFORM`. |
-| `--init` | Create the config file if missing, resolve every default into it, and exit without running. |
+| `-c`, `--config` | The YAML file. |
+| `-y`, `--overwrite` | Overwrite existing outputs without asking. Under `TRANSFORM` and `PREDICTION`, recompute cases that are already written. Without it, `PREDICTION` skips them, and refuses a `Prediction.yml` or checkpoints other than the ones they were written with. |
+| `--gpu` | GPU ids (`--gpu 0 1`). Without it, the run is on the CPU. |
+| `--cpu` | Number of CPU processes when no `--gpu` is given. Under `TRANSFORM`, the number of processes sharing the cases. |
+| `-q`, `--quiet` | Less console output. |
+| `-tb`, `--tensorboard` | Start TensorBoard on `127.0.0.1` (needs the `tensorboard` extra). Not for `EVALUATION` or `TRANSFORM`. |
+| `--init` | Write the config file with every default resolved, and exit without running. |
 
-### Default config file per command
+Per command:
 
-If `-c/--config` is omitted, each command falls back to a **fixed filename in the
-current directory**:
+| Command | Options |
+| --- | --- |
+| `TRAIN` | `--checkpoints-dir` (`./Checkpoints/`), `--statistics-dir` (`./Statistics/`) |
+| `RESUME` | `--model` (required): the checkpoint; `--lr` to change the learning rate; the `TRAIN` directories |
+| `PREDICTION` | `--models` (required): one or more checkpoints, several make an ensemble; `--predictions-dir` (`./Predictions/`) |
+| `EVALUATION` | `--evaluations-dir` (`./Evaluations/`) |
+| `TRANSFORM` | `--plan` prints the plan and stops; `--transforms-dir` (`./Transforms/`) holds the run logs |
 
-| Command | Default config | Root key |
-| --- | --- | --- |
-| `TRAIN` / `RESUME` | `./Config.yml` | `Trainer:` |
-| `PREDICTION` | `./Prediction.yml` | `Predictor:` |
-| `EVALUATION` | `./Evaluation.yml` | `Evaluator:` |
-| `TRANSFORM` | `./Transform.yml` | `Transformer:` |
+The underscore spellings (`--checkpoints_dir`) also work. `konfai --version` prints the version.
 
-Reading a config rewrites it on disk: after a run your YAML holds the resolved
-defaults. See {doc}`../config_guide/index`.
+Each run prints the devices it uses (`[KonfAI] Running on cuda:0`) and, when it ends, where it wrote its
+outputs. An unknown GPU id is a usage error.
 
-### Generating a config: `--init`
-
-`konfai <COMMAND> --init` is how a config file is generated: it creates the
-command's config file when missing (seeded with its root key), binds the
-workflow once so every default resolves into the file, and exits without
-running anything. `-c` picks the filename. A binding error after partial
-resolution still leaves what resolved on disk, plus the error naming the key.
+### Generating a config
 
 ```bash
 konfai TRAIN --init -c Config.yml
 ```
 
-### `konfai list`
+`--init` creates the file if needed, fills in every default, and exits. It reads no data, so it works in an
+empty folder. What the defaults cannot decide (an output name, a `Write` destination) is printed as what is
+left to complete.
 
-`konfai list {transforms,augmentations,criteria,reductions,models,blocks}`
-prints one component family: the exact spelling a YAML config references, and
-each component's one-line doc. `konfai list models` covers both the Python
-catalog (`segmentation.UNet.UNet`) and the declarative catalog
-(`default|UNet.yml`). `list` takes none of the run flags and loads no torch for
-`--help`.
+### Listing components
 
-### Command-specific options
+```bash
+konfai list transforms
+```
 
-`TRAIN`
-
-- `--checkpoints-dir` / `--checkpoints_dir` (default `./Checkpoints/`)
-- `--statistics-dir` / `--statistics_dir` (default `./Statistics/`)
-
-`RESUME`
-
-- `--model`: checkpoint path to resume from (**required**)
-- `--lr`: override the learning rate on resume (omit to keep the checkpoint LR)
-- `--checkpoints-dir` / `--statistics-dir`: as for TRAIN
-
-`PREDICTION`
-
-- `--models`: one or more checkpoint paths (**required**); multiple = ensemble
-- `--predictions-dir` / `--predictions_dir` (default `./Predictions/`)
-
-`EVALUATION`
-
-- `--evaluations-dir` / `--evaluations_dir` (default `./Evaluations/`)
-
-`TRANSFORM`
-
-- `--plan`: print the per-case streaming plan and exit. The plan probes each
-  destination with a real region-write open, so its verdict is the run's own,
-  then takes back what the probe created: the entry, and the store itself when
-  it did not exist before. It also reads the config the way a run does, which
-  resolves the defaults back into `Transform.yml`; copy the file first to keep
-  the text you wrote.
-- `--transforms-dir` / `--transforms_dir` (default `./Transforms/`): run logs;
-  the outputs go where each `Write:` says. `--plan` prints and writes nothing
-  there.
-- `--gpu`: each rank runs its chain on its device, in taller slabs than on a
-  CPU, and writes the same bytes; a `KonfAIInference` stage runs its nested
-  inference there too. There is no `-tb`: the workflow emits no scalars.
-- `--plan` short-circuits before the distributed wrapper, so it runs in one
-  process and spawns no ranks. `--cpu` and `--gpu` are still read: the plan is
-  sized for the run's world size (one rank per GPU, else `--cpu` ranks), and an
-  `auto` budget is the node's memory split across that many ranks, so
-  `--plan --cpu 4` reports the per-rank budget a four-process run would actually
-  get. An explicit `memory_budget` is already per rank and is not divided. The
-  plan is the requested output, so `-q` does not silence it. `konfai-cluster`
-  refuses `--plan`: a plan submits nothing.
-
-The default is **CPU**: `--gpu` defaults to an empty list, so pass `--gpu 0` to
-use a card. An id that is not among the visible CUDA devices is a usage error
-(exit code 2), checked once the command is dispatched so that `--help` never
-loads torch. `--cpu` must be greater than 0. Unless `-q` is passed, every run
-prints one startup line naming the resolved devices (`[KonfAI] Running on
-cuda:0`, or `[KonfAI] Running on CPU (4 workers)`), so a silent CPU fallback on
-a GPU machine is visible.
-`--version` works on the root parser, `konfai --version`, not on a subcommand.
+`konfai list {transforms,augmentations,criteria,reductions,schedulers,models,blocks}` prints the exact names
+a config can use, with one line of description each. `konfai list models` covers the Python models
+(`segmentation.UNet.UNet`) and the YAML catalog (`default|UNet.yml`).
 
 ### How a run is launched
 
-Every workflow runs under the distributed runtime in `konfai.utils.runtime`: it
-sets `CUDA_VISIBLE_DEVICES` from `--gpu`, handles the overwrite and verbosity
-flags, launches TensorBoard when requested, spawns one worker process per
-device with `torch.multiprocessing.spawn` and initializes `torch.distributed`
-on a free local TCP port. Even a local multi-process run uses that bootstrap,
-for the workflows that need a process group: TRAIN, PREDICTION and EVALUATION.
-TRANSFORM ranks are independent, each writing its own shard, so they are
-spawned without one: no port, no rendezvous, and a rank that fails takes down
-nothing but its own shard. The `KONFAI_*` variables the wrappers set on the way
-are listed under [Environment variables](#environment-variables).
+A run with one device runs in the current process. With several, KonfAI starts one process per device.
+Training and evaluation connect them through `torch.distributed`; prediction and transform processes work
+on their own cases independently. On Windows, `TRAIN`, `RESUME` and `EVALUATION` run on one process only.
+
+No workflow lets several processes write to a single-file format (`h5`). Ctrl+C stops a run with exit code
+130. A process killed by the system for lack of memory ends the run with a message saying so.
 
 ## `konfai-apps`
 
-Higher-level packaged workflow runner.
-
-Use `konfai-apps` when a workflow is already packaged as a KonfAI App and you
-want a simpler interface than the low-level YAML CLI.
-
-This command is provided by the standalone `konfai-apps` package.
-
-### Commands
+Runs a packaged app ({doc}`../usage/apps`).
 
 | Command | Purpose |
 | --- | --- |
-| `infer` | Run inference for an app. |
-| `eval` | Run evaluation for an app. |
-| `uncertainty` | Run uncertainty estimation for an app. |
-| `pipeline` | Chain inference, evaluation, and optional uncertainty. **`--gt` is required**: it always evaluates. |
-| `fine-tune` | Fine-tune an app on a dataset. |
-| `bundle` | Assemble an app bundle (HF layout), optionally with a portable ONNX model. |
-| `download` | Pre-fetch an app's files from Hugging Face into the local cache (offline use). |
+| `infer` | run inference |
+| `eval` | evaluate against a ground truth |
+| `uncertainty` | estimate uncertainty |
+| `pipeline` | inference, evaluation, and optionally uncertainty; `--gt` is required |
+| `fine-tune` | fine-tune the app on a dataset |
+| `bundle` | build an app bundle, optionally with an ONNX model |
+| `download` | download an app's files for offline use |
 
-`bundle` and `download` have their own signatures: neither takes `app` nor the
-shared options below. `bundle NAME` requires `--out`, `--app-json`, `--config` and
-`--checkpoint`, and its `--patch-size` sizes the ONNX export rather than
-inference. `download APP [FILES…]` takes `--no-force-update`. Run `--help` on either for
-the full signature.
-
-### Shared options
+Options shared by `infer`, `eval`, `uncertainty`, `pipeline` and `fine-tune`:
 
 | Option | Meaning |
 | --- | --- |
-| `app` | App identifier or repository path. |
-| `--host`, `--port`, `--token` | Switch from local app execution to remote server mode. |
-| `-i`, `--inputs` | Input paths, grouped by repeated flag occurrences. |
+| `app` | The app: a Hugging Face `repo:app`, a local folder, or a server's app. |
+| `--host`, `--port`, `--token` | Run on a `konfai-apps-server` instead of locally. |
+| `-i`, `--inputs` | Input files; repeat the flag for each input group. |
 | `-o`, `--output` | Output directory. |
-| `--gpu` / `--cpu` | Device selection: **mutually exclusive**, as on the `konfai` CLI. |
-| `--tmp-dir` (alias: `--tmp_dir`) | Where intermediate artifacts are written. On `infer`, `eval`, `uncertainty` and `pipeline` only. |
-| `-q`, `--quiet` | Reduce console output. |
-| `--download` | Pre-download the full app locally. |
-| `--force_update` | Force an updated app download. |
+| `--gpu` / `--cpu` | The device (one or the other). |
+| `--tmp-dir` | Where intermediate files go. |
+| `-q`, `--quiet` | Less output. |
+| `--download` | Download the whole app first. |
+| `--force_update` | Download the app again. |
 
-### Important command-specific options
+Per command:
 
-`infer`
+| Command | Options |
+| --- | --- |
+| `infer` | `--ensemble` or `--ensemble-models`, `--tta`, `-uncertainty`, `--prediction-file` |
+| `eval` | `--gt`, `--mask`, `--evaluation-file` |
+| `uncertainty` | `--uncertainty-file` |
+| `pipeline` | those of `infer`, `eval` and `uncertainty` |
+| `fine-tune` | `name`, `-d/--dataset`, `--models` (which checkpoints), `--epochs`, `--it-validation`, `--lr`, `--batch-size`, `--config` |
 
-- `--ensemble` / `--ensemble-models`: **mutually exclusive**
-- `--tta`
-- `--mc`
-- `-uncertainty`
-- `--prediction-file` (alias: `--prediction_file`)
+`bundle NAME` takes `--out`, `--app-json`, `--config` and `--checkpoint`. `download APP [FILES…]` takes
+`--no-force-update`. Run `--help` on either for details.
 
-`eval`
+### Tuning an app without editing it
 
-- `--gt`
-- `--mask`
-- `--evaluation-file` (alias: `--evaluation_file`)
-
-`uncertainty`
-
-- `--uncertainty-file` (alias: `--uncertainty_file`)
-
-`pipeline`
-
-- combines the options from `infer`, `eval`, and `uncertainty`
-- `--gt` is **required** here (unlike the per-app `pipeline` shims, where it is optional)
-
-`fine-tune`
-
-- positional `name`
-- `-d`, `--dataset`
-- `--models`: checkpoint name(s) to fine-tune, e.g. `CV_0 CV_1` (default: first available)
-- `--epochs`
-- `--it-validation`
-- `--lr`: override the learning rate; omitted, the checkpoint's is resumed
-- `--batch-size`: override the training batch size (`Trainer.Dataset.batch_size`)
-- `--set`: the same config overrides as `infer` (see below)
-- `--config` (aliases: `--config-file`, `--config_file`)
-
-### Tuning a preset (`--set`, `--patch-size`, `--batch-size`)
-
-`infer` and `pipeline` accept all three overrides below; `fine-tune` accepts
-`--set` and `--batch-size` (plus its own `--lr`, `--epochs` and `--it-validation`,
-with `--batch-size` writing the training `Trainer.Dataset.batch_size`). They let
-you adapt a published App without editing its bundled config:
+`infer` and `pipeline` take the three options below; `fine-tune` takes `--set` and `--batch-size`:
 
 | Option | Meaning |
 | --- | --- |
-| `--set NAME=VALUE` | Override any config value (repeatable). A bare `NAME` tunes a model parameter (`--set iterations=300`); a dotted `NAME` is a full path from the config root (`--set Predictor.Dataset.batch_size=2`). The value is parsed as YAML (int / float / bool / list / string). |
-| `--patch-size` | Override the inference `Patch.patch_size` (one value = an isotropic cube; else per-axis). |
-| `--batch-size` | Override the inference batch size. Without it the app's config decides: `batch_size: 0` measures the batch on the GPU. |
+| `--set NAME=VALUE` | Change a config value (repeatable). A bare name changes a model parameter (`--set iterations=300`), a dotted one a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |
+| `--patch-size` | The inference patch size (one value for a cube). |
+| `--batch-size` | The batch size. Without it, the app decides (`batch_size: 0` measures it on the GPU). |
 
-These are the same knobs SlicerKonfAI drives through its ⚙ **Advanced** dialog.
-
-These overrides work in remote mode too (`--host …`). Each operation declares
-which tunables the server must carry: `infer` and `pipeline` forward `patch_size`,
-`batch_size` and `config_overrides`, `fine-tune` forwards `batch_size` and
-`config_overrides`. The
-client refuses the submission when the server does not echo them back in
-`accepted_options`, so a server too old to honour a tunable fails loudly instead
-of ignoring it.
+They also work on a remote server; a server that does not support one refuses the job.
 
 ## `konfai-apps-server`
 
-FastAPI server exposing packaged apps remotely.
-
-This command is the server-side counterpart of `konfai-apps --host ...`.
-It is also provided by the standalone `konfai-apps` package.
-
-Important options:
+Serves apps over HTTP, for `konfai-apps --host …` ({doc}`app-server-api`).
 
 | Option | Meaning |
 | --- | --- |
-| `--host` | Bind address. |
-| `--port` | Bind port. |
+| `--host`, `--port` | Bind address and port. |
 | `--auth` | `off` or `bearer`. |
-| `--token-env` | Environment variable holding the token. |
-| `--token` | Development-only token override. |
-| `--apps` | JSON file listing the available apps. |
-| `--download` | Pre-download configured apps at startup. |
-| `--check` | Validate configured apps without downloading them. |
+| `--token-env` | The environment variable holding the token. |
+| `--token` | A token on the command line, for development. |
+| `--apps` | A JSON file listing the apps. |
+| `--download` | Download the apps at startup. |
+| `--check` | Check the apps and exit without serving. |
 
 ## `konfai-cluster`
 
-Cluster-oriented wrapper around the low-level `konfai` commands: it takes the
-same workflow arguments and submits them to SLURM through `submitit`. The
-command ships with the core package; submitting needs `submitit`, which the
-`cluster` extra installs.
+Submits a `konfai` workflow to SLURM. Its options go **before** the workflow command:
+
+```bash
+konfai-cluster --name my_job --num-nodes 2 TRAIN -y --gpu 0 1 --config Config.yml
+```
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--name` | **required** | SLURM job name. |
-| `--num-nodes` | `1` | Nodes to request. |
+| `--name` | required | Job name. |
+| `--num-nodes` | `1` | Nodes. |
 | `--memory` | `16` | Memory per node, in GB. |
-| `--time-limit` | `1440` | Wall-clock limit, in minutes. |
+| `--time-limit` | `1440` | Time limit, in minutes. |
 
-Otherwise `konfai-cluster` takes the same subcommands and arguments as `konfai`.
-**The cluster options come before the subcommand**: they sit on the top-level
-parser, so putting them after it fails with `the following arguments are
-required: --name`:
-
-```bash
-konfai-cluster --name my_job --num-nodes 2 TRAIN -y --config Config.yml
-```
+`--gpu` is required: the job runs one process per listed GPU on each node. `--plan` is refused (a plan
+submits nothing).
 
 ## `konfai-mcp`
 
-Runs the MCP server that exposes KonfAI to an LLM agent. Every option also reads
-an environment variable, so a client that can only set `env` can configure the
-server without arguments: see [Environment variables](#environment-variables).
+Runs the MCP server ({doc}`../usage/mcp`). Every option but `--i-know-this-is-insecure` also has an
+environment variable ([below](#konfai-mcp-variables)).
 
 | Option | Meaning |
 | --- | --- |
-| `--transport` | `stdio` (default), `sse`, or `streamable-http`. |
-| `--session` | Default session name for this server process. |
-| `--workspace-root` | Directory holding MCP sessions and datasets. |
-| `--log-tail-lines` | Default maximum lines returned by log-tail helpers. |
-| `--host` / `--port` | Bind address and port, for the SSE/HTTP transports. |
-| `--path` | HTTP path prefix, for the SSE/HTTP transports. |
-| `--log-level` | FastMCP/Uvicorn log level, where the transport supports it. |
-| `--bearer-token` | Token required by the SSE/HTTP transports. |
+| `--transport` | `stdio` (default), `sse` or `streamable-http`. |
+| `--session` | Default session name. |
+| `--workspace-root` | Where sessions and datasets live. |
+| `--log-tail-lines` | Default number of log lines returned. |
+| `--host`, `--port`, `--path` | Bind address, port and path, for SSE and HTTP. |
+| `--log-level` | Server log level. |
+| `--bearer-token` | Token required over SSE and HTTP. |
+| `--stateless-http` | Streamable HTTP without sessions, for replicas behind a load balancer. |
+| `--json-response` | Answer in plain JSON instead of an event stream, for buffering proxies. |
+| `--i-know-this-is-insecure` | Allow a network address without a token. |
+
+```{warning}
+Over SSE or HTTP, a network address without a bearer token is refused: anyone on the network could run jobs
+and read files. On loopback without a token, the server only answers `127.0.0.1`, `localhost` and `::1`.
+```
 
 ## `konfai-studio`
 
-Launches the Studio web UI and its BFF. Binds loopback by default; anything else
-requires authentication, because Studio drives arbitrary host compute.
+Runs the Studio web UI ({doc}`../usage/studio`).
 
 | Option | Meaning |
 | --- | --- |
-| `--host` / `--port` | Bind address (default `127.0.0.1`) and port (default `8730`). |
-| `--proxy-headers` | Trust `X-Forwarded-*`; set this behind nginx or Caddy. |
-| `--forwarded-allow-ips` | Proxy IPs allowed to set those headers (default `127.0.0.1`). |
-| `--ssl-certfile` / `--ssl-keyfile` | Serve HTTPS directly; the two go together. |
-| `--i-know-this-is-insecure` | Bind a public address with no `KONFAI_STUDIO_TOKEN`. |
+| `--host`, `--port` | Bind address (`127.0.0.1`) and port (`8730`). |
+| `--proxy-headers` | Trust `X-Forwarded-*`, behind nginx or Caddy. |
+| `--forwarded-allow-ips` | Proxies allowed to set them (`127.0.0.1`). |
+| `--ssl-certfile`, `--ssl-keyfile` | Serve HTTPS. |
+| `--i-know-this-is-insecure` | Allow a network address without `KONFAI_STUDIO_TOKEN`. |
 
 ```{warning}
-Binding a non-loopback address without `KONFAI_STUDIO_TOKEN` is refused, not
-warned about: an unauthenticated Studio is a shell on the host. Set a token and
-serve over TLS: see `konfai-studio/docs/REMOTE.md`.
+Studio runs code on the host. A network address without `KONFAI_STUDIO_TOKEN` is refused. Set a token and
+serve over TLS (`konfai-studio/docs/REMOTE.md`).
 ```
 
-## ONNX export is not a subcommand
+## Exit codes
 
-`konfai/export.py` can export a trained model to ONNX (+ a manifest) for the
-`konfai-rs` portable-inference path, but it is a **Python-API-only** feature: there is no `konfai export` subcommand. See {doc}`../usage/python-api`.
+`konfai`, `konfai-cluster`, `konfai-apps` and the app CLIs share one convention:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success. |
+| `1` | The command ran and failed (a refusal or an error). |
+| `2` | Usage error: a missing or invalid argument. |
+| `130` | Interrupted by Ctrl+C. |
+
+A process stopped by a signal ends with it (a shell shows 128 plus the signal number). `impact-reg-konfai`
+does not use `130` yet. The servers exit with `0` on Ctrl+C; `konfai-mcp` on `stdio` exits with `130`, or on
+its own when its client closes.
+
+ONNX export has no subcommand: it is a Python function ({doc}`../usage/python-api`).
 
 ## Environment variables
 
-This section catalogues the environment variables KonfAI reads or sets: the
-user-facing ones you may set yourself, and the `KONFAI_*` runtime variables the
-CLI wrappers manage. Reach for it when a run behaves differently across shells
-or machines, or when you are debugging the runtime wrappers themselves.
-
-### User-facing variables
-
-#### `CUDA_VISIBLE_DEVICES`
-
-Controls which GPUs are visible to PyTorch and therefore to KonfAI.
-
-KonfAI also rewrites this variable internally when you pass `--gpu`.
-
-#### `KONFAI_API_TOKEN`
-
-Bearer token used by:
-
-- `konfai-apps` in remote mode
-- `konfai-apps-server` in bearer-auth mode
-
-#### `KONFAI_APPS_INSTALL_REQUIREMENTS`
-
-Set to `0` to stop `konfai-apps` from pip-installing a resolved app's
-`requirements.txt` (installed by default; core packages are never touched).
-This is a **trust-model** switch: see the apps guide.
-
-#### Streaming and write-path switches
-
-Diagnostic kill-switches for the streamed prediction writer. Defaults are the
-streamed behavior; set to `0`/a value only to compare against the whole-volume
-path or to tune the gate.
+### Variables you may set
 
 | Variable | Effect |
 | --- | --- |
-| `KONFAI_STREAMED_WRITES` | `0` disables streamed writes entirely (whole-volume reference path). |
-| `KONFAI_STREAM_WORTH_THRESHOLD` | Overrides the "worth streaming" accumulator-size threshold (fraction of the per-rank memory budget). Test harnesses set `0` to force the streamed machinery on toy volumes. |
-| `KONFAI_ASYNC_WRITES` | Controls the background writer for disjoint-file sinks. |
-| `KONFAI_INLINE_SINGLE_RANK` | Default on. `0` forces a single rank through the spawn path instead of running it in-process: useful when a host process must keep its own CUDA context. |
+| `CUDA_VISIBLE_DEVICES` | Which GPUs are visible. KonfAI sets it from `--gpu`; GPUs named by UUID are refused. |
+| `KONFAI_API_TOKEN` | Bearer token of `konfai-apps` in remote mode and of `konfai-apps-server`. |
+| `KONFAI_APPS_INSTALL_REQUIREMENTS` | `0` stops `konfai-apps` from installing an app's `requirements.txt` ({doc}`../usage/apps`). |
+| `KONFAI_APPS_MAX_DATASET_BYTES` | Largest fine-tune dataset `konfai-apps-server` accepts (default 64 GiB; above, HTTP 413). |
+| `KONFAI_DECOMPRESSED_DIRECTORY` | Where compressed images are decompressed for region reads (default `~/.cache/konfai/decompressed`). |
+| `KONFAI_TENSORBOARD_HOST` | The address TensorBoard binds (default `127.0.0.1`). TensorBoard has no authentication: from another machine, forward the port with `ssh -N -L <port>:127.0.0.1:<port> user@server`. |
+| `KONFAI_DEBUG` | `1` shows the full traceback of a KonfAI refusal, and records the last layer reached in `KONFAI_DEBUG_LAST_LAYER`. |
+| `KONFAI_STREAMED_WRITES` | `0` turns off streamed prediction writes, to compare against. |
+| `KONFAI_STREAM_WORTH_THRESHOLD` | The output size above which prediction streams, as a share of the budget (`0` always streams). |
+| `KONFAI_ASYNC_WRITES` | Turns the background writer on or off. |
+| `KONFAI_INLINE_SINGLE_RANK` | `0` runs a single process through the multi-process path, for a host that keeps its own CUDA context. |
 
-#### Hugging Face authentication
+Hugging Face's own variables (`HF_TOKEN`, `HF_HUB_OFFLINE`, …) apply to app downloads.
 
-The repository and CI also rely on Hugging Face-hosted assets. KonfAI itself
-uses `huggingface_hub`, so standard Hugging Face authentication variables may be
-relevant in practice, but they are not KonfAI-specific.
+### Variables KonfAI sets
 
-### Runtime variables set by KonfAI
+The CLI sets these for the run; you do not set them yourself.
 
-**These variables are normally set by the CLI wrappers and are not expected to
-be managed manually in day-to-day usage.**
+| Variable | Purpose |
+| --- | --- |
+| `KONFAI_config_file`, `KONFAI_ROOT`, `KONFAI_STATE` | The config file, its root key and the command. |
+| `KONFAI_CHECKPOINTS_DIRECTORY`, `KONFAI_STATISTICS_DIRECTORY`, `KONFAI_PREDICTIONS_DIRECTORY`, `KONFAI_EVALUATIONS_DIRECTORY`, `KONFAI_TRANSFORMS_DIRECTORY` | The output directories. |
+| `KONFAI_OVERWRITE`, `KONFAI_VERBOSE` | `-y` and the inverse of `-q`. |
+| `KONFAI_TENSORBOARD_PORT` | The TensorBoard port. |
+| `KONFAI_CLUSTER` | Set under `konfai-cluster`. |
+| `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH` | The config binder's state. |
+| `KONFAI_APPS_CONFIG` | The config an app runs. |
+| `KONFAI_MASTER_PORT` | The port processes meet on. |
+| `KONFAI_LOCAL_RANKS` | How many processes share the machine's memory budget. |
+| `KONFAI_DECOMPRESSED_RUN` | This run's folder of decompressed images, removed at the end. |
 
-| Variable | Set by | Purpose |
+### konfai-mcp variables
+
+| Variable | Option | Effect |
 | --- | --- | --- |
-| `KONFAI_config_file` | workflow wrappers | Active YAML file path. |
-| `KONFAI_ROOT` | workflow wrappers | Root config object: `Trainer`, `Predictor`, `Evaluator`, or `Transformer`. |
-| `KONFAI_STATE` | workflow wrappers | Active workflow state: `TRAIN`, `RESUME`, `PREDICTION`, `EVALUATION`, or `TRANSFORM`. |
-| `KONFAI_CHECKPOINTS_DIRECTORY` | training wrapper | Checkpoint output directory. |
-| `KONFAI_STATISTICS_DIRECTORY` | training wrapper | Statistics output directory. |
-| `KONFAI_PREDICTIONS_DIRECTORY` | prediction wrapper | Prediction output directory. |
-| `KONFAI_EVALUATIONS_DIRECTORY` | evaluation wrapper | Evaluation output directory. |
-| `KONFAI_TRANSFORMS_DIRECTORY` | transform wrapper | Transform run logs and plan directory. |
-| `KONFAI_OVERWRITE` | distributed wrapper | Mirrors the `--overwrite` flag. |
-| `KONFAI_TENSORBOARD_PORT` | distributed wrapper | Selected TensorBoard port. |
-| `KONFAI_VERBOSE` | distributed wrapper | Mirrors the inverse of `--quiet`. |
-| `KONFAI_CLUSTER` | cluster wrapper | Marks cluster execution. |
+| `KONFAI_MCP_WORKSPACES_ROOT` | `--workspace-root` | Where sessions and datasets live. |
+| `KONFAI_MCP_SESSION` | `--session` | Default session name. |
+| `KONFAI_MCP_TRANSPORT` | `--transport` | `stdio`, `sse` or `streamable-http`. |
+| `KONFAI_MCP_HOST`, `KONFAI_MCP_PORT` | `--host`, `--port` | Bind address and port. |
+| `KONFAI_MCP_PATH` | `--path` | HTTP path. |
+| `KONFAI_MCP_BEARER_TOKEN` | `--bearer-token` | Token over SSE and HTTP. |
+| `KONFAI_MCP_LOG_LEVEL` | `--log-level` | Log level. |
+| `KONFAI_MCP_LOG_TAIL_LINES` | `--log-tail-lines` | Default number of log lines. |
+| `KONFAI_MCP_STATELESS_HTTP`, `KONFAI_MCP_JSON_RESPONSE` | `--stateless-http`, `--json-response` | `1` turns them on. |
+| `KONFAI_MCP_APP_CATALOG` | | A JSON file of app sources added to the catalogue ({doc}`../usage/mcp`). |
+| `KONFAI_MCP_SUBPROCESS_TIMEOUT` | | Seconds a validation or plan may take (default `1800`, `0` for no limit). |
+| `KONFAI_MCP_VALIDATE_ROOT` | | Scratch folder of `validate_workflow_api` when called directly. |
 
-### Internal debug/config variables
+The option wins over the variable.
 
-The codebase also references internal variables such as:
-
-- `KONFAI_CONFIG_MODE`, `KONFAI_CONFIG_PATH`: the config binder's mode machine
-- `KONFAI_APPS_CONFIG`
-- `KONFAI_DEBUG`: `1` re-attaches the framework traceback to a designed refusal (a
-  `KonfAIError`), which otherwise prints its message and remedy alone
-- `KONFAI_DEBUG_LAST_LAYER`: set it (empty) before a run and the network appends each module
-  it enters, so after a crash it names the last layer reached
-- `KONFAI_MASTER_PORT`: distributed rendezvous bookkeeping
-- `KONFAI_LOCAL_RANKS`: how many ranks share one node's RAM, published by the
-  launcher so a node-scoped `memory_budget` is divided before the spawn. It changes
-  the cache-versus-stream decision, so it is not mere bookkeeping.
-- `KONFAI_ATTR_KEY`, `KONFAI_DEPS`, `KONFAI_COMPONENT_BASES`, `KONFAI_VERSION`
-
-These are part of KonfAI's internal execution model and are best treated as
-implementation details unless you are actively extending the framework.
-
-### konfai-mcp
-
-Every `konfai-mcp` command-line option has a matching variable, so an MCP client
-that can only set `env` configures the server without arguments. The option wins
-when both are given.
-
-| Variable | Equivalent option | Effect |
-| --- | --- | --- |
-| `KONFAI_MCP_WORKSPACES_ROOT` | `--workspace-root` | Directory holding MCP sessions and datasets. |
-| `KONFAI_MCP_SESSION` | `--session` | Default session name for this server process. |
-| `KONFAI_MCP_TRANSPORT` | `--transport` | `stdio` (default), `sse`, or `streamable-http`. |
-| `KONFAI_MCP_HOST` / `KONFAI_MCP_PORT` | `--host` / `--port` | Bind address and port, for the SSE/HTTP transports. |
-| `KONFAI_MCP_PATH` | `--path` | HTTP path prefix, for those same transports. |
-| `KONFAI_MCP_BEARER_TOKEN` | `--bearer-token` | Token required by the SSE/HTTP transports. |
-| `KONFAI_MCP_LOG_LEVEL` | `--log-level` | FastMCP/Uvicorn log level. |
-| `KONFAI_MCP_LOG_TAIL_LINES` | `--log-tail-lines` | Default maximum lines returned by log-tail helpers. |
-
-An invalid `KONFAI_MCP_TRANSPORT` is rejected at startup rather than passed
-through. A few further `KONFAI_MCP_*` names configure internals with no option of
-their own (the app catalog, the subprocess timeout, the validation root) and
-are covered in {doc}`../usage/mcp`.
-
-### KonfAI Studio
-
-`konfai-studio` reads its own family. The first two are security-relevant: Studio
-drives arbitrary host compute, so binding a non-loopback address without a token is
-refused unless you override it. See `konfai-studio/docs/REMOTE.md`.
+### KonfAI Studio variables
 
 | Variable | Effect |
 | --- | --- |
-| `KONFAI_STUDIO_TOKEN` | Shared bearer token. **Unset means no authentication**, which is why a non-loopback bind is refused without it. |
-| `KONFAI_STUDIO_INSECURE_COOKIE` | Drops the `Secure` flag on the session cookie, for plain-HTTP testing only. |
-| `KONFAI_STUDIO_LLM` | Which backend drives the agent (for example `anthropic`, or an OpenAI-compatible server). |
-| `KONFAI_STUDIO_LLM_API_KEY` | Key for that backend. |
-| `KONFAI_STUDIO_LLM_BASE_URL` | Base URL of an OpenAI-compatible server (vLLM / Ollama / LM Studio). |
-| `KONFAI_STUDIO_MODEL` | Main model id. |
-| `KONFAI_STUDIO_SIDE_MODEL` | Model used for the cheaper side calls. |
-| `KONFAI_STUDIO_MAX_TOKENS` | Per-response token ceiling. |
-| `KONFAI_STUDIO_MAX_TURNS` | Agent-loop turn ceiling. |
-| `KONFAI_STUDIO_TERMINAL` | Enables the in-app terminal. |
-
-## Next steps
-
-- {doc}`components/models`: the component names those YAML configs can reference
-- {doc}`../usage/apps`: the guided workflow behind `konfai-apps`
-- {doc}`../usage/python-api`: the same workflows as Python callables
+| `KONFAI_STUDIO_TOKEN` | Shared bearer token. Unset means no authentication, so a network address is refused. |
+| `KONFAI_STUDIO_INSECURE_COOKIE` | Drop the cookie's `Secure` flag, for plain-HTTP tests. |
+| `KONFAI_STUDIO_LLM` | Which LLM backend drives the agent (`anthropic`, or an OpenAI-compatible server). |
+| `KONFAI_STUDIO_LLM_API_KEY` | Its key. |
+| `KONFAI_STUDIO_LLM_BASE_URL` | The URL of an OpenAI-compatible server (vLLM, Ollama, LM Studio). |
+| `KONFAI_STUDIO_MODEL`, `KONFAI_STUDIO_SIDE_MODEL` | The main model and the one for cheaper side calls. |
+| `KONFAI_STUDIO_MAX_TOKENS`, `KONFAI_STUDIO_MAX_TURNS` | Limits per answer and per agent loop. |
+| `KONFAI_STUDIO_TERMINAL` | Turn on the in-app terminal. |
+| `KONFAI_STUDIO_SLICER` | The 3D Slicer executable to launch (default: `Slicer` on `PATH`). |
+| `KONFAI_STUDIO_PROXY_HEADERS`, `KONFAI_STUDIO_LOOPBACK` | Set by `konfai-studio` itself from its options. |

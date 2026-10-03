@@ -1,6 +1,6 @@
 # Examples
 
-Every example here is a notebook you can **open and run top to bottom**. Each one downloads (or
+Every example here but the Quickstart is a notebook you can **open and run top to bottom**. Each one downloads (or
 generates) its own data, runs the real KonfAI commands, and ends by showing you the result. Nothing
 is hidden behind a flag you have to flip.
 
@@ -8,6 +8,13 @@ They all work from a fresh environment, including **Google Colab**: click the ba
 README, then *Runtime > Run all*.
 
 ## Start here
+
+Start with [`Segmentation/TwoClasses`](Segmentation/TwoClasses/), the
+[Quickstart](https://konfai.readthedocs.io/en/latest/quickstart.html): a two-class segmentation
+trained, predicted and evaluated on four synthetic cases, on one CPU, with a check of every file it
+writes. It is the one example run from a shell rather than a notebook.
+
+## The framework examples
 
 These four are the framework itself: a YAML config, the `konfai` CLI, and nothing else.
 
@@ -18,7 +25,7 @@ These four are the framework itself: a YAML config, the `konfai` CLI, and nothin
 | [`Synthesis`](Synthesis/) | Turn an MR volume into a synthetic CT, scored with MAE / PSNR / SSIM inside the body mask. | ~7 min |
 | [`Transform`](Transform/) | Fold a cohort into one template, and expand each case into drawn copies: dataset preparation. | ~1 min, CPU |
 
-`Registration` is the shortest way to see the whole `TRAIN -> PREDICTION -> EVALUATION` loop.
+Of these four, `Registration` is the shortest way to see the whole `TRAIN -> PREDICTION -> EVALUATION` loop.
 `Segmentation` is the best template to copy for your own data. `Synthesis` shows the richer patterns:
 a custom Python model, a perceptual loss, test-time augmentation, and an optional GAN variant.
 `Transform` is the odd one out and the quickest: dataset preparation, nothing to train first, nothing to download. It is the
@@ -60,13 +67,14 @@ Every notebook only calls the CLI, so you can do the same by hand. From `Segment
 
 ```bash
 konfai TRAIN      -y --gpu 0 --config Config.yml
-konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/*.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/[0-9]*.pt
 konfai EVALUATION -y          --config Evaluation.yml
 ```
 
 `SEG_BASELINE` is that example's `train_name`; `Registration` uses `REG_BASELINE` and `Synthesis`
 `TRAIN_01`. Checkpoints are named after the moment they were written, so the glob is what saves you
-looking the filename up.
+looking the filename up. It starts with a digit to match that dated file only: `resume_latest.pt` beside it
+is a training continuation, and naming both runs an ensemble of the two.
 
 Each run writes a workspace keyed by `train_name`: `Checkpoints/`, `Statistics/` (TensorBoard logs
 and the resolved config), `Predictions/`, and `Evaluations/` (the metric JSON).

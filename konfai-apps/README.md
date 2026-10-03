@@ -35,13 +35,19 @@ From PyPI:
 python -m pip install konfai-apps
 ```
 
+The HTTP job server is an extra; running apps, locally or against a server, does not need it:
+
+```bash
+python -m pip install "konfai-apps[server]"
+```
+
 From a local checkout of this monorepo:
 
 ```bash
 git clone https://github.com/fideus-labs/KonfAI.git
 cd KonfAI
 python -m pip install -e .
-python -m pip install -e ./konfai-apps
+python -m pip install -e "./konfai-apps[server]"
 ```
 
 Check the entrypoints:
@@ -181,16 +187,17 @@ client = KonfAIAppClient(
 
 ## Remote Server
 
-`konfai-apps-server` exposes packaged apps through a FastAPI service.
+`konfai-apps-server` exposes packaged apps through a FastAPI service (the `server` extra).
 
-Minimal example:
+Minimal example, `apps.json` listing the apps the server exposes:
 
 ```bash
+echo '{"apps": ["VBoussot/ImpactSynth:CBCT"]}' > apps.json
 export KONFAI_API_TOKEN="secret"
 konfai-apps-server \
   --host 0.0.0.0 \
   --port 8000 \
-  --apps ./konfai-apps/tests/assets/apps.json
+  --apps apps.json
 ```
 
 Once the server is running, the client switches to remote mode as soon as
@@ -257,13 +264,13 @@ Install both packages in editable mode:
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ./konfai-apps
+python -m pip install -e "./konfai-apps[server]"
 ```
 
 Run the package test suite:
 
 ```bash
-pytest -q konfai-apps/tests
+pytest konfai-apps/tests
 ```
 
 The tests are split into:

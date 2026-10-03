@@ -27,9 +27,15 @@ on:
 permissions:
   contents: read
 
+# Only a pull request's runs share a group: a newer push cancels the run it supersedes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   konfai_apps_ci:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     env:
       HF_HOME: ${{ github.workspace }}/.cache/huggingface
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/.cache/huggingface/hub
@@ -86,15 +92,15 @@ jobs:
 
       - name: Install standalone apps package
         run: |
-          pip install -e ./konfai-apps
+          pip install -e "./konfai-apps[server]"
 
       - name: Run apps tests
         run: |
-          python -m pytest -q konfai-apps/tests
+          python -m pytest konfai-apps/tests
 
       - name: Install app bundles
-        # Editable, so each bundle's scm-derived `konfai==`/`konfai-apps==` pin resolves against
-        # the editable installs above (both sides derive the same version from this checkout).
+        # From a checkout each bundle pins `konfai>=`/`konfai-apps>=` the closest release tag (`>=0.0`
+        # in this tagless shallow clone), which the editable installs above satisfy.
         shell: bash
         run: |
           for app in apps/*/; do pip install -e "./$app"; done

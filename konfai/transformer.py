@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import time
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,14 +59,15 @@ from konfai.utils.budget import (
     format_bytes,
     node_local_ranks,
     record_resident_floor,
+    resident_floor,
     run_peak_resident_bytes,
     set_per_rank_budget,
     sweep_share,
 )
 from konfai.utils.config import apply_config, config, strict_config
-from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import ConfigError, DatasetManagerError, TransformerError
-from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache
+from konfai.utils.dataset import Attribute, Dataset, refuse_shared_single_file
+from konfai.utils.errors import ConfigError, DatasetManagerError, KonfAIWarning, TransformerError
+from konfai.utils.ome_zarr import CHUNK_CACHE_FLOOR, bound_chunk_cache, chunk_cache_counts
 from konfai.utils.runtime import (
     DistributedObject,
     State,
@@ -375,7 +377,13 @@ class Transformer(DistributedObject):
         # What the RANK may hold, beside _budget_bytes which is the share left for the work: the
         # closing line judges the process's peak against the first, the sizing spends the second.
         self._rank_budget_bytes: float = 0.0
+        # A declared budget states what the WORK may take (MemoryBudget.work_bytes), so the closing
+        # line judges what the run held above the process floor; an 'auto' one the whole process.
+        self._budget_is_work = False
         self._shards: list[list[int]] = []
+        # Whether a spawned rank hands its failed items to the launcher instead of raising: mp.spawn
+        # terminates the other ranks mid-case when one raises. A cluster task keeps raising.
+        self._report_to_launcher = False
         self._reductions: dict[str, CaseReduction | None] = {}
         self._planned: dict[tuple[str, str], Verdict] = {}
 
@@ -494,9 +502,9 @@ class Transformer(DistributedObject):
         return dtype
 
     def _probe_write_destinations(
-        self, engine: CaseMaterializer, probed: set[tuple[str, str]], a: int = 0
+        self, engine: CaseMaterializer, probed: set[tuple[str, str]], a: int = 0, overwrite: bool = False
     ) -> str | None:
-        """Open a real region-write stream on each Save/Write destination, then remove it.
+        """Open a real region-write stream on each Save/Write destination the run writes, then remove it.
 
         The refusals that matter (rank, dtype, geometry) live in ``open_data_stream``, which the
         engine only reaches at the first computed slab, so the plan opens it here: one entry creation
@@ -513,7 +521,7 @@ class Transformer(DistributedObject):
             return None
         channels = int(manager.base_shape[0])
         dtype = self._dtype_hypothesis(manager)
-        for transform, spatial, attributes in engine.write_targets(a):
+        for transform, spatial, attributes in engine.write_targets(a, rewrite=overwrite):
             key = key_of(transform)
             if key in probed:
                 continue
@@ -627,7 +635,7 @@ class Transformer(DistributedObject):
             return Verdict.SKIP, None
         if not manager.can_stream_patch(copy_index, apply_augmentations=augmented):
             return Verdict.WHOLE_VOLUME, manager.stream_refusal(copy_index, apply_augmentations=augmented)
-        probe_failure = self._probe_write_destinations(item.engine, probed, copy_index)
+        probe_failure = self._probe_write_destinations(item.engine, probed, copy_index, overwrite)
         if probe_failure is not None:
             # The run would fail the sweep at its first slab and fall back: say so now.
             return Verdict.WHOLE_VOLUME, probe_failure
@@ -736,6 +744,7 @@ class Transformer(DistributedObject):
         # decoded-chunk cache is bounded here too, as part of what the process holds.
         self._budget_bytes = per_rank_budget
         self._rank_budget_bytes = budget.per_rank_bytes(node_ranks)
+        self._budget_is_work = not budget.shared_across_ranks
         set_per_rank_budget(per_rank_budget)
         chunk_cache_bytes = bound_chunk_cache()
         entries: list[TransformPlanEntry] = []
@@ -797,6 +806,9 @@ class Transformer(DistributedObject):
         # No overwrite prompt on the run folder: it holds the logs and a config copy, both rewritten
         # in place, and prompting would break the default per-case resume.
         os.makedirs(self.transform_path, exist_ok=True)
+        for stale in self.transform_path.glob("failed_rank_*.json"):
+            stale.unlink()
+        self._report_to_launcher = os.environ.get("KONFAI_CLUSTER") != "True"
         config_copy = self.transform_path / config_file().name
         if not (config_copy.exists() and config_copy.samefile(config_file())):  # -c may name the copy itself
             shutil.copyfile(config_file(), config_copy)
@@ -822,23 +834,17 @@ class Transformer(DistributedObject):
 
     def _guard_sharded_destinations(self, world_size: int) -> None:
         """Multi-rank runs refuse a single-file Save destination before anything is written."""
-        if world_size <= 1:
-            return
-        for managers in self.dataset.managers.values():
-            for transform in managers[0].transforms if managers else []:
-                if not isinstance(transform, Save):
-                    continue
-                destination, _group = save_destination(transform, managers[0].dataset, managers[0].group_dest)
-                # NOT concurrent_write_safe(): that asks whether two entries of one shared store may
-                # be written at once, and answers no for omezarr. Ranks shard by CASE, and a
-                # directory dataset gives each case its own file or store, so their writes are
-                # disjoint; only a single-file store (h5) puts every case in one handle.
-                if not destination.is_directory:
-                    raise TransformerError(
-                        f"--cpu {world_size}: destination '{destination.filename}' is a"
-                        " single-file store, and every rank would write into the same file.",
-                        "Use one process, or a directory destination (omezarr, mha, nii.gz).",
-                    )
+        refuse_shared_single_file(
+            world_size,
+            (
+                save_destination(transform, managers[0].dataset, managers[0].group_dest)[0]
+                for managers in self.dataset.managers.values()
+                if managers
+                for transform in managers[0].transforms
+                if isinstance(transform, Save)
+            ),
+            TransformerError,
+        )
 
     def _enforce_plan(self, plan: TransformPlan) -> None:
         """The refusals the plan's verdicts imply, raised before any byte moves: an output over the
@@ -902,10 +908,12 @@ class Transformer(DistributedObject):
                 remedy,
             )
         if self.on_fallback == "warn" and plan.fallback_entries:
-            print(
-                f"[KonfAI] WARNING: {len(plan.fallback_entries)} case(s) take the whole-volume"
-                " path (which stage refused, and why, is in the plan this run wrote to its log). They"
-                " fit the budget; set on_fallback: error to refuse them."
+            warnings.warn(
+                f"{len(plan.fallback_entries)} case(s) take the whole-volume path (which stage refused, and"
+                " why, is in the plan this run wrote to its log). They fit the budget; set on_fallback: error"
+                " to refuse them.",
+                KonfAIWarning,
+                stacklevel=2,
             )
 
     def _shard_work(self, world_size: int) -> None:
@@ -939,10 +947,13 @@ class Transformer(DistributedObject):
         peak = run_peak_resident_bytes()
         if peak is None:
             return None
-        # The RANK's whole figure, not the share left for the work: the peak includes the interpreter
-        # and the libraries, which the work budget has taken off it.
+        # A declared budget is the work's, so the work is judged above the floor the run started from;
+        # an 'auto' one is the rank's whole figure, the interpreter and the libraries included.
+        floor = resident_floor() if self._budget_is_work else None
+        if floor is not None:
+            peak = max(0, peak - floor)
+        held = f"held {format_bytes(peak)}{' above the process floor' if floor is not None else ''} at its peak"
         budget = self._rank_budget_bytes or self._budget_bytes
-        held = f"held {format_bytes(peak)} at its peak"
         if not budget or budget <= 0:
             return f"{held} (no memory_budget declared: nothing bounded it)"
         over = peak / budget
@@ -959,6 +970,7 @@ class Transformer(DistributedObject):
         chain_device = torch.device(f"cuda:{device}") if isinstance(device, int) else device
         started = time.monotonic()
         SWEEP_CLOCK.reset()
+        cache_counts = chunk_cache_counts()  # the cache outlives the run: its counts are read as a difference
         # What a region is measured above: the process as it stands before its first case. Released
         # with the run; the closing line below reads the peak first.
         record_resident_floor()
@@ -1007,14 +1019,32 @@ class Transformer(DistributedObject):
             held = self._held_line()
             if held is not None:
                 print(f"[KonfAI] {who}{held}")
-            if failed:
-                listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
-                raise TransformerError(
-                    f"{len(failed)} of {len(shard)} work item(s) failed on {who or 'this rank '}:\n{listed}",
-                    "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
-                )
+            hits, misses, evictions = (
+                now - before for now, before in zip(chunk_cache_counts(), cache_counts, strict=True)
+            )
+            if hits + misses:
+                print(f"[KonfAI] {who}decoded-chunk cache: {hits} hit(s), {misses} miss(es), {evictions} eviction(s)")
+            if failed and world_size > 1 and self._report_to_launcher:
+                self._failures_file(global_rank).write_text(json.dumps(failed), encoding="utf-8")
+            elif failed:
+                raise _failed_items_error(failed, len(shard), f"on {who or 'this rank '}")
         finally:
             clear_resident_floor()
+
+    def _failures_file(self, rank: int) -> Path:
+        return self.transform_path / f"failed_rank_{rank}.json"
+
+    def __exit__(self, exc_type, value, traceback):
+        """Leave the run, then raise once for the items the spawned ranks could not write."""
+        super().__exit__(exc_type, value, traceback)
+        failed: list[list[str]] = []
+        for rank in range(self.world_size):
+            path = self._failures_file(rank)
+            if path.exists():
+                failed.extend(json.loads(path.read_text(encoding="utf-8")))
+                path.unlink()
+        if failed and exc_type is None:
+            raise _failed_items_error(failed, sum(map(len, self._shards)), f"over {self.world_size} ranks")
 
     def _run_item(
         self, item: WorkItem, chain_device: torch.device, allow_fallback: bool, progress: tqdm.tqdm
@@ -1073,6 +1103,14 @@ class Transformer(DistributedObject):
         return counts
 
 
+def _failed_items_error(failed: list, total: int, where: str) -> TransformerError:
+    listed = "\n".join(f"  {group_dest}: '{what}': {reason}" for group_dest, what, reason in failed)
+    return TransformerError(
+        f"{len(failed)} of {total} work item(s) failed {where}:\n{listed}",
+        "The other items were written; a rerun resumes at the failed ones (their outputs do not exist).",
+    )
+
+
 def build_transform(
     transform_file: Path | str | dict = Path("./Transform.yml").resolve(),
     transforms_dir: Path | str = Path("./Transforms").resolve(),
@@ -1112,8 +1150,11 @@ def plan_transform(
     del quiet
     workflow = build_transform(transform_file=transform_file, transforms_dir=transforms_dir)
     world_size = len(gpu or []) or max(1, int(cpu or 1))
-    plan = cast(Transformer, workflow).compute_plan(world_size, bool(overwrite))
+    workflow = cast(Transformer, workflow)
+    plan = workflow.compute_plan(world_size, bool(overwrite))
     print(plan.report())
+    # The launch's destination refusal, said by the plan too: a plan the run would refuse is not a go.
+    workflow._guard_sharded_destinations(world_size)
     return plan
 
 

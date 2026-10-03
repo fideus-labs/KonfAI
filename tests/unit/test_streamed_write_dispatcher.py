@@ -34,6 +34,7 @@ import torch
 from konfai.data.data_manager import DatasetIter
 from konfai.data.patching import SlabRegionStream
 from konfai.data.patching.stage import _halo_radii
+from konfai.data.reduction import Mean, Reduction
 from konfai.data.transform import (
     Canonical,
     Dilate,
@@ -50,10 +51,11 @@ from konfai.data.transform import (
     Transform,
     TransformInverse,
 )
-from konfai.predictor import Mean, OutputDataset, Reduction
+from konfai.predictor import OutputDataset
 from konfai.predictor.output import _FinalizeStage
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import PatchError
+from oracle_support import geometry
 
 # --------------------------------------------------------------------------------------
 # SlabRegionStream: each region kind, streamed over random slab partitions, must equal the
@@ -425,23 +427,13 @@ def _dataset_iter(transforms: list[Transform]) -> DatasetIter:
     )
 
 
-def _geometry_attribute() -> Attribute:
-    attribute = Attribute()
-    attribute["Origin"] = np.zeros(3)
-    attribute["Spacing"] = np.ones(3)
-    attribute["Direction"] = np.eye(3).flatten()
-    return attribute
-
-
 def test_plan_all_pointwise_streams_direct() -> None:
-    plan = _output_dataset(final=[TensorCast("float32", inverse=False)])._plan_stream(
-        _dataset_iter([]), 0, _geometry_attribute()
-    )
+    plan = _output_dataset(final=[TensorCast("float32", inverse=False)])._plan_stream(_dataset_iter([]), 0, geometry())
     assert plan is not None and plan.mode == "direct"
 
 
 def test_plan_one_geometry_inverse_streams_through_the_region_stage() -> None:
-    plan = _output_dataset()._plan_stream(_dataset_iter([Flip("0", inverse=True)]), 0, _geometry_attribute())
+    plan = _output_dataset()._plan_stream(_dataset_iter([Flip("0", inverse=True)]), 0, geometry())
     assert plan is not None and plan.mode == "region"
     assert plan.pipe_start == 0 and plan.stages[0].inverted
 
@@ -452,7 +444,7 @@ def test_plan_several_region_stages_compose_into_one_streamed_pipe() -> None:
     plan = _output_dataset()._plan_stream(
         _dataset_iter([Flip("0", inverse=True), Padding([0, 0, 0, 0, 2, 1], inverse=True)]),
         0,
-        _geometry_attribute(),
+        geometry(),
     )
     assert plan is not None and plan.mode == "region"
     assert plan.pipe_start == 0 and plan.tail_start == len(plan.stages)
@@ -461,9 +453,7 @@ def test_plan_several_region_stages_compose_into_one_streamed_pipe() -> None:
 def test_plan_whole_volume_stage_falls_to_the_buffered_tail_and_swallows_the_region() -> None:
     # [region, WHOLE_VOLUME]: the tail must start at the region stage, not after it: a buffered head
     # is pointwise-only so the buffer sits on the accumulator grid.
-    plan = _output_dataset(final=[Softmax(1)])._plan_stream(
-        _dataset_iter([Flip("0", inverse=True)]), 0, _geometry_attribute()
-    )
+    plan = _output_dataset(final=[Softmax(1)])._plan_stream(_dataset_iter([Flip("0", inverse=True)]), 0, geometry())
     assert plan is not None and plan.mode == "buffered"
     assert plan.pipe_start is None and plan.tail_start == 0
 
@@ -471,12 +461,12 @@ def test_plan_whole_volume_stage_falls_to_the_buffered_tail_and_swallows_the_reg
 def test_plan_seeded_global_stat_counts_as_pointwise_and_unseeded_does_not() -> None:
     # Normalize forward in the finalize chain needs the volume's Min/Max: with the statistic already on
     # the case it is a per-voxel map; without it each slab would derive its own, so it must be a tail.
-    seeded = _geometry_attribute()
+    seeded = geometry()
     seeded["Min"] = 0.0
     seeded["Max"] = 1.0
     plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), 0, seeded)
     assert plan is not None and plan.mode == "direct"
-    plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), 0, _geometry_attribute())
+    plan = _output_dataset(final=[Normalize(inverse=False)])._plan_stream(_dataset_iter([]), 0, geometry())
     assert plan is not None and plan.mode == "buffered" and plan.tail_start == 0
 
 
@@ -485,7 +475,7 @@ def test_plan_refuses_tta_custom_reduction_and_non_pointwise_before_reduction() 
         def __call__(self, tensors):
             return tensors[0]
 
-    attribute = _geometry_attribute()
+    attribute = geometry()
     assert _output_dataset(nb_data_augmentation=2)._plan_stream(_dataset_iter([]), 0, attribute) is None
     assert _output_dataset(reduction=_CustomReduction())._plan_stream(_dataset_iter([]), 0, attribute) is None
     assert _output_dataset(before=[Softmax(1)])._plan_stream(_dataset_iter([]), 0, attribute) is None
@@ -494,7 +484,7 @@ def test_plan_refuses_tta_custom_reduction_and_non_pointwise_before_reduction() 
 def test_plan_non_region_writable_format_buffers_and_writes_classically() -> None:
     # gipl cannot serve region writes: the pointwise chain still streams the accumulator into a buffer
     # (the windowed-accumulator win survives), and the volume is written through the classic writer.
-    plan = _output_dataset(file_format="gipl")._plan_stream(_dataset_iter([]), 0, _geometry_attribute())
+    plan = _output_dataset(file_format="gipl")._plan_stream(_dataset_iter([]), 0, geometry())
     assert plan is not None and plan.mode == "buffered" and plan.tail_start == len(plan.stages)
 
 
@@ -518,7 +508,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
     # Toy volumes sit far below the worth gate: zero it so the streamed machinery is exercised.
     monkeypatch.setenv("KONFAI_STREAM_WORTH_THRESHOLD", "0")
 
-    attribute = _geometry_attribute()
+    attribute = geometry()
     model_volume = volume.clone()
     for transform in transforms:
         model_volume = transform("CASE_000", model_volume, attribute)

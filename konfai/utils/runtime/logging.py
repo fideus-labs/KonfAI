@@ -27,17 +27,16 @@ import sys
 import time
 import traceback
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TextIO, cast
+from typing import TYPE_CHECKING, TextIO, cast
 
 import numpy as np
+import tqdm
 
-try:
-    from torch.utils.tensorboard.writer import SummaryWriter
-except ImportError:
-    SummaryWriter = None  # type: ignore[assignment,misc]
 from konfai import (
     __version__,
     evaluations_directory,
@@ -46,7 +45,11 @@ from konfai import (
     statistics_directory,
     transforms_directory,
 )
-from konfai.utils.errors import ConfigError, KonfAIWarning
+from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning
+
+if TYPE_CHECKING:
+    # TRAIN and PREDICTION import the writer they open; TensorBoard stays out of the other workflows.
+    from torch.utils.tensorboard.writer import SummaryWriter
 
 
 class NullSummaryWriter:
@@ -94,14 +97,15 @@ def _log_video_format(array: np.ndarray) -> np.ndarray:
         result_list.append(_log_images_format(array[:, t, ...]))
     result = np.stack(result_list, axis=1)
 
+    # [B, T, C, Y, X]: the channels (axis 2) become the three colours of each sample's frame.
     nb_channel = result.shape[2]
     if nb_channel < 3:
-        channel_split = [result[:, :, 0, ...] for i in range(3)]
+        channel_split = [result[:, :, :1] for i in range(3)]
     else:
-        channel_split = np.split(result, 3, axis=0)
+        channel_split = np.array_split(result, 3, axis=2)
     array = np.zeros((result.shape[0], result.shape[1], 3, *list(result.shape[3:])))
     for i, channels in enumerate(channel_split):
-        array[:, :, i] = np.mean(channels, axis=0)
+        array[:, :, i] = np.mean(channels, axis=2)
     return array
 
 
@@ -120,8 +124,15 @@ class DataLog(Enum):
         module path is keyed by its dotted name."""
         parsed: dict[str, tuple[DataLog, int]] = {}
         for entry in entries or []:
-            target, strategy, count = entry.split("/")
-            parsed[target.replace(":", ".")] = (cls[strategy], int(count))
+            try:
+                target, strategy, count = entry.split("/")
+                parsed[target.replace(":", ".")] = (cls[strategy], int(count))
+            except (ValueError, KeyError) as error:
+                raise ConfigError(
+                    f"Invalid data_log entry '{entry}'.",
+                    f"Write 'group_or_module/STRATEGY/N', STRATEGY one of {', '.join(cls.__members__)}"
+                    " and N the number of samples to log.",
+                ) from error
         return parsed
 
     def __call__(self, tb: "SummaryWriter | NullSummaryWriter", name: str, layer: np.ndarray, it: int):
@@ -151,8 +162,11 @@ _KONFAI_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 def _show_warning(message, category, filename, lineno, file=None, line=None) -> None:
-    """KonfAI's own warnings read as its other messages; a third party's keep Python's format. The
-    category decides, not the frame, which a ``stacklevel`` may place in the caller's code."""
+    """KonfAI's own warnings read as its other messages; a third party's keep Python's format. Own is a
+    ``KonfAIWarning``, whose frame a ``stacklevel`` may place in the caller's code, or a warning raised
+    from a file under the package's directory. That prefix has no separator, so the sibling packages
+    (``konfai_apps``, ``konfai_mcp``, ``konfai_studio``, or ``konfai-apps/`` beside ``konfai/`` in a
+    source tree) count as own too."""
     if issubclass(category, KonfAIWarning) or str(filename).startswith(_KONFAI_ROOT):
         text = f"[KonfAI] WARNING: {message}\n"
     else:
@@ -161,6 +175,17 @@ def _show_warning(message, category, filename, lineno, file=None, line=None) -> 
         (file or sys.stderr).write(text)
     except (OSError, ValueError):
         pass
+
+
+@contextmanager
+def konfai_warnings() -> Iterator[None]:
+    """Show KonfAI's warnings as its other messages inside the block, as a run's ``Log`` does."""
+    previous = warnings.showwarning
+    warnings.showwarning = _show_warning
+    try:
+        yield
+    finally:
+        warnings.showwarning = previous
 
 
 class _ConsoleHandler(logging.Handler):
@@ -174,6 +199,19 @@ class _ConsoleHandler(logging.Handler):
 
 
 _CONSOLE_HANDLER = _ConsoleHandler(logging.WARNING)
+
+
+class ProgressBar(tqdm.tqdm):
+    """A tqdm bar that draws its final state before it clears itself (``leave=False``).
+
+    tqdm skips the frames inside its refresh interval and clears such a bar without drawing the last
+    one, so the run's log, which records what is drawn, would end on a stale frame.
+    """
+
+    def close(self) -> None:
+        if not self.disable and not self.leave:
+            self.refresh()
+        super().close()
 
 
 class MinimalLog:
@@ -251,9 +289,18 @@ class MinimalLog:
             else:
                 msg = f"{self._mirror_take_pending()}{msg}"
             self._mirror_at_line_start = msg.endswith("\n")
+        self._mirror_write(msg)
+
+    def _mirror_write(self, text: str) -> None:
         # Best-effort: a broken pipe (the mirror's reader is gone) never stops the job.
         try:
-            self._stdout_bak.write(msg)
+            try:
+                self._stdout_bak.write(text)
+            except UnicodeEncodeError as error:
+                # A console outside UTF-8 (a Windows pipe) shows what it cannot encode escaped. The
+                # stream names its code page; the error of a single-byte one only says 'charmap'.
+                encoding = getattr(self._stdout_bak, "encoding", None) or error.encoding
+                self._stdout_bak.write(text.encode(encoding, "backslashreplace").decode(encoding))
             self._stdout_bak.flush()
         except (BrokenPipeError, ValueError):
             pass
@@ -275,11 +322,7 @@ class MinimalLog:
     def _mirror_emit_pending(self) -> None:
         held = self._mirror_take_pending()
         if held:
-            try:
-                self._stdout_bak.write(held)
-                self._stdout_bak.flush()
-            except (BrokenPipeError, ValueError):
-                pass
+            self._mirror_write(held)
 
     def fileno(self):
         if sys.__stdout__ is None:
@@ -316,7 +359,7 @@ class Log(MinimalLog):
         if self.outer is not None:
             return
         # Append, never truncate: this file is opened before the overwrite prompt runs.
-        self.file = open(file_path, "a", buffering=1)
+        self.file = open(file_path, "a", buffering=1, encoding="utf-8")
         self._last_logged: str | None = None
         # Re-runs append to one file: each opens with a line saying which run follows.
         self.file.write(
@@ -334,11 +377,13 @@ class Log(MinimalLog):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.outer is not None:
             return
+        if exc_val is not None:
+            # The run ends on it: the file says why, as the console does. A designed refusal is its message.
+            if isinstance(exc_val, KonfAIError):
+                self.file.write(f"{str(exc_val).strip()}\n")
+            elif not isinstance(exc_val, KeyboardInterrupt):
+                self.file.write("".join(traceback.format_exception(exc_type, exc_val, exc_tb)))
         super().__exit__(exc_type, exc_val, exc_tb)
-        if exc_type is not None and not (exc_type is SystemExit and exc_val.code in (0, None)):
-            # The interpreter prints an uncaught exception only once this block has put the real streams back: without
-            # this, the run's log ends on its last progress frame and never says what stopped it.
-            self.file.write("".join(traceback.format_exception(exc_type, exc_val, exc_tb)))
         self.file.__exit__(exc_type, exc_val, exc_tb)
 
     def write(self, msg: str):
@@ -365,6 +410,19 @@ def record(message: str) -> Path | None:
     return Path(sink.file.name)
 
 
+def _network_address(family: socket.AddressFamily = socket.AF_INET) -> str:
+    """This host's address on its default route: where a browser on another machine reaches a wildcard bind."""
+    probe_target, loopback = (
+        (("10.255.255.255", 1), "127.0.0.1") if family == socket.AF_INET else (("2001:db8::1", 1), "::1")
+    )
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect(probe_target)
+            return probe.getsockname()[0]
+    except OSError:
+        return loopback
+
+
 class TensorBoard:
     """Lifecycle helper that optionally starts a TensorBoard side process."""
 
@@ -384,24 +442,17 @@ class TensorBoard:
             if not port or not port.isdigit():
                 raise ValueError("Invalid or missing KONFAI_TENSORBOARD_PORT.")
 
-            command = [
-                tensorboard_exe,
-                "--logdir",
-                str(logdir),
-                "--port",
-                port,
-                "--bind_all",
-            ]
+            # TensorBoard has no authentication: the network is opened only on an explicit address.
+            host = os.environ.get("KONFAI_TENSORBOARD_HOST") or "127.0.0.1"
+            command = [tensorboard_exe, "--logdir", str(logdir), "--port", port, "--host", host]
             self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # nosec B603
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("10.255.255.255", 1))
-                ip = s.getsockname()[0]
-            except Exception:
-                ip = "127.0.0.1"
-            finally:
-                s.close()
-            print(f"[KonfAI] Tensorboard : http://{ip}:{os.environ['KONFAI_TENSORBOARD_PORT']}/")
+            if host == "0.0.0.0":  # nosec B104 - reads the address asked for, binds nothing
+                host = _network_address()
+            elif host == "::":
+                host = f"[{_network_address(socket.AF_INET6)}]"
+            elif ":" in host:
+                host = f"[{host}]"
+            print(f"[KonfAI] Tensorboard : http://{host}:{port}/")
         return self
 
     def __exit__(self, exc_type, value, traceback):

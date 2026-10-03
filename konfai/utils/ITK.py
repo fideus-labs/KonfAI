@@ -32,6 +32,8 @@ except ImportError:
 from konfai.utils.errors import TransformError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from konfai.data.geometry import AffineMap, AffineStage, DisplacementStage, Grid, SpatialStages, WorldBox
     from konfai.utils.dataset import Dataset
 
@@ -217,6 +219,23 @@ def _grid_of_image(image: sitk.Image) -> Grid:
     )
 
 
+def physical_point_to_index(grid: Grid) -> np.ndarray:
+    """The world-to-index matrix ITK holds for ``grid`` (``ImageBase::m_PhysicalPointToIndex``).
+
+    ITK inverts ``direction @ diag(spacing)`` through a singular value decomposition, whose last bits
+    are not the exact inverse's (on a signed permutation, terms of an ulp's order where the exact
+    inverse has zeros); a nearest pick on a half-voxel tie follows them. Read off an image of that
+    geometry at origin zero, where a unit vector's continuous index is the matrix's column exactly.
+    Without SimpleITK no route runs ITK, and the exact inverse stands in.
+    """
+    if sitk is None:
+        return grid.world_to_index.matrix
+    image = sitk.Image([1] * grid.rank, sitk.sitkUInt8)
+    image.SetSpacing(np.asarray(grid.spacing_xyz, dtype=np.float64).tolist())
+    image.SetDirection(np.asarray(grid.direction_xyz, dtype=np.float64).ravel().tolist())
+    return np.array([image.TransformPhysicalPointToContinuousIndex(tuple(axis)) for axis in np.eye(grid.rank)]).T
+
+
 def _displacement_stage(
     grid: Grid, values: np.ndarray, order: int, what: str, dtype: np.dtype | type = np.float64
 ) -> DisplacementStage:
@@ -290,7 +309,7 @@ def read_transform_stages(
     dataset: Any,
     group: str,
     name: str,
-    box: WorldBox | None = None,
+    box: Callable[[], WorldBox] | None = None,
     headers_only: bool = False,
     field_dtype: np.dtype | type = np.float64,
 ) -> SpatialStages:
@@ -301,9 +320,9 @@ def read_transform_stages(
     through :func:`decode_transform_stages`, as does everything a store that serves transforms alone
     (``read_transform`` and nothing else) hands over.
 
-    ``box`` is the world box the caller will evaluate the map over, read from the headers before a
-    voxel is fetched: a field entry then comes back as its own sub-grid over the window that box
-    falls in, plus the lattice point linear interpolation reaches for. Without it the whole entry is
+    ``box`` answers the world box the caller will evaluate the map over, asked only of a field entry
+    a store can serve by slice: that entry then comes back as its own sub-grid over the nodes linear
+    interpolation reads there. Without it the whole entry is
     read, which is what a whole-volume call and the plan's own decode want. Only a displacement
     entry is windowed: an affine is a matrix and a BSpline a coarse control grid, both small.
     ``headers_only`` is the plan's read: a dense field comes back as NO stage at all, which is the
@@ -331,7 +350,7 @@ def read_transform_stages(
         shape, header = dataset.get_infos(group, name)
         if DISPLACEMENT_FIELD_ATTRIBUTE in header:
             grid = Grid.of([int(extent) for extent in shape[1:]], header, what)
-            window = grid.index_window(box, 1)
+            window = grid.node_window(box())
     if window is not None:
         data, attribute = dataset.read_data_slice(group, name, (slice(None), *window))
         return (_displacement_stage(grid.sub_grid(window), data, 1, what, field_dtype),)

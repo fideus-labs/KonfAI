@@ -28,7 +28,7 @@ import os
 import shutil
 import struct
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -74,6 +74,8 @@ class DataStream(ABC):
         return os.path.join(directory, f".{stem}.{DataStream.temporary_suffix()}.{extension}")
 
     _file: File | None = None
+    #: Called once the stream is closed or aborted: the dataset that opened it drops its memoised paths.
+    _on_finish: Callable[[], None] | None = None
     _finished: bool = False
 
     def __enter__(self) -> DataStream:
@@ -118,8 +120,12 @@ class DataStream(ABC):
                 with contextlib.suppress(Exception):
                     _retire_dead_debris(published)  # past the publish: housekeeping cannot fail the write
         finally:
-            if self._file is not None:
-                self._file.__exit__(exc_type, value, traceback)
+            try:
+                if self._file is not None:
+                    self._file.__exit__(exc_type, value, traceback)
+            finally:
+                if self._on_finish is not None:
+                    self._on_finish()
 
 
 #: Handing a written page back to the kernel takes ``madvise``, which not every platform has; where

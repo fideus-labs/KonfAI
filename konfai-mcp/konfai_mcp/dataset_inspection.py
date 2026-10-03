@@ -472,7 +472,7 @@ class DatasetInspectionMixin:
             # as is, fine-tune a close one, or train from scratch. Only when nothing was found does the next
             # step remain "locate the dataset".
             payload["next_actions"] = (
-                ["list_apps", "run_app_infer", "fine_tune_app", "run_train", "design_config_strategy"]
+                ["list_apps", "run_app", "fine_tune_app", "run_train", "design_config_strategy"]
                 if payload["groups"]
                 else ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
             )
@@ -494,7 +494,7 @@ class DatasetInspectionMixin:
     def _sample_dataset_names(self, names: list[str], max_cases: int | None, seed: int) -> list[str]:
         if max_cases is None or max_cases <= 0 or len(names) <= max_cases:
             return sorted(names)
-        rng = random.Random(seed)
+        rng = random.Random(seed)  # nosec B311 - a seeded case sample, not a secret
         return sorted(rng.sample(names, max_cases))
 
     def compute_dataset_group_statistics(

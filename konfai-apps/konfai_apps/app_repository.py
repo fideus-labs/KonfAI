@@ -41,7 +41,7 @@ from typing import Any, Literal, Union, get_args, get_origin
 
 import numpy as np
 import requests
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+from huggingface_hub import HfApi, constants, hf_hub_download, snapshot_download
 from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.config import Choices, Range, _coerce_config_value
@@ -49,6 +49,7 @@ from konfai.utils.errors import ConfigError
 from konfai.utils.utils import is_windows_absolute_path
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from ruamel.yaml import YAML, YAMLError
 
 from .errors import AppMetadataError, AppRepositoryError
@@ -239,46 +240,65 @@ def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str
     return [str(a) for a in apps]
 
 
-def get_available_apps_on_hf_repo(repo_id: str, force_update: bool) -> list[str]:
-    """List the app folders of a Hugging Face repository: its top-level folders holding an ``app.json``.
+def _cache_name(repo_id: str) -> str:
+    """The folder the Hugging Face cache keeps ``repo_id`` in."""
+    return f"models--{repo_id.replace('/', '--')}"
 
-    Read from the Hub in one tree listing, so a cache holding some apps never hides the others. When the
-    Hub cannot be reached (offline, ``HF_HUB_OFFLINE``), the cached snapshot of the same revision is
-    listed instead and said to be, since a cache holds only the apps already used; ``force_update``
-    refuses that fallback.
-    """
-    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
-    try:
-        tree = HfApi().list_repo_tree(repo_id=base_repo_id, revision=revision, repo_type="model", recursive=True)
-        paths = [PurePosixPath(entry.path) for entry in tree]
-        return sorted(path.parts[0] for path in paths if len(path.parts) == 2 and path.name == "app.json")
-    except Exception as exc:
-        cached = None if force_update else _cached_apps(base_repo_id, revision)
-        if cached is None:
-            raise AppRepositoryError(
-                f"Failed to inspect Hugging Face repository '{repo_id}'. "
-                "Unable to list its tree and detect valid application folders. "
-                "Please check that the repository exists, that you have access to it, "
-                "that your authentication is valid, and that your internet connection is working.\n"
-                f"Original error: {exc}"
-            ) from exc
-        print(f"[KonfAI-Apps] The Hugging Face Hub cannot be reached: listing the apps of '{repo_id}' cached here.")
-        return cached
+
+def _apps_in(files: list[str]) -> list[str]:
+    """The folders holding an ``app.json``."""
+    return [path.split("/")[0] for path in files if PurePosixPath(path).parts[1:] == ("app.json",)]
 
 
 def _cached_apps(repo_id: str, revision: str | None) -> list[str] | None:
-    """The app folders of the cached snapshot of ``repo_id`` at ``revision`` (a branch, tag or commit;
-    ``main`` when ``None``), or ``None`` when that revision is not cached. The snapshot is read as it
-    is: huggingface_hub calls one without every file of the repository incomplete and will not list it."""
-    from huggingface_hub import constants
-    from huggingface_hub.file_download import repo_folder_name
-
-    root = Path(constants.HF_HUB_CACHE) / repo_folder_name(repo_id=repo_id, repo_type="model")
-    ref = root / "refs" / (revision or "main")
-    commit = ref.read_text(encoding="utf-8").strip() if ref.is_file() else revision
-    if not commit or not (root / "snapshots" / commit).is_dir():
+    """The folders whose ``app.json`` the local cache holds at ``revision``, or ``None`` when it holds no snapshot."""
+    cache = Path(constants.HF_HUB_CACHE) / _cache_name(repo_id)
+    try:
+        commit: str | None = (cache / "refs" / (revision or "main")).read_text(encoding="utf-8").strip()
+    except OSError:
+        commit = revision  # a commit hash is its own revision
+    snapshot = cache / "snapshots" / (commit or "")
+    if not commit or not snapshot.is_dir():
         return None
-    return sorted(path.parent.name for path in (root / "snapshots" / commit).glob("*/app.json"))
+    return sorted(path.name for path in snapshot.iterdir() if (path / "app.json").is_file())
+
+
+def get_available_apps_on_hf_repo(repo_id: str, force_update: bool = False) -> list[str]:
+    """List the app folders of a Hugging Face repository, and download each one's files but its checkpoints.
+
+    The Hub is asked once, for the repository's file list at the resolved revision. Offline, or when the Hub
+    cannot be reached, the apps the local cache holds are listed. ``force_update`` requires the Hub.
+    """
+    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+    failure: Exception | None = None
+    if not constants.HF_HUB_OFFLINE:
+        try:
+            files = [
+                sibling.rfilename for sibling in HfApi().model_info(base_repo_id, revision=revision).siblings or []
+            ]
+            apps = sorted(_apps_in(files))
+            if force_update or _cached_apps(base_repo_id, revision) != apps:
+                prefixes = tuple(f"{app}/" for app in apps)
+                small = [path for path in files if path.startswith(prefixes) and not path.endswith(".pt")]
+                snapshot_download(repo_id=base_repo_id, repo_type="model", revision=revision, allow_patterns=small)  # nosec B615
+            return apps
+        except Exception as exc:
+            failure = exc
+    cached = None if force_update else _cached_apps(base_repo_id, revision)
+    if cached is None:
+        raise AppRepositoryError(
+            f"Failed to inspect Hugging Face repository '{repo_id}'. Check that the repository exists, that you "
+            "have access to it and that your internet connection is working; offline, only cached apps are listed.\n"
+            f"Original error: {failure or 'HF_HUB_OFFLINE is set and nothing is cached'}"
+        ) from failure
+    return cached
+
+
+def get_downloaded_apps_on_hf_repo(repo_id: str) -> dict[str, str]:
+    """The apps of a Hugging Face repository the local cache holds, each with the reference that resolves it."""
+    base_repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo_id)
+    names = _cached_apps(base_repo_id, revision) or []
+    return {name: f"{base_repo_id}@{revision or 'main'}:{name}" for name in names}
 
 
 def is_app_repo(filenames: list[str]) -> bool:
@@ -742,7 +762,7 @@ class LocalAppRepository(AppRepositoryInfo):
         if self._patch_size is not None:
             return self._patch_size
         try:
-            filenames = self._all_repo_filenames()
+            filenames = self._get_filenames()
             path = self._download(self._require_repo_filename("Prediction.yml", filenames))
             with open(path) as file:
                 data = YAML().load(file)
@@ -778,6 +798,10 @@ class LocalAppRepository(AppRepositoryInfo):
             yaml.dump(data, file)
 
     def _disable_uncertainty(self, inference_file_path: str) -> None:
+        from konfai.data.transform import InferenceStack
+        from konfai.utils.errors import KonfAIError
+        from konfai.utils.utils import get_module
+
         yaml = YAML()
         with open(inference_file_path) as file:
             data = yaml.load(file)
@@ -785,13 +809,26 @@ class LocalAppRepository(AppRepositoryInfo):
         predictor = data["Predictor"]
         outputs = predictor["outputs_dataset"]
 
-        has_inference_stack = False
-        for value in outputs.values():
-            after = value["OutputDataset"]["after_reduction_transforms"]
-            if "InferenceStack" in after:
-                has_inference_stack = True
-                break
-        if not has_inference_stack:
+        # A chain is a mapping keyed by stage, a list of one-stage entries, or absent (null, "None"), as core
+        # reads it; a key names its class as core resolves it (`InferenceStack#2`, a module-qualified name).
+        def is_stack(entry: Any) -> bool:
+            try:
+                module, name = get_module(
+                    entry if isinstance(entry, str) else next(iter(entry)), "konfai.data.transform"
+                )
+            except (ImportError, KonfAIError):
+                return False  # a stage that does not import is not KonfAI's InferenceStack
+            return getattr(module, name, None) is InferenceStack
+
+        def without_stack(chain: Any) -> Any:
+            if isinstance(chain, list):
+                return [entry for entry in chain if not is_stack(entry)]
+            if isinstance(chain, dict):
+                return {name: kwargs for name, kwargs in chain.items() if not is_stack(name)}
+            return chain
+
+        chains = [value["OutputDataset"].get("after_reduction_transforms") for value in outputs.values()]
+        if all(without_stack(chain) == chain for chain in chains):
             return
 
         predictor["combine"] = "Mean"
@@ -801,8 +838,7 @@ class LocalAppRepository(AppRepositoryInfo):
             if output.get("reduction") != "Mean":
                 output.pop(output.get("reduction"), None)
             output["reduction"] = "Mean"
-            if "InferenceStack" in output["after_reduction_transforms"]:
-                del output["after_reduction_transforms"]["InferenceStack"]
+            output["after_reduction_transforms"] = without_stack(output.get("after_reduction_transforms"))
 
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
@@ -1002,7 +1038,7 @@ class LocalAppRepository(AppRepositoryInfo):
         new local app runs with them as its defaults: the inference-side "save as a local app" that mirrors
         :meth:`install_fine_tune`. ``display_name`` renames the copy in ``app.json``.
         """
-        filenames = self._get_filenames()
+        filenames = self._all_repo_filenames()
         if not is_app_repo(filenames):
             raise AppRepositoryError(f"'{self._app_name}' is not a valid KonfAI app (no app.json); cannot export.")
         path.mkdir(parents=True, exist_ok=True)
@@ -1094,7 +1130,7 @@ class LocalAppRepository(AppRepositoryInfo):
         inference app reports False. Root-level membership on purpose: a nested ``x/Config.yml`` would
         match the basename fallback but fail fine-tune's flat lookup. Best-effort on error."""
         try:
-            return "Config.yml" in self._all_repo_filenames()
+            return "Config.yml" in self._get_filenames()
         except Exception:
             return False
 
@@ -1136,7 +1172,8 @@ class LocalAppRepository(AppRepositoryInfo):
             for name in declared[:number_of_model]:
                 models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
         else:
-            # Legacy metadata that declares no models: every .pt the repository holds, in listing order.
+            # app.json declares no models: every .pt the repository holds, in listing order, up to the
+            # count asked; a weightless app ("models": []) asks for none.
             models_to_download = available_models
             remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
             if remote_filenames is not None:
@@ -1188,7 +1225,8 @@ class LocalAppRepository(AppRepositoryInfo):
         requirements_filename = self._find_repo_filename("requirements.txt", filenames)
         if requirements_filename is not None:
             with open(self._download(requirements_filename), encoding="utf-8") as file:
-                required_lines = [line.strip() for line in file if line.strip() and not line.startswith("#")]
+                # pip's comment rule: '#' at the start of a line or after whitespace.
+                required_lines = [line for line in (re.sub(r"(^|\s+)#.*$", "", raw).strip() for raw in file) if line]
         with open(self._download("app.json"), encoding="utf-8") as file:
             no_deps = [str(line) for line in json.load(file).get("requirements_no_deps", [])]
         # Compare PEP 503 canonical names throughout: pip resolves 'konfai_apps' and 'Konfai.Apps' to the
@@ -1290,6 +1328,11 @@ class LocalAppRepository(AppRepositoryInfo):
         forced_batch_size: int | None = None,
         config_overrides: list[str] | None = None,
     ) -> list[Path]:
+        if number_of_mc_dropout:
+            raise AppRepositoryError(
+                f"Monte Carlo dropout ({number_of_mc_dropout} samples) is not implemented: it would change nothing.",
+                "Use test-time augmentation (--tta) or an ensemble of checkpoints for an uncertainty.",
+            )
         if len(name_of_models) == 0 and number_of_model == 0:
             number_of_model = len(self._checkpoints_name)
 
@@ -1305,7 +1348,6 @@ class LocalAppRepository(AppRepositoryInfo):
 
         shutil.copy2(inference_file_path, prediction_file)
         self._set_number_of_augmentation(prediction_file, number_of_augmentation)
-        # `number_of_mc_dropout` is plumbed through but not applied to the prediction config.
         if not uncertainty:
             self._disable_uncertainty(prediction_file)
         # An explicit patch or batch wins; otherwise the app's config decides (``batch_size: 0`` there
@@ -1481,6 +1523,28 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
         self._apply_config_overrides(str(config), overrides)
 
 
+@functools.cache
+def _release_tag(repo_id: str) -> str | None:
+    """The bundle revision published for this konfai-apps, decided once per process: ``v<version>`` when this is
+    a release and ``repo_id`` carries that tag (downloaded already, or listed by the Hub), else ``None``
+    (``main``). A development build and an unreachable Hub take ``main``."""
+    try:
+        version = Version(importlib.metadata.version("konfai-apps"))
+    except (importlib.metadata.PackageNotFoundError, InvalidVersion):
+        return None
+    if version.is_devrelease or version.local:
+        return None
+    tag = f"v{version}"
+    if (Path(constants.HF_HUB_CACHE) / _cache_name(repo_id) / "refs" / tag).is_file():
+        return tag
+    if constants.HF_HUB_OFFLINE:
+        return None
+    try:
+        return tag if any(ref.name == tag for ref in HfApi().list_repo_refs(repo_id).tags) else None
+    except Exception:
+        return None
+
+
 class LocalAppRepositoryFromHF(LocalAppRepository):
     """KonfAI app repository backed by a Hugging Face model repository."""
 
@@ -1491,8 +1555,12 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
 
     @staticmethod
     def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:
+        """The repository and its revision: the one after ``@`` (``main`` is the default one), else the release
+        tag of this konfai-apps."""
         base_repo_id, _, revision = repo_id.partition("@")
-        return base_repo_id, revision or None
+        if revision:
+            return base_repo_id, revision if revision != "main" else None
+        return base_repo_id, _release_tag(base_repo_id)
 
     @staticmethod
     def _list_repo_tree(repo_id: str, app_name: str, recursive: bool = False) -> list[Any]:
@@ -1631,8 +1699,8 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         return LocalAppRepositoryFromHF.download(self._repo_id, filename, self._force_update)
 
     def get_app_filenames(self) -> list[str]:
-        """Return the app files as paths relative to the app folder."""
-        return self._get_filenames()
+        """Return the app files as paths relative to the app folder, downloaded or not."""
+        return self._all_repo_filenames()
 
     def download_files(self, filenames: list[str] | None = None, force_update: bool = True) -> list[Path]:
         """
@@ -1802,6 +1870,13 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     if app_id.count(":") == 1:
         repo_id, name = app_id.split(":", 1)
         return LocalAppRepositoryFromHF(repo_id, name, force_update)
+    if ":" not in app_id:
+        # Worded apart from "not found": SlicerKonfAI drops a saved app whose error reads so, and a
+        # directory can be missing for a while (an unmounted drive).
+        raise AppRepositoryError(
+            f"No app directory at '{Path(app_id).expanduser().resolve()}': an app id without ':' names a local "
+            "directory. The other forms are repo_id:app_name, host:port:app_name and host:port:app_name|token."
+        )
     raise AppRepositoryError(
         "Invalid app_id format. Expected one of:\n"
         "  - repo_id:app_name\n"

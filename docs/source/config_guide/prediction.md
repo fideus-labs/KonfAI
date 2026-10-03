@@ -1,6 +1,6 @@
 # Prediction configuration
 
-Prediction configuration lives under the `Predictor` root object.
+Prediction is configured under the `Predictor` root, in `Prediction.yml`.
 
 ```yaml
 Predictor:
@@ -17,192 +17,105 @@ Predictor:
 
 ## Running it
 
-From the directory that contains `Prediction.yml` and the `Checkpoints/`
-folder written by training:
+From the folder holding `Prediction.yml` and the training's `Checkpoints/`:
 
 ```bash
 konfai PREDICTION -y --gpu 0 --config Prediction.yml \
   --models Checkpoints/SEG_BASELINE/SELECTED_MODEL.pt
 ```
 
-`SELECTED_MODEL.pt` is the dated file `BEST` kept in that directory.
-`resume_latest.pt` (a training continuation) and `crash_*.pt` are not models to
-predict with, and several `--models` paths run an ensemble.
-
-You can also pass multiple checkpoints:
+`SELECTED_MODEL.pt` is the dated checkpoint training kept (not `resume_latest.pt` or `crash_*.pt`). Several
+`--models` make an ensemble:
 
 ```bash
-konfai PREDICTION -y --gpu 0 --config Prediction.yml \
-  --models ckpt_a.pt ckpt_b.pt ckpt_c.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.pt ckpt_c.pt
 ```
 
-When multiple checkpoints are provided, the predictor combines them using the
-`combine` strategy from the YAML, usually `Mean` or `Median`.
-
-The combination runs in float16 on purpose: each member's output is cast to
-float16 as it arrives and `Mean` accumulates in that dtype, which halves the
-memory of a 41-channel ensemble and is what the apps were tuned on. Its range is
-float16's: a value above 65,504 becomes infinity, and the running sum of an
-ensemble overflows before its mean would (two members at 40,000 each). Model
-outputs in a normalised range (probabilities, `[-1, 1]` intensities) are inside
-it. If a model emits larger values, scale its output inside the model before
-it reaches Composite, then restore the physical range in the output transforms
-if needed. `before_reduction_transforms` runs after Composite's cast and model
-combination, so it cannot prevent overflow there. Float32 model execution does
-not make the combination float32; the intentional fast cast stays unchanged.
-
-A rerun resumes: a case whose every configured output is already on disk is
-skipped (the run prints how many), so a mid-cohort failure pays only the
-missing cases. `-y`/`--overwrite` recomputes everything.
+- **Ensembles.** `combine` merges the members: `Mean`, `Median`, `Std`, `Vote`, `Concat`, or your own
+  reduction. For a segmentation, save the `Softmax` output and apply `Argmax` in `final_transforms`, so the
+  probabilities are averaged before the labels are chosen; or merge label maps with `Vote`. `Mean` refuses
+  label maps (the mean of two labels is a third).
+- **Precision.** Members are combined in float16, which halves the memory of a many-class ensemble. Values
+  above 65,504 overflow: keep model outputs in a normalised range and restore the scale in the output
+  transforms.
+- **Resume.** A case whose outputs are all written is skipped; `-y` predicts everything again.
+- **Unreadable inputs.** A case whose file cannot be read (truncated, empty, corrupt) is set aside with a
+  warning, and the others are predicted. It gets no output, so a rerun predicts it once the file is fixed.
+  A run where no case can be read fails. Only read errors are set aside: a config error or an out-of-memory
+  still stops the run.
 
 ## Top-level fields
 
-| Field | Type | Default in code | Required | Effect |
-| --- | --- | --- | --- | --- |
-| `Model` | mapping | `ModelLoader()` | Yes | Selects the model class used for prediction. |
-| `Dataset` | mapping | `DataPrediction()` | Yes | Defines inference data loading and test-time augmentation. |
-| `outputs_dataset` | mapping | default output dataset | Yes in practice | Controls which outputs are written to disk and how. |
-| `combine` | string | `Mean` | No | Reduces outputs across multiple checkpoints. |
-| `checkpoint_cache_gib` | float | `1.0` | No | Maximum retained checkpoint payload per prediction process, in GiB. `0` disables caching of reloadable sources. See [Checkpoint memory](#checkpoint-memory). |
-| `train_name` | string | `"name"` | Yes in practice | Names the prediction run and output folder. |
-| `manual_seed` | int or null | `None` | No | Optional seed. |
-| `gpu_checkpoints` | list or null | `None` | No | Module placement optimization. |
-| `autocast` | bool | `false` | No | Enables AMP during inference. On the shipped Segmentation example: 4.2 s to 2.7 s, 11110 of 58.4 million label voxels change, at boundaries. On a 3D UNet (five levels to 256 channels, 96 cubed patches, batch 2, twenty 128 cubed cases): 4.8 s to 2.9 s. |
-| `channels_last` | bool | `false` | No | Lays the convolution weights and inputs out channels-last (4-D and 5-D). With `autocast`, 2.7 s to 2.2 s on the same example and no further voxel changes, and 2.9 s to 2.4 s on the 3D UNet above; alone, no gain and 3199 voxels moved by the kernels cuDNN then picks. |
-| `cudnn_benchmark` | bool | `false` | No | Lets cuDNN benchmark its convolution kernels even when `manual_seed` is set, trading a bit-for-bit replay for speed. Without a seed cuDNN benchmarks either way. |
-| `torch_compile` | bool | `false` | No | Compiles the model's graph walk with `torch.compile`, once for all the members of an ensemble (they load their weights into one model). The first batches pay the compilation, which inductor caches for the next run. On a 2D UNet (5 slices, 41 classes, 40 cases, with `autocast` and `channels_last`) the forward did not move and 0.05 % of the voxels took another label: a network whose forward is bound by its kernels is where it can gain. A graph with a `ModelPatch` or a module reading attributes stays eager, and the run says so. |
-| `data_log` | list or null | `None` | No | Optional TensorBoard logging. |
-| `check_training_transforms` | bool | `true` | No | Warns when a model input is not preprocessed the way its checkpoint trained on it. See [The training-chain check](#the-training-chain-check). |
+| Field | Default | Effect |
+| --- | --- | --- |
+| `Model` | | The model, with the same `classpath` as in training. The weights come from `--models`. |
+| `Dataset` | | The input data (below). |
+| `outputs_dataset` | | What to write and how (below). |
+| `combine` | `Mean` | How the members of an ensemble are merged. |
+| `checkpoint_cache_gib` | `1.0` | Memory for keeping the ensemble's checkpoints loaded (below). |
+| `train_name` | | Names the output folder `Predictions/<train_name>/`. |
+| `manual_seed` | `null` | Seeds the test-time augmentation draws (with the case name, so a case's draws never depend on the others). |
+| `autocast` | `false` | Mixed precision: about 1.6 times faster; a few labels may change at boundaries. |
+| `channels_last` | `false` | Channels-last layout: a little faster on top of `autocast`, on some models. |
+| `cudnn_benchmark` | `false` | Fastest cuDNN kernels even with a seed, without exact replay. |
+| `torch_compile` | `false` | Compile the model once for all the members. Pays on long runs (TTA, many patches); the first run compiles. Where it cannot compile (no Triton), the model runs uncompiled. |
+| `gpu_checkpoints` | `null` | Modules to place on other GPUs. |
+| `data_log` | `null` | Outputs to log in TensorBoard. |
 
 ### Checkpoint memory
 
-One model instance runs the ensemble members in turn and keeps their
-deserialized checkpoints in a host cache of `checkpoint_cache_gib` (1 GiB per
-prediction process by default, independent of the dataset budget):
+The members of an ensemble run one after the other in one model. Their weights stay in a host cache of
+`checkpoint_cache_gib` (per process) and are reloaded when they do not fit; only the model's weights are kept,
+not the optimizer's. `0` turns the cache off.
 
-```yaml
-Predictor:
-  checkpoint_cache_gib: 1.0
-```
-
-The budget counts the tensor storages a checkpoint retains (a view charges its
-whole allocation) plus their containers; only the `Model` entry is kept, the
-optimizer and `Model_EMA` entries are dropped, and an EMA-only checkpoint is
-refused. Local files are memory-mapped, so a load touches the weight pages
-only. Members that fit stay cached across batches and the others load on
-demand; a file that changed on disk is reloaded. In-memory checkpoints must
-fit the budget, since they cannot be reloaded. `0` disables the cache for
-files and URLs. The active model, a checkpoint being deserialized and the data
-buffers are outside this budget, and each rank has its own.
-
-## `Predictor.Model`
-
-Prediction uses the same `classpath` convention as training:
-
-```yaml
-Model:
-  classpath: Model:UNetpp5
-  outputs_criterions: {}
-```
-
-In most prediction configs:
-
-- you select the architecture
-- you keep only the inference-relevant parameters
-- you disable or simplify training-only criteria
-
-Checkpoint loading is controlled by the CLI argument `--models`, not by the YAML
-file itself.
+On a GPU, the members stay resident when that costs the batch nothing: each loads once, and a forward
+switches to its weights instead of copying a checkpoint in. When holding them would shrink the measured batch,
+they load per batch instead, as for a model whose class defines its own `load`; a rank that runs out of memory
+with them resident restarts with them loading per batch. At one batch size the outputs are the same to the bit.
 
 ## `Predictor.Dataset`
 
-Prediction datasets are instantiated through `DataPrediction`.
+| Field | Effect |
+| --- | --- |
+| `dataset_filenames` | Where the inputs are ({doc}`index`). |
+| `groups_src` | The input groups and their transforms. |
+| `augmentations` | Test-time augmentation. A `Flip` gives the copies the distinct mirrors its `f_prob` allows, in turn (7 copies: all seven), rather than drawing them. |
+| `Patch` | How the volume is cut (below). |
+| `subset` | Which cases to predict. |
+| `batch_size` | Patches per batch. `0`, the default, measures the largest batch that fits on the GPU. A `0` patch axis then takes the largest extent among the cases, the smaller ones padded up to it, so the patches share one shape. |
+| `num_workers` | Loader workers (`null`: 0, or up to 4 when the format cannot read regions). Each worker holds the case it prepares, so more workers use more RAM. |
+| `pin_memory`, `prefetch_factor`, `persistent_workers` | DataLoader settings, as in training. |
 
-Key fields:
-
-| Field | Type | Effect |
+| `Patch` field | Default | Effect |
 | --- | --- | --- |
-| `dataset_filenames` | list[str] | Input dataset sources. |
-| `groups_src` | mapping | Input groups and preprocessing transforms. |
-| `augmentations` | mapping | Test-time augmentation definitions. |
-| `Patch` | mapping | Sliding-window or slice-wise inference setup. |
-| `subset` | string / list / null | Restricts which cases are predicted: a flat selector: a case name, a case-list file, `~file` to exclude, a `start:end` slice, or a list of those. Not a nested mapping. |
-| `batch_size` | int | Number of patches per inference batch. `0` measures it on the GPU: a forward of one patch, then of two, then the largest power of two whose forward fits half of the usable VRAM (80 % of the free memory once the case's accumulation is reserved); the other half is headroom for the convolution workspace. Halved if it still runs out. On CPU, `0` runs one patch at a time. |
+| `patch_size` | `[128, 128, 128]` | The patch the model sees. A `0` lets KonfAI size that axis. |
+| `overlap` | `null` | Voxels (`16`), a fraction (`0.2`), `"20%"`, or one per axis. `null`: 20%. |
+| `pad_value` | `null` | Padding past the volume. `null`: the data's minimum. |
+| `extend_slice` | `0` | 2.5-D: neighbouring slices added as channels (with `patch_size[0] == 1`). |
+| `mode` | `tile` | What a case over `max_voxels` gets: `tile` cuts it into patches, `resample` runs it whole on a grid coarse enough and brings the output back onto the case's grid. |
+| `max_voxels` | `null` | The voxels a patch (`tile`) or a case's coarse grid (`resample`) holds. `null`: sized from the two costs below. |
+| `vram_bytes_per_voxel`, `ram_bytes_per_voxel` | `null` | What a voxel costs the pass on the GPU and in RAM. With `max_voxels` unset, KonfAI holds the tighter of the free GPU memory and the rank's RAM budget. |
 
-Use `Dataset.Patch` when:
-
-- the full input does not fit in memory
-- you want slice-wise or sliding-window inference
-- you need the same spatial strategy as training
-
-### Free patch axes: sizing by measurement
-
-A `patch_size` entry of `0` declares a FREE axis the framework sizes itself. The
-patch starts at the axis's full extent (the whole volume when every axis is
-free), and shrinks only if the device actually runs out of memory:
+### Letting KonfAI size the patch
 
 ```yaml
 Patch:
-  patch_size: [0, 0, 0]   # whole volume when it fits; [1, 0, 0] = full 2D slices
+  patch_size: [0, 0, 0]   # the whole volume when it fits; [1, 0, 0] for whole 2-D slices
   overlap: 0
 ```
 
-There is no budget key: the budget is the GPU's measured free VRAM. On a CUDA
-out-of-memory the free axes take more patches, the fewest that fit: the axis
-whose patch is the longest splits first, and each axis is cut into equal parts
-with its overlap (531 voxels in two patches of 295 overlapping by 59 compute
-1.1 times the axis; two of 392, the largest that fits, overlap by 253 and
-compute 1.5 times it). The run reads what the failed forward cost (the measurement is free, it
-already ran) and splits until the patch fits, typically one restart; an OOM
-that leaves no number (a library allocating outside PyTorch) splits once per
-restart. Pinned axes never move. The chosen size also reserves room for the accumulation, so the blend
-stays on the GPU; when that reservation cannot fit (or cannot be measured), the
-forward is sized alone and the writer blends on the host instead. `overlap`
-accepts a voxel count (`8`), a percent string (`"20%"`), or `null` (a 20%
-default), resolved after the size; an axis a single patch spans gets none. A
-`patch_size` without a `0` is never resized: the OOM propagates.
+A `0` axis starts at the whole extent. If the GPU runs out of memory, KonfAI measures what the forward
+needed and cuts the axis into the fewest equal patches that fit, usually in one retry. It also keeps room to
+blend the result on the GPU. A patch size without `0` is never changed.
 
-`overlap` accepts four forms and the binder keeps each one's type: a voxel count
-(`16`), a fraction (`0.2`), a percent string (`"20%"`), and a per-axis list
-(`[10, 20, 0]`). Declaration-order coercion once turned `overlap: 0.25` into
-`int(0.25) == 0`: silent no-overlap; that is fixed and pinned by
-`tests/unit/test_config.py::test_apply_config_union_keeps_the_value_type_over_lossy_coercion`.
+### Preprocessing must match training
 
-### The training-chain check
-
-A checkpoint carries no record of how its inputs were preprocessed, so a
-`Prediction.yml` that standardizes a group differently from the `Config.yml` it
-trained on still runs: the model sees a scale it has never seen and the output
-is wrong in silence. The Synthesis example once shipped `Standardize(mask: None)`
-in training against `Standardize(mask: MASK)` in prediction, and paid 409 HU of
-MAE instead of 98 with the same weights.
-
-At checkpoint load, PREDICTION compares the two. For a checkpoint at
-`Checkpoints/<train_name>/*.pt` it reads the resolved config the run left in
-`Statistics/<train_name>/`, and for every group the live config declares
-`is_input: true` it walks the `transforms` and `patch_transforms` chains stage by
-stage, naming the group, the position, the class and the arguments that differ:
-
-```text
-[KonfAI] WARNING: this run preprocesses a model input differently from TRAIN_01:
-[KonfAI]   'MR:MR' transforms[1] Standardize: mask: 'None' in training, 'MASK' here
-```
-
-It warns and never refuses, because a difference can be deliberate. What is
-compared is what reaches the model, so none of these is a finding: a stage that
-alters no value (`Statistics`, `Save`), everything from an `Expand` marker on
-(the copies' draws), the `inverse` argument (an output-path setting), a group
-the live config does not declare as a model input, and anything an
-`outputs_dataset` applies afterwards. A checkpoint that keeps no resolved config
-within reach (an app bundle, a hand-copied `.pt`, a run whose `--statistics-dir`
-was elsewhere) prints one line saying the check could not run. The training
-config is only read, never bound, so the run's record stays byte-identical.
-
-Set `check_training_transforms: false` to silence it.
+A checkpoint does not record how its inputs were preprocessed. A `Prediction.yml` that prepares an input
+differently from the `Config.yml` it was trained with runs, and gives wrong results: the Synthesis example
+once used a different `Standardize` mask in prediction, and its error went from 98 to 409 HU with the same
+weights. Keep the input transforms of the two files identical.
 
 ## `outputs_dataset`
-
-`outputs_dataset` defines how selected model outputs become files on disk.
 
 ```yaml
 outputs_dataset:
@@ -214,74 +127,50 @@ outputs_dataset:
       reduction: Mean
 ```
 
-Important nested fields:
+The key is the model output to save ({doc}`../reference/components/models`).
 
 | Field | Effect |
 | --- | --- |
-| output key | Selects the model output to export. |
-| `name_class` | Classpath of the output sink; a bare name resolves in `konfai.predictor` (default `OutputDataset`). |
-| `group` | Output group name written to disk. |
-| `dataset_filename` | Destination dataset path and format. |
-| `same_as_group` | Geometry reference group for exported volumes. |
-| `before_reduction_transforms` | Applied before combining ensemble or TTA outputs. |
-| `after_reduction_transforms` | Applied after reduction. |
-| `final_transforms` | Final transforms applied before writing. |
-| `reduction` | Combines multiple predictions, usually `Mean` or `Median`. |
-| `patch_combine` | Optional patch reassembly strategy. |
+| `name_class` | The writer class (`OutputDataset`). |
+| `group` | The name of the written group. |
+| `dataset_filename` | Where to write, and in which format. |
+| `same_as_group` | `source:destination` groups whose geometry the output takes. |
+| `before_reduction_transforms` | Transforms applied to each copy before the copies are merged. |
+| `reduction` | How the test-time augmentation copies are merged (`Mean`, `Vote` for labels, …). |
+| `after_reduction_transforms` | Transforms after the merge. |
+| `final_transforms` | Transforms just before writing (an `Argmax`, an inverse normalisation). |
+| `attributes` | Header values to set, as `key=value` (`key=` removes one). |
+| `patch_combine` | How overlapping patches are blended: `Trim` (default), `Mean`, `Cosinus`, `Gaussian`. Label maps take only `Trim`. |
 
-One `Prediction.yml` can be shared between different checkpoints as long as
-the exported output name stays consistent.
+### Writing a layer as it is
 
-**Streamed writes are automatic: there is no config key.** When an output can be finalized slab by slab
-identically to the assembled volume (a single augmentation, a voxel-local reduction, and an
-`mha`/`h5`/`omezarr` destination), each slab is written to disk as its patches complete, bounding RAM at
-one patch window instead of the whole volume. Geometry inverses stream too, composed in any number
-(`Canonical`/`Flip`/`Permute`, `Padding`, a nearest-mode `Resample`):
-each slab is remapped, cropped, or resampled through a sliding window straight to its written region.
-A chain streaming cannot honour streams its pointwise prefix into a light post-reduction buffer and
-runs the rest whole-volume on it. Streamed outputs match the assembled path voxel for voxel on a given
-device; only a transcendental-terminated float chain (Softmax/Sigmoid) can differ by ~1 ULP between a
-GPU window and a CPU whole-volume run. Set `KONFAI_STREAMED_WRITES=0` to force the whole-volume path
-globally (ops/debug or exact bit-reproducibility against a CPU run).
+`OutputDataset` writes an output on the grid of an input group (`same_as_group`) and undoes that group's
+transforms. To write an output that lives on a grid of its own, such as an intermediate layer or features
+at a lower resolution, use `OutputLayerDataset`:
 
-### Where the run's time went
-
-A run whose loop took more than a second closes with a line accounting for it, phase
-by phase, in the same shape as the transform workflow's sweep line:
-
-```text
-[KonfAI] prediction 84.2 s = fetch 3.1 + forward 41.5 + blend 22.0 + finalize(stream) 9.8 + finalize(case) 0.0 + drain 1.2 + other 6.6 | writer 30.4 s, waited on 8.9 s
+```yaml
+outputs_dataset:
+  UNetBlock_0:UNetBlock_1:DownConvBlock:Activation_1:   # features after the first pooling, half size
+    OutputDataset:
+      name_class: OutputLayerDataset
+      group: Features
 ```
 
-The sum before the bar is the loop's own thread and it closes exactly: what the named
-phases do not account for is `other`. `fetch` is the wait for the loader's next batch,
-`forward` the model, `blend` a patch's inverses and its blend into the accumulator (the
-copy home included when the case accumulates on the host), the two `finalize` figures
-the slabs and the cases handed to the writer, and `drain` the writes still queued when
-the loop ends. On a GPU the loop only enqueues the forward and the blend, so the device's
-time is waited for where a result crosses to the host.
+It takes the same keys except `same_as_group`. The layer is written as it comes out, with the case's origin
+and its spacing scaled to the layer's size: a layer half the input's size gets twice the spacing, its first
+voxel on the input's first, as a strided convolution places it (a pooling layer is half a voxel off). No input
+transform is undone. With several patches, their positions must scale to whole voxels. The layer is assembled
+whole: one over `memory_budget` is refused.
 
-After the bar is the writer: its own thread's time, and how long the loop stood waiting
-on it inside the finalize phases. The background writer overlaps the disk with the next
-forward only while its queue has room; `waited on` close to `writer` means the
-destination is the floor of the run, and the writer has become synchronous.
+The output is written slab by slab as patches complete, so a large output never sits whole in memory.
+There is no key for it: it happens whenever the output allows it ({doc}`../usage/large-images`).
+
+A run that took more than a second ends with one line saying where the time went (loading, forward,
+blending, writing). When the writer's time is close to the total, the disk is the limit.
 
 ## Examples
-
-See:
 
 - `examples/Segmentation/Prediction.yml`
 - `examples/Synthesis/Prediction.yml`
 
-## Troubleshooting
-
-- If geometry or intensity range is wrong, review the final transforms in
-  `outputs_dataset`.
-
-## Next steps
-
-- {doc}`evaluation`: to score the written predictions against ground truth.
-- {doc}`index`: the shared `dataset_filenames`, `groups_src`,
-  and `subset` conventions.
-- {doc}`../reference/components/models`: how the model output paths referenced by
-  `outputs_dataset` are named.
+Next: {doc}`evaluation`, to score the predictions.

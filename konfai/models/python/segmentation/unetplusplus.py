@@ -16,7 +16,8 @@
 
 """Parametric UNet++: weight-exact and forward-exact with ``smp.UnetPlusPlus`` (ResNet encoder).
 
-This is the Python counterpart of the fixed declarative ``UNetpp.yml`` used by the ImpactSynth app.
+This is the Python counterpart of the catalog's fixed graph ``default|UNetPlusPlus.yml``; the ImpactSynth app
+ships a variant of it (literal widths, a final ``Tanh``).
 It builds, module-for-module and in forward-execution order, the network produced by
 ``segmentation_models_pytorch.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None,
 in_channels=IN, classes=CLS, activation=None)`` (a **ResNet-18/34 encoder** feeding a **UNet++

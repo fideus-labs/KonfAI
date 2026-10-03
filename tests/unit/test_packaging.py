@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -102,10 +103,19 @@ def test_errors_module_importable() -> None:
 
 
 def test_local_vram_query_requires_monitoring_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(konfai, "_PYNVML_AVAILABLE", False)
+    monkeypatch.setitem(sys.modules, "pynvml", None)  # an import of it now raises ImportError
+
+    monkeypatch.setitem(sys.modules, "pynvml", None)  # what an install without nvidia-ml-py imports
 
     with pytest.raises(KonfAIError, match="nvidia-ml-py"):
         konfai.get_vram([0])
+
+
+def test_import_konfai_leaves_the_monitoring_libraries_to_their_use() -> None:
+    """``konfai --help`` imports the package: psutil and pynvml load only when get_ram/get_vram run."""
+    script = "import sys, konfai.main; print(sorted({'psutil', 'pynvml'} & set(sys.modules)))"
+    completed = subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
+    assert completed.stdout.strip() == "[]"
 
 
 def test_itk_helper_requires_simpleitk(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -393,10 +403,9 @@ def test_the_dependency_self_check_names_only_what_an_install_carries(monkeypatc
 
 @pytest.mark.parametrize("setup_py", _SIBLING_SETUPS)
 def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monkeypatch) -> None:
-    """Every sibling once pinned ``konfai==<its own scm version>``: from a working tree that is a
-    ``.dev`` version no installed core carries, so ``pip install -e ./konfai-mcp`` resolved nowhere
-    but at a clean release tag. The pin must admit the core this tree installs: exact at a tag,
-    the closest release or newer from a tree."""
+    """A sibling's own scm version is, from a working tree, a ``.dev`` version no installed core
+    carries. The pin must admit the core this tree installs: exact at a tag, the closest release or
+    newer from a tree."""
     import importlib.metadata
     import runpy
 
@@ -416,3 +425,84 @@ def test_sibling_pins_resolve_against_the_core_of_this_tree(setup_py: str, monke
         assert operators in ({"=="}, {">="}), requirement
         if requirement.name == "konfai":
             assert requirement.specifier.contains(core, prereleases=True), f"{requirement} against the core {core}"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the image entrypoint is a POSIX shell script")
+@pytest.mark.parametrize(
+    ("argv", "runs"),
+    [
+        ([], "konfai --help"),
+        (["TRAIN", "-c", "Config.yml"], "konfai TRAIN -c Config.yml"),
+        (["--version"], "konfai --version"),
+        (["konfai-apps", "infer"], "konfai-apps infer"),
+        (["python", "-c", "print(1)"], "python -c print(1)"),
+    ],
+)
+def test_the_docker_entrypoint_runs_a_program_as_given_and_konfai_arguments_through_konfai(
+    tmp_path: Path, argv: list[str], runs: str
+) -> None:
+    """docker/README.md checks CUDA with ``docker run ... python -c ...``: a program the image carries
+    runs as given, and anything else is handed to ``konfai``."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for program in ("konfai", "konfai-apps", "python"):
+        stub = bin_dir / program
+        stub.write_text(f'#!/bin/sh\necho "{program} $*"\n', encoding="utf-8")
+        stub.chmod(0o755)
+    result = subprocess.run(
+        ["sh", str(_REPO_ROOT / "docker" / "entrypoint.sh"), *argv],
+        env={"PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode, result.stdout.strip()) == (0, runs), result.stderr
+
+
+_SPDX_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".css", ".html", ".sh")
+# wasm-bindgen writes these; the README beside them pins their hashes.
+_GENERATED_SOURCES = "konfai-studio/frontend/src/konfai-rs/"
+
+
+def test_every_source_file_carries_the_spdx_header() -> None:
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", *(f"*{suffix}" for suffix in _SPDX_SUFFIXES)],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("not a git checkout")
+    missing = [
+        name
+        for name in listing.stdout.splitlines()
+        if not name.startswith(_GENERATED_SOURCES)
+        and "SPDX-License-Identifier: Apache-2.0" not in (_REPO_ROOT / name).read_text(encoding="utf-8")[:2000]
+    ]
+    assert not missing, missing
+
+
+@pytest.mark.slow
+def test_the_sdist_carries_the_konfai_package_and_what_builds_it(tmp_path: Path) -> None:
+    """The published sdist was the whole monorepo (9.5 MB: the sibling packages, the docs, the
+    tooling); it carries the package, and a wheel built from it ships what the tree's does."""
+    pytest.importorskip("build")
+    pytest.importorskip("setuptools_scm")
+    built = subprocess.run(
+        [sys.executable, "-m", "build", "--sdist", "--no-isolation", "--outdir", str(tmp_path)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert built.returncode == 0, built.stdout + built.stderr
+    (sdist,) = tmp_path.glob("konfai-*.tar.gz")
+    with tarfile.open(sdist) as archive:
+        top = {Path(name).parts[1] for name in archive.getnames() if len(Path(name).parts) > 1}
+        members = archive.getnames()
+    allowed = {"konfai", "konfai.egg-info", "pyproject.toml", "setup.cfg", "PKG-INFO", "README.md", "LICENSE"}
+    assert top <= allowed | {"CHANGELOG.md", "MANIFEST.in", ".gitignore"}, sorted(top - allowed)
+    assert any("/konfai/models/yaml/UNet.yml" in name for name in members)
+    assert any("/konfai/models/python/segmentation/" in name for name in members)
