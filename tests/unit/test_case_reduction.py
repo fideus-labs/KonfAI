@@ -813,7 +813,9 @@ def test_the_fold_charges_the_operator_s_own_work_to_the_chain(tmp_path: Path, m
     division and leave every addition it made in ``other``: the phase that is supposed to say what
     the reduction costs would under-report it by the whole of the fold.
     """
-    delay = 0.02
+    # Five times the member reads measured under a load of 25, so a busy machine does not read them as the
+    # operator's work.
+    delay = 0.1
     accumulate = Mean.accumulate
 
     def slow(self: Mean, member: torch.Tensor) -> None:
