@@ -36,36 +36,40 @@ from tqdm import tqdm
 # Key format: (OS, ARCH, FLAVOR)
 #   - OS     : platform.system() -> "Linux", "Windows", "Darwin"
 #   - ARCH   : normalized architecture -> "x86_64", "arm64"
-#   - FLAVOR : "cpu" or "cu128", only those GITHUB_TAG publishes
+#   - FLAVOR : "cpu", "cu128" or "cu130", only those GITHUB_TAG publishes
 #
 # No asset bundles LibTorch, yet each binary links the LibTorch it was built against (ASSET_LIBTORCH), which
 # keeps no ABI across minor versions. The environment's pip ``torch`` serves when it is that major.minor;
 # otherwise the installer downloads that exact LibTorch beside the binary (loader_env searches it first).
 # elastix runs as a subprocess, so its LibTorch never has to be the one the Python process imported: the
-# cu128 asset with its own LibTorch (CUDA runtime included) runs beside a CUDA 13 torch.
+# cu128 asset with its own LibTorch (CUDA runtime included) runs beside any other CUDA torch. The cu130 asset
+# serves the torch it was built against only: the Linux LibTorch of CUDA 13 carries no CUDA runtime.
 # -----------------------------------------------------------------------------
 ELX_ASSET_TEMPLATE = {
     ("Linux", "x86_64", "cpu"): "elastix-impact-linux-x86_64-cpu.zip",
     ("Linux", "x86_64", "cu128"): "elastix-impact-linux-x86_64-cu128.zip",
+    ("Linux", "x86_64", "cu130"): "elastix-impact-linux-x86_64-cu130.zip",
     ("Windows", "x86_64", "cpu"): "elastix-impact-windows-x86_64-cpu.zip",
     ("Windows", "x86_64", "cu128"): "elastix-impact-windows-x86_64-cu128.zip",
-    # Built on macos-14, Apple Silicon: the name says x86_64, the binary is arm64.
-    ("Darwin", "arm64", "cpu"): "elastix-impact-macos-14-x86_64-cpu.zip",
+    ("Windows", "x86_64", "cu130"): "elastix-impact-windows-x86_64-cu130.zip",
+    ("Darwin", "arm64", "cpu"): "elastix-impact-macos-arm64-cpu.zip",
 }
 
 #: The sha256 GitHub publishes for each asset of GITHUB_TAG, a prerelease: an archive that differs is refused rather
 #: than run.
 ASSET_SHA256 = {
-    "elastix-impact-linux-x86_64-cpu.zip": "cfdbb65c2a18bc0a535b50cb8e497a9671ef35fb7a34c3ec56cc5faf0c5c8fac",
-    "elastix-impact-linux-x86_64-cu128.zip": "fb21d43b9c1449a0423d1e80544765f1aac2ad113719caaaeaf6333c66cfbb05",
-    "elastix-impact-windows-x86_64-cpu.zip": "709493cecf9d752ab6a8bbcd2c953503c9c3c7bd6f776396496afd3be422e7fe",
-    "elastix-impact-windows-x86_64-cu128.zip": "f2e1d5d3279f5414d73c01b9bfb8a9ae7a42e79c10e2e9308a4f040c865bb225",
-    "elastix-impact-macos-14-x86_64-cpu.zip": "9df7ce62b5602ba5348d18eb9b03283ab1fb0409ef372cd90f48b42e78955755",
+    "elastix-impact-linux-x86_64-cpu.zip": "9078f7b2e1ee073f45395df5e056ccce4138efbd1ee6bff38ab900f0066ab1a0",
+    "elastix-impact-linux-x86_64-cu128.zip": "0dd030f0c6b3cf06e6dfbeeeb9048d30d317287edc8b52d6e5ad69afe4b6be54",
+    "elastix-impact-linux-x86_64-cu130.zip": "81605bf0fd54d04830d260c1424b10d9c27aea267016fa1188b84c33db2fef8b",
+    "elastix-impact-windows-x86_64-cpu.zip": "b708906dd90c552423262c725f90bcdebb5b08d260c3b95914217ed6ba5d1743",
+    "elastix-impact-windows-x86_64-cu128.zip": "833b9df65dfb1ca90a109e4ef142d5be1fc6b59e577c548c0b39f45fc11abda7",
+    "elastix-impact-windows-x86_64-cu130.zip": "98d644927074bb3678a73cfd77d06a8a4d8a94f3bc88690594fcbfb5dd374c27",
+    "elastix-impact-macos-arm64-cpu.zip": "347866a8ea1756e04823bfb7ac4b023a2b3796fb51c23b9dd1f35b3ec91f89ce",
 }
 
-#: The LibTorch each flavor of GITHUB_TAG was built against (the release notes of ImpactElastix 1.0.0). From
-#: torch 2.9 on, c10::SymInt::sym_ne is inline and those binaries no longer load against the pip torch.
-ASSET_LIBTORCH = {"cpu": "2.8.0", "cu128": "2.8.0"}
+#: The LibTorch each flavor of GITHUB_TAG was built against (the release notes of ImpactElastix 1.1.0). LibTorch
+#: keeps no ABI across minor versions, so a binary loads against the pip torch of that major.minor only.
+ASSET_LIBTORCH = {"cpu": "2.11.0", "cu128": "2.11.0", "cu130": "2.12.1"}
 
 
 def libtorch_url(os_name: str, flavor: str) -> str:
@@ -90,7 +94,7 @@ CUDA128_MIN_DRIVER_WINDOWS = CUDA_MIN_DRIVER["cu128"]["Windows"]
 
 GITHUB_OWNER = "vboussot"
 GITHUB_REPO = "ImpactElastix"
-GITHUB_TAG = "1.0.0"
+GITHUB_TAG = "1.1.0"
 
 
 DEFAULT_PREFIX = Path.cwd() / "elastix-impact"
@@ -205,12 +209,17 @@ def extract_archive(archive: Path, dst_dir: Path, keep: Callable[[str], bool] | 
 
 
 def torch_cuda_flavor() -> str | None:
-    """The CUDA asset for a CUDA torch, ``None`` for a CPU torch (konfai then never runs on the GPU). The
-    asset brings the LibTorch it was built against, CUDA runtime included, whenever the environment's torch
-    is another one, so any CUDA torch can use it: only the driver has to be recent enough."""
+    """The CUDA asset for a CUDA torch, ``None`` for a CPU torch (konfai then never runs on the GPU): ``cu130``
+    for the torch that asset was built against, whose CUDA 13 runtime it reads from the environment, else
+    ``cu128``, which brings the LibTorch it was built against, CUDA runtime included, whenever the environment's
+    torch is another one, so any CUDA torch can use it: only the driver has to be recent enough."""
     import torch
 
-    return "cu128" if torch.version.cuda else None
+    if not torch.version.cuda:
+        return None
+    built = ASSET_LIBTORCH["cu130"].split(".")[:2]
+    same = torch.version.cuda.split(".")[0] == "13" and torch.__version__.split("+")[0].split(".")[:2] == built
+    return "cu130" if same else "cu128"
 
 
 def _unsupported(what: str) -> str:
@@ -280,12 +289,12 @@ def install_elastix_impact(install_path: Path, force_cuda: bool, force_cpu: bool
     wanted = torch_cuda_flavor()
     flavor = "cpu"
     if force_cuda:
-        if not has_nvidia or not driver_ok_for_cuda(os_name, drv, "cu128"):
+        flavor = wanted or "cu128"
+        if not has_nvidia or not driver_ok_for_cuda(os_name, drv, flavor):
             raise RuntimeError(
-                f"CUDA forced but NVIDIA driver/GPU not suitable for cu128. Detected: "
+                f"CUDA forced but NVIDIA driver/GPU not suitable for {flavor}. Detected: "
                 f"has_nvidia={has_nvidia}, driver={drv}"
             )
-        flavor = "cu128"
     elif not force_cpu and has_nvidia and wanted is not None:
         if driver_ok_for_cuda(os_name, drv, wanted):
             flavor = wanted
@@ -388,17 +397,20 @@ def loader_env(install_path: Path) -> dict[str, str]:
     """The environment the elastix binary needs to link its shared libraries.
 
     The LibTorch the installer put under ``libtorch/lib`` comes first, when the environment's pip ``torch``
-    is not the version the asset was built against; then the install's own ``lib/``, the pip torch's LibTorch
-    and anything ``KONFAI_ELASTIX_EXTRA_LIB`` names. The Windows asset keeps its DLLs next to the executable,
-    so the install root is searched too.
+    is not the version the asset was built against; then the install's own ``lib/``, which holds the IMPACT plugins
+    elastix loads by name, the pip torch's LibTorch with the CUDA runtime pip installs beside it (``nvidia/*/lib``:
+    the CUDA plugin links ``libcudart`` itself), and anything ``KONFAI_ELASTIX_EXTRA_LIB`` names. The Windows asset
+    keeps its DLLs next to the executable, so the install root is searched too.
     """
     import torch
 
+    packages = Path(torch.__file__).resolve().parent.parent
     searched = [
         str(install_path / "libtorch" / "lib"),
         str(install_path / "lib"),
         str(install_path),
-        str(Path(torch.__file__).resolve().parent / "lib"),
+        str(packages / "torch" / "lib"),
+        *sorted(str(path) for path in (packages / "nvidia").glob("*/lib")),
         os.environ.get("KONFAI_ELASTIX_EXTRA_LIB", ""),
     ]
     variable = {"Windows": "PATH", "Darwin": "DYLD_LIBRARY_PATH"}.get(platform.system(), "LD_LIBRARY_PATH")

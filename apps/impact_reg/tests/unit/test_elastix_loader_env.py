@@ -34,13 +34,21 @@ def _loader_variable() -> str:
     return {"Windows": "PATH", "Darwin": "DYLD_LIBRARY_PATH"}.get(platform.system(), "LD_LIBRARY_PATH")
 
 
-def test_loader_env_names_torch_the_install_and_the_declared_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loader_env_names_torch_the_install_and_the_declared_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("KONFAI_ELASTIX_EXTRA_LIB", os.path.join("declared", "extra"))
+    packages = tmp_path.resolve()
+    (packages / "nvidia" / "cu13" / "lib").mkdir(parents=True)
+    monkeypatch.setattr(torch, "__file__", str(packages / "torch" / "__init__.py"))
     install = Path("install-root")
 
     searched = loader_env(install)[_loader_variable()].split(os.pathsep)
 
-    assert str(Path(torch.__file__).resolve().parent / "lib") in searched, "LibTorch comes from the pip torch"
+    assert str(packages / "torch" / "lib") in searched, "LibTorch comes from the pip torch"
+    # The CUDA plugin links libcudart itself, which pip installs beside torch, not in it: without this the plugin
+    # failed to load wherever no system CUDA toolkit provided the library.
+    assert str(packages / "nvidia" / "cu13" / "lib") in searched
     # The LibTorch the asset was built against, when the installer had to bring it, wins over the pip torch.
     assert searched[0] == str(install / "libtorch" / "lib")
     assert str(install / "lib") in searched, "the install's own runtime"

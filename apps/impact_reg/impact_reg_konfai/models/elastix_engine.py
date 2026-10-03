@@ -426,7 +426,7 @@ class ElastixEngine:
             self._unchecked = False
             # IMPACT's features are computed along each image's voxel axes: both images go in with their voxel axes
             # in LPS order, the transform comes back physical. A residual oblique rotation is sampled physically by
-            # elastix-IMPACT built on ITKIMPACT; the released 1.0.0 binary ignores it.
+            # elastix-IMPACT, which is built on ITKIMPACT.
             fixed, moving, fixed_mask, moving_mask = world_aligned_pair(fixed, moving, fixed_mask, moving_mask)
         else:
             # Grey values alone, compared through mutual information: a few hot voxels no longer squeeze the tissue

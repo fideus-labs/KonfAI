@@ -75,8 +75,8 @@ moving labels warped through the transform; **TRE** the distance between the dat
 keypoints are left out: no method improves them, even where the Dice does); **Folded** the share of voxels whose
 Jacobian determinant is negative; **Time** the whole `register` call, start-up and writing included; **VRAM** the
 peak GPU memory of its processes, PyTorch's cache included. The best Dice of each dataset (the best TRE for BraTSReg) is
-in bold. The `Elastix_IMPACT_*` rows ran an elastix-IMPACT build with the Static fix of the next release; the
-`ConvexAdam_*` rows ran in a fresh environment, as pip resolves the presets' requirements today (itk-impact 0.1.5). The
+in bold. The `Elastix_IMPACT_*` rows ran an elastix-IMPACT build with the Static fix that release 1.1.0 carries; the
+`ConvexAdam_*` rows ran in a fresh environment, as pip resolved the presets' requirements then (itk-impact 0.1.5). The
 three presets on TotalSegmentator MR features are measured on the MR/CT and CBCT/CT sets they are made for.
 
 Each row is one run. elastix samples its metric at random, and the draw matters: `Generic_Rigid_BSpline`'s AbdomenMRCT

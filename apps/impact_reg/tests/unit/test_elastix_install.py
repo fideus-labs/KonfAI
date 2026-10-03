@@ -81,17 +81,17 @@ def test_a_reinstall_replaces_the_previous_one_whole(tmp_path: Path, monkeypatch
     assert [path.name for path in tmp_path.iterdir()] == ["elastix-impact"], "a staging directory was left behind"
 
 
-@pytest.mark.parametrize(("torch_version", "libtorch"), [("2.12.1+cu130", True), ("2.8.0+cu128", False)])
+@pytest.mark.parametrize(("torch_version", "libtorch"), [("2.13.0+cu128", True), ("2.11.0+cu128", False)])
 def test_the_libtorch_the_asset_was_built_against_comes_with_it_unless_torch_is_that_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, torch_version: str, libtorch: bool
 ) -> None:
-    # The 1.0.0 binaries link LibTorch 2.8 and fail to load against 2.9 and later (c10::SymInt::sym_ne became
-    # inline): linked against the pip torch, every elastix preset failed on a fresh install.
+    # LibTorch keeps no ABI across minor versions: linked against a pip torch of another one, every elastix preset
+    # failed on a fresh install.
     fetched = _machine(monkeypatch, driver=(595, 84), cuda="12.8", torch_version=torch_version)
 
     elastix_install.install_elastix_impact(tmp_path / "elastix-impact", force_cuda=False, force_cpu=False)
 
-    expected = ["https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-2.8.0%2Bcu128.zip"]
+    expected = ["https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-2.11.0%2Bcu128.zip"]
     assert fetched[1:] == (expected if libtorch else [])
     if libtorch:
         cudart = tmp_path / "elastix-impact" / "libtorch" / "lib" / "libcudart.so.12"
@@ -101,8 +101,8 @@ def test_the_libtorch_the_asset_was_built_against_comes_with_it_unless_torch_is_
 def test_a_torch_of_that_version_whose_probe_fails_still_gets_the_libtorch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A torch 2.8 built for CUDA 12.6 keeps no libcudart.so.12 where the cu128 binary looks for it.
-    fetched = _machine(monkeypatch, driver=(595, 84), cuda="12.6", torch_version="2.8.0+cu126")
+    # A torch 2.11 built for CUDA 12.6 keeps no libcudart.so.12 where the cu128 binary looks for it.
+    fetched = _machine(monkeypatch, driver=(595, 84), cuda="12.6", torch_version="2.11.0+cu126")
     probes: list[Path] = []
 
     def probe(path: Path) -> None:
@@ -161,14 +161,22 @@ def test_an_offline_download_says_how_to_install_elsewhere(tmp_path: Path, monke
 
 
 @pytest.mark.parametrize(
-    ("torch_cuda", "asset"), [("12.8", "cu128"), ("13.0", "cu128"), ("11.8", "cu128"), (None, "cpu")]
+    ("torch_version", "torch_cuda", "asset"),
+    [
+        ("2.12.1+cu130", "13.0", "cu130"),
+        ("2.13.0+cu130", "13.0", "cu128"),
+        ("2.11.0+cu128", "12.8", "cu128"),
+        ("2.6.0+cu118", "11.8", "cu128"),
+        ("2.12.1+cpu", None, "cpu"),
+    ],
 )
-def test_any_cuda_torch_takes_the_cuda_asset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, torch_cuda: str | None, asset: str
+def test_any_cuda_torch_takes_a_cuda_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, torch_version: str, torch_cuda: str | None, asset: str
 ) -> None:
-    # The asset brings its own LibTorch and CUDA runtime, so a CUDA 13 torch runs the cu128 binary: it used to ask
-    # for a cu130 asset the release does not carry, fall back to the CPU one and fail every GPU IMPACT run.
-    fetched = _machine(monkeypatch, driver=(595, 84), cuda=torch_cuda)
+    # cu130 reads its CUDA runtime from the environment (the Linux LibTorch of CUDA 13 carries none), so it serves
+    # the torch it was built against only. Any other CUDA torch runs cu128, which brings its LibTorch and CUDA
+    # runtime: asking for an asset by the torch's CUDA alone fell back to the CPU one and failed every GPU IMPACT run.
+    fetched = _machine(monkeypatch, driver=(595, 84), cuda=torch_cuda, torch_version=torch_version)
 
     elastix_install.install_elastix_impact(tmp_path / "elastix-impact", force_cuda=False, force_cpu=False)
 
@@ -203,8 +211,8 @@ def test_apple_silicon_installs_the_arm64_macos_asset(tmp_path: Path, monkeypatc
 
     assert fetched == [
         f"https://github.com/vboussot/ImpactElastix/releases/download/{elastix_install.GITHUB_TAG}/"
-        "elastix-impact-macos-14-x86_64-cpu.zip",
-        "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.8.0.zip",
+        "elastix-impact-macos-arm64-cpu.zip",
+        "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.11.0.zip",
     ]
 
 
@@ -250,6 +258,7 @@ def test_a_cpu_install_is_replaced_once_the_cuda_one_can_run(
     monkeypatch.setattr(elastix_install.platform, "system", lambda: "Linux")
     monkeypatch.setattr(elastix_install.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(torch.version, "cuda", "13.0")
+    monkeypatch.setattr(torch, "__version__", "2.13.0+cu130")
 
     assert elastix_install.cuda_upgrade_available(install) is expected
     assert bool(requested) is (recorded == "cpu")
