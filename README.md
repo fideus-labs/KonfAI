@@ -29,8 +29,7 @@ PyTorch and MONAI components you already trust.
 
 One configuration model connects storage, transforms, model graphs, losses,
 training, prediction, evaluation, and output geometry. The resolved YAML is the
-experiment record: inspectable, diffable, and runnable by a researcher or an
-agent.
+experiment record: inspectable, diffable, and runnable by a researcher or a program.
 
 ```yaml
 Trainer:
@@ -48,7 +47,7 @@ konfai TRAIN -c Config.yml --gpu 0     # then PREDICTION, then EVALUATION
 <p align="center">
   <picture>
     <source media="(max-width: 640px)" srcset="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow-mobile.svg" width="720" height="1330" />
-    <img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow.svg" alt="KonfAI reads medical data regionally, executes transforms and PyTorch graphs patch by patch, reconstructs outputs, and delivers medical datasets, Apps, HTTP services, Slicer workflows, and agent-operated experiments." width="1100" height="458" />
+    <img src="https://raw.githubusercontent.com/fideus-labs/KonfAI/main/docs/source/_static/readme/execution-flow.svg" alt="KonfAI reads medical data regionally, executes transforms and PyTorch graphs patch by patch, reconstructs outputs, and delivers medical datasets, Apps, HTTP services, Slicer workflows, and automated experiments." width="1100" height="458" />
   </picture>
 </p>
 
@@ -63,10 +62,10 @@ registration, and synthesis:
 
 > 📄 **Paper:** [KonfAI: A Modular and Fully Configurable Framework for Deep Learning in Medical Imaging](https://www.arxiv.org/abs/2508.09823) (Boussot & Dillenseger, 2025)
 
-> 🤖 **Agent-operable.** KonfAI ships an **[MCP server](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
-> so an LLM agent can drive the *entire* experiment loop (inspect a dataset, author & validate YAML,
+> 🤖 **MCP tools.** KonfAI ships an **[MCP server](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
+> so an MCP client can drive the *entire* experiment loop (inspect a dataset, author & validate YAML,
 > launch train / predict / evaluate / transform, monitor jobs, compare runs), always grounded in the same
-> reproducible configs a human would run. → **[Agents & MCP](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
+> reproducible configs a human would run. → **[MCP workflows](https://konfai.readthedocs.io/en/latest/usage/mcp.html)**
 
 ---
 
@@ -320,10 +319,10 @@ Not limited to these: any importable class (`monai.losses:DiceLoss`,
 
 ---
 
-## 🤖 Agent-ready by design
+## 🤖 Automate workflows through MCP
 
 KonfAI is built to serve as a **deterministic backend for LLM-driven
-experimentation**. Through the **KonfAI-MCP server**, an agent can:
+experimentation**. Through the **KonfAI-MCP server**, a client can:
 
 - 🔎 inspect datasets and infer their structure
 - 📝 generate and validate YAML configurations
@@ -367,7 +366,7 @@ konfai-studio            # -> http://127.0.0.1:8730
 | **App bundles** (`apps/`) | ready-to-run: `impact-synth`, `impact-seg`, `mrsegmentator`, `totalsegmentator`, `impact-reg` |
 | **[SlicerKonfAI](https://github.com/vboussot/SlicerKonfAI)** | run segmentation, synthesis, evaluation, and uncertainty Apps from 3D Slicer |
 | **[SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg)** | run IMPACT-Reg presets and inspect registration results in 3D Slicer |
-| **KonfAI-MCP** | expose KonfAI to LLM agents: inspect data, author configs, launch and monitor runs |
+| **KonfAI-MCP** | expose KonfAI to MCP clients: inspect data, author configs, launch and monitor runs |
 | **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp`: inspect data, train, predict, evaluate, and compare from one conversation |
 
 See the [ecosystem map](https://konfai.readthedocs.io/en/latest/usage/apps.html#the-ecosystem-around-an-app)
@@ -404,11 +403,11 @@ Contributions are welcome: improve examples, clarify docs, add tests, or extend
 models / transforms / apps. See the
 [developer guide](https://konfai.readthedocs.io/en/latest/development.html).
 
-**AI coding agents:** start with [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md), the canonical
+**Contributors:** start with [`AGENTS.md`](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md), the canonical
 reference for conventions, commands, and repository rules. The docs site also
 publishes [llms.txt](https://konfai.readthedocs.io/en/latest/llms.txt) and
 [llms-full.txt](https://konfai.readthedocs.io/en/latest/llms-full.txt): the
-quickstart, config guides and component catalog in one agent-ingestible file.
+quickstart, config guides and component catalog in one plain-text file.
 
 ---
 

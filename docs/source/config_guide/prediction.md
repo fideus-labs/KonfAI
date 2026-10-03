@@ -55,7 +55,7 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.p
 | `checkpoint_cache_gib` | `1.0` | Memory for keeping the ensemble's checkpoints loaded (below). |
 | `train_name` | | Names the output folder `Predictions/<train_name>/`. |
 | `manual_seed` | `null` | Seeds the test-time augmentation draws (with the case name, so a case's draws never depend on the others). |
-| `autocast` | `false` | Mixed precision: about 1.6 times faster; a few labels may change at boundaries. |
+| `autocast` | `false` | Mixed precision. Speed depends on the model and hardware; labels may change at boundaries. |
 | `channels_last` | `false` | Channels-last layout: a little faster on top of `autocast`, on some models. |
 | `cudnn_benchmark` | `false` | Fastest cuDNN kernels even with a seed, without exact replay. |
 | `torch_compile` | `false` | Compile the model once for all the members. Pays on long runs (TTA, many patches); the first run compiles. Where it cannot compile (no Triton), the model runs uncompiled. |
@@ -110,10 +110,9 @@ blend the result on the GPU. A patch size without `0` is never changed.
 
 ### Preprocessing must match training
 
-A checkpoint does not record how its inputs were preprocessed. A `Prediction.yml` that prepares an input
-differently from the `Config.yml` it was trained with runs, and gives wrong results: the Synthesis example
-once used a different `Standardize` mask in prediction, and its error went from 98 to 409 HU with the same
-weights. Keep the input transforms of the two files identical.
+Use the same input preprocessing as training, including normalization masks and
+intensity ranges. A mismatch can change predictions without causing an execution error.
+Check `Prediction.yml` against the training configuration before using a checkpoint.
 
 ## `outputs_dataset`
 
@@ -156,14 +155,19 @@ outputs_dataset:
       group: Features
 ```
 
-It takes the same keys except `same_as_group`. The layer is written as it comes out, with the case's origin
-and its spacing scaled to the layer's size: a layer half the input's size gets twice the spacing, its first
-voxel on the input's first, as a strided convolution places it (a pooling layer is half a voxel off). No input
-transform is undone. With several patches, their positions must scale to whole voxels. The layer is assembled
-whole: one over `memory_budget` is refused.
+It takes the same keys except `same_as_group`. No input transform is undone.
+The output keeps the case's origin and scales its spacing by the ratio between
+the input and layer sizes: a layer half the input's size gets twice the spacing.
+With several patches, their positions must scale to whole voxels.
 
-The output is written slab by slab as patches complete, so a large output never sits whole in memory.
-There is no key for it: it happens whenever the output allows it ({doc}`../usage/large-images`).
+Compatible `OutputDataset` routes write completed slabs as patches arrive
+({doc}`../usage/large-images`). `OutputLayerDataset` assembles the layer output
+in memory and refuses accumulators whose estimated size exceeds `memory_budget`.
+
+The first output voxel is placed on the first input voxel. This matches some
+strided convolutions, but the writer does not infer the layer's actual sampling
+grid from its stride, crop or padding. Pooling can shift voxel centres. Check the
+physical alignment before using an intermediate layer as a registered medical image.
 
 A run that took more than a second ends with one line saying where the time went (loading, forward,
 blending, writing). When the writer's time is close to the total, the disk is the limit.

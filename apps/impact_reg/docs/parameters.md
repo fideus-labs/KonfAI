@@ -62,7 +62,7 @@ Each model under `models` (or under each entry of `levels`, which replaces `mode
 | `ref` | the feature model, `repo:file` on Hugging Face or a local TorchScript file |
 | `layers_mask` | the layers kept, see above |
 | `layers_weight` | one weight for every kept layer, or one per kept layer |
-| `distance` | `L1`, `L2` (default), `Dice`, `Cosine`, `L1Cosine`, `NCC`, `LNCC`; all 0 at a perfect match |
+| `distance` | `L1`, `L2` (default), `Dice`, `Cosine`, `L1Cosine`, `NCC`, `LNCC`; Dice compares raw features and can be negative |
 | `pca` | principal components each kept layer is reduced to, fitted on the fixed image (0 keeps every channel) |
 | `subset_features` | channels of each kept layer drawn at random at every iteration (0 compares all of them) |
 | `voxel_size` | the resolution (mm) the image is resampled to before the model sees it; left out, the image as it is |

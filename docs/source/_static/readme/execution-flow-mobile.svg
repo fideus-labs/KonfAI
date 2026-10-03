@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="720" height="1330" viewBox="0 0 720 1330" role="img" aria-labelledby="title desc">
   <title id="title">KonfAI end-to-end execution flow</title>
-  <desc id="desc">Medical images flow through the patch-native KonfAI engine into medical datasets, applications, services, Slicer, and agent-operated experiments.</desc>
+  <desc id="desc">Medical images flow through the patch-native KonfAI engine into medical datasets, applications, services, Slicer, and automated experiments.</desc>
   <defs>
     <linearGradient id="engineFill" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#123a34"/>
@@ -81,7 +81,7 @@
     <rect class="pill" x="0" y="0" width="288" height="48" rx="14"/><circle cx="24" cy="24" r="7" fill="#3fdcc3"/><text class="pillText" x="43" y="31">Medical datasets</text>
     <rect class="pill" x="302" y="0" width="302" height="48" rx="14"/><circle cx="326" cy="24" r="7" fill="#8fc9ec"/><text class="pillText" x="345" y="31">Apps &amp; fine-tuning</text>
     <rect class="pill" x="0" y="62" width="288" height="48" rx="14"/><circle cx="24" cy="86" r="7" fill="#b7a5f5"/><text class="pillText" x="43" y="93">HTTP &amp; 3D Slicer</text>
-    <rect class="pill" x="302" y="62" width="302" height="48" rx="14"/><circle cx="326" cy="86" r="7" fill="#f59c90"/><text class="pillText" x="345" y="93">MCP &amp; agents</text>
+    <rect class="pill" x="302" y="62" width="302" height="48" rx="14"/><circle cx="326" cy="86" r="7" fill="#f59c90"/><text class="pillText" x="345" y="93">MCP clients</text>
   </g>
   <text class="small" x="360" y="1320" text-anchor="middle">Storage → GPU → clinically usable artifact.</text>
 </svg>

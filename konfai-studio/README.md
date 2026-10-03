@@ -1,12 +1,15 @@
 # KonfAI Studio
 
-![KonfAI Studio: the agent authors an MR→CT synthesis run (write_workflow_config → validate → run_train) while the live training feed, multi-run loss curves, and model-output samples stream beside the chat, all local, offline, nothing leaves the machine.](docs/screenshot.png)
+![KonfAI Studio: Studio runs an MR→CT synthesis run (write_workflow_config → validate → run_train) while the live training feed, multi-run loss curves, and model-output samples stream beside the chat, with the selected language-model backend.](docs/screenshot.png)
 
 A single **chatbot** (à la ChatGPT / Claude, specialized for medical imaging) that drives
 `konfai-mcp` end to end. A clinician-researcher points it at their own dataset and, from the
 conversation alone, onboards data, authors/reuses a model, trains, infers, visualizes results,
 compares, keeps & reproduces experiments, then deploys the frozen model privately (on-prem or
-100% in the browser). The compute stays on the user's site; nothing is uploaded to a third party.
+100% in the browser). KonfAI jobs run on the machine hosting Studio. Chat messages and tool results are sent to the
+selected language-model endpoint. Use a local endpoint when those exchanges must stay local;
+app and model downloads may still need network access. See the
+[Studio guide](https://konfai.readthedocs.io/en/latest/usage/studio.html) for setup and data handling.
 
 **This is a product surface, not a new engine.** Every capability maps 1:1 onto an existing
 `konfai-mcp` tool. The build is the web UI + a thin bridge (BFF), plus the ONNX export.
@@ -17,7 +20,7 @@ Five real sessions on real data. Each video is one continuous take, sped up but 
 
 ### Train from your dataset
 
-Point Studio at your images and ask in plain words. The agent inspects the dataset, writes and
+Point Studio at your images and ask in plain words. Studio inspects the dataset, writes and
 validates the config, and asks before spending GPU time. Training runs with live curves and
 validation samples, then the held-out cases are predicted, evaluated, and opened in the viewer
 next to the ground truth.
@@ -42,7 +45,7 @@ https://github.com/user-attachments/assets/91310a7f-973e-4098-a23d-ef6cab072c00
 
 ### Fit a challenge task
 
-How KonfAI is used in challenge season. The agent designs a loss shaped for the task's score,
+How KonfAI is used in challenge season. Studio designs a loss shaped for the task's score,
 writes it as a real PyTorch module, smoke tests it before any GPU hour, and plugs it into the
 config by classpath. It trains under a time budget, scores the result the way the challenge
 does, and claims nothing without a fair baseline.
@@ -61,8 +64,7 @@ https://github.com/user-attachments/assets/b9b4c01f-7bf0-4f61-86f6-5ae8ce784534
 
 - `konfai_studio/`: the Python package (the BFF)
   - `server.py`: FastAPI that streams the chat over SSE, serves the front, streams volumes to NiiVue
-  - `agent.py`: the pluggable brain (`KONFAI_STUDIO_LLM`): `claude-code` (Claude Agent SDK, default),
-    `openai` (local vLLM/Ollama or any OpenAI-compatible endpoint), `anthropic` (Claude API)
+  - Model backends: Claude Code (default), the Claude API or an OpenAI-compatible endpoint
   - `web/`: the built front (`index.html` + `assets/`, git-ignored; logos are committed)
 - `frontend/`: the React + Vite source (chat panel + NiiVue viewer; `npm run build` emits into `web/`)
 - `docs/`: the spec and the remote-deployment guide
@@ -91,7 +93,7 @@ release from PyPI. At a release tag the pin is exact.
 
 ```bash
 pip install -e ./konfai-mcp             # must precede studio, see above
-pip install -e ./konfai-studio                 # deps: fastapi, uvicorn, fastmcp, claude-agent-sdk
+pip install -e ./konfai-studio                 # installs the server dependencies
 npm --prefix konfai-studio/frontend install    # once
 npm --prefix konfai-studio/frontend run build  # builds the front into konfai_studio/web/
 ```

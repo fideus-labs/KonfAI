@@ -1,15 +1,15 @@
 # KonfAI MCP Server
 
-`konfai-mcp` turns KonfAI into a backend an LLM agent can *drive*. Give it a dataset
+`konfai-mcp` turns KonfAI into a backend an MCP client can *drive*. Give it a dataset
 and a goal in plain language and it inspects the data, picks the cheapest path that
 fits (reuse a published model, fine-tune one, or train from scratch), writes and
 validates the config, runs training / prediction / evaluation, monitors the jobs, and
 returns metrics with a record you can reproduce.
 
-It is the agent-facing counterpart to the CLI: same framework, same YAML, but exposed
+It is the client-facing counterpart to the CLI: same framework, same YAML, but exposed
 as structured, deterministic tools instead of hand-edited files. The package is kept
 deliberately separate: `konfai` is the machine-learning framework, `konfai-mcp` is the
-MCP server that exposes it to agents, and the core never depends on it.
+MCP server that exposes it to clients, and the core never depends on it.
 
 ## Vision
 
@@ -25,7 +25,7 @@ Typical target workflows include:
 
 The server is built around a few principles:
 
-- agent-friendly tool contracts
+- structured tool contracts
 - explicit experiment workspaces
 - reproducible job manifests and config snapshots
 - staged validation before expensive runs
@@ -45,7 +45,7 @@ That separation is deliberate:
 
 - `konfai` stays focused on training, prediction, evaluation, and runtime logic
 - `konfai-mcp` owns MCP tool registration, workspaces, job management, and
-  agent-oriented workflows
+  automated workflows
 
 ## Package Layout
 
@@ -72,8 +72,8 @@ Tests:
 pip install konfai-mcp
 ```
 
-Add `pip install "konfai[imaging]"` if the agent will read `.mha`/`.nii` data or
-run training. This gives you the MCP entrypoint, `konfai-mcp`. The wheel carries
+Install `konfai[imaging]` in the MCP server environment to read `.mha`/`.nii` data
+or run training: `pip install "konfai[imaging]"`. This gives you the MCP entrypoint, `konfai-mcp`. The wheel carries
 the repository's `examples/`, the templates a session starts from
 (`templates://list`); run from a checkout, the server reads them in place.
 
@@ -178,7 +178,7 @@ Structured resources exposed by the server include:
 - `job://{job_id}/{status,log,manifest}`
 - `apps://catalog`
 
-These resources are meant to be machine-readable checkpoints for an agent that
+These resources are meant to be machine-readable checkpoints for a client that
 needs to recover state, inspect artifacts, or decide the next step.
 
 ## MCP Tools
@@ -217,7 +217,7 @@ At a glance, by stage:
 Hardware for device selection is a **resource, not a tool**: `server://capabilities`
 reports per-GPU total / used / **free** VRAM and a recommended device, and every
 train / predict / evaluate / fine-tune launch payload carries a `vram_preflight`
-block for the GPUs it will use, so an agent sizes `batch_size` / `patch_size` to
+block for the GPUs it will use, so a client sizes `batch_size` / `patch_size` to
 the free VRAM without an extra call.
 
 ## Use a published app instead of training
@@ -225,8 +225,8 @@ the free VRAM without an extra call.
 Training from scratch is only one of three ways to satisfy a request. Many tasks
 are already solved by a **published KonfAI app** (a config + code + weights bundle
 on a local path, a HuggingFace repo, or a remote server). The MCP exposes the whole
-*use / adapt / package* half of the lifecycle, so an agent can pick the cheapest
-path that actually fits, **without ever training when a model already exists.**
+*use / adapt / package* half of the lifecycle, so a client can pick the cheapest
+path that fits the request and available data.
 
 The `solve_task` prompt frames the entry decision as a three-way fork:
 
@@ -264,12 +264,13 @@ plus an ad-hoc `repos=[...]` override. `register_app_source` / `unregister_app_s
 let a user pin their own HuggingFace repo or local app. A bare HuggingFace
 `repo_id` or a `host:port` remote server entry is expanded into its apps.
 
-> ⚠️ **Trust.** Resolving a **local or HuggingFace** app imports its Python code and
-> pip-installs its requirements, so every execution / fine-tune / parameter-read tool
-> is gated behind an explicit `allow_untrusted_code=True`. A **remote** app runs on the
-> user's own server (its inputs are uploaded there) and needs no code gate.
+Tools that load a local or Hugging Face app's Python code require
+`allow_untrusted_code=True`; app resolution can also install its requirements.
+Use a source you trust. Metadata lookup with `list_apps` or `describe_app` does not
+load app code. Remote app servers may be listed in the catalogue, but MCP execution
+tools refuse them. Use `konfai-apps` directly to run a remote app.
 
-## Typical Agent Workflow
+## Typical workflow
 
 For a dataset-driven task, the intended loop is:
 
@@ -288,7 +289,7 @@ For a dataset-driven task, the intended loop is:
 12. `summarize_session`
 13. `leaderboard` / `get_run_metrics`
 
-For iterative improvement, the agent can then:
+For iterative improvement, the client can then:
 
 - rewrite one or more configs
 - validate again
@@ -306,7 +307,7 @@ The server supports semantic validation before full execution.
 and optionally set it up, using the current experiment state and available
 artifacts.
 
-This is important for agent workflows because it catches errors such as:
+This is important for automated workflows because it catches errors such as:
 
 - broken YAML roots
 - missing model checkpoints for prediction

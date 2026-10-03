@@ -6,7 +6,7 @@
 | `konfai-cluster` | `konfai` (needs the `cluster` extra to submit) | submit those workflows to SLURM |
 | `konfai-apps` | `konfai-apps` | run a packaged app |
 | `konfai-apps-server` | `konfai-apps` | serve apps over HTTP |
-| `konfai-mcp` | `konfai-mcp` | expose KonfAI to an LLM agent |
+| `konfai-mcp` | `konfai-mcp` | expose KonfAI to an MCP client |
 | `konfai-studio` | `konfai-studio` | the web UI over `konfai-mcp` |
 
 ## `konfai`
@@ -283,11 +283,11 @@ The option wins over the variable.
 | --- | --- |
 | `KONFAI_STUDIO_TOKEN` | Shared bearer token. Unset means no authentication, so a network address is refused. |
 | `KONFAI_STUDIO_INSECURE_COOKIE` | Drop the cookie's `Secure` flag, for plain-HTTP tests. |
-| `KONFAI_STUDIO_LLM` | Which LLM backend drives the agent (`anthropic`, or an OpenAI-compatible server). |
+| `KONFAI_STUDIO_LLM` | Model backend: `claude-code` (default), `anthropic`, or `openai` for a compatible endpoint. |
 | `KONFAI_STUDIO_LLM_API_KEY` | Its key. |
 | `KONFAI_STUDIO_LLM_BASE_URL` | The URL of an OpenAI-compatible server (vLLM, Ollama, LM Studio). |
 | `KONFAI_STUDIO_MODEL`, `KONFAI_STUDIO_SIDE_MODEL` | The main model and the one for cheaper side calls. |
-| `KONFAI_STUDIO_MAX_TOKENS`, `KONFAI_STUDIO_MAX_TURNS` | Limits per answer and per agent loop. |
+| `KONFAI_STUDIO_MAX_TOKENS`, `KONFAI_STUDIO_MAX_TURNS` | Limits per answer and per tool loop. |
 | `KONFAI_STUDIO_TERMINAL` | Turn on the in-app terminal. |
 | `KONFAI_STUDIO_SLICER` | The 3D Slicer executable to launch (default: `Slicer` on `PATH`). |
 | `KONFAI_STUDIO_PROXY_HEADERS`, `KONFAI_STUDIO_LOOPBACK` | Set by `konfai-studio` itself from its options. |

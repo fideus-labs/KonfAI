@@ -6,24 +6,24 @@ run the same workflow.
 
 ```python
 import konfai
-from konfai.data.transform import Resample, Write
+from konfai.data.transform import Clip, Write
 
 if __name__ == "__main__":
     result = konfai.transform(
-        "moved",
-        "./Staged:mha",
-        {"Moving": {"Moved": [
-            Resample(reference="{case}", reference_group="DVF", field_group="DVF"),
-            Write(dataset="./Output:mha"),
+        "prepared",
+        "./Dataset:mha",
+        {"CT": {"CLIPPED": [
+            Clip(min_value=-100, max_value=100),
+            Write(dataset="./Prepared:mha"),
         ]}},
-        memory_budget="8G",
+        memory_budget="128M",
     )
     result.outputs      # where each chain's Write landed
     result.config       # the resolved YAML of the run: keep it to reproduce the experiment
 ```
 
 A chain is a list of stage objects (the classes the YAML names, with the same arguments), or the same thing
-as a dictionary (`{"Resample": {...}, "Write": {...}}`), or a tree loaded from a YAML file and modified.
+as a dictionary (`{"Clip": {...}, "Write": {...}}`), or a tree loaded from a YAML file and modified.
 
 | Workflow | Python |
 | --- | --- |
@@ -32,15 +32,31 @@ as a dictionary (`{"Resample": {...}, "Write": {...}}`), or a tree loaded from a
 | PREDICTION | `konfai.predict(models=[...], config=tree_or_path, ...)` |
 | TRAIN / RESUME | load the YAML into a dictionary, change what you study, `konfai.train(config=tree)` |
 
-Every function takes a config as a file path or as a dictionary, which makes sweeps simple: each run keeps
-its resolved config as the record of what was tried.
+`train` and `predict` accept `config` as a file path or dictionary. `evaluate` takes
+datasets and metrics; `transform` and `plan_transform` take datasets and chains.
+Each executed workflow keeps its resolved configuration. For example, after the
+{doc}`CPU quickstart <../quickstart>`:
+
+```python
+import konfai
+from konfai.metric.measure import Dice
+
+if __name__ == "__main__":
+    result = konfai.evaluate(
+        "quick-check",
+        ["./Dataset:mha", "./Predictions/CT_TWO_CLASSES/Dataset:mha"],
+        metrics={"PRED": {"SEG": [Dice(labels=[1])]}},
+        cpu=1,
+    )
+    print(result.metrics)
+```
 
 ## How a call behaves
 
 - **Errors raise.** A refusal is a `KonfAIError` with its message and remedy; your code decides what to do.
-- **Results are objects.** `transform` returns the outputs and the workspace; `evaluate` returns the metrics
-  as a dictionary.
-- **Your config file is not modified.** It is copied to a scratch folder, which receives the resolved
+- **Results are objects.** `transform` returns the outputs and workspace; `evaluate` returns an
+  `EvaluationResult` whose `metrics` field holds the results.
+- **A config file passed to `train` or `predict` is not modified.** It is copied to a scratch folder, which receives the resolved
   defaults.
 - **One workflow at a time per process.** The `KONFAI_*` environment and the memory budget are restored
   after each call.
@@ -137,16 +153,12 @@ client.pipeline(
 It uploads the inputs, streams the logs, downloads the result into `output`, and stops the remote job if
 you interrupt it.
 
-```{warning}
-`RemoteServer` speaks plain HTTP: the token and the images are not encrypted. Put the server behind a TLS
-reverse proxy beyond localhost.
-```
+`RemoteServer` speaks plain HTTP. For a server beyond localhost, put it behind a
+TLS reverse proxy to encrypt the token and images in transit.
 
-```{danger}
-Resolving an app **runs its Python code** and, by default, **installs its `requirements.txt`** (never touching
-`torch` or `konfai`; `KONFAI_APPS_INSTALL_REQUIREMENTS=0` turns this off). Only use apps from sources you
-trust. On a server, the `--apps` list decides which apps can run.
-```
+An app runs its Python code and installs its requirements by default. Use a source
+you trust. Set `KONFAI_APPS_INSTALL_REQUIREMENTS=0` to manage requirements yourself.
+On a server, the `--apps` list decides which apps can run.
 
 ### Bundles and ONNX export
 

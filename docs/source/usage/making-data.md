@@ -1,4 +1,4 @@
-# Making datasets
+# Prepare a dataset
 
 The fourth workflow prepares data. It reads a dataset, runs a chain of
 transforms over it, and writes a dataset, and it is what you run before, or
@@ -120,7 +120,7 @@ transforms:
 ```
 
 `Save` and `Write` also build OME-NGFF pyramids on the way out with
-`scale_factors: [4]`, so a viewer gets its coarse levels for free.
+`scale_factors: [4]`, so a viewer gets its coarse levels while writing.
 
 ## Read the plan
 
