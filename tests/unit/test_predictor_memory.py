@@ -31,6 +31,7 @@ from konfai.predictor.loop import _prediction_report, _Predictor
 from konfai.utils import vram
 from konfai.utils.clock import SweepClock
 from konfai.utils.dataset import Attribute
+from konfai.utils.runtime import DataLog, NullSummaryWriter
 
 
 class DummyPredictNetwork(Network):
@@ -615,6 +616,20 @@ def _loop_doubles(batches: int) -> tuple[_Predictor, Any, dict[str, Any], Any]:
     predictor_any._on_cuda = False
     predictor_any.set_aside = {}
     return predictor, dataset, outputs_dataset, model_composite
+
+
+def test_predict_log_without_tensorboard_skips_image_preparation_and_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    predictor, _, _, model = _loop_doubles(batches=1)
+    predictor.tb = NullSummaryWriter()
+    predictor._has_runtime_measures = False
+    predictor.data_log = DataLog.parse(["input/IMAGES/1", "out_a/IMAGES/1"])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Disabled visualization must neither copy inputs nor run the model")
+
+    monkeypatch.setattr(model.module, "get_layers", unexpected, raising=False)
+    monkeypatch.setattr(torch.Tensor, "cpu", unexpected)
+    predictor._predict_log(next(iter(predictor.dataloader_prediction)))
 
 
 def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_outputs(

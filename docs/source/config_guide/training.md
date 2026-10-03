@@ -75,6 +75,10 @@ list of case names.
 | `EarlyStopping` | `null` | Stop when the score stops improving (below). |
 | `save_checkpoint_mode` | `BEST` | `BEST` keeps the checkpoint with the lowest validation loss, `ALL` keeps every save. |
 
+Image logging is skipped when TensorBoard is unavailable. Model outputs requested by `data_log` use
+an extra forward in evaluation mode: BatchNorm statistics and the random generators used by training
+are preserved, and each module returns to its previous mode afterwards.
+
 ### `EarlyStopping`
 
 | Field | Default | Effect |

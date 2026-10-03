@@ -62,6 +62,8 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.p
 | `gpu_checkpoints` | `null` | Modules to place on other GPUs. |
 | `data_log` | `null` | Outputs to log in TensorBoard. |
 
+When TensorBoard is unavailable, `data_log` skips image preparation and the extra forward for model outputs.
+
 ### Checkpoint memory
 
 The members of an ensemble run one after the other in one model. Their weights stay in a host cache of

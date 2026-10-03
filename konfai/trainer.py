@@ -59,6 +59,7 @@ from konfai.utils.clock import SweepClock, startup_clock
 from konfai.utils.config import apply_config, config, strict_config
 from konfai.utils.errors import ConfigError, KonfAIWarning, TrainerError
 from konfai.utils.live_control import LiveControl
+from konfai.utils.pretrained import _evaluating
 from konfai.utils.runtime import (
     DataLog,
     DistributedObject,
@@ -70,6 +71,7 @@ from konfai.utils.runtime import (
     configure_workflow_environment,
     confirm_overwrite_or_raise,
     description,
+    preserved_rng,
     run_distributed_app,
     safe_torch_load,
     seed_all,
@@ -1029,7 +1031,7 @@ class _Trainer:
             return {}
 
         images_log = []
-        if len(self.data_log):
+        if self.data_log and not isinstance(self.tb, NullSummaryWriter):
             for name, data_type in self.data_log.items():
                 if name in batch_sample:
                     data_type[0](
@@ -1062,16 +1064,18 @@ class _Trainer:
 
             if len(images_log):
                 # get_layers is model-scoped: run it once per model, not once per network.
-                for name, layer, _ in model.get_layers(
-                    [v.tensor for v in batch_sample.values() if v.is_input],
-                    images_log,
-                ):
-                    self.data_log[name][0](
-                        self.tb,
-                        f"{type_log}/{name}{label}",
-                        layer[: self.data_log[name][1]].detach().cpu().numpy(),
-                        self.it,
-                    )
+                # A visualization must not train BatchNorm or consume the next training draw.
+                with preserved_rng(), _evaluating(model):
+                    for name, layer, _ in model.get_layers(
+                        [v.tensor for v in batch_sample.values() if v.is_input],
+                        images_log,
+                    ):
+                        self.data_log[name][0](
+                            self.tb,
+                            f"{type_log}/{name}{label}",
+                            layer[: self.data_log[name][1]].detach().cpu().numpy(),
+                            self.it,
+                        )
 
         if type_log == "Training":
             for name, network in self.model.module.get_networks().items():

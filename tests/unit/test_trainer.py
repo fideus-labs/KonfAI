@@ -31,7 +31,7 @@ from konfai.metric.schedulers import PolyLRScheduler
 from konfai.network.network import Network
 from konfai.trainer import EarlyStopping, EarlyStoppingBase, Trainer, _Trainer
 from konfai.utils.errors import ConfigError, TrainerError
-from konfai.utils.runtime import State
+from konfai.utils.runtime import DataLog, NullSummaryWriter, State
 from torch import nn
 from torch.optim.swa_utils import AveragedModel
 
@@ -1425,7 +1425,8 @@ def test_latest_resume_copy_fallback_is_atomic_and_never_truncates_a_prior_link(
     assert not list(latest.parent.glob(".resume-*"))
 
 
-def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("tensorboard", [False, True])
+def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monkeypatch, tensorboard: bool) -> None:
     # A Dice loss reports the coefficient on the boards and minimizes one minus it. The default
     # selection sums the minimized values: summing the reported ones reads a cross entropy of 0.2 plus
     # a Dice of 0.9 as worse than 0.7 plus 0.3.
@@ -1441,7 +1442,7 @@ def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monk
     model = _DummyModel()
     model.module = _Module()
     trainer = _build_trainer(tmp_path, monkeypatch, ["2026_01_01_00_00_00"], model=model)
-    trainer.tb = SimpleNamespace(add_scalars=lambda *args, **kwargs: None)
+    trainer.tb = SimpleNamespace(add_scalars=lambda *args, **kwargs: None) if tensorboard else NullSummaryWriter()
     monkeypatch.setattr(
         DistributedObject,
         "get_measure",
@@ -1457,6 +1458,73 @@ def test_default_selection_scores_what_the_losses_minimized(tmp_path: Path, monk
     assert reported == {"CE": 0.2, "Dice": 0.9, "MAE": 5.0}  # what the boards and the description show
     assert trainer._loss_score == {"CE": 0.2, "Dice": pytest.approx(0.1)}  # what selects the checkpoint
     assert trainer.early_stopping.get_score(trainer._loss_score) == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("type_log", ["Training", "Validation"])
+def test_logging_without_tensorboard_skips_image_preparation_and_forward(tmp_path: Path, monkeypatch, type_log) -> None:
+    trainer = _build_trainer(tmp_path, monkeypatch, ["now"])
+    trainer.tb = NullSummaryWriter()
+    trainer.data_log = DataLog.parse(["input/IMAGES/1", "Out/IMAGES/1"])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Disabled visualization must neither copy inputs nor run the model")
+
+    trainer.model.module.get_layers = unexpected
+    # Fail before a tensor copy, not just when a discarded image reaches the writer.
+    monkeypatch.setattr(torch.Tensor, "cpu", unexpected)
+    batch = cast(Any, {"input": SimpleNamespace(tensor=torch.ones(2, 1, 4, 4), is_input=True)})
+    assert trainer._log(type_log, batch) == {}
+
+
+@pytest.mark.parametrize("writer_fails", [False, True])
+@pytest.mark.parametrize("composite_with_ema", [False, True])
+def test_training_visualization_preserves_buffers_rng_and_module_modes(
+    tmp_path: Path, monkeypatch, writer_fails, composite_with_ema
+) -> None:
+    class Jitter(nn.Module):
+        def forward(self, tensor):
+            # Unlike Dropout, a custom stochastic layer can draw even in eval mode.
+            return tensor + torch.rand_like(tensor)
+
+    model = Network(in_channels=1)
+    body = Network(in_channels=1) if composite_with_ema else model
+    body.add_module("Norm", nn.BatchNorm2d(1))
+    body.add_module("Frozen", nn.Dropout2d(0.5))
+    if composite_with_ema:
+        model.add_module("Body", body)
+    model.add_module("Out", Jitter())
+    model.train()
+    body["Frozen"].eval()
+    trainer = _build_trainer(tmp_path, monkeypatch, ["now"], model=SimpleNamespace(module=model))
+    models = [model]
+    if composite_with_ema:
+        trainer.model_ema = AveragedModel(model)
+        models.append(trainer.model_ema.module)
+    trainer.data_log = DataLog.parse(["Out/IMAGES/1"])
+    calls = []
+
+    def write_images(*args, **kwargs):
+        assert not any(module.training for module in models[len(calls)].modules())
+        calls.append(args)
+        if writer_fails and len(calls) == len(models):
+            raise OSError("image writer failed")
+
+    trainer.tb = SimpleNamespace(add_images=write_images)
+    batch = cast(Any, {"input": SimpleNamespace(tensor=torch.ones(2, 1, 4, 4) * 5, is_input=True)})
+    modes = [module.training for network in models for module in network.modules()]
+    buffers = [(buffer, buffer.clone()) for network in models for buffer in network.buffers()]
+    rng = torch.get_rng_state().clone()
+
+    if writer_fails:
+        with pytest.raises(OSError, match="image writer failed"):
+            trainer._train_log(batch)
+    else:
+        trainer._train_log(batch)
+
+    assert len(calls) == len(models)
+    assert [module.training for network in models for module in network.modules()] == modes
+    assert all(torch.equal(buffer, original) for buffer, original in buffers)
+    assert torch.equal(torch.get_rng_state(), rng)
 
 
 def test_a_resume_model_that_is_no_checkpoint_is_refused_by_name(tmp_path: Path) -> None:

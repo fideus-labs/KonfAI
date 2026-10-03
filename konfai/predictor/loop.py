@@ -431,7 +431,7 @@ class _Predictor:
                 )
 
         # Images and a module-layer target (get_layers re-runs a forward) throttle to the status cadence.
-        if not len(self.data_log) or self.it % _DESCRIPTION_EVERY != 0:
+        if isinstance(self.tb, NullSummaryWriter) or not self.data_log or self.it % _DESCRIPTION_EVERY != 0:
             return
         images_log = []
         for name, data_type in self.data_log.items():
