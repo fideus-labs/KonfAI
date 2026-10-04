@@ -315,18 +315,24 @@ _DTYPES += [np.float16, np.float32, np.float64, np.bool_]
 _ALIGNED = np.diag([-1.0, -1.0, 1.0])
 
 
+_CUDA = pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device"))
+
+
 @pytest.mark.parametrize("fill", [9.0, -1.0])
-@pytest.mark.parametrize("route", ["host", "device"])
+@pytest.mark.parametrize("route", ["host", "device", _CUDA])
 @pytest.mark.parametrize("direction", ["aligned", "permuted", "oblique"])
 @pytest.mark.parametrize("dtype", _DTYPES, ids=lambda dtype: np.dtype(dtype).name)
 def test_a_nearest_resample_serves_every_dtype(monkeypatch, dtype, direction: str, route: str, fill: float) -> None:
     """A nearest pick copies voxels in their own dtype and fills the far face in it, the fill cast as
     ITK casts it (-1 is 255 in a uint8 volume). torch has no fill of its own for uint16, uint32 or
-    uint64, which is what a microscope stores. Whole and region by region, every dtype resamples as
-    the same values do in float64, cast; off the separable path, as ``sitk.Resample`` does, or, where
-    ITK has no such pixel (bool, float16), as the same values in a wider dtype."""
-    if route == "device":
+    uint64, which is what a microscope stores, and on CUDA no index either. Whole and region by region,
+    every dtype resamples as the same values do in float64, cast; off the separable path, as
+    ``sitk.Resample`` does, or, where ITK has no such pixel (bool, float16), as the same values in a
+    wider dtype. A CUDA device picks the voxels the host picks: it divides by a Python scalar through
+    its reciprocal, one bit off, which moved the half-voxel ties of this grid."""
+    if route != "host":
         monkeypatch.setattr("konfai.data.transform.resample.sitk", None)
+    place = torch.Tensor.cuda if route == "cuda" else torch.Tensor.cpu
     shape = (7, 9, 11)
     values = np.random.default_rng(17).integers(0, 120, size=shape)[None]
     volume = values.astype(dtype)
@@ -335,20 +341,20 @@ def test_a_nearest_resample_serves_every_dtype(monkeypatch, dtype, direction: st
 
     stage = Resample(**request)
     landed = Attribute(attribute)
-    whole = stage("CASE", torch.from_numpy(volume.copy()), landed)
+    whole = stage("CASE", place(torch.from_numpy(volume.copy())), landed).cpu()
     extent = list(whole.shape[1:])
     regions = torch.cat(
         [
             stage._sample(
                 "CASE",
-                torch.from_numpy(volume.copy()),
+                place(torch.from_numpy(volume.copy())),
                 (slice(start, min(start + 3, extent[0])), slice(0, extent[1]), slice(0, extent[2])),
                 [0, 0, 0],
             )
             for start in range(0, extent[0], 3)
         ],
         dim=1,
-    )
+    ).cpu()
 
     wide = Resample(**request)("CASE", torch.from_numpy(values.astype(np.float64)), Attribute(attribute))
 
