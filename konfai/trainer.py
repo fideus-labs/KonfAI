@@ -87,17 +87,6 @@ def _checkpoint_score(path: Path, default: float) -> float:
 
 def _ddp_kwargs(model: Network, local_rank: int, size: int) -> dict[str, Any]:
     """Use the ordinary reducer: training losses live on Measure, outside DDP's returned tensors."""
-    for network in model.get_networks().values():
-        if network.measure is not None:
-            for output, targets in network.measure.outputs_criterions.items():
-                for criteria in targets.values():
-                    if any(attr.is_loss and attr.accumulation for attr in criteria.values()):
-                        raise ConfigError(
-                            f"Distributed training cannot use criterion accumulation on {output!r}: "
-                            "it backpropagates inside forward, before gradient synchronization is ready.",
-                            "Set accumulation: false on this output's losses, or train on one process. "
-                            "nb_batch_per_step remains available for distributed batch accumulation.",
-                        )
     # static_graph delays the first reduction through a hook on forward's return value. Network keeps
     # its losses in Measure, so their backward never reaches that hook and ranks silently diverge.
     options: dict[str, Any] = {"static_graph": False, "find_unused_parameters": True}
@@ -701,7 +690,7 @@ class _Trainer:
                     with self.model.module.accumulation_sync(self.model):
                         with clock.phase("forward"):
                             if isinstance(self.model, DDP):
-                                self.model(batch_sample, clock=clock, _ddp_losses=True)
+                                self.model(batch_sample, clock=clock, _ddp_losses=self.model.require_backward_grad_sync)
                             else:
                                 self.model(batch_sample, clock=clock)
                         with clock.phase("backward+step"):

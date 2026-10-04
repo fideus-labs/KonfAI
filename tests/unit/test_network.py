@@ -807,18 +807,51 @@ def test_loss_groups_can_share_the_same_graph(patched, accumulated) -> None:
 
 
 @pytest.mark.parametrize("nested", [False, True])
-def test_ddp_refuses_backward_inside_forward_and_accepts_reporting_criteria(nested, monkeypatch) -> None:
+def test_ddp_selects_patch_accumulation_only_for_losses(nested, monkeypatch) -> None:
     from konfai.trainer import _ddp_kwargs
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     root, leaf = _microbatch_network(2, True, False, nested, False)
-    with pytest.raises(ConfigError, match="Distributed training cannot use criterion accumulation") as caught:
-        _ddp_kwargs(root, local_rank=0, size=1)
-    assert "accumulation: false" in str(caught.value)
+    assert root.accumulates_patch_gradients()
+    assert _ddp_kwargs(root, local_rank=0, size=1) == {"static_graph": False, "find_unused_parameters": True}
     for targets in leaf.measure.outputs_criterions.values():
         for attr in targets["Y"].values():
             attr.is_loss = False
+    assert not root.accumulates_patch_gradients()
     assert _ddp_kwargs(root, local_rank=0, size=1) == {"static_graph": False, "find_unused_parameters": True}
+
+
+def test_immediate_loss_releases_saved_activations_as_each_patch_finishes() -> None:
+    def peak_saved(accumulated, width):
+        root, leaf = _microbatch_network(1, accumulated, True, False, False)
+        leaf.add_module("Out", torch.nn.Sequential(torch.nn.Conv2d(1, 8, 1), torch.nn.ReLU(), torch.nn.Conv2d(8, 1, 1)))
+        leaf.optimizer = torch.optim.SGD(leaf.parameters(), lr=0.01)
+        live, peak = 0, 0
+
+        class Saved:
+            def __init__(self, tensor):
+                nonlocal live, peak
+                self.tensor = tensor
+                live += tensor.numel()
+                peak = max(peak, live)
+
+            def __del__(self):
+                nonlocal live
+                live -= self.tensor.numel()
+
+        batch = {
+            "X": _BatchItem(torch.ones(1, 1, width, width), True),
+            "Y": _BatchItem(torch.zeros(1, 1, width, width), False),
+        }
+        with torch.autograd.graph.saved_tensors_hooks(Saved, lambda saved: saved.tensor):
+            root(batch)
+            root.backward(root)
+        assert live == 0
+        return peak
+
+    small, large = peak_saved(True, 4), peak_saved(True, 16)
+    assert large == small, "saved activations must not grow with the number of patches"
+    assert peak_saved(False, 16) > 10 * large
 
 
 @pytest.mark.parametrize("accumulated", [False, True])

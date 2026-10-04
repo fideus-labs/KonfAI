@@ -42,6 +42,7 @@ from konfai.network.network.base import (
     mark_accumulated,
     strip_accumulated,
 )
+from konfai.network.network.distributed import average_gradients, local_backward
 from konfai.network.network.loaders import LRSchedulersLoader, OptimizerLoader, TargetCriterionsLoader
 from konfai.network.network.measure import Measure
 from konfai.utils.clock import SweepClock
@@ -1288,11 +1289,28 @@ class Network(ModuleArgsDict, ABC):
         so the DDP synchronisation can be decided for the whole step."""
         return (self._it + 1) % self.nb_batch_per_step == 0
 
+    def accumulates_patch_gradients(self) -> bool:
+        """Whether any loss backpropagates inside the forward walk, including scheduled losses."""
+        return any(
+            attr.is_loss and attr.accumulation
+            for network in self.get_networks().values()
+            if network.measure is not None
+            for targets in network.measure.outputs_criterions.values()
+            for criteria in targets.values()
+            for attr in criteria.values()
+        )
+
     def accumulation_sync(self, model: Any) -> AbstractContextManager[Any]:
         """The DDP context the coming forward AND backward run under: ``no_sync`` when no network of the
         graph steps on this batch, the ordinary reduction otherwise. DDP marks the gradients to reduce
         during ``forward``, so the context must wrap the forward too. A graph whose networks step at
-        different cadences reduces whenever one of them does."""
+        different cadences reduces whenever one of them does. With patch-wise backward, all batches
+        stay local here; ``backward`` averages each optimizer's gradients just before its step."""
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel) and self.accumulates_patch_gradients():
+            # Backward happens inside forward, before DDP prepares its reducer. Keep the whole
+            # walk local and average at each optimizer boundary instead. no_sync disables the next
+            # buffer broadcast too, so preserve that independent DDP responsibility.
+            return local_backward(model)
         trained = [network for network in self.get_networks().values() if network.optimizer is not None]
         if not trained or any(network.steps_this_batch() for network in trained):
             return nullcontext()
@@ -1317,7 +1335,10 @@ class Network(ModuleArgsDict, ABC):
         pending: list[Network] | None = [] if isinstance(model, torch.nn.parallel.DistributedDataParallel) else None
         result = self._backward(pending)
         if pending is not None:
+            patch_accumulation = self.accumulates_patch_gradients()
             for network in pending:
+                if patch_accumulation and network.optimizer is not None:
+                    average_gradients(network.optimizer, model.process_group, model.bucket_bytes_cap, network.scaler)
                 network._optimizer_step()
         return result
 

@@ -153,9 +153,15 @@ It can be combined with `nb_batch_per_step`: gradients are averaged across the p
 A loss outside its `start`/`stop` window does not delay the other losses. If no loss contributes a
 gradient, the optimizer waits.
 
-Distributed training requires `accumulation: false` on loss criteria. Patch-by-patch backward runs
-before DDP can prepare gradient synchronization, so this combination is refused. Distributed batch
-accumulation with `nb_batch_per_step` is supported.
+`accumulation: true` also works in distributed training. Each process backpropagates its patches
+locally, freeing their backward buffers as it goes. KonfAI averages the gradients across processes
+before each optimizer update, including when `nb_batch_per_step` spans several batches. This keeps
+gradient communication out of the patch loop. No additional setting is needed.
+This reduces activation memory; throughput depends on the model, since gradient communication
+starts after the local backward passes finish.
+
+If an immediate loss and a deferred loss share a graph, its backward buffers remain until the
+deferred loss runs. Use immediate accumulation for all losses on that graph to release them per patch.
 
 An output can carry several criteria: `examples/Segmentation` puts a cross entropy on
 `UNetBlock_0:Head:Conv` and a Dice loss on `UNetBlock_0:Head:Softmax`. A model with no loss is refused.
