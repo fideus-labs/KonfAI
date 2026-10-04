@@ -82,6 +82,9 @@ These work on a stack of ensemble members (prediction post-processing).
 | `Norm` | Vector magnitude over the last axis. | | yes | no ‡ |
 | `Percentage` | `tensor / baseline * 100`. | `baseline` | no | yes |
 
+With `InferenceStack(mode="Seg")`, the saved stack holds each member's class indices. The returned
+prediction is the mean of the input scores.
+
 ## Writing and changing the number of cases
 
 | Name | Purpose | Key arguments (defaults) |

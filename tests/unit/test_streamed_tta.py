@@ -472,6 +472,38 @@ def test_inference_stack_folds_copies_one_at_a_time_as_their_concatenation(
     np.testing.assert_array_equal(read[1], read[0])
 
 
+@pytest.mark.parametrize(
+    ("route", "buffered"), [("whole", False), ("copies", False), ("copies", True), ("slabs", False), ("slabs", True)]
+)
+def test_segmentation_stack_preserves_labels_above_255_in_the_written_file(tmp_path, monkeypatch, route, buffered):
+    labels = torch.tensor([0, 255, 256, 299]).repeat(6).reshape(2, 3, 2, 2)
+    labels[1] = labels[1].roll(1, -1)
+    logits = torch.zeros(2, 300, 3, 2, 2).scatter_(1, labels.unsqueeze(1), 9.0)
+    path = tmp_path / "stack.h5"
+    stage = InferenceStack(f"{path}:h5", mode="Seg")
+    attribute = geometry()
+    if buffered:
+        monkeypatch.setattr(stage.dataset, "open_data_stream", lambda *args, **kwargs: None)
+
+    if route == "whole":
+        reduced = stage("CASE", logits, attribute)
+    elif route == "copies":
+        reduced = stage.fold_copies("CASE", iter([logits[:1], logits[1:]]), 2, attribute)
+    else:
+        regions = [slice(0, 2), slice(2, 3)]
+        reduced = torch.cat(
+            [stage.stream_slab("CASE", logits[:, :, region], region, [3, 2, 2], attribute) for region in regions],
+            dim=1,
+        )
+
+    saved, saved_attribute = Dataset(str(path), "h5").read_data("InferenceStack", "CASE")
+    assert saved.dtype == np.float32
+    np.testing.assert_array_equal(saved, labels.numpy())
+    torch.testing.assert_close(reduced, logits.mean(0), rtol=0, atol=0)
+    for key in ("Origin", "Spacing", "Direction"):
+        np.testing.assert_array_equal(saved_attribute.get_np_array(key), attribute.get_np_array(key))
+
+
 @pytest.mark.parametrize(("shape", "patch_size"), [(SHAPE, PATCH_SIZE), ([3, 4, 6], [3, 4, 2])], ids=["z", "x"])
 def test_interleaved_case_entries_order_copies_by_slab_start(shape: list[int], patch_size: list[int]) -> None:
     """The copies advance together along the axis the grid sweeps, the one the input streams its slabs on."""

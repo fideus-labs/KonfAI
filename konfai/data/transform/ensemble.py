@@ -176,7 +176,7 @@ class InferenceStack(Transform):
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         if self.mode == "Seg":
-            _tensors = torch.argmax(tensors, dim=1).to(torch.uint8)  # a softmax keeps the order it is taken of
+            _tensors = torch.argmax(tensors, dim=1)
         else:
             _tensors = tensors.squeeze(1)
         return _tensors.float().cpu().numpy()
