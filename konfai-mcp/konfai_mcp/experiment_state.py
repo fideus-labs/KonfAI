@@ -382,12 +382,18 @@ def _listing(path: Path) -> tuple[tuple[str, int], ...]:
     """What a structure scan reads: the root's entries and each case directory's, by name and mtime.
     The root's own mtime says nothing of a file added inside a case."""
     seen: list[tuple[str, int]] = []
-    for entry in os.scandir(path):
-        seen.append((entry.name, _mtime(entry)))
-        if entry.is_dir():
-            # ponytail: every case is listed each turn; a root that is one flat-chunk store lists its chunks,
-            # key that layout on its metadata file if it shows.
-            seen.extend((f"{entry.name}/{child.name}", _mtime(child)) for child in os.scandir(entry.path))
+    with os.scandir(path) as entries:
+        for entry in entries:
+            seen.append((entry.name, _mtime(entry)))
+            try:
+                if entry.is_dir():
+                    # ponytail: every case is listed each turn; a root that is one flat-chunk store lists its chunks,
+                    # key that layout on its metadata file if it shows.
+                    with os.scandir(entry.path) as children:
+                        seen.extend((f"{entry.name}/{child.name}", _mtime(child)) for child in children)
+            except OSError:
+                # An unavailable child must not hide the root store or the other readable cases.
+                continue
     return tuple(sorted(seen))
 
 

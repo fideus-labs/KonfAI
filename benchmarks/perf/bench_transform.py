@@ -254,6 +254,8 @@ def main() -> None:
             out_dir = scratch / f"out_b{tag}_{i}"
             tdir = scratch / f"Transforms_b{tag}_{i}"
             runs.append(in_fresh_process(["--worker", str(store), str(out_dir), str(budget), str(tdir)]))
+        if any(run["held_bytes"] is None for run in runs):
+            raise SystemExit(f"[perf] no held-memory measurement at {budget:g} GiB; cannot verify the budget")
         timed = runs[1:] if len(runs) > 1 else runs  # the first fresh process also warms the page cache
         wall = statistics.median(r["wall_s"] for r in timed)
         peak = max(r["peak_bytes"] for r in timed)
@@ -273,8 +275,10 @@ def main() -> None:
         )
         if budget == budgets[0]:
             check = compare_h5(find_output(scratch / f"out_b{tag}_0"), naive_out)
+            if not check["shape_equal"]:
+                raise SystemExit(f"[perf] output shapes differ from the naive loop: {check}")
             result["konfai_vs_naive"] = check
-            metrics["max_abs_diff_konfai_vs_naive"] = float(check.get("max_abs_diff", float("nan")))
+            metrics["max_abs_diff_konfai_vs_naive"] = float(check["max_abs_diff"])
         for stray in scratch.glob(f"out_b{tag}_*"):
             if stray.is_file():
                 stray.unlink(missing_ok=True)
@@ -284,15 +288,15 @@ def main() -> None:
     check = result["konfai_vs_naive"]
     result["facts"] = [
         # Equal to float32 rounding: another CPU's vector path lands one ULP away (1.19e-07 measured).
-        fact("max_abs_diff_konfai_vs_naive", check.get("max_abs_diff", float("nan")), 1e-6, "<="),
+        fact("max_abs_diff_konfai_vs_naive", check["max_abs_diff"], 1e-6, "<="),
         fact("shape_equal_konfai_vs_naive", check.get("shape_equal", False), 1),
         fact("attrs_equal_konfai_vs_naive", check.get("attrs_equal", False), 1),
     ]
     for row in sweep_rows:
         # The sweep's held peak is what the plan sizes against the budget; the process RSS also carries
-        # the interpreter's floor, which no budget compresses. A run nothing measured states no fact.
+        # the interpreter's floor, which no budget compresses. Missing measurements were refused above.
         held = row["held_bytes"]
-        peak = float("nan") if None in held else max(held) / 2**30
+        peak = max(held) / 2**30
         tag = f"{row['budget_gib']:g}".replace(".", "p")
         result["facts"].append(fact(f"sweep_peak_gib_b{tag}", peak, row["budget_gib"], "<="))
 

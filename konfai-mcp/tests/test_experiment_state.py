@@ -24,6 +24,7 @@ same whether the session was driven from Studio, from an MCP client, or by hand.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,25 @@ def test_a_dangling_link_in_a_case_does_not_hide_the_dataset(tmp_path: Path) -> 
 
     payload = state(workspace(tmp_path), dataset=str(data))
 
+    assert payload["cases"] == 1 and payload["groups"] == ["CT"]
+
+
+@pytest.mark.parametrize("error", [PermissionError, FileNotFoundError])
+def test_an_unreadable_scale_does_not_hide_a_zarr_store(tmp_path: Path, monkeypatch, error) -> None:
+    """Inventory reads the store's structure, without needing to open its scale directories."""
+    data = tmp_path / "CT.zarr"
+    scale = data / "scale0"
+    scale.mkdir(parents=True)
+    (data / "zarr.json").write_text('{"zarr_format": 3, "node_type": "group"}', encoding="utf-8")
+    scandir = os.scandir
+
+    def unreadable(path):
+        if Path(path) == scale:
+            raise error("scale unavailable")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unreadable)
+    payload = state(workspace(tmp_path), dataset=str(data))
     assert payload["cases"] == 1 and payload["groups"] == ["CT"]
 
 

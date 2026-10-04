@@ -252,6 +252,8 @@ def main() -> None:
         runs[name] = run
         metrics[f"{name}_ms"] = round(statistics.median(run["walls_ms"]), 2)
         held = "not measured"
+        if run["held_bytes"] is None and sys.platform == "linux":
+            raise SystemExit(f"[perf] stage '{name}' has no held-memory measurement; cannot verify its bound")
         if run["held_bytes"] is not None:
             volumes = round(run["held_bytes"] / run["volume_bytes"], 3)
             facts.append(fact(f"{name}_held_volumes", volumes, bounds[name] + _SLACK, "<="))
