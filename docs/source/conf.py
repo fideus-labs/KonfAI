@@ -14,9 +14,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import os
 import sys
 from datetime import datetime
+
+from sphinx import addnodes
+from sphinx.pycode import ModuleAnalyzer
 
 sys.path.insert(0, os.path.abspath("../../"))  # to access konfai/
 sys.path.insert(0, os.path.abspath("../../konfai-apps"))  # standalone konfai_apps package
@@ -229,6 +233,45 @@ def _write_redirects(app, exception):
         )
 
 
+def _source_module(module, fullname):
+    """The module viewcode shows ``fullname`` from, or None where it has no source to show: an inherited member
+    documented on a subclass, a builtin."""
+    try:
+        defined = importlib.import_module(module)
+        for name in fullname.split("."):
+            defined = getattr(defined, name)
+        source = getattr(defined, "__module__", None) or module
+        analyzer = ModuleAnalyzer.for_module(source)
+        analyzer.find_tags()
+    except Exception:
+        return None
+    return source if fullname in analyzer.tags else None
+
+
+def _anchor_viewcode_backlinks(app, doctree):
+    """Give every description viewcode links to from a source page an anchor that link lands on.
+
+    viewcode builds a ``[docs]`` link from the last page describing the object and the module the first description
+    of that source file was written under: a page describing it with ``:no-index:``, or under a package re-exporting
+    it, has no such anchor. Each description is put under the module defining its object and carries that id. One
+    viewcode has no source for is taken off it: it gets no ``[source]`` link either way, and a builtin's module
+    would be listed in the source index with no page behind it."""
+    signatures = [node for node in doctree.findall(addnodes.desc_signature) if node.get("module")]
+    anchors = {anchor for signature in signatures for anchor in signature["ids"]}
+    for signature in signatures:
+        fullname = signature.get("fullname")
+        source = _source_module(signature["module"], fullname) if fullname else None
+        if source is None:
+            del signature["module"]
+            continue
+        signature["module"] = source
+        if f"{source}.{fullname}" not in anchors:
+            anchors.add(f"{source}.{fullname}")
+            signature["ids"].append(f"{source}.{fullname}")
+
+
 def setup(app):
     app.connect("build-finished", _write_llms_txt)
     app.connect("build-finished", _write_redirects)
+    # Before viewcode's own doctree-read (priority 500), which reads the module this rewrites.
+    app.connect("doctree-read", _anchor_viewcode_backlinks, priority=400)

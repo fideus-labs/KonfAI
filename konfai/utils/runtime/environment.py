@@ -20,6 +20,7 @@
 import atexit
 import builtins
 import os
+import pickle  # nosec B403 - only its error class is named
 import shutil
 import sys
 import tempfile
@@ -258,6 +259,15 @@ def checkpoint_source(entry: str | Path, error: type[KonfAIError]) -> str | Path
     return path
 
 
+def _cut_short(source: str) -> bool:
+    """A zip-format checkpoint whose archive lost its end: an interrupted copy or download."""
+    try:
+        with open(source, "rb") as file:
+            return file.read(2) == b"PK" and not is_zipfile(source)
+    except OSError:
+        return False
+
+
 def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = False) -> Any:
     """Load a checkpoint from a local path or an ``https://`` URL, preferring ``weights_only=True``.
 
@@ -274,7 +284,18 @@ def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = 
     try:
         return torch.load(source, map_location=map_location, weights_only=True, **load_options)
     except Exception:
-        return torch.load(source, map_location=map_location, weights_only=False, **load_options)  # nosec B614
+        try:
+            return torch.load(source, map_location=map_location, weights_only=False, **load_options)  # nosec B614
+        except Exception as exc:
+            # Only what says the bytes are no checkpoint, a pickle that will not load or an archive cut short:
+            # anything else, the memory running out included, is raised as it is.
+            if not (isinstance(exc, pickle.UnpicklingError | EOFError) or _cut_short(source)):
+                raise
+            raise KonfAIError(
+                "Checkpoint",
+                f"'{source}' is not a readable checkpoint: {exc}",
+                "Pass a complete .pt written by a KonfAI run: a truncated copy or another file is refused here.",
+            ) from exc
 
 
 def is_interactive_session() -> bool:

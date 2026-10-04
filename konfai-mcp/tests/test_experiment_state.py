@@ -24,6 +24,7 @@ same whether the session was driven from Studio, from an MCP client, or by hand.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -121,8 +122,8 @@ def test_the_data_itself_is_read_so_a_route_can_be_chosen(tmp_path: Path) -> Non
 
 
 def test_the_data_is_read_once_and_re_read_when_it_changes(tmp_path: Path) -> None:
-    """The scan is the one expensive fact here, so it is cached: keyed by the directory's own mtime, so
-    a case added to the dataset is picked up rather than remembered wrong."""
+    """The scan is the one expensive fact here, so it is cached against the listing it read: a case
+    added to the dataset, or a group added to a case, is picked up rather than remembered wrong."""
     data = tmp_path / "pelvis"
     (data / "case_a").mkdir(parents=True)
     (data / "case_a" / "CT.mha").write_bytes(b"\x00")
@@ -131,6 +132,23 @@ def test_the_data_is_read_once_and_re_read_when_it_changes(tmp_path: Path) -> No
     (data / "case_b").mkdir()
     (data / "case_b" / "CT.mha").write_bytes(b"\x00")
     assert state(workspace(tmp_path), dataset=str(data))["cases"] == 2
+
+    for case in ("case_a", "case_b"):
+        (data / case / "Label.mha").write_bytes(b"\x00")
+    assert state(workspace(tmp_path), dataset=str(data))["groups"] == ["CT", "Label"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a link needs a privilege there")
+def test_a_dangling_link_in_a_case_does_not_hide_the_dataset(tmp_path: Path) -> None:
+    """A link whose target is gone is an entry the scan passes over: the cases beside it are still read."""
+    data = tmp_path / "pelvis"
+    (data / "case_a").mkdir(parents=True)
+    (data / "case_a" / "CT.mha").write_bytes(b"\x00")
+    (data / "case_a" / "Label.mha").symlink_to(data / "gone.mha")
+
+    payload = state(workspace(tmp_path), dataset=str(data))
+
+    assert payload["cases"] == 1 and payload["groups"] == ["CT"]
 
 
 def test_the_dataset_is_read_back_from_the_config_without_rewriting_it(tmp_path: Path) -> None:

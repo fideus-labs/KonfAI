@@ -203,6 +203,40 @@ def test_a_layers_mask_longer_than_the_model_s_outputs_fails_at_build(tmp_path) 
     fireants._ImpactCore(fireants.ModelSpec(ref=str(path)), False)
 
 
+class _HeldConstant(torch.nn.Module):
+    """A feature model holding a tensor that is neither a parameter nor a buffer, as a trace bakes a constant in:
+    ``.to()`` leaves it where the file was mapped."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scale = torch.tensor([2.0])
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        nb_layer: torch.Tensor,
+        stats: torch.Tensor | None = None,
+        direction: torch.Tensor | None = None,
+    ) -> list[torch.Tensor]:
+        return [x * self.scale]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="a constant left on the CPU only shows on a CUDA run")
+def test_a_jacobian_model_holding_a_constant_is_scored_on_the_card(tmp_path) -> None:
+    """The file is mapped onto the device the loss runs on: loaded on the CPU and moved, the network leaves its
+    constant behind and its first forward on the card fails."""
+    path = tmp_path / "constant.pt"
+    torch.jit.script(_HeldConstant()).save(str(path))
+    loss = fireants.ImpactFeatureLoss(
+        [[fireants.ModelSpec(ref=str(path), distance="L1")]], "Jacobian", False, 5, 0, 0, False
+    )
+    moved = torch.rand(1, 1, 16, 16, 16, device="cuda", requires_grad=True)
+
+    loss(moved, torch.rand(1, 1, 16, 16, 16, device="cuda")).sum().backward()
+
+    assert torch.isfinite(moved.grad).all()
+
+
 def test_the_feature_models_load_once_for_every_registration(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     # register runs per case and per native tile, in one process: the models are fetched and loaded once.
     path = tmp_path / "one_layer.pt"

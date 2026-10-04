@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from konfai.utils.config import config
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, KonfAIError
 
 if TYPE_CHECKING:
     from konfai.network.network.network import Network
@@ -270,9 +270,9 @@ class PretrainedFrom:
 
         try:
             state = safe_torch_load(self.checkpoint, torch.device("cpu"))
-        except (OSError, RuntimeError, ValueError) as error:
+        except (OSError, RuntimeError, ValueError, KonfAIError) as error:
             raise ConfigError(
-                f"Model.pretrained_from.checkpoint: cannot load '{self.checkpoint}'.", str(error)
+                f"Model.pretrained_from.checkpoint: cannot load '{self.checkpoint}'.", str(error).strip()
             ) from error
         # A wrapped checkpoint: "state_dict" (Lightning and most trainers), "network_weights" (nnU-Net).
         if isinstance(state, dict):
