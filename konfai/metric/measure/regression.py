@@ -611,11 +611,9 @@ class FocalLoss(Criterion):
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         target = Dice.on_grid(output, targets[0]).long()
 
-        logpt = F.log_softmax(output, dim=1)
+        # Keep only the target class before exponentiating: no full probability volume to save for backward.
+        logpt = F.log_softmax(output, dim=1).gather(1, target)
         pt = torch.exp(logpt)
-
-        logpt = logpt.gather(1, target)
-        pt = pt.gather(1, target)
 
         loss = -((1 - pt) ** self.gamma) * logpt
         alpha = self._buffers["alpha"]

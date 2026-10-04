@@ -1320,6 +1320,41 @@ class TestFocalLossAlpha:
         assert "alpha" in dict(focal.named_buffers())
 
 
+@pytest.mark.parametrize("shape", [(2, 7, 4, 5), (2, 7, 3, 4, 5)])
+@pytest.mark.parametrize("reduction", ["none", "mean", "sum"])
+@pytest.mark.parametrize("alpha", [None, [1.0, 2.0, 1.0, 3.0, 0.5, 1.0, 2.0]])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_focal_loss_preserves_values_and_gradients_without_full_class_probabilities(shape, reduction, alpha, dtype):
+    output = torch.randn(shape, dtype=dtype, generator=torch.Generator().manual_seed(42), requires_grad=True)
+    target = torch.randint(shape[1], (shape[0], 1, *shape[2:]), generator=torch.Generator().manual_seed(43))
+    reference_output = output.detach().clone().requires_grad_()
+    reference_log = F.log_softmax(reference_output, dim=1)
+    reference = -((1 - reference_log.exp().gather(1, target)) ** 2.0) * reference_log.gather(1, target)
+    if alpha is not None:
+        weights = torch.tensor(alpha)
+        weights = weights / weights.sum() * len(alpha)
+        reference = reference * weights[target]
+    if reduction != "none":
+        reference = getattr(reference, reduction)()
+    reference.sum().backward()
+
+    # Backward needs log_softmax's full output, but no second full tensor of class probabilities.
+    full_buffers = set()
+
+    def pack(tensor):
+        if tuple(tensor.shape) == shape:
+            full_buffers.add(tensor.data_ptr())
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+        actual = FocalLoss(alpha=alpha, reduction=reduction)(output, target)
+    actual.sum().backward()
+
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    torch.testing.assert_close(output.grad, reference_output.grad, rtol=0, atol=0)
+    assert len(full_buffers) == 1, "FocalLoss retained probabilities for classes discarded by gather"
+
+
 @pytest.mark.parametrize("criterion", [MAE(), MSE(), Dice(labels=[1])], ids=["MAE", "MSE", "Dice"])
 def test_a_mask_counts_every_voxel_that_is_not_zero(criterion) -> None:
     """A mask stored 0/255, as an 8-bit export writes it: any value but 0 is inside, so it scores as
