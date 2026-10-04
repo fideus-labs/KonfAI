@@ -857,6 +857,30 @@ def test_accuracy_reports_per_batch_not_a_lifetime_running_fraction() -> None:
     assert all_wrong.item() == pytest.approx(0.0)  # not blended with the previous batch
 
 
+@pytest.mark.parametrize(("dtype", "margin"), [(torch.float32, 1e-8), (torch.float16, 1e-4), (torch.bfloat16, 1e-3)])
+def test_accuracy_preserves_the_order_of_close_logits(dtype, margin) -> None:
+    from konfai.metric.measure import Accuracy
+
+    # Softmax rounds these distinct logits to a tie and argmax then picks the wrong class.
+    logits = torch.tensor([[0.0, margin]], dtype=dtype)
+    assert Accuracy()(logits, torch.tensor([1])).item() == 1.0
+
+
+def test_accuracy_weighs_a_partial_batch_by_its_sample_count(tmp_path, monkeypatch) -> None:
+    from konfai.utils.dataset import Attribute
+
+    measure, _ = _measure_from_config(tmp_path, monkeypatch, {"Accuracy": {"is_loss": False}})
+    measure.set_window(2)
+    for index, (size, label) in enumerate([(3, 0), (1, 1)]):
+        output = torch.tensor([[2.0, 0.0]]).expand(size, -1)
+        target = torch.full((size, 1), label)
+        measure.update("out", output, {"ref": (target, [Attribute()] * size)}, index, 1, training=False)
+
+    # Three correct samples and one incorrect sample: not the unweighted mean of 1 and 0.
+    assert measure.get_last_values(2) == {"out:ref:Accuracy": 0.75}
+    assert measure.get_last_values(0) == {"out:ref:Accuracy": 0.75}
+
+
 def test_lpips_preprocessing_follows_input_device() -> None:
     # LPIPS.preprocessing must keep the input's device (the model is moved to it lazily in _loss):
     # a hardcoded .to(0) crashes a CPU-only host and pins every DDP rank to GPU 0.
@@ -1520,7 +1544,7 @@ def _lpips_in(measure):
 
 @pytest.mark.parametrize(("is_loss", "as_loss"), [({}, True), ({"is_loss": True}, True), ({"is_loss": False}, False)])
 def test_lpips_takes_its_role_from_the_config(tmp_path, monkeypatch, is_loss, as_loss) -> None:
-    # Left out, LPIPS is a loss, as every criterion is but PSNR and SSIM.
+    # Left out, LPIPS is a loss, as every criterion is but Accuracy, PSNR and SSIM.
     _lpips_backend(monkeypatch, "stub")
     measure, config = _measure_from_config(tmp_path, monkeypatch, {"LPIPS": is_loss})
 

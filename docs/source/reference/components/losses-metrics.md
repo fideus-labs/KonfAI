@@ -9,9 +9,10 @@ one from another library.
 
 `is_loss: true` makes a criterion a loss (its value is back-propagated); `is_loss: false` only logs it. In
 `Evaluation.yml` every criterion is a metric. Without `is_loss`, a criterion takes its own role: a loss,
-except `PSNR` and `SSIM`, which are metrics.
+except `Accuracy`, `PSNR` and `SSIM`, which are metrics.
 
 - `PSNR` cannot be a loss (it grows as the output improves): train on `MSE`.
+- `Accuracy` cannot be a loss (choosing the highest-scoring class has no gradient): train on `CrossEntropyLoss`.
 - `SSIM` with `is_loss: true` minimises `1 - SSIM` and still reports the SSIM.
 
 ## Attaching a criterion
@@ -74,7 +75,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `Dice` | Dice per label; the loss is `1 - mean`. Takes probabilities (after a `Softmax`) or a label map; logits are refused. | `labels=None` (every label present) |
 | `CrossEntropyLoss` | Cross entropy, on logits. | `weight=None, reduction="mean"` |
 | `FocalLoss` | Focal loss; `alpha` weights each label. | `gamma=2.0, alpha=None, reduction="mean"` |
-| `Accuracy` | Classification accuracy. | |
+| `Accuracy` | Fraction of correct classes, chosen from logits or probabilities. Metric only. | |
 | `DiceSaveMap` | Dice that also writes the error map. | `labels=None, dataset=None, group=None` |
 
 ## Adversarial and perceptual

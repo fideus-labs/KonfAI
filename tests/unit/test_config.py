@@ -1688,6 +1688,38 @@ def test_a_tuple_annotation_binds_a_tuple(write_config, annotation, literal, exp
     assert bound == expected and type(bound) is type(expected)
 
 
+@pytest.mark.parametrize("role", [None, False, True])
+def test_accuracy_config_resolves_to_a_metric_and_refuses_training_as_a_loss(write_config, monkeypatch, role):
+    from konfai.network.network import CriterionsLoader
+    from konfai.utils.errors import MeasureError
+
+    options = "{}" if role is None else "{is_loss: " + str(role).lower() + "}"
+    path = write_config(
+        "Trainer:\n  Model:\n    Net:\n      outputs_criterions:\n        out:\n"
+        "          targets_criterions:\n            ref:\n              criterions_loader:\n"
+        f"                Accuracy: {options}\n"
+    )
+    monkeypatch.setenv("KONFAI_ROOT", "Trainer")
+    key = "Trainer.Model.Net.outputs_criterions.out.targets_criterions.ref"
+    original = path.read_bytes()
+
+    def build():
+        with strict_config("Trainer"):
+            return apply_config(key)(CriterionsLoader)().get_criterions("Net", "out", "ref")
+
+    if role is True:
+        with pytest.raises(MeasureError, match="Accuracy is a metric"):
+            build()
+        assert path.read_bytes() == original
+    else:
+        (attr,) = build().values()
+        assert attr.is_loss is False
+        tree = ruamel.yaml.YAML(typ="safe").load(path.read_text())
+        for segment in key.split("."):
+            tree = tree[segment]
+        assert tree["criterions_loader"]["Accuracy"]["is_loss"] is False
+
+
 def test_a_prediction_dataset_without_batch_size_measures_its_batch(write_config) -> None:
     """A ``Predictor.Dataset`` that leaves ``batch_size`` out binds 0, written back: the batch is measured on
     a GPU and runs one patch at a time on a CPU. A written value keeps its meaning."""

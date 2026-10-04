@@ -143,7 +143,7 @@ outputs_criterions:
 - `criterions_loader` lists the criteria. Each takes `is_loss`, `group` (criteria of one group are summed),
   `start` and `stop` (the iterations it is active), `accumulation`, `schedulers` (its weight over time), and
   its own arguments.
-- Without `is_loss`, a criterion takes its own role: a loss, except `PSNR` and `SSIM`, which are metrics.
+- Without `is_loss`, a criterion takes its own role: a loss, except `Accuracy`, `PSNR` and `SSIM`, which are metrics.
 
 Criteria with `is_loss: false` run without gradient tracking: they report a score without keeping
 backward buffers. Criteria used as losses keep their gradients.

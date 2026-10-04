@@ -572,12 +572,16 @@ class KLDivergence(CriterionWithInit):
 
 class Accuracy(Criterion):
     maximize = True  # reported value is the accuracy fraction (higher-is-better)
+    batch_mean = True
+    default_is_loss = False
+    loss_capable = False  # argmax has no gradient
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
         # Return this batch's accuracy; the logging window means it over the batches and resets between
         # train and validation. Accumulating n/corrects on the instance instead would report one lifetime
         # fraction that blends every epoch and both splits.
-        predicted = torch.argmax(torch.softmax(output, dim=1), dim=1)
+        # Softmax can round distinct logits to a tie, and its probabilities are never used here.
+        predicted = torch.argmax(output, dim=1)
         target = targets[0]
         if target.dim() == output.dim():  # the dataset's channel axis, which the argmax removed
             target = target.squeeze(1)
