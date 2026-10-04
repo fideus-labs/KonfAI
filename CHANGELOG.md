@@ -75,9 +75,11 @@ The unused `konfai[ssim]` extra is removed; KonfAI's built-in SSIM remains avail
   layers, distances, weights, PCA, channel selection, sampling and Static/Jacobian modes. Unsupported
   combinations are refused before a run. All three engines support 2-D networks, masks and a seed.
 - impact-reg: large-image registration uses a resampled global pass and tiled deformable passes,
-  with a declared memory budget per card. `presets`, `show`, `apply` and checked `--set` overrides
+  with a declared memory budget per card. `list`, `show`, `apply` and checked `--set` overrides
   expose the recipe; each rank records the plan it actually completed. ConvexAdam presets pin
   `itk-impact==0.1.6`, and the preset repository is pinned to a commit rather than following `main`.
+- impact-reg: the elastix engine installs elastix-IMPACT 1.1.0, with the CUDA 13.0 binary when the
+  installed torch is the one that binary was built against.
 - Prediction patches can use `tile` or `resample`, bounded by `max_voxels` and the available host/GPU
   budgets. Resampled labels preserve thin structures, and OME-Zarr inputs can use their pyramid level.
   An output layer can also be written on its own grid without borrowing an input group's geometry.
