@@ -204,7 +204,7 @@ class ConvexAdamEngine:
         if stages and _itk_impact_predates_its_stages():
             raise MeasureError(
                 "The ConvexAdam stages need itk-impact 0.1.6 or later.",
-                'Install it beside the torch its wheels are built against: pip install "itk-impact>=0.1.6"'
+                'Install it beside the torch its wheels are built against: pip install "itk-impact==0.1.6"'
                 ' "torch==2.12.*"',
             )
         if any(stage not in ("coarse", "fine") for stage in stages) or "coarse" in stages[1:]:
