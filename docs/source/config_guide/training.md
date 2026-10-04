@@ -148,6 +148,15 @@ outputs_criterions:
 Criteria with `is_loss: false` run without gradient tracking: they report a score without keeping
 backward buffers. Criteria used as losses keep their gradients.
 
+`accumulation: true` backpropagates each model patch as soon as its loss group is ready.
+It can be combined with `nb_batch_per_step`: gradients are averaged across the patches and batches.
+A loss outside its `start`/`stop` window does not delay the other losses. If no loss contributes a
+gradient, the optimizer waits.
+
+Distributed training requires `accumulation: false` on loss criteria. Patch-by-patch backward runs
+before DDP can prepare gradient synchronization, so this combination is refused. Distributed batch
+accumulation with `nb_batch_per_step` is supported.
+
 An output can carry several criteria: `examples/Segmentation` puts a cross entropy on
 `UNetBlock_0:Head:Conv` and a Dice loss on `UNetBlock_0:Head:Softmax`. A model with no loss is refused.
 

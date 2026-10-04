@@ -1193,15 +1193,23 @@ class Network(ModuleArgsDict, ABC):
         batch_sample: BatchSample,
         output_layers: list[str] = [],
         clock: SweepClock | None = None,
+        *,
+        _ddp_losses: bool = False,
     ) -> list[tuple[str, torch.Tensor]]:
         """The graph walk over ``batch_sample``, its criteria evaluated as their output groups complete.
-        ``clock`` charges the criteria to its ``criteria`` phase, apart from the walk."""
+        ``clock`` charges the criteria to its ``criteria`` phase, apart from the walk.
+        ``_ddp_losses`` exposes training losses to DDP's unused-parameter discovery."""
         if not len(self.outputsGroup) and not len(output_layers):
             return []
 
         self.reset_loss()
         try:
-            return self._forward(batch_sample, output_layers, clock)
+            outputs = self._forward(batch_sample, output_layers, clock)
+            if _ddp_losses:
+                for name, network in self.get_networks().items():
+                    if network.measure is not None:
+                        outputs.extend((f"{name}.loss", loss) for loss in network.measure.get_loss())
+            return outputs
         finally:
             self.release_targets()
 
@@ -1258,6 +1266,7 @@ class Network(ModuleArgsDict, ABC):
                                 output_group.network._it,
                                 nb,
                                 self.training,
+                                nb_batch_per_step=output_group.network.nb_batch_per_step,
                             )
                         output_group.clear()
             if name in output_layers:
@@ -1287,6 +1296,17 @@ class Network(ModuleArgsDict, ABC):
         trained = [network for network in self.get_networks().values() if network.optimizer is not None]
         if not trained or any(network.steps_this_batch() for network in trained):
             return nullcontext()
+        # A loss stopping before the optimizer boundary may leave no graph to trigger a reduction
+        # at that boundary. Synchronize its last contribution while the graph still exists.
+        if any(
+            attr.is_loss and attr.stop == network._it
+            for network in trained
+            if network.measure is not None
+            for targets in network.measure.outputs_criterions.values()
+            for criteria in targets.values()
+            for attr in criteria.values()
+        ):
+            return nullcontext()
         no_sync = getattr(model, "no_sync", None)
         return no_sync() if callable(no_sync) else nullcontext()
 
@@ -1303,6 +1323,11 @@ class Network(ModuleArgsDict, ABC):
 
     def _optimizer_step(self) -> None:
         assert self.scaler is not None and self.optimizer is not None  # nosec B101 - checked by _backward
+        # Scheduled or empty-mask losses can leave the optimizer with nothing to unscale or step.
+        if not any(
+            parameter.grad is not None for group in self.optimizer.param_groups for parameter in group["params"]
+        ):
+            return
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
@@ -1313,8 +1338,11 @@ class Network(ModuleArgsDict, ABC):
             if self.scaler and self.optimizer:
                 self._requires_grad(list(self.measure.outputs_criterions.keys()))
                 should_step = self.steps_this_batch()
-                for loss in self.measure.get_loss():
-                    self.scaler.scale(loss / self.nb_batch_per_step).backward()
+                losses = [self.scaler.scale(loss / self.nb_batch_per_step) for loss in self.measure.get_loss()]
+                if losses:
+                    # Groups can share a trunk: one traversal sums their gradients without freeing
+                    # a shared graph before the next group's backward or retaining it unnecessarily.
+                    torch.autograd.backward(losses)
 
                 if should_step:
                     if pending is None:

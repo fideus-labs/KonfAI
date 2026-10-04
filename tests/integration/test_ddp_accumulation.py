@@ -15,8 +15,10 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from konfai.network.network import Network
+from konfai.metric.schedulers import Constant
+from konfai.network.network import CriterionsAttr, Measure, Network
 from konfai.trainer import _ddp_kwargs
+from konfai.utils.dataset import Attribute
 from konfai.utils.runtime.distributed import pin_gloo_to_loopback
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -38,13 +40,24 @@ class _Leaf(Network):
 
 
 class _Graph(Network):
-    def __init__(self, cadences: tuple[int, ...]) -> None:
+    def __init__(self, cadences: tuple[int, ...], loss_path: str) -> None:
         super().__init__(in_channels=1, dim=2)
         for index, cadence in enumerate(cadences):
             self.add_module(f"Leaf_{index}", _Leaf(index, cadence))
 
-    def forward(self, value: torch.Tensor) -> list[torch.Tensor]:
-        return [leaf["Linear"](value) for leaf in self.children()]
+        for index, leaf in enumerate(self.children()):
+            # Each optimizer trains an independent branch reading the original input.
+            self._modulesArgs[f"Leaf_{index}"].out_branch = [str(index + 1)]
+            attr = CriterionsAttr(
+                start=2 if loss_path == "scheduled" and index == len(cadences) - 1 else 0,
+                stop=0 if loss_path == "stopped" else None,
+            )
+            attr.schedulers = {Constant(): None}
+            leaf.measure = Measure(leaf.get_name(), {})
+            leaf.measure.outputs_criterions = {f"Leaf_{index}.Linear": {"Y": {torch.nn.MSELoss(): attr}}}
+            leaf.measure.init(self, ["X", "Y"])
+            leaf.measure.scaler = leaf.scaler
+        self.init_outputs_group()
 
 
 def _count_and_average(state: dict[str, int], bucket: dist.GradBucket) -> torch.futures.Future[torch.Tensor]:
@@ -52,7 +65,7 @@ def _count_and_average(state: dict[str, int], bucket: dist.GradBucket) -> torch.
     return dist.all_reduce(bucket.buffer(), async_op=True).get_future().then(lambda result: result.value()[0] / 2)
 
 
-def _run_rank(rank: int, root: str, cadences: tuple[int, ...]) -> None:
+def _run_rank(rank: int, root: str, cadences: tuple[int, ...], loss_path: str) -> None:
     torch.set_num_threads(1)
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     path = Path(root)
@@ -63,18 +76,21 @@ def _run_rank(rank: int, root: str, cadences: tuple[int, ...]) -> None:
             "gloo", init_method=(path / "rendezvous").as_uri(), rank=rank, world_size=2, timeout=timedelta(seconds=30)
         )
     try:
-        model = _Graph(cadences)
+        model = _Graph(cadences, loss_path)
         ddp = DDP(model, **_ddp_kwargs(model, local_rank=rank, size=1))
         state = {"calls": 0}
         ddp.register_comm_hook(state, _count_and_average)
         observed: list[list[float]] = []
         for _ in range(6):
             with model.accumulation_sync(ddp):
-                outputs = ddp(torch.tensor([[float(rank + 1)]]))
-                for leaf, output in zip(model.children(), outputs, strict=True):
-                    # The loss surface is minimal; production Network.backward owns the scaler,
-                    # counters, optimizer boundaries and gradient reset.
-                    leaf.measure = SimpleNamespace(outputs_criterions={}, get_loss=lambda y=output: [y.square().mean()])
+                value = torch.tensor([[float(rank + 1)]])
+                ddp(
+                    {
+                        "X": SimpleNamespace(tensor=value, attribute=[Attribute()], is_input=True),
+                        "Y": SimpleNamespace(tensor=torch.zeros_like(value), attribute=[Attribute()], is_input=False),
+                    },
+                    _ddp_losses=True,
+                )
                 model.backward(ddp)
             observed.append([float(leaf["Linear"].weight.detach().item()) for leaf in model.children()])
         (path / f"rank-{rank}.json").write_text(json.dumps({"weights": observed, "reductions": state["calls"]}))
@@ -82,11 +98,21 @@ def _run_rank(rank: int, root: str, cadences: tuple[int, ...]) -> None:
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("cadences, reductions", [((1,), 6), ((2,), 3), ((2, 3), 4)])
+@pytest.mark.parametrize(
+    "cadences, reductions, loss_path",
+    [
+        ((1,), 6, "deferred"),
+        ((2,), 3, "deferred"),
+        ((2, 3), 4, "deferred"),
+        ((1,), 4, "scheduled"),
+        ((1, 1), 6, "scheduled"),
+        ((2,), 1, "stopped"),
+    ],
+)
 def test_ddp_accumulation_matches_global_batch_updates_and_reduces_at_boundaries(
-    tmp_path: Path, cadences: tuple[int, ...], reductions: int
+    tmp_path: Path, cadences: tuple[int, ...], reductions: int, loss_path: str
 ) -> None:
-    context = mp.spawn(_run_rank, args=(str(tmp_path), cadences), nprocs=2, join=False)
+    context = mp.spawn(_run_rank, args=(str(tmp_path), cadences, loss_path), nprocs=2, join=False)
     deadline = time.monotonic() + 60
     try:
         while not context.join(timeout=1):
@@ -107,6 +133,11 @@ def test_ddp_accumulation_matches_global_batch_updates_and_reduces_at_boundaries
     # The global batch is x=[1,2], loss=mean((w*x)^2), hence dloss/dw=5*w.
     # SGD(lr=.1) halves w at each optimizer step regardless of the accumulation length.
     expected = [[0.5 ** ((iteration + 1) // cadence) for cadence in cadences] for iteration in range(6)]
+    if loss_path == "scheduled":
+        for iteration, weights in enumerate(expected):
+            weights[-1] = 0.5 ** max(0, iteration - 1)
+    elif loss_path == "stopped":
+        expected = [[1.0], *[[0.75] for _ in range(5)]]
     for rank in range(2):
         result: dict[str, Any] = json.loads((tmp_path / f"rank-{rank}.json").read_text())
         torch.testing.assert_close(torch.tensor(result["weights"]), torch.tensor(expected))

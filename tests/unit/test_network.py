@@ -714,6 +714,127 @@ def test_accumulation_backward_not_refired_by_plain_loss_in_same_group() -> None
     assert scaler.scale.call_count == 1
 
 
+def _microbatch_network(cadence, accumulated, patched, nested, scaled, schedule=None, mixed=False, groups=False):
+    from konfai.data.patching import ModelPatch
+
+    leaf = Network(
+        in_channels=1,
+        dim=2,
+        nb_batch_per_step=cadence,
+        patch=ModelPatch(patch_size=[2, 2]) if patched else None,
+    )
+    leaf.add_module("Out", torch.nn.Conv2d(1, 1, 1, bias=False))
+    leaf["Out"].weight.data.fill_(1.0)
+    root = Network(in_channels=1, dim=2) if nested else leaf
+    if nested:
+        root.add_module("Body", leaf)
+    output = "Body.Out" if nested else "Out"
+    first = _criterion_attr(accumulation=accumulated)
+    criteria = {torch.nn.MSELoss(): first}
+    if schedule is not None or mixed:
+        second = _criterion_attr(accumulation=accumulated and not mixed)
+        second.start, second.stop = schedule if schedule is not None else (0, None)
+        second.group = int(groups)
+        criteria[torch.nn.L1Loss()] = second
+    leaf.measure = Measure(leaf.get_name(), {})
+    leaf.measure.outputs_criterions = {output: {"Y": criteria}}
+    leaf.measure.init(root, ["X", "Y"])
+    root.init_outputs_group()
+    leaf.optimizer = torch.optim.SGD(leaf.parameters(), lr=0.05)
+    leaf.scaler = torch.amp.GradScaler("cpu", enabled=scaled, init_scale=8.0)
+    leaf.measure.scaler = leaf.scaler
+    return root, leaf
+
+
+@pytest.mark.parametrize("cadence", [1, 2, 4])
+@pytest.mark.parametrize("patched", [False, True])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("scaled", [False, True])
+def test_patch_and_batch_accumulation_match_a_single_pytorch_batch(cadence, patched, nested, scaled) -> None:
+    root, leaf = _microbatch_network(cadence, True, patched, nested, scaled)
+    reference = torch.nn.Conv2d(1, 1, 1, bias=False)
+    reference.weight.data.fill_(1.0)
+    optimizer = torch.optim.SGD(reference.parameters(), lr=0.05)
+    inputs = [torch.full((1, 1, 4, 4), float(i + 1)) for i in range(cadence)]
+    target = torch.zeros(1, 1, 4, 4)
+    for _ in range(2):
+        initial = leaf["Out"].weight.detach().clone()
+        for i, input_ in enumerate(inputs):
+            root({"X": _BatchItem(input_, True), "Y": _BatchItem(target, False)})
+            root.backward(root)
+            if i + 1 < cadence:
+                assert torch.equal(leaf["Out"].weight, initial)
+        optimizer.zero_grad()
+        reference(torch.cat(inputs)).square().mean().backward()
+        optimizer.step()
+        torch.testing.assert_close(leaf["Out"].weight, reference.weight)
+
+
+@pytest.mark.parametrize("patched", [False, True])
+@pytest.mark.parametrize("accumulated", [False, True])
+def test_a_scheduled_loss_does_not_block_other_losses_outside_its_window(patched, accumulated) -> None:
+    root, leaf = _microbatch_network(1, accumulated, patched, False, True, schedule=(2, 3))
+    reference = torch.nn.Parameter(torch.ones(()))
+    optimizer = torch.optim.SGD([reference], lr=0.05)
+    for iteration in range(6):
+        root({"X": _BatchItem(torch.ones(1, 1, 4, 4), True), "Y": _BatchItem(torch.zeros(1, 1, 4, 4), False)})
+        root.backward(root)
+        optimizer.zero_grad()
+        loss = reference.square() + (reference.abs() if 2 <= iteration <= 3 else 0)
+        loss.backward()
+        optimizer.step()
+        torch.testing.assert_close(leaf["Out"].weight.squeeze(), reference)
+
+
+@pytest.mark.parametrize("patched", [False, True])
+@pytest.mark.parametrize("cadence", [1, 2])
+def test_immediate_and_deferred_losses_share_a_graph_without_losing_gradients(patched, cadence) -> None:
+    root, leaf = _microbatch_network(cadence, True, patched, False, True, mixed=True)
+    for _ in range(cadence):
+        root({"X": _BatchItem(torch.ones(1, 1, 4, 4), True), "Y": _BatchItem(torch.zeros(1, 1, 4, 4), False)})
+        root.backward(root)
+    # d(w**2 + abs(w))/dw = 3 at w=1; lr=.05, whatever either accumulation cadence.
+    torch.testing.assert_close(leaf["Out"].weight, torch.full_like(leaf["Out"].weight, 0.85))
+
+
+@pytest.mark.parametrize("patched", [False, True])
+@pytest.mark.parametrize("accumulated", [False, True])
+def test_loss_groups_can_share_the_same_graph(patched, accumulated) -> None:
+    root, leaf = _microbatch_network(1, accumulated, patched, False, True, schedule=(0, None), groups=True)
+    root({"X": _BatchItem(torch.ones(1, 1, 4, 4), True), "Y": _BatchItem(torch.zeros(1, 1, 4, 4), False)})
+    root.backward(root)
+    torch.testing.assert_close(leaf["Out"].weight, torch.full_like(leaf["Out"].weight, 0.85))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_ddp_refuses_backward_inside_forward_and_accepts_reporting_criteria(nested, monkeypatch) -> None:
+    from konfai.trainer import _ddp_kwargs
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    root, leaf = _microbatch_network(2, True, False, nested, False)
+    with pytest.raises(ConfigError, match="Distributed training cannot use criterion accumulation") as caught:
+        _ddp_kwargs(root, local_rank=0, size=1)
+    assert "accumulation: false" in str(caught.value)
+    for targets in leaf.measure.outputs_criterions.values():
+        for attr in targets["Y"].values():
+            attr.is_loss = False
+    assert _ddp_kwargs(root, local_rank=0, size=1) == {"static_graph": False, "find_unused_parameters": True}
+
+
+@pytest.mark.parametrize("accumulated", [False, True])
+def test_an_optimizer_waits_for_a_loss_that_starts_later_even_with_a_scaler(accumulated) -> None:
+    root, leaf = _microbatch_network(1, accumulated, False, False, True)
+    for criteria in leaf.measure.outputs_criterions.values():
+        for attributes in criteria["Y"].values():
+            attributes.start = 2
+    leaf.measure.init(root, ["X", "Y"])
+    for iteration in range(3):
+        root({"X": _BatchItem(torch.ones(1, 1, 4, 4), True), "Y": _BatchItem(torch.zeros(1, 1, 4, 4), False)})
+        root.backward(root)
+        expected = 1.0 if iteration < 2 else 0.9
+        torch.testing.assert_close(leaf["Out"].weight, torch.full_like(leaf["Out"].weight, expected))
+
+
 def _two_dice_measure(accumulation: bool) -> Measure:
     """Dice on label 1 and Dice on label 2 over one output and target: ``Dice`` and ``Dice#2`` in the
     list spelling of ``criterions_loader``."""
@@ -1160,9 +1281,9 @@ def test_composite_criteria_are_scheduled_on_the_owning_networks_counter() -> No
     seen_its: list[int] = []
     original_update = sub.measure.update
 
-    def recording_update(output_group, output, batch, it, nb, training):
+    def recording_update(output_group, output, batch, it, nb, training, nb_batch_per_step=1):
         seen_its.append(it)
-        return original_update(output_group, output, batch, it, nb, training)
+        return original_update(output_group, output, batch, it, nb, training, nb_batch_per_step=nb_batch_per_step)
 
     sub.measure.update = recording_update  # type: ignore[method-assign]
 

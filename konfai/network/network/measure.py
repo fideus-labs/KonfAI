@@ -211,6 +211,8 @@ class Measure:
             group: int,
             is_loss: bool,
             accumulation: bool,
+            start: int = 0,
+            stop: int | None = None,
         ) -> None:
             self.name = name
             self.is_loss = is_loss
@@ -218,6 +220,7 @@ class Measure:
             self.output_group = output_group
             self.target_group = target_group
             self.group = group
+            self.start, self.stop = start, stop
 
             # This iteration's (weight, loss) pairs: the gradient's, cleared by ``reset_loss``.
             self._loss: list[tuple[float, torch.Tensor]] = []
@@ -418,6 +421,8 @@ class Measure:
                         criterions_attr.group,
                         criterions_attr.is_loss,
                         criterions_attr.accumulation,
+                        criterions_attr.start,
+                        criterions_attr.stop,
                     )
 
     def update(
@@ -428,6 +433,7 @@ class Measure:
         it: int,
         nb_patch: int,
         training: bool,
+        nb_batch_per_step: int = 1,
     ) -> None:
         for target_group, criteria in self.outputs_criterions[output_group].items():
             groups = [group for group in target_group.split(";") if group in batch_data_with_attribute]
@@ -464,14 +470,28 @@ class Measure:
                         accumulated = [
                             record
                             for record in self._loss[criterions_attr.group].values()
-                            if record.accumulation and record.is_loss
+                            if record.accumulation
+                            and record.is_loss
+                            and it >= record.start
+                            and (record.stop is None or it <= record.stop)
                         ]
                         if len({len(record) for record in accumulated}) == 1:
-                            loss = _summed(record.get_last_loss() for record in accumulated) / nb_patch
+                            loss = (
+                                _summed(record.get_last_loss() for record in accumulated) / nb_patch / nb_batch_per_step
+                            )
+                            # Another group not complete for this patch, or a deferred loss, may
+                            # still need the same graph. Release it with the last immediate group.
+                            retain_graph = any(
+                                record.is_loss
+                                and (not record.accumulation or len(record) < len(accumulated[0]))
+                                and it >= record.start
+                                and (record.stop is None or it <= record.stop)
+                                for _, record in self._records()
+                            )
                             if self.scaler is not None:
-                                self.scaler.scale(loss).backward()
+                                self.scaler.scale(loss).backward(retain_graph=retain_graph)
                             else:
-                                loss.backward()
+                                loss.backward(retain_graph=retain_graph)
 
     def get_loss(self) -> list[torch.Tensor]:
         return [
