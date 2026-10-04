@@ -225,6 +225,39 @@ def test_a_checkpoint_of_another_network_is_refused_naming_both() -> None:
     assert "'MyNet'" in message and "'_ResizableNet'" in message
 
 
+def test_checkpoint_loading_keeps_parent_and_child_weights_under_their_full_paths() -> None:
+    def model():
+        root, child = Network(), Network()
+        root.add_module("fc", torch.nn.Linear(1, 1, bias=False))
+        child.add_module("fc", torch.nn.Linear(1, 1, bias=False))
+        root.add_module("child", child)
+        return root, child
+
+    original, original_child = model()
+    with torch.no_grad():
+        original["fc"].weight.fill_(2)
+        original_child["fc"].weight.fill_(7)
+    restored, restored_child = model()
+    restored.load({"Model": original.network_states()}, init=False)
+    torch.testing.assert_close(restored["fc"].weight, original["fc"].weight)
+    torch.testing.assert_close(restored_child["fc"].weight, original_child["fc"].weight)
+
+
+def test_checkpoint_loading_refuses_an_ambiguous_short_name() -> None:
+    model = _ResizableNet(fc_out=4)
+    weights = model.state_dict()
+    checkpoint = {"Model": {"First._ResizableNet": weights, "Second._ResizableNet": weights}}
+    with pytest.raises(ConfigError, match="ambiguous"):
+        model.load(checkpoint, init=False)
+
+
+def test_checkpoint_loading_still_accepts_a_unique_short_name() -> None:
+    original = _ResizableNet(fc_out=4)
+    restored = _ResizableNet(fc_out=4)
+    restored.load({"Model": {"FormerParent._ResizableNet": original.state_dict()}}, init=False)
+    torch.testing.assert_close(restored["fc"].weight, original["fc"].weight)
+
+
 def test_load_state_dict_shape_mismatch_raises_without_opt_in() -> None:
     """The overlap-copy resize is opt-in (``allow_head_resize``): by default a checkpoint whose
     out-channels disagree with the model fails the load, naming the tensor and both shapes."""

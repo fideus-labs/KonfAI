@@ -768,15 +768,27 @@ class Network(ModuleArgsDict, ABC):
             value = state_dict[name]
             model_state_dict_tmp: dict[str, torch.Tensor] = {}
             if isinstance(value, dict):
-                by_name = {k.split(".")[-1]: v for k, v in value.items()}
-                if self.get_name() not in by_name:
+                # Prefer the full checkpoint path, just as optimizer and schedule state do.
+                # A parent and child can have the same short name but different weights.
+                matches = (
+                    [state_key]
+                    if state_key in value
+                    else [path for path in value if path.split(".")[-1] == self.get_name()]
+                )
+                if not matches:
                     raise ConfigError(
                         f"The checkpoint holds no weights for the network '{self.get_name()}': "
                         f"its networks are {sorted(value)}.",
                         "A checkpoint entry is keyed by the network's name: the class name of a Python model, "
                         "the 'name' (else the file name) of a YAML model. Load it into the model that wrote it.",
                     )
-                model_state_dict_tmp = by_name[self.get_name()]
+                if len(matches) > 1:
+                    raise ConfigError(
+                        f"The checkpoint name '{self.get_name()}' is ambiguous: it matches {matches}, "
+                        f"but none is the current network path '{state_key}'.",
+                        "Load the original model graph or give the checkpoint an unambiguous network name.",
+                    )
+                model_state_dict_tmp = value[matches[0]]
             modules_name = self.get_mapping()
             model_state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
 

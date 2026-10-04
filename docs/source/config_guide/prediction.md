@@ -79,6 +79,10 @@ switches to its weights instead of copying a checkpoint in. When holding them wo
 they load per batch instead, as for a model whose class defines its own `load`; a rank that runs out of memory
 with them resident restarts with them loading per batch. At one batch size the outputs are the same to the bit.
 
+For nested models, weights are matched by the network's full path in the checkpoint. A short name is
+accepted only when it identifies one entry; an ambiguous name is refused instead of loading another
+network's weights. The same matching applies to training resumes.
+
 ## `Predictor.Dataset`
 
 | Field | Effect |
