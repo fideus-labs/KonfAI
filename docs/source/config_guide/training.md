@@ -175,6 +175,13 @@ These are simultaneous updates: the generator's loss uses the discriminator befo
 They differ from an alternating loop that updates the discriminator, then evaluates it again for
 the generator's loss; changing between these rules changes the training algorithm.
 
+`DiscriminatorADA` adapts its augmentation probability from its configured real-image
+`PatchGanLoss` criteria (`target: 1`), regardless of the dataset group's name. It waits for finite
+observations. Evaluation bypasses these augmentations and leaves the probability and its update
+counter unchanged. Checkpoints save both values; older weights without this state start at zero.
+An augmentation with zero probability returns its input directly, without preparing random draws
+or copying the batch.
+
 An output can carry several criteria: `examples/Segmentation` puts a cross entropy on
 `UNetBlock_0:Head:Conv` and a Dice loss on `UNetBlock_0:Head:Softmax`. A model with no loss is refused.
 

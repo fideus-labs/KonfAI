@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import itertools
+import math
 from functools import partial
 from typing import Literal, cast
 
@@ -22,9 +23,11 @@ import numpy as np
 import torch
 from konfai.data import augmentation
 from konfai.data.patching import ModelPatch
+from konfai.metric.measure import PatchGanLoss
 from konfai.models.python.generation import gan
 from konfai.models.python.segmentation import NestedUNet, UNet
 from konfai.network import blocks, network
+from konfai.network.network.measure import criterion_keys
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import ConfigError
 
@@ -154,15 +157,13 @@ class DiscriminatorADA(network.Network):
     DiscriminatorHead = Discriminator.DiscriminatorHead
 
     class UpdateP(torch.nn.Module):
-        """Adaptive-augmentation (ADA) probability controller.
+        """Adapt from finite real-image losses during training; freeze during evaluation.
 
-        `p` and `_it` are intentional running training state: every `n` calls the
-        augmentation probability `p` is nudged toward `ada_target` based on the
-        discriminator measure. They are deliberately kept as plain Python scalars
-        (not registered buffers) so the checkpoint format stays compatible with
-        existing pretrained weights. `_it` only matters modulo `n`, so it is never
-        reset; `p` accumulates by design.
+        Python scalars avoid reading GPU buffers on every call. Torch's extra state saves both
+        the probability and its update cadence; older weights without it start at zero.
         """
+
+        _version = 2
 
         def __init__(self):
             super().__init__()
@@ -173,20 +174,42 @@ class DiscriminatorADA(network.Network):
 
             self.measure = None
             self.names = []
-            self.p = 0
+            self.p = 0.0
 
         def set_measure(self, measure: network.Measure | None, names: list[str]):
             self.measure = measure
             self.names = names
 
+        def get_extra_state(self) -> dict[str, float | int]:
+            return {"p": float(self.p), "it": self._it}
+
+        def set_extra_state(self, state: dict[str, float | int]) -> None:
+            self.p = float(state["p"])
+            self._it = int(state["it"])
+
+        def _load_from_state_dict(
+            self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        ):
+            super()._load_from_state_dict(
+                state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+            )
+            key = prefix + "_extra_state"
+            if key in missing_keys and local_metadata.get("version", 1) < 2:
+                missing_keys.remove(key)
+                self.p, self._it = 0.0, 0
+
         def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+            if not self.training:
+                return tensor.new_zeros(())
             if self.measure is not None and self._it % self.n == 0:
-                value = sum([v for k, v in self.measure.get_last_values(self.n).items() if k in self.names])
-                adjust = np.sign(self.ada_target - value) * (self.ada_interval)
-                self.p += adjust
-                self.p = np.clip(self.p, 0, 1)
+                values = self.measure.get_last_values(self.n)
+                if self.names and all(name in values for name in self.names):
+                    value = sum(values[name] for name in self.names)
+                    if math.isfinite(value):
+                        adjust = np.sign(self.ada_target - value) * self.ada_interval
+                        self.p = np.clip(self.p + adjust, 0, 1)
             self._it += 1
-            return torch.tensor(self.p).to(tensor.device)
+            return torch.tensor(self.p, dtype=torch.float64, device=tensor.device)
 
     class DiscriminatorAugmentation(torch.nn.Module):
         def __init__(self, dim: int):
@@ -231,7 +254,12 @@ class DiscriminatorADA(network.Network):
                 aug.load(prob * p)
 
         def forward(self, tensor: torch.Tensor, prob: torch.Tensor) -> torch.Tensor:
-            self._set_p(prob.item())
+            if not self.training:
+                return tensor
+            probability = prob.item()
+            if probability == 0:
+                return tensor
+            self._set_p(probability)
             out = list(tensor)
             for aug in self.data_augmentations.keys():
                 aug.state_init(
@@ -296,10 +324,21 @@ class DiscriminatorADA(network.Network):
         )
 
     def initialized(self):
-        cast(DiscriminatorADA.UpdateP, self.get_submodule("DiscriminatorModel.Prob")).set_measure(
-            self.measure,
-            ["Discriminator_B.DiscriminatorModel.Head.Conv:None:PatchGanLoss"],
-        )
+        # The target dataset name is arbitrary: read the real-image adversarial criteria
+        # actually configured for this discriminator, including repeated criteria.
+        names: list[str] = []
+        if self.measure is not None:
+            for output, targets in self.measure.outputs_criterions.items():
+                for target, criteria in targets.items():
+                    keys = criterion_keys(output, target, (type(criterion).__name__ for criterion in criteria))
+                    names.extend(
+                        key
+                        for (criterion, attr), key in zip(criteria.items(), keys, strict=True)
+                        if attr.is_loss
+                        and isinstance(criterion, PatchGanLoss)
+                        and criterion.get_buffer("target").item() == 1
+                    )
+        cast(DiscriminatorADA.UpdateP, self.get_submodule("DiscriminatorModel.Prob")).set_measure(self.measure, names)
 
 
 class GeneratorV1(network.Network):
