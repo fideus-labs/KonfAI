@@ -1490,8 +1490,9 @@ class DatasetManager:
                                 member.key, (slice(0, int(block.shape[0])), *target), block, headers[member.key]
                             )
                     held = meter.held() if meter is not None else None
-                    SWEEP_CLOCK.region(target[0].stop - target[0].start, held)
-                    growth.after(held)
+                    rows = target[0].stop - target[0].start
+                    SWEEP_CLOCK.region(rows, held)
+                    growth.after(held, rows)
                     cut_next()
                 # The publish is a write too (an OME-Zarr pyramid is derived here), and it is waited for.
                 with SWEEP_CLOCK.phase("wait(write)"):

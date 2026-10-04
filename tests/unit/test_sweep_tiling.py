@@ -244,6 +244,12 @@ def test_the_regions_grow_by_doubling_while_they_hold_under_a_third_of_the_budge
     assert settled.after(2000) == 16 and settled.after(100) == 16, "a halving restarts the count"
 
 
+def test_an_over_budget_reading_still_shrinks_while_old_regions_are_queued() -> None:
+    growth = budget_module.RegionGrowth(rows=8, cap=64, budget_bytes=1000.0)
+    assert growth.after(100, rows=8) == 16
+    assert growth.after(2000, rows=8) == 8, "a stale height only prevents growth, not a needed shrink"
+
+
 @pytest.fixture
 def two_core_rank(monkeypatch: pytest.MonkeyPatch) -> None:
     """A rank that owns two cores, so the sweep queues a read-ahead: the price, and the text of the
