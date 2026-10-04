@@ -977,7 +977,8 @@ def test_h5_chunk_cache_outlives_a_read_and_leaves_large_unfiltered_chunks_alone
         source = large if name == "large" else small
         assert np.array_equal(dataset.read_data_slice("CT", name, window)[0], source[window])
 
-    with Dataset.File(str(store), True, "h5") as backend:
+    # Dataset normalizes Windows separators; inspect the same pool entry that served the reads.
+    with Dataset.File(dataset.filename, True, "h5") as backend:
         kept = dict(backend._datasets)
         again = backend._require_dataset("CT", "large")
     assert list(kept) == [f"/CT/{name}" for name in read[-Dataset.H5File._KEPT_DATASETS :]]
