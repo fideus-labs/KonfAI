@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
@@ -630,6 +631,34 @@ def test_predict_log_without_tensorboard_skips_image_preparation_and_forward(mon
     monkeypatch.setattr(model.module, "get_layers", unexpected, raising=False)
     monkeypatch.setattr(torch.Tensor, "cpu", unexpected)
     predictor._predict_log(next(iter(predictor.dataloader_prediction)))
+
+
+def test_predict_log_copies_only_the_displayed_planes_of_inputs_and_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    predictor, _, _, model = _loop_doubles(batches=1)
+    predictor._has_runtime_measures = False
+    predictor.data_log = DataLog.parse(["input/IMAGES/1", "out_a/IMAGES/1"])
+    images = []
+    predictor.tb = SimpleNamespace(add_images=lambda *args: images.append(args))
+    batch = next(iter(predictor.dataloader_prediction))
+    batch["input"] = replace(
+        batch["input"], tensor=torch.arange(16 * 4 * 5, dtype=torch.float32).reshape(1, 1, 16, 4, 5)
+    )
+    monkeypatch.setattr(
+        model.module, "get_layers", lambda *args: [("out_a", batch["input"].tensor, None)], raising=False
+    )
+    copied = []
+    original_cpu = torch.Tensor.cpu
+
+    def counted_cpu(tensor, *args, **kwargs):
+        copied.append(tensor.numel())
+        return original_cpu(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", counted_cpu)
+    predictor._predict_log(batch)
+
+    assert copied == [4 * 5, 4 * 5]
+    assert [row[0] for row in images] == ["Prediction/input", "Prediction/out_a"]
+    np.testing.assert_array_equal(images[0][1], images[1][1])
 
 
 def test_predictor_runs_prediction_logging_once_per_batch_even_with_multiple_outputs(

@@ -78,6 +78,7 @@ list of case names.
 Image logging is skipped when TensorBoard is unavailable. Model outputs requested by `data_log` use
 an extra forward in evaluation mode: BatchNorm statistics and the random generators used by training
 are preserved, and each module returns to its previous mode afterwards.
+For a 3-D `IMAGE` or `IMAGES` log, only the displayed central slice is copied to CPU.
 
 ### `EarlyStopping`
 

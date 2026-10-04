@@ -439,7 +439,7 @@ class _Predictor:
                 data_type[0](
                     self.tb,
                     f"Prediction/{name}",
-                    batch_sample[name].tensor[: self.data_log[name][1]].detach().cpu().numpy(),
+                    batch_sample[name].tensor[: self.data_log[name][1]],
                     self.it,
                 )
             else:
@@ -453,6 +453,6 @@ class _Predictor:
                 self.data_log[layer_name][0](
                     self.tb,
                     f"Prediction/{layer_name}",
-                    layer[: self.data_log[layer_name][1]].detach().cpu().numpy(),
+                    layer[: self.data_log[layer_name][1]],
                     self.it,
                 )

@@ -825,6 +825,60 @@ def test_a_malformed_data_log_entry_is_a_config_error_naming_it(entry: str) -> N
     assert "IMAGES, VIDEO" in str(refusal.value)
 
 
+@pytest.mark.parametrize("strategy", [rt_logg.DataLog.IMAGE, rt_logg.DataLog.IMAGES])
+@pytest.mark.parametrize("shape", [(2, 1, 7, 4, 5), (2, 3, 7, 4, 5), (2, 1, 4, 5), (2, 3, 4, 5), (2, 4, 5)])
+@pytest.mark.parametrize("constant", [False, True])
+def test_image_logs_keep_numpy_pixels_and_copy_only_displayed_tensor_elements(monkeypatch, strategy, shape, constant):
+    import numpy as np
+    import torch
+
+    tensor = torch.arange(int(np.prod(shape)), dtype=torch.float32).reshape(shape)
+    if constant:
+        tensor.fill_(3)
+    tensor.requires_grad_()
+    images = []
+    board = SimpleNamespace(add_image=lambda *args: images.append(args), add_images=lambda *args: images.append(args))
+    strategy(board, "CT", tensor.detach().numpy(), 9)
+    copied = []
+    original_cpu = torch.Tensor.cpu
+
+    def counted_cpu(value, *args, **kwargs):
+        copied.append(value.numel())
+        return original_cpu(value, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", counted_cpu)
+    strategy(board, "CT", tensor, 9)
+
+    assert len(images) == 2
+    assert images[0][0] == images[1][0] == "CT"
+    assert images[0][2] == images[1][2] == 9
+    np.testing.assert_array_equal(images[1][1], images[0][1])
+    assert sum(copied) == images[0][1].size  # IMAGE copies only the first sample, IMAGES all selected samples
+
+
+@pytest.mark.parametrize(
+    ("strategy", "method", "shape"),
+    [
+        (rt_logg.DataLog.VIDEO, "add_video", (2, 3, 4, 5, 6)),
+        (rt_logg.DataLog.SIGNAL, "add_scalars", (2, 3, 1, 1)),
+        (rt_logg.DataLog.AUDIO, "add_audio", (1, 1, 20)),
+    ],
+)
+def test_other_log_strategies_accept_tensors_with_the_same_values_as_numpy(strategy, method, shape):
+    import numpy as np
+    import torch
+
+    tensor = torch.arange(int(np.prod(shape)), dtype=torch.float32).reshape(shape).requires_grad_()
+
+    def render(layer):
+        calls = []
+        board = SimpleNamespace(**{method: lambda *args: calls.append(args)})
+        strategy(board, "signal", layer, 11)
+        return calls
+
+    np.testing.assert_equal(render(tensor), render(tensor.detach().numpy()))
+
+
 class _Board:
     """Keeps what a VIDEO log hands TensorBoard."""
 

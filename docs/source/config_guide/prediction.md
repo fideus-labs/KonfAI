@@ -63,6 +63,7 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.p
 | `data_log` | `null` | Outputs to log in TensorBoard. |
 
 When TensorBoard is unavailable, `data_log` skips image preparation and the extra forward for model outputs.
+For a 3-D `IMAGE` or `IMAGES` log, only the displayed central slice is copied to CPU.
 
 ### Checkpoint memory
 

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO, cast
 
 import numpy as np
+import torch
 import tqdm
 
 from konfai import (
@@ -67,15 +68,18 @@ def _log_signal_format(array: np.ndarray) -> dict[str, np.ndarray]:
     return {str(i): channel for i, channel in enumerate(array)}
 
 
-def _log_image_format(array: np.ndarray) -> np.ndarray:
+def _log_image_format(array: np.ndarray | torch.Tensor) -> np.ndarray:
     if len(array.shape) == 2:
-        array = np.expand_dims(array, axis=0)
+        array = array[None]
 
     if len(array.shape) == 3 and array.shape[0] != 1:
-        array = np.expand_dims(array, axis=0)
+        array = array[None]
     if len(array.shape) == 4:
         array = array[:, array.shape[1] // 2]
 
+    # Select the displayed plane on its device: a 3-D volume need not cross to the host for one image.
+    if isinstance(array, torch.Tensor):
+        array = array.detach().cpu().numpy()
     array = array.astype(float)
     b = -np.min(array)
     if (np.max(array) + b) > 0:
@@ -84,7 +88,7 @@ def _log_image_format(array: np.ndarray) -> np.ndarray:
         return 0 * array
 
 
-def _log_images_format(array: np.ndarray) -> np.ndarray:
+def _log_images_format(array: np.ndarray | torch.Tensor) -> np.ndarray:
     result = []
     for n in range(array.shape[0]):
         result.append(_log_image_format(array[n]))
@@ -135,14 +139,16 @@ class DataLog(Enum):
                 ) from error
         return parsed
 
-    def __call__(self, tb: "SummaryWriter | NullSummaryWriter", name: str, layer: np.ndarray, it: int):
+    def __call__(self, tb: "SummaryWriter | NullSummaryWriter", name: str, layer: np.ndarray | torch.Tensor, it: int):
+        if self == DataLog.IMAGE:
+            return tb.add_image(name, _log_image_format(layer[0]), it)
+        if self == DataLog.IMAGES:
+            return tb.add_images(name, _log_images_format(layer), it)
+        if isinstance(layer, torch.Tensor):
+            layer = layer.detach().cpu().numpy()
         if self == DataLog.SIGNAL:
             for b in range(layer.shape[0]):
                 tb.add_scalars(name, _log_signal_format(layer[b, :, 0]), layer.shape[0] * it + b)
-        elif self == DataLog.IMAGE:
-            return tb.add_image(name, _log_image_format(layer[0]), it)
-        elif self == DataLog.IMAGES:
-            return tb.add_images(name, _log_images_format(layer), it)
         elif self == DataLog.VIDEO:
             return tb.add_video(name, _log_video_format(layer), it)
         elif self == DataLog.AUDIO:

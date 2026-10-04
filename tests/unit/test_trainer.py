@@ -1516,9 +1516,10 @@ def test_logging_without_tensorboard_skips_image_preparation_and_forward(tmp_pat
 
 
 @pytest.mark.parametrize("writer_fails", [False, True])
+@pytest.mark.parametrize("spatial_dims", [2, 3])
 @pytest.mark.parametrize("composite_with_ema", [False, True])
 def test_training_visualization_preserves_buffers_rng_and_module_modes(
-    tmp_path: Path, monkeypatch, writer_fails, composite_with_ema
+    tmp_path: Path, monkeypatch, writer_fails, spatial_dims, composite_with_ema
 ) -> None:
     class Jitter(nn.Module):
         def forward(self, tensor):
@@ -1527,8 +1528,8 @@ def test_training_visualization_preserves_buffers_rng_and_module_modes(
 
     model = Network(in_channels=1)
     body = Network(in_channels=1) if composite_with_ema else model
-    body.add_module("Norm", nn.BatchNorm2d(1))
-    body.add_module("Frozen", nn.Dropout2d(0.5))
+    body.add_module("Norm", (nn.BatchNorm2d if spatial_dims == 2 else nn.BatchNorm3d)(1))
+    body.add_module("Frozen", (nn.Dropout2d if spatial_dims == 2 else nn.Dropout3d)(0.5))
     if composite_with_ema:
         model.add_module("Body", body)
     model.add_module("Out", Jitter())
@@ -1549,7 +1550,15 @@ def test_training_visualization_preserves_buffers_rng_and_module_modes(
             raise OSError("image writer failed")
 
     trainer.tb = SimpleNamespace(add_images=write_images)
-    batch = cast(Any, {"input": SimpleNamespace(tensor=torch.ones(2, 1, 4, 4) * 5, is_input=True)})
+    batch = cast(Any, {"input": SimpleNamespace(tensor=torch.ones(2, 1, *([4] * spatial_dims)) * 5, is_input=True)})
+    copied = []
+    original_cpu = torch.Tensor.cpu
+
+    def counted_cpu(tensor, *args, **kwargs):
+        copied.append(tensor.numel())
+        return original_cpu(tensor, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", counted_cpu)
     modes = [module.training for network in models for module in network.modules()]
     buffers = [(buffer, buffer.clone()) for network in models for buffer in network.buffers()]
     rng = torch.get_rng_state().clone()
@@ -1561,6 +1570,7 @@ def test_training_visualization_preserves_buffers_rng_and_module_modes(
         trainer._train_log(batch)
 
     assert len(calls) == len(models)
+    assert copied == [4 * 4] * len(models)  # only the displayed plane of each model output reaches the host
     assert [module.training for network in models for module in network.modules()] == modes
     assert all(torch.equal(buffer, original) for buffer, original in buffers)
     assert torch.equal(torch.get_rng_state(), rng)
