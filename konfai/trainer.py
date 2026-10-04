@@ -492,7 +492,7 @@ class _Trainer:
                 best_loss = checkpoint_loss
                 best_ckpt = checkpoint_path
 
-        if best_ckpt is None and len(all_checkpoints) > 1:
+        if best_ckpt is None and all_checkpoints:
             best_ckpt = max(all_checkpoints, key=lambda p: p.stat().st_mtime)
             best_loss = self.early_stopping.worst_score
         if best_ckpt is not None:
@@ -504,12 +504,13 @@ class _Trainer:
 
     def _update_best_checkpoint(self, checkpoint_path: Path, loss: float) -> None:
         """Keep only the current best checkpoint without rescanning all saves."""
-        is_new_best = self._best_checkpoint_loss is None or self.early_stopping.is_better(
-            loss, self._best_checkpoint_loss
+        finite = math.isfinite(loss)
+        is_new_best = self._best_checkpoint_loss is None or (
+            finite and self.early_stopping.is_better(loss, self._best_checkpoint_loss)
         )
         if is_new_best:
             previous_best = self._best_checkpoint_path
-            self._best_checkpoint_loss = loss
+            self._best_checkpoint_loss = loss if finite else None
             self._best_checkpoint_path = checkpoint_path
             if previous_best is not None and previous_best != checkpoint_path and previous_best.exists():
                 previous_best.unlink()

@@ -91,6 +91,8 @@ For a 3-D `IMAGE` or `IMAGES` log, only the displayed central slice is copied to
 
 An undefined score (`NaN` or infinity) counts as an evaluation without improvement and consumes
 patience. Only a finite score can become the best reference; the first finite score resets the counter.
+`BEST` checkpoint retention also prefers finite scores. Until one is available, it keeps the latest
+checkpoint, including after a resume.
 
 ## `Trainer.Model`
 

@@ -154,6 +154,32 @@ def test_best_checkpoint_keeps_highest_score_when_mode_is_max(tmp_path: Path, mo
     assert torch.load(checkpoints[0], map_location="cpu", weights_only=False)["loss"] == 0.85
 
 
+@pytest.mark.parametrize("invalid", [None, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(("mode", "scores"), [("max", (0.5, 0.6)), ("min", (0.6, 0.5))])
+@pytest.mark.parametrize("resume", [False, True])
+def test_best_checkpoint_prefers_finite_scores_and_keeps_the_latest_until_one_exists(
+    tmp_path, monkeypatch, invalid, mode, scores, resume
+) -> None:
+    dates = ["undefined_a", "undefined_b", "finite_a", "undefined_c", "finite_b", "undefined_d"]
+    trainer = _build_trainer(tmp_path, monkeypatch, dates, early_stopping=EarlyStopping(mode=mode))
+    directory = tmp_path / "Checkpoints" / "RUN"
+
+    _save(trainer, invalid)
+    assert (directory / "undefined_a.pt").is_file()
+    if resume:
+        trainer = _build_trainer(tmp_path, monkeypatch, dates[1:], early_stopping=EarlyStopping(mode=mode))
+    for score, retained in (
+        (invalid, "undefined_b"),
+        (scores[0], "finite_a"),
+        (invalid, "finite_a"),
+        (scores[1], "finite_b"),
+        (invalid, "finite_b"),
+    ):
+        _save(trainer, score)
+        assert [path.stem for path in directory.glob("*.pt")] == [retained]
+    assert torch.load(directory / "finite_b.pt", weights_only=False)["loss"] == scores[1]
+
+
 def test_best_checkpoint_bootstrap_scans_existing_files_once_and_prunes_stale_ones(
     tmp_path: Path,
     monkeypatch,
