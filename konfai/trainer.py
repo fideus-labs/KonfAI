@@ -211,11 +211,15 @@ class EarlyStopping(EarlyStoppingBase):
         return sum([i for v, i in values.items() if v in self.monitor])
 
     def __call__(self, current_score: float) -> bool:
-        if self.best_score is None:
+        if math.isfinite(current_score) and (self.best_score is None or not math.isfinite(self.best_score)):
+            # The first finite score also repairs an undefined baseline restored from an older run.
             self.best_score = current_score
-            return False
+            self.counter = 0
+            return self.early_stop
 
-        if self.mode == "min":
+        if not math.isfinite(current_score) or self.best_score is None:
+            improvement = float("-inf")  # undefined evaluations consume patience, never become the baseline
+        elif self.mode == "min":
             improvement = self.best_score - current_score
         elif self.mode == "max":
             improvement = current_score - self.best_score

@@ -461,6 +461,45 @@ def test_early_stopping_triggers_after_patience_without_improvement() -> None:
     assert stopper.is_stopped() is True
 
 
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(("mode", "scores"), [("max", (0.5, 0.6)), ("min", (0.6, 0.5))])
+def test_early_stopping_undefined_scores_consume_patience_without_poisoning_the_baseline(invalid, mode, scores) -> None:
+    stopper = EarlyStopping(patience=2, mode=mode)
+
+    assert stopper(invalid) is False
+    assert stopper.best_score is None
+    assert stopper.counter == 1
+    assert stopper(scores[0]) is False
+    assert stopper.counter == 0
+    assert stopper(scores[1]) is False
+    assert stopper.best_score == scores[1]
+    assert stopper.counter == 0
+    assert stopper(invalid) is False
+    assert stopper.best_score == scores[1]
+    assert stopper(invalid) is True
+    assert stopper.best_score == scores[1]
+
+
+@pytest.mark.parametrize("mode", ["min", "max"])
+def test_early_stopping_stops_an_entirely_undefined_series(mode) -> None:
+    stopper = EarlyStopping(patience=3, mode=mode)
+    assert stopper(float("nan")) is False
+    assert stopper(float("inf")) is False
+    assert stopper(float("-inf")) is True
+    assert stopper.best_score is None
+    assert stopper.counter == 3
+    assert stopper(0.5) is True  # a finite score must not restart a run that already stopped
+
+
+@pytest.mark.parametrize("mode", ["min", "max"])
+def test_early_stopping_replaces_an_undefined_baseline_restored_from_an_older_run(mode) -> None:
+    stopper = EarlyStopping(patience=3, mode=mode)
+    stopper.restore({"counter": 1, "best_score": float("nan"), "early_stop": False})
+    assert stopper(0.5) is False
+    assert stopper.best_score == 0.5
+    assert stopper.counter == 0
+
+
 def test_get_score_reports_missing_metric_and_available_keys() -> None:
     stopper = EarlyStopping(monitor=["val_loss"], patience=3)
 

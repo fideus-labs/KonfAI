@@ -88,6 +88,9 @@ are preserved, and each module returns to its previous mode afterwards.
 | `min_delta` | `0.0` | The smallest change that counts as an improvement. |
 | `mode` | `min` | `min` or `max`: the direction that improves. |
 
+An undefined score (`NaN` or infinity) counts as an evaluation without improvement and consumes
+patience. Only a finite score can become the best reference; the first finite score resets the counter.
+
 ## `Trainer.Model`
 
 A `classpath` selects the model; its arguments go in a section named after the class:
