@@ -31,10 +31,13 @@ konfai PREDICTION -y --gpu 0 --config Prediction.yml \
 konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.pt ckpt_c.pt
 ```
 
-- **Ensembles.** `combine` merges the members: `Mean`, `Median`, `Std`, `Vote`, `Concat`, or your own
+- **Ensembles.** `combine` merges the members: `Mean`, `Sum`, `Median`, `Std`, `Vote`, `Concat`, or your own
   reduction. For a segmentation, save the `Softmax` output and apply `Argmax` in `final_transforms`, so the
   probabilities are averaged before the labels are chosen; or merge label maps with `Vote`. `Mean` refuses
   label maps (the mean of two labels is a third).
+  `Sum` adds the members without dividing by their count. A custom reduction derived from `Mean`
+  keeps its own behavior. With one member, `Concat` preserves it and `Std` returns a zero spread map,
+  without intermediate volume buffers.
 - **Precision.** Members are combined in float16, which halves the memory of a many-class ensemble. Values
   above 65,504 overflow: keep model outputs in a normalised range and restore the scale in the output
   transforms.

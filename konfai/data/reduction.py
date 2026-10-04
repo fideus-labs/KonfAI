@@ -155,6 +155,8 @@ class Std(Reduction):
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
         self.start()
+        if len(tensors) == 1 and type(self) is Std:
+            return torch.zeros_like(tensors[0], dtype=torch.float32)
         for tensor in tensors:
             self.accumulate(tensor)
         return self.finalize()
@@ -334,7 +336,7 @@ class Concat(Reduction):
     working_multiple = 0.0  # the concatenation is the output region, charged at its own width
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        return torch.cat(tensors, dim=1)
+        return tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=1)
 
     def output_channels(self, channels: int, cases: int) -> int:
         return channels * cases

@@ -144,7 +144,7 @@ def _cohort(root: Path, geometry: Geometry, count: int) -> tuple[Dataset, list[n
 
 
 @pytest.mark.parametrize("operator", ["Mean", "Median", "Std", "Vote", "Concat"])
-@pytest.mark.parametrize("count", [2, 3, 4, 5])
+@pytest.mark.parametrize("count", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("slab_rows", [1, 3, 64], ids=["row-regions", "few-regions", "one-region"])
 def test_a_streamed_reduction_equals_the_operator_on_the_whole_cohort(
     operator: str, count: int, slab_rows: int, tmp_path: Path

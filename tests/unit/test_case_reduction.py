@@ -45,7 +45,7 @@ from konfai.data.patching import (
     open_held_meter,
 )
 from konfai.data.patching.budget import GROWTH_CAP_UNITS
-from konfai.data.reduction import Concat, Mean, Median, Reduction, Vote
+from konfai.data.reduction import Concat, Mean, Median, Reduction, Std, Vote
 from konfai.data.transform import (
     Clip,
     Dilate,
@@ -200,6 +200,37 @@ def test_median_of_an_even_cohort_matches_numpy_without_assembling(tmp_path: Pat
     np.testing.assert_allclose(written, np.median(volumes, axis=0), rtol=1e-6)
     # Never assembled: each case streamed, so no manager ever loaded its volume.
     assert all(not manager.loaded and not manager.data for manager in engine.managers)
+
+
+@pytest.mark.parametrize("operator", [Concat, Std])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64, torch.int16])
+def test_a_single_member_reduction_preserves_values_dtype_and_the_input(operator, dtype) -> None:
+    tensor = torch.arange(120).reshape(1, 1, 2, 3, 4, 5).to(dtype).transpose(-1, -2)
+    original = tensor.clone()
+    result = operator()([tensor])
+    expected = tensor if operator is Concat else torch.zeros_like(tensor, dtype=torch.float32)
+    assert result.dtype == expected.dtype and result.shape == expected.shape
+    assert torch.equal(result, expected)
+    assert torch.equal(tensor, original)
+
+
+@pytest.mark.parametrize("operator", [Concat, Std])
+def test_a_single_member_reduction_allocates_at_most_its_output(operator) -> None:
+    tensor = torch.ones(1, 1, 1, 16, 32, 32)
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU], profile_memory=True) as profile:
+        result = operator()([tensor])
+    allocated = sum(max(event.self_cpu_memory_usage, 0) for event in profile.key_averages())
+    budget = result.numel() * result.element_size() if operator is Std else 0
+    assert allocated <= budget
+
+
+def test_a_single_member_std_subclass_keeps_its_own_finalize() -> None:
+    class OffsetStd(Std):
+        def finalize(self):
+            return super().finalize() + 10
+
+    result = OffsetStd()([torch.ones(1, 1, 1, 2, 3, 4)])
+    assert torch.equal(result, torch.full_like(result, 10))
 
 
 def test_mean_is_incremental_so_the_cohort_is_never_resident(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

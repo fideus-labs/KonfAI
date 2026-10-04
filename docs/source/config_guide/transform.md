@@ -178,7 +178,7 @@ transforms:
 
 | Field | Default | Effect |
 | --- | --- | --- |
-| `operator` | `Median` | `Mean`, `Median`, `Vote`, `Concat`, or your own `Reduction` class. Its parameters go next to `operator`. |
+| `operator` | `Median` | `Mean`, `Sum`, `Median`, `Std`, `Vote`, `Concat`, or your own `Reduction` class. Its parameters go next to `operator`. |
 | `output` | required | The name of the single entry written. |
 | `grid` | `strict` | How the cases must agree on their grid (below). |
 | `grid_tolerance` | `1e-6` | The tolerance of `strict`. |
