@@ -500,7 +500,7 @@ class Dataset:
     def iter_data_blocks(self, groups: str, name: str) -> Callable[[], Iterator[np.ndarray]]:
         """A factory of passes over one entry, block by block along the first spatial axis, each
         block about ``_STATISTICS_CHUNK_ELEMENTS`` elements: what the statistics fold and the
-        quantile scan iterate. A store that cannot serve bounded region reads (NRRD) is read whole
+        quantile scan iterate. A store that cannot serve bounded region reads (GIPL) is read whole
         once and kept for every pass: the declared whole-volume route, which the plan names LOAD and
         refuses when the volume does not fit the budget."""
         shape, _ = self.get_infos(groups, name)
@@ -546,7 +546,7 @@ class Dataset:
         return _lerp_like_numpy(low, high, weight) if weight else low
 
     def bounded_region_reads(self, groups: str, name: str) -> bool:
-        """Whether a region read of this entry decodes only the region, or the whole volume (NRRD, a
+        """Whether a region read of this entry decodes only the region, or the whole volume (GIPL, a
         compressed file with no uncompressed twin). ``False`` for a missing entry."""
         try:
             return self._resolve_entry(groups, name, lambda file, _, entry: file.bounded_region_reads(entry))

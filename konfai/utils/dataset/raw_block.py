@@ -15,13 +15,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""Bounded reads of an uncompressed MetaImage or NIfTI: the header's pixel block, mapped band by band."""
+"""Bounded reads of an uncompressed MetaImage, NIfTI or NRRD: the header's pixel block, mapped band by band."""
 
 from __future__ import annotations
 
 import functools
 import os
 import struct
+import threading
 from collections.abc import Sequence
 from typing import Any, Literal, NamedTuple
 
@@ -37,9 +38,28 @@ from konfai.utils.dataset.stream import _MHA_ELEMENT_TYPES, _NIFTI_DATATYPES
 #: NumPy dtype of each element type the raw-block route reads (the inverses of the writers' tables).
 _NIFTI_DTYPES = {code: np.dtype(name) for name, code in _NIFTI_DATATYPES.items()}
 _MHA_DTYPES = {token: np.dtype(name) for name, token in _MHA_ELEMENT_TYPES.items()}
-#: How much of a file a MetaImage header is looked for in: MetaIO writes a few hundred bytes, user
-#: fields a few more; a header that runs past this is read by ITK.
-_MHA_HEADER_PROBE_BYTES = 1 << 16
+#: Every spelling the NRRD format gives a type, which the writers' table holds one of.
+_NRRD_DTYPES = {
+    token: np.dtype(name)
+    for name, tokens in {
+        "int8": ("int8", "int8_t", "signed char"),
+        "uint8": ("uint8", "uint8_t", "uchar", "unsigned char"),
+        "int16": ("int16", "int16_t", "short", "short int", "signed short", "signed short int"),
+        "uint16": ("uint16", "uint16_t", "ushort", "unsigned short", "unsigned short int"),
+        "int32": ("int32", "int32_t", "int", "signed int"),
+        "uint32": ("uint32", "uint32_t", "uint", "unsigned int"),
+        "int64": ("int64", "int64_t", "longlong", "long long", "long long int", "signed long long"),
+        "uint64": ("uint64", "uint64_t", "ulonglong", "unsigned long long", "unsigned long long int"),
+        "float32": ("float",),
+        "float64": ("double",),
+    }.items()
+    for token in tokens
+}
+#: The kinds of a NRRD axis that runs through space or time; any other holds a voxel's components.
+_NRRD_DOMAIN_KINDS = ("domain", "space", "time")
+#: How much of a file a MetaImage or a NRRD header is looked for in: MetaIO writes a few hundred
+#: bytes, user fields a few more; a header that runs past this is read by ITK.
+_HEADER_PROBE_BYTES = 1 << 16
 
 
 @functools.cache
@@ -61,12 +81,12 @@ def _sitk_component_dtypes() -> dict[int, np.dtype]:
 
 
 class _PixelBlock(NamedTuple):
-    """An uncompressed MetaImage or NIfTI as a memmap serves it: where its raw pixels start, how
-    they are stored, and what ITK reads in its header."""
+    """An uncompressed MetaImage, NIfTI or NRRD as a memmap serves it: where its raw pixels start,
+    how they are stored, and what ITK reads in its header."""
 
     offset: int
     dtype: np.dtype  # as stored, byte order included
-    interleaved: bool  # MetaIO keeps a pixel's components together; NIfTI keeps each component's volume whole
+    interleaved: bool  # MetaIO and NRRD keep a pixel's components together; NIfTI each component's volume whole
     shape: tuple[int, ...]  # channel-first
     metadata: Attribute  # the header's own keys, as image_to_data imports them
     probe: Any  # a one-voxel sitk.Image carrying the header's geometry: ITK's own index-to-world arithmetic
@@ -92,7 +112,7 @@ def _mha_header(path: str) -> tuple[dict[str, str], int] | None:
     """A MetaImage header's fields in order, up to ``ElementDataFile`` (MetaIO's last), and the offset
     its local data starts at; ``None`` when no such field is within the probe."""
     with open(path, "rb") as file:
-        head = file.read(_MHA_HEADER_PROBE_BYTES)
+        head = file.read(_HEADER_PROBE_BYTES)
     fields: dict[str, str] = {}
     position = 0
     while "ElementDataFile" not in fields:
@@ -125,6 +145,73 @@ def _mha_raw_block(path: str) -> tuple[int, np.dtype] | None:
     return position, dtype.newbyteorder(">" if big_endian else "<")
 
 
+class _NrrdHeader(NamedTuple):
+    """The header of a NRRD whose data a flat block holds: what it says and where it sits in the file."""
+
+    encoding: str
+    encoding_span: tuple[int, int]  # where the encoding is spelled, which a decompressed twin rewrites
+    offset: int  # where the data starts, past the blank line
+    dtype: np.dtype  # as stored, byte order included
+    shape: tuple[int, ...]  # channel-first
+
+
+def _nrrd_header(path: str) -> _NrrdHeader | None:
+    """The header of a NRRD whose pixels sit behind it in one block, a pixel's components together.
+
+    ``None`` for a detached header, skipped lines or bytes, a type or a byte order it does not name,
+    a component axis that is not the fastest, and a header that does not end within the probe: ITK
+    reads those. The encoding is the caller's to judge.
+    """
+    with open(path, "rb") as file:
+        head = file.read(_HEADER_PROBE_BYTES)
+    if not head.startswith(b"NRRD"):
+        return None
+    fields: dict[str, str] = {}
+    encoding_span = (0, 0)
+    position = 0
+    while True:
+        end = head.find(b"\n", position)
+        if end < 0:
+            return None
+        line = head[position:end].rstrip(b"\r").decode("latin-1")
+        if not line:
+            break  # the blank line: the data follows
+        # "field: value"; the magic, a comment and a "key:=value" pair are none of the header's fields.
+        key, separator, value = line.partition(": ")
+        if separator and not key.startswith("#") and ":=" not in key:
+            fields[key.strip().lower()] = value.strip()
+            if key.strip().lower() == "encoding":
+                encoding_span = (position + len(key) + len(separator), position + len(line))
+        position = end + 1
+    dtype = _NRRD_DTYPES.get(fields.get("type", ""))
+    try:
+        sizes = [int(extent) for extent in fields["sizes"].split()]
+    except (KeyError, ValueError):
+        return None
+    kinds = fields.get("kinds", "").split() or ["domain"] * len(sizes)
+    directions = fields.get("space directions", "").split() or ["("] * len(sizes)
+    if (
+        dtype is None
+        or len(kinds) != len(sizes)
+        or len(directions) != len(sizes)
+        or any(key in fields for key in ("data file", "datafile"))
+        or any(fields.get(key, "0") != "0" for key in ("line skip", "lineskip", "byte skip", "byteskip"))
+    ):
+        return None
+    orders: dict[str, Literal["<", ">"]] = {"little": "<", "big": ">"}
+    order = orders.get(fields.get("endian", "little" if dtype.itemsize == 1 else ""))
+    # The axis holding a voxel's components, if there is one, has to be the fastest: the block is
+    # then a pixel's components together, as MetaIO stores them.
+    components = [
+        axis for axis in range(len(sizes)) if kinds[axis] not in _NRRD_DOMAIN_KINDS or directions[axis] == "none"
+    ]
+    if order is None or components not in ([], [0]):
+        return None
+    channels, spatial = (sizes[0], sizes[1:]) if components else (1, sizes)
+    shape = (channels, *reversed(spatial))
+    return _NrrdHeader(fields.get("encoding", ""), encoding_span, end + 1, dtype.newbyteorder(order), shape)
+
+
 def _nifti_raw_block(path: str) -> tuple[int, np.dtype] | None:
     """Where a single-file uncompressed NIfTI-1 keeps its pixels and how; ``None`` for any other.
 
@@ -147,9 +234,22 @@ def _nifti_raw_block(path: str) -> tuple[int, np.dtype] | None:
     return int(vox_offset), dtype.newbyteorder(order)
 
 
+#: ITK's header read and its one-voxel extract are not safe from several threads asking their
+#: first at once, as a cache fill reading its cases on a thread pool does: one thread at a time
+#: qualifies a file. Each file is asked once, so the reads themselves stay concurrent.
+_QUALIFYING = threading.Lock()
+
+
 @functools.lru_cache(maxsize=4096)
 def _pixel_block_at(path: str, stamp: tuple[int, int]) -> _PixelBlock | None:
-    """The raw block of ``path`` as it was at ``stamp``, with its header read by ITK once.
+    """The raw block of ``path`` as it was at ``stamp``, with its header read by ITK once."""
+    del stamp  # part of the key: a rewritten file gets a record of its own
+    with _QUALIFYING:
+        return _qualified_block(path)
+
+
+def _qualified_block(path: str) -> _PixelBlock | None:
+    """The raw block of ``path``, or ``None`` when only ITK can read the file.
 
     Qualified against ITK's own reading of the header: the element type it reports must be the one
     stored, and the file must hold every element the shape announces. A file that fails either is
@@ -158,15 +258,20 @@ def _pixel_block_at(path: str, stamp: tuple[int, int]) -> _PixelBlock | None:
     The geometry and the metadata are taken off a one-voxel region ITK extracts, not off its header
     read alone: ITK's NIfTI IO reads the header again before it reads pixels, and the direction it
     then carries differs from the first read's in the sign of its zeros, which the record keeps as
-    text. A vector NIfTI, which ITK cannot extract a region of, is the one file whose record comes
-    from the header read.
+    text. Two files take their record from the header read: a vector NIfTI, which ITK cannot extract
+    a region of, and a NRRD, which ITK reads whole for one voxel of it.
     """
-    del stamp  # part of the key: a rewritten file gets a record of its own
     image_io = sitk.ImageFileReader.GetImageIOFromFileName(path)
+    announced = None  # the shape a NRRD header orders its axes into, which ITK has to read the same
     if image_io == "MetaImageIO":
         raw, interleaved = _mha_raw_block(path), True
     elif image_io == "NiftiImageIO":
         raw, interleaved = _nifti_raw_block(path), False
+    elif image_io == "NrrdImageIO":
+        nrrd = _nrrd_header(path)
+        if nrrd is None or nrrd.encoding != "raw":
+            return None
+        raw, interleaved, announced = (nrrd.offset, nrrd.dtype), True, nrrd.shape
     else:
         return None
     if raw is None:
@@ -181,9 +286,10 @@ def _pixel_block_at(path: str, stamp: tuple[int, int]) -> _PixelBlock | None:
         rank not in (2, 3)
         or _sitk_component_dtypes().get(reader.GetPixelID()) != dtype.newbyteorder("=")
         or os.path.getsize(path) < offset + int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+        or announced not in (None, shape)
     ):
         return None
-    if not interleaved and shape[0] > 1:
+    if image_io == "NrrdImageIO" or (not interleaved and shape[0] > 1):
         probe = sitk.Image([1] * rank, sitk.sitkUInt8)
         probe.SetOrigin(reader.GetOrigin())
         probe.SetSpacing(reader.GetSpacing())

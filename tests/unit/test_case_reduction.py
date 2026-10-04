@@ -256,18 +256,18 @@ def test_an_operator_that_folds_in_place_is_budgeted_for_what_it_holds(tmp_path:
 
 
 def test_members_on_an_unbounded_store_are_priced_once_per_region(tmp_path: Path) -> None:
-    """An NRRD decodes the whole volume behind every region asked of it, so the fold reads each
+    """A GIPL decodes the whole volume behind every region asked of it, so the fold reads each
     member once per region (twice that with a statistics pass), and a budget that lowers the slab
     multiplies it. The plan says so, with the remedy; the bytes are the same either way."""
     engine, destination, volumes = _run(
-        tmp_path, [], Reduce(operator="Mean", output="avg"), [], slab_rows=3, file_format="nrrd"
+        tmp_path, [], Reduce(operator="Mean", output="avg"), [], slab_rows=3, file_format="gipl"
     )
     plan = engine.plan()
     assert plan.regions == 3  # 8 rows in slabs of 3
-    assert plan.unbounded == {f"CASE_{index:03d}": "nrrd" for index in range(CASES)}
+    assert plan.unbounded == {f"CASE_{index:03d}": "gipl" for index in range(CASES)}
     assert plan.read_factor == 3
     described = plan.describe()
-    assert "sit on nrrd" in described and "3 decodes per member (one per region), 12 in all" in described
+    assert "sit on gipl" in described and "3 decodes per member (one per region), 12 in all" in described
     assert "put a Save ...:h5 before the Reduce" in described
 
     engine.slab_rows = 1
@@ -300,7 +300,7 @@ def test_a_save_before_the_reduce_moves_the_members_onto_a_bounded_store(tmp_pat
         Reduce(operator="Mean", output="avg"),
         [],
         slab_rows=3,
-        file_format="nrrd",
+        file_format="gipl",
     )
     assert engine.plan().read_factor == 1 and not engine.plan().unbounded
     engine.materialize()

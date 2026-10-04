@@ -1118,6 +1118,24 @@ def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, imag
     assert ".tmp" not in str(refusal.value)
 
 
+@pytest.mark.parametrize(
+    ("file_format", "shape"),
+    [("gipl", (2, 4, 5, 6)), ("png", (1, 4, 5, 6)), ("jpg", (4, 5, 6))],
+    ids=["a vector volume as gipl", "a 3-D volume as png", "four channels as jpg"],
+)
+def test_a_volume_the_format_would_store_in_part_is_refused_by_name(
+    tmp_path: Path, image_attributes, file_format: str, shape: tuple[int, ...]
+) -> None:
+    """ITK's writer stores what the format holds of the volume and raises nothing: the header of what
+    it wrote says how much, and no entry is published."""
+    pytest.importorskip("SimpleITK")
+    dataset = Dataset(tmp_path / "store", file_format)
+    rank = len(shape) - 1
+    with pytest.raises(DatasetManagerError, match=f"as '{file_format}': the format holds"):
+        dataset.write("CT", "CASE_001", np.ones(shape, np.uint8), image_attributes([0.0] * rank, [1.0] * rank))
+    assert not list((tmp_path / "store" / "CASE_001").iterdir())
+
+
 def test_a_dicom_write_that_fails_keeps_itks_error(tmp_path: Path, image_attributes, monkeypatch) -> None:
     """GDCM reports every failed write, a full disk included, as a component type it does not support:
     that phrase says nothing about the format, so it is not read as a refusal."""
@@ -1272,7 +1290,7 @@ def test_the_readers_own_itk_keys_do_not_travel_with_the_volume(tmp_path: Path) 
 
 
 # --------------------------------------------------------------------------------------
-# Region reads off the raw pixel block of an uncompressed MetaImage / NIfTI
+# Region reads off the raw pixel block of an uncompressed MetaImage / NIfTI / NRRD
 # --------------------------------------------------------------------------------------
 
 _BLOCK_ORIGIN, _BLOCK_SPACING = [10.0, -20.5, 30.25], [0.7, 1.3, 2.1]
@@ -1294,8 +1312,11 @@ _BLOCK_SERVED = (
     "bigendian.mha",
     "plane.mha",
     "identity.nii",
+    "scalar.nrrd",
+    "vector.nrrd",
+    "streamed.nrrd",
 )
-_BLOCK_LEFT_TO_ITK = ("compressed.mha", "scalar.nii.gz", "detached.mhd", "scaled.nii", "scalar.nrrd")
+_BLOCK_LEFT_TO_ITK = ("compressed.mha", "scalar.nii.gz", "detached.mhd", "scaled.nii", "compressed.nrrd", "scalar.gipl")
 
 
 def _block_image(data: np.ndarray, direction: np.ndarray) -> "sitk.Image":
@@ -1313,13 +1334,13 @@ def _block_image(data: np.ndarray, direction: np.ndarray) -> "sitk.Image":
 
 def _write_block_fixture(root: Path, kind: str) -> tuple[Path, np.ndarray]:
     """One file of ``kind`` under ``root``, and the channel-first array it holds."""
-    from konfai.utils.dataset.stream import _MhaDataStream, _NiftiDataStream
+    from konfai.utils.dataset.stream import _MhaDataStream, _NiftiDataStream, _NrrdDataStream
 
     rng = np.random.default_rng(len(kind))
     scalar = (rng.normal(size=(1, 12, 14, 16)) * 100).astype(np.float32)
     vector = (rng.normal(size=(3, 12, 14, 16)) * 100).astype(np.int16)
     path = root / kind
-    if kind == "vector.mha":
+    if kind in ("vector.mha", "vector.nrrd"):
         sitk.WriteImage(_block_image(vector, _BLOCK_DIRECTION), str(path))
         return path, vector
     if kind == "rotated.mha":
@@ -1333,14 +1354,14 @@ def _write_block_fixture(root: Path, kind: str) -> tuple[Path, np.ndarray]:
         stored = vector.astype(np.float32)
         sitk.WriteImage(_block_image(stored, _BLOCK_DIRECTION), str(path))
         return path, stored
-    if kind in ("streamed.mha", "streamed.nii"):
-        stored = vector if kind == "streamed.mha" else vector.astype(np.float32)
+    if kind.startswith("streamed."):
+        stored = vector.astype(np.float32) if kind == "streamed.nii" else vector
         attributes = Attribute()
         attributes["Origin"] = np.asarray(_BLOCK_ORIGIN)
         attributes["Spacing"] = np.asarray(_BLOCK_SPACING)
         attributes["Direction"] = _BLOCK_DIRECTION
-        stream_class = _MhaDataStream if kind == "streamed.mha" else _NiftiDataStream
-        with stream_class(str(path), list(stored.shape), stored.dtype, attributes) as stream:
+        streams = {"mha": _MhaDataStream, "nii": _NiftiDataStream, "nrrd": _NrrdDataStream}
+        with streams[path.suffix[1:]](str(path), list(stored.shape), stored.dtype, attributes) as stream:
             stream.write_slice(tuple(slice(0, extent) for extent in stored.shape), stored)
         return path, stored
     if kind == "bigendian.mha":
@@ -1377,7 +1398,7 @@ def _write_block_fixture(root: Path, kind: str) -> tuple[Path, np.ndarray]:
         return path, stored
     writer = sitk.ImageFileWriter()
     writer.SetFileName(str(path))
-    writer.SetUseCompression(kind in ("compressed.mha", "scalar.nii.gz"))
+    writer.SetUseCompression(kind in ("compressed.mha", "scalar.nii.gz", "compressed.nrrd"))
     writer.Execute(_block_image(scalar, _BLOCK_DIRECTION))
     return path, scalar
 
@@ -1431,6 +1452,24 @@ def test_a_region_off_the_raw_block_is_the_one_itk_decodes(
         }
     else:
         assert dict(attributes) == dict(want_attributes)
+
+
+@pytest.mark.parametrize("kind", _BLOCK_SERVED)
+def test_a_whole_volume_off_the_raw_block_is_the_one_itk_reads(tmp_path: Path, monkeypatch, kind: str) -> None:
+    """Same bytes, same dtype, same attribute record (keys, order, text) as ``sitk.ReadImage``."""
+
+    path, _ = _write_block_fixture(tmp_path, kind)
+    assert raw_block_module._pixel_block(str(path)) is not None
+    backend = _block_backend(path)
+    name = path.name.split(".", 1)[0]
+    got, attributes = backend.file_to_data("", name)
+
+    monkeypatch.setattr("konfai.utils.dataset.sitk_file._pixel_block", lambda path: None)
+    want, want_attributes = backend.file_to_data("", name)
+
+    assert got.dtype == want.dtype and got.dtype.isnative and got.flags.writeable
+    np.testing.assert_array_equal(got, want)
+    assert list(attributes.items()) == list(want_attributes.items())
 
 
 def test_every_patch_of_a_grid_records_what_itk_records(tmp_path: Path, monkeypatch) -> None:

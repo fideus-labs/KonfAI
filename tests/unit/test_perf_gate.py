@@ -33,7 +33,10 @@ def compare(tmp_path, baseline, run, extra=()):
     )
 
 
-@pytest.mark.parametrize("metric", ["wall_s_whole", "peak_rss_gib_whole", "konfai_wall_s_b1", "forward_ms"])
+@pytest.mark.parametrize(
+    "metric",
+    ["wall_s_whole", "peak_rss_gib_whole", "konfai_wall_s_b1", "forward_ms", "mha_vector_write_ms", "gzip_reads_ms"],
+)
 def test_actual_workflow_metric_names_fail_on_regression(tmp_path, metric):
     baseline = result()
     baseline["benches"]["predict"]["result"]["metrics"] = {metric: 1}

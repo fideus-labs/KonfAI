@@ -68,7 +68,7 @@ Each case gets a verdict:
 | Verdict | Meaning |
 | --- | --- |
 | `STREAM` | Read and written region by region. Memory stays at one slab. |
-| `LOAD` | Read once into memory because its format cannot serve regions (NRRD). It fits the budget. |
+| `LOAD` | Read once into memory because its format cannot serve regions (GIPL, TIFF). It fits the budget. |
 | `WHOLE-VOLUME` | A stage needs the whole volume, so the case is assembled in memory. The plan names the stage and why. |
 | `SKIP` | The output already exists. |
 | `REDUCE` / `REFUSED` | For a chain that folds the cohort into one output (`Reduce`, below): it streams, or it cannot run. |
@@ -199,7 +199,7 @@ segmentations with `Vote`, which keeps the label most cases agree on.
 resample every case onto a reference first (`Resample: {reference: …}`, below).
 
 A `Reduce` that cannot stream refuses the run: there is no whole-volume fallback. A cohort stored in a
-format that cannot serve regions (NRRD) is decoded once per region; put a `Save: {dataset: ./Cache:h5}`
+format that cannot serve regions (GIPL, TIFF) is decoded once per region; put a `Save: {dataset: ./Cache:h5}`
 before the `Reduce` so each case is decoded once. A reduction is one unit of work, so `--cpu N` cannot
 split it.
 

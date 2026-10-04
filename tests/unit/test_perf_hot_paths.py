@@ -20,6 +20,7 @@ from pathlib import Path
 
 import konfai.utils.dataset as dataset_module
 import numpy as np
+import pytest
 import torch
 from konfai.data.patching import Accumulator
 from konfai.data.reduction import Mean
@@ -237,7 +238,8 @@ def _eq_nan(a, b):
 
 
 def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
-    """Perf batch: float32 clamp_ fast path is byte-identical; int/float64 keep the scatter path."""
+    """Perf batch: float32 clamp_ fast path is byte-identical; a stored integer with whole bounds clamps
+    in place and float64 keeps the scatter path, all three equal to the reference."""
     from konfai.data.transform import Clip
     from konfai.utils.dataset import Attribute
 
@@ -252,7 +254,7 @@ def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
     assert _eq_nan(got, _old_clip(f32, lo, hi))
     assert got.dtype == torch.float32
 
-    # int16 (CT-style) must NOT crash and must equal the reference scatter (else-branch)
+    # int16 (CT-style) must NOT crash and must equal the reference scatter (the integer clamp)
     i16 = torch.tensor([[-2000, -5, 0, 5, 2000]], dtype=torch.int16)
     got_i = clip("x", i16.clone(), Attribute())
     assert torch.equal(got_i, _old_clip(i16, lo, hi))
@@ -263,6 +265,22 @@ def test_clip_clamp_fast_path_is_byte_identical_on_float32_and_safe_on_int():
     got_d = clip("x", f64.clone(), Attribute())
     assert _eq_nan(got_d, _old_clip(f64, lo, hi))
     assert got_d.dtype == torch.float64
+
+
+@pytest.mark.parametrize("dtype", [torch.int8, torch.uint8, torch.int16])
+@pytest.mark.parametrize("bounds", [(0.0, 100.0), (5.0, 50.0), (0.5, 2.5), (-5.0, 5.0), (-0.5, 2.5)])
+def test_clip_on_a_stored_integer_is_the_float_compared_fills(dtype, bounds):
+    """Whole bounds clamp the integers themselves, any other bound compares a float copy of them:
+    both are the reference fills, voxel for voxel."""
+    from konfai.data.transform import Clip
+    from konfai.utils.dataset import Attribute
+
+    low, high = bounds
+    if low < torch.iinfo(dtype).min:
+        pytest.skip("the dtype does not hold the lower bound")
+    values = torch.arange(-130, 131).to(dtype)
+    got = Clip(min_value=low, max_value=high)("x", values.clone(), Attribute())
+    assert got.dtype == dtype and torch.equal(got, _old_clip(values, low, high))
 
 
 def test_clip_float32_nan_dynamic_bound_does_not_corrupt_volume():

@@ -133,10 +133,12 @@ class RegionGrowth:
         )
         return True
 
-    def after(self, held: int | None) -> int:
-        """The height of the regions cut after one that held ``held`` bytes."""
+    def after(self, held: int | None, rows: int | None = None) -> int:
+        """The next height after a region that held ``held`` bytes. Queued regions cut at an older
+        height do not establish the current height's cost; over-budget readings still halve it."""
         budget = self.budget_bytes
-        self._at_height += 1
+        if rows is None or rows == self.rows:
+            self._at_height += 1
         if held is None or not budget or budget <= 0:
             return self.rows
         if held > budget:

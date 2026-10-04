@@ -210,6 +210,36 @@ def test_a_pipelined_sweep_writes_the_bytes_the_sequential_one_writes(
     np.testing.assert_array_equal(pipelined, sequential)
 
 
+@pytest.mark.parametrize("depth", [1, 3])
+def test_growth_waits_for_regions_of_the_new_height_to_fill_the_pipeline(tmp_path, monkeypatch, depth):
+    """Queued short regions cannot establish the cost of the larger ones cut behind them."""
+    from konfai.data.patching.budget import HeldMeter, RegionGrowth
+    from konfai.data.patching.sizer import SegmentSizer
+
+    monkeypatch.setattr("konfai.data.patching.sweep._sweep_pipeline_depth", lambda: depth)
+    monkeypatch.setattr(SegmentSizer, "start", lambda self: ([1, *self.spatial[1:]], RegionGrowth(1, 8, 1000.0)))
+    heights = []
+    apply = DatasetManager._apply_streamed_region
+
+    def record(self, source, spans, tensor, *args, **kwargs):
+        heights.append(spans[-1][0].stop - spans[-1][0].start)
+        return apply(self, source, spans, tensor, *args, **kwargs)
+
+    monkeypatch.setattr(DatasetManager, "_apply_streamed_region", record)
+    # The larger height's cost is known only once it has filled the pipeline.
+    monkeypatch.setattr(
+        "konfai.data.patching.manager.open_held_meter",
+        lambda device: HeldMeter(lambda: 500 if heights.count(2) >= depth + 2 else 100, 0),
+    )
+    volume = np.arange(256 * 5 * 4, dtype=np.float32).reshape(1, 256, 5, 4)
+    source = Dataset(tmp_path / "source", "mha")
+    source.write("CT", "CASE_000", volume, _attributes())
+    manager = _manager(source, [Save(f"{tmp_path / 'out'}:h5")], tmp_path)
+    assert CaseMaterializer(manager).materialize() is Verdict.STREAM
+    np.testing.assert_array_equal(Dataset(tmp_path / "out", "h5").read_data("CT", "CASE_000")[0], volume)
+    assert 2 in heights and max(heights) == 2, f"grew before measuring the new height: {heights}"
+
+
 class _DeclaredThenHanded(Transform):
     """A per-voxel stage logging the regions declared to it and the ones it is then handed."""
 

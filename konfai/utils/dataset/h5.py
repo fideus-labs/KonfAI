@@ -74,12 +74,13 @@ _h5_file_locks_guard = threading.Lock()
 
 
 class _PooledRead(NamedTuple):
-    """An open read handle, the store as it was when opened, and the entries' attributes read off the
-    handle once and kept for its life."""
+    """An open read handle, the store as it was when opened, the entries' attributes read off the
+    handle once and kept for its life, and the datasets last read, kept open with it."""
 
     file: Any
     opened_on: tuple[int, int] | None
     sidecars: dict[str, Attribute]
+    datasets: dict[str, Any]
 
 
 class _H5ReadPool:
@@ -114,7 +115,7 @@ class _H5ReadPool:
         for remaining in reversed(range(self._OPEN_ATTEMPTS)):
             stamp = self._stamp(filename)
             try:
-                return _PooledRead(_open_h5(filename, "r", **open_kwargs), stamp, {})
+                return _PooledRead(_open_h5(filename, "r", **open_kwargs), stamp, {}, {})
             except OSError:
                 if not remaining:
                     raise
@@ -235,6 +236,12 @@ class H5File(AbstractFile):
     # its own h5 contiguous). nslots per the h5py guidance: a prime, well above the chunks held.
     _READ_CHUNK_CACHE_BYTES = 128 * 1024 * 1024
     _READ_CHUNK_CACHE_SLOTS = 100003
+    #: The datasets a pooled handle keeps open, the latest read last, its cache bytes divided between
+    #: them: a case's groups (image, labels, mask) are read in turn.
+    _KEPT_DATASETS = 4
+    #: Above this, an unfiltered chunk is read where the selection lies in the file and never cached:
+    #: loading it whole costs its size and saves a later read one seek.
+    _DIRECT_CHUNK_BYTES = 1 << 20
 
     @staticmethod
     def _read_chunk_cache_bytes() -> int:
@@ -258,6 +265,7 @@ class H5File(AbstractFile):
         self.read = read
         self._lock: threading.RLock | None = None
         self._sidecars: dict[str, Attribute] | None = None  # the pooled handle's, on a read open
+        self._datasets: dict[str, Any] | None = None  # the pooled handle's, on a read open
 
     def __enter__(self):
         # The open/use/close sequence is serialised per file: two writers must never race between
@@ -271,7 +279,7 @@ class H5File(AbstractFile):
                     rdcc_nbytes=self._read_chunk_cache_bytes(),
                     rdcc_nslots=self._READ_CHUNK_CACHE_SLOTS,
                 )
-                self.h5, self._sidecars = pooled.file, pooled.sidecars
+                self.h5, self._sidecars, self._datasets = pooled.file, pooled.sidecars, pooled.datasets
             else:
                 _h5_read_pool.drop(self.filename)
                 if not os.path.exists(self.filename):
@@ -488,7 +496,7 @@ class H5File(AbstractFile):
         if group == "":
             key = self._recovered_key(h5_group, name)
             if key is not None:
-                result = h5_group[key]
+                result = self._open_entry(h5_group, key)
         elif group == "*":
             for k in h5_group.keys():
                 if isinstance(h5_group[k], h5py.Group):
@@ -501,6 +509,45 @@ class H5File(AbstractFile):
                 if result_tmp is not None:
                     result = result_tmp
         return result
+
+    def _open_entry(self, h5_group: h5py.Group, key: str) -> Any:
+        """``h5_group[key]``; a dataset this handle reads stays open with the handle.
+
+        HDF5's chunk cache lives in the open dataset and is dropped when it closes: reopened on every
+        read, a compressed chunk was decoded again each time (300 one-row reads over gzip chunks:
+        12 s, 0.12 s kept open).
+        """
+        if self._datasets is None or h5_group.get(key, getclass=True) is not h5py.Dataset:
+            return h5_group[key]
+        path = f"{h5_group.name.rstrip('/')}/{key}"
+        dataset = self._datasets.pop(path, None)
+        if dataset is None or not dataset.id.valid:
+            dataset = self._open_for_reads(h5_group, key)
+        self._datasets[path] = dataset
+        while len(self._datasets) > self._KEPT_DATASETS:
+            del self._datasets[next(iter(self._datasets))]
+        return dataset
+
+    def _open_for_reads(self, h5_group: h5py.Group, key: str) -> h5py.Dataset:
+        """The dataset under its share of the handle's chunk cache, or under none when its chunks are
+        unfiltered and large (512 shuffled one-row reads of 64 MiB chunks: 15.8 s through the cache,
+        0.09 s past it). Reopened to change it: an open dataset keeps the cache it was opened with."""
+
+        def opened(cache_bytes: int) -> h5py.Dataset:
+            access = h5py.h5p.create(h5py.h5p.DATASET_ACCESS)
+            access.set_chunk_cache(self._READ_CHUNK_CACHE_SLOTS, cache_bytes, 0.75)
+            return h5py.Dataset(h5py.h5d.open(h5_group.id, key.encode(), access))
+
+        dataset = opened(self._read_chunk_cache_bytes() // self._KEPT_DATASETS)
+        chunks = dataset.chunks
+        if (
+            chunks is not None
+            and not dataset.id.get_create_plist().get_nfilters()
+            and int(np.prod(chunks)) * dataset.dtype.itemsize > self._DIRECT_CHUNK_BYTES
+        ):
+            del dataset
+            dataset = opened(0)
+        return dataset
 
     def get_infos(self, groups: str, name: str) -> tuple[list[int], Attribute]:
         dataset = self._require_dataset(groups, name)

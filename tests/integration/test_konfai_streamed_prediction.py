@@ -173,7 +173,8 @@ _UINT8_BEFORE_REDUCTION = """        before_reduction_transforms:
 _UINT8_VARIANTS = ("ResampleLabel", "GeometryStack")
 
 # Whether the variant's output is written by the streamed region writer (hand-written MetaImage
-# header, no CenterOfRotation) or assembled in the buffer and written classically by SimpleITK.
+# header, no CenterOfRotation) or assembled in the buffer and written classically by SimpleITK. The
+# outputs here hold one channel: a multi-channel volume takes the region writer on both routes.
 _VARIANT_USES_STREAMED_WRITER = {
     "base": True,
     "Canonical": True,

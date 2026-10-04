@@ -429,7 +429,7 @@ class CaseMaterializer:
 
     def reads_its_source_whole(self, a: int = 0, apply_augmentations: bool = False) -> bool | None:
         """Whether a sweep of this case would decode its stored source whole for every region: the
-        store serves no bounded region read (an NRRD). ``None`` when the chain cannot stream;
+        store serves no bounded region read (a GIPL). ``None`` when the chain cannot stream;
         a Save cache still to write lands on a store serving bounded reads, so it never counts."""
         segments = self.manager.sweep_segments(a, apply_augmentations)
         if segments is None:

@@ -1415,6 +1415,28 @@ def test_normalize_never_writes_into_the_tensor_it_is_handed() -> None:
     assert torch.equal(channels, before)
 
 
+@pytest.mark.parametrize("dtype", ["float32", "float64", "int16"])
+def test_a_rescaling_stage_never_writes_into_the_tensor_it_is_handed(dtype: str) -> None:
+    """These stages write their chain into its first result, never into the case they are handed,
+    forward or inverse."""
+    import torch
+    from konfai.data.transform import Normalize, Percentage, Standardize, UnNormalize
+    from konfai.utils.dataset import Attribute
+
+    case = (torch.arange(64).reshape(2, 4, 8) % 11).to(getattr(torch, dtype))
+    before = case.clone()
+    for stage in (Normalize(), Standardize(), Standardize(mean=[1.0, 2.0], std=[3.0, 4.0]), UnNormalize()):
+        attribute = Attribute()
+        out = stage("CASE", case, attribute)
+        assert torch.equal(case, before), type(stage).__name__
+        if hasattr(stage, "inverse"):
+            handed = out.clone()
+            stage.inverse("CASE", out, attribute)
+            assert torch.equal(out, handed), type(stage).__name__
+    Percentage(baseline=3.0)("CASE", case, Attribute())
+    assert torch.equal(case, before)
+
+
 def test_normalize_yields_a_floating_tensor_from_an_integer_case() -> None:
     """A constant integer case (an MR clipped flat) must reach the network as floats, like any other case."""
     import torch

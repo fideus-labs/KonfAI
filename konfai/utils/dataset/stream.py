@@ -407,5 +407,23 @@ class _NrrdDataStream(_MhaDataStream):
             ("encoding", "raw"),
             ("space origin", point(attributes.get_np_array("Origin"))),
         ]
-        header = "NRRD0004\n" + "".join(f"{key}: {value}\n" for key, value in fields) + "\n"
-        _RawBlockStream.__init__(self, path, header.encode("ascii"), block_dtype, (*spatial, shape[0]))
+        # Attribute entries ride along as key/value pairs, like WriteImage embeds image metadata. The
+        # NRRD_ ones are ITK's reading of a NRRD's own fields, which this header spells itself.
+        pairs = [
+            (key, str(value).replace("\\", "\\\\"))
+            for key, value in attributes.items()
+            if str(value)
+            and "\n" not in str(value)
+            and "\r" not in str(value)
+            and "\n" not in key
+            and "\r" not in key
+            and ":=" not in key
+            and not key.startswith("NRRD_")
+        ]
+        header = (
+            "NRRD0004\n"
+            + "".join(f"{key}: {value}\n" for key, value in fields)
+            + "".join(f"{key}:={value}\n" for key, value in pairs)
+            + "\n"
+        )
+        _RawBlockStream.__init__(self, path, header.encode("utf-8"), block_dtype, (*spatial, shape[0]))

@@ -15,8 +15,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""Region reads of a compressed ITK file (``.nii.gz``, a zlib MetaImage): an uncompressed twin in a
-cache directory, decompressed once per run and then mapped band by band like any uncompressed file.
+"""Region reads of a compressed ITK file (``.nii.gz``, a zlib MetaImage, a gzip NRRD): an uncompressed
+twin in a cache directory, decompressed once per run and then mapped band by band like any
+uncompressed file.
 
 A compressed stream is not seekable, so ITK decodes it from its start for every region asked of it.
 The twin moves that cost to one decode per entry per run. It lives under
@@ -49,7 +50,7 @@ try:
     import SimpleITK as sitk
 except ImportError:
     sitk = None  # type: ignore[assignment]
-from konfai.utils.dataset.raw_block import _MHA_DTYPES, _mha_header, _sitk_component_dtypes
+from konfai.utils.dataset.raw_block import _MHA_DTYPES, _mha_header, _nrrd_header, _sitk_component_dtypes
 from konfai.utils.dataset.staging import _writer_is_dead
 from konfai.utils.dataset.stream import DataStream
 from konfai.utils.errors import KonfAIWarning
@@ -65,7 +66,7 @@ FREE_SPACE_SHARE = 0.5
 #: Bytes read or written per step: what a decompression holds, whatever the volume.
 _CHUNK = 1 << 20
 #: The compressed suffixes served, and their twin's.
-_TWIN_SUFFIXES = ((".nii.gz", ".nii"), (".mha", ".mha"), (".mhd", ".mha"))
+_TWIN_SUFFIXES = ((".nii.gz", ".nii"), (".mha", ".mha"), (".mhd", ".mha"), (".nrrd", ".nrrd"))
 
 _refusal_warned = False
 _process_runs: set[Path] = set()
@@ -75,11 +76,11 @@ class _Layout(NamedTuple):
     """The twin a compressed file decompresses into: the block a region read maps, and how it is written."""
 
     shape: tuple[int, ...]  # channel-first
-    interleaved: bool  # MetaIO keeps a pixel's components together; NIfTI each component's volume whole
+    interleaved: bool  # MetaIO and NRRD keep a pixel's components together; NIfTI each component's volume whole
     nbytes: int  # the twin's size on disk (an upper bound for NIfTI)
     data: str  # the file holding the compressed stream: the entry itself, or a MetaImage's detached .zraw
     offset: int  # where the stream starts in it
-    header: bytes | None  # a MetaImage twin's header; ``None`` for NIfTI, whose twin is its stream inflated
+    header: bytes | None  # the twin's header; ``None`` for NIfTI, whose twin is its stream inflated
 
 
 def _root() -> Path:
@@ -142,7 +143,8 @@ def run_scope() -> Iterator[None]:
 
 def layout(path: str) -> _Layout | None:
     """The twin ``path`` decompresses into, or ``None`` when it is not a compressed file served this way:
-    a gzipped single-file NIfTI, or a zlib MetaImage whose pixels are local or in one detached file."""
+    a gzipped single-file NIfTI, a zlib MetaImage whose pixels are local or in one detached file, or a
+    gzip NRRD that holds its own pixels."""
     if not path.lower().endswith(tuple(compressed for compressed, _ in _TWIN_SUFFIXES)):
         return None
     try:
@@ -155,8 +157,9 @@ def layout(path: str) -> _Layout | None:
 @functools.lru_cache(maxsize=4096)
 def _layout_at(path: str, stamp: tuple[int, int]) -> _Layout | None:
     del stamp  # part of the key: a rewritten file gets a layout of its own
+    suffix = next(compressed for compressed, _ in _TWIN_SUFFIXES if path.lower().endswith(compressed))
     try:
-        return _nifti_layout(path) if path.lower().endswith(".nii.gz") else _mha_layout(path)
+        return {".nii.gz": _nifti_layout, ".nrrd": _nrrd_layout}.get(suffix, _mha_layout)(path)
     except (OSError, RuntimeError, ValueError, KeyError):
         return None  # a file ITK cannot read either: its own route says what it is
 
@@ -207,6 +210,19 @@ def _mha_layout(path: str) -> _Layout | None:
     ).encode("latin-1")
     nbytes = len(twin_header) + int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
     return _Layout(shape, True, nbytes, data, start, twin_header)
+
+
+def _nrrd_layout(path: str) -> _Layout | None:
+    nrrd = _nrrd_header(path)
+    if nrrd is None or nrrd.encoding not in ("gzip", "gz"):
+        return None
+    with open(path, "rb") as file:
+        head = file.read(nrrd.offset)
+    # The same header, its encoding spelled raw.
+    start, stop = nrrd.encoding_span
+    twin_header = head[:start] + b"raw" + head[stop:]
+    nbytes = len(twin_header) + int(np.prod(nrrd.shape, dtype=np.int64)) * nrrd.dtype.itemsize
+    return _Layout(nrrd.shape, True, nbytes, path, nrrd.offset, twin_header)
 
 
 @functools.cache

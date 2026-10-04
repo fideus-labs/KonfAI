@@ -119,6 +119,24 @@ def test_separable_nearest_keeps_wide_integer_labels():
     assert inside_general.numel() and bool((inside_general == label).all())
 
 
+@pytest.mark.parametrize("mode", ["linear", "cubic"])
+def test_a_separable_blend_never_writes_into_its_source(mode: str):
+    """The blend writes into the copies it gathers. A float32 source is its own working tensor, and
+    an axis the map leaves alone is not gathered at all: the source must come back untouched."""
+    from konfai.data.sampling import gather_separable
+
+    source = torch.arange(6 * 8 * 10, dtype=torch.float32).reshape(1, 6, 8, 10)
+    before = source.clone()
+    axes = [
+        torch.arange(6, dtype=torch.float64),  # left alone
+        torch.arange(5, dtype=torch.float64) * 1.5 + 0.25,
+        torch.arange(7, dtype=torch.float64) * 1.3 + 0.1,
+    ]
+    out = gather_separable(source, axes, [0, 0, 0], [6, 8, 10], mode, 0.0)
+    assert out.shape == (1, 6, 5, 7)
+    assert torch.equal(source, before)
+
+
 def test_two_dimensional_slabs_hold_the_same_contract():
     """Rank 2 exercises every axis-order convention with one spatial axis fewer; nothing pins it
     elsewhere in the suite, and a 2-D drift would look exactly like a working resample."""
