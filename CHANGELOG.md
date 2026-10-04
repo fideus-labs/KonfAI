@@ -131,7 +131,13 @@ The unused `konfai[ssim]` extra is removed; KonfAI's built-in SSIM remains avail
   MetaImage/NRRD writes use the region writer. The affected paths retain the previous voxels and geometry.
 - TTA traverses copies along the streamed axis and folds uncertainty one copy at a time; a whole-case
   route is used when it fits the declared budget. Lazy imports reduce CLI and MCP startup work.
+- A prediction config without `batch_size` now measures its batch on the GPU (the default was 1);
+  set `batch_size` to pin it.
 - Performance gates now refuse missing memory evidence instead of omitting the check or writing `NaN`.
+- The release timing series holds its 94 facts on the reference host. Against that host's v1.8.3
+  baseline, the training-epoch benchmark takes 18 to 20% longer per epoch: since the split fix, the
+  example trains on four of its five cases instead of three and validates on one instead of two.
+  The per-step benchmark stays within 5% of the baseline.
 
 ### 📝 Documentation
 
