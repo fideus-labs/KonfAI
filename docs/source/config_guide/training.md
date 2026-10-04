@@ -142,6 +142,9 @@ outputs_criterions:
   its own arguments.
 - Without `is_loss`, a criterion takes its own role: a loss, except `PSNR` and `SSIM`, which are metrics.
 
+Criteria with `is_loss: false` run without gradient tracking: they report a score without keeping
+backward buffers. Criteria used as losses keep their gradients.
+
 An output can carry several criteria: `examples/Segmentation` puts a cross entropy on
 `UNetBlock_0:Head:Conv` and a Dice loss on `UNetBlock_0:Head:Softmax`. A model with no loss is refused.
 

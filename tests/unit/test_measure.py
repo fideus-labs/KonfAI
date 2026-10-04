@@ -1414,6 +1414,67 @@ def test_psnr_as_a_loss_is_refused(tmp_path, monkeypatch) -> None:
         _measure_from_config(tmp_path, monkeypatch, {"PSNR": {"is_loss": True}})
 
 
+@pytest.mark.parametrize("name", ["PSNR", "MAE", "torch:nn:MSELoss"])
+def test_reporting_only_metrics_save_no_backward_tensors_and_keep_their_scores(tmp_path, monkeypatch, name) -> None:
+    from konfai.utils.dataset import Attribute
+
+    options = {"is_loss": False}
+    if name == "PSNR":
+        options["dynamic_range"] = 1.0
+    measure, _ = _measure_from_config(tmp_path, monkeypatch, {name: options})
+    output = torch.linspace(0.0, 1.0, 512).reshape(1, 1, 8, 8, 8).requires_grad_()
+    target = torch.zeros_like(output)
+    (criterion,) = measure.outputs_criterions["out"]["ref"]
+    expected = CriterionResult.of(criterion(output.detach(), target)).materialized()
+    saved = []
+
+    def pack(tensor):
+        saved.append(tensor.numel())
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+        measure.update("out", output, {"ref": (target, [Attribute()])}, it=0, nb_patch=1, training=True)
+
+    assert saved == []
+    assert measure.get_last_values(1) == {f"out:ref:{type(criterion).__name__}": expected}
+    assert output.grad is None
+    assert torch.is_grad_enabled()
+
+
+@pytest.mark.parametrize("accumulation", [False, True])
+def test_reporting_metrics_leave_loss_gradients_and_validation_grad_mode_intact(tmp_path, monkeypatch, accumulation):
+    from konfai.utils.dataset import Attribute
+
+    measure, _ = _measure_from_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "PSNR": {"dynamic_range": 1.0},
+            "MAE": {"is_loss": False},
+            "torch:nn:MSELoss": {"is_loss": True, "accumulation": accumulation},
+        },
+    )
+    output = torch.linspace(0.0, 1.0, 64).reshape(1, 1, 8, 8).requires_grad_()
+    target = torch.full_like(output, 0.2, requires_grad=True)
+    reference_output = output.detach().clone().requires_grad_()
+    F.mse_loss(reference_output, target.detach()).backward()
+
+    measure.update("out", output, {"ref": (target, [Attribute()])}, it=0, nb_patch=1, training=True)
+    if not accumulation:
+        sum(measure.get_loss()).backward()
+    assert torch.equal(output.grad, reference_output.grad)
+    assert target.grad is None  # the existing target contract detaches a reference, even another model output
+
+    # A loss listed during validation must not re-enable the caller's disabled gradients.
+    modes = []
+    for criterion in measure.outputs_criterions["out"]["ref"]:
+        criterion.register_forward_pre_hook(lambda *_args: modes.append(torch.is_grad_enabled()))
+    measure.reset_loss()
+    with torch.no_grad():
+        measure.update("out", output, {"ref": (target, [Attribute()])}, it=1, nb_patch=1, training=False)
+    assert modes == [False, False, False]
+
+
 def test_ssim_as_a_loss_raises_the_ssim(tmp_path, monkeypatch) -> None:
     measure, _ = _measure_from_config(tmp_path, monkeypatch, {"SSIM": {"is_loss": True, "dynamic_range": 1.0}})
     torch.manual_seed(0)

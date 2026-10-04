@@ -447,7 +447,10 @@ class Measure:
                     target_data = [
                         self._target(group, batch_data_with_attribute[group][0], output.device) for group in groups
                     ]
-                    loss = call_criterion(criterion, output, target_data, target_attribute, None)
+                    # A reporting-only metric never backpropagates. Detaching its result afterwards
+                    # is too late to avoid saving the intermediate tensors for an unused backward.
+                    with torch.set_grad_enabled(torch.is_grad_enabled() and criterions_attr.is_loss):
+                        loss = call_criterion(criterion, output, target_data, target_attribute, None)
                     # What the value averages: the batch's patches (``Criterion.batch_mean``), else the batch.
                     patches = (output.shape[0] if getattr(criterion, "batch_mean", False) else 1) if self.scored else 0
                     self._loss[criterions_attr.group][key].add(scheduler.get_value(), loss, patches)
