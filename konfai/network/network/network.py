@@ -449,7 +449,9 @@ class ModuleArgsDict(torch.nn.Module, ABC):
                     yield name + "." + k, v, u
 
     def _requires_grad(self, keys: list[str]):
-        keys = keys.copy()
+        if not keys:
+            return
+        keys = list(dict.fromkeys(strip_accumulated(key) for key in keys))
         for name, module, args in self.named_module_args_dict():
             requires_grad = args.requires_grad
             if requires_grad is not None and module is not None:
@@ -1292,12 +1294,10 @@ class Network(ModuleArgsDict, ABC):
     def accumulates_patch_gradients(self) -> bool:
         """Whether any loss backpropagates inside the forward walk, including scheduled losses."""
         return any(
-            attr.is_loss and attr.accumulation
+            record.is_loss and record.accumulation
             for network in self.get_networks().values()
             if network.measure is not None
-            for targets in network.measure.outputs_criterions.values()
-            for criteria in targets.values()
-            for attr in criteria.values()
+            for _, record in network.measure._records()
         )
 
     def accumulation_sync(self, model: Any) -> AbstractContextManager[Any]:
@@ -1329,17 +1329,20 @@ class Network(ModuleArgsDict, ABC):
         return no_sync() if callable(no_sync) else nullcontext()
 
     def backward(self, model: Any) -> dict[str, Any]:
-        """Backpropagate the graph, then step any optimizers waiting for DDP reductions. A DDP bucket can
-        span several nested networks, so stepping the first before the last one's backward completes uses
-        local gradients. Only distributed execution defers the steps."""
-        pending: list[Network] | None = [] if isinstance(model, torch.nn.parallel.DistributedDataParallel) else None
+        """Finish the graph's backwards before changing any weights shared by its losses.
+
+        A GAN's generator backward still reads the discriminator's forward-time weights. In DDP,
+        a bucket can also span networks: all backwards must finish before any optimizer steps.
+        """
+        pending: list[Network] = []
         result = self._backward(pending)
-        if pending is not None:
-            patch_accumulation = self.accumulates_patch_gradients()
-            for network in pending:
-                if patch_accumulation and network.optimizer is not None:
-                    average_gradients(network.optimizer, model.process_group, model.bucket_bytes_cap, network.scaler)
-                network._optimizer_step()
+        patch_accumulation = (
+            isinstance(model, torch.nn.parallel.DistributedDataParallel) and self.accumulates_patch_gradients()
+        )
+        for network in pending:
+            if patch_accumulation and network.optimizer is not None:
+                average_gradients(network.optimizer, model.process_group, model.bucket_bytes_cap, network.scaler)
+            network._optimizer_step()
         return result
 
     def _optimizer_step(self) -> None:
@@ -1354,10 +1357,16 @@ class Network(ModuleArgsDict, ABC):
         self.optimizer.zero_grad(set_to_none=True)
 
     @_function_network()
-    def _backward(self, pending: list["Network"] | None):
+    def _backward(self, pending: list["Network"], root: "Network"):
         if self.measure:
             if self.scaler and self.optimizer:
-                self._requires_grad(list(self.measure.outputs_criterions.keys()))
+                root._requires_grad(
+                    [
+                        record.output_group
+                        for _, record in self.measure._records()
+                        if record.is_loss and not record.accumulation and len(record)
+                    ]
+                )
                 should_step = self.steps_this_batch()
                 losses = [self.scaler.scale(loss / self.nb_batch_per_step) for loss in self.measure.get_loss()]
                 if losses:
@@ -1366,10 +1375,7 @@ class Network(ModuleArgsDict, ABC):
                     torch.autograd.backward(losses)
 
                 if should_step:
-                    if pending is None:
-                        self._optimizer_step()
-                    else:
-                        pending.append(self)
+                    pending.append(self)
                 self._it += 1
 
     @_function_network()

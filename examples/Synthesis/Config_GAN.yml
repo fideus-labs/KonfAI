@@ -39,7 +39,7 @@ Trainer:
                     stop: None
                     accumulation: false
                     target: 1
-          Generator_A_to_B:;accu;Head:Tanh: # Patch-wise generator supervision before 3D re-assembly
+          Generator_A_to_B:;accu;Head:Tanh: # Supervision on the generator's reconstructed 3D output
             targets_criterions:
               CT:
                 criterions_loader:

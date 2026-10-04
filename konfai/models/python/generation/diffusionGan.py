@@ -105,7 +105,11 @@ class DiscriminatorADA(network.Network):
             self.noise_step = noise_step
 
         def forward(self, tensor: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-            return self.time_embed((p * self.noise_step).long().repeat(tensor.shape[0]))
+            # The GAN toggles the discriminator's parameters as a group. Its fixed sinusoidal
+            # table must remain fixed even after that outer requires_grad_(True).
+            return torch.nn.functional.embedding(
+                (p * self.noise_step).long().repeat(tensor.shape[0]), self.time_embed.weight.detach()
+            )
 
     class DDPMTE(torch.nn.Module):
         def __init__(self, in_channels: int, out_channels: int) -> None:
@@ -598,21 +602,29 @@ def _wire_adversarial(gan: network.Network, generator: network.Network, discrimi
 class DiffusionGan(network.Network):
     def __init__(
         self,
-        generator: GeneratorV1 = GeneratorV1(),
-        discriminator: DiscriminatorADA = DiscriminatorADA(),
+        generator: GeneratorV1 = None,  # type: ignore[assignment]
+        discriminator: DiscriminatorADA = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
-        _wire_adversarial(self, generator, discriminator)
+        _wire_adversarial(
+            self,
+            generator if generator is not None else GeneratorV1(),
+            discriminator if discriminator is not None else DiscriminatorADA(),
+        )
 
 
 class DiffusionGanV2(network.Network):
     def __init__(
         self,
-        generator: GeneratorV2 = GeneratorV2(),
-        discriminator: Discriminator = Discriminator(),
+        generator: GeneratorV2 = None,  # type: ignore[assignment]
+        discriminator: Discriminator = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
-        _wire_adversarial(self, generator, discriminator)
+        _wire_adversarial(
+            self,
+            generator if generator is not None else GeneratorV2(),
+            discriminator if discriminator is not None else Discriminator(),
+        )
 
 
 class CycleGanDiscriminator(network.Network):
@@ -805,10 +817,12 @@ class CycleGanGeneratorV3(network.Network):
 class DiffusionCycleGan(network.Network):
     def __init__(
         self,
-        generators: CycleGanGeneratorV3 = CycleGanGeneratorV3(),
-        discriminators: CycleGanDiscriminator = CycleGanDiscriminator(),
+        generators: CycleGanGeneratorV3 = None,  # type: ignore[assignment]
+        discriminators: CycleGanDiscriminator = None,  # type: ignore[assignment]
     ) -> None:
         super().__init__()
+        generators = generators if generators is not None else CycleGanGeneratorV3()
+        discriminators = discriminators if discriminators is not None else CycleGanDiscriminator()
         self.add_module("Generator", generators, in_branch=[0, 1], out_branch=["pB", "pA"])
         self.add_module(
             "Discriminator",

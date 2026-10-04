@@ -817,6 +817,7 @@ def test_ddp_selects_patch_accumulation_only_for_losses(nested, monkeypatch) -> 
     for targets in leaf.measure.outputs_criterions.values():
         for attr in targets["Y"].values():
             attr.is_loss = False
+    leaf.measure.init(root, ["X", "Y"])
     assert not root.accumulates_patch_gradients()
     assert _ddp_kwargs(root, local_rank=0, size=1) == {"static_graph": False, "find_unused_parameters": True}
 

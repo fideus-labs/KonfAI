@@ -18,6 +18,7 @@
 """A network's measure: its criteria over named outputs, and their running values."""
 
 import math
+import warnings
 from collections import deque
 from collections.abc import Iterable, Iterator
 from itertools import islice
@@ -27,10 +28,10 @@ import numpy as np
 import torch
 
 from konfai.metric.schedulers import Scheduler
-from konfai.network.network.base import strip_accumulated
+from konfai.network.network.base import is_accumulated, strip_accumulated
 from konfai.network.network.loaders import CriterionsAttr, TargetCriterionsLoader
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import ConfigError, MeasureError
+from konfai.utils.errors import ConfigError, KonfAIWarning, MeasureError
 
 if TYPE_CHECKING:
     from konfai.metric.measure.base import CriterionWithInit
@@ -408,6 +409,51 @@ class Measure:
         for old, new in outputs_group_rename.items():
             self.outputs_criterions.pop(old)
             self.outputs_criterions[new] = outputs_criterions_bak[old]
+        # Losses from different patch walks do not arrive together: e.g. a GAN's slice
+        # reconstruction precedes its adversarial loss on the assembled volume. Waiting for
+        # equal patch counts drops contributions; retain these losses for one joint backward.
+        from konfai.network.network.network import Network
+
+        nodes = [("", model), *((name, module) for name, module, _ in model.named_module_args_dict())]
+        patch_networks: dict[tuple[str, ...], Network] = {
+            tuple(name.split(".")) if name else (): module
+            for name, module in nodes
+            if isinstance(module, Network) and module.patch is not None
+        }
+
+        def patch_walk(output: str) -> tuple[str, ...] | None:
+            parts = output.split(".")
+            clean = strip_accumulated(output).split(".")
+            walks: list[tuple[str, ...]] = [
+                path
+                for path in patch_networks
+                if tuple(clean[: len(path)]) == path and len(path) < len(parts) and not is_accumulated(parts[len(path)])
+            ]
+            return max(walks, key=len) if walks else None
+
+        losses = [
+            (output, attr)
+            for output, targets in self.outputs_criterions.items()
+            for criteria in targets.values()
+            for attr in criteria.values()
+            if attr.is_loss
+        ]
+        walks = {patch_walk(output) for output, _ in losses}
+        owner = next((module for _, module in nodes if isinstance(module, Network) and module.measure is self), None)
+        # A discriminator cutting an upstream generator's output into patches reuses the
+        # generator graph for every patch, even if there is only one adversarial criterion.
+        defer = len(walks) > 1 or (
+            owner is not None
+            and any(walk is not None and owner not in patch_networks[walk].modules() for walk in walks)
+        )
+        if defer and any(attr.accumulation for _, attr in losses):
+            warnings.warn(
+                "Losses read different patch walks or reuse an upstream graph; "
+                "KonfAI defers this network's losses to preserve every gradient. "
+                "Their shared activations remain until backward.",
+                KonfAIWarning,
+                stacklevel=2,
+            )
         for output_group in self.outputs_criterions:
             for target_group, criteria in self.outputs_criterions[output_group].items():
                 keys = criterion_keys(output_group, target_group, (type(criterion).__name__ for criterion in criteria))
@@ -420,7 +466,7 @@ class Measure:
                         target_group,
                         criterions_attr.group,
                         criterions_attr.is_loss,
-                        criterions_attr.accumulation,
+                        criterions_attr.accumulation and not defer,
                         criterions_attr.start,
                         criterions_attr.stop,
                     )
@@ -459,14 +505,15 @@ class Measure:
                         loss = call_criterion(criterion, output, target_data, target_attribute, None)
                     # What the value averages: the batch's patches (``Criterion.batch_mean``), else the batch.
                     patches = (output.shape[0] if getattr(criterion, "batch_mean", False) else 1) if self.scored else 0
-                    self._loss[criterions_attr.group][key].add(scheduler.get_value(), loss, patches)
+                    record = self._loss[criterions_attr.group][key]
+                    record.add(scheduler.get_value(), loss, patches)
                     # Only the accumulation loss that completes the group's per-patch set may fire the
                     # accumulated backward: a plain (non-accumulation) loss added later in the SAME
                     # numeric group must not re-satisfy the uniform-count test and re-run backward over
                     # the already-freed accumulation graph (double gradient / crash). The criterion's own
                     # flags are the cheap half of that test and gate it: 0.02 us a call against 2.94 for
                     # the count over the group (timeit, 20000 calls).
-                    if training and criterions_attr.accumulation and criterions_attr.is_loss:
+                    if training and record.accumulation and record.is_loss:
                         accumulated = [
                             record
                             for record in self._loss[criterions_attr.group].values()

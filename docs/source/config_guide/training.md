@@ -161,7 +161,19 @@ This reduces activation memory; throughput depends on the model, since gradient 
 starts after the local backward passes finish.
 
 If an immediate loss and a deferred loss share a graph, its backward buffers remain until the
-deferred loss runs. Use immediate accumulation for all losses on that graph to release them per patch.
+deferred loss runs. Losses on different patch walks also need special handling: for example, a GAN's
+generator can be supervised per patch while its adversarial loss reads the reconstructed output.
+KonfAI automatically defers that network's losses and reports this decision at construction. The same
+applies when patches repeatedly reuse an upstream network's graph. Other networks can still accumulate
+immediately; DDP uses its ordinary reducer when all losses are deferred.
+
+For a GAN or another model with several optimizers, all gradients are computed using the weights of
+the same forward pass before any optimizer changes them. Each optimizer keeps its own
+`nb_batch_per_step` cadence. The discriminator's fake-image loss reads detached generator output;
+the generator's adversarial loss passes through the discriminator with its parameters frozen.
+These are simultaneous updates: the generator's loss uses the discriminator before its update.
+They differ from an alternating loop that updates the discriminator, then evaluates it again for
+the generator's loss; changing between these rules changes the training algorithm.
 
 An output can carry several criteria: `examples/Segmentation` puts a cross entropy on
 `UNetBlock_0:Head:Conv` and a Dice loss on `UNetBlock_0:Head:Softmax`. A model with no loss is refused.

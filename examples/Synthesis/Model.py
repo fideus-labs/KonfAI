@@ -118,12 +118,20 @@ class Discriminator(network.Network):
 class Gan(network.Network):
     def __init__(
         self,
-        generator: UNetpp5 = UNetpp5(),
-        discriminator: Discriminator = Discriminator(),
+        generator: UNetpp5 = None,
+        discriminator: Discriminator = None,
     ) -> None:
         super().__init__()
+        generator = generator if generator is not None else UNetpp5()
+        discriminator = discriminator if discriminator is not None else Discriminator()
         self.add_module("Generator_A_to_B", generator, in_branch=[0], out_branch=["pB"])
-        self.add_module("Discriminator_B", discriminator, in_branch=[1], out_branch=[-1], requires_grad=True)
+        self.add_module(
+            "Discriminator_B", discriminator, in_branch=[1], out_branch=[-1], requires_grad=True, training=True
+        )
         self.add_module("detach", blocks.Detach(), in_branch=["pB"], out_branch=["pB_detach"])
-        self.add_module("Discriminator_pB_detach", discriminator, in_branch=["pB_detach"], out_branch=[-1])
-        self.add_module("Discriminator_pB", discriminator, in_branch=["pB"], out_branch=[-1], requires_grad=False)
+        self.add_module(
+            "Discriminator_pB_detach", discriminator, in_branch=["pB_detach"], out_branch=[-1], training=True
+        )
+        self.add_module(
+            "Discriminator_pB", discriminator, in_branch=["pB"], out_branch=[-1], requires_grad=False, training=True
+        )
