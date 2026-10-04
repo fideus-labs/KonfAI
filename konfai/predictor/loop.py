@@ -112,8 +112,8 @@ class _Predictor:
             the loader's batches grow with it, the smaller ones it prefetched merged. ``None`` runs the
             loader's batches.
         batch_cap (int | None): The largest batch a measured one may take, after one ran out of memory.
-        device (int | None): The CUDA device the model runs on, ``None`` off CUDA: the ensemble's members kept
-            there stay only while they cost the batch nothing.
+        device (int | None): The CUDA device the model runs on, ``None`` off CUDA: a configured batch is
+            weighed beside the resident ensemble members on this device.
     """
 
     def __init__(
@@ -362,18 +362,7 @@ class _Predictor:
             return
         spent_one, kept = self._one_patch
         usable = vram.usable_after_oom(device) - kept
-        batch = self._capped(vram.measured_batch(spent_one, spent, usable), batch_sample)
-        resident = composite.resident_bytes(device)
-        if resident:
-            # The members stay resident only when they cost the batch nothing: the same measurement with their
-            # bytes free is the batch a run loading them per batch takes.
-            reloading = self._capped(
-                vram.measured_batch(spent_one, spent, usable + vram.usable_vram(resident)), batch_sample
-            )
-            if reloading > batch:
-                self._release(composite, f"resident, they cut the measured batch from {reloading} to {batch} patches")
-                batch = reloading
-        self._grow(batch)
+        self._grow(self._capped(vram.measured_batch(spent_one, spent, usable), batch_sample))
         self.measure_batch_on = None
         if self.global_rank == 0:
             print(f"[KonfAI] VRAM: measured batch {self.batch} patches.", flush=True)
