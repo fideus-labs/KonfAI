@@ -179,6 +179,13 @@ def _masked_fill(values: torch.Tensor, mask: torch.Tensor, fill: float) -> torch
     return values.view(signed).masked_fill(mask, value.view(signed).item()).view(values.dtype)
 
 
+def _picked(values: torch.Tensor, index: tuple[slice | torch.Tensor, ...]) -> torch.Tensor:
+    """``values[index]`` in ``values``' own dtype, whatever it is: CUDA has no index kernel for uint16, uint32 or
+    uint64, which are read through the signed view of the same bits."""
+    signed = _SIGNED_VIEW.get(values.dtype)
+    return values[index] if signed is None else values.view(signed)[index].view(values.dtype)
+
+
 def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) -> torch.Tensor:
     """``translation + Σ_j column_j · p_j``, accumulated in ``j`` order: ITK's own association. Not
     ``points @ matrix.T + offset``, which BLAS is free to reassociate; the two answers differ in the
@@ -441,7 +448,11 @@ def scanline_index(
     start = at(0.0)
     along = at(float(extent)) - start
     columns = region_zyx[-1]
-    alpha = torch.arange(int(columns.start), int(columns.stop), dtype=dtype, device=device) / float(extent)
+    # Divided by a tensor: CUDA divides by a Python scalar through its reciprocal, one bit away from the quotient
+    # ITK computes, which moves an exact half-voxel tie to the other voxel.
+    alpha = torch.arange(int(columns.start), int(columns.stop), dtype=dtype, device=device) / torch.tensor(
+        float(extent), dtype=dtype, device=device
+    )
     return start.unsqueeze(-2) + alpha.unsqueeze(-1) * along.unsqueeze(-2)
 
 
@@ -558,7 +569,7 @@ def gather_separable(
         """``tensor.index_select(array_axis + 1, index)``, spelled as an index: the same copy of the
         same voxels. index_select on an inner axis walks a scalar loop on the host."""
         taps_index: tuple[slice | torch.Tensor, ...] = (*[slice(None)] * (array_axis + 1), index)
-        return tensor[taps_index]
+        return _picked(tensor, taps_index)
 
     out = source if mode == "nearest" else source.type(sampling_dtype(source))
     for array_axis in range(rank) if blend is None else blend:
@@ -684,7 +695,7 @@ def gather(
             )
             flat = flat * window_zyx[array_axis] + local
         # An index, not index_select: the same copy, several times faster on the host.
-        picked = work.reshape(int(work.shape[0]), -1)[:, flat.reshape(-1)].reshape(out_shape)
+        picked = _picked(work.reshape(int(work.shape[0]), -1), (slice(None), flat.reshape(-1))).reshape(out_shape)
         if itk_blend:
             picked = _itk_cast(picked)
         return _masked_fill(picked, ~inside.unsqueeze(0), fill).type(source.dtype)
