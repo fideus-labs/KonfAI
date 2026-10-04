@@ -35,6 +35,8 @@ NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine 
 runtime-evaluated annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
+import importlib.metadata
+import re
 from typing import Annotated
 
 import itk
@@ -119,6 +121,19 @@ def _resampled(image: "itk.Image", reference: "itk.Image", transform: "itk.Trans
     return resampler.GetOutput()
 
 
+def _itk_impact_predates_its_stages() -> bool:
+    """Whether the installed itk-impact is older than 0.1.6, the first whose stages take what this module sets:
+    0.1.5 has ``ImpactModelConfiguration`` already and no ``SetSamplingPercentage``. A source build carries no
+    distribution to read a version from, and is taken at its symbols."""
+    if not hasattr(itk, "ImpactModelConfiguration"):
+        return True
+    try:
+        installed = importlib.metadata.version("itk-impact")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    return tuple(int(part) for part in re.findall(r"\d+", installed)[:3]) < (0, 1, 6)
+
+
 def _itk_field_to_sitk_transform(field: "itk.Image", reference: sitk.Image) -> sitk.Transform:
     """Wrap an itk displacement field (on the fixed grid) as a SimpleITK ``DisplacementFieldTransform``, which
     only takes a float64 field."""
@@ -186,6 +201,12 @@ class ConvexAdamEngine:
         balance_coarse_layers: bool = False,
     ) -> None:
         # Checked here, before any download: past this point a bad value fails at the first case, or not at all.
+        if stages and _itk_impact_predates_its_stages():
+            raise MeasureError(
+                "The ConvexAdam stages need itk-impact 0.1.6 or later.",
+                'Install it beside the torch its wheels are built against: pip install "itk-impact>=0.1.6"'
+                ' "torch==2.12.*"',
+            )
         if any(stage not in ("coarse", "fine") for stage in stages) or "coarse" in stages[1:]:
             # The coarse stage starts from scratch: after a 'fine' it would throw the refinement away.
             raise ValueError(

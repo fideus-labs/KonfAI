@@ -94,11 +94,12 @@ def _download_model(criterion: str, repo_id: str, filename: str) -> str:
     return path
 
 
-def _load_frozen(model_path: str) -> torch.nn.Module:
-    """The TorchScript extractor at ``model_path``, on the CPU, in eval mode and with its weights frozen: a fixed
-    feature space, whose weights no optimizer holds, so a gradient for them is never used. A ScriptModule refuses
-    requires_grad_, its parameters do not."""
-    model = torch.jit.load(model_path, map_location="cpu").eval()  # nosec B614
+def _load_frozen(model_path: str, device: torch.device) -> torch.nn.Module:
+    """The TorchScript extractor at ``model_path``, mapped onto ``device``, in eval mode and with its weights frozen:
+    a fixed feature space, whose weights no optimizer holds, so a gradient for them is never used. A ScriptModule
+    refuses requires_grad_, its parameters do not. A constant the trace baked in stays where the file is mapped
+    (``.to()`` moves parameters and buffers only), so the file is mapped where the network runs."""
+    model = torch.jit.load(model_path, map_location=device).eval()  # nosec B614
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     return model
@@ -189,6 +190,8 @@ def model_key(ref: str) -> str:
 #: The IMPACT distances, as itk-impact defines them, on feature maps ``[B, C, *spatial]`` (channel axis 1), averaged
 #: over the voxels a mask ``[B, 1, *spatial]`` weighs (all without one). Each is 0 at a perfect match but Dice, which is
 #: 0 there only on binary maps: identical soft maps of 0.5 score 0.5, and raw features can take it below 0.
+#: L1 and L2 average the channels, as itk-impact's metric does (``updateValue``); its dense ``forwardValue`` sums them,
+#: C times larger, to balance ConvexAdam's diffusion regulariser.
 DISTANCES = ("L1", "L2", "Dice", "Cosine", "L1Cosine", "NCC", "LNCC")
 _EPS = 1e-6
 #: itk-impact's L1Cosine: the cosine damped by exp(-lambda |f - m|) per channel.
@@ -837,6 +840,7 @@ class ImpactFeatureModel:
         # The patches one batch of ``sampled`` holds, once one has run out of memory (0: PATCH_BUDGET's).
         self.batch = 0
         self.model: torch.nn.Module | None = None
+        self._mapped: torch.device | None = None  # where _on mapped the file; None for a network handed in
 
     @classmethod
     def download(
@@ -886,12 +890,17 @@ class ImpactFeatureModel:
         # float16 has no 3-D pooling on the CPU.
         return self.half and device.type == "cuda"
 
+    def _on(self, device: torch.device) -> torch.nn.Module:
+        """The network on ``device``, its file mapped there: loaded at its first use, and again when the device
+        changes, since what the trace baked in does not follow ``.to()``. A network handed in is only moved."""
+        if self.model is None or self._mapped not in (None, device):
+            self.model, self._mapped = _load_frozen(self.model_path, device), device
+        return self.model.to(device)
+
     def network(self, device: torch.device) -> torch.nn.Module:
         """The TorchScript network on ``device``, in float16 there with ``half``; a 2-D one swept over a volume's slices
         along its first spatial axis."""
-        if self.model is None:
-            self.model = _load_frozen(self.model_path)
-        network = self.model.to(device)
+        network = self._on(device)
         network = network.half() if self._half(device) else network.float()
         return _SliceSweep(network) if self.dim == 2 else network
 
@@ -1041,14 +1050,12 @@ class ImpactFeatureModel:
         (``stats.numel() == 4``): a whole batch at once would leave every sample normalized by the
         batch's own min/max (MIND) or mean/std (the MRI TS models), which is another case's intensities.
         """
-        if self.model is None:
-            self.model = _load_frozen(self.model_path)
-        self.model.to(output.device)
+        network = self._on(output.device)
         slices = range(output.shape[2]) if output.dim() == 5 and self.dim == 2 else (slice(None),)
         for sample in range(output.shape[0]):
             for z in slices:
                 yield _masked_feature_loss(
-                    self.model,
+                    network,
                     self.inputs(output[sample : sample + 1, :, z], output_attributes[sample]),
                     self.inputs(target[sample : sample + 1, :, z], target_attributes[sample]),
                     self.weights,

@@ -3,8 +3,8 @@ name: perf_pr_gate
 # The facts of the benchmark series on every pull request touching the framework or the benches: the
 # streamed route wrote the voxels of the whole-volume route, the transform equals the plain loop
 # to float32 rounding, the plan's held peak stayed within its budget, a stage holds no more volumes
-# than it did and returns the voxels of its plain formula, a chunked h5 layout reads at the cost of a
-# contiguous one. A fact has its expected value in the run itself, so it needs no baseline and holds
+# than it did and returns the voxels of its plain formula, every storage layout returns the reference
+# voxels. A fact has its expected value in the run itself, so it needs no baseline and holds
 # on any machine. Times are reported in the sticky comment, never gated here: a shared runner is not
 # the machine class the baselines were taken on.
 on:

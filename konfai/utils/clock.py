@@ -48,20 +48,25 @@ class SweepClock:
         """One region swept: its height, and what the run held after it where an instrument read it."""
         self._regions.append((int(rows), held))
 
+    def peak_held(self) -> int | None:
+        """The most a region was measured to hold, in bytes, or ``None`` where no instrument read one."""
+        held = [bytes_ for _, bytes_ in self._regions if bytes_ is not None]
+        return max(held) if held else None
+
     def regions_line(self) -> str:
         """The regions the sweeps cut, first to last, and the most one of them was measured to hold:
         what the growth decided, so a run says where its height went and not only what it took."""
         if not self._regions:
             return ""
         heights = [rows for rows, _ in self._regions]
-        held = [bytes_ for _, bytes_ in self._regions if bytes_ is not None]
+        held = self.peak_held()
         runs = _runs(heights)
         if len(runs) <= _REGION_PATH_RUNS:
             path = " -> ".join(str(rows) for rows, _ in runs)
         else:
             # A cohort repeats one growth per case: the heights counted say it in a line that stays one.
             path = ", ".join(f"{rows} x{count}" for rows, count in sorted(Counter(heights).items(), reverse=True))
-        peak = f", peak held {max(held) / 2**30:.2f} GiB" if held else ", unmeasured"
+        peak = f", peak held {held / 2**30:.2f} GiB" if held is not None else ", unmeasured"
         return f" | {len(heights)} region(s) of {path} row(s){peak}"
 
     def spent(self, name: str) -> float:

@@ -11,8 +11,8 @@ reuses it.
    is above 3, the power profile is not `performance`, the GPU is in use by another process, or a
    process outside the run holds more than half a core. `--force` records the numbers anyway and
    stamps every warning into the result. The audit of 2026-09-06 measured a 2x spread on every
-   absolute number from the profile and the load alone; ratios measured back to back survive, absolute
-   numbers do not.
+   absolute number from the profile and the load alone. Ratios measured back to back help compare
+   paths on that machine, but are not portable limits across CPUs, filesystems or shared runners.
 2. **A fingerprint beside every number.** Commit (and dirty flag), versions, CPU, GPU and driver,
    power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`. The
    commit is this tree's, so the gate also refuses when the interpreter imports `konfai` from anywhere
@@ -47,7 +47,7 @@ reuses it.
 | What do TRANSFORM's other routes cost: a fold, copies, the whole-volume fallback? | `bench_transform_routes.py` | the `[KonfAI] done` and `sweep` clocks, tree RSS | wall per route on the Transform example's cohort; valid only when the done line reports the route and the outputs exist |
 | Does a resample through a displacement field hold what it was given? | `bench_transform_field.py` | the `[KonfAI] held` line, SimpleITK voxel identity | one case warped through a smooth field per budget (256M, 512M, 1G): what the run held above the process floor against the budget, and 0 difference from SimpleITK's whole-volume resample; the plan prices a field as no displacement, so this is the route the plan does not see |
 | What does one stage cost on a whole region, and does it still hold what it held? | `bench_stages.py` | a fresh process per stage pinned to one thread, the kernel's resident high-water mark reset before the call | per stage and stored dtype (`Normalize`, `Standardize`, `UnNormalize`, `Clip`, `Resample` linear, cubic and oblique, the coordinate walk): ms per call, float32 volumes held over the tensor handed in (a fact: within the bound written beside the scenario), voxels differing from the formula written plainly (a fact: 0) |
-| What does a region read cost through `Dataset`, per layout an HDF5 store comes in? | `bench_reads.py` | wall of shuffled one-row reads and of one pass in whole chunks, each layout against the contiguous one | one volume stored contiguous, chunked unfiltered (small and large chunks), gzip and byte shuffle: ms per layout, h5py's own bytes on every read (a fact), a chunked layout's shuffled reads within 5 times the contiguous one's (a fact: HDF5's chunk cache lives in the open dataset, so a dataset reopened per read decodes its chunk again each time); the same volume as a raw `mha`, `nii` and `nrrd`, read whole within 2 times the window covering it (a fact: each comes off the mapped raw block), and the `nrrd`'s shuffled reads within 5 times the `mha`'s (a fact: ITK reads a NRRD whole for any region); the volume written whole as `mha` and `nrrd`, a channel of four within 2.5 times the one-channel write (a fact: SimpleITK takes a vector volume pixel by pixel) |
+| What does a region read cost through `Dataset`, per layout an HDF5 store comes in? | `bench_reads.py` | wall of shuffled one-row reads and of one pass in whole chunks, each layout against the contiguous one | one volume stored contiguous, chunked unfiltered (small and large chunks), gzip and byte shuffle: ms per layout and h5py's own bytes on every read (a fact); raw `mha`, `nii` and `nrrd` whole reads versus one full window; NRRD versus MetaImage region reads; one-channel versus four-channel whole writes. Voxels must match. Times and their ratios are measurements, checked against the same machine's baseline rather than fixed ratios on shared CI runners. |
 | What does a training epoch cost when its patches are read from the store instead of held in RAM, per backend? | `bench_train_stream.py` | the trainer's `[KonfAI] epoch` clock (`wait(data)` against the rest), tree RSS | a fresh `konfai TRAIN` of the Segmentation example on synthetic cases per backend (`mha`, `mha-gz`, `h5`, `omezarr`) and regime (`loaded` at a 64G budget, `streamed` at 128M); a run that chose the other regime is rejected |
 | Does a case reduction hold what its plan prices? | `bench_reductions.py` | the CUDA caching allocator's peak | per operator, dtype and member count, the fold's peak against the members, buffers and output the plan charges; a fact per fold that the peak stays within the price |
 | How long is the test suite, and what does the thread pin do? | `bench_tests.py` | `pytest` wall and CPU-seconds, `OMP_NUM_THREADS` 1 vs unset | test-fast pinned/unpinned, CPU-s, failures |
@@ -122,7 +122,7 @@ A bench states two kinds of results. Its **facts** carry their expected value: t
 wrote the voxels of the whole-volume route (`differing_voxels_whole_vs_stream == 0`), the transform
 equals the plain loop to float32 rounding (`max_abs_diff_konfai_vs_naive <= 1e-6`), the sweep's held peak stayed
 within its budget, a stage held no more volumes than its bound and returned the voxels of its plain
-formula, a chunked h5 layout read at the cost of a contiguous one, no test failed. `facts.py RUN.json` checks them on any machine and needs no
+formula, every storage layout returned the reference voxels, no test failed. `facts.py RUN.json` checks them on any machine and needs no
 baseline. Its **times and memory** compare to `baselines/<machine>.json` through `compare.py`,
 within one machine class (`harness.machine_class`: `KONFAI_PERF_MACHINE`, else the host name) and
 only when the fingerprints agree. `perf-check` runs the facts first, then the comparison.

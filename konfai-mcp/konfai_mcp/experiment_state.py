@@ -34,6 +34,7 @@ and action buttons, one definition, no second opinion.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -365,8 +366,29 @@ def _names(root: Path, pattern: str, *, dirs: bool = False) -> list[str]:
 
 
 # A dataset scan costs ~700ms on a few dozen cases: too much to repeat every turn, and pointless: the
-# answer only changes when the data does. Keyed by the directory's own mtime, so adding a case re-derives.
-_SCANNED: dict[tuple[str, float], tuple[list[str], int]] = {}
+# answer only changes when the data does. Remembered against the listing it was read from, so a case
+# added, or a group added to a case, re-derives.
+_SCANNED: dict[str, tuple[tuple[tuple[str, int], ...], tuple[list[str], int]]] = {}
+
+
+def _mtime(entry: os.DirEntry[str]) -> int:
+    try:
+        return entry.stat().st_mtime_ns
+    except OSError:  # a dangling link is still an entry, which the scan passes over
+        return 0
+
+
+def _listing(path: Path) -> tuple[tuple[str, int], ...]:
+    """What a structure scan reads: the root's entries and each case directory's, by name and mtime.
+    The root's own mtime says nothing of a file added inside a case."""
+    seen: list[tuple[str, int]] = []
+    for entry in os.scandir(path):
+        seen.append((entry.name, _mtime(entry)))
+        if entry.is_dir():
+            # ponytail: every case is listed each turn; a root that is one flat-chunk store lists its chunks,
+            # key that layout on its metadata file if it shows.
+            seen.extend((f"{entry.name}/{child.name}", _mtime(child)) for child in os.scandir(entry.path))
+    return tuple(sorted(seen))
 
 
 def _scan_dataset(path: Path) -> tuple[list[str], int]:
@@ -377,18 +399,19 @@ def _scan_dataset(path: Path) -> tuple[list[str], int]:
     only: no pixel is opened.
     """
     try:
-        key = (str(path), path.stat().st_mtime)
+        listing = _listing(path)
     except OSError:
         return [], 0
-    if key not in _SCANNED:
+    seen = _SCANNED.get(str(path))
+    if seen is None or seen[0] != listing:
         from .dataset_inspection import DatasetInspectionMixin  # local: keeps this module free of numpy
 
         try:
             scan = DatasetInspectionMixin()._scan_dataset_structure(path)
-            _SCANNED[key] = (sorted(scan["groups"]), int(scan["total_cases"]))
         except (OSError, ValueError, KeyError):
-            _SCANNED[key] = ([], 0)
-    return _SCANNED[key]
+            return [], 0  # not remembered: a scan that failed is tried again
+        seen = _SCANNED[str(path)] = (listing, (sorted(scan["groups"]), int(scan["total_cases"])))
+    return seen[1]
 
 
 def _newest(*roots: Path) -> str:

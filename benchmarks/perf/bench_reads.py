@@ -23,20 +23,20 @@ One volume, written five ways into one h5 file as a third-party tool would: cont
 chunked with byte shuffle. Each layout serves, through ``Dataset.read_data_slice``, the shuffled
 one-row windows of a patch loader and one pass in whole chunks, as a sweep or a statistics scan reads.
 
-Two facts per layout: every read returns h5py's own bytes, and the shuffled reads of a chunked layout
-cost no more than :data:`_OVER_CONTIGUOUS` times the contiguous layout's. HDF5's chunk cache is what
-holds the second one: it lives in the open dataset, so a dataset reopened on every read decodes its
-chunk again each time, and a large unfiltered chunk loaded through it is read whole for one row.
+Every read must return h5py's own bytes. The shuffled reads of a chunked layout are also timed
+against the contiguous layout's. HDF5's chunk cache lives in the open dataset, so a dataset reopened
+on every read decodes its chunk again each time, and a large unfiltered chunk loaded through it is
+read whole for one row.
 
 The same volume as an uncompressed MetaImage, NIfTI and NRRD is then read whole, ``Dataset.read_data``
-against the one window covering it: each comes off the file's raw block, so a whole read costs no
-more than :data:`_WHOLE_OVER_WINDOW` times the window (through ITK's reader it measured 3 and 5).
-The NRRD's shuffled one-row reads cost no more than :data:`_NRRD_OVER_MHA` times the MetaImage's:
-ITK reads a NRRD whole for any region of it, where the raw block serves the row.
+against the one window covering it: each comes off the file's raw block. The NRRD's shuffled one-row
+reads are timed against the MetaImage's: ITK reads a NRRD whole for any region of it, where the raw
+block serves the row.
 
 The volume is last written whole, ``Dataset.write``, with one channel and with four: a channel of
-the four costs no more than :data:`_VECTOR_OVER_SCALAR` times the one-channel write. SimpleITK takes
-a vector volume pixel by pixel, which the region writer handed the volume whole does not.
+the four is compared with the one-channel write. SimpleITK takes a vector volume pixel by pixel,
+which the region writer handed the volume whole does not. Times and ratios remain measurements,
+not machine-independent facts: compare the times to the same machine's baseline with compare.py.
 """
 
 from __future__ import annotations
@@ -67,17 +67,6 @@ LAYOUTS: dict[str, dict[str, object]] = {
     "gzip": {"chunks": (1, 16, 256, 256), "compression": "gzip", "compression_opts": 1},
     "shuffle": {"chunks": (1, 16, 256, 256), "shuffle": True},
 }
-#: What a chunked layout's shuffled reads may cost over the contiguous one's. Reopened on every
-#: read, gzip measured 230 times it and byte shuffle 16; kept open, every layout stays under 1.5.
-_OVER_CONTIGUOUS = 5.0
-#: What a whole read of a raw file may cost over the window covering it.
-_WHOLE_OVER_WINDOW = 2.0
-#: What a raw NRRD's shuffled reads may cost over the MetaImage's. Read whole by ITK for every row,
-#: it measured 52 times it; off its raw block, the same.
-_NRRD_OVER_MHA = 5.0
-#: What a channel of a four-channel whole write may cost over the one-channel write. Through
-#: SimpleITK it measured 5; through the region writer, 1.5.
-_VECTOR_OVER_SCALAR = 2.5
 _CHANNELS = 4
 
 
@@ -152,13 +141,13 @@ def main() -> None:
                 lambda raw=raw: [raw.read_data_slice("CT", "P000", _row(z)) for z in rows], repeats
             )
             ratio = round(metrics[f"{fmt}_whole_ms"] / metrics[f"{fmt}_window_ms"], 3)
-            facts.append(fact(f"{fmt}_whole_over_window", ratio, _WHOLE_OVER_WINDOW, "<="))
+            metrics[f"{fmt}_whole_over_window"] = ratio
             print(
                 f"[perf] {fmt}: whole read {metrics[f'{fmt}_whole_ms']} ms, the window covering it {metrics[f'{fmt}_window_ms']} ms,"
                 f" {len(rows)} one-row reads {metrics[f'{fmt}_reads_ms']} ms"
             )
         ratio = round(metrics["nrrd_reads_ms"] / metrics["mha_reads_ms"], 3)
-        facts.append(fact("nrrd_reads_over_mha", ratio, _NRRD_OVER_MHA, "<="))
+        metrics["nrrd_reads_over_mha"] = ratio
         vector = np.concatenate([volume + channel for channel in range(_CHANNELS)])
         for fmt in ("mha", "nrrd"):
             written = Dataset(f"{scratch}/written_{fmt}", fmt)
@@ -170,14 +159,14 @@ def main() -> None:
             same = np.array_equal(written.read_data("CT", "vector")[0], vector)
             facts.append(fact(f"{fmt}_vector_write_same_voxels", same, 1))
             ratio = round(metrics[f"{fmt}_vector_write_ms"] / (_CHANNELS * metrics[f"{fmt}_scalar_write_ms"]), 3)
-            facts.append(fact(f"{fmt}_vector_write_over_scalar", ratio, _VECTOR_OVER_SCALAR, "<="))
+            metrics[f"{fmt}_vector_write_over_scalar"] = ratio
             print(
                 f"[perf] {fmt}: whole write {metrics[f'{fmt}_scalar_write_ms']} ms, with {_CHANNELS} channels {metrics[f'{fmt}_vector_write_ms']} ms"
             )
     for name in LAYOUTS:
         if name != "contiguous":
             ratio = round(metrics[f"{name}_reads_ms"] / metrics["contiguous_reads_ms"], 3)
-            facts.append(fact(f"{name}_reads_over_contiguous", ratio, _OVER_CONTIGUOUS, "<="))
+            metrics[f"{name}_reads_over_contiguous"] = ratio
 
     result = {
         "gate_warnings": gate.warnings,

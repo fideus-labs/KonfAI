@@ -512,7 +512,7 @@ def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp
 
 @pytest.mark.parametrize("file_format", ["mha", "nrrd"])
 @pytest.mark.parametrize("shape", [(3, 4, 5, 6), (2, 5, 6)], ids=["3-D", "2-D"])
-def test_a_multi_channel_volume_written_whole_is_the_file_simpleitk_writes(tmp_path, file_format, shape):
+def test_a_multi_channel_volume_written_whole_is_the_file_simpleitk_writes(tmp_path, monkeypatch, file_format, shape):
     """SimpleITK takes a vector volume pixel by pixel, so the region writer is handed it whole: the
     file reads back as the one SimpleITK writes, voxels, geometry and every attribute."""
     sitk = pytest.importorskip("SimpleITK")
@@ -528,11 +528,16 @@ def test_a_multi_channel_volume_written_whole_is_the_file_simpleitk_writes(tmp_p
     attributes["Spacing"] = np.asarray([1.5, 0.75, 3.0][:rank])
     attributes["Direction"] = rotation.ravel()
 
-    dataset = Dataset(tmp_path / "konfai", file_format)
-    dataset.write("CT", "CASE_001", volume, Attribute(attributes))
     reference = tmp_path / "simpleitk" / "CASE_001" / f"CT.{file_format}"
     reference.parent.mkdir(parents=True)
     sitk.WriteImage(data_to_image(volume, attributes), str(reference))
+
+    def reject_whole_itk_write(*args, **kwargs):
+        pytest.fail("a supported vector volume must use the region writer, without an ITK volume copy")
+
+    monkeypatch.setattr(sitk, "WriteImage", reject_whole_itk_write)
+    dataset = Dataset(tmp_path / "konfai", file_format)
+    dataset.write("CT", "CASE_001", volume, Attribute(attributes))
 
     got, got_attributes = dataset.read_data("CT", "CASE_001")
     want, want_attributes = Dataset(tmp_path / "simpleitk", file_format).read_data("CT", "CASE_001")

@@ -82,9 +82,12 @@ def naive_normalize(store: Path, out: Path, *, min_value: float = -1.0, max_valu
     return wall, sampler.stop()
 
 
-def konfai_normalize(store: Path, out_dir: Path, budget_gib: float, transforms_dir: Path) -> tuple[float, int, int]:
-    """One konfai.transform run; returns (wall_s, peak tree RSS bytes, RSS before the call)."""
+def konfai_normalize(
+    store: Path, out_dir: Path, budget_gib: float, transforms_dir: Path
+) -> tuple[float, int, int, int | None]:
+    """One konfai.transform run; returns (wall_s, peak tree RSS bytes, RSS before the call, the sweep's held peak)."""
     import konfai
+    from konfai.data.patching.sweep import SWEEP_CLOCK
     from konfai.data.transform import Normalize, Write
 
     sampler = PeakSampler()
@@ -100,19 +103,19 @@ def konfai_normalize(store: Path, out_dir: Path, budget_gib: float, transforms_d
         quiet=True,
     )
     wall = time.perf_counter() - start
-    return wall, sampler.stop(), baseline
+    return wall, sampler.stop(), baseline, SWEEP_CLOCK.peak_held()
 
 
 def _worker_konfai(store: Path, out_dir: Path, budget_gib: float, transforms_dir: Path, prof: Path | None) -> None:
-    """One transform in this fresh process; prints one JSON line (wall, peak, floor)."""
+    """One transform in this fresh process; prints one JSON line (wall, peak, floor, held)."""
     profile = cProfile.Profile() if prof is not None else None
     if profile is not None:
         profile.enable()
-    wall, peak, floor = konfai_normalize(store, out_dir, budget_gib, transforms_dir)
+    wall, peak, floor, held = konfai_normalize(store, out_dir, budget_gib, transforms_dir)
     if profile is not None:
         profile.disable()
         profile.dump_stats(str(prof))
-    print(json.dumps({"wall_s": wall, "peak_bytes": peak, "floor_bytes": floor}))
+    print(json.dumps({"wall_s": wall, "peak_bytes": peak, "floor_bytes": floor, "held_bytes": held}))
 
 
 def _worker_naive(store: Path, out: Path) -> None:
@@ -120,7 +123,7 @@ def _worker_naive(store: Path, out: Path) -> None:
     print(json.dumps({"wall_s": wall, "peak_bytes": peak}))
 
 
-def in_fresh_process(argv: list[str]) -> dict[str, float]:
+def in_fresh_process(argv: list[str]) -> dict[str, float | None]:
     """Run this script's worker mode in a new interpreter and parse its JSON line."""
     completed = subprocess.run(
         [sys.executable, str(Path(__file__).resolve()), *argv], capture_output=True, text=True, check=False
@@ -264,6 +267,7 @@ def main() -> None:
                 "walls_s": [round(r["wall_s"], 3) for r in runs],
                 "peak_rss_gib": round(peak / 2**30, 3),
                 "region_rows": rows,
+                "held_bytes": [r["held_bytes"] for r in runs],
                 "plan": plan_lines(scratch / f"Transforms_b{tag}_0"),
             }
         )
@@ -286,13 +290,11 @@ def main() -> None:
     ]
     for row in sweep_rows:
         # The sweep's held peak is what the plan sizes against the budget; the process RSS also carries
-        # the interpreter's floor, which no budget compresses.
-        held = [re.search(r"peak held ([0-9.]+) GiB", line) for line in row["plan"]]
-        peaks = [float(m.group(1)) for m in held if m]
+        # the interpreter's floor, which no budget compresses. A run nothing measured states no fact.
+        held = row["held_bytes"]
+        peak = float("nan") if None in held else max(held) / 2**30
         tag = f"{row['budget_gib']:g}".replace(".", "p")
-        result["facts"].append(
-            fact(f"sweep_peak_gib_b{tag}", max(peaks) if peaks else float("nan"), row["budget_gib"], "<=")
-        )
+        result["facts"].append(fact(f"sweep_peak_gib_b{tag}", peak, row["budget_gib"], "<="))
 
     prof_path = scratch / "transform.prof"
     in_fresh_process(
