@@ -7,23 +7,67 @@ Each version's section is the body of its GitHub Release. How a section is writt
 
 ### 💥 Breaking changes
 
-- An omitted transform chain or augmentation chain now means no stages. Declare the preprocessing
-  and draws your experiment needs explicitly; an empty chain no longer inserts defaults.
-- Masks select every non-zero voxel. IMPACT takes its mask by position rather than by an assumed
-  group name. Check configs that relied on a particular label value or an implicit mask binding.
-- Removed compatibility spellings: reference reductions under `konfai.data.reduction` (for example
-  `konfai.data.reduction.Median`), use `OutputDataset` instead of `OutSameAsGroupDataset`, and name a
-  nested app stage `konfai_apps.transforms:KonfAIInference`. Repeated chain entries use a YAML list or
-  the occurrence form `Name#2`, not `Name/N`. Python model classpaths use `konfai.models.python` or the
-  relative model spelling; the pre-1.6 absolute paths no longer resolve.
-- PREDICTION no longer compares its preprocessing chain with a training config beside the checkpoint.
-  Remove `check_training_transforms`; the caller must still use the preprocessing the model trained
-  with. Unread keys are reported, not silently treated as active settings.
-- The MCP app workflow uses one `run_app` tool, whose outputs stay inside the session. Clients must
-  use the per-device memory figures instead of the removed aggregate `vram_gb`. Studio no longer
-  adopts transcripts from the MCP workspace.
-- Install `konfai-apps[server]` to run the app job server. The unused `konfai[ssim]` extra is removed;
-  KonfAI's built-in SSIM remains available.
+#### Explicit transform and augmentation chains
+
+An omitted transform chain or augmentation chain now means no stages. Declare the preprocessing
+and draws your experiment needs explicitly; an empty chain no longer inserts defaults.
+
+#### Non-zero masks
+
+Masks select every non-zero voxel. Check configs that relied on a particular label value.
+
+#### Positional IMPACT masks
+
+IMPACT takes its mask by position rather than by an assumed group name. Check configs that relied
+on an implicit mask binding.
+
+#### Reduction imports
+
+Reference reductions under `konfai.data.reduction` (for example `konfai.data.reduction.Median`),
+instead of the removed `konfai.predictor` aliases.
+
+#### Output dataset name
+
+Use `OutputDataset` instead of the removed `OutSameAsGroupDataset` alias.
+
+#### Nested app inference classpath
+
+Name a nested app stage `konfai_apps.transforms:KonfAIInference`; the bare-name loader shim is removed.
+
+#### Repeated chain entries
+
+Repeated chain entries use a YAML list or the occurrence form `Name#2`, not `Name/N`.
+
+#### Python model classpaths
+
+Python model classpaths use `konfai.models.python` or the relative model spelling; the pre-1.6
+absolute paths no longer resolve.
+
+#### Prediction preprocessing check
+
+PREDICTION no longer compares its preprocessing chain with a training config beside the checkpoint.
+Remove `check_training_transforms`; the caller must still use the preprocessing the model trained
+with. Unread keys are reported, not silently treated as active settings.
+
+#### Unified MCP app workflow
+
+The MCP app workflow uses one `run_app` tool, whose outputs stay inside the session.
+
+#### MCP memory figures
+
+Clients must use the per-device memory figures instead of the removed aggregate `vram_gb`.
+
+#### Studio transcript storage
+
+Studio no longer adopts transcripts from the MCP workspace.
+
+#### App job server installation
+
+Install `konfai-apps[server]` to run the app job server.
+
+#### SSIM extra removed
+
+The unused `konfai[ssim]` extra is removed; KonfAI's built-in SSIM remains available.
 
 ### ✨ Features
 
