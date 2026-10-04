@@ -818,7 +818,9 @@ def test_data_log_entries_parse_to_a_strategy_and_a_count_per_target() -> None:
     assert parsed == {"CT": (rt_logg.DataLog.IMAGES, 5), "Generator.Head.Tanh": (rt_logg.DataLog.VIDEO, 2)}
 
 
-@pytest.mark.parametrize("entry", ["CT/VIDEO", "CT/MOVIE/2", "CT/IMAGES/two"])
+@pytest.mark.parametrize(
+    "entry", ["CT/VIDEO", "CT/MOVIE/2", "CT/IMAGES/two", "CT/IMAGE/0", "CT/IMAGES/-1", "/IMAGE/1", " /VIDEO/2"]
+)
 def test_a_malformed_data_log_entry_is_a_config_error_naming_it(entry: str) -> None:
     with pytest.raises(ConfigError, match=f"'{entry}'") as refusal:
         rt_logg.DataLog.parse([entry])

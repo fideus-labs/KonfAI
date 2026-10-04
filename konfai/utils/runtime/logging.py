@@ -130,12 +130,14 @@ class DataLog(Enum):
         for entry in entries or []:
             try:
                 target, strategy, count = entry.split("/")
+                if not target.strip() or int(count) <= 0:
+                    raise ValueError("A log target and a positive sample count are required.")
                 parsed[target.replace(":", ".")] = (cls[strategy], int(count))
             except (ValueError, KeyError) as error:
                 raise ConfigError(
                     f"Invalid data_log entry '{entry}'.",
                     f"Write 'group_or_module/STRATEGY/N', STRATEGY one of {', '.join(cls.__members__)}"
-                    " and N the number of samples to log.",
+                    " and N a positive number of samples to log. The target must not be empty.",
                 ) from error
         return parsed
 
