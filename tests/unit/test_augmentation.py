@@ -113,6 +113,30 @@ def test_noise_field_is_part_of_the_draw_not_of_the_global_rng() -> None:
     assert not torch.equal(first, aug._compute("case", 0, 0, volume.clone()))
 
 
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.int64])
+def test_zero_noise_step_preserves_the_input_without_building_a_field(monkeypatch, streamed, dtype):
+    from types import SimpleNamespace
+
+    from konfai.data.augmentation import placed
+
+    noise = Noise(n_std=0.5)
+    noise.load(0.0)
+    noise.state_init(0, [[8, 8]], [Attribute()])
+    tensor = torch.ones(1, 3, 4, dtype=dtype)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("A zero noise step must not generate a field that will be multiplied by zero")
+
+    monkeypatch.setattr(placed, "_hashed_normal_field", unexpected)
+    if streamed:
+        context = SimpleNamespace(source=(slice(1, 4), slice(2, 6)), source_shape=(8, 8))
+        output = noise.stream_region("case", 0, 0, tensor, context)
+    else:
+        output = noise.compute("case", 0, 0, tensor)
+    assert output is tensor
+
+
 def test_augmentation_inverse_uses_local_slot_for_global_index():
     """``inverse(a)`` receives the *global* sample index.
 

@@ -113,6 +113,9 @@ class Noise(PlacedDraw):
     def _apply(
         self, index: int, a: int, tensor: torch.Tensor, offsets: tuple[int, ...], full: tuple[int, ...]
     ) -> torch.Tensor:
+        if self.ts[index][a] == 0:
+            # alpha_hat[0] == 1: the field would be discarded after allocating and hashing it.
+            return tensor
         alpha_hat_t = self.alpha_hat[self.ts[index][a]].to(tensor.device).reshape(*[1 for _ in tensor.shape])
         field = _hashed_normal_field(self.field_seeds[index][a], tuple(tensor.shape), offsets, full, tensor.device)
         # The field is this draw's own buffer: scaled in place, so the sum is the only other volume.
