@@ -146,7 +146,7 @@ flowchart TB
 
 `SKIP`: already written, so the run resumes. `REDUCE`: the cohort is folded. `WHOLE-VOLUME`: a stage needs the
 whole volume, and the plan names it. `STREAM`: read and written region by region. `LOAD`: the format cannot
-read regions (NRRD) and the case fits the budget, so it is read once. The run's log in `./Transforms/<name>/`
+read regions (GIPL, TIFF) and the case fits the budget, so it is read once. The run's log in `./Transforms/<name>/`
 holds the full plan.
 
 ## In Python

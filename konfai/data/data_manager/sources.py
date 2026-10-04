@@ -583,8 +583,8 @@ class Data(DataSources):
 
     def _patch_read_decodes_the_volume(self) -> bool:
         """Whether reading one patch costs a whole-volume decode, on any case of any group: only
-        where the patches are read from the store one by one AND the store cannot serve a region (an
-        NRRD, a compressed file with no uncompressed twin). ``False`` before ``prepare``, and with no
+        where the patches are read from the store one by one AND the store cannot serve a region (a
+        GIPL, a compressed file with no uncompressed twin). ``False`` before ``prepare``, and with no
         patch, where the one read of a case is the volume."""
         if self._managers is None or self.patch is None:
             return False

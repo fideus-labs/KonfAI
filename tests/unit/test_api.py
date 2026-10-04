@@ -342,7 +342,8 @@ def test_the_reference_follows_the_case(cohort: Path, monkeypatch: pytest.Monkey
     ("stored", "written", "verdict"),
     [
         ("nii.gz", "nii.gz", "STREAM"),  # read from its uncompressed twin, written in slabs
-        ("nrrd", "mha", "LOAD"),
+        ("gipl", "mha", "LOAD"),  # serves no region and fits: read once
+        ("nrrd", "nrrd", "STREAM"),
         ("mhd", "mhd", "WHOLE-VOLUME"),
         ("mha", "mha", "STREAM"),
     ],

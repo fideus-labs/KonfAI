@@ -46,6 +46,8 @@ BENCHES = (
     "transform",
     "transform_routes",
     "transform_field",
+    "stages",
+    "reads",
     "reductions",
     "tests",
 )

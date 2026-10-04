@@ -104,6 +104,8 @@ _UNWRITABLE_VOLUME = (
     "cannot write images with a dimension",  # BMP
     "stored pixel type was not specified",  # DICOM, a floating point volume
 )
+#: The formats whose ITK writer stores any volume it takes, whole: one channel or several, 2-D or 3-D.
+_HOLD_ANY_VOLUME = ("mha", "mhd", "nii", "nii.gz", "nrrd", "hdr", "img")
 
 
 def _mhd_pixels(header: str) -> str | None:
@@ -118,10 +120,23 @@ def _mhd_pixels(header: str) -> str | None:
     return pixels
 
 
+def _unwritable(image: sitk.Image, final: str, file_format: str, reason: str) -> DatasetManagerError:
+    return DatasetManagerError(
+        f"SimpleITK cannot write the {image.GetDimension()}-D {image.GetPixelIDTypeAsString()} volume"
+        f" '{final}' as '{file_format}': {reason}",
+        "Write it as mha, nrrd, h5 or omezarr, which hold any.",
+    )
+
+
 def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> None:
     """``sitk.WriteImage`` of the entry published as ``final``: a format with no writer for this
     volume is refused by name, not by ITK's trace naming the staging file. Any other failure (a
-    permission, a full disk) keeps ITK's error."""
+    permission, a full disk) keeps ITK's error.
+
+    A file holding fewer values than the volume is refused too. ITK's GIPL writer stores one channel
+    of a vector volume, its PNG writer one plane of a 3-D one, its JPEG writer three channels of
+    four, and none of them raises: the header of what was written is what says so. It is read back
+    for the formats that may hold less, a header read being a tenth to half of a small write."""
     try:
         sitk.WriteImage(image, path)
     except RuntimeError as error:
@@ -130,11 +145,21 @@ def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> 
             raise
         # ITK's first line is its source location; the reason follows.
         reason = " ".join(message.splitlines()[1:]).replace(path, final) or message
-        raise DatasetManagerError(
-            f"SimpleITK cannot write the {image.GetDimension()}-D {image.GetPixelIDTypeAsString()} volume"
-            f" '{final}' as '{file_format}': {reason}",
-            "Write it as mha, nrrd, h5 or omezarr, which hold any.",
-        ) from error
+        raise _unwritable(image, final, file_format, reason) from error
+    if file_format in _HOLD_ANY_VOLUME:
+        return
+    written = sitk.ImageFileReader()
+    written.SetFileName(path)
+    try:
+        written.ReadImageInformation()
+    except RuntimeError:
+        return  # a file ITK cannot read back says so when it is read
+    held = written.GetNumberOfComponents() * int(np.prod(written.GetSize(), dtype=np.int64))
+    handed = image.GetNumberOfComponentsPerPixel() * image.GetNumberOfPixels()
+    if held < handed:
+        raise _unwritable(
+            image, final, file_format, f"the format holds {held} of its {handed} values, and ITK drops the rest."
+        )
 
 
 def _nifti_declared_bytes(path: str) -> int | None:
@@ -188,7 +213,7 @@ def _warn_unstreamed_region_read(path: str) -> None:
         f"Patch-streaming '{suffix}' files (e.g. '{path}'): this format cannot serve a disk region, "
         "so every patch decodes the whole "
         "volume again: many times the cost of one read. Convert the dataset to a chunked format (OME-Zarr "
-        "or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii. Warned once per format.",
+        "or HDF5), which KonfAI streams natively, or to an uncompressed .mha/.nii/.nrrd. Warned once per format.",
         KonfAIWarning,
         stacklevel=2,
     )
@@ -201,6 +226,9 @@ _STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
     "nii.gz": (_NiftiGzipStream, _NIFTI_DATATYPES),
     "nrrd": (_NrrdDataStream, _NRRD_TYPES),
 }
+#: The formats whose region writer leaves a file that reads back as the one ITK's writer leaves:
+#: voxels, geometry and every attribute. A NIfTI's spells its header otherwise (no qform).
+_WHOLE_BY_STREAM = ("mha", "nrrd")
 
 
 class SitkFile(AbstractFile):
@@ -253,8 +281,9 @@ class SitkFile(AbstractFile):
 
         SimpleITK exposes no equivalent of ImageIOBase::CanStreamRead(), so the streaming IOs are
         mirrored here: MetaImage and NIfTI stream while their pixel data is uncompressed. A compressed
-        stream is not seekable, and NrrdImageIO never streams, so both decode the whole volume for
-        every region asked of them. Getting this wrong only ever costs speed, never correctness.
+        stream is not seekable, and NrrdImageIO never streams (a NRRD is served off its raw block or
+        not at all), so both decode the whole volume for every region asked of them. Getting this
+        wrong only ever costs speed, never correctness.
 
         Cached: the patch path asks this per read, and it opens the file to read a header.
         """
@@ -287,9 +316,9 @@ class SitkFile(AbstractFile):
         One step along the banded axis, everything below it whole: that is what this says.
 
         A compressed file answers for the twin its regions are read from (:mod:`.decompressed`),
-        before that twin exists. ``None`` where ITK decodes instead of mapping (an NRRD, a compressed
-        file whose twin cannot be written), where the whole volume is the cost and the streaming
-        refusal already says so.
+        before that twin exists. ``None`` where ITK decodes instead of mapping (a format only ITK
+        reads, a compressed file whose twin cannot be written), where the whole volume is the cost
+        and the streaming refusal already says so.
         """
         path = self._resolve_data_path(name)
         if path is not None:
@@ -458,6 +487,13 @@ class SitkFile(AbstractFile):
             data = np.load(path)
         else:
             _require_sitk(path)
+            block = _pixel_block(path)
+            if block is not None:
+                # The volume off the file's raw block, as a region read takes its window: the voxels and
+                # the record ITK's reader gives, without its buffer and the copy out of it.
+                with contextlib.suppress(OSError, ValueError):  # replaced under the stat: ITK answers for it
+                    whole = tuple(slice(0, extent, 1) for extent in block.shape)
+                    return _pixel_block_region(block, path, whole), _pixel_block_attributes(block, None)
             image = sitk.ReadImage(path)
             data, attributes_tmp = image_to_data(image)
             attributes.update(attributes_tmp)
@@ -579,7 +615,18 @@ class SitkFile(AbstractFile):
             vtk_writer.Write()
         elif is_an_image(attributes):
             _require_sitk(f"{self.filename}{name}.{self.file_format}", "write")
-            self.data_to_file(name, data_to_image(data, attributes), attributes)
+            # SimpleITK takes a vector volume pixel by pixel, four times the cost of writing it: the
+            # region writer is handed the volume whole where its file reads back as SimpleITK's.
+            stream = (
+                self.open_data_stream(name, list(data.shape), data.dtype, attributes)
+                if isinstance(data, np.ndarray) and data.shape[0] > 1 and self.file_format in _WHOLE_BY_STREAM
+                else None
+            )
+            if stream is None:
+                self.data_to_file(name, data_to_image(data, attributes), attributes)
+            else:
+                with stream:
+                    stream.write_slice(tuple(slice(0, extent) for extent in data.shape), data)
         elif len(data.shape) == 2 and data.shape[1] == 3 and data.shape[0] > 0:
             data = np.round(data, 4)
             write_landmarks(data, Path(f"{self.filename}{name}.fcsv"))

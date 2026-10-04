@@ -37,6 +37,36 @@ def _seeded_scalar(cache_attribute: Attribute, key: str) -> float:
         return float(cache_attribute.get_tensor(key).reshape(-1)[0])
 
 
+def _writes_into(volume: torch.Tensor, stat: torch.Tensor) -> bool:
+    """Whether an op of ``volume`` with ``stat`` keeps its shape and dtype: it then writes into the
+    volume, where the out-of-place spelling allocates a second one."""
+    return (
+        volume.is_floating_point()
+        and torch.result_type(volume, stat) == volume.dtype
+        and (stat.numel() == 1 or stat.shape[0] == volume.shape[0])
+    )
+
+
+def _shifted(tensor: torch.Tensor, by: float | torch.Tensor) -> torch.Tensor:
+    """``tensor - by`` in a tensor of its own. A stored integer is cast once and shifted in place:
+    the subtraction would hold the cast beside its result. A bool tensor refuses the subtraction."""
+    dtype = torch.result_type(tensor, by)
+    if tensor.dtype in (dtype, torch.bool):
+        return tensor - by
+    cast = tensor.to(dtype)
+    return cast.sub_(by) if not isinstance(by, torch.Tensor) or _writes_into(cast, by) else cast - by
+
+
+def _clamps_as_integers(dtype: torch.dtype, low: float, high: float) -> bool:
+    """Whether the fills of a ``Clip`` to ``[low, high]`` are the integer clamp of a tensor of ``dtype``:
+    whole bounds the dtype holds, over values a float32 comparison reads exactly. The fills compare a
+    float copy of the volume, which a stored CT is then clipped without."""
+    if dtype not in (torch.int8, torch.uint8, torch.int16):
+        return False
+    held = torch.iinfo(dtype)
+    return all(bound.is_integer() and held.min <= bound <= held.max for bound in (low, high))
+
+
 def _dataset_holding(datasets: list[Dataset], group: str, name: str) -> Dataset:
     """The dataset holding the case's ``group``, or a refusal naming it."""
     for dataset in datasets:
@@ -215,11 +245,13 @@ class Clip(Transform):
         min_value = float(min_value)
         max_value = float(max_value)
 
-        # Fast path: one fused in-place clamp, for float32 and non-NaN bounds only. An integer tensor
-        # rejects float bounds, float16/float64 compare at another precision than the fallback, and
+        # Fast paths: one fused in-place clamp, for float32 with non-NaN bounds and for a stored integer
+        # with whole bounds. float16/float64 compare at another precision than the fallback, and
         # clamp_ propagates a NaN bound where the fallback fill no-ops on it.
         if tensor.dtype == torch.float32 and min_value == min_value and max_value == max_value:
             tensor.clamp_(min=min_value, max=max_value)
+        elif _clamps_as_integers(tensor.dtype, min_value, max_value):
+            tensor.clamp_(min=int(min_value), max=int(max_value))
         else:
             tensor.masked_fill_(tensor.float() < min_value, min_value)
             tensor.masked_fill_(tensor.float() > max_value, max_value)
@@ -233,7 +265,7 @@ class Clip(Transform):
 class Normalize(TransformInverse):
     """Map intensities to a target min/max interval and optionally invert it."""
 
-    # The rescale is a chain of out-of-place ops, so a volume-worth stands next to the result.
+    # The inverse holds one intermediate volume next to its result; the forward writes into its result.
     working_multiple = 1.0
 
     def __init__(
@@ -297,14 +329,14 @@ class Normalize(TransformInverse):
                 else:
                     tensor = torch.full_like(tensor, self.min_value, dtype=dtype)
             else:
+                # One new volume, then in place: each out-of-place step would allocate a volume of its own.
+                span = self.max_value - self.min_value
                 if self.channels:
                     tensor = tensor.to(dtype, copy=True)
                     for channel in self.channels:
-                        tensor[channel] = (self.max_value - self.min_value) * (
-                            tensor[channel] - input_min
-                        ) / norm + self.min_value
+                        tensor[channel].sub_(input_min).mul_(span).div_(norm).add_(self.min_value)
                 else:
-                    tensor = (self.max_value - self.min_value) * (tensor - input_min) / norm + self.min_value
+                    tensor = _shifted(tensor, input_min).mul_(span).div_(norm).add_(self.min_value)
 
         return tensor
 
@@ -318,11 +350,13 @@ class Normalize(TransformInverse):
         else:
             input_min = float(cache_attribute.pop("Min"))
             input_max = float(cache_attribute.pop("Max"))
-            return (tensor - self.min_value) * (input_max - input_min) / (self.max_value - self.min_value) + input_min
+            # The product by a float is floating whatever the tensor, so the rest writes into it.
+            restored = (tensor - self.min_value) * (input_max - input_min)
+            return restored.div_(self.max_value - self.min_value).add_(input_min)
 
 
 class UnNormalize(Transform):
-    # The rescale is a chain of out-of-place ops, so a volume-worth stands next to the result.
+    # One intermediate volume stands next to the result.
     working_multiple = 1.0
 
     locality = LocalityKind.POINTWISE
@@ -333,7 +367,8 @@ class UnNormalize(Transform):
         self.max_value = max_value
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return (tensor + 1) / 2 * (self.max_value - self.min_value) + self.min_value
+        # The division is floating whatever the tensor, so the rest writes into it.
+        return ((tensor + 1) / 2).mul_(self.max_value - self.min_value).add_(self.min_value)
 
 
 class Standardize(TransformInverse):
@@ -389,35 +424,32 @@ class Standardize(TransformInverse):
                 cache_attribute["Std"] = std_value
             if self.lazy:
                 return tensor
-            mean = self._broadcast(mean_value.to(tensor.device), tensor)
-            std = self._broadcast(std_value.to(tensor.device), tensor)
-            return (tensor - mean) / std
+            return self._standardized(tensor, mean_value, std_value)
 
         selected: torch.Tensor | None = None
 
         def values() -> torch.Tensor:
+            # Cast once: the mean and the std of an integer case would each convert the volume.
             nonlocal selected
             if selected is None:
-                selected = tensor if self.mask is None else _masked_values(self, name, tensor)
+                selected = (tensor if self.mask is None else _masked_values(self, name, tensor)).type(torch.float32)
             return selected
 
         if "Mean" not in cache_attribute:
             cache_attribute["Mean"] = (
-                torch.tensor([torch.mean(values().type(torch.float32))])
-                if self.mean is None
-                else torch.tensor(self.mean)
+                torch.tensor([torch.mean(values())]) if self.mean is None else torch.tensor(self.mean)
             )
 
         if "Std" not in cache_attribute:
-            cache_attribute["Std"] = (
-                torch.tensor([torch.std(values().type(torch.float32))]) if self.std is None else torch.tensor(self.std)
-            )
+            cache_attribute["Std"] = torch.tensor([torch.std(values())]) if self.std is None else torch.tensor(self.std)
         if self.lazy:
             return tensor
-        else:
-            mean = self._broadcast(cache_attribute.get_tensor("Mean").to(tensor.device), tensor)
-            std = self._broadcast(cache_attribute.get_tensor("Std").to(tensor.device), tensor)
-            return (tensor - mean) / std
+        return self._standardized(tensor, cache_attribute.get_tensor("Mean"), cache_attribute.get_tensor("Std"))
+
+    def _standardized(self, tensor: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+        centered = _shifted(tensor, self._broadcast(mean.to(tensor.device), tensor))
+        std = self._broadcast(std.to(tensor.device), tensor)
+        return centered.div_(std) if _writes_into(centered, std) else centered / std
 
     @staticmethod
     def _broadcast(stat: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
@@ -438,7 +470,8 @@ class Standardize(TransformInverse):
             # fp16 output from being promoted.
             mean = self._broadcast(cache_attribute.pop_tensor("Mean").to(tensor.device, torch.float32), tensor)
             std = self._broadcast(cache_attribute.pop_tensor("Std").to(tensor.device, torch.float32), tensor)
-            return tensor * std + mean
+            scaled = tensor * std
+            return scaled.add_(mean) if _writes_into(scaled, mean) else scaled + mean
 
 
 class TensorCast(TransformInverse):

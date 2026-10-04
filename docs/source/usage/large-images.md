@@ -46,8 +46,8 @@ The format decides how cheap a region read is:
 | --- | --- |
 | OME-Zarr, HDF5 | yes, natively (`omezarr@1` reads pyramid level 1) |
 | DICOM series (`:dicom`) | yes, slice by slice |
-| MetaImage, NIfTI | yes; a compressed file (`.nii.gz`, compressed `.mha`) is first decompressed once per run into `~/.cache/konfai/decompressed` |
-| NRRD | correct but slow: the whole volume is decoded for every region |
+| MetaImage, NIfTI, NRRD | yes; a compressed file (`.nii.gz`, compressed `.mha` or `.nrrd`) is first decompressed once per run into `~/.cache/konfai/decompressed` |
+| GIPL, TIFF | correct but slow: the whole volume is decoded for every region |
 
 Set `KONFAI_DECOMPRESSED_DIRECTORY` to put the decompressed copies on another disk (see
 [compressed files](../reference/components/storage-backends.md#compressed-files)). An OME-Zarr dataset holds

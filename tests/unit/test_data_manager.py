@@ -1542,7 +1542,7 @@ def _prepared_prediction(
 
 @pytest.mark.parametrize(
     ("file_format", "spins_workers"),
-    [("mha", False), ("nii.gz", False), ("nrrd", True)],
+    [("mha", False), ("nii.gz", False), ("tif", True)],
     ids=[
         "a region read decodes the region",
         "a compressed region is read from the uncompressed twin",

@@ -166,10 +166,10 @@ def _reject_whole_volume_read(*args: object, **kwargs: object) -> None:
         ("volume.mhd", False, True),
         ("volume.nii", False, True),
         ("volume.nii.gz", True, False),
-        # NrrdImageIO serves no region at all, compressed or not: a slab loop would decode the whole
-        # volume once per slab, so it stays on the single whole-volume read.
-        ("volume.nrrd", False, False),
+        # NrrdImageIO serves no region itself: an uncompressed one is read off its raw block.
+        ("volume.nrrd", False, True),
         ("volume.nrrd", True, False),
+        ("volume.gipl", False, False),
     ],
 )
 def test_sitk_supports_region_read_matches_itk_streaming_capability(
@@ -182,7 +182,13 @@ def test_sitk_supports_region_read_matches_itk_streaming_capability(
 
 @pytest.mark.parametrize(
     ("file_format", "compress", "warns"),
-    [("nrrd", False, True), ("mha", True, False), ("nii.gz", True, False), ("mha", False, False)],
+    [
+        ("gipl", False, True),
+        ("mha", True, False),
+        ("nii.gz", True, False),
+        ("nrrd", True, False),
+        ("mha", False, False),
+    ],
 )
 def test_patch_stream_warns_once_per_format_that_cannot_serve_a_disk_region(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file_format: str, compress: bool, warns: bool
@@ -947,6 +953,43 @@ def test_h5_read_handle_carries_an_imaging_sized_chunk_cache(tmp_path) -> None:
         _, nslots, nbytes, _ = backend.h5.id.get_access_plist().get_cache()
     assert nbytes == Dataset.H5File._READ_CHUNK_CACHE_BYTES
     assert nslots == Dataset.H5File._READ_CHUNK_CACHE_SLOTS
+
+
+def test_h5_chunk_cache_outlives_a_read_and_leaves_large_unfiltered_chunks_alone(tmp_path) -> None:
+    """HDF5's chunk cache lives in the open dataset and is dropped when it closes: a dataset read
+    stays open with the pooled handle, the latest few of them, under its share of the handle's cache.
+    A large unfiltered chunk is the exception: a window of it is read where it lies in the file, so
+    it is opened under no cache."""
+    h5py = pytest.importorskip("h5py")
+    store = tmp_path / "third_party.h5"
+    small = np.arange(2 * 16 * 32 * 32, dtype=np.int16).reshape(2, 16, 32, 32)
+    large = np.arange(64 * 128 * 128, dtype=np.int16).reshape(1, 64, 128, 128)
+    with h5py.File(store, "w") as file:
+        file.create_dataset("CT/gzip", data=small, chunks=(1, 8, 32, 32), compression="gzip")
+        file.create_dataset("CT/shuffle", data=small, chunks=(1, 8, 32, 32), shuffle=True)
+        file.create_dataset("CT/small", data=small, chunks=(1, 2, 16, 16))
+        file.create_dataset("CT/contiguous", data=small)
+        file.create_dataset("CT/large", data=large, chunks=(1, 64, 128, 128))  # one 2 MiB chunk
+    dataset = Dataset(str(store), "h5")
+    window = (slice(None), slice(3, 5), slice(None), slice(1, 30))
+    read = ["contiguous", "gzip", "shuffle", "small", "large"]
+    for name in read:
+        source = large if name == "large" else small
+        assert np.array_equal(dataset.read_data_slice("CT", name, window)[0], source[window])
+
+    with Dataset.File(str(store), True, "h5") as backend:
+        kept = dict(backend._datasets)
+        again = backend._require_dataset("CT", "large")
+    assert list(kept) == [f"/CT/{name}" for name in read[-Dataset.H5File._KEPT_DATASETS :]]
+    assert again is kept["/CT/large"] and all(handle.id.valid for handle in kept.values())
+    share = Dataset.H5File._read_chunk_cache_bytes() // Dataset.H5File._KEPT_DATASETS
+    cache = {path: handle.id.get_access_plist().get_chunk_cache()[1] for path, handle in kept.items()}
+    assert cache == {"/CT/gzip": share, "/CT/shuffle": share, "/CT/small": share, "/CT/large": 0}
+
+    # A write takes the store back from the pool, kept datasets included.
+    dataset.write("CT", "NEW", small, Attribute())
+    assert np.array_equal(dataset.read_data("CT", "NEW")[0], small)
+    assert not any(handle.id.valid for handle in kept.values())
 
 
 def test_ome_zarr_image_is_memoised_per_store_and_invalidated_by_writes(tmp_path) -> None:

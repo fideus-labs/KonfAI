@@ -35,7 +35,6 @@ from konfai import RemoteServer
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
 from konfai.utils.utils import env_flag
 
-from . import app as app_module
 from .app_repository import (
     LocalAppRepository,
     LocalAppRepositoryFromHF,
@@ -528,6 +527,10 @@ def build_app_cli(
             _show(resolve_app(args))
             return
         gpu = [] if args.cpu is not None else args.gpu
+        # Imported where an app is built: `app` loads torch and SimpleITK, which the parser, `list`
+        # and `show` answer without.
+        from . import app as app_module
+
         konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
 
         if args.command == infer_command:
@@ -851,6 +854,8 @@ def main_apps() -> None:
     host = kwargs.pop("host")
     port = kwargs.pop("port")
     token = kwargs.pop("token")
+
+    from . import app as app_module
 
     konfai_app: AbstractKonfAIApp
     if host is not None:

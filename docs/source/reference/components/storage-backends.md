@@ -6,7 +6,7 @@ case and group layout.
 
 | Backend | Formats | Layout | Region reads | Region writes | Extra |
 | --- | --- | --- | --- | --- | --- |
-| `SitkFile` | `mha`, `mhd`, `nii`, `nii.gz`, `nrrd`, `nrrd.gz`, `gipl`, `hdr`, `img`, `dcm`, `tif`, `png`, `jpg`, `bmp`, `itk.txt`, `fcsv`, `xml`, `vtk`, `npy` | one file per case and group (the default) | MetaImage and NIfTI (compressed ones through a decompressed copy); not NRRD | uncompressed `.mha` and `.nii` | `konfai[itk]` |
+| `SitkFile` | `mha`, `mhd`, `nii`, `nii.gz`, `nrrd`, `nrrd.gz`, `gipl`, `hdr`, `img`, `dcm`, `tif`, `png`, `jpg`, `bmp`, `itk.txt`, `fcsv`, `xml`, `vtk`, `npy` | one file per case and group (the default) | MetaImage, NIfTI and NRRD (compressed ones through a decompressed copy) | `mha`, `nii`, `nii.gz` and `nrrd` | `konfai[itk]` |
 | `H5File` | `h5` | one HDF5 file for the whole dataset | yes | yes | `konfai[hdf5]` |
 | `OmeZarrFile` | `omezarr` (also `ome-zarr`, `zarr`), `omezarr@<level>` | one store per case and group | yes | yes, pyramids included | `konfai[omezarr]` |
 | `DicomFile` | `dicom` | one series folder per case and group | slice by slice | no | `konfai[dicom]` |
@@ -22,9 +22,9 @@ things.
 
 ## Compressed files
 
-A `.nii.gz` or a compressed MetaImage cannot be read by region: the whole stream must be decoded from the
-start. So the first time a run reads a region of such a file, KonfAI decompresses it once into an
-uncompressed copy and reads every region from the copy. Values and geometry are unchanged.
+A `.nii.gz`, a compressed MetaImage or a compressed NRRD cannot be read by region: the whole stream must be
+decoded from the start. So the first time a run reads a region of such a file, KonfAI decompresses it once into
+an uncompressed copy and reads every region from the copy. Values and geometry are unchanged.
 
 - **Where:** `~/.cache/konfai/decompressed/`, one folder per run. Set `KONFAI_DECOMPRESSED_DIRECTORY` to use
   another disk (avoid `/tmp` if it is in memory).
@@ -79,6 +79,8 @@ like any image. `itktransform` names the backend: files are `.h5` or `.tfm`, nev
 
 - A pixel type the format cannot hold (a `bool` volume, a float `png`) is refused with the reason. Cast
   booleans to `uint8`, or use `h5` or `omezarr`, which keep them.
+- A volume the format would store only part of (several channels as `gipl`, a 3-D volume as `png`) is
+  refused too. Write it as `mha`, `nrrd`, `h5` or `omezarr`, which hold any.
 - Landmarks are read and written in LPS. A `.fcsv` whose `# CoordinateSystem` is `RAS` is converted; `LPS`,
   `0`, `1` or no line are read as LPS. A file from 3D Slicer older than 4.11 writes `0` over RAS points: set
   its line to `RAS`.

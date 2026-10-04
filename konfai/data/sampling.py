@@ -191,9 +191,11 @@ def _apply(points_xyz: torch.Tensor, affine: AffineMap, device: torch.device) ->
     ``points @ matrix.T + offset``, which BLAS is free to reassociate; the two answers differ in the
     last bit and a continuous index landing on an exact half rounds to the other voxel."""
     matrix = torch.tensor(affine.matrix, dtype=_walk_dtype(), device=device)
-    out = torch.tensor(affine.translation, dtype=_walk_dtype(), device=device).expand(points_xyz.shape).clone()
+    out = torch.tensor(affine.translation, dtype=_walk_dtype(), device=device)
     for j in range(affine.rank):
-        out = out + points_xyz[..., j, None] * matrix[:, j]
+        # The first sum is the one tensor allocated (in the dtype the terms promote to); the rest write into it.
+        term = points_xyz[..., j, None] * matrix[:, j]
+        out = out + term if j == 0 else out.add_(term)
     return out
 
 
@@ -211,7 +213,8 @@ def _to_index(
     shifted = world_xyz - origin
     out = torch.zeros_like(world_xyz)
     for j in range(grid.rank):
-        out = out + shifted[..., j, None] * matrix[:, j]
+        term = shifted[..., j, None] * matrix[:, j]
+        out = out + term if j == 0 else out.add_(term)
     return out
 
 
@@ -588,8 +591,9 @@ def gather_separable(
             blended: torch.Tensor | None = None
             for tap in range(4):
                 weight = broadcast(_cubic_weights(axis - (base + tap)).to(out.dtype), array_axis)
-                term = taps(out, array_axis, local(index + tap, array_axis)) * weight
-                blended = term if blended is None else blended + term
+                # Written into the gathered copy and into the running sum: no pass allocates its own.
+                term = taps(out, array_axis, local(index + tap, array_axis)).mul_(weight)
+                blended = term if blended is None else blended.add_(term)
             out = blended if blended is not None else out
             continue
         # One axis at a time, not eight corners at once. The tensor product is the same sum, and
@@ -600,8 +604,9 @@ def gather_separable(
         low = taps(out, array_axis, local(index, array_axis))
         high = taps(out, array_axis, local(index + 1, array_axis))
         # lerp fuses the three passes `low * (1 - w) + high * w` into one. Exact at w = 0, which is
-        # the only endpoint reachable: w is `x - floor(x)`, so it never reaches 1.
-        out = torch.lerp(low, high, share)
+        # the only endpoint reachable: w is `x - floor(x)`, so it never reaches 1. Written into the
+        # gathered copy: a third volume would cost more to allocate than the blend to compute.
+        out = low.lerp_(high, share)
     # No float trip for a nearest pick: copies stay in the payload's own dtype the whole way, the
     # rule `gather` already holds. A float32 detour rounds every integer label above 2**24.
     if mode == "cubic":

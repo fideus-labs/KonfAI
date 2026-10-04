@@ -65,7 +65,8 @@ def _write(path: Path, image: "sitk.Image") -> Path:
 
 def _twins(root: Path) -> list[Path]:
     """The twins published under the cache root: never a lock, never a staging file."""
-    return sorted(path for path in root.rglob("*") if path.suffix in (".nii", ".mha") and not path.name.startswith("."))
+    suffixes = (".nii", ".mha", ".nrrd")
+    return sorted(path for path in root.rglob("*") if path.suffix in suffixes and not path.name.startswith("."))
 
 
 def _assert_same_read(twinned: tuple, today: tuple, vector_nifti: bool = False) -> None:
@@ -120,7 +121,9 @@ def counted(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
 @pytest.mark.parametrize("dtype", _DTYPES)
 @pytest.mark.parametrize("channels", [1, 3], ids=["scalar", "vector"])
 @pytest.mark.parametrize("shape", [(6, 7, 5), (7, 5)], ids=["3-D", "2-D"])
-@pytest.mark.parametrize("filename", ["CT.nii.gz", "CT.mha", "CT.mhd"], ids=["nii.gz", "mha", "mhd+zraw"])
+@pytest.mark.parametrize(
+    "filename", ["CT.nii.gz", "CT.mha", "CT.mhd", "CT.nrrd"], ids=["nii.gz", "mha", "mhd+zraw", "nrrd"]
+)
 def test_a_region_of_the_twin_is_todays_region_of_the_compressed_file(
     tmp_path: Path, cache: Path, filename: str, shape: tuple[int, ...], channels: int, dtype: str
 ) -> None:

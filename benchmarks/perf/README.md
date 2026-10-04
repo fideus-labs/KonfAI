@@ -46,6 +46,8 @@ reuses it.
 | What does the framework add over a plain loop, and how does the region height matter? | `bench_transform.py` | `bench_streaming.py` reused, a 25-line numpy+h5py baseline, a budget sweep, `cProfile` share of the statistics scan | s/GiB over the naive loop, peak RSS, wall vs budget curve, the scan's share |
 | What do TRANSFORM's other routes cost: a fold, copies, the whole-volume fallback? | `bench_transform_routes.py` | the `[KonfAI] done` and `sweep` clocks, tree RSS | wall per route on the Transform example's cohort; valid only when the done line reports the route and the outputs exist |
 | Does a resample through a displacement field hold what it was given? | `bench_transform_field.py` | the `[KonfAI] held` line, SimpleITK voxel identity | one case warped through a smooth field per budget (256M, 512M, 1G): what the run held above the process floor against the budget, and 0 difference from SimpleITK's whole-volume resample; the plan prices a field as no displacement, so this is the route the plan does not see |
+| What does one stage cost on a whole region, and does it still hold what it held? | `bench_stages.py` | a fresh process per stage pinned to one thread, the kernel's resident high-water mark reset before the call | per stage and stored dtype (`Normalize`, `Standardize`, `UnNormalize`, `Clip`, `Resample` linear, cubic and oblique, the coordinate walk): ms per call, float32 volumes held over the tensor handed in (a fact: within the bound written beside the scenario), voxels differing from the formula written plainly (a fact: 0) |
+| What does a region read cost through `Dataset`, per layout an HDF5 store comes in? | `bench_reads.py` | wall of shuffled one-row reads and of one pass in whole chunks, each layout against the contiguous one | one volume stored contiguous, chunked unfiltered (small and large chunks), gzip and byte shuffle: ms per layout, h5py's own bytes on every read (a fact), a chunked layout's shuffled reads within 5 times the contiguous one's (a fact: HDF5's chunk cache lives in the open dataset, so a dataset reopened per read decodes its chunk again each time); the same volume as a raw `mha`, `nii` and `nrrd`, read whole within 2 times the window covering it (a fact: each comes off the mapped raw block), and the `nrrd`'s shuffled reads within 5 times the `mha`'s (a fact: ITK reads a NRRD whole for any region); the volume written whole as `mha` and `nrrd`, a channel of four within 2.5 times the one-channel write (a fact: SimpleITK takes a vector volume pixel by pixel) |
 | What does a training epoch cost when its patches are read from the store instead of held in RAM, per backend? | `bench_train_stream.py` | the trainer's `[KonfAI] epoch` clock (`wait(data)` against the rest), tree RSS | a fresh `konfai TRAIN` of the Segmentation example on synthetic cases per backend (`mha`, `mha-gz`, `h5`, `omezarr`) and regime (`loaded` at a 64G budget, `streamed` at 128M); a run that chose the other regime is rejected |
 | Does a case reduction hold what its plan prices? | `bench_reductions.py` | the CUDA caching allocator's peak | per operator, dtype and member count, the fold's peak against the members, buffers and output the plan charges; a fact per fold that the peak stays within the price |
 | How long is the test suite, and what does the thread pin do? | `bench_tests.py` | `pytest` wall and CPU-seconds, `OMP_NUM_THREADS` 1 vs unset | test-fast pinned/unpinned, CPU-s, failures |
@@ -64,6 +66,12 @@ reuses it.
   geometry, never bytes.
 - The framework's clock lines (`[KonfAI] startup|epoch|prediction|sweep`) print only above one second: a
   0.0 in a result means under a second, not zero.
+- `cProfile` puts time on calls that did not take it: `bench_train_epoch.py --cprofile` reads 24 s for
+  twenty `torch.flip` that take 0.09 s under a wall clock. A profile says where to look; only two wall
+  clocks, run back to back, say what a change is worth.
+- A tensor above 32 MiB is mapped by glibc on every allocation and pays its page faults again: an
+  out-of-place step over a volume costs more than its arithmetic (`Normalize` on 128 MiB: 226 ms
+  out of place, 81 ms writing into its first result). `bench_stages.py` holds that line.
 - The framework pins its own threads (`rank_cpu_share`) and the pixi test tasks pin `OMP_NUM_THREADS=1`;
   a bare `pytest` does not, and the tests bench measures both states on purpose.
 
@@ -81,6 +89,10 @@ pixi run --environment dev python benchmarks/perf/run_all.py            # add --
 pixi run --environment dev python benchmarks/perf/compare.py results/<host>/<baseline>.json results/<host>/<run>.json
 # the release gate: the series, then the comparison to baselines/<host>.json (exit 1 on a regression)
 pixi run perf-check
+# once a release is out, or when a bench joins the series: this run becomes the host's baseline
+# (a quiet machine and a clean tree; a baseline missing a bench makes every comparison invalid)
+cp results/<host>/<stamp>-<sha>-all.json baselines/<host>.json
+cp results/<host>/<stamp>-<sha>-all.md baselines/<host>.md
 ```
 
 The comparison exits **0** only for a complete comparable series, **1** for a measured regression,
@@ -109,7 +121,8 @@ diagnostic, not a baseline.
 A bench states two kinds of results. Its **facts** carry their expected value: the streamed route
 wrote the voxels of the whole-volume route (`differing_voxels_whole_vs_stream == 0`), the transform
 equals the plain loop to float32 rounding (`max_abs_diff_konfai_vs_naive <= 1e-6`), the sweep's held peak stayed
-within its budget, no test failed. `facts.py RUN.json` checks them on any machine and needs no
+within its budget, a stage held no more volumes than its bound and returned the voxels of its plain
+formula, a chunked h5 layout read at the cost of a contiguous one, no test failed. `facts.py RUN.json` checks them on any machine and needs no
 baseline. Its **times and memory** compare to `baselines/<machine>.json` through `compare.py`,
 within one machine class (`harness.machine_class`: `KONFAI_PERF_MACHINE`, else the host name) and
 only when the fingerprints agree. `perf-check` runs the facts first, then the comparison.
@@ -117,7 +130,7 @@ only when the fingerprints agree. `perf-check` runs the facts first, then the co
 In CI:
 
 - `perf_pr_gate`: on every pull request touching `konfai/` or the benches, the CPU lanes
-  (`startup`, `transform`, `predict --synthetic`: random 256^3 cases and a seeded random model
+  (`startup`, `transform`, `stages`, `reads`, `predict --synthetic`: random 256^3 cases and a seeded random model
   through the Python API, so the two routes' identity is checked at scale with nothing to
   download) run on a GitHub runner and `facts.py` gates them; the times are in the sticky comment,
   reported only.

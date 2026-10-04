@@ -1184,7 +1184,7 @@ def test_a_loaded_case_takes_its_statistic_from_the_loaded_volume(
     from konfai.utils import dataset as dataset_module
 
     rng = np.random.default_rng(3)
-    source = Dataset(tmp_path / "source", "nrrd")
+    source = Dataset(tmp_path / "source", "gipl")
     volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
     source.write("CT", "CASE_000", volume, _image_attributes())
     config_path = _write_config(
@@ -1365,13 +1365,13 @@ def test_a_case_that_fits_is_loaded_when_streaming_would_reread_the_source(
 ) -> None:
     """The route is chosen from predicted cost against the budget, never the answer.
 
-    An NRRD cannot serve bounded region reads, so streaming decodes the whole source once per
+    A GIPL cannot serve bounded region reads, so streaming decodes the whole source once per
     slab; a case whose working set fits the budget is then LOADED (one read), and the plan
     says so with the factor. LOAD is a choice, not a fallback: on_fallback=error must not refuse
     it, and the bytes match the streamed route of the same chain.
     """
     rng = np.random.default_rng(3)
-    source = Dataset(tmp_path / "source", "nrrd")
+    source = Dataset(tmp_path / "source", "gipl")
     volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
     source.write("CT", "CASE_000", volume, _image_attributes())
     out = tmp_path / "out"
@@ -1445,17 +1445,17 @@ def _plan_counters(plan) -> dict[str, int]:
 
 
 def _write_mixed_cohort(tmp_path: Path) -> Path:
-    """Two bounded mha cases and one NRRD case, read through two chains: one that streams
+    """Two bounded mha cases and one GIPL case, read through two chains: one that streams
     (or LOADs, for the source that cannot serve bounded reads) and one that falls back."""
     rng = np.random.default_rng(3)
     bounded = Dataset(tmp_path / "source", "mha")
     for index in range(2):
         volume = (rng.random((1, 8, 32, 32)) * 100).astype(np.float32)
         bounded.write("CT", f"CASE_{index:03d}", volume, _image_attributes())
-    unbounded = Dataset(tmp_path / "source_nrrd", "nrrd")
+    unbounded = Dataset(tmp_path / "source_gipl", "gipl")
     unbounded.write("CT", "CASE_002", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
     # The case fits: its working set is the case, its in-flight copy and Clip's own 2.5. The sweep
-    # still slabs it, which is what makes the NRRD member cheaper to LOAD than to stream.
+    # still slabs it, which is what makes the GIPL member cheaper to LOAD than to stream.
     budget = 5 * 8 * 32 * 32 * 4
     config_path = tmp_path / "Transform.yml"
     config_path.write_text(
@@ -1465,7 +1465,7 @@ def _write_mixed_cohort(tmp_path: Path) -> Path:
         "  Dataset:\n"
         "    dataset_filenames:\n"
         f"      - {tmp_path / 'source'}:mha\n"
-        f"      - {tmp_path / 'source_nrrd'}:nrrd\n"
+        f"      - {tmp_path / 'source_gipl'}:gipl\n"
         f"    memory_budget: {budget}b\n"
         "    groups_src:\n"
         "      CT:\n"
@@ -1655,9 +1655,9 @@ def _write_snapshot_cohort(tmp_path: Path) -> Path:
     bounded = Dataset(tmp_path / "source", "mha")
     for name in ("CASE_000", "CASE_001", "CASE_003"):
         bounded.write("CT", name, (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
-    unbounded = Dataset(tmp_path / "source_nrrd", "nrrd")
+    unbounded = Dataset(tmp_path / "source_gipl", "gipl")
     unbounded.write("CT", "CASE_002", (rng.random((1, 8, 32, 32)) * 100).astype(np.float32), _image_attributes())
-    # 5x the case, so the NRRD member still fits WHOLE (the case, its in-flight copy and
+    # 5x the case, so the GIPL member still fits WHOLE (the case, its in-flight copy and
     # Clip's own 2.5) and the plan keeps printing its LOAD line.
     budget = 5 * 8 * 32 * 32 * 4
     clip = "              Clip:\n                min_value: 0.0\n                max_value: 50.0\n"
@@ -1670,7 +1670,7 @@ def _write_snapshot_cohort(tmp_path: Path) -> Path:
         "  Dataset:\n"
         "    dataset_filenames:\n"
         f"      - {tmp_path / 'source'}:mha\n"
-        f"      - {tmp_path / 'source_nrrd'}:nrrd\n"
+        f"      - {tmp_path / 'source_gipl'}:gipl\n"
         f"    memory_budget: {budget}b\n"
         "    subset: '~CASE_003'\n"
         "    groups_src:\n"
@@ -1731,7 +1731,7 @@ _SNAPSHOT_REPORT = """\
     (1 cop(ies)) own pass: the only copy of this case still to write; a shared pass with one member is its own sweep.
   CT -> D (Clip -> Reduce -> Write <tmp>/out_d:h5): REDUCE 3 case(s) -> 1 output 'atlas': REDUCE
     4.5 resident region(s) of 1 row(s) = 0.00 GiB  (incremental accumulator)
-    reads: 1 of 3 member(s) sit on nrrd, which decodes the whole volume behind every region read: 8 decodes per member (one per region), 8 in all, at the starting height
+    reads: 1 of 3 member(s) sit on gipl, which decodes the whole volume behind every region read: 8 decodes per member (one per region), 8 in all, at the starting height
     put a Save ...:h5 before the Reduce so each member is materialized on a bounded store first
     peak ~= 22.00 KiB vs the regions' share of the budget, 80.00 KiB of 160.00 KiB per rank
     cases: CASE_000, CASE_001, CASE_002

@@ -101,7 +101,7 @@ class Percentage(Transform):
         self.baseline = baseline
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        return tensors / self.baseline * 100.0
+        return (tensors / self.baseline).mul_(100.0)
 
 
 class Magnitude(Transform):

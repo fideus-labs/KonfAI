@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from konfai.utils.dataset import Attribute, Dataset, is_staging_entry
+from konfai.utils.dataset import Attribute, Dataset, data_to_image, is_staging_entry
 from oracle_support import geometry
 
 pytest.importorskip("SimpleITK")
@@ -508,6 +508,39 @@ def test_publishing_an_entry_retires_dead_writers_debris_and_keeps_live_ones(tmp
     finally:
         live.kill()
         live.wait()
+
+
+@pytest.mark.parametrize("file_format", ["mha", "nrrd"])
+@pytest.mark.parametrize("shape", [(3, 4, 5, 6), (2, 5, 6)], ids=["3-D", "2-D"])
+def test_a_multi_channel_volume_written_whole_is_the_file_simpleitk_writes(tmp_path, file_format, shape):
+    """SimpleITK takes a vector volume pixel by pixel, so the region writer is handed it whole: the
+    file reads back as the one SimpleITK writes, voxels, geometry and every attribute."""
+    sitk = pytest.importorskip("SimpleITK")
+    rank = len(shape) - 1
+    volume = np.random.default_rng(0).integers(-100, 100, shape).astype(np.int16)
+    theta = 0.3
+    rotation = np.eye(rank)
+    rotation[:2, :2] = [[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]]
+    attributes = geometry([0.0] * rank, [1.0] * rank, np.eye(rank).ravel())
+    attributes["Study"] = "phantom: C:\\data"
+    # A geometry stacked over the first, as a case read from disk and resampled carries it.
+    attributes["Origin"] = np.asarray([5.0, -7.5, 100.125][:rank])
+    attributes["Spacing"] = np.asarray([1.5, 0.75, 3.0][:rank])
+    attributes["Direction"] = rotation.ravel()
+
+    dataset = Dataset(tmp_path / "konfai", file_format)
+    dataset.write("CT", "CASE_001", volume, Attribute(attributes))
+    reference = tmp_path / "simpleitk" / "CASE_001" / f"CT.{file_format}"
+    reference.parent.mkdir(parents=True)
+    sitk.WriteImage(data_to_image(volume, attributes), str(reference))
+
+    got, got_attributes = dataset.read_data("CT", "CASE_001")
+    want, want_attributes = Dataset(tmp_path / "simpleitk", file_format).read_data("CT", "CASE_001")
+    assert got.dtype == want.dtype
+    np.testing.assert_array_equal(got, volume)
+    np.testing.assert_array_equal(got, want)
+    assert list(got_attributes.items()) == list(want_attributes.items())
+    assert got_attributes["Study"] == "phantom: C:\\data"
 
 
 @pytest.mark.parametrize("file_format", ["nii", "nii.gz", "nrrd"])

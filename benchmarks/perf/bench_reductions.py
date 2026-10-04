@@ -115,6 +115,8 @@ def main() -> None:
                 facts.append(fact(f"{name}_peak_within_price", peak, priced, "<="))
     result["region_shape"] = list(shape)
     result["measured"] = measured
+    # What compare.py judges against the baseline: a series bench without metrics cannot be compared.
+    result["metrics"] = {f"{name}_peak_mib": round(entry["peak_bytes"] / 2**20, 2) for name, entry in measured.items()}
     result["facts"] = facts
     worst = max(measured.items(), key=lambda item: item[1]["peak_bytes"] / item[1]["priced_bytes"])
     result["headline"] = (

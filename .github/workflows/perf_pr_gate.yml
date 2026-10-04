@@ -2,9 +2,11 @@ name: perf_pr_gate
 
 # The facts of the benchmark series on every pull request touching the framework or the benches: the
 # streamed route wrote the voxels of the whole-volume route, the transform equals the plain loop
-# to float32 rounding, the plan's held peak stayed within its budget. A fact has its expected value in the run
-# itself, so it needs no baseline and holds on any machine. Times are reported in the sticky
-# comment, never gated here: a shared runner is not the machine class the baselines were taken on.
+# to float32 rounding, the plan's held peak stayed within its budget, a stage holds no more volumes
+# than it did and returns the voxels of its plain formula, a chunked h5 layout reads at the cost of a
+# contiguous one. A fact has its expected value in the run itself, so it needs no baseline and holds
+# on any machine. Times are reported in the sticky comment, never gated here: a shared runner is not
+# the machine class the baselines were taken on.
 on:
   pull_request:
     paths:
@@ -45,7 +47,7 @@ jobs:
       # The prediction lane runs synthetic 256^3 cases with a seeded random model: the identity of
       # the two routes needs no trained checkpoint and no data to download.
       - name: The CPU lanes of the series
-        run: python benchmarks/perf/run_all.py --only startup,transform,predict --cpu --synthetic --force
+        run: python benchmarks/perf/run_all.py --only startup,transform,predict,stages,reads --cpu --synthetic --force
 
       # After a failed lane too: run_all writes its series first, and the failed bench is a violated fact.
       - name: The facts

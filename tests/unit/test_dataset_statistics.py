@@ -162,7 +162,7 @@ def _former_image_whole_pass(directory: Path, name: str, group: str, extension: 
 
 @pytest.mark.parametrize(
     ("extension", "former"),
-    [("mha", _former_image_slab_walk), ("nii.gz", _former_image_slab_walk), ("nrrd", _former_image_whole_pass)],
+    [("mha", _former_image_slab_walk), ("nii.gz", _former_image_slab_walk), ("tif", _former_image_whole_pass)],
     ids=["region reads", "region reads of the uncompressed twin", "whole read"],
 )
 @pytest.mark.parametrize("channels", [None, [1]])
@@ -177,7 +177,7 @@ def test_an_image_folds_within_ulps_of_its_former_pass(
     volume = _volume((2, 37, 12, 10))
     dataset = Dataset(tmp_path / "store", extension)
     dataset.write("CT", "P0", volume, image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
-    assert dataset.bounded_region_reads("CT", "P0") is (extension != "nrrd")
+    assert dataset.bounded_region_reads("CT", "P0") is (extension != "tif")
 
     got = dataset.read_data_statistics("CT", "P0", channels)
 
@@ -313,7 +313,7 @@ def test_the_fold_reads_a_bounded_store_by_blocks_and_never_whole(
 def test_the_fold_reads_an_unbounded_store_whole_once(
     tmp_path: Path, image_attributes, small_blocks: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dataset = Dataset(tmp_path / "store", "nrrd")
+    dataset = Dataset(tmp_path / "store", "gipl")
     dataset.write("CT", "P0", _volume((1, 37, 12, 10)), image_attributes([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
     monkeypatch.setattr(Dataset, "read_data_slice", lambda *_: pytest.fail("no region read on an unbounded store"))
     reads: list[str] = []
