@@ -1601,6 +1601,47 @@ def test_criterion_result_refuses_a_misshaped_labelled_pair() -> None:
     assert ok.value.labels == ["a", "b"]
 
 
+class TestPSNRStreamedPerfectMatch:
+    @pytest.mark.parametrize("masked", [False, True])
+    @pytest.mark.parametrize("dynamic_range", [1.0, 4095.0])
+    def test_a_perfect_match_has_infinite_psnr_in_both_routes(self, masked, dynamic_range):
+        from konfai.metric.measure import PSNR
+
+        output = torch.arange(48, dtype=torch.float32).reshape(2, 2, 3, 4)
+        target = output.clone()
+        targets = [target]
+        if masked:
+            mask = torch.zeros(2, 1, 3, 4, dtype=torch.bool)
+            mask[0, :, 1:, :] = True  # an empty patch and an empty batch item are skipped
+            target[0, :, 0, :] += 10  # a difference outside the mask does not lower the score
+            targets.append(mask)
+        metric = PSNR(dynamic_range)
+        eager_loss, eager_value = metric(output, *targets)
+        states = [
+            metric.partial_metric(output[..., row : row + 1, :], *[t[..., row : row + 1, :] for t in targets])
+            for row in range(3)
+        ]
+        loss, value = metric.combine_metric(states)
+
+        assert float(eager_loss) == float(eager_value) == float(loss) == value == float("inf")
+
+    def test_a_perfect_patch_does_not_make_an_imperfect_case_perfect(self):
+        from konfai.metric.measure import PSNR
+
+        output = torch.zeros(1, 1, 2, 4)
+        target = output.clone()
+        target[..., 1, :] = 1
+        metric = PSNR(1.0)
+        states = [
+            metric.partial_metric(output[..., row : row + 1, :], target[..., row : row + 1, :]) for row in range(2)
+        ]
+
+        _, value = metric.combine_metric(states)
+
+        assert value == pytest.approx(10 * np.log10(2.0))
+        assert value == pytest.approx(float(metric(output, target)[1]))
+
+
 class TestMaskedStreamedDenominator:
     """The masked partial statistic counts what the mask SELECTS: a one-channel mask over C
     channels selects C times its voxels, the denominator ``forward``'s mean divides by. Counting

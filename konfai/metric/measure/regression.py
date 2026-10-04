@@ -193,7 +193,9 @@ class PSNR(MaskedLoss):
 
     def _finish(self, total: float, count: int) -> float:
         # The log is a function of the RUNNING mean, applied once at the end, never per patch.
-        return float(10 * np.log10(self._dynamic_range**2 / (total / count)))
+        # Like the tensor route, a perfect match scores +inf instead of raising on division by zero.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return float(10 * np.log10(np.divide(self._dynamic_range**2, total / count)))
 
 
 class SSIM(MaskedLoss):
