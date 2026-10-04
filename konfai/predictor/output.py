@@ -1297,7 +1297,7 @@ class OutputDataset(Dataset, NeedDevice):
     def _copy_fold(self) -> InferenceStack | None:
         """The first after-reduction transform when it folds a Concat's copies one at a time (``fold_copies``)."""
         first = self.after_reduction_transforms[0] if self.after_reduction_transforms else None
-        if isinstance(self.reduction, Concat) and isinstance(first, InferenceStack) and first.folds_copies:
+        if type(self.reduction) is Concat and type(first) is InferenceStack and first.folds_copies:
             return first
         return None
 

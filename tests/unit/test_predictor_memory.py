@@ -83,13 +83,17 @@ def test_model_composite_streams_ensemble_through_a_single_loaded_model() -> Non
 
 
 @pytest.mark.parametrize("count", [0, 1, 3])
-@pytest.mark.parametrize("kind", ["mean", "sum", "custom"])
+@pytest.mark.parametrize("kind", ["mean", "sum", "custom", "custom_finalize"])
 def test_model_composite_honours_the_selected_reduction_including_mean_subclasses(count, kind) -> None:
     class OffsetMean(Mean):
         def __call__(self, tensors):
             return super().__call__(tensors) + 10
 
-    operator = {"mean": Mean, "sum": Sum, "custom": OffsetMean}[kind]()
+    class FinalizeOffsetMean(Mean):
+        def finalize(self):
+            return super().finalize() + 10
+
+    operator = {"mean": Mean, "sum": Sum, "custom": OffsetMean, "custom_finalize": FinalizeOffsetMean}[kind]()
     composite = ModelComposite(DummyPredictNetwork(), operator)
     scales = [1.0, 3.0, 5.0][:count]
     composite.load([{"scale": scale} for scale in scales])
@@ -100,7 +104,7 @@ def test_model_composite_honours_the_selected_reduction_including_mean_subclasse
     expected = sum(scales or [1.0])
     if kind != "sum":
         expected /= max(count, 1)
-    if kind == "custom":
+    if kind.startswith("custom"):
         expected += 10
     assert name == "out" and channels == [1] * max(count, 1)
     assert torch.equal(result, torch.full_like(result, expected))

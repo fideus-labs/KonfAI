@@ -236,12 +236,13 @@ def test_aligner_joint_intervals_carry_every_stream_and_stay_bounded() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, monkeypatch, drive_tta) -> None:
+@pytest.mark.parametrize("mode, channels", [("Seg", 2), ("mean", 1), ("mean", 2), ("median", 1), ("median", 2)])
+def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, monkeypatch, drive_tta, mode, channels):
     # InferenceStack declares SLAB: per-voxel member reduction plus a per-region side write of the
     # stack. Fed through the streamed prefix it must produce the same main output AND the same stack
     # entry as the whole-volume call: here on a TTA Concat chain, where the stack holds both copies.
     def run(where: str, streamed: bool):
-        stack = InferenceStack("", "stack", mode="Seg")
+        stack = InferenceStack("", "stack", mode=mode)
         streamed_out, whole_volume = drive_tta(
             tmp_path / where,
             monkeypatch,
@@ -249,6 +250,7 @@ def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, mo
             streamed=streamed,
             reduction=Concat(),
             after=[stack],
+            channels=channels,
         )
         stack_data, _ = Dataset(f"{tmp_path / where}/output.h5", "h5").read_data("InferenceStack", "CASE_000")
         return streamed_out, torch.from_numpy(stack_data), whole_volume
@@ -259,6 +261,50 @@ def test_streamed_inference_stack_writes_the_stack_region_by_region(tmp_path, mo
     want, want_stack, _ = run("reference", streamed=False)
     assert torch.equal(got, want)
     assert torch.equal(got_stack, want_stack)
+
+
+def test_concat_subclass_keeps_its_values_before_inference_stack_on_both_routes(tmp_path, monkeypatch, drive_tta):
+    class OffsetConcat(Concat):
+        def __call__(self, tensors):
+            return super().__call__(tensors) + 10
+
+    outputs, stacks = [], []
+    for streamed in (True, False):
+        where = tmp_path / str(streamed)
+        result, whole = drive_tta(
+            where,
+            monkeypatch,
+            augmentation=Flip(f_prob=[0, 1, 1]),
+            streamed=streamed,
+            reduction=OffsetConcat(),
+            channels=1,
+            after=[InferenceStack("", "stack", mode="mean")],
+        )
+        assert whole is not streamed
+        outputs.append(result)
+        stacks.append(Dataset(f"{where}/output.h5", "h5").read_data("InferenceStack", "CASE_000")[0])
+    assert torch.equal(outputs[0], outputs[1])
+    np.testing.assert_array_equal(stacks[0], stacks[1])
+
+
+def test_inference_stack_subclass_call_is_not_replaced_by_a_copy_fold(tmp_path, monkeypatch, drive_tta):
+    class OffsetStack(InferenceStack):
+        def __call__(self, name, tensors, attribute):
+            return super().__call__(name, tensors, attribute) + 10
+
+    outputs = []
+    for index, stage in enumerate((InferenceStack, OffsetStack)):
+        result, whole = drive_tta(
+            tmp_path / str(index),
+            monkeypatch,
+            augmentation=Flip(f_prob=[0, 1, 1]),
+            streamed=False,
+            reduction=Concat(),
+            after=[stage("", "stack", mode="mean")],
+        )
+        assert whole
+        outputs.append(result)
+    torch.testing.assert_close(outputs[1], outputs[0] + 10)
 
 
 def test_a_mask_after_reduction_streams_and_reads_its_slab_of_the_mask(tmp_path, monkeypatch, drive_tta) -> None:
@@ -331,10 +377,13 @@ def test_a_mask_behind_a_region_stage_streams_and_reads_its_region_of_the_mask(
     assert torch.equal(got, want)
 
 
-def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path, monkeypatch, drive_tta) -> None:
+@pytest.mark.parametrize("mode, channels", [("Seg", 2), ("mean", 1), ("mean", 2), ("median", 1), ("median", 2)])
+def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(
+    tmp_path, monkeypatch, drive_tta, mode, channels
+):
     # A destination that cannot serve region writes must not lose the stack: the SLAB stage buffers
     # and writes classically at the last slab: the whole-volume path's memory, never a missing file.
-    stack = InferenceStack(f"{tmp_path}/stack_only.h5:h5", "stack", mode="Seg")
+    stack = InferenceStack(f"{tmp_path}/stack_only.h5:h5", "stack", mode=mode)
     stack.dataset.open_data_stream = lambda *args, **kwargs: None  # type: ignore[union-attr,method-assign]
     written, whole_volume = drive_tta(
         tmp_path / "streamed",
@@ -343,11 +392,25 @@ def test_streamed_inference_stack_buffers_when_the_sink_refuses_regions(tmp_path
         streamed=True,
         reduction=Concat(),
         after=[stack],
+        channels=channels,
     )
     assert not whole_volume
     stack_data, _ = Dataset(f"{tmp_path}/stack_only.h5", "h5").read_data("InferenceStack", "CASE_000")
     # The full stack: both copies, over the case's whole spatial extent.
-    assert stack_data.shape == (2, *written.shape[1:])
+    expected_shape = (2, *written.shape) if mode != "Seg" and channels > 1 else (2, *written.shape[1:])
+    assert stack_data.shape == expected_shape
+    reference, _ = drive_tta(
+        tmp_path / "reference",
+        monkeypatch,
+        augmentation=Flip(f_prob=[0, 1, 1]),
+        streamed=False,
+        reduction=Concat(),
+        after=[InferenceStack(f"{tmp_path}/reference_stack.h5:h5", "stack", mode=mode)],
+        channels=channels,
+    )
+    expected, _ = Dataset(f"{tmp_path}/reference_stack.h5", "h5").read_data("InferenceStack", "CASE_000")
+    assert torch.equal(written, reference)
+    np.testing.assert_array_equal(stack_data, expected)
 
 
 def test_streamed_tta_binds_the_draw_by_the_manager_case_index(tmp_path, monkeypatch, drive_tta) -> None:

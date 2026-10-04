@@ -97,7 +97,7 @@ class Mean(Reduction):
     incremental = True
 
     def __call__(self, tensors: list[torch.Tensor]) -> torch.Tensor:
-        if len(tensors) == 1:
+        if len(tensors) == 1 and type(self) in (Mean, Sum):
             return tensors[0].to(_averaged_dtype(tensors[0].dtype))
         self.start()
         for tensor in tensors:

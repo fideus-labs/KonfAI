@@ -252,10 +252,13 @@ class InferenceStack(Transform):
         if tensor.shape[0] == 1:
             return tensor.squeeze(0)
         stack = self._stack(tensor)
+        # Mean/median retain a non-singleton channel axis after the member axis. Spatial slabs
+        # start after both axes; segmentation's argmax and single-channel stacks retain only one.
+        prefix = stack.shape[: -len(spatial_shape)]
         dataset = self.dataset if self.dataset else self.datasets[-1]
         if name not in self._stack_sinks and name not in self._stack_buffers:
             sink = dataset.open_data_stream(
-                "InferenceStack", name, [stack.shape[0], *spatial_shape], stack.dtype, cache_attribute
+                "InferenceStack", name, [*prefix, *spatial_shape], stack.dtype, cache_attribute
             )
             if sink is None:
                 self._stack_buffers[name] = []
@@ -264,10 +267,14 @@ class InferenceStack(Transform):
         if name in self._stack_buffers:
             self._stack_buffers[name].append(stack)
             if region.stop == spatial_shape[0]:
-                whole = np.concatenate(self._stack_buffers.pop(name), axis=1)
+                whole = np.concatenate(self._stack_buffers.pop(name), axis=len(prefix))
                 dataset.write("InferenceStack", name, whole, cache_attribute)
         else:
-            target = (slice(0, stack.shape[0]), region, *(slice(0, extent) for extent in spatial_shape[1:]))
+            target = (
+                *(slice(0, extent) for extent in prefix),
+                region,
+                *(slice(0, extent) for extent in spatial_shape[1:]),
+            )
             self._stack_sinks[name].write_slice(target, stack)
             if region.stop == spatial_shape[0]:
                 self._stack_sinks.pop(name).close()
