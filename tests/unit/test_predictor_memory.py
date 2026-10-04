@@ -827,23 +827,22 @@ def _stub_cuda_readings(monkeypatch: pytest.MonkeyPatch, forwards: list[int], us
 
 
 @pytest.mark.parametrize(
-    ("usable", "batch_cap", "released", "expected"),
+    ("usable", "batch_cap", "expected"),
     [
-        # Beside the members' 50 bytes 31 patches fit, 16 as a power of two; with them free 33 fit, 32.
-        (820.0, None, True, [1, 2, 32, 5]),
-        # 35 fit beside them and 37 without: 32 either way.
-        (900.0, None, False, [1, 2, 32, 5]),
-        # An out-of-memory capped the batch at 16: 16 either way.
-        (820.0, 16, False, [1, 2, 16, 16, 5]),
+        # Beside the members' 50 bytes 31 patches fit, 16 as a power of two; with them free 33 would, 32.
+        (820.0, None, [1, 2, 16, 16, 5]),
+        (900.0, None, [1, 2, 32, 5]),
+        # An out-of-memory capped the batch at 16.
+        (900.0, 16, [1, 2, 16, 16, 5]),
     ],
-    ids=["33 patches fit, 16 beside them: released", "32 either way: resident", "capped at 16: resident"],
+    ids=["16 beside them, 32 without", "32 beside them", "capped at 16"],
 )
-def test_ensemble_members_stay_resident_only_when_they_cost_the_measured_batch_nothing(
-    monkeypatch: pytest.MonkeyPatch, usable: float, batch_cap: int | None, released: bool, expected: list[int]
+def test_the_measured_batch_is_what_fits_beside_the_resident_members(
+    monkeypatch: pytest.MonkeyPatch, usable: float, batch_cap: int | None, expected: list[int]
 ) -> None:
-    """The measured batch is the largest power of two that fits: members kept on the device can halve it
-    for the few hundred megabytes they hold. The same measurement with their bytes free is the batch a run
-    loading them per batch takes; when it is larger the members are released and the run takes it."""
+    """Members kept on the device stay there: the measured batch is the largest power of two that fits
+    beside them, even where releasing them would double it. Releasing them would load each member again
+    for every batch; a larger batch alone does not establish a throughput gain."""
     forwards: list[int] = []
     _stub_cuda_readings(monkeypatch, forwards, usable)
     members = _ResidentMembers(50)
@@ -853,7 +852,7 @@ def test_ensemble_members_stay_resident_only_when_they_cost_the_measured_batch_n
     seen = _run_patches(monkeypatch, loader, forwards, members, measure_batch_on=0, batch_cap=batch_cap, device=0)
 
     assert forwards == expected
-    assert members.released is released
+    assert not members.released
     assert seen == list(range(40)), "every patch once, in order"
 
 
