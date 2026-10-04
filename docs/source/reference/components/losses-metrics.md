@@ -68,6 +68,10 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `SSIM` | Structural similarity. A metric unless `is_loss: true`. | `dynamic_range=4095.0` |
 | `MAESaveMap` | MAE that also writes the error map. | `reduction="mean", dataset=None, group=None` |
 
+With a positive `dynamic_range`, an exact match scores `PSNR = +inf`, including with a mask or streamed
+evaluation. Evaluation JSON stores this as `null`, like other non-finite scores, and excludes it from
+finite aggregates. The case still reports its finite metrics (`MSE = 0`, for example).
+
 ## Segmentation and classification
 
 | Name | Purpose | Key arguments (defaults) |

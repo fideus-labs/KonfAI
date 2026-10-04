@@ -88,13 +88,15 @@ EVALUATION_TEMPLATE = """Evaluator:
 
 
 def _create_paired_dataset(dataset_dir: Path, predictions_dir: Path) -> None:
-    """Ground-truth CT and a spatially-varying 'prediction' per case, so the metrics are non-trivial."""
+    """One perfect prediction and two spatially-varying ones: zero error must also stream."""
     rng = np.random.default_rng(7)
     for idx in range(3):
         (dataset_dir / f"CASE_{idx:03d}").mkdir(parents=True)
         (predictions_dir / f"CASE_{idx:03d}").mkdir(parents=True)
         ct = rng.normal(size=(12, 16, 16)).astype(np.float32)
         sct = (0.85 * ct + 0.1 * rng.normal(size=ct.shape) + 0.02 * idx).astype(np.float32)
+        if idx == 0:
+            sct = ct.copy()
         write_image(dataset_dir / f"CASE_{idx:03d}" / "CT.mha", ct, SimpleITK.sitkFloat32)
         write_image(predictions_dir / f"CASE_{idx:03d}" / "sCT.mha", sct, SimpleITK.sitkFloat32)
 
@@ -163,6 +165,14 @@ def test_streamed_evaluation_matches_whole_volume(tmp_path: Path) -> None:
 
     whole = _read_metrics(whole_dir)
     streamed = _read_metrics(streamed_dir)
+
+    for report in (whole, streamed):
+        # Infinite PSNR is represented as null in strict JSON, as for every non-finite metric;
+        # the case still completes and its finite metrics retain their perfect-match scores.
+        assert report["case"]["sCT:CT:PSNR"]["CASE_000"] is None
+        assert report["case"]["sCT:CT:MSE"]["CASE_000"] == 0.0
+        assert report["case"]["sCT:CT:SSIM"]["CASE_000"] == pytest.approx(1.0)
+        assert report["aggregates"]["sCT:CT:PSNR"]["count"] == 2.0
 
     whole_cases = whole["case"] if "case" in whole else whole
     streamed_cases = streamed["case"] if "case" in streamed else streamed

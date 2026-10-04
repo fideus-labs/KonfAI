@@ -172,19 +172,23 @@ class Statistics:
 
     @staticmethod
     def get_statistic(values: list[float]) -> dict[str, float]:
-        """Max, min, std, quartiles, mean and count of the non-NaN ``values``: all NaN when there is none."""
+        """Max, min, std, quartiles, mean and count of finite ``values``; count is zero when none remain."""
         array = np.asarray(values, dtype=float)
-        count = int(np.count_nonzero(~np.isnan(array)))
+        # JSONL stores every non-finite score as null, read back as NaN on resume. Apply the same
+        # exclusion on the first run so its aggregates do not change merely by resuming it.
+        array = array[np.isfinite(array)]
+        count = array.size
         if count == 0:
             return dict.fromkeys(("max", "min", "std", "25pc", "50pc", "75pc", "mean"), np.nan) | {"count": 0.0}
+        quartiles = np.percentile(array, [25, 50, 75])
         return {
-            "max": float(np.nanmax(array)),
-            "min": float(np.nanmin(array)),
-            "std": float(np.nanstd(array)),
-            "25pc": float(np.nanpercentile(array, 25)),
-            "50pc": float(np.nanpercentile(array, 50)),
-            "75pc": float(np.nanpercentile(array, 75)),
-            "mean": float(np.nanmean(array)),
+            "max": float(np.max(array)),
+            "min": float(np.min(array)),
+            "std": float(np.std(array)),
+            "25pc": float(quartiles[0]),
+            "50pc": float(quartiles[1]),
+            "75pc": float(quartiles[2]),
+            "mean": float(np.mean(array)),
             "count": float(count),
         }
 

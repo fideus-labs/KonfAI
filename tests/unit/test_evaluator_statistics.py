@@ -24,6 +24,18 @@ from konfai.evaluator import Statistics
 
 
 class TestGetStatisticCount:
+    @pytest.mark.parametrize("values", [[], [np.nan, np.inf, -np.inf]])
+    def test_no_finite_values_has_zero_count_and_undefined_statistics(self, values):
+        stats = Statistics.get_statistic(values)
+
+        assert stats["count"] == 0.0
+        assert all(np.isnan(value) for key, value in stats.items() if key != "count")
+
+    def test_infinities_do_not_erase_the_finite_cases(self):
+        expected = Statistics.get_statistic([1.0, 3.0, 5.0])
+
+        assert Statistics.get_statistic([np.inf, 1.0, np.nan, 3.0, -np.inf, 5.0]) == expected
+
     def test_count_is_zero_when_every_value_is_nan(self):
         """An all-NaN series must report a count of 0, not NaN."""
         stats = Statistics.get_statistic([np.nan, np.nan])
@@ -49,6 +61,23 @@ class TestGetStatisticCount:
 
 
 class TestWriteJsonValidity:
+    def test_resuming_preserves_aggregates_when_a_case_has_infinite_psnr(self, tmp_path):
+        incremental = tmp_path / "cases.jsonl"
+        complete = Statistics(tmp_path / "complete.json")
+        complete.open_incremental(incremental)
+        for case, value in enumerate([float("inf"), 10.0, 20.0]):
+            complete.add({"PRED:CT:PSNR": value}, str(case))
+        complete.write([complete.measures])
+
+        resumed = Statistics(tmp_path / "resumed.json")
+        resumed.write([Statistics.load_incremental([incremental])])
+        report = json.loads(complete.filename.read_text())
+
+        assert report == json.loads(resumed.filename.read_text())
+        assert report["case"]["PRED:CT:PSNR"]["0"] is None
+        assert report["aggregates"]["PRED:CT:PSNR"]["mean"] == 15.0
+        assert report["aggregates"]["PRED:CT:PSNR"]["count"] == 2.0
+
     def test_write_emits_standard_json_for_non_finite_values(self, tmp_path):
         """NaN/Infinity must serialize as JSON null, never as bare NaN/Infinity."""
         statistics = Statistics(tmp_path / "Metric.json")
