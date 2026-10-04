@@ -457,7 +457,8 @@ class ModelComposite(Network):
             )
         # A weightless model (loaded with no checkpoint sources) is a single replica: the model as constructed.
         n_replicas = len(self._state_sources) or 1
-        if isinstance(self.combine, Mean):
+        # This shortcut implements Mean itself; a subclass (Sum or a custom fold) owns its result.
+        if type(self.combine) is Mean:
             sum_acc: dict[str, torch.Tensor] = {}
             count: dict[str, int] = defaultdict(int)
             channels: dict[str, list[int]] = defaultdict(list)

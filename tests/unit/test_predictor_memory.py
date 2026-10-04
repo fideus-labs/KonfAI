@@ -23,7 +23,7 @@ import pytest
 import torch
 import tqdm
 from konfai.data.data_manager import BatchDataItem, DatasetIter, GrowingBatchSampler
-from konfai.data.reduction import Mean
+from konfai.data.reduction import Mean, Sum
 from konfai.data.transform import TransformInverse
 from konfai.network.network import Network, place_graph
 from konfai.predictor import PREDICTION_CLOCK, ModelComposite, OutputDataset
@@ -80,6 +80,31 @@ def test_model_composite_streams_ensemble_through_a_single_loaded_model() -> Non
     assert isinstance(streamed_model, DummyPredictNetwork)
     assert streamed_model.load_history == [1.0, 3.0]
     assert streamed_model.load_name_history == ["DummyPredictNetwork", "DummyPredictNetwork"]
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+@pytest.mark.parametrize("kind", ["mean", "sum", "custom"])
+def test_model_composite_honours_the_selected_reduction_including_mean_subclasses(count, kind) -> None:
+    class OffsetMean(Mean):
+        def __call__(self, tensors):
+            return super().__call__(tensors) + 10
+
+    operator = {"mean": Mean, "sum": Sum, "custom": OffsetMean}[kind]()
+    composite = ModelComposite(DummyPredictNetwork(), operator)
+    scales = [1.0, 3.0, 5.0][:count]
+    composite.load([{"scale": scale} for scale in scales])
+    batch = {"input": BatchDataItem(["CASE"], torch.ones(1, 1, 4, 4), [Attribute()], [0], [0], [0], True)}
+
+    [(name, channels, result)] = composite(batch, ["out"])
+
+    expected = sum(scales or [1.0])
+    if kind != "sum":
+        expected /= max(count, 1)
+    if kind == "custom":
+        expected += 10
+    assert name == "out" and channels == [1] * max(count, 1)
+    assert torch.equal(result, torch.full_like(result, expected))
+    assert torch.equal(batch["input"].tensor, torch.ones(1, 1, 4, 4))
 
 
 def test_model_composite_hands_over_a_lone_model_output_and_folds_an_ensemble_in_place() -> None:
@@ -461,8 +486,8 @@ def test_get_output_hands_the_assembled_volume_on_as_a_view() -> None:
     """One model chunk: the assembled volume reaches the reduction without a copy.
 
     Stacking a lone chunk copied it: 448 MiB and 54 ms per copy of a [14, 256^3] fp16 case,
-    measured, once per augmentation. No reduction writes into what it is handed (a Mean of one is
-    the member itself, a fold of several copies first, Median/Vote/Concat build a new tensor), so
+    measured, once per augmentation. No reduction writes into what it is handed (a lone member
+    may be handed on, a fold of several copies first or builds a new tensor), so
     the accumulator's own buffer, which assemble() has already let go of, can be the answer.
     """
     output_dataset = OutputDataset(
