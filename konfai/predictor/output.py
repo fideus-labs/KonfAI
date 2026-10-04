@@ -1070,9 +1070,11 @@ class OutputDataset(Dataset, NeedDevice):
                 else:
                     chunk = transform.stream_region(self.names[index], chunk, context, Attribute(attribute))
             results.append(chunk)
-        # A lone chunk stacks as a view: torch.stack would copy the slab once per slab of the case.
+        # Chunks no transform touched stack as a view of the slab: torch.stack would copy it once per slab of the case.
         if len(results) == 1:
             return results[0].unsqueeze(0).unsqueeze(0)
+        if not self.before_reduction_transforms and len({chunk.shape[0] for chunk in chunks}) == 1:
+            return layer.unflatten(0, (len(chunks), -1)).unsqueeze(0)
         return torch.stack(results, dim=0).unsqueeze(0)
 
     def _finalize_slab(

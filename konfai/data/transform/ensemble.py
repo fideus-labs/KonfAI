@@ -183,7 +183,7 @@ class InferenceStack(Transform):
 
     def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
         if self.mode != "median":
-            return tensors.float().mean(0).to(tensors.dtype)
+            return tensors.mean(0, dtype=torch.float32).to(tensors.dtype)
         # A median selects, so the stack is widened only where torch has no median kernel.
         try:
             return torch.median(tensors, dim=0).values
@@ -216,12 +216,12 @@ class InferenceStack(Transform):
             for members in copies:
                 stack = self._stack(members)
                 if written == 0:
-                    total, dtype = members.float().sum(0), members.dtype
+                    total, dtype = members.sum(0, dtype=torch.float32), members.dtype
                     if count * len(stack) > 1:
                         shape = [count * len(stack), *stack.shape[1:]]
                         sink = dataset.open_data_stream("InferenceStack", name, shape, stack.dtype, cache_attribute)
                 else:
-                    total.add_(members.float().sum(0))
+                    total.add_(members.sum(0, dtype=torch.float32))
                 if sink is None:
                     rows.append(stack)
                 else:
