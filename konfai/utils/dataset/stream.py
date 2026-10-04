@@ -414,6 +414,7 @@ class _NrrdDataStream(_MhaDataStream):
             for key, value in attributes.items()
             if str(value)
             and "\n" not in str(value)
+            and "\r" not in str(value)
             and "\n" not in key
             and "\r" not in key
             and ":=" not in key

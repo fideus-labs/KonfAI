@@ -548,15 +548,23 @@ def test_a_multi_channel_volume_written_whole_is_the_file_simpleitk_writes(tmp_p
     assert got_attributes["Study"] == "phantom: C:\\data"
 
 
-@pytest.mark.parametrize("line_break", ["\n", "\r", "\r\n"])
+@pytest.mark.parametrize(
+    ("invalid_key", "invalid_value"),
+    [
+        ("invalid\nkey", "omit this entry"),
+        ("invalid\rkey", "omit this entry"),
+        ("invalid\r\nkey", "omit this entry"),
+        ("invalid", "omit\rthis entry"),
+        ("invalid", "omit\r\nthis entry"),
+    ],
+)
 @pytest.mark.parametrize("how", ["stream", "write"])
-def test_nrrd_metadata_keys_cannot_break_the_header(tmp_path, line_break, how):
+def test_nrrd_metadata_line_breaks_cannot_break_the_header(tmp_path, invalid_key, invalid_value, how):
     sitk = pytest.importorskip("SimpleITK")
     volume = _volume(channels=3)
     attributes = _image_attributes()
     attributes["Study"] = "phantom"
-    invalid_key = f"invalid{line_break}key"
-    attributes[invalid_key] = "omit this entry"
+    attributes[invalid_key] = invalid_value
     dataset = Dataset(tmp_path / "store", "nrrd")
     if how == "stream":
         _write_by_slabs(dataset, volume, attributes)
