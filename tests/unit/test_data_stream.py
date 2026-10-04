@@ -548,6 +548,29 @@ def test_a_multi_channel_volume_written_whole_is_the_file_simpleitk_writes(tmp_p
     assert got_attributes["Study"] == "phantom: C:\\data"
 
 
+@pytest.mark.parametrize("line_break", ["\n", "\r", "\r\n"])
+@pytest.mark.parametrize("how", ["stream", "write"])
+def test_nrrd_metadata_keys_cannot_break_the_header(tmp_path, line_break, how):
+    sitk = pytest.importorskip("SimpleITK")
+    volume = _volume(channels=3)
+    attributes = _image_attributes()
+    attributes["Study"] = "phantom"
+    invalid_key = f"invalid{line_break}key"
+    attributes[invalid_key] = "omit this entry"
+    dataset = Dataset(tmp_path / "store", "nrrd")
+    if how == "stream":
+        _write_by_slabs(dataset, volume, attributes)
+    else:
+        dataset.write("CT", "CASE_001", volume, attributes)
+
+    path = tmp_path / "store" / "CASE_001" / "CT.nrrd"
+    header = path.read_bytes().split(b"\n\n", 1)[0]
+    assert invalid_key.encode() not in header
+    image = sitk.ReadImage(str(path))
+    np.testing.assert_array_equal(np.moveaxis(sitk.GetArrayFromImage(image), -1, 0), volume)
+    assert dataset.read_data("CT", "CASE_001")[1]["Study"] == "phantom"
+
+
 @pytest.mark.parametrize("file_format", ["nii", "nii.gz", "nrrd"])
 @pytest.mark.parametrize("channels", [1, 3])
 def test_a_two_dimensional_nifti_streams_like_the_whole_write(tmp_path, channels, file_format):

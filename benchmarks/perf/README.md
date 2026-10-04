@@ -69,9 +69,9 @@ reuses it.
 - `cProfile` puts time on calls that did not take it: `bench_train_epoch.py --cprofile` reads 24 s for
   twenty `torch.flip` that take 0.09 s under a wall clock. A profile says where to look; only two wall
   clocks, run back to back, say what a change is worth.
-- A tensor above 32 MiB is mapped by glibc on every allocation and pays its page faults again: an
-  out-of-place step over a volume costs more than its arithmetic (`Normalize` on 128 MiB: 226 ms
-  out of place, 81 ms writing into its first result). `bench_stages.py` holds that line.
+- Temporary volume allocations can add page faults to a stage's arithmetic. `bench_stages.py`
+  measures each stage's time and peak memory, and compares its values with the out-of-place formula;
+  it does not time that reference formula.
 - The framework pins its own threads (`rank_cpu_share`) and the pixi test tasks pin `OMP_NUM_THREADS=1`;
   a bare `pytest` does not, and the tests bench measures both states on purpose.
 

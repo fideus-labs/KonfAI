@@ -132,6 +132,9 @@ def main() -> None:
             Dataset(f"{scratch}/{fmt}", fmt).write("CT", "P000", volume, Attribute(geometry))
             raw = Dataset(f"{scratch}/{fmt}", fmt)
             facts.append(fact(f"{fmt}_whole_same_voxels", np.array_equal(raw.read_data("CT", "P000")[0], volume), 1))
+            same = all(np.array_equal(raw.read_data_slice("CT", "P000", _row(z))[0], volume[_row(z)]) for z in rows)
+            same = same and np.array_equal(raw.read_data_slice("CT", "P000", whole_window)[0], volume)
+            facts.append(fact(f"{fmt}_regions_same_voxels", same, 1))
             # More repeats than the layouts: one read is a few milliseconds.
             metrics[f"{fmt}_whole_ms"] = _median_ms(lambda raw=raw: raw.read_data("CT", "P000"), 5 * repeats)
             metrics[f"{fmt}_window_ms"] = _median_ms(

@@ -412,7 +412,12 @@ class _NrrdDataStream(_MhaDataStream):
         pairs = [
             (key, str(value).replace("\\", "\\\\"))
             for key, value in attributes.items()
-            if str(value) and "\n" not in str(value) and ":=" not in key and not key.startswith("NRRD_")
+            if str(value)
+            and "\n" not in str(value)
+            and "\n" not in key
+            and "\r" not in key
+            and ":=" not in key
+            and not key.startswith("NRRD_")
         ]
         header = (
             "NRRD0004\n"
