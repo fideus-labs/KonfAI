@@ -3,6 +3,150 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
+## v1.8.7 (2026-10-05)
+
+### 💥 Breaking changes
+
+#### Explicit transform and augmentation chains
+
+An omitted transform chain or augmentation chain now means no stages. Declare the preprocessing
+and draws your experiment needs explicitly; an empty chain no longer inserts defaults.
+
+#### Non-zero masks
+
+Masks select every non-zero voxel. Check configs that relied on a particular label value.
+
+#### Positional IMPACT masks
+
+IMPACT takes its mask by position rather than by an assumed group name. Check configs that relied
+on an implicit mask binding.
+
+#### Reduction imports
+
+Reference reductions under `konfai.data.reduction` (for example `konfai.data.reduction.Median`),
+instead of the removed `konfai.predictor` aliases.
+
+#### Output dataset name
+
+Use `OutputDataset` instead of the removed `OutSameAsGroupDataset` alias.
+
+#### Nested app inference classpath
+
+Name a nested app stage `konfai_apps.transforms:KonfAIInference`; the bare-name loader shim is removed.
+
+#### Repeated chain entries
+
+Repeated chain entries use a YAML list or the occurrence form `Name#2`, not `Name/N`.
+
+#### Python model classpaths
+
+Python model classpaths use `konfai.models.python` or the relative model spelling; the pre-1.6
+absolute paths no longer resolve.
+
+#### Prediction preprocessing check
+
+PREDICTION no longer compares its preprocessing chain with a training config beside the checkpoint.
+Remove `check_training_transforms`; the caller must still use the preprocessing the model trained
+with. Unread keys are reported, not silently treated as active settings.
+
+#### Unified MCP app workflow
+
+The MCP app workflow uses one `run_app` tool, whose outputs stay inside the session.
+
+#### MCP memory figures
+
+Clients must use the per-device memory figures instead of the removed aggregate `vram_gb`.
+
+#### Studio transcript storage
+
+Studio no longer adopts transcripts from the MCP workspace.
+
+#### App job server installation
+
+Install `konfai-apps[server]` to run the app job server.
+
+#### SSIM extra removed
+
+The unused `konfai[ssim]` extra is removed; KonfAI's built-in SSIM remains available.
+
+### ✨ Features
+
+- impact-reg: elastix, ConvexAdam and FireANTs share one IMPACT loss contract for feature models,
+  layers, distances, weights, PCA, channel selection, sampling and Static/Jacobian modes. Unsupported
+  combinations are refused before a run. All three engines support 2-D networks, masks and a seed.
+- impact-reg: large-image registration uses a resampled global pass and tiled deformable passes,
+  with a declared memory budget per card. `list`, `show`, `apply` and checked `--set` overrides
+  expose the recipe; each rank records the plan it actually completed. ConvexAdam presets pin
+  `itk-impact==0.1.6`, and the preset repository is pinned to a commit rather than following `main`.
+- impact-reg: the elastix engine installs elastix-IMPACT 1.1.0, with the CUDA 13.0 binary when the
+  installed torch is the one that binary was built against.
+- Prediction patches can use `tile` or `resample`, bounded by `max_voxels` and the available host/GPU
+  budgets. Resampled labels preserve thin structures, and OME-Zarr inputs can use their pyramid level.
+  An output layer can also be written on its own grid without borrowing an input group's geometry.
+- Compressed ITK inputs can serve regions from a decompressed copy made once per run. Raw and gzip
+  NRRD inputs now have a region-read route too, so a streamable chain need not decode the whole image
+  for every patch.
+- Test-time flips visit distinct mirrors in turn rather than repeatedly drawing the same ones.
+
+### 🐛 Bug Fixes
+
+- Config binding refuses misspelled keys, invalid values and incompatible arguments with their paths.
+  A failed workflow build leaves the original config unchanged; `--init` can still write the defaults
+  resolved so far. Python API calls preserve the caller's file and restore the runtime environment.
+- Training and RESUME preserve recorded seeds, splits and run state. Criteria use their declared
+  metric/loss role; training without a loss is refused. Checkpoints with incompatible tensors or
+  unreadable archives fail by name instead of producing a partial or unexplained load.
+- GAN prediction runs through the generator alone. GAN-family default sub-networks belong to each
+  model instance; constructing a second model no longer shares the first model's generator or
+  discriminator. IMPACT TorchScript models are mapped to the device on which they execute.
+- Patch resampling follows ITK's index conventions on permuted and oblique grids, and CUDA selects
+  the same voxels as the host. Transform shapes, crop geometry, axis reductions, integer draws,
+  mask handling and displacement-field units are corrected across the streamed routes.
+- Storage backends preserve geometry and metadata, invalidate stale DICOM reads and bound scans.
+  Truncated writes fail without publishing a partial output. Formats that would silently discard
+  channels or spatial planes are refused, and multi-file outputs are published together.
+- App inputs pair by case rather than incidental file order; run summaries name skipped inputs and
+  written outputs. Fine-tuning refuses to overwrite user data, multi-rank writes that would lose
+  cases are refused, and an out-of-memory exit remains distinguishable from other errors.
+- MCP refreshes dataset inventories when a case's groups change, tolerates broken links and unreadable
+  child directories, and preserves valid root OME-Zarr stores. Studio shows the server's saved state,
+  rebuilds curves after reconnecting and reports job failures.
+- Unsupported `torch_compile` environments fall back to ordinary execution. Runtime, CLI and sibling
+  package fixes cover Windows as well as Linux and macOS; cancellation reaps spawned jobs.
+
+### ⚡ Performance
+
+- Ensemble prediction keeps checkpoints on the GPU when they fit and measures the batch beside
+  them. It no longer unloads the weights solely to double the batch; existing memory fallbacks remain.
+  Finalizing an ensemble slab also avoids an unnecessary copy that could trigger an OOM and CPU restart.
+- In the constrained-VRAM five-fold synthesis comparison, two runs per side took 80.832 seconds
+  before and 65.954 seconds after the residency change: **18.4% less wall time**. The five-fold
+  MRSegmentator comparison reduced peak VRAM from 15.846 to 13.854 GiB and completed without an OOM.
+  These are measured scenarios, not a general speedup guarantee.
+- At a fixed batch size, resident and reloaded predictions match exactly, including geometry.
+  Changing the batch shape can change floating-point results: the two synthesis cases measured a
+  maximum difference below 0.889 HU and a mean absolute difference below 0.013 HU. The final
+  MRSegmentator labels matched, while a small number of intermediate member labels differed.
+  These numerical checks do not establish clinical equivalence.
+- Value-transform chains reuse their first result, HDF5 datasets retain their chunk cache with the
+  pooled file handle, and raw MetaImage/NIfTI reads use their mapped block. Whole multi-channel
+  MetaImage/NRRD writes use the region writer. The affected paths retain the previous voxels and geometry.
+- TTA traverses copies along the streamed axis and folds uncertainty one copy at a time; a whole-case
+  route is used when it fits the declared budget. Lazy imports reduce CLI and MCP startup work.
+- A prediction config without `batch_size` now measures its batch on the GPU (the default was 1);
+  set `batch_size` to pin it.
+- Performance gates now refuse missing memory evidence instead of omitting the check or writing `NaN`.
+- The release timing series holds its 94 facts on the reference host. Against that host's v1.8.3
+  baseline, the training-epoch benchmark takes 18 to 20% longer per epoch: since the split fix, the
+  example trains on four of its five cases instead of three and validates on one instead of two.
+  The per-step benchmark stays within 5% of the baseline.
+
+### 📝 Documentation
+
+- Reworked the user journeys, config guides, component references, examples and troubleshooting;
+  added a glossary and clarified app packaging, registration and memory-planning contracts.
+  Source links now point to actual code anchors.
+
 ## v1.8.6 (2026-09-23)
 
 ### 💥 Breaking changes
