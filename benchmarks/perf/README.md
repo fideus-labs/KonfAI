@@ -8,19 +8,27 @@ reuses it.
 ## Protocol (enforced, not promised)
 
 1. **A quiet machine, or nothing.** `harness.machine_gate()` refuses to time when the 1-minute load
-   is above 3, the power profile is not `performance`, the GPU is in use by another process, or a
+   is above 3, the power profile is not `performance`, the machine runs on battery (the GPU is then
+   power-capped: its benches measured 1.3 to 1.8x slower), the GPU is in use by another process, or a
    process outside the run holds more than half a core. `--force` records the numbers anyway and
    stamps every warning into the result. The audit of 2026-09-06 measured a 2x spread on every
    absolute number from the profile and the load alone. Ratios measured back to back help compare
    paths on that machine, but are not portable limits across CPUs, filesystems or shared runners.
-2. **A fingerprint beside every number.** Commit (and dirty flag), versions, CPU, GPU and driver,
-   power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`. The
+2. **A fingerprint beside every number.** Commit (and dirty flag), versions, CPU and its temperature,
+   GPU and driver, power profile, load average, thread pin. `harness.fingerprint()`; written by `write_result`. The
    commit is this tree's, so the gate also refuses when the interpreter imports `konfai` from anywhere
    else (an editable install of another checkout, for instance): run from a worktree with that
    worktree on `PYTHONPATH`, or with its own environment.
-3. **Warmup, then the median of three**, every run kept in the JSON. Device timing is synchronized
-   (`cuda_timer`, CUDA events on both ends).
-4. **Memory is the whole process tree** (`PeakSampler`, RSS at 50 ms; children count) and the GPU's
+3. **Warmup, then a median**, every run kept in the JSON: of the repeats for a run of seconds (three
+   to five), of the steps for a training step (200), of the calls that fit in a second for a call of
+   milliseconds (`steady_ms`). Device timing is synchronized (`cuda_timer`, CUDA events on both ends).
+   A compiled variant runs on an inductor cache of its own: a process that loads a cached
+   compilation steps faster than the one that compiled it (13.1 against 16.5 ms on the 2D example).
+   A bench that times one thread (`startup`, `stages`, `reads`) holds the performance cores of a
+   hybrid CPU (`hold_performance_cores`): on an efficiency core a millisecond read took 1.2 to 2.1 ms
+   where it takes 0.9 on a performance one.
+4. **Memory is the whole process tree** (`PeakSampler`, RSS at 50 ms and the process's own kernel
+   high-water mark; children count) and the GPU's
    used memory (`GpuSampler`, 250 ms, baseline recorded): a working budget is not a cap on a process.
 5. **Correctness is part of the timing**: a bench that produces an output compares it (voxels and
    geometry through SimpleITK, never bytes: the MHA header spelling differs between writers) against
@@ -106,10 +114,10 @@ such as `wall_s_whole`, `peak_rss_gib_whole` and `konfai_wall_s_b1`. A failed sc
 `run_all.py` exit nonzero after writing its diagnostic series; it cannot certify a release by
 leaving the failed scenario out. Run `run_all.py --quick` directly when only checking the scripts.
 
-Every bench accepts `--force` (time on a busy machine, warnings recorded), `--repeats N`, `--quick`
-(smaller inputs, one repeat: a smoke test of the bench itself, never a number to publish) and
-`--out DIR`. Results and baselines are git-ignored: a baseline stays on the machine that took it, with its
-fingerprint.
+Every bench accepts `--force` (time on a busy machine, warnings recorded), `--repeats N` (`--steps`
+for the training step, `--seconds` for the reads), `--quick` (smaller inputs, one repeat: a smoke
+test of the bench itself, never a number to publish) and `--out DIR`. Results and baselines are
+git-ignored: a baseline stays on the machine that took it, with its fingerprint.
 
 ## Reading a result
 
@@ -130,6 +138,19 @@ formula, every storage layout returned the reference voxels, no test failed. `fa
 baseline. Its **times and memory** compare to `baselines/<machine>.json` through `compare.py`,
 within one machine class (`harness.machine_class`: `KONFAI_PERF_MACHINE`, else the host name) and
 only when the fingerprints agree. `perf-check` runs the facts first, then the comparison.
+
+A bench puts in `metrics`, which is what `compare.py` reads, only what two runs of one commit
+reproduce within the tolerances: a wall, a step, an epoch, a peak under a budget that binds. What its
+instrument does not resolve stays in the result where it was read, reported and not compared:
+
+- the phases of an epoch and of a prediction loop, which the `[KonfAI]` clocks print to a tenth of a
+  second when most are under one (`epoch_lines`, `phases`), and the startup clock, which prints only
+  past one second (`startup`);
+- the copy, the loss and the optimizer of a training step, each under a millisecond (`medians_ms`);
+- a TRANSFORM peak under a budget larger than the case, which is how many regions were in flight
+  together (`by_budget`; the budget fact bounds it);
+- the plain loop TRANSFORM is measured against, and the profile's cumulative time (`naive`, `cprofile`);
+- the unpinned test run, whose workers oversubscribe every core (`unpinned`).
 
 In CI:
 

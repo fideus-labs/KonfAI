@@ -16,7 +16,7 @@
 
 """TRANSFORM's other routes on the shipped Transform example's cohort: a fold, copies, the whole volume.
 
-    python benchmarks/perf/bench_transform_routes.py [--repeats 3] [--force] [--quick]
+    python benchmarks/perf/bench_transform_routes.py [--repeats 5] [--force] [--quick]
 
 ``examples/Transform/make_dataset.py`` writes six cases that share no grid. Three chains run on a
 scratch copy through the CLI, each in a fresh process: ``Transform.yml`` (Clip, Resample onto one
@@ -90,7 +90,7 @@ def done_line(output: str) -> dict[str, float] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args()

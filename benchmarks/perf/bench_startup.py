@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time
 
-from harness import fingerprint, konfai_executable, machine_gate, write_result
+from harness import fingerprint, hold_performance_cores, konfai_executable, machine_gate, write_result
 
 TOP_MODULES = ("konfai", "torch", "numpy", "dask", "ngff_zarr", "zarr", "SimpleITK", "h5py", "scipy", "ruamel")
 
@@ -96,6 +96,7 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true")
     args = parser.parse_args()
     repeats = 1 if args.quick else args.repeats
+    hold_performance_cores()
     gate = machine_gate(force=args.force)
     fp = fingerprint()
 

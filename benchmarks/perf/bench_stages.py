@@ -50,7 +50,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from facts import fact
-from harness import fingerprint, machine_gate, write_result
+from harness import fingerprint, hold_performance_cores, machine_gate, write_result
 from konfai.data.geometry import Grid
 from konfai.data.sampling import source_index_rows
 from konfai.data.transform import Clip, Normalize, Resample, Standardize, Transform, UnNormalize
@@ -235,6 +235,7 @@ def main() -> None:
     if args.worker:
         _worker(args.worker[0], int(args.worker[1]), int(args.worker[2]))
         return
+    hold_performance_cores()
     gate = machine_gate(force=args.force)
     fp = fingerprint()
     rows = QUICK_ROWS if args.quick else ROWS
