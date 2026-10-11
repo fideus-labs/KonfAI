@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "baselines-konfai"
+dynamic = ["version", "dependencies"]
+description = "The registration baselines of ImagingBenchmarks as KonfAI apps: the authors' code at a pinned version, wrapped, with its settings as configuration."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+
+authors = [
+  { name = "Valentin Boussot", email = "boussot.v@gmail.com" }
+]
+
+[project.urls]
+Homepage = "https://github.com/fideus-labs/ImagingBenchmarks"
+Repository = "https://github.com/fideus-labs/ImagingBenchmarks"
+Issues = "https://github.com/fideus-labs/ImagingBenchmarks/issues"
+License = "https://www.apache.org/licenses/LICENSE-2.0"
+
+[project.scripts]
+baselines-konfai = "baselines_konfai.cli:main"
+
+[tool.setuptools_scm]
+root = "../.."
+tag_regex = "^v(?P<version>.*)$"
+local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: end-to-end tests that run a real KonfAI preset (heavy).",
+  "gpu: requires a CUDA device.",
+  "slow: takes more than a few seconds.",
+]
+
+[tool.setuptools.packages.find]
+include = ["baselines_konfai*"]  # bundles/ holds the apps, not Python

@@ -1,0 +1,18 @@
+{
+    "display_name": "ConvexAdam (MIND)",
+    "short_description": "ConvexAdam with MIND-SSC features, the authors' code at a pinned commit with its defaults: the ImagingBenchmarks baseline <code>convexadam_mind</code>.",
+    "description": "Siebert et al.'s ConvexAdam: a coupled-convex initialisation on a coarse grid, then Adam instance optimisation on a finer one, both on MIND-SSC features. This app runs <a href='https://github.com/multimodallearning/convexAdam'>the authors' repository</a> at commit b229e52 with <code>convex_adam_pt(fixed, moving)</code> and every setting at its default, exactly as the ImagingBenchmarks leaderboards run it. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. A GPU is needed. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS): the fixed point x matches x + u(x) in the moving image.<br><br><b>How to cite:</b><br><cite>H. Siebert, L. Hansen, M. P. Heinrich, <i>Fast 3D registration with accurate optimisation and little learning for Learn2Reg 2021</i>, MICCAI Workshops 2021.</cite>",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {"display_name": "Fixed image", "volume_type": "VOLUME", "required": true},
+        "Moving": {"display_name": "Moving image", "volume_type": "VOLUME", "required": true},
+        "FixedMask": {"display_name": "Fixed mask (ignored by this baseline)", "volume_type": "SEGMENTATION", "required": false, "default": "ones"},
+        "MovingMask": {"display_name": "Moving mask (ignored by this baseline)", "volume_type": "SEGMENTATION", "required": false, "default": "ones"}
+    },
+    "outputs": {
+        "DisplacementField": {"display_name": "Displacement field", "volume_type": "VOLUME", "required": true}
+    }
+}
