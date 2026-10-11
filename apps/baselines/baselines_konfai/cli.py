@@ -16,7 +16,7 @@
 
 """Command-line wrapper for the baseline apps: ``baselines-konfai register <baseline> -i fixed -i moving -o out``.
 
-The baselines live on Hugging Face (``fideus-labs/Baselines``); ``BASELINES_KONFAI_REPO`` points at a local
+The baselines live on Hugging Face (``VBoussot/ImpactReg``); ``BASELINES_KONFAI_REPO`` points at a local
 directory of app folders instead.
 """
 
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from konfai_apps.cli import build_app_cli
 
-BASELINES_KONFAI_REPO = os.environ.get("BASELINES_KONFAI_REPO", "fideus-labs/Baselines")
+BASELINES_KONFAI_REPO = os.environ.get("BASELINES_KONFAI_REPO", "VBoussot/ImpactReg")
 
 
 def resolve_app(args: argparse.Namespace) -> str:
