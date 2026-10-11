@@ -23,8 +23,7 @@ matches `x + u(x)` in the moving one.
 | app | runs | pinned at |
 |---|---|---|
 | `ConvexAdam_MIND` | `convex_adam_pt` of multimodallearning/convexAdam, defaults | `b229e52` |
-| `UniGradICON`, `MultiGradICON` | `unigradicon-register` with the authors' weights, 50 steps of instance optimisation on LNCC | unigradicon 1.0.5, weights by hash |
-| `UniGradICON_lungmask`, `MultiGradICON_lungmask` | the same, the lung masks given to the command | unigradicon 1.0.5 |
+| `UniGradICON`, `MultiGradICON` | `unigradicon-register` with the authors' weights, 50 steps of instance optimisation on LNCC; `--set masks=true` multiplies each image by its lung mask, the authors' lung protocol | unigradicon 1.0.5, weights by hash |
 | `Demons` | ITK's fast symmetric forces Demons as SimpleITK's Demons notebook runs it | SimpleITK ≥ 2.5 |
 | `CorrField` | `corrfield.py` of the Lung250M-4B repository, defaults, on a 1 mm grid | `53598ca` |
 | `Anatomix_ConvexAdam` | ConvexAdam on anatomix and MIND-SSC features, the anatomix pipeline's defaults | `4c86aee`, weights `842cfe9` |
