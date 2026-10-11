@@ -1,0 +1,38 @@
+{
+    "display_name": "uniGradICON, lung protocol",
+    "short_description": "uniGradICON with the authors' lung protocol: each image multiplied by its lung mask before registration, as their Learn2Reg lung submissions; the ImagingBenchmarks baseline <code>unigradicon_lungmask</code>. The field means nothing outside the lungs.",
+    "description": "uniGradICON with the authors' lung protocol: each image multiplied by its lung mask before registration, as their Learn2Reg lung submissions; the ImagingBenchmarks baseline <code>unigradicon_lungmask</code>. The field means nothing outside the lungs. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. The command knows two modalities, <code>ct</code> (clamped to [-1000, 1000] HU) and <code>mri</code> (minimum to the 99th percentile), read off the intensities. The weights come from <a href='https://github.com/uncbiag/uniGradICON'>the authors' release</a>, checked against their hash; the package is pinned at 1.0.5. A GPU is needed. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).<br><br><b>How to cite:</b><br><cite>L. Tian et al., <i>uniGradICON: A foundation model for medical image registration</i>, MICCAI 2024; B. Demir et al., <i>multiGradICON</i>, WBIR 2024.</cite>",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed the lung mask",
+            "volume_type": "SEGMENTATION",
+            "required": true
+        },
+        "MovingMask": {
+            "display_name": "Moving the lung mask",
+            "volume_type": "SEGMENTATION",
+            "required": true
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

@@ -1,0 +1,40 @@
+{
+    "display_name": "anatomix + ConvexAdam",
+    "short_description": "The ICLR 2025 pipeline of neel-dey/anatomix at a pinned commit, through its own convex_adam() with the defaults of its script: 16 anatomix and 12 MIND-SSC channels compared by SSD, diffusion weight 0.75, convex grid 2 with search half-width 1, 80 Adam steps on a grid of 2; CT clipped to [-450, 450] HU. The ImagingBenchmarks baseline <code>anatomix_convexadam</code>.",
+    "description": "The ICLR 2025 pipeline of neel-dey/anatomix at a pinned commit, through its own convex_adam() with the defaults of its script: 16 anatomix and 12 MIND-SSC channels compared by SSD, diffusion weight 0.75, convex grid 2 with search half-width 1, 80 Adam steps on a grid of 2; CT clipped to [-450, 450] HU. The ImagingBenchmarks baseline <code>anatomix_convexadam</code>. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. The weights come from the authors' Hugging Face repository at a pinned revision. A GPU is needed. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

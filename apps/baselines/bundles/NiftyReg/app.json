@@ -1,0 +1,40 @@
+{
+    "display_name": "NiftyReg",
+    "short_description": "reg_f3d with its defaults: cubic B-spline with control points every 5 voxels, NMI with 64 bins, bending energy 0.001, first-order penalty 0.01, no Jacobian penalty, 3 levels; NiftyReg v2.0.0 built from the authors' repository on first use (cmake and a C++ compiler needed). The ImagingBenchmarks baseline <code>niftyreg</code>. CPU.",
+    "description": "reg_f3d with its defaults: cubic B-spline with control points every 5 voxels, NMI with 64 bins, bending energy 0.001, first-order penalty 0.01, no Jacobian penalty, 3 levels; NiftyReg v2.0.0 built from the authors' repository on first use (cmake and a C++ compiler needed). The ImagingBenchmarks baseline <code>niftyreg</code>. CPU. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. Masks are ignored by this baseline. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

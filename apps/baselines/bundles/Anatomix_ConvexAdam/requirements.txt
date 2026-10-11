@@ -1,0 +1,5 @@
+baselines-konfai
+nibabel
+monai==1.6.1
+huggingface_hub
+scikit-learn

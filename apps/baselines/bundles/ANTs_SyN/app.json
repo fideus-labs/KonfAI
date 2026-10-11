@@ -1,0 +1,40 @@
+{
+    "display_name": "ANTs SyN",
+    "short_description": "SyN as the Learn2Reg 2024 organisers ran it for LUMIR (antsRegistrationSyN[so]): cross-correlation of radius 2, from the identity, 100x70x50x20 iterations, single precision, on the ANTs 2.6.5 release binaries fetched on first use. The ImagingBenchmarks baseline <code>ants</code>. CPU.",
+    "description": "SyN as the Learn2Reg 2024 organisers ran it for LUMIR (antsRegistrationSyN[so]): cross-correlation of radius 2, from the identity, 100x70x50x20 iterations, single precision, on the ANTs 2.6.5 release binaries fetched on first use. The ImagingBenchmarks baseline <code>ants</code>. CPU. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. Masks are ignored by this baseline. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

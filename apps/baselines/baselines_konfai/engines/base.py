@@ -25,8 +25,12 @@ NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine 
 annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
+import hashlib
 import os
+import shutil
 import subprocess  # nosec B404
+import urllib.request
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -56,6 +60,81 @@ def pinned_source(name: str, url: str, commit: str) -> Path:
         subprocess.run(["git", "clone", "--quiet", url, str(target)], check=True)  # nosec B603 B607
         subprocess.run(["git", "-C", str(target), "checkout", "--quiet", commit], check=True)  # nosec B603 B607
     return target
+
+
+def fetch(url: str, target: Path, sha256: str | None = None) -> Path:
+    """``url`` downloaded once to ``target`` and, when a hash is given, checked against it."""
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        urllib.request.urlretrieve(url, part)  # nosec B310 - the authors' release, checked below
+        with part.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        if sha256 and digest != sha256:
+            part.unlink()
+            raise RuntimeError(f"{url} does not match its recorded hash")
+        part.rename(target)
+    return target
+
+
+def pinned_archive(name: str, url: str, sha256: str) -> Path:
+    """A release archive at ``url``, downloaded once into the cache, checked against ``sha256`` and unpacked: the
+    binaries a baseline was measured with."""
+    target = cache_dir() / f"{name}-{sha256[:12]}"
+    if not (target / ".unpacked").exists():
+        archive = fetch(url, target / "archive", sha256)
+        if zipfile.is_zipfile(archive):
+            with zipfile.ZipFile(archive) as packed:
+                packed.extractall(target)  # nosec B202 - our own pinned archive
+                for entry in packed.infolist():  # zipfile drops the modes: the binaries must stay executable
+                    if mode := (entry.external_attr >> 16) & 0o777:
+                        (target / entry.filename).chmod(mode)
+        else:
+            shutil.unpack_archive(str(archive), str(target), "gztar")
+        archive.unlink()
+        (target / ".unpacked").touch()
+    return target
+
+
+def pinned_environment(root: Path, python: str, installs: list[list[str]]) -> Path:
+    """A virtual environment at ``root/venv`` on its own Python, made once by uv (``pip install uv``): for the tools
+    whose pins do not run on the host's Python. ``installs`` are ``pip install`` argument lists, run in order."""
+    try:
+        import uv
+
+        command = uv.find_uv_bin()
+    except ImportError:
+        command = shutil.which("uv") or ""
+    if not command:
+        raise RuntimeError("this baseline builds its own Python environment with uv: pip install uv")
+    venv = root / "venv"
+    if not (venv / ".ready").exists():
+        subprocess.run([command, "venv", "--quiet", "--clear", "--python", python, str(venv)], check=True)  # nosec B603
+        for arguments in installs:
+            subprocess.run(  # nosec B603
+                [
+                    command,
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--no-cache",
+                    "--python",
+                    str(venv / "bin" / "python"),
+                    *arguments,
+                ],
+                check=True,
+            )
+        (venv / ".ready").touch()
+    return venv
+
+
+def built_source(name: str, url: str, commit: str, build: Callable[[Path], None]) -> Path:
+    """The authors' repository at ``commit``, built once by ``build`` (a marker says it is done)."""
+    source = pinned_source(name, url, commit)
+    if not (source / ".built").exists():
+        build(source)
+        (source / ".built").touch()
+    return source
 
 
 def field_from_voxels(displacement: np.ndarray, fixed: sitk.Image) -> np.ndarray:

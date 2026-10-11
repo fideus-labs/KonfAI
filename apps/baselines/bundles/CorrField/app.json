@@ -1,0 +1,39 @@
+{
+    "display_name": "corrField",
+    "short_description": "corrField as the Lung250M-4B authors ship it, at a pinned commit, with its defaults: Foerstner keypoints inside the fixed image's lung mask, MIND-SSC, discrete matching, thin-plate splines. The ImagingBenchmarks baseline <code>corrfield</code>, lungs only: the fixed mask is required.",
+    "description": "corrField as the Lung250M-4B authors ship it, at a pinned commit, with its defaults: Foerstner keypoints inside the fixed image's lung mask, MIND-SSC, discrete matching, thin-plate splines. The ImagingBenchmarks baseline <code>corrfield</code>, lungs only: the fixed mask is required. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. The pair is brought to a grid of at least 1 mm and at most 50 million voxels, and the field back onto the fixed grid. A GPU is needed. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (the lungs)",
+            "volume_type": "SEGMENTATION",
+            "required": true
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

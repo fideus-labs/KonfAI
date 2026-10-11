@@ -1,0 +1,40 @@
+{
+    "display_name": "greedy",
+    "short_description": "greedy as its Quick Start runs it: normalised cross-correlation over a 2x2x2 window, 100x50x10 iterations, the deformable stage alone; the picsl_greedy package at a pinned version. One modality only. The ImagingBenchmarks baseline <code>greedy</code>. CPU.",
+    "description": "greedy as its Quick Start runs it: normalised cross-correlation over a 2x2x2 window, 100x50x10 iterations, the deformable stage alone; the picsl_greedy package at a pinned version. One modality only. The ImagingBenchmarks baseline <code>greedy</code>. CPU. The pair must be aligned (rigidly for one patient, by an affine transform between two subjects): only the deformable stage runs. Masks are ignored by this baseline. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

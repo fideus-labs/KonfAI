@@ -1,0 +1,40 @@
+{
+    "display_name": "BrainMorph",
+    "short_description": "BrainMorph as the LUMIR organisers run it: 512 keypoints, the H model, thin-plate splines without regularisation; a keypoint network trained on 100,000 brain MR images. The ImagingBenchmarks baseline <code>brainmorph</code>.",
+    "description": "BrainMorph as the LUMIR organisers run it: 512 keypoints, the H model, thin-plate splines without regularisation; a keypoint network trained on 100,000 brain MR images. The ImagingBenchmarks baseline <code>brainmorph</code>. Brain MR, aligned pairs. <a href='https://github.com/alanqrwang/brainmorph/tree/106b029d6048d3d9d2f73cf7996a0b0813cbc4ae'>The authors' repository</a> at the commit of the LUMIR call (later commits dropped the H model), with its dependencies at versions of that date (torch 2.3 on Python 3.11) in an environment uv builds on first use (5 GB), and the weights checked against their hash. A GPU is recommended, up to the Ada generation: torch 2.3 has no kernels for Blackwell GPUs, so there the app runs on the CPU (no <code>--gpu</code>). Masks are ignored by this baseline. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).<br><br><b>How to cite:</b><br><cite>A. Q. Wang et al., <i>BrainMorph: A foundational keypoint model for robust and flexible brain MRI registration</i>, MELBA 2025.</cite>",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

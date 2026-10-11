@@ -1,0 +1,40 @@
+{
+    "display_name": "SynthMorph",
+    "short_description": "FreeSurfer's <code>mri_synthmorph register</code> with its defaults (regularisation 0.5, 7 integration steps, extent 256), the deformable model alone: a network trained on synthetic brain images of any contrast. The ImagingBenchmarks baseline <code>synthmorph</code>.",
+    "description": "FreeSurfer's <code>mri_synthmorph register</code> with its defaults (regularisation 0.5, 7 integration steps, extent 256), the deformable model alone: a network trained on synthetic brain images of any contrast. The ImagingBenchmarks baseline <code>synthmorph</code>. Brain MR, aligned pairs: the tool's help says the deformable model assumes prior affine alignment. What the official image <code>freesurfer/synthmorph</code> holds, without a container: the script and its package from <a href='https://github.com/freesurfer/freesurfer/tree/21b31bf1b58ac195567c7777b21228130e4326e1/mri_synthmorph'>FreeSurfer's repository</a> at a pinned commit, the weights (3.5 GB) checked against their hash, and TensorFlow 2.17 on Python 3.12 in an environment uv builds on first use (7 GB). A GPU is recommended, up to the Ada generation: TensorFlow 2.17 has no kernels for Blackwell GPUs, so there the app runs on the CPU (no <code>--gpu</code>). Masks are ignored by this baseline. Output: the displacement field on the fixed grid, in mm along the world axes (ITK, LPS).<br><br><b>How to cite:</b><br><cite>M. Hoffmann et al., <i>Anatomy-aware and acquisition-agnostic joint registration with SynthMorph</i>, Imaging Neuroscience 2024.</cite>",
+    "task": "registration",
+    "tta": 0,
+    "mc_dropout": 0,
+    "models": [],
+    "inputs": {
+        "Fixed": {
+            "display_name": "Fixed image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "Moving": {
+            "display_name": "Moving image",
+            "volume_type": "VOLUME",
+            "required": true
+        },
+        "FixedMask": {
+            "display_name": "Fixed mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        },
+        "MovingMask": {
+            "display_name": "Moving mask (ignored by this baseline)",
+            "volume_type": "SEGMENTATION",
+            "required": false,
+            "default": "ones"
+        }
+    },
+    "outputs": {
+        "DisplacementField": {
+            "display_name": "Displacement field",
+            "volume_type": "VOLUME",
+            "required": true
+        }
+    }
+}

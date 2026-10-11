@@ -1,0 +1,4 @@
+baselines-konfai
+unigradicon==1.0.5
+icon_registration==1.1.8
+itk==6.0b2
