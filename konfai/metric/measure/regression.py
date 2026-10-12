@@ -203,6 +203,11 @@ class SSIM(MaskedLoss):
     torch on the tensors' device. The map is built slab by slab along the first spatial axis, so the
     five window statistics it needs hold a few MiB at a time whatever the case.
 
+    Under a mask, both volumes are set to 0 outside it and the map is averaged over the mask's voxels
+    of the cropped extent, the map as it is (a window at the mask's edge reads the zeros past it): the
+    masked SSIM of SynthRAD's evaluation (``crop(ssim_map, 3)[crop(mask, 3)].mean()``). The voxels
+    outside the mask are not scored: each of them would compare two zeros and score 1.
+
     A voxel's window reaches the window's radius past a patch's faces: reducible from patches read
     with that radius of halo, each scoring the map voxels centred in its own grid slot.
 
@@ -247,9 +252,12 @@ class SSIM(MaskedLoss):
         return tensor
 
     @staticmethod
-    def _map_sum(x: torch.Tensor, y: torch.Tensor, data_range: float) -> tuple[torch.Tensor, int]:
+    def _map_sum(
+        x: torch.Tensor, y: torch.Tensor, data_range: float, keep: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | int]:
         """The sum (float64) and voxel count of skimage's SSIM map over the valid region of one
-        ``[N, *spatial]`` pair, its operations in skimage's order."""
+        ``[N, *spatial]`` pair, its operations in skimage's order; with ``keep`` (bool, the valid
+        region's shape, broadcast over the channels), over the map voxels it keeps."""
         window = SSIM.window
         voxels = window ** (x.dim() - 1)
         cov_norm = voxels / (voxels - 1)
@@ -269,7 +277,10 @@ class SSIM(MaskedLoss):
         a2 = vxy.mul_(2).add_(c2)
         b2 = vx.add_(vy).add_(c2)
         s = a1.mul_(a2).div_(b1.mul_(b2))
-        return s.sum(dtype=torch.float64), s.numel()
+        if keep is None:
+            return s.sum(dtype=torch.float64), s.numel()
+        keep = keep.expand_as(s)
+        return torch.where(keep, s, 0.0).sum(dtype=torch.float64), keep.sum()
 
     @staticmethod
     def _map(x: torch.Tensor, y: torch.Tensor, data_range: float) -> torch.Tensor:
@@ -297,8 +308,8 @@ class SSIM(MaskedLoss):
         """The sum and voxel count of one ``[C, *spatial]`` pair's SSIM map over the map voxels
         centred in ``core`` (slices of the spatial axes; ``None`` is the whole pair). Each slab reads
         the window's radius past the core and nothing more: a patch read with that radius of halo
-        scores its grid slot exactly as the whole volume does. A mask multiplies both, slab by slab,
-        and the count runs over the whole cropped extent, as the masked mode always was."""
+        scores its grid slot exactly as the whole volume does. A mask sets both to 0 outside it, slab
+        by slab, and the sum and the count run over the map voxels centred in the mask."""
         radius = (SSIM.window - 1) // 2
         spatial = x.shape[1:]
         if core is None:
@@ -311,20 +322,22 @@ class SSIM(MaskedLoss):
         plane = x.shape[0] * int(np.prod([stop - start + 2 * radius for start, stop in spans[1:]]))
         planes = max(2 * radius + 2, SSIM.slab_bytes // (plane * 8))  # the maps are float64
         total = torch.zeros((), dtype=torch.float64, device=x.device)
-        count = 0
+        count: torch.Tensor | int = 0
         first, last = spans[0]
         for start in range(first, last, planes):
             rows = slice(start - radius, min(last, start + planes) + radius)
             xs, ys = x[(slice(None), rows, *inner)], y[(slice(None), rows, *inner)]
+            centres = None
             if mask is not None:
                 # torch.where, not a float x bool product: on a cache-resident slab the mixed-dtype
                 # product runs an unvectorised cast path (10.4 ms per 14 MiB slab against 1.3).
                 keep = mask[(slice(None), rows, *inner)]
                 xs, ys = torch.where(keep, xs, 0.0), torch.where(keep, ys, 0.0)
-            slab_total, slab_count = SSIM._map_sum(xs, ys, data_range)
+                centres = keep[(slice(None), *(slice(radius, size - radius) for size in keep.shape[1:]))]
+            slab_total, slab_count = SSIM._map_sum(xs, ys, data_range, centres)
             total += slab_total
-            count += slab_count
-        return float(total), count
+            count = count + slab_count
+        return float(total), int(count)
 
     @staticmethod
     def _check_extent(x: torch.Tensor) -> None:
@@ -336,10 +349,11 @@ class SSIM(MaskedLoss):
 
     @staticmethod
     def _ssim(x: torch.Tensor, y: torch.Tensor, mask: torch.Tensor | None, data_range: float) -> float:
-        """The SSIM of one ``[C, *spatial]`` pair: the mean of its map over the cropped extent."""
+        """The SSIM of one ``[C, *spatial]`` pair: the mean of its map over the cropped extent, or over
+        the mask's voxels in it; NaN for a mask with none there."""
         SSIM._check_extent(x)
         total, count = SSIM._map_sum_over(x, y, mask, data_range, None)
-        return total / count
+        return total / count if count else float("nan")
 
     @staticmethod
     def _differentiable_ssim(
@@ -347,9 +361,14 @@ class SSIM(MaskedLoss):
     ) -> torch.Tensor:
         """``_ssim`` with its gradient: the whole map at once, which autograd keeps for the backward."""
         SSIM._check_extent(x)
-        if mask is not None:
-            x, y = torch.where(mask, x, 0.0), torch.where(mask, y, 0.0)
-        return SSIM._map(x.double(), y.double(), data_range).mean()
+        if mask is None:
+            return SSIM._map(x.double(), y.double(), data_range).mean()
+        x, y = torch.where(mask, x, 0.0), torch.where(mask, y, 0.0)
+        ssim_map = SSIM._map(x.double(), y.double(), data_range)
+        radius = (SSIM.window - 1) // 2
+        centres = mask[(slice(None), *(slice(radius, size - radius) for size in mask.shape[1:]))].expand_as(ssim_map)
+        # an empty selection keeps a finite value and a zero gradient
+        return torch.where(centres, ssim_map, 0.0).sum() / centres.sum().clamp(min=1)
 
     def _pairs(
         self, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
@@ -394,7 +413,9 @@ class SSIM(MaskedLoss):
             if pair is None:
                 items.append((0.0, 0, False))
             else:
-                items.append((*SSIM._map_sum_over(*pair, self._dynamic_range, core), True))
+                total, count = SSIM._map_sum_over(*pair, self._dynamic_range, core)
+                # a masked item is scored where its mask holds a voxel of the cropped extent
+                items.append((total, count, pair[2] is None or count > 0))
         return ("items", items)
 
     def _finish(self, total: float, count: int) -> float:
