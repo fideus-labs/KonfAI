@@ -521,16 +521,14 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
         tree = _yaml_safe(dict(config), "config")
         _anchor_model_paths(tree, Path.cwd())
         return tree  # type: ignore[return-value]
-    from ruamel.yaml import YAML
-
+    from konfai.utils.config import _yaml
     from konfai.utils.runtime.environment import register_scratch_config
 
     source = Path(config)
     scratch = Path(tempfile.mkdtemp(prefix="konfai_config_"))
     register_scratch_config(scratch)
     copy = scratch / source.name
-    yaml = YAML()
-    yaml.width = 4096  # a long absolute path stays on its line
+    yaml = _yaml()
     with source.open("r", encoding="utf-8") as file:
         tree = yaml.load(file)
     if _anchor_model_paths(tree, source.resolve().parent):
@@ -542,9 +540,18 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
 
 
 def _anchor_model_paths(tree: object, base: Path) -> bool:
-    """Make every relative model-YAML ``classpath`` under ``tree`` absolute against ``base``;
-    whether any changed. The catalog spelling (``default|Name.yml``) is not a path."""
+    """Make every relative model-YAML ``classpath`` and every relative ``!include`` under ``tree``
+    absolute against ``base``; whether any changed. The catalog spelling (``default|Name.yml``) and a
+    file on the Hub are not paths."""
+    from konfai.utils.config import _HUB_FILE, Included
+
     changed = False
+    if isinstance(tree, Included):
+        reference, hash_, keys = tree.spec.partition("#")
+        if not Path(reference).is_absolute() and not (_HUB_FILE.match(reference) and not (base / reference).exists()):
+            tree.spec = str((base / reference).resolve()) + hash_ + keys
+            changed = True
+        return changed  # its own content is read from its file, not from this tree
     if isinstance(tree, dict):
         classpath = tree.get("classpath")
         if (

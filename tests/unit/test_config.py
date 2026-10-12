@@ -1701,3 +1701,55 @@ def test_a_prediction_dataset_without_batch_size_measures_its_batch(write_config
     write_config("Predictor:\n  Dataset:\n    num_workers: 0\n    batch_size: 1\n")
     dataset = apply_config("Predictor")(DataPrediction)()
     assert (dataset.batch_size, dataset.measures_batch) == (1, False)
+
+
+def test_an_included_block_binds_and_the_reference_is_written_back(write_config) -> None:
+    """``!include FILE#KEY`` binds the block another file holds, and the write-back keeps the reference, not the
+    block: the included file stays the one place the block is written, untouched by the run."""
+    config_path = write_config("Root:\n  child: !include shared.yml#Blocks.child\n  name: here\n")
+    shared = config_path.parent / "shared.yml"
+    shared.write_text("Blocks:\n  child:\n    value: 3\n", encoding="utf-8")
+
+    @config("child")
+    class Child:
+        def __init__(self, value: int = 1, scale: float = 2.0) -> None:
+            self.value, self.scale = value, scale
+
+    class Root:
+        def __init__(self, child: Child = Child(), name: str = "") -> None:
+            self.child, self.name = child, name
+
+    with strict_config("Root"):
+        root = apply_config("Root")(Root)()
+
+    assert (root.child.value, root.child.scale, root.name) == (3, 2.0, "here")
+    written = config_path.read_text(encoding="utf-8")
+    assert "child: !include shared.yml#Blocks.child" in written and "value: 3" not in written
+    assert shared.read_text(encoding="utf-8") == "Blocks:\n  child:\n    value: 3\n"
+
+
+def test_an_include_that_names_nothing_or_closes_a_cycle_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "a.yml").write_text("Root: !include b.yml#Root\n", encoding="utf-8")
+    (tmp_path / "b.yml").write_text("Root: !include a.yml#Root\n", encoding="utf-8")
+    (tmp_path / "c.yml").write_text("Root: !include e.yml#Absent\n", encoding="utf-8")
+    (tmp_path / "d.yml").write_text("Root: !include e.yml#Root.value\n", encoding="utf-8")
+    (tmp_path / "e.yml").write_text("Root:\n  value: 3\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="cycle"):
+        _load_tree(tmp_path / "a.yml")
+    with pytest.raises(ConfigError, match="holds no 'Absent'"):
+        _load_tree(tmp_path / "c.yml")
+    with pytest.raises(ConfigError, match="not a block"):
+        _load_tree(tmp_path / "d.yml")
+
+
+def test_the_api_anchors_a_relative_include_to_the_config_files_directory(tmp_path: Path) -> None:
+    from konfai.api import _config_copy
+
+    folder = tmp_path / "experiment"
+    folder.mkdir()
+    (folder / "shared.yml").write_text("Dataset:\n  batch_size: 2\n", encoding="utf-8")
+    (folder / "Evaluation.yml").write_text("Evaluator:\n  Dataset: !include shared.yml#Dataset\n", encoding="utf-8")
+    copy = Path(_config_copy(folder / "Evaluation.yml"))
+    assert copy.parent != folder
+    assert f"Dataset: !include {(folder / 'shared.yml').resolve()}#Dataset" in copy.read_text(encoding="utf-8")
+    assert _load_tree(copy)["Evaluator"]["Dataset"]["batch_size"] == 2

@@ -38,12 +38,106 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import ruamel.yaml
+from ruamel.yaml.comments import CommentedMap
 
 from konfai.utils.errors import ConfigError, KonfAIWarning
 
-yaml = ruamel.yaml.YAML()
-yaml.width = 4096  # the write-back keeps a long line (a label list, a path) on its line
 _log = logging.getLogger(__name__)
+
+#: ``owner/name[@revision]:path``: a file of a Hugging Face model repository.
+_HUB_FILE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)(?:@(?P<revision>[^:]+))?:(?P<path>[^:]+)$")
+#: The files whose includes are being read, outermost first: an include that names one of them is a cycle.
+_including: list[Path] = []
+
+
+class Included(CommentedMap):
+    """A block another file holds, named in a config as ``!include FILE[#KEY.KEY]``.
+
+    ``FILE`` is a path relative to the file that names it, an absolute path, or ``owner/name[@revision]:path``
+    in a Hugging Face model repository; ``#KEY.KEY`` picks a block inside it, the whole file otherwise. The block
+    binds as if it were written in place, and the config is written back with the reference, never with the
+    block's content: the file it comes from stays the one place it is written, and a default the binder resolves
+    inside it is not recorded.
+    """
+
+    yaml_tag = "!include"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.spec = ""
+
+    def __deepcopy__(self, memo: dict) -> "Included":
+        copy = super().__deepcopy__(memo)
+        copy.spec = self.spec
+        return copy
+
+    @classmethod
+    def to_yaml(cls, representer: Any, node: "Included") -> Any:
+        return representer.represent_scalar(cls.yaml_tag, node.spec)
+
+    @classmethod
+    def from_yaml(cls, constructor: Any, node: Any) -> "Included":
+        name = str(node.start_mark.name or "")
+        base = Path(name).resolve().parent if name and not name.startswith("<") else Path.cwd()
+        return _included(str(constructor.construct_scalar(node)), base)
+
+
+def _yaml() -> ruamel.yaml.YAML:
+    """KonfAI's YAML: round trip, long lines kept, ``!include`` read and written. One per load: ruamel's reader
+    is not reentrant, and an include is read while the file naming it is."""
+    instance = ruamel.yaml.YAML()
+    instance.width = 4096  # the write-back keeps a long line (a label list, a path) on its line
+    instance.register_class(Included)
+    return instance
+
+
+yaml = _yaml()
+
+
+def include_path(spec: str, base: Path) -> Path:
+    """The file an ``!include`` names (see :class:`Included`), fetched from the Hub when it lives there."""
+    reference = spec.partition("#")[0]
+    hub = _HUB_FILE.match(reference)
+    if hub is not None and not (base / reference).exists():
+        from huggingface_hub import hf_hub_download
+
+        # the revision the include names; without one, the repository's default branch, as the author wrote it
+        return Path(hf_hub_download(hub["repo"], hub["path"], revision=hub["revision"]))  # nosec B615
+    return (Path(reference) if Path(reference).is_absolute() else base / reference).resolve()
+
+
+def _included(spec: str, base: Path) -> Included:
+    path = include_path(spec, base)
+    if not path.is_file():
+        raise ConfigError(
+            f"'!include {spec}' names no file ('{path}').",
+            "An include is a path relative to the file that names it, an absolute path, or"
+            " 'owner/name[@revision]:path' on the Hugging Face Hub, then '#KEY.KEY' for a block inside it.",
+        )
+    if path in _including:
+        chain = " -> ".join(str(p) for p in [*_including, path])
+        raise ConfigError(
+            f"'!include {spec}' closes a cycle: {chain}.", "An included file cannot include its includer."
+        )
+    _including.append(path)
+    try:
+        block: Any = _load_tree(path)
+    finally:
+        _including.pop()
+    keys = spec.partition("#")[2]
+    for key in filter(None, keys.split(".")):
+        if not isinstance(block, Mapping) or key not in block:
+            held = sorted(str(k) for k in block) if isinstance(block, Mapping) else []
+            raise ConfigError(f"'!include {spec}': '{path}' holds no '{key}' there.", f"It holds {held}.")
+        block = block[key]
+    if not isinstance(block, Mapping):
+        raise ConfigError(
+            f"'!include {spec}' names a {type(block).__name__}, not a block.",
+            "An include stands for a block (a mapping); write a single value in place.",
+        )
+    included = Included(block)
+    included.spec = spec
+    return included
 
 
 @dataclass(frozen=True)
@@ -88,7 +182,7 @@ def _load_tree(filename: Path | str) -> dict:
     """The file's YAML tree (an empty file is an empty tree); a syntax error is a ConfigError with its line."""
     with open(filename, encoding="utf-8") as stream:
         try:
-            tree = yaml.load(stream)
+            tree = _yaml().load(stream)
         except ruamel.yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
             location = f" at line {mark.line + 1}" if mark is not None else ""

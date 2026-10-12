@@ -114,6 +114,27 @@ write your own.
 A value written `default|...` in the code is a default the config can override: `train_name` defaults to
 `default|TRAIN_01`, meaning `TRAIN_01` unless you write another name.
 
+## Sharing a block between files
+
+`!include` writes, in place of a block, a block another file holds:
+
+```yaml
+Predictor:
+  Dataset: !include shared.yml#Predictor.Dataset
+```
+
+| Form | Example | Reads |
+| --- | --- | --- |
+| a path | `!include shared.yml`, `!include ../common/Dataset.yml` | the file, relative to the file that names it |
+| a path and a key | `!include shared.yml#Predictor.Dataset` | that block of the file |
+| a Hub file | `!include owner/name@v1.8.7:App/Prediction.yml#Predictor.Dataset` | that file of a Hugging Face model repository, at that revision |
+
+The block binds as if it were written in place. The write-back keeps the `!include` line, never the block's
+content: the included file stays the one place the block is written, and a default resolved inside it is not
+recorded. An include stands for a block, not a single value; one that closes a cycle is refused. The Python
+API copies a config file before reading it and makes a relative include absolute in the copy, as it does a
+relative model `classpath`.
+
 ## The `Dataset` block
 
 Every workflow reads its data through a `Dataset:` block. The keys below are shared; each workflow page lists
