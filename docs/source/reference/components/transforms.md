@@ -66,7 +66,7 @@ loaded whole.
 | `SelectLabel` | Remap labels, given as `"(old,new)"`. | `labels` | no | no | yes |
 | `Mask` | Set voxels outside a mask to `value_outside`. The mask is a group or a file. | `path="./default.mha", value_outside=0` | no | no | yes |
 | `KeepLabels` | Keep the labels another group of the case also holds, set the others to 0: a label is then scored only when both maps hold it. | `group` | no | no | yes |
-| `Otsu` | A body mask: 1 above Otsu's threshold of the whole case (ITK's, 128 bins), one `uint8` channel; a multichannel image is the mean of its channels. | | no | no | yes |
+| `Otsu` | A body mask: 1 above Otsu's threshold of the whole case (ITK's, 128 bins), one `uint8` channel; a multichannel image is the mean of its channels. | | no | no | no |
 | `Dilate` | Binary dilation. | `dilate=1` | no | no | yes |
 | `Sum` | Sum over `dim`. | `dim=0` | no † | no | yes over channels |
 | `MergeLabels` | Merge the label maps of a `combine: Concat` ensemble of disjoint tasks into one (TotalSegmentator's five tasks). | | no | no | yes |

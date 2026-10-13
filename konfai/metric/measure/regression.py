@@ -373,14 +373,18 @@ class SSIM(MaskedLoss):
     def _pairs(
         self, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] | None]:
-        """Per batch item, the float pair and its bool mask; ``None`` for an item its mask empties."""
+        """Per batch item, the float pair and its bool mask; ``None`` for an item whose mask holds no voxel of the
+        cropped extent, where the map is: the three reductions then score the same items."""
         self._require_target(targets)
         target = targets[0].to(device=output.device)
         mask = self.get_mask(list(targets[1:]))
         mask = None if mask is None else mask.to(device=output.device)
+        radius = (SSIM.window - 1) // 2
         for batch in range(output.shape[0]):
-            mask_b = None if mask is None else mask[batch, ...]
-            if mask_b is not None and not torch.any(mask_b):
+            mask_b = scored = None if mask is None else mask[batch, ...]
+            if mask_b is not None and all(size >= SSIM.window for size in mask_b.shape[1:]):
+                scored = mask_b[(slice(None), *(slice(radius, size - radius) for size in mask_b.shape[1:]))]
+            if scored is not None and not torch.any(scored):
                 yield None
             else:
                 yield output[batch].float(), target[batch].float(), mask_b

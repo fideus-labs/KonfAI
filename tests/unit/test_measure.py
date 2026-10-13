@@ -622,6 +622,27 @@ class TestSSIM:
 
         assert value < 0.3
 
+    def test_an_item_masked_on_its_border_alone_is_skipped_by_the_metric_the_loss_and_the_stream(self):
+        # The map is cropped by three voxels: a mask that lives there scores nothing, and must not count as 0.
+        x1, y1 = self._pair("random", (12, 14, 13))
+        x2, y2 = self._pair("smooth", (12, 14, 13))
+        x = torch.tensor(np.stack([x1, x2]))[:, None]
+        y = torch.tensor(np.stack([y1, y2]))[:, None]
+        mask = torch.ones(2, 1, 12, 14, 13, dtype=torch.uint8)
+        mask[1] = 0
+        mask[1, 0, :2] = 1  # the second item: its first two planes only
+        metric = SSIM(dynamic_range=4095.0)
+        first = metric(x[:1], y[:1])[1]
+
+        _, value = metric(x, y, mask)
+        loss_form = SSIM(dynamic_range=4095.0)
+        loss_form.as_loss = True
+        loss, kept = loss_form(x.requires_grad_(), y, mask)
+        _, streamed = metric.combine_metric([metric.partial_metric(x.detach(), y, mask)])
+
+        assert value == pytest.approx(first, abs=1e-12) == pytest.approx(float(kept), abs=1e-6)
+        assert streamed == pytest.approx(first, abs=1e-12) and float(loss) == pytest.approx(1 - first, abs=1e-6)
+
     def test_batch_items_are_averaged_and_an_empty_mask_item_skipped(self):
         x1, y1 = self._pair("random", (12, 14, 13))
         x2, y2 = self._pair("smooth", (12, 14, 13))
