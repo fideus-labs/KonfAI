@@ -543,12 +543,12 @@ def _anchor_model_paths(tree: object, base: Path) -> bool:
     """Make every relative model-YAML ``classpath`` and every relative ``!include`` under ``tree``
     absolute against ``base``; whether any changed. The catalog spelling (``default|Name.yml``) and a
     file on the Hub are not paths."""
-    from konfai.utils.config import _HUB_FILE, Included
+    from konfai.utils.config import Included, _hub_file
 
     changed = False
     if isinstance(tree, Included):
         reference, hash_, keys = tree.spec.partition("#")
-        if not Path(reference).is_absolute() and not (_HUB_FILE.match(reference) and not (base / reference).exists()):
+        if not Path(reference).is_absolute() and _hub_file(reference, base) is None:
             tree.spec = str((base / reference).resolve()) + hash_ + keys
             changed = True
         return changed  # its own content is read from its file, not from this tree

@@ -94,12 +94,24 @@ def _yaml() -> ruamel.yaml.YAML:
 yaml = _yaml()
 
 
+def _hub_file(reference: str, base: Path) -> re.Match[str] | None:
+    """``reference`` as a file of the Hugging Face Hub, unless a file of that name lies beside the includer."""
+    hub = _HUB_FILE.match(reference)
+    return hub if hub is not None and not (base / reference).exists() else None
+
+
 def include_path(spec: str, base: Path) -> Path:
     """The file an ``!include`` names (see :class:`Included`), fetched from the Hub when it lives there."""
     reference = spec.partition("#")[0]
-    hub = _HUB_FILE.match(reference)
-    if hub is not None and not (base / reference).exists():
-        from huggingface_hub import hf_hub_download
+    hub = _hub_file(reference, base)
+    if hub is not None:
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as error:
+            raise ConfigError(
+                f"'!include {spec}' names a file on the Hugging Face Hub, which needs huggingface_hub.",
+                "Install it with `pip install huggingface_hub`.",
+            ) from error
 
         # the revision the include names; without one, the repository's default branch, as the author wrote it
         return Path(hf_hub_download(hub["repo"], hub["path"], revision=hub["revision"]))  # nosec B615
