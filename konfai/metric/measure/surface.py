@@ -42,8 +42,8 @@ SurfaceDistances = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 
 
 def surface_distances(reference: np.ndarray, output: np.ndarray, spacing: tuple[float, ...]) -> SurfaceDistances:
-    """The distances between the surfaces of two boolean masks, over the box that holds both. Empty when both masks
-    are empty; infinite distances from the surface that exists to the one that does not."""
+    """The distances between the surfaces of two boolean masks, given on the box that holds both; infinite distances
+    from the surface that exists to the one that does not."""
     if len(spacing) == 3:
         areas = tables.create_table_neighbour_code_to_surface_area(spacing)
         kernel, full = tables.ENCODE_NEIGHBOURHOOD_3D_KERNEL, 0b11111111
@@ -52,18 +52,11 @@ def surface_distances(reference: np.ndarray, output: np.ndarray, spacing: tuple[
         kernel, full = tables.ENCODE_NEIGHBOURHOOD_2D_KERNEL, 0b1111
     else:
         raise MeasureError(f"A surface distance is defined on a 2D or 3D mask, not on {len(spacing)} dimensions.")
-    held = np.nonzero(reference | output)
-    if len(held[0]) == 0:
-        return np.array([]), np.array([]), np.array([]), np.array([])
-    box = tuple(slice(int(axis.min()), int(axis.max()) + 1) for axis in held)
-
-    def cropped(mask: np.ndarray) -> np.ndarray:
-        # one zero voxel past the box on every axis, as the reference code pads: the 2x2x2 kernel then sees every face
-        out = np.zeros([b.stop - b.start + 1 for b in box], np.uint8)
-        out[(slice(0, -1),) * len(box)] = mask[box]
-        return out
-
-    codes = [ndimage.correlate(cropped(mask), kernel, mode="constant", cval=0) for mask in (reference, output)]
+    # one zero voxel past the box on every axis, as the reference code pads: the 2x2x2 kernel then sees every face
+    codes = [
+        ndimage.correlate(np.pad(mask.astype(np.uint8), [(0, 1)] * mask.ndim), kernel, mode="constant", cval=0)
+        for mask in (reference, output)
+    ]
     borders = [(code != 0) & (code != full) for code in codes]
     to_surface = [
         ndimage.distance_transform_edt(~border, sampling=spacing) if border.any() else np.full(border.shape, np.inf)
@@ -104,6 +97,7 @@ class _SurfaceCriterion(CriterionWithAttribute):
     ``Dice``. The spacing comes from the output's attributes."""
 
     accepts_output_attributes = True
+    missing: float  #: the value of a label the reference holds and the output lacks
 
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
@@ -137,7 +131,7 @@ class _SurfaceCriterion(CriterionWithAttribute):
             if label not in boxes[0]:
                 return float("nan")  # the reference lacks it: not scored
             if label not in boxes[1]:
-                return self._missing()
+                return self.missing
             box = tuple(
                 slice(min(p.start, q.start), max(p.stop, q.stop))
                 for p, q in zip(boxes[0][label], boxes[1][label], strict=True)
@@ -146,10 +140,6 @@ class _SurfaceCriterion(CriterionWithAttribute):
 
         with ThreadPoolExecutor(min(8, os.cpu_count() or 1)) as pool:
             return dict(zip(labels, pool.map(one, labels), strict=True))
-
-    def _missing(self) -> float:
-        """The value of a label the reference holds and the output lacks."""
-        raise NotImplementedError()
 
     def forward(  # type: ignore[override]  # the added keywords are this subclass's contract
         self,
@@ -188,6 +178,8 @@ class HausdorffDistance(_SurfaceCriterion):
     """The robust Hausdorff distance in mm, the ``percentile`` of the surface distances (95 by default: HD95). A
     label the output lost is infinite and left out of the mean."""
 
+    missing = float("inf")
+
     def __init__(self, percentile: float = 95.0, labels: list[int] | None = None) -> None:
         super().__init__(labels)
         self._percentile = float(percentile)
@@ -195,15 +187,13 @@ class HausdorffDistance(_SurfaceCriterion):
     def _value(self, distances: SurfaceDistances) -> float:
         return robust_hausdorff(distances, self._percentile)
 
-    def _missing(self) -> float:
-        return float("inf")
-
 
 class SurfaceDice(_SurfaceCriterion):
     """The surface Dice at ``tolerance`` mm (the normalised surface distance of Metrics Reloaded): the share of both
     surfaces that lies within the tolerance of the other. A label the output lost scores 0."""
 
     maximize = True
+    missing = 0.0
 
     def __init__(self, tolerance: float = 1.0, labels: list[int] | None = None) -> None:
         super().__init__(labels)
@@ -211,6 +201,3 @@ class SurfaceDice(_SurfaceCriterion):
 
     def _value(self, distances: SurfaceDistances) -> float:
         return surface_dice(distances, self._tolerance)
-
-    def _missing(self) -> float:
-        return 0.0

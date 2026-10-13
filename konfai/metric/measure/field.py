@@ -107,11 +107,11 @@ class Jacobian(CriterionWithAttribute):
     over the field. The value reported is SDlogJ within the first mask; the dict holds ``sdlogj<name>`` and
     ``folds<name>`` per mask, ``names`` giving each mask's suffix (``["_body", "_mask"]``; by position when left
     out). ``whole`` adds the whole field, under that suffix (``""``), reported first.
-    SDlogJ is the standard deviation of ``log(clip(det J + 3, 1e-9, 1e9))`` with ``crop`` voxels left
+    SDlogJ is the standard deviation of ``log(clip(det J + 3, 1e-9, 1e9))`` with 2 voxels left
     out on every face (when every extent allows it); the folds count every voxel of the mask.
 
-    Reducible from disjoint patches read with ``crop`` voxels of halo: a slot scores its own voxels, their
-    derivatives taken from the halo, and leaves out those within ``crop`` of the patch's faces, which is the crop at
+    Reducible from disjoint patches read with 2 voxels of halo: a slot scores its own voxels, their
+    derivatives taken from the halo, and leaves out those within 2 voxels of the patch's faces, which is the crop at
     a volume face and nothing inside, as the whole volume crops. The running sums (count, sum, sum of squares of
     the log; voxels, folds) add up exactly.
     """
@@ -121,15 +121,10 @@ class Jacobian(CriterionWithAttribute):
 
     accepts_output_attributes = True
 
-    def __init__(self, names: list[str] | None = None, crop: int = 2, whole: str | None = None) -> None:
+    def __init__(self, names: list[str] | None = None, whole: str | None = None) -> None:
         super().__init__()
         self._names = names
         self._whole = whole
-        self._crop = int(crop)
-        if self._crop > self.halo:
-            raise MeasureError(
-                f"Jacobian streams with a halo of {self.halo} voxels: a crop of {crop} cannot be served."
-            )
 
     def _sums(
         self,
@@ -139,7 +134,7 @@ class Jacobian(CriterionWithAttribute):
         direction: np.ndarray,
         core: tuple[slice, ...] | None = None,
     ) -> np.ndarray:
-        """Per mask: the count, sum and sum of squares of the log over the slot's voxels at least ``crop`` from the
+        """Per mask: the count, sum and sum of squares of the log over the slot's voxels at least ``halo`` from the
         patch's faces, then the slot's voxel count and folds. ``core`` is the slot within the patch (the whole patch
         when ``None``); a mask of ``None`` is the whole field."""
         spatial = field.shape[1:]
@@ -148,10 +143,10 @@ class Jacobian(CriterionWithAttribute):
         # Nothing is cropped on a volume too thin for it. Seen from a patch, an axis is the volume's own when the
         # slot spans the whole read (no halo on either side); a thin slot at a far face of a thick volume still crops.
         thin = any(
-            extent <= 2 * self._crop and c.start == 0 and c.stop == extent
+            extent <= 2 * self.halo and c.start == 0 and c.stop == extent
             for c, extent in zip(core, spatial, strict=True)
         )
-        crop = 0 if thin else self._crop
+        crop = 0 if thin else self.halo
         kept = tuple(
             slice(max(c.start, crop), min(c.stop, extent - crop)) for c, extent in zip(core, spatial, strict=True)
         )

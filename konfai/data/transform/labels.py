@@ -335,8 +335,7 @@ class Otsu(Transform):
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         _require_simpleitk()
-        grey = tensor.float()
-        grey = grey[0] if grey.shape[0] == 1 else grey.sum(0) / grey.shape[0]
+        grey = tensor.float().mean(0)
         calculator = sitk.OtsuThresholdImageFilter()
         calculator.Execute(sitk.GetImageFromArray(grey.cpu().numpy()))
         # ITK compares in the image's own type: the float32 the volume is thresholded in
@@ -378,9 +377,7 @@ class KeepLabels(Transform):
         held = self.held(name)
         if not tensor.is_floating_point():  # a label this map's type cannot hold is not in it
             held = held[(held >= torch.iinfo(tensor.dtype).min) & (held <= torch.iinfo(tensor.dtype).max)]
-        kept = tensor.clone()
-        kept[~torch.isin(tensor, held.to(device=tensor.device, dtype=tensor.dtype))] = 0
-        return kept
+        return torch.where(torch.isin(tensor, held.to(device=tensor.device, dtype=tensor.dtype)), tensor, 0)
 
 
 class FlatLabel(Transform):

@@ -170,7 +170,6 @@ class TestJacobian:
         assert _jacobian(field)["sdlogj"] == pytest.approx(0.0, abs=1e-12)
         field[0, 2, 4, :, :] = 5.0  # the same jump in the middle is seen
         assert _jacobian(field)["sdlogj"] > 0.1
-        assert Jacobian([""], crop=0)(field, _ones(field), attributes=[[_attribute([1, 1, 1])]])[1]["sdlogj"] > 0.1
 
     def test_two_dimensions(self):
         field = torch.zeros(1, 2, 10, 10)

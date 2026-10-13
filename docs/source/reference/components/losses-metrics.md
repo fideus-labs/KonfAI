@@ -94,7 +94,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 | Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
 | `TRE` | Target registration error between landmarks. | |
-| `Jacobian` | SDlogJ (the standard deviation of `log(clip(det J + 3, 1e-9, 1e9))`, `crop` voxels left out on every face) and the share of folds (`det J <= 0`) of a displacement field in mm along the world axes, within each mask given as a target and, with `whole`, over the whole field, in one pass; logs `sdlogj<name>` and `folds<name>` per mask. Metric only. | `names=None, crop=2, whole=None` |
+| `Jacobian` | SDlogJ (the standard deviation of `log(clip(det J + 3, 1e-9, 1e9))`, 2 voxels left out on every face) and the share of folds (`det J <= 0`) of a displacement field in mm along the world axes, within each mask given as a target and, with `whole`, over the whole field, in one pass; logs `sdlogj<name>` and `folds<name>` per mask. Metric only. | `names=None, whole=None` |
 | `GradientImages` | Gradient smoothness (or gradient difference with a target). | |
 | `KLDivergence` | VAE KL term, against the prior N(`mu`, `std`²). | `shape` (required), `dim=100, mu=0, std=1` |
 | `Variance`, `Mean` | Variance or mean of the output (uncertainty). | |
