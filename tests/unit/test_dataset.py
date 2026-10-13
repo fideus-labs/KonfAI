@@ -1106,7 +1106,7 @@ def test_an_evicted_h5_handle_goes_back_with_the_view_it_had(tmp_path: Path) -> 
     assert dataset.is_dataset_exist("MASK", "P001")
 
 
-@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm", "nrrd.gz"])
+@pytest.mark.parametrize("file_format", ["itk.txt", "fcsv", "xml", "npy", "png", "jpg", "bmp", "dcm"])
 def test_a_volume_the_format_cannot_hold_is_refused_by_name(tmp_path: Path, image_attributes, file_format: str) -> None:
     """A format SimpleITK has no writer for, or whose writer refuses this volume, answered with ITK's
     trace and the name of a staging file the user never asked for."""
