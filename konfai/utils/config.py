@@ -22,6 +22,7 @@ import functools
 import inspect
 import logging
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -31,6 +32,7 @@ import typing
 import warnings
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
@@ -46,8 +48,12 @@ _log = logging.getLogger(__name__)
 
 #: ``owner/name[@revision]:path``: a file of a Hugging Face model repository.
 _HUB_FILE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)(?:@(?P<revision>[^:]+))?:(?P<path>[^:]+)$")
-#: The files whose includes are being read, outermost first: an include that names one of them is a cycle.
-_including: list[Path] = []
+#: A file of the Hub: its repository, the revision asked for (``None``: the default branch) and its path there.
+_HubOrigin = tuple[str, str | None, str]
+#: The includes this load is reading, outermost first, each with the Hub file it came from: an include that names one
+#: of them is a cycle, and a relative include of a Hub file is read from the same repository. One per load, so two
+#: threads reading the same file do not see each other's.
+_including: ContextVar[tuple[tuple[Path, _HubOrigin | None], ...]] = ContextVar("_including", default=())
 
 
 class Included(_CommentedMap):
@@ -100,42 +106,68 @@ def _hub_file(reference: str, base: Path) -> re.Match[str] | None:
     return hub if hub is not None and not (base / reference).exists() else None
 
 
-def include_path(spec: str, base: Path) -> Path:
-    """The file an ``!include`` names (see :class:`Included`), fetched from the Hub when it lives there."""
+def _hub_download(spec: str, origin: _HubOrigin) -> Path:
+    """The Hub file ``origin`` in the local cache, a refusal naming the include when it cannot be had."""
+    try:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
+    except ImportError as error:
+        raise ConfigError(
+            f"'!include {spec}' names a file on the Hugging Face Hub, which needs huggingface_hub.",
+            "Install it with `pip install huggingface_hub`.",
+        ) from error
+    repo, revision, path = origin
+    try:
+        # the revision the include names; without one, the repository's default branch, as the author wrote it
+        return Path(hf_hub_download(repo, path, revision=revision))  # nosec B615
+    except (HfHubHTTPError, EntryNotFoundError, OSError, ValueError) as error:
+        raise ConfigError(
+            f"'!include {spec}' names '{path}' of '{repo}'{f' at {revision}' if revision else ''}, which the Hub does not give.",
+            f"Check the repository, the revision and the path, and the network: {error}",
+        ) from error
+
+
+def _resolve(spec: str, base: Path, includer: _HubOrigin | None = None) -> tuple[Path, _HubOrigin | None]:
+    """The file an ``!include`` names and, when it lives on the Hub, where: named there outright, or relative to an
+    includer that itself came from the Hub, whose repository and revision it then shares."""
     reference = spec.partition("#")[0]
     hub = _hub_file(reference, base)
     if hub is not None:
-        try:
-            from huggingface_hub import hf_hub_download
-        except ImportError as error:
-            raise ConfigError(
-                f"'!include {spec}' names a file on the Hugging Face Hub, which needs huggingface_hub.",
-                "Install it with `pip install huggingface_hub`.",
-            ) from error
+        origin: _HubOrigin = (hub["repo"], hub["revision"], hub["path"])
+    elif includer is not None and not Path(reference).is_absolute():
+        inside = posixpath.normpath(posixpath.join(posixpath.dirname(includer[2]), reference))
+        if inside.startswith(".."):
+            raise ConfigError(f"'!include {spec}' leaves the repository '{includer[0]}' it is read from.")
+        origin = (includer[0], includer[1], inside)
+    else:
+        return (Path(reference) if Path(reference).is_absolute() else base / reference).resolve(), None
+    return _hub_download(spec, origin), origin
 
-        # the revision the include names; without one, the repository's default branch, as the author wrote it
-        return Path(hf_hub_download(hub["repo"], hub["path"], revision=hub["revision"]))  # nosec B615
-    return (Path(reference) if Path(reference).is_absolute() else base / reference).resolve()
+
+def include_path(spec: str, base: Path) -> Path:
+    """The file an ``!include`` names (see :class:`Included`), fetched from the Hub when it lives there."""
+    return _resolve(spec, base)[0]
 
 
 def _included(spec: str, base: Path) -> Included:
-    path = include_path(spec, base)
+    chain = _including.get()
+    path, origin = _resolve(spec, base, chain[-1][1] if chain else None)
     if not path.is_file():
         raise ConfigError(
             f"'!include {spec}' names no file ('{path}').",
             "An include is a path relative to the file that names it, an absolute path, or"
             " 'owner/name[@revision]:path' on the Hugging Face Hub, then '#KEY.KEY' for a block inside it.",
         )
-    if path in _including:
-        chain = " -> ".join(str(p) for p in [*_including, path])
+    if path in (read for read, _ in chain):
+        names = " -> ".join(str(read) for read in [*(read for read, _ in chain), path])
         raise ConfigError(
-            f"'!include {spec}' closes a cycle: {chain}.", "An included file cannot include its includer."
+            f"'!include {spec}' closes a cycle: {names}.", "An included file cannot include its includer."
         )
-    _including.append(path)
+    token = _including.set((*chain, (path, origin)))
     try:
         block: Any = _load_tree(path)
     finally:
-        _including.pop()
+        _including.reset(token)
     keys = spec.partition("#")[2]
     for key in filter(None, keys.split(".")):
         if not isinstance(block, Mapping) or key not in block:

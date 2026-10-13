@@ -131,7 +131,8 @@ Predictor:
 
 The block binds as if it were written in place. The write-back keeps the `!include` line, never the block's
 content: the included file stays the one place the block is written, and a default resolved inside it is not
-recorded. An include stands for a block, not a single value; one that closes a cycle is refused. The Python
+recorded. An include stands for a block, not a single value; one that closes a cycle is refused. A relative
+include inside a Hub file is read from the same repository at the same revision. The Python
 API copies a config file before reading it and makes a relative include absolute in the copy, as it does a
 relative model `classpath`.
 
