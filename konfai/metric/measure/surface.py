@@ -31,7 +31,7 @@ import torch
 from scipy import ndimage
 
 from konfai.metric.measure import surface_tables as tables
-from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute, output_grid
+from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute
 from konfai.metric.measure.segmentation import Dice
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import DatasetManagerError, MeasureError
@@ -170,7 +170,7 @@ class _SurfaceCriterion(CriterionWithAttribute):
             self._per_label(
                 output[item, 0].round().to(torch.int64).cpu().numpy(),
                 target[item, 0].round().to(torch.int64).cpu().numpy(),
-                self._spacing(output_grid(attributes, output_attributes), item, output.dim() - 2),
+                self._spacing(self.output_grid(attributes, output_attributes), item, output.dim() - 2),
             )
             for item in range(output.shape[0])
         ]

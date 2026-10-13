@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute, output_grid
+from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import DatasetManagerError, MeasureError
 
@@ -232,7 +232,7 @@ class Jacobian(CriterionWithAttribute):
     ) -> CriterionOutput:
         names = self._names_for(targets)
         return self._report(
-            output, names, self._totals(output, targets, output_grid(attributes, output_attributes), None)
+            output, names, self._totals(output, targets, self.output_grid(attributes, output_attributes), None)
         )
 
     def partial_metric(  # type: ignore[override]  # core= and the attributes are this metric's streamed contract
@@ -245,7 +245,7 @@ class Jacobian(CriterionWithAttribute):
     ) -> Any:
         """The running sums of one patch's slot: (names, totals, a tensor to report on)."""
         names = self._names_for(targets)
-        field = output_grid(attributes, output_attributes)
+        field = self.output_grid(attributes, output_attributes)
         return names, self._totals(output, targets, field, core), output[:1, :1, :1].detach()
 
     def combine_metric(self, states: list[Any]) -> CriterionOutput:
