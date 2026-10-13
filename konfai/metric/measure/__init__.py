@@ -28,6 +28,7 @@ from konfai.metric.measure.base import CriterionWithAttribute as CriterionWithAt
 from konfai.metric.measure.base import CriterionWithInit as CriterionWithInit
 from konfai.metric.measure.base import LabelledValues as LabelledValues
 from konfai.metric.measure.base import MaskedLoss as MaskedLoss
+from konfai.metric.measure.field import Jacobian as Jacobian
 from konfai.metric.measure.impact import ImpactFeatureModel as ImpactFeatureModel
 from konfai.metric.measure.impact import IMPACTReg as IMPACTReg
 from konfai.metric.measure.impact import IMPACTSynth as IMPACTSynth
@@ -51,6 +52,8 @@ from konfai.metric.measure.regression import Variance as Variance
 from konfai.metric.measure.segmentation import Dice as Dice
 from konfai.metric.measure.segmentation import DiceSaveMap as DiceSaveMap
 from konfai.metric.measure.segmentation import LabelSums as LabelSums
+from konfai.metric.measure.surface import HausdorffDistance as HausdorffDistance
+from konfai.metric.measure.surface import SurfaceDice as SurfaceDice
 
 __all__ = [
     "BCE",
@@ -74,9 +77,11 @@ __all__ = [
     "FocalLoss",
     "GradientImages",
     "Gram",
+    "HausdorffDistance",
     "IMPACTReg",
     "IMPACTSynth",
     "ImpactFeatureModel",
+    "Jacobian",
     "KLDivergence",
     "LabelSums",
     "LabelledValues",
@@ -86,5 +91,6 @@ __all__ = [
     "PatchGanLoss",
     "PerceptualLoss",
     "SAM_Perceptual",
+    "SurfaceDice",
     "Variance",
 ]

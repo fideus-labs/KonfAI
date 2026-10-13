@@ -2234,6 +2234,7 @@ packages:
   - torch>=2.3
   - tqdm
   - numpy
+  - scipy
   - ruamel-yaml
   - psutil
   - simpleitk>=2.0 ; extra == 'itk'

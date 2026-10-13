@@ -35,6 +35,7 @@ dependencies = [
   "torch>=2.3",
   "tqdm",
   "numpy",
+  "scipy",  # distance transforms and label boxes of the surface criteria
   "ruamel.yaml",
   "psutil"
 ]

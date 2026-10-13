@@ -641,12 +641,18 @@ class Evaluator(DistributedObject):
                 cored = tensors if core is None else [t[(slice(None), slice(None), *core)] for t in tensors]
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
                     reads_halo = core is not None and int(getattr(metric, "halo", 0)) > 0
+                    # A metric that reads the geometry gets the patch's attributes, as the whole-volume path hands them.
+                    extra: dict[str, Any] = {}
+                    if getattr(metric, "accepts_attributes", False):
+                        extra["attributes"] = [batch_sample[output_group].attribute] + [
+                            batch_sample[group].attribute for group in target_group.split(";") if group in batch_sample
+                        ]
                     with self._clock.phase(metric.get_name()), torch.no_grad():
                         # Criterion declares neither the halo's core= nor partial_map: the reducible hooks.
                         state = (
-                            cast(Any, metric).partial_metric(*tensors, core=core)
+                            cast(Any, metric).partial_metric(*tensors, core=core, **extra)
                             if reads_halo
-                            else metric.partial_metric(*cored)
+                            else metric.partial_metric(*cored, **extra)
                         )
                     entry = self._pending.setdefault((output_group, target_group, index), (metric, []))
                     entry[1].append(state)
