@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """The surface criteria (HausdorffDistance, SurfaceDice) and the field criterion (Jacobian)."""
 
 import numpy as np
@@ -60,6 +76,30 @@ class TestSurface:
         mask[..., 16:20, 16:20, 16:20] = 1  # keeps label 2 only
         _, hd = HausdorffDistance(95.0)(output, reference, mask, attributes=[[_attribute([1, 1, 1])]])
         assert list(hd) == [2]
+
+    def test_a_batch_scores_the_labels_of_every_item(self):
+        first, reference_first = _cubes(0)
+        second, reference_second = _cubes(0)
+        reference_first[reference_first == 2] = 0  # only the second item's reference holds label 2
+        output, reference = torch.cat([first, second]), torch.cat([reference_first, reference_second])
+        attributes = [[_attribute([1, 1, 1]), _attribute([1, 1, 1])]]
+        _, hd = HausdorffDistance(95.0)(output, reference, attributes=attributes)
+        assert hd[1] == 0.0 and hd[2] == float("inf")
+
+    def test_the_mean_keeps_its_fraction_on_an_integer_map(self):
+        output, reference = _cubes(3)
+        loss, hd = HausdorffDistance(100.0, labels=[1])(output, reference, attributes=[[_attribute([0.5, 1.0, 2.0])]])
+        assert loss.dtype == torch.float32 and float(loss) == pytest.approx(hd[1]) == pytest.approx(1.5)
+
+    def test_the_spacing_is_the_outputs_when_it_is_given(self):
+        output, reference = _cubes(3)
+        _, hd = HausdorffDistance(100.0, labels=[1])(
+            output,
+            reference,
+            attributes=[[_attribute([1.0, 1.0, 1.0])]],
+            output_attributes=[_attribute([0.5, 1.0, 2.0])],
+        )
+        assert hd[1] == pytest.approx(1.5)
 
     def test_two_dimensions(self):
         reference = torch.zeros(1, 1, 16, 16, dtype=torch.uint8)

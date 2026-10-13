@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Lookup tables of google-deepmind/surface-distance (commit 1f805cea), reformatted and without its ``__future__`` imports:
 the surface area (3D) or contour length (2D) of every 2x2x2 (2x2) neighbourhood configuration of a mask, the
 marching-cubes normals behind the area. Kept apart so that a surface metric here is the one that code computes."""

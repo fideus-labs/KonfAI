@@ -17,7 +17,7 @@
 
 """Surface criteria over label maps: the robust Hausdorff distance and the surface Dice (the normalised surface
 distance), computed as google-deepmind/surface-distance computes them, the code Metrics Reloaded scores with. A
-boundary voxel is a surface element whose area its 2x2x2 neighbourhood gives (``_surface_tables``), the
+boundary voxel is a surface element whose area its 2x2x2 neighbourhood gives (``surface_tables``), the
 distance from one surface to the other comes from a distance transform, and the percentile and the overlap weigh
 every element by its area. Each label is scored on the box that holds it in both maps, the labels in parallel: the
 distance transforms release the interpreter.
@@ -30,8 +30,8 @@ import numpy as np
 import torch
 from scipy import ndimage
 
-from konfai.metric.measure import _surface_tables as tables
-from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute
+from konfai.metric.measure import surface_tables as tables
+from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute, output_grid
 from konfai.metric.measure.segmentation import Dice
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import DatasetManagerError, MeasureError
@@ -103,6 +103,8 @@ class _SurfaceCriterion(CriterionWithAttribute):
     value is the mean over the labels scored, NaN for a label the reference lacks. Extra targets are masks, as for
     ``Dice``. The spacing comes from the output's attributes."""
 
+    accepts_output_attributes = True
+
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
         self._labels = labels
@@ -111,10 +113,10 @@ class _SurfaceCriterion(CriterionWithAttribute):
         raise NotImplementedError()
 
     @staticmethod
-    def _spacing(attributes: list[list[Attribute]], item: int, dimensions: int) -> tuple[float, ...]:
+    def _spacing(grid: list[Attribute], item: int, dimensions: int) -> tuple[float, ...]:
         """The voxel spacing in the array's axis order (``(x, y, z)`` in the attributes, ``[z, y, x]`` in memory)."""
         try:
-            spacing = attributes[0][item].get_np_array("Spacing")
+            spacing = grid[item].get_np_array("Spacing")
         except (IndexError, KeyError, DatasetManagerError) as error:
             raise MeasureError(
                 "A surface distance needs the voxel spacing, which the output's attributes do not carry.",
@@ -149,8 +151,12 @@ class _SurfaceCriterion(CriterionWithAttribute):
         """The value of a label the reference holds and the output lacks."""
         raise NotImplementedError()
 
-    def forward(  # type: ignore[override]  # the added keyword is this subclass's contract
-        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    def forward(  # type: ignore[override]  # the added keywords are this subclass's contract
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Attribute]],
+        output_attributes: list[Attribute] | None = None,
     ) -> CriterionOutput:
         if output.shape[1] != 1:
             raise MeasureError(
@@ -164,18 +170,18 @@ class _SurfaceCriterion(CriterionWithAttribute):
             self._per_label(
                 output[item, 0].round().to(torch.int64).cpu().numpy(),
                 target[item, 0].round().to(torch.int64).cpu().numpy(),
-                self._spacing(attributes, item, output.dim() - 2),
+                self._spacing(output_grid(attributes, output_attributes), item, output.dim() - 2),
             )
             for item in range(output.shape[0])
         ]
-        labels = list(per_item[0]) if per_item else []
+        labels = sorted({label for scores in per_item for label in scores})
         values = {}
         for label in labels:
-            scored = [scores[label] for scores in per_item if not np.isnan(scores[label])]
+            scored = [scores[label] for scores in per_item if not np.isnan(scores.get(label, np.nan))]
             values[label] = float(np.mean(scored)) if scored else float("nan")
         finite = [v for v in values.values() if np.isfinite(v)]
         mean = float(np.mean(finite)) if finite else float("nan")
-        return output.new_tensor(mean if np.isfinite(mean) else 0.0), values
+        return torch.tensor(mean if np.isfinite(mean) else 0.0, dtype=torch.float32, device=output.device), values
 
 
 class HausdorffDistance(_SurfaceCriterion):

@@ -18,7 +18,7 @@
 
 import torch
 
-from konfai.data.transform.base import Transform
+from konfai.data.transform.base import LocalityKind, PatchLocality, Transform
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import TransformError
 from konfai.utils.ITK import displace_points
@@ -33,6 +33,9 @@ class Displace(Transform):
     def __init__(self, field_group: str = "DVF") -> None:
         super().__init__()
         self.field_group = field_group
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="a point set has no grid to cut into patches")
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         dataset = self.dataset_holding(self.field_group, name)

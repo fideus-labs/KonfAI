@@ -641,12 +641,15 @@ class Evaluator(DistributedObject):
                 cored = tensors if core is None else [t[(slice(None), slice(None), *core)] for t in tensors]
                 for index, metric in enumerate(self.metrics[output_group][target_group]):
                     reads_halo = core is not None and int(getattr(metric, "halo", 0)) > 0
-                    # A metric that reads the geometry gets the patch's attributes, as the whole-volume path hands them.
+                    # A metric that reads the geometry gets the patch's attributes as call_criterion hands them on
+                    # the whole-volume path: the targets', and the output's when it declares it reads them.
                     extra: dict[str, Any] = {}
                     if getattr(metric, "accepts_attributes", False):
-                        extra["attributes"] = [batch_sample[output_group].attribute] + [
+                        extra["attributes"] = [
                             batch_sample[group].attribute for group in target_group.split(";") if group in batch_sample
                         ]
+                        if getattr(metric, "accepts_output_attributes", False):
+                            extra["output_attributes"] = batch_sample[output_group].attribute
                     with self._clock.phase(metric.get_name()), torch.no_grad():
                         # Criterion declares neither the halo's core= nor partial_map: the reducible hooks.
                         state = (

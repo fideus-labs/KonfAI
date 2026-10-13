@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute
+from konfai.metric.measure.base import CriterionOutput, CriterionWithAttribute, output_grid
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import DatasetManagerError, MeasureError
 
@@ -40,11 +40,11 @@ SLAB_BYTES = 8 << 20
 LOG_FOUR = float(np.log(4.0))
 
 
-def _geometry(attributes: list[list[Attribute]], item: int, dimensions: int) -> tuple[np.ndarray, np.ndarray]:
+def _geometry(field: list[Attribute], item: int, dimensions: int) -> tuple[np.ndarray, np.ndarray]:
     """The spacing along the array's axes (``[z, y, x]``) and the direction (index to world, ITK's row-major)."""
     try:
-        spacing = attributes[0][item].get_np_array("Spacing")
-        direction = attributes[0][item].get_np_array("Direction").reshape(dimensions, dimensions)
+        spacing = field[item].get_np_array("Spacing")
+        direction = field[item].get_np_array("Direction").reshape(dimensions, dimensions)
     except (IndexError, KeyError, ValueError, DatasetManagerError) as error:
         raise MeasureError(
             "A field's Jacobian needs its spacing and direction, which the output's attributes do not carry.",
@@ -118,6 +118,8 @@ class Jacobian(CriterionWithAttribute):
 
     reducible = True
     halo = 2
+
+    accepts_output_attributes = True
 
     def __init__(self, names: list[str] | None = None, crop: int = 2, whole: str | None = None) -> None:
         super().__init__()
@@ -203,13 +205,13 @@ class Jacobian(CriterionWithAttribute):
         self,
         output: torch.Tensor,
         targets: tuple[torch.Tensor, ...],
-        attributes: list[list[Attribute]],
+        field: list[Attribute],
         core: tuple[slice, ...] | None,
     ) -> np.ndarray:
         whole: list[torch.Tensor | None] = [None] if self._whole is not None else []
         totals = np.zeros((len(whole) + len(targets), 5))
         for item in range(output.shape[0]):
-            spacing, direction = _geometry(attributes, item, output.dim() - 2)
+            spacing, direction = _geometry(field, item, output.dim() - 2)
             masks = whole + [target[item, 0].to(device=output.device) > 0 for target in targets]
             totals += self._sums(output[item], masks, spacing, direction, core)
         return totals
@@ -221,22 +223,30 @@ class Jacobian(CriterionWithAttribute):
         first = values[f"sdlogj{names[0]}"]
         return output.new_tensor(first if np.isfinite(first) else 0.0), values
 
-    def forward(  # type: ignore[override]  # the added keyword is this subclass's contract
-        self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
+    def forward(  # type: ignore[override]  # the added keywords are this subclass's contract
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Attribute]],
+        output_attributes: list[Attribute] | None = None,
     ) -> CriterionOutput:
         names = self._names_for(targets)
-        return self._report(output, names, self._totals(output, targets, attributes, None))
+        return self._report(
+            output, names, self._totals(output, targets, output_grid(attributes, output_attributes), None)
+        )
 
-    def partial_metric(  # type: ignore[override]  # core= and attributes= are this metric's streamed contract
+    def partial_metric(  # type: ignore[override]  # core= and the attributes are this metric's streamed contract
         self,
         output: torch.Tensor,
         *targets: torch.Tensor,
         core: tuple[slice, ...] | None = None,
         attributes: list[list[Attribute]],
+        output_attributes: list[Attribute] | None = None,
     ) -> Any:
         """The running sums of one patch's slot: (names, totals, a tensor to report on)."""
         names = self._names_for(targets)
-        return names, self._totals(output, targets, attributes, core), output[:1, :1, :1].detach()
+        field = output_grid(attributes, output_attributes)
+        return names, self._totals(output, targets, field, core), output[:1, :1, :1].detach()
 
     def combine_metric(self, states: list[Any]) -> CriterionOutput:
         names, _, on = states[0]

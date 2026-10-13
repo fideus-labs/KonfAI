@@ -321,10 +321,14 @@ class Otsu(Transform):
 
     The threshold is ITK's (``OtsuThresholdImageFilter``, 128 bins) of the whole case, the image in float32 and a
     multichannel image (a colour photograph) as the mean of its channels. It needs the whole volume, which the
-    loader hands it: the stage declares nothing, so it is ``WHOLE_VOLUME``.
+    loader hands it: the stage is ``WHOLE_VOLUME``.
     """
 
-    working_multiple = 2.0  # the float32 grey copy, and SimpleITK's own of it
+    # in volumes of an int16 case: the float32 grey copy (2), SimpleITK's own of it (2) and the uint8 mask (0.5)
+    working_multiple = 4.5
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="Otsu's threshold is computed on the whole volume")
 
     def output_channels(self, channels: int) -> int:
         return 1

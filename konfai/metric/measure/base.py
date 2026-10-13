@@ -131,6 +131,14 @@ class CriterionWithInit(Criterion):
         raise NotImplementedError()
 
 
+def output_grid(attributes: list[list[Attribute]], output_attributes: list[Attribute] | None) -> list[Attribute]:
+    """The per-item attributes of a criterion's output, where its geometry is read: the output's own, or in training,
+    where a model output has none, the first target's, which lies on the output's grid."""
+    if output_attributes is not None:
+        return output_attributes
+    return attributes[0] if attributes else []
+
+
 class CriterionWithAttribute(Criterion):
     """A criterion handed the per-sample attributes of its targets: ``attributes[i]`` belongs to
     ``targets[i]``, in the order of the target group, in training and in evaluation alike. A subclass
