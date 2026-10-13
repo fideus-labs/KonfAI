@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import ruamel.yaml
-from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.comments import CommentedMap as _CommentedMap
 
 from konfai.utils.errors import ConfigError, KonfAIWarning
 
@@ -50,7 +50,7 @@ _HUB_FILE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)(?:@(?P<revision>[^:]+))?:(?P
 _including: list[Path] = []
 
 
-class Included(CommentedMap):
+class Included(_CommentedMap):
     """A block another file holds, named in a config as ``!include FILE[#KEY.KEY]``.
 
     ``FILE`` is a path relative to the file that names it, an absolute path, or ``owner/name[@revision]:path``
