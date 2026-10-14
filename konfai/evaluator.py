@@ -599,7 +599,8 @@ class Evaluator(DistributedObject):
         true_loss: float | dict,
         direction: str,
     ) -> None:
-        """Record one metric value: a dict records each component plus their NaN-skipping mean."""
+        """Record one metric value: a dict records each component plus the mean of the finite ones (a label a
+        criterion could not score is NaN, one the output lost is infinite: neither is in the mean)."""
         if isinstance(true_loss, dict):
             total = 0.0
             count = 0
@@ -607,7 +608,7 @@ class Evaluator(DistributedObject):
                 component_key = f"{base_key}:{k}"
                 result[component_key] = v
                 statistics.directions[component_key] = direction
-                if not np.isnan(v):
+                if np.isfinite(v):
                     total += v
                     count += 1
             result[base_key] = total / count if count > 0 else np.nan

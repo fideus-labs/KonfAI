@@ -25,6 +25,7 @@ import torch
 from konfai.data.transform import Displace, KeepLabels, Otsu
 from konfai.metric.measure import Jacobian
 from konfai.utils.dataset import Attribute
+from konfai.utils.errors import MeasureError
 from scipy.ndimage import gaussian_filter
 from scipy.spatial.transform import Rotation
 
@@ -164,3 +165,33 @@ def test_the_jacobian_over_the_whole_field_is_its_value_within_a_mask_of_ones():
     assert set(whole[1]) == set(ones[1]) and float(whole[0]) == pytest.approx(float(ones[0]), abs=1e-12)
     for key, value in ones[1].items():
         assert whole[1][key] == pytest.approx(value, abs=1e-12), key
+
+
+def test_tre_gives_the_mean_with_each_landmark_or_one_percentile():
+    from konfai.metric.measure import TRE
+
+    rng = np.random.default_rng(5)
+    moved, moving = torch.tensor(rng.normal(0, 4, (1, 40, 3))), torch.tensor(rng.normal(0, 4, (1, 40, 3)))
+    errors = np.linalg.norm(moved[0].numpy() - moving[0].numpy(), axis=1)
+    loss, each = TRE()(moved, moving)
+    assert float(loss) == pytest.approx(errors.mean()) and each.values.numpy() == pytest.approx(errors)
+    loss, value = TRE(percentile=95)(moved, moving)
+    assert float(value) == pytest.approx(np.percentile(errors, 95)) == pytest.approx(float(loss))
+    with pytest.raises(MeasureError):
+        TRE(percentile=120)
+
+
+def test_missing_labels_counts_what_the_output_lacks_of_the_reference():
+    from konfai.metric.measure import MissingLabels
+
+    reference = torch.zeros(2, 1, 8, 8, 8, dtype=torch.int64)
+    reference[0, 0, :2], reference[0, 0, 3:5], reference[0, 0, 6:] = 1, 2, 7
+    reference[1, 0, :4] = 1
+    output = reference.clone()
+    output[0][output[0] == 2] = 0  # the first item loses label 2
+    output[0, 0, 5] = 9  # a label the reference lacks is not counted
+    assert MissingLabels()(output, reference)[1] == 0.5  # one of the first item, none of the second
+    assert MissingLabels(labels=[1, 7])(output, reference)[1] == 0.0
+    mask = torch.zeros_like(reference)
+    mask[:, :, :3] = 1  # outside the mask nothing is held, so nothing is missed
+    assert MissingLabels()(output, reference, mask)[1] == 0.0

@@ -52,6 +52,7 @@ from konfai.metric.measure.regression import Variance as Variance
 from konfai.metric.measure.segmentation import Dice as Dice
 from konfai.metric.measure.segmentation import DiceSaveMap as DiceSaveMap
 from konfai.metric.measure.segmentation import LabelSums as LabelSums
+from konfai.metric.measure.segmentation import MissingLabels as MissingLabels
 from konfai.metric.measure.surface import HausdorffDistance as HausdorffDistance
 from konfai.metric.measure.surface import SurfaceDice as SurfaceDice
 
@@ -88,6 +89,7 @@ __all__ = [
     "MAESaveMap",
     "MaskedLoss",
     "Mean",
+    "MissingLabels",
     "PatchGanLoss",
     "PerceptualLoss",
     "SAM_Perceptual",

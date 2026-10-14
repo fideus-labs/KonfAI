@@ -27,7 +27,14 @@ import torch
 import torch.nn.functional as F
 
 from konfai.data.patching import ModelPatch
-from konfai.metric.measure.base import Criterion, CriterionWithInit, LabelledValues, MaskedLoss, _require_optional
+from konfai.metric.measure.base import (
+    Criterion,
+    CriterionOutput,
+    CriterionWithInit,
+    LabelledValues,
+    MaskedLoss,
+    _require_optional,
+)
 from konfai.metric.measure.segmentation import Dice
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
@@ -485,13 +492,23 @@ class LPIPS(MaskedLoss):
 
 
 class TRE(Criterion):
+    """The target registration error: the distance between paired landmarks, their mean with each landmark's own.
+    With ``percentile`` it is that percentile of a case's landmark errors instead (95: the error all but the worst
+    twentieth of its landmarks stay under), linearly interpolated, as one value."""
+
     batch_mean = True
 
-    def __init__(self) -> None:
+    def __init__(self, percentile: float | None = None) -> None:
         super().__init__()
+        if percentile is not None and not 0 <= percentile <= 100:
+            raise MeasureError(f"TRE takes a percentile between 0 and 100, got {percentile}.")
+        self._percentile = percentile
 
-    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, LabelledValues]:
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
         loss = torch.linalg.norm(output - targets[0], dim=2)
+        if self._percentile is not None:
+            value = torch.quantile(loss.double(), self._percentile / 100, dim=1).mean()
+            return value.to(loss.dtype), value.detach()
         per_landmark = loss.mean(0).detach()
         return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
 

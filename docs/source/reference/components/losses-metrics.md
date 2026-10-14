@@ -78,6 +78,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 | `DiceSaveMap` | Dice that also writes the error map. | `labels=None, dataset=None, group=None` |
 | `HausdorffDistance` | The robust Hausdorff distance in mm per label: the `percentile` of the surface distances, each surface element weighted by its area, as google-deepmind/surface-distance computes it. The value is the mean over the labels; a label the output lost is infinite and left out. Metric only. | `percentile=95.0, labels=None` |
 | `SurfaceDice` | The surface Dice at `tolerance` mm per label (Metrics Reloaded's normalised surface distance): the share of both surfaces within the tolerance of the other; a label the output lost scores 0. Metric only. | `tolerance=1.0, labels=None` |
+| `MissingLabels` | How many labels of the reference the output lacks: the structures a segmentation did not find, or those a registration's warp lost. Metric only. | `labels=None` |
 
 ## Adversarial and perceptual
 
@@ -93,7 +94,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 
 | Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
-| `TRE` | Target registration error between landmarks. | |
+| `TRE` | Target registration error: the distance between paired landmarks, their mean and each landmark's own; with `percentile`, that percentile of a case's landmark errors as one value. | `percentile=None` |
 | `Jacobian` | SDlogJ (the standard deviation of `log(clip(det J + 3, 1e-9, 1e9))`, 2 voxels left out on every face) and the share of folds (`det J <= 0`) of a displacement field in mm along the world axes, within each mask given as a target and, with `whole`, over the whole field, in one pass; logs `sdlogj<name>` and `folds<name>` per mask. Metric only. | `names=None, whole=None` |
 | `GradientImages` | Gradient smoothness (or gradient difference with a target). | |
 | `KLDivergence` | VAE KL term, against the prior N(`mu`, `std`²). | `shape` (required), `dim=100, mu=0, std=1` |
