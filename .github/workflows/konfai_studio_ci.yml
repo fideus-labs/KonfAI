@@ -74,7 +74,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         # Pull requests run Linux; a push to main, the weekly schedule and a manual run add Windows and
         # macOS, whose code paths (process groups, paths, signals) the Linux lanes never take.
         include: >-
