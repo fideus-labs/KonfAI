@@ -109,18 +109,22 @@ class RemoteServer:
         return ssl.create_default_context(cafile=self.ca_cert) if self.https else None
 
     def get_json(self, path: str, timeout_s: float, params: list[tuple[str, int]] | None = None) -> dict:
-        """The JSON body of ``GET <base url>/<path>``; a failed status raises (``HTTPError``)."""
+        """The JSON body of ``GET <base url>/<path>``; a failed status raises (``HTTPError``), and so does a
+        redirect: urllib would follow it with the token, to any host and over plain HTTP."""
         import json
         from urllib.parse import urlencode
-        from urllib.request import Request, urlopen
+        from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+
+        class _Refused(HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs) -> None:
+                return None
 
         url = f"{self.get_url()}/{path}"
         if params:
             url += "?" + urlencode(params)
+        opener = build_opener(_Refused, HTTPSHandler(context=self.ssl_context()))
         # The scheme is one of this class's two constants (get_url), never caller input: no file:// reach.
-        with urlopen(  # nosec B310
-            Request(url, headers=self.get_headers()), timeout=timeout_s, context=self.ssl_context()
-        ) as response:
+        with opener.open(Request(url, headers=self.get_headers()), timeout=timeout_s) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
 
 
