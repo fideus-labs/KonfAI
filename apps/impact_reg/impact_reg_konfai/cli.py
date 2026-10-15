@@ -212,6 +212,17 @@ convention): resampling the moving image through it gives Moved.""",
     )
     add_device(reg)
     add_tmp_dir(reg, tmp_dir_help)
+    reg.add_argument(
+        "--host",
+        default=None,
+        help="Run each preset on this konfai-apps server; the ensemble and the moved image are computed here.",
+    )
+    reg.add_argument("--port", type=int, default=8000, help="The server's port.")
+    reg.add_argument(
+        "--token",
+        default=os.environ.get("KONFAI_API_TOKEN"),
+        help="The server's bearer token (or the KONFAI_API_TOKEN environment variable).",
+    )
 
     # eval -------------------------------------------------------------------
     ev = subparsers.add_parser(
@@ -399,11 +410,16 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
         else:
             print_app(args.name, describe_app(impact_reg.IMPACT_REG_KONFAI_REPO, args.name))
         return
+    from konfai import RemoteServer
+
+    host = getattr(args, "host", None)
     app = impact_reg.ImpactRegKonfAIApp(
-        download=getattr(args, "download", False), force_update=getattr(args, "force_update", False)
+        download=getattr(args, "download", False),
+        force_update=getattr(args, "force_update", False),
+        remote_server=RemoteServer(host, args.port, args.token) if host else None,
     )
     if args.command == "register":
-        if not args.gpu and args.cpu is None and not args.quiet:
+        if not args.gpu and args.cpu is None and not args.quiet and not host:
             import torch
 
             if torch.cuda.is_available():

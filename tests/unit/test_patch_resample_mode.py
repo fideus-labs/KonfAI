@@ -92,7 +92,7 @@ def test_an_unset_max_voxels_is_the_tighter_of_the_gpu_and_the_host(monkeypatch:
     from konfai.utils import budget, vram
 
     asked: list = []
-    monkeypatch.setattr(konfai, "get_vram", lambda devices: asked.append(devices) or (0.0, 24.0))
+    monkeypatch.setattr(konfai, "get_vram", lambda devices, remote_server=None: asked.append(devices) or (0.0, 24.0))
     monkeypatch.setattr(budget, "available_memory_bytes", lambda: (16 * 2**30, "test"))
     monkeypatch.setattr(budget, "_per_rank_bytes", None)
     host = int(16 * 2**30 * budget.AUTO_MEMORY_SAFETY_FRACTION / 950)
