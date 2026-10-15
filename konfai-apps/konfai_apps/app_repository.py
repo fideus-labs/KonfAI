@@ -228,6 +228,7 @@ def get_available_apps_on_remote_server(remote_server: RemoteServer) -> list[str
         f"{remote_server.get_url()}/repo_apps_list",
         headers=remote_server.get_headers(),
         timeout=remote_server.timeout,
+        verify=remote_server.verify,
     )
     r.raise_for_status()
 
@@ -1730,7 +1731,9 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
     def __init__(self, remote_server: RemoteServer, app_name: str) -> None:
         self._remote_server = remote_server
         url = f"{remote_server.get_url()}/repo_apps/{app_name}"
-        response = requests.get(url, headers=remote_server.get_headers(), timeout=remote_server.timeout)
+        response = requests.get(
+            url, headers=remote_server.get_headers(), timeout=remote_server.timeout, verify=remote_server.verify
+        )
         response.raise_for_status()
         data: dict[str, Any] = response.json()
 
@@ -1810,7 +1813,12 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
             return re.sub(r"[^a-zA-Z0-9._-]+", "_", value)
 
         url = f"{self._remote_server.get_url()}/repo_apps_config/{self._app_name}"
-        response = requests.get(url, headers=self._remote_server.get_headers(), timeout=self._remote_server.timeout)
+        response = requests.get(
+            url,
+            headers=self._remote_server.get_headers(),
+            timeout=self._remote_server.timeout,
+            verify=self._remote_server.verify,
+        )
         response.raise_for_status()
 
         base_tmp = Path(tempfile.gettempdir())
@@ -1849,6 +1857,8 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     - ``/path/to/app_repository`` -> local folder
     - ``host:port:app_name`` -> remote KonfAI app server
     - ``host:port:app_name|token`` -> remote KonfAI app server with bearer token
+    - ``https://host:port:app_name[|token]`` -> the same server over HTTPS, its certificate checked against
+      ``KONFAI_API_CA_CERT`` when set
     """
     local_path = _resolve_local_app_path(app_id)
     if local_path is not None:
@@ -1856,6 +1866,9 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
             return LocalAppRepositoryFromDirectory(local_path.parent, local_path.name)
         raise AppRepositoryError(f"Local app directory not found: {app_id!r}")
 
+    https = app_id.startswith("https://")
+    if https:
+        app_id = app_id.removeprefix("https://")
     if app_id.count(":") >= 2:
         host, port_str, name_and_token = app_id.split(":", 2)
         name_and_token_split = name_and_token.split("|")
@@ -1864,7 +1877,8 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
         if len(name_and_token_split) == 2:
             name, token = name_and_token_split
         if port_str.isdigit():
-            remote = RemoteServer(host, int(port_str), token)
+            ca_cert = (os.environ.get("KONFAI_API_CA_CERT") or None) if https else None
+            remote = RemoteServer(host, int(port_str), token, https, ca_cert)
             return AppRepositoryInfoFromRemoteServer(remote, name)
 
     if app_id.count(":") == 1:

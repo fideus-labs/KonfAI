@@ -632,6 +632,16 @@ def main_apps() -> None:
             default=os.environ.get("KONFAI_API_TOKEN"),
             help="Bearer token (or use KONFAI_API_TOKEN env var)",
         )
+        parser.add_argument("--https", action="store_true", help="Reach the server over HTTPS.")
+        parser.add_argument(
+            "--ca-cert",
+            "--ca_cert",
+            dest="ca_cert",
+            type=str,
+            default=None,
+            help="The certificate (PEM) the server's is checked against, for a server whose certificate no system "
+            "authority signed; implies --https. With --https alone, KONFAI_API_CA_CERT is that certificate.",
+        )
         _add_app_io(parser, fine_tune=is_fine_tune)
 
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
@@ -854,12 +864,14 @@ def main_apps() -> None:
     host = kwargs.pop("host")
     port = kwargs.pop("port")
     token = kwargs.pop("token")
+    https = kwargs.pop("https")
+    ca_cert = kwargs.pop("ca_cert") or ((os.environ.get("KONFAI_API_CA_CERT") or None) if https else None)
 
     from . import app as app_module
 
     konfai_app: AbstractKonfAIApp
     if host is not None:
-        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), RemoteServer(host, port, token))
+        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), RemoteServer(host, port, token, https, ca_cert))
     else:
         konfai_app = app_module.KonfAIApp(kwargs.pop("app"), kwargs.pop("download"), kwargs.pop("force_update"))
 
@@ -924,8 +936,26 @@ def main_apps_server() -> None:
         action="store_true",
         help="Validate all apps listed in --apps (no download) and exit; with --download, download and serve.",
     )
+    parser.add_argument(
+        "--ssl-certfile",
+        "--ssl_certfile",
+        dest="ssl_certfile",
+        type=Path,
+        default=None,
+        help="Serve HTTPS with this certificate (PEM).",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        "--ssl_keyfile",
+        dest="ssl_keyfile",
+        type=Path,
+        default=None,
+        help="The certificate's private key (PEM).",
+    )
 
     args = parser.parse_args()
+    if (args.ssl_certfile is None) != (args.ssl_keyfile is None):
+        raise SystemExit("--ssl-certfile and --ssl-keyfile go together: HTTPS needs the certificate and its key.")
 
     _configure_server_auth_env(args.auth, args.token, args.token_env)
 
@@ -964,4 +994,12 @@ def main_apps_server() -> None:
             except Exception as exc:
                 print(f"[KonfAI-Apps] Failed to cache '{app.get_name()}': {exc}", flush=True)
 
-    uvicorn.run("konfai_apps.app_server:app", host=args.host, port=args.port, log_level="info", reload=False)
+    uvicorn.run(
+        "konfai_apps.app_server:app",
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        reload=False,
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
+    )

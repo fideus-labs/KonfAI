@@ -1494,6 +1494,7 @@ def _remote_repo_from_payload(monkeypatch: pytest.MonkeyPatch, payload: dict):
 
     class _Server:
         timeout = 5
+        verify = True
 
         def get_url(self) -> str:
             return "http://127.0.0.1:1"
@@ -1776,3 +1777,27 @@ def test_max_voxels_lands_in_the_prediction_patch(tmp_path: Path) -> None:
 
     assert YAML(typ="safe").load(config.read_text())["Predictor"]["Dataset"]["Patch"]["max_voxels"] == 5000
     assert collect_remote_options("infer", {"max_voxels": 5000}) == {"max_voxels": 5000}
+
+
+@pytest.mark.parametrize(
+    ("app_id", "url", "verify"),
+    [
+        ("gpu-box:8000:demo|tok", "http://gpu-box:8000", True),
+        ("https://gpu-box:8000:demo|tok", "https://gpu-box:8000", "/ca.pem"),
+    ],
+)
+def test_a_remote_identifier_names_its_scheme(monkeypatch: pytest.MonkeyPatch, app_id, url, verify) -> None:
+    """``https://`` before ``host:port:app`` reaches the server over HTTPS, checked against KONFAI_API_CA_CERT;
+    without it the server is HTTP whatever that variable holds."""
+    seen: dict = {}
+    monkeypatch.setattr(
+        app_repository_module.AppRepositoryInfoFromRemoteServer,
+        "__init__",
+        lambda self, remote, name: seen.update(remote=remote, name=name),
+    )
+    monkeypatch.setenv("KONFAI_API_CA_CERT", "/ca.pem")
+
+    app_repository_module.get_app_repository_info(app_id, False)
+
+    remote = seen["remote"]
+    assert (remote.get_url(), remote.verify, remote.token, seen["name"]) == (url, verify, "tok", "demo")

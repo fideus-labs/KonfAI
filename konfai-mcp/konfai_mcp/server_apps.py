@@ -164,13 +164,14 @@ class AppService:
         """Classify a catalogue entry, mirroring ``get_app_repository_info`` dispatch.
 
         Returns one of: ``local`` (an existing path to an app folder), ``remote``
-        (``host:port:name``), ``remote_server`` (``host:port[|token]`` to expand into its apps),
+        (``host:port:name``), ``remote_server`` (``host:port[|token]`` to expand into its apps), each
+        reached over HTTPS when prefixed ``https://``,
         ``hf_app`` (``repo_id:app_name``), ``hf_repo`` (a bare ``repo_id`` to expand into its apps),
         or ``unknown``.
         """
         if Path(ref).expanduser().exists():
             return "local"
-        parts = ref.split(":")
+        parts = ref.removeprefix("https://").split(":")
         if len(parts) >= 3 and parts[1].isdigit():
             return "remote"
         # 'host:port[|token]' is a remote server to enumerate (not a single app).
@@ -236,11 +237,13 @@ class AppService:
                     apps.append({"ref": f"{ref}:{name}", "source": "hf", "repo": ref, "app_name": name})
             elif kind == "remote_server":
                 try:
-                    base, _, token = ref.partition("|")
+                    scheme = "https://" if ref.startswith("https://") else ""
+                    base, _, token = ref.removeprefix(scheme).partition("|")
                     host, port_str = base.split(":")
                     from konfai import RemoteServer
 
-                    server = RemoteServer(host, int(port_str), token or None)
+                    ca_cert = (os.environ.get("KONFAI_API_CA_CERT") or None) if scheme else None
+                    server = RemoteServer(host, int(port_str), token or None, bool(scheme), ca_cert)
                     names = app_repository.get_available_apps_on_remote_server(server)
                 except Exception as exc:  # server unreachable / auth -> report, keep going
                     errors.append({"ref": ref, "error": f"{type(exc).__name__}: {exc}"})
@@ -249,9 +252,9 @@ class AppService:
                 for name in names:
                     apps.append(
                         {
-                            "ref": f"{host}:{port_str}:{name}{suffix}",
+                            "ref": f"{scheme}{host}:{port_str}:{name}{suffix}",
                             "source": "remote",
-                            "repo": f"{host}:{port_str}",
+                            "repo": f"{scheme}{host}:{port_str}",
                             "app_name": name,
                         }
                     )
