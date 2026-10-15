@@ -69,3 +69,16 @@ def test_slicer_consumed_core_symbol_is_stable(module_path: str, name: str, kind
         and pname not in params
     }
     assert not new_required, f"{module_path}.{name} added required parameter(s) {sorted(new_required)}; Slicer breaks."
+
+
+class _SlicerServer:
+    """SlicerKonfAI's RemoteServer, as the core sees it: its own get_json, and nothing konfai's class added since."""
+
+    def get_json(self, path: str, timeout_s: float, params: list | None = None) -> dict:
+        return {"status": "ok"} if path == "health" else {}
+
+
+def test_the_server_helpers_take_slicers_own_server_object() -> None:
+    import konfai
+
+    assert konfai.check_server(_SlicerServer()) == (True, "OK")

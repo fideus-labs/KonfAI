@@ -176,6 +176,8 @@ def test_classify_reference_shapes(tmp_path: Path) -> None:
     assert classify("localhost:8000:MyApp") == "remote"
     assert classify("localhost:8000") == "remote_server"  # bare host:port = a server to enumerate
     assert classify("192.168.0.5:8080") == "remote_server"
+    assert classify("https://gpu-box:8443:MyApp") == "remote"
+    assert classify("https://gpu-box:8443|token") == "remote_server"
     assert classify("mysteryword") == "unknown"
 
 

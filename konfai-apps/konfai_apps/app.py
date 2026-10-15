@@ -396,6 +396,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                 headers=self.remote_server.get_headers(),
                 stream=True,
                 timeout=(connect_timeout, read_timeout),
+                verify=self.remote_server.verify,
             ) as r:
                 if r.status_code == 401:
                     raise RuntimeError("Unauthorized: invalid or missing token")
@@ -450,6 +451,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                 url,
                 headers=self.remote_server.get_headers(),
                 timeout=timeout_s,
+                verify=self.remote_server.verify,
             )
 
             if r.status_code == 401:
@@ -525,6 +527,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     headers=self.remote_server.get_headers(),
                     stream=True,
                     timeout=(connect_timeout, read_timeout),
+                    verify=self.remote_server.verify,
                 ) as r:
                     if r.status_code == 401:
                         raise RuntimeError("Unauthorized: invalid or missing token")
@@ -681,6 +684,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
                         data=body,
                         headers={**self.remote_server.get_headers(), "Content-Type": body.content_type},
                         timeout=(connect_timeout, read_timeout),
+                        verify=self.remote_server.verify,
                     ) as r:
                         if r.status_code == 401:
                             raise RuntimeError("Unauthorized: invalid or missing token")

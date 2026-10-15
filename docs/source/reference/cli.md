@@ -99,6 +99,8 @@ Options shared by `infer`, `eval`, `uncertainty`, `pipeline` and `fine-tune`:
 | --- | --- |
 | `app` | The app: a Hugging Face `repo:app`, a local folder, or a server's app. |
 | `--host`, `--port`, `--token` | Run on a `konfai-apps-server` instead of locally. |
+| `--https` | Reach that server over HTTPS. |
+| `--ca-cert` | The certificate the server's is checked against, for a self-signed one; implies `--https`. With `--https` alone, `KONFAI_API_CA_CERT` is that certificate. |
 | `-i`, `--inputs` | Input files; repeat the flag for each input group. |
 | `-o`, `--output` | Output directory. |
 | `--gpu` / `--cpu` | The device (one or the other). |
@@ -134,7 +136,7 @@ They also work on a remote server; a server that does not support one refuses th
 
 ## `konfai-apps-server`
 
-Serves apps over HTTP, for `konfai-apps --host …` ({doc}`app-server-api`).
+Serves apps over HTTP, or HTTPS with a certificate, for `konfai-apps --host …` ({doc}`app-server-api`).
 
 | Option | Meaning |
 | --- | --- |
@@ -145,6 +147,7 @@ Serves apps over HTTP, for `konfai-apps --host …` ({doc}`app-server-api`).
 | `--apps` | A JSON file listing the apps. |
 | `--download` | Download the apps at startup. |
 | `--check` | Check the apps and exit without serving. |
+| `--ssl-certfile`, `--ssl-keyfile` | Serve HTTPS with this certificate and its key. |
 
 ## `konfai-cluster`
 

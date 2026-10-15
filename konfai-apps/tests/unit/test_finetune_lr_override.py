@@ -301,7 +301,7 @@ def test_remote_client_fine_tune_sends_lr_in_data(monkeypatch: pytest.MonkeyPatc
 
     captured: dict = {}
 
-    def fake_post(url, data, headers, timeout):  # type: ignore[no-untyped-def]
+    def fake_post(url, data, headers, timeout, verify=True):  # type: ignore[no-untyped-def]
         files, form = decode_multipart(data)
         return _FakePostResponse(captured, files, form)
 
@@ -314,6 +314,7 @@ def test_remote_client_fine_tune_sends_lr_in_data(monkeypatch: pytest.MonkeyPatc
     client.remote_server = types.SimpleNamespace(  # type: ignore[attr-defined]
         get_url=lambda: "http://server",
         get_headers=lambda: {},
+        verify=True,
     )
 
     client.fine_tune(dataset=dataset_dir, output=tmp_path / "out", lr=0.03)

@@ -153,8 +153,9 @@ client.pipeline(
 It uploads the inputs, streams the logs, downloads the result into `output`, and stops the remote job if
 you interrupt it.
 
-`RemoteServer` speaks plain HTTP. For a server beyond localhost, put it behind a
-TLS reverse proxy to encrypt the token and images in transit.
+`RemoteServer` speaks plain HTTP by default. For a server beyond localhost, serve it
+over HTTPS (`konfai-apps-server --ssl-certfile … --ssl-keyfile …`) and pass `https=True`,
+or `ca_cert="server.pem"` when no system authority signed its certificate.
 
 An app runs its Python code and installs its requirements by default. Use a source
 you trust. Set `KONFAI_APPS_INSTALL_REQUIREMENTS=0` to manage requirements yourself.
