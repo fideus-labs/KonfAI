@@ -44,6 +44,7 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
+from konfai import RemoteServer
 from konfai.utils.dataset import (
     Attribute,
     Dataset,
@@ -333,10 +334,13 @@ def _preset_overrides(
     return passes
 
 
-def _plan(manifest: dict, gpu: list[int], max_voxels: int | None) -> tuple[int | None, int | None]:
+def _plan(
+    manifest: dict, gpu: list[int], max_voxels: int | None, remote_server: RemoteServer | None = None
+) -> tuple[int | None, int | None]:
     """The voxels a preset registers whole and those one of its tiles holds (see ``register``): what the device holds
     at the peak costs its ``app.json`` declares (KonfAI's ``max_voxels``), None for a pass that declares none; or
-    ``max_voxels`` for the whole pass, the tiles in proportion to their cost."""
+    ``max_voxels`` for the whole pass, the tiles in proportion to their cost. With ``remote_server``, the device
+    is the server's."""
     from konfai.utils.vram import max_voxels as voxels_on
 
     tiling = manifest.get("tiling") or {}
@@ -347,8 +351,8 @@ def _plan(manifest: dict, gpu: list[int], max_voxels: int | None) -> tuple[int |
         ratio = whole.get(device, 0) / tile[device] if tile and tile.get(device) else 0
         return max_voxels, int(max_voxels * ratio) if ratio else max_voxels
     at = gpu[0] if gpu else None
-    return voxels_on(whole.get("vram"), whole.get("ram"), at), voxels_on(
-        tile.get("vram"), tile.get("ram"), at
+    return voxels_on(whole.get("vram"), whole.get("ram"), at, remote_server), voxels_on(
+        tile.get("vram"), tile.get("ram"), at, remote_server
     ) if tile else None
 
 
@@ -798,9 +802,14 @@ def _run_transform(
 class ImpactRegKonfAIApp:
     """Run IMPACT-Reg preset apps, ensemble their displacement fields, evaluate, and estimate uncertainty."""
 
-    def __init__(self, download: bool = False, force_update: bool = False) -> None:
+    def __init__(
+        self, download: bool = False, force_update: bool = False, remote_server: RemoteServer | None = None
+    ) -> None:
         self._download = download
         self._force_update = force_update
+        # Each preset pass runs on this server when set; the ensemble, the evaluation and the uncertainty
+        # stay here, on the fields it sends back.
+        self._remote = remote_server
         # The --set overrides each preset run took, by its workspace (``label``): ``applied`` in register.json.
         self._applied: dict[str, list[str]] = {}
         # Per preset, the voxels it registers whole and those a tile holds, KonfAI's ``max_voxels``: ``plans`` in
@@ -890,10 +899,18 @@ class ImpactRegKonfAIApp:
             command.append("--download")
         if self._force_update:
             command.append("--force_update")
+        env = {**os.environ, "TMPDIR": str(work)}
+        if self._remote is not None:
+            command += ["--host", self._remote.host, "--port", str(self._remote.port)]
+            # Through the environment konfai-apps reads it from, not the argv any process listing shows; a
+            # server named without one gets none, not the token this process inherited.
+            env.pop("KONFAI_API_TOKEN", None)
+            if self._remote.token:
+                env["KONFAI_API_TOKEN"] = self._remote.token
         # The engines' temporary files (elastix's images, FireANTs' total field) go to the work dir too: a
         # RAM-backed /tmp would hold several gigabytes a tile of a large pair in memory.
         try:
-            subprocess.run(command, check=True, env={**os.environ, "TMPDIR": str(work)})  # nosec B603
+            subprocess.run(command, check=True, env=env)  # nosec B603
         except subprocess.CalledProcessError as error:
             if error.returncode == EXIT_OUT_OF_MEMORY:
                 raise _OutOfMemory(
@@ -994,7 +1011,7 @@ class ImpactRegKonfAIApp:
                     print(f"[ImpactReg] preset {index}/{len(presets)}: {preset}", flush=True)
                 manifest = _manifest(preset)
                 tiling = manifest.get("tiling") or {}
-                budget, tile_budget = _plan(manifest, gpu, max_voxels)
+                budget, tile_budget = _plan(manifest, gpu, max_voxels, self._remote)
                 self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
                 largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
                 tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)

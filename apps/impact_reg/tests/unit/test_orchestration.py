@@ -845,7 +845,9 @@ def test_register_records_the_overrides_each_pass_took(tmp_path: Path, monkeypat
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": _TILING})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
 
     def fake_run(command, **kwargs):
@@ -941,7 +943,9 @@ def test_max_voxels_pins_the_tiles_too(monkeypatch: pytest.MonkeyPatch) -> None:
     assert reg._plan(manifest, [0], 1000) == (1000, 2000)
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1150 * 575 * 10 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1150 * 575 * 10 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
     assert reg._plan(manifest, [0], None) == (5750, 11500)
 
@@ -952,7 +956,7 @@ def test_every_preset_is_sized_from_both_costs_it_declares(monkeypatch: pytest.M
     asked: list = []
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: asked.append((vram_cost, ram_cost, gpu)) or 10**6,
+        lambda vram_cost, ram_cost, gpu, remote_server=None: asked.append((vram_cost, ram_cost, gpu)) or 10**6,
     )
     manifest = {"vram_bytes_per_voxel": 100, "ram_bytes_per_voxel": 40}
     assert reg._plan(manifest, [], None) == (10**6, None) and asked == [(100.0, 40.0, None)]
@@ -982,7 +986,9 @@ def test_a_pair_too_large_runs_its_global_stages_resampled_then_native_tiles_and
 
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = preset  # type: ignore[method-assign]
@@ -1015,7 +1021,9 @@ def test_the_tiles_get_a_fixed_mask_on_the_fixed_grid(tmp_path: Path, monkeypatc
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1150, "tiling": tiling})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 * 1150 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(
+            1000 * 1150 / (vram_cost if gpu is not None else ram_cost)
+        ),
     )
     seen: dict = {}
 
@@ -1224,7 +1232,7 @@ def test_a_pass_out_of_gpu_memory_ends_the_run_and_the_global_pass_runs_once(
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1, "tiling": tiling})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(1000 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(1000 / (vram_cost if gpu is not None else ram_cost)),
     )
     calls: list = []
 
@@ -1251,7 +1259,7 @@ def test_a_pair_that_fits_is_registered_whole_under_its_budget(tmp_path: Path, m
     monkeypatch.setattr(reg, "_manifest", lambda preset: {"ram_bytes_per_voxel": 1, "tiling": tiling})
     monkeypatch.setattr(
         "konfai.utils.vram.max_voxels",
-        lambda vram_cost, ram_cost, gpu: int(10**6 / (vram_cost if gpu is not None else ram_cost)),
+        lambda vram_cost, ram_cost, gpu, remote_server=None: int(10**6 / (vram_cost if gpu is not None else ram_cost)),
     )
     calls: list = []
 

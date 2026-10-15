@@ -688,6 +688,12 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     ) as r:
                         if r.status_code == 401:
                             raise RuntimeError("Unauthorized: invalid or missing token")
+                        if r.status_code == 404:
+                            raise KonfAIAppClientError(
+                                f"The remote server does not serve '{self.app}'.",
+                                "A server runs only the apps its --apps list names, revision included.",
+                                f"Add '{self.app}' to that list and restart the server.",
+                            )
                         r.raise_for_status()
                         resp = r.json()
                         job_id = resp["job_id"]
