@@ -148,7 +148,9 @@ def test_ome_zarr_output_is_readable_by_ngff_zarr(tmp_path: Path) -> None:
     img0 = mz.images[0]
     assert tuple(img0.dims) == ("c", "z", "y", "x")
     assert img0.scale == {"c": 1.0, "z": 2.0, "y": 0.6, "x": 0.5}
-    assert img0.translation == {"c": 0.0, "z": 3.0, "y": 2.0, "x": 1.0}
+    assert img0.translation == {"c": 0.0, "z": 0.0, "y": 0.0, "x": 0.0}
+    transform = ngff_zarr.ngff_transform_to_itk_transform(mz.metadata.coordinateTransformations[0], img0.dims)[0]
+    np.testing.assert_allclose(transform.parameters[-3:], [1.0, 2.0, 3.0])
     assert np.array_equal(np.asarray(img0.data), data)
 
 

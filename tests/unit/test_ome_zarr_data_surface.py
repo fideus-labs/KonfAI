@@ -165,10 +165,7 @@ def test_write_ome_zarr_builds_a_pyramid_by_position(tmp_path: Path) -> None:
 
 
 def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path) -> None:
-    """The konfai sidecar records the geometry the writer was handed: level 0's. Read at ``@1``
-    through the Dataset, the level's own scale and translation win over it: from the sidecar, level 1
-    would come back with level 0's spacing on an eighth of the voxels (half the samples along each of
-    the three axes): half the extent per axis, for every consumer that registers on the coarse level."""
+    """Each pyramid level's offset is mapped through the same physical rotation as level zero."""
     root = tmp_path / "cases"
     store = root / "case_1" / "CT.ome.zarr"
     store.parent.mkdir(parents=True)
@@ -182,14 +179,12 @@ def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path)
 
     _shape, fine = Dataset(str(root), "omezarr@0").get_infos("CT", "case_1")
     _shape, coarse = Dataset(str(root), "omezarr@1").get_infos("CT", "case_1")
-    # Level 0 is the level the sidecar describes: read as recorded, Direction included.
+    # Level zero retains the original physical grid.
     np.testing.assert_array_equal(fine.get_np_array("Spacing"), [2.0, 1.0, 1.0])
     np.testing.assert_array_equal(fine.get_np_array("Origin"), [10.0, 20.0, 30.0])
-    # Level 1 has its own scale and translation (x, y, z): the sidecar's Spacing and Origin are
-    # not this level's, so they yield to the transforms, while the Direction NGFF cannot express
-    # still comes from the sidecar.
+    # The coarser voxel centre is shifted along the rotated image axes.
     np.testing.assert_allclose(coarse.get_np_array("Spacing"), [4.0, 2.0, 2.0])
-    np.testing.assert_allclose(coarse.get_np_array("Origin"), [11.0, 20.5, 30.5])
+    np.testing.assert_allclose(coarse.get_np_array("Origin"), [10.5, 21.0, 30.5])
     direction = [0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     np.testing.assert_array_equal(fine.get_np_array("Direction"), direction)
     np.testing.assert_array_equal(coarse.get_np_array("Direction"), direction)
@@ -199,16 +194,13 @@ def test_a_coarser_level_reads_its_own_geometry_not_the_sidecars(tmp_path: Path)
 
 
 def test_a_translation_moved_by_another_ngff_tool_is_the_origin_read(tmp_path: Path) -> None:
-    """The sidecar is written beside the NGFF transforms and only KonfAI keeps it current: a store
-    another tool moved (a new translation, the same scale) is read where that tool put it."""
+    """A standard translation changed by another tool is the physical origin KonfAI reads."""
     root = tmp_path / "cases"
     Dataset(str(root), "omezarr").write("CT", "case_1", _volume(), geometry((5.0, 6.0, 7.0)))
     metadata_path = root / "case_1" / "CT.ome.zarr" / "zarr.json"
     metadata = json.loads(metadata_path.read_text())
-    for level in metadata["attributes"]["ome"]["multiscales"][0]["datasets"]:
-        for transform in level["coordinateTransformations"]:
-            if transform["type"] == "translation":
-                transform["translation"] = [0.0, 100.0, 200.0, 300.0]  # c, z, y, x
+    transform = metadata["attributes"]["ome"]["multiscales"][0]["coordinateTransformations"][0]
+    transform["transformations"][-1]["translation"] = [0.0, 100.0, 200.0, 300.0]
     metadata_path.write_text(json.dumps(metadata))
     clear_ome_zarr_cache(root / "case_1" / "CT.ome.zarr")
 
@@ -292,8 +284,8 @@ def test_append_levels_turns_a_streamed_store_into_a_pyramid(tmp_path: Path) -> 
     assert get_ome_zarr_info(store)["n_levels"] == 2
     level0, _ = read_ome_zarr_data_slice(store, (slice(None),) * 4, level=0)
     np.testing.assert_array_equal(level0, volume)
-    # The sidecar survives the rewrite: losing Direction is silent, the reader falls back to identity.
-    assert get_ome_zarr_info(store)["attributes"]["Direction"] == [1, 0, 0, 0, 1, 0, 0, 0, 1]
+    # The physical mapping survives adding pyramid levels.
+    np.testing.assert_array_equal(get_ome_zarr_info(store)["standard_geometry"]["Direction"], np.eye(3).ravel())
 
 
 def test_append_levels_without_factors_is_a_no_op(tmp_path: Path) -> None:
