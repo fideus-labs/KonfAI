@@ -136,3 +136,36 @@ def test_a_small_field_rotation_is_not_discarded_as_identity(tmp_path: Path) -> 
     write_ome_zarr(tmp_path, np.zeros((2, 4, 4), np.float32), attributes=attributes, displacement_field=True)
     geometry = get_ome_zarr_info(tmp_path)["standard_geometry"]
     np.testing.assert_allclose(geometry["Direction"], direction.ravel(), atol=1e-20, rtol=1e-14)
+
+
+def test_a_nonlinear_image_mapping_is_not_silently_ignored(tmp_path: Path) -> None:
+    import dataclasses
+
+    from ngff_zarr.v06.zarr_metadata import CoordinateSystemIdentifier, Displacements
+
+    multiscales = nz.to_multiscales(nz.to_ngff_image(np.zeros((4, 4), np.uint8), dims=["y", "x"]), scale_factors=[])
+    intrinsic = multiscales.metadata.intrinsic_coordinate_system
+    multiscales.metadata.coordinateSystems.append(dataclasses.replace(intrinsic, name="world"))
+    multiscales.metadata.coordinateTransformations = [
+        Displacements(
+            input=CoordinateSystemIdentifier(name=intrinsic.name),
+            output=CoordinateSystemIdentifier(name="world"),
+            path="field",
+            interpolation="linear",
+        )
+    ]
+    nz.to_ngff_zarr(str(tmp_path), multiscales, version="0.6")
+    with pytest.raises(DatasetManagerError, match="nonlinear"):
+        get_ome_zarr_info(tmp_path)
+
+
+def test_standard_geometry_ignores_private_axis_and_unit_hints(tmp_path: Path) -> None:
+    image = nz.to_ngff_image(
+        np.zeros((4, 4), np.uint8), dims=["y", "x"], scale={"y": 2, "x": 3}, translation={"y": 5, "x": 7}
+    )
+    multiscales = nz.to_multiscales(image, scale_factors=[])
+    multiscales.root_attributes = {"konfai": {"attributes": {"OMEAxes_0": "y x", "OMEUnits_0": "meter meter"}}}
+    nz.to_ngff_zarr(str(tmp_path), multiscales, version="0.5")
+    geometry = get_ome_zarr_info(tmp_path)["standard_geometry"]
+    np.testing.assert_array_equal(geometry["Origin"], [7, 5])
+    np.testing.assert_array_equal(geometry["Spacing"], [3, 2])

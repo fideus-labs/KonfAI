@@ -101,6 +101,7 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
     import ngff_zarr
     from ngff_zarr.rfc4 import anatomical_orientation_to_itk_direction
 
+    from konfai.utils.dataset.attribute import Attribute
     from konfai.utils.ome_zarr import millimetres_per_unit
 
     dims = list(image.dims)
@@ -108,12 +109,18 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
     n = len(xyz)
     metadata = multiscales.metadata
     intrinsic = getattr(metadata, "intrinsic_coordinate_system", None)
-    transforms = [t for t in (metadata.coordinateTransformations or []) if t.type != "displacements"]
+    is_field = intrinsic is not None and any(a.type == "displacement" for a in intrinsic.axes)
+    transforms = [
+        t
+        for t in (metadata.coordinateTransformations or [])
+        if not (is_field and t.type == "displacements" and t.input is not None and t.input == t.output)
+    ]
     matrix, offset = np.eye(n), np.zeros(n)
     units = {k: v for k, v in (image.axes_units or {}).items() if v}
     orientations = {k: v for k, v in (image.axes_orientations or {}).items() if v}
     private = (multiscales.root_attributes or {}).get("konfai", {}).get("attributes", {})
-    if not transforms and without_geometry(private) != private:
+    recorded = Attribute(private)
+    if not transforms and any(key in recorded for key in ("Origin", "Spacing", "Direction")):
         raise DatasetManagerError(
             "This OME-Zarr store keeps geometry in private KonfAI attributes.",
             "Rewrite it with RFC-5 coordinate transformations before reading it.",
@@ -128,6 +135,8 @@ def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
         ):
             raise DatasetManagerError("OME-Zarr requires one unambiguous intrinsic-to-world transformation.")
         transform = transforms[0]
+        if transform.type in ("displacements", "coordinates"):
+            raise DatasetManagerError("A nonlinear OME-Zarr transformation cannot describe an image grid.")
         systems = [s for s in metadata.coordinateSystems if s.name == transform.output.name]
         if len(systems) != 1 or [a.name for a in systems[0].axes] != dims:
             raise DatasetManagerError("OME-Zarr world axes must match the intrinsic axes in order.")
