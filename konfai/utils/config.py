@@ -22,6 +22,7 @@ import functools
 import inspect
 import logging
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -31,6 +32,7 @@ import typing
 import warnings
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
@@ -38,12 +40,148 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
 import ruamel.yaml
+from ruamel.yaml.comments import CommentedMap as _CommentedMap
 
 from konfai.utils.errors import ConfigError, KonfAIWarning
 
-yaml = ruamel.yaml.YAML()
-yaml.width = 4096  # the write-back keeps a long line (a label list, a path) on its line
 _log = logging.getLogger(__name__)
+
+#: ``owner/name[@revision]:path``: a file of a Hugging Face model repository.
+_HUB_FILE = re.compile(r"^(?P<repo>[\w.-]+/[\w.-]+)(?:@(?P<revision>[^:]+))?:(?P<path>[^:]+)$")
+#: A file of the Hub: its repository, the revision asked for (``None``: the default branch) and its path there.
+_HubOrigin = tuple[str, str | None, str]
+#: The includes this load is reading, outermost first, each with the Hub file it came from: an include that names one
+#: of them is a cycle, and a relative include of a Hub file is read from the same repository. One per load, so two
+#: threads reading the same file do not see each other's.
+_including: ContextVar[tuple[tuple[Path, _HubOrigin | None], ...]] = ContextVar("_including", default=())
+
+
+class Included(_CommentedMap):
+    """A block another file holds, named in a config as ``!include FILE[#KEY.KEY]``.
+
+    ``FILE`` is a path relative to the file that names it, an absolute path, or ``owner/name[@revision]:path``
+    in a Hugging Face model repository; ``#KEY.KEY`` picks a block inside it, the whole file otherwise. The block
+    binds as if it were written in place, and the config is written back with the reference, never with the
+    block's content: the file it comes from stays the one place it is written, and a default the binder resolves
+    inside it is not recorded.
+    """
+
+    yaml_tag = "!include"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.spec = ""
+
+    def __deepcopy__(self, memo: dict) -> "Included":
+        copy = super().__deepcopy__(memo)
+        copy.spec = self.spec
+        return copy
+
+    @classmethod
+    def to_yaml(cls, representer: Any, node: "Included") -> Any:
+        return representer.represent_scalar(cls.yaml_tag, node.spec)
+
+    @classmethod
+    def from_yaml(cls, constructor: Any, node: Any) -> "Included":
+        name = str(node.start_mark.name or "")
+        base = Path(name).resolve().parent if name and not name.startswith("<") else Path.cwd()
+        return _included(str(constructor.construct_scalar(node)), base)
+
+
+def _yaml() -> ruamel.yaml.YAML:
+    """KonfAI's YAML: round trip, long lines kept, ``!include`` read and written. One per load: ruamel's reader
+    is not reentrant, and an include is read while the file naming it is."""
+    instance = ruamel.yaml.YAML()
+    instance.width = 4096  # the write-back keeps a long line (a label list, a path) on its line
+    instance.register_class(Included)
+    return instance
+
+
+yaml = _yaml()
+
+
+def _hub_file(reference: str, base: Path) -> re.Match[str] | None:
+    """``reference`` as a file of the Hugging Face Hub, unless a file of that name lies beside the includer."""
+    hub = _HUB_FILE.match(reference)
+    return hub if hub is not None and not (base / reference).exists() else None
+
+
+def _hub_download(spec: str, origin: _HubOrigin) -> Path:
+    """The Hub file ``origin`` in the local cache, a refusal naming the include when it cannot be had."""
+    try:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
+    except ImportError as error:
+        raise ConfigError(
+            f"'!include {spec}' names a file on the Hugging Face Hub, which needs huggingface_hub.",
+            "Install it with `pip install huggingface_hub`.",
+        ) from error
+    repo, revision, path = origin
+    try:
+        # the revision the include names; without one, the repository's default branch, as the author wrote it
+        return Path(hf_hub_download(repo, path, revision=revision))  # nosec B615
+    except (HfHubHTTPError, EntryNotFoundError, OSError, ValueError) as error:
+        raise ConfigError(
+            f"'!include {spec}' names '{path}' of '{repo}'{f' at {revision}' if revision else ''}, which the Hub does not give.",
+            f"Check the repository, the revision and the path, and the network: {error}",
+        ) from error
+
+
+def _resolve(spec: str, base: Path, includer: _HubOrigin | None = None) -> tuple[Path, _HubOrigin | None]:
+    """The file an ``!include`` names and, when it lives on the Hub, where: named there outright, or relative to an
+    includer that itself came from the Hub, whose repository and revision it then shares."""
+    reference = spec.partition("#")[0]
+    hub = _hub_file(reference, base)
+    if hub is not None:
+        origin: _HubOrigin = (hub["repo"], hub["revision"], hub["path"])
+    elif includer is not None and not Path(reference).is_absolute():
+        inside = posixpath.normpath(posixpath.join(posixpath.dirname(includer[2]), reference))
+        if inside.startswith(".."):
+            raise ConfigError(f"'!include {spec}' leaves the repository '{includer[0]}' it is read from.")
+        origin = (includer[0], includer[1], inside)
+    else:
+        return (Path(reference) if Path(reference).is_absolute() else base / reference).resolve(), None
+    return _hub_download(spec, origin), origin
+
+
+def include_path(spec: str, base: Path) -> Path:
+    """The file an ``!include`` names (see :class:`Included`), fetched from the Hub when it lives there."""
+    return _resolve(spec, base)[0]
+
+
+def _included(spec: str, base: Path) -> Included:
+    chain = _including.get()
+    path, origin = _resolve(spec, base, chain[-1][1] if chain else None)
+    if not path.is_file():
+        raise ConfigError(
+            f"'!include {spec}' names no file ('{path}').",
+            "An include is a path relative to the file that names it, an absolute path, or"
+            " 'owner/name[@revision]:path' on the Hugging Face Hub, then '#KEY.KEY' for a block inside it.",
+        )
+    if path in (read for read, _ in chain):
+        names = " -> ".join(str(read) for read in [*(read for read, _ in chain), path])
+        raise ConfigError(
+            f"'!include {spec}' closes a cycle: {names}.", "An included file cannot include its includer."
+        )
+    token = _including.set((*chain, (path, origin)))
+    try:
+        block: Any = _load_tree(path)
+    finally:
+        _including.reset(token)
+    keys = spec.partition("#")[2]
+    for key in filter(None, keys.split(".")):
+        if not isinstance(block, Mapping) or key not in block:
+            held = sorted(str(k) for k in block) if isinstance(block, Mapping) else []
+            raise ConfigError(f"'!include {spec}': '{path}' holds no '{key}' there.", f"It holds {held}.")
+        block = block[key]
+    if not isinstance(block, Mapping):
+        raise ConfigError(
+            f"'!include {spec}' names a {type(block).__name__}, not a block.",
+            "An include stands for a block (a mapping); write a single value in place.",
+        )
+    included = Included(block)
+    included.spec = spec
+    return included
 
 
 @dataclass(frozen=True)
@@ -88,7 +226,7 @@ def _load_tree(filename: Path | str) -> dict:
     """The file's YAML tree (an empty file is an empty tree); a syntax error is a ConfigError with its line."""
     with open(filename, encoding="utf-8") as stream:
         try:
-            tree = yaml.load(stream)
+            tree = _yaml().load(stream)
         except ruamel.yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
             location = f" at line {mark.line + 1}" if mark is not None else ""
