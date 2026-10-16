@@ -90,7 +90,7 @@ dev = [
   "h5py",
   "pydicom",
   "zarr>=3",
-  "ngff-zarr>=0.49",
+  "ngff-zarr[validate]>=0.49",
   "dask",
   "scikit-image",
   "onnx",
