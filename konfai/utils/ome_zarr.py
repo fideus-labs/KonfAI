@@ -1224,22 +1224,25 @@ def create_ome_zarr_store(
         chunks = [min(shape[0], max(1, CHUNK_TARGET_BYTES // max(1, tile_bytes))), *spatial_chunks]
     chunks = tuple(chunks)
 
+    from konfai.utils.ome_zarr_geometry import declare_geometry, without_geometry
+
+    axis_aligned_field = displacement_field and _grid_is_axis_aligned(attributes)
     data = dask.array.zeros(tuple(shape), dtype=np.dtype(dtype), chunks=chunks)
-    image = ngff_zarr.to_ngff_image(data, dims=dims, scale=scale, translation=translation, axes_units=units)
+    image = ngff_zarr.to_ngff_image(
+        data, dims=dims, scale=scale, translation=translation if axis_aligned_field else None, axes_units=units
+    )
     version = _DEFAULT_VERSION
     if displacement_field:
         # Typing the component axis (NGFF RFC-5, so version 0.6) declares the channels a field.
         image.axes_types = {"c": _DISPLACEMENT_AXIS_TYPE}
         version = _RFC5_VERSION
     multiscales = ngff_zarr.to_multiscales(image, scale_factors=[], chunks=chunks, cache=False)
-    from konfai.utils.ome_zarr_geometry import declare_geometry, without_geometry
-
-    if not displacement_field or not _grid_is_axis_aligned(attributes):
-        declare_geometry(multiscales, attributes, units)
+    if not axis_aligned_field:
+        declare_geometry(multiscales, attributes, [translation[d] for d in dims])
     stored_attributes = without_geometry(attributes)
     if displacement_field:
         # One layout for every field: components in the spec's order, marked so nothing guesses.
-        if _grid_is_axis_aligned(attributes):
+        if axis_aligned_field:
             _declare_displacements_transform(multiscales, units)
         multiscales.root_attributes = {
             _KONFAI_ATTR_KEY: {

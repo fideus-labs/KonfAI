@@ -23,12 +23,11 @@ def without_geometry(attributes: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, units: dict[str, str]) -> None:
+def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, translation: list[float]) -> None:
     """Declare the intrinsic-to-world mapping; the intrinsic grid starts at zero."""
     from ngff_zarr.rfc4 import LPS
     from ngff_zarr.v06.zarr_metadata import (
         Affine,
-        Axis,
         CoordinateSystem,
         CoordinateSystemIdentifier,
         Rotation,
@@ -49,21 +48,12 @@ def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, units:
     direction = flat.reshape(n, n)
     if not np.isfinite(direction).all() or np.linalg.det(direction) == 0:
         raise DatasetManagerError("OME-Zarr direction must be finite and invertible.")
-    factors = np.array([millimetres_per_unit(units.get(d)) or 1.0 for d in spatial])
+    factors = np.array([millimetres_per_unit(image.axes_units.get(d)) or 1.0 for d in spatial])
     # Units belong to coordinates, so a rotation between differently scaled axes is conjugated.
     linear = direction[::-1, ::-1] * factors[None, :] / factors[:, None]
     matrix = np.eye(len(image.dims))
     indices = [image.dims.index(d) for d in spatial]
     matrix[np.ix_(indices, indices)] = linear
-    translation = [float(image.translation.get(d, 0.0)) for d in image.dims]
-    for d in image.dims:
-        image.translation[d] = 0.0
-    # to_multiscales has already materialised the per-level transform metadata.
-    for dataset in multiscales.metadata.datasets:
-        for entry in dataset.coordinateTransformations:
-            for part in getattr(entry, "transformations", [entry]):
-                if part.type == "translation":
-                    part.translation = [0.0] * len(image.dims)
     linear_transform: Rotation | Affine
     if np.allclose(matrix.T @ matrix, np.eye(len(matrix)), atol=1e-10, rtol=0) and np.isclose(np.linalg.det(matrix), 1):
         linear_transform = Rotation(rotation=matrix.tolist())
@@ -73,14 +63,7 @@ def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None, units:
     world = CoordinateSystem(
         name="world",
         axes=[
-            Axis(
-                name=a.name,
-                type=a.type,
-                unit=a.unit,
-                discrete=a.discrete,
-                orientation=LPS.get(a.name) if a.type == "space" else None,
-            )
-            for a in intrinsic.axes
+            dataclasses.replace(a, orientation=LPS.get(a.name) if a.type == "space" else None) for a in intrinsic.axes
         ],
     )
     transform = TransformSequence(
