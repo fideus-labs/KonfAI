@@ -18,9 +18,8 @@
 
 ``ngff-zarr`` owns all OME-NGFF metadata parsing, multiscale handling and (de)serialisation. This
 module maps between KonfAI's channel-first ``C[Z]YX`` arrays / ``(x, y, z)`` geometry and
-ngff-zarr's ``NgffImage`` (axis-named ``scale``/``translation``), and round-trips the ``Attribute``
-sidecar (the ``Direction`` matrix included, which OME-NGFF cannot express) through a single
-``konfai`` root attribute.
+ngff-zarr's RFC-5 coordinate transformations. Geometry is stored in the standard metadata;
+non-geometric ``Attribute`` records round-trip through a ``konfai`` root attribute.
 
 Reads are lazy: the array is a chunked store, so slicing only materialises the requested patch.
 
@@ -116,9 +115,7 @@ def _native_byteorder(array: np.ndarray) -> np.ndarray:
     return array.astype(_native_dtype(array.dtype), copy=False)
 
 
-# NGFF RFC-5 types the component axis of a vector field. Those types exist only from NGFF 0.6,
-# whose coordinate-systems metadata ngff-zarr still writes as a release candidate, so 0.6 is written
-# for a field and nothing else; 0.5 is the default, the same multiscales metadata on a zarr v3 store.
+# NGFF 0.6 carries image geometry and typed displacement fields in standard transformations.
 _DISPLACEMENT_AXIS_TYPE = "displacement"
 
 # Every field store holds its components in the spec's order, the output axes' (dz, dy, dx for a zyx
@@ -126,7 +123,7 @@ _DISPLACEMENT_AXIS_TYPE = "displacement"
 # backend's read/write boundary. An axis-aligned grid is additionally declared a ``displacements``
 # transformation mapping the physical coordinate system onto itself through the level-0 array, which
 # makes it applicable by a spec reader; a rotated grid cannot be declared (RFC-5 maps a field to
-# space by scale and translation alone) and keeps only the typed axis, its Direction in the sidecar
+# space by scale and translation alone) and keeps the typed axis, a standard grid transformation
 # and the marker below. A typed store carrying neither the entry nor the marker is refused by name.
 _PHYSICAL_CS = "physical"
 _FIELD_COMPONENTS_KEY = "field_components"
@@ -139,7 +136,7 @@ _FIELD_VALUES_KEY = "field_values"
 _FIELD_VALUES = "axis-units"
 
 _RFC5_VERSION = "0.6"
-_DEFAULT_VERSION = "0.5"
+_DEFAULT_VERSION = "0.6"
 #: The layout a store written before the 0.5 default carries. Levels appended to one join it there.
 _V2_VERSION = "0.4"
 
@@ -200,6 +197,12 @@ def _read_konfai_attributes(store_path: str | Path) -> dict[str, Any]:
     A copy of a memoised parse."""
     root = _multiscales(str(store_path)).root_attributes or {}
     return dict(root.get(_KONFAI_ATTR_KEY, {}).get("attributes", {}))
+
+
+def _standard_geometry(store_path: str, image: Any) -> dict[str, Any]:
+    from konfai.utils.ome_zarr_geometry import read_geometry
+
+    return read_geometry(_multiscales(store_path), image)
 
 
 def _from_ngff_zarr(store_path: str | Path) -> Any:
@@ -859,6 +862,7 @@ def read_ome_zarr_data_slice(
         "translation": _ordered(dict(image.translation), dims),
         "units": _axis_units(image),
         "attributes": _read_konfai_attributes(store_path),
+        "standard_geometry": _standard_geometry(str(store_path), image),
     }
     return _native_byteorder(np.asarray(patch)), metadata
 
@@ -907,6 +911,8 @@ def _spatial_geometry(
         raise DatasetManagerError(
             f"OME-Zarr geometry must contain {dimension} spacing and origin values for {shape_label}."
         )
+    if not np.isfinite(spacing_xyz).all() or not np.isfinite(origin_xyz).all() or np.any(np.asarray(spacing_xyz) <= 0):
+        raise DatasetManagerError("OME-Zarr spacing must be positive and finite, and origin finite.")
     coordinate = {"x": (spacing_xyz[0], origin_xyz[0]), "y": (spacing_xyz[1], origin_xyz[1])}
     if dimension == 3:
         coordinate["z"] = (spacing_xyz[2], origin_xyz[2])
@@ -1009,8 +1015,8 @@ def write_ome_zarr(
     RFC-5 axis types exist only from 0.6.
 
     ``spacing``, ``origin`` and ``attributes`` are keyword-only. The first two are the voxel size and
-    the world position of the first voxel, in ``(x, y, z)``; ``attributes`` is the konfai sidecar, for
-    what NGFF cannot express: the ``Direction`` matrix first. A sidecar without a ``Direction`` key
+    the world position of the first voxel, in ``(x, y, z)``; ``attributes`` supplies Direction,
+    written as an RFC-5 transformation, and any non-geometric attributes. No ``Direction`` key
     reads back as the identity, axis-aligned whatever grid its array came from, and a registration
     run on such a pair returns its field in that axis-aligned frame.
 
@@ -1073,7 +1079,7 @@ def _grid_is_axis_aligned(attributes: dict[str, Any] | None) -> bool:
 
     RFC-5 maps a field's array to space by scale and translation alone, so only an axis-aligned grid
     can be declared a ``displacements`` transformation; an oriented one keeps the label-only layout,
-    its Direction in the sidecar. The sidecar is read through :class:`Attribute`: the LATEST
+    its grid rotation in a standard transformation. Read through :class:`Attribute`, the LATEST
     ``Direction`` is the grid the store describes.
     """
     from konfai.utils.dataset.attribute import Attribute
@@ -1083,7 +1089,7 @@ def _grid_is_axis_aligned(attributes: dict[str, Any] | None) -> bool:
         return True
     flat = record.get_np_array("Direction")
     side = round(len(flat) ** 0.5)
-    return side * side == len(flat) and bool(np.allclose(flat.reshape(side, side), np.eye(side)))
+    return side * side == len(flat) and bool(np.array_equal(flat.reshape(side, side), np.eye(side)))
 
 
 def _declare_displacements_transform(multiscales: Any, units: dict[str, str]) -> None:
@@ -1106,7 +1112,7 @@ def _declare_displacements_transform(multiscales: Any, units: dict[str, str]) ->
     multiscales.metadata = dataclasses.replace(
         multiscales.metadata,
         coordinateSystems=[*multiscales.metadata.coordinateSystems, physical],
-        coordinateTransformations=[entry],
+        coordinateTransformations=[*(multiscales.metadata.coordinateTransformations or []), entry],
     )
 
 
@@ -1226,19 +1232,24 @@ def create_ome_zarr_store(
         image.axes_types = {"c": _DISPLACEMENT_AXIS_TYPE}
         version = _RFC5_VERSION
     multiscales = ngff_zarr.to_multiscales(image, scale_factors=[], chunks=chunks, cache=False)
+    from konfai.utils.ome_zarr_geometry import declare_geometry, without_geometry
+
+    if not displacement_field or not _grid_is_axis_aligned(attributes):
+        declare_geometry(multiscales, attributes, units)
+    stored_attributes = without_geometry(attributes)
     if displacement_field:
         # One layout for every field: components in the spec's order, marked so nothing guesses.
         if _grid_is_axis_aligned(attributes):
             _declare_displacements_transform(multiscales, units)
         multiscales.root_attributes = {
             _KONFAI_ATTR_KEY: {
-                "attributes": dict(attributes or {}),
+                "attributes": stored_attributes,
                 _FIELD_COMPONENTS_KEY: _FIELD_COMPONENTS,
                 _FIELD_VALUES_KEY: _FIELD_VALUES,
             }
         }
-    elif attributes:
-        multiscales.root_attributes = {_KONFAI_ATTR_KEY: {"attributes": dict(attributes)}}
+    elif stored_attributes:
+        multiscales.root_attributes = {_KONFAI_ATTR_KEY: {"attributes": stored_attributes}}
     compression = {} if displacement_field else {"compressor": _COMPRESSOR}
     _write_skeleton(store_path, multiscales, version, **compression)
 
@@ -1365,7 +1376,8 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
     ``shape``, ``scale`` and ``translation`` follow the STORE's own axes, listed in ``axes``: a
     scalar volume written without a channel axis has three of each. ``canonical_shape`` is the
     C[Z]YX form the reader indexes, so ``scale[1:]`` is not the spacing of its spatial axes.
-    ``geometry`` maps each axis NAME to its ``(scale, translation)``. Prefer it.
+    ``geometry`` maps each intrinsic axis NAME to its ``(scale, translation)``.
+    ``standard_geometry`` is the complete physical geometry, in millimetres and xyz order.
     """
     image = _load_image(str(store_path), level)
     dims = [str(axis).lower() for axis in image.dims]
@@ -1395,4 +1407,5 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
         },
         "n_levels": n_levels,
         "attributes": _read_konfai_attributes(store_path),
+        "standard_geometry": _standard_geometry(str(store_path), image),
     }

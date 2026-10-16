@@ -103,7 +103,7 @@ def test_a_micrometre_store_read_and_written_back_keeps_its_numbers(tmp_path: Pa
     written = get_ome_zarr_info(destination)
     assert _axis_units(destination) == {"c": None, "z": "micrometer", "y": "micrometer", "x": "micrometer"}
     assert np.allclose(written["geometry"]["z"]["scale"], MICRON_SPACING["z"])
-    assert np.allclose(written["geometry"]["x"]["translation"], MICRON_ORIGIN["x"])
+    assert np.allclose(written["standard_geometry"]["Origin"][0], MICRON_ORIGIN["x"] / 1000)
     # And read back through the same door, it is millimetres again.
     assert np.allclose(ome_zarr_attributes(written).get_np_array("Spacing"), [0.03008, 0.03008, 0.04])
 

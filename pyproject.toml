@@ -55,13 +55,13 @@ itk = ["SimpleITK>=2.0"]
 hdf5 = ["h5py"]
 monitoring = ["nvidia-ml-py"]
 tensorboard = ["tensorboard"]
-imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr>=3", "ngff-zarr>=0.45", "dask"]
+imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr>=3", "ngff-zarr>=0.49", "dask"]
 vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
-omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
+omezarr = ["zarr>=3", "ngff-zarr>=0.49", "dask"]
 # Reading a dataset root from S3: s3fs is the fsspec implementation, aiohttp the transport
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
@@ -90,7 +90,7 @@ dev = [
   "h5py",
   "pydicom",
   "zarr>=3",
-  "ngff-zarr>=0.45",
+  "ngff-zarr>=0.49",
   "dask",
   "scikit-image",
   "onnx",
