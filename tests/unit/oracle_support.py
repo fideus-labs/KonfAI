@@ -54,6 +54,7 @@ from konfai.data.transform import (
     Gradient,
     HistogramMatching,
     InferenceStack,
+    KeepLabels,
     LocalityKind,
     Mask,
     MergeLabels,
@@ -529,6 +530,8 @@ def stage_cases(rank: int = 3) -> dict[str, list[StageCase]]:
         "InferenceStack": [StageCase(InferenceStack("Dataset", "model"))],
         # A companion volume aligned with the case: the mask is a stored group of the same grid.
         "Mask": [StageCase(Mask(path="Labels", value_outside=-7))],
+        # The integer volume keeps the values the label map holds, read block by block from the stored group.
+        "KeepLabels": [StageCase(KeepLabels(group="Labels"), group="Int16")],
         "MergeLabels": [StageCase(MergeLabels(), group="Ensemble")],
         "OneHot": [StageCase(OneHot(4), group="Labels")],
         # Pads reaching both borders of every axis, asymmetric and wider than the patch, constant,
