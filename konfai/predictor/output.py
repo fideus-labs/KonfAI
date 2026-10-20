@@ -915,6 +915,14 @@ class OutputDataset(Dataset, NeedDevice):
                     if locality.kind is not LocalityKind.CROP:
                         probe = result
                 else:
+                    # The plan judged every stage on the case's attribute as it stands; walked through
+                    # the stages before it, a stage can turn out to need the whole volume (Canonical's
+                    # inverse once a Resample inverse has restored an oblique direction).
+                    if not self._voxel_local(locality, walking):
+                        raise PredictorError(
+                            f"{type(stage.transform).__name__} is {locality.kind.name} on this case:"
+                            f" {locality.reason or 'it reads beyond its own voxels'}"
+                        )
                     pull_fns.append(lambda target: list(target))
                     shapes.append(list(shape))
                     probe = stage.stream_region(name, probe, _corner_context(shape), walking)
