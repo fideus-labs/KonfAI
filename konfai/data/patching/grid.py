@@ -55,9 +55,15 @@ class Patch(ABC):
         self,
         patch_size: list[int],
         overlap: OverlapSpec = None,
-        pad_value: float | None = 0,
+        pad_value: float | str | None = 0,
         extend_slice: int = 0,
     ) -> None:
+        if isinstance(pad_value, str) and pad_value != "edge":
+            raise ConfigError(
+                f"Patch has an unknown pad_value '{pad_value}'.",
+                "Give a number, 'edge' (the volume's edge voxel, MONAI's padding_mode: replicate), or None (the"
+                " data's minimum).",
+            )
         if extend_slice != 0 and patch_size is not None and patch_size[0] != 1:
             raise ValueError(
                 "`extend_slice` can only be used when patch_size[0] == 1 "
@@ -72,6 +78,8 @@ class Patch(ABC):
         self._shapes: dict[int, list[int]] = {}
         #: The cut itself, made on first use and left out of the pickle (``__getstate__``).
         self._grids: dict[int, _PatchGrid] = {}
+        #: What pads a patch past the volume, on both sides of it: a value, ``edge`` (the edge voxel), or None
+        #: (the data's minimum).
         self.pad_value = pad_value
         self.extend_slice = extend_slice
         # The last patch of an axis is padded up to the patch size for a model. A consumer that REDUCES
@@ -110,6 +118,7 @@ class Patch(ABC):
                 self.free_axis_multiple,
                 self._declared_free_axis,
                 sweep_axis,
+                inside=self.pad_to_patch,
             )
             grid = self._grids[a] = _PatchGrid(sweep_axis, slices)
         return grid
@@ -182,8 +191,10 @@ class Patch(ABC):
                     m = free_axis_rounding(self.free_axis_multiple, axis, nspatial)
                     target = ((extent + m - 1) // m) * m if m > 1 else extent
                 p = 0 if _slice.start + target <= extent else target - (extent - _slice.start)
-                constant_padding.append(0)
-                constant_padding.append(p)
+                # The volume sits in the middle of its patch: half the padding before it (the floor).
+                before = p // 2
+                constant_padding.append(before)
+                constant_padding.append(p - before)
 
         return PatchReadPlan(
             data_slices=tuple(slices_pre + slices),
@@ -197,7 +208,10 @@ class Patch(ABC):
         if any(plan.reflect_padding):
             data_sliced = F.pad(data_sliced, plan.reflect_padding, "reflect")
         if any(plan.constant_padding):
-            data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
+            if self.pad_value == "edge":
+                data_sliced = _pad_edge(data_sliced, plan.constant_padding)
+            else:
+                data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
         if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
                 data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)
@@ -213,7 +227,7 @@ class Patch(ABC):
         the device."""
         if data.dtype == torch.uint8:
             return F.pad(data, padding, "constant", 0)
-        if self.pad_value is not None:
+        if isinstance(self.pad_value, int | float):
             return F.pad(data, padding, "constant", self.pad_value)
         padded = F.pad(data, padding, "constant", 0)
         # torch has no min for uint16/uint32; int64 holds both exactly.
@@ -235,6 +249,17 @@ class Patch(ABC):
         return len(self._grid(a).slices)
 
 
+def _pad_edge(data: torch.Tensor, padding: tuple[int, ...]) -> torch.Tensor:
+    """``data`` padded (``F.pad`` pair order) with its edge voxels, whatever its dtype: ``F.pad``'s ``replicate``
+    takes floating point only, an index clamped to the axis takes anything."""
+    for pair, (before, after) in enumerate(zip(padding[::2], padding[1::2], strict=True)):
+        dim = data.dim() - 1 - pair
+        if before or after:
+            index = torch.arange(-before, data.shape[dim] + after, device=data.device).clamp_(0, data.shape[dim] - 1)
+            data = data.index_select(dim, index)
+    return data
+
+
 @config("Patch")
 class DatasetPatch(Patch):
     """Patch definition applied when sampling data from datasets.
@@ -252,7 +277,7 @@ class DatasetPatch(Patch):
         self,
         patch_size: list[int] = [128, 128, 128],
         overlap: OverlapSpec = None,
-        pad_value: float | None = None,
+        pad_value: float | str | None = None,
         extend_slice: int = 0,
         mode: str = "tile",
         max_voxels: int | None = None,

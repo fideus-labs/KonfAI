@@ -221,7 +221,9 @@ def test_a_voxel_overlap_is_dropped_on_an_axis_one_patch_spans() -> None:
     slices = get_patch_slices_from_shape(patch_size, shape, 32)
 
     assert slices == get_patch_slices_from_shape(patch_size, shape, [32, 32, 32])
-    assert _axis_overlaps(slices, [30, 128, 160]) == [0, 32, 32]
+    # The stride the overlap sets, read off the grid before its last patch moves back inside the volume.
+    stride = get_patch_slices_from_shape(patch_size, shape, 32, inside=False)
+    assert _axis_overlaps(stride, [30, 128, 160]) == [0, 32, 32]
     with pytest.raises(ConfigError, match=">= 0 voxels"):
         get_patch_slices_from_shape(patch_size, shape, -8)
 
@@ -397,7 +399,8 @@ def test_a_weighted_blend_refuses_an_integer_layer(combine_cls, dtype) -> None:
     ],
 )
 def test_an_integer_layer_reassembles_exactly_without_a_fractional_share(combine_cls, overlap, dtype) -> None:
-    labels = torch.randint(0, 5, (1, 1, 14, 14), generator=torch.Generator().manual_seed(0)).to(dtype)
+    # 16 is two patches of 8: with no overlap the last patch already ends on the volume's end, so no voxel is shared.
+    labels = torch.randint(0, 5, (1, 1, 16, 16), generator=torch.Generator().manual_seed(0)).to(dtype)
     patch_slices, patches = _tile_2d(labels, [8, 8], overlap=overlap)
     combine = None
     if combine_cls is not None:
@@ -556,7 +559,8 @@ def test_blend_recovers_the_source_in_low_precision(combine_cls):
     torch.testing.assert_close(accumulator.assemble().float(), full, rtol=0, atol=5e-3)
 
 
-@pytest.mark.parametrize("combine_cls", [Mean, Cosinus, Gaussian])
+# Gaussian's floored weight is normalised voxel by voxel, not one share per axis.
+@pytest.mark.parametrize("combine_cls", [Mean, Cosinus])
 @pytest.mark.parametrize(
     ("patch", "weighted_axes"),
     [([6, 12, 14], [0]), ([1, 12, 14], []), ([10, 12, 14], [])],
@@ -730,8 +734,8 @@ def test_trim_kept_boxes_are_cached_per_axis_position_not_per_patch():
     once. Keyed per patch, every patch missed and each miss re-sorted the starts of every patch:
     O(P^2) over a case (15.6 s for 18,000 thin 2.5D patches, 16 ms here, measured).
 
-    The boxes themselves come from the same window nonzero run, checked against a derivation that
-    reads the windows position by position.
+    Each box keeps the voxels nearer its patch's centre than any other's (a tie to the later patch), the last
+    patch of an axis ending on the volume's end, nearer its neighbour than the stride: checked voxel by voxel.
     """
     shape, patch, overlap = [20, 22, 24], [8, 8, 8], 4
     slices = get_patch_slices_from_shape(patch, shape, overlap)
@@ -740,14 +744,12 @@ def test_trim_kept_boxes_are_cached_per_axis_position_not_per_patch():
     accumulator = Accumulator(slices, patch, patch_combine=combine, batch=False)
 
     starts = [sorted({s[dim].start for s in accumulator.patch_slices}) for dim in range(len(shape))]
-    expected = {}
+    assert starts[1][-2:] == [12, 14]  # 22 voxels: the last patch moved back from the stride to end inside
     for dim, axis_starts in enumerate(starts):
-        for position, start in enumerate(axis_starts):
-            ones = combine.window(dim, position, len(axis_starts)).nonzero().flatten()
-            expected[dim, start] = slice(int(ones[0]), int(ones[-1]) + 1)
-    boxes = [accumulator._kept_box(patch_slice) for patch_slice in accumulator.patch_slices]
-
-    assert boxes == [tuple(expected[dim, s.start] for dim, s in enumerate(p)) for p in accumulator.patch_slices]
+        for voxel in range(shape[dim]):
+            nearest = min(axis_starts, key=lambda start: (abs(voxel - start - (patch[dim] - 1) / 2), -start))
+            kept = accumulator._kept_span(dim, nearest)
+            assert kept.start <= voxel - nearest < kept.stop, (dim, voxel, nearest, kept)
     assert len(accumulator._kept) == sum(len(axis_starts) for axis_starts in starts) < len(slices)
     assert [list(positions) for positions in accumulator._positions()] == starts
 
@@ -772,7 +774,7 @@ def test_border_patches_pad_with_the_patch_minimum_kept_on_the_device(dtype):
     the oracle here (a padded patch keeps every band, on every axis that pads).
     """
     torch.manual_seed(0)
-    shape = [7, 9, 10]
+    shape = [2, 9, 10]  # axis 0 shorter than the patch: every patch is padded there, one voxel on each side
     data = torch.randn(2, *shape) * 40
     if dtype in (torch.uint16, torch.uint32):
         # torch has no min for these: a minimum above zero tells it from a zero pad.
@@ -1084,3 +1086,106 @@ def test_trim_streams_a_padded_final_patch_like_the_whole_volume(shape, patch, o
 
     assert torch.equal(whole.assemble(), labels)
     assert torch.equal(torch.cat([tensor for _, tensor in slabs], dim=1), labels)
+
+
+# --------------------------------------------------------------------------------------
+# MONAI's sliding window: windows ending inside, edge padding, a Gaussian blend
+# --------------------------------------------------------------------------------------
+
+
+def _monai_starts(extent: int, patch: int, overlap: float) -> list[int]:
+    """MONAI 1.5.1's window starts on one axis: ``_get_scan_interval`` then ``dense_patch_slices``, on the axis
+    padded up to the patch (``sliding_window_inference``)."""
+    extent = max(extent, patch)
+    interval = patch if patch == extent else max(int(patch * (1 - overlap)), 1)
+    count = next(d for d in range(math.ceil(extent / interval)) if d * interval + patch >= extent) + 1
+    return [d * interval - max(d * interval + patch - extent, 0) for d in range(count)]
+
+
+def _importance_map(patch: list[int], sigma_scale: float = 0.125) -> torch.Tensor:
+    """MONAI 1.5.1's ``compute_importance_map(patch, mode="gaussian")``, line for line."""
+    sigmas = [size * sigma_scale for size in patch]
+    importance_map = torch.ones(())
+    for i, size in enumerate(patch):
+        x = torch.arange(start=-(size - 1) / 2.0, end=(size - 1) / 2.0 + 1, dtype=torch.float)
+        x = torch.exp(x**2 / (-2 * sigmas[i] ** 2))
+        importance_map = importance_map.unsqueeze(-1) * x[(None,) * i] if i > 0 else x
+    min_non_zero = max(torch.min(importance_map).item(), 1e-3)
+    return torch.clamp_(importance_map.to(torch.float), min=min_non_zero)
+
+
+@pytest.mark.parametrize(
+    "extent, starts",
+    [(154, [0, 58]), (247, [0, 72, 144, 151]), (96, [0]), (78, [0]), (168, [0, 72])],
+)
+def test_the_last_window_ends_inside_the_volume_where_monai_places_it(extent, starts):
+    """The wholeBody CT bundle's windows (96, overlap 0.25) on a 1.5 mm CT 154 voxels high start at 0 and 58: the
+    last one ends on the volume's last voxel. A reduction's disjoint slots (``inside=False``) keep it on the stride."""
+    assert _monai_starts(extent, 96, 0.25) == starts
+    slices = get_patch_slices_from_shape([96], [extent], 0.25)
+    assert [s[0].start for s in slices] == starts
+    if extent == 154:
+        assert [s[0].start for s in get_patch_slices_from_shape([96], [extent], 0.25, inside=False)] == [0, 72]
+
+
+def test_a_short_axis_is_padded_on_both_sides_with_its_edge():
+    """MONAI pads an axis shorter than the window half before (the floor), half after, here with the edge voxel
+    (``padding_mode: replicate``); the accumulator crops the same middle back out."""
+    volume = torch.randn(1, 12, 7)
+    patch = DatasetPatch(patch_size=[8, 12], overlap=0.25, pad_value="edge")
+    patch.load([12, 7])
+    assert [s[0].start for s in patch.get_patch_slices()] == [0, 4]
+    plan = patch.get_read_plan(list(volume.shape), 0, 0, True)
+    assert plan.constant_padding == (2, 3, 0, 0)
+    padded = patch.get_data(volume, 0, 0, True)
+    assert torch.equal(padded, torch.nn.functional.pad(volume[:, 0:8], (2, 3), "replicate"))
+
+    accumulator = Accumulator(patch.get_patch_slices(), [8, 12], None, batch=False)
+    for index in range(patch.get_size()):
+        accumulator.add_layer(index, patch.get_data(volume, index, 0, True))
+    assert torch.equal(accumulator.assemble(), volume)
+
+
+@pytest.mark.parametrize("shape", [[21, 17, 6], [16, 30, 11]])
+def test_a_gaussian_blends_as_a_sliding_window_inference(shape):
+    """``Gaussian`` reassembles the patches as MONAI's sliding window does: each patch weighted by the importance
+    map clamped at 1e-3, divided by the sum of the maps covering the voxel, an axis shorter than the window padded
+    on both sides and cropped back."""
+    torch.manual_seed(0)
+    size, overlap = [8, 8, 8], 0.25
+    starts = [_monai_starts(extent, p, overlap) for extent, p in zip(shape, size, strict=True)]
+    outputs = {start: torch.randn(2, *size) for start in itertools.product(*starts)}
+
+    padded = [max(extent, p) for extent, p in zip(shape, size, strict=True)]
+    importance = _importance_map(size)
+    total, weight = torch.zeros(2, *padded), torch.zeros(1, *padded)
+    for start, output in outputs.items():
+        window = tuple(slice(s, s + p) for s, p in zip(start, size, strict=True))
+        total[(slice(None), *window)] += importance * output
+        weight[(slice(None), *window)] += importance
+    crop = tuple(slice((p - e) // 2, (p - e) // 2 + e) for p, e in zip(padded, shape, strict=True))
+    reference = (total / weight)[(slice(None), *crop)]
+
+    slices = get_patch_slices_from_shape(size, shape, overlap)
+    gaussian = Gaussian()
+    gaussian.set_patch_config(size, blend_overlap(overlap, size))
+    accumulator = Accumulator(slices, size, gaussian, batch=False)
+    for index, patch_slice in enumerate(slices):
+        accumulator.add_layer(index, outputs[tuple(s.start for s in patch_slice)].clone())
+    torch.testing.assert_close(accumulator.assemble(), reference, rtol=1e-5, atol=1e-5)
+
+
+def test_a_pad_value_spelled_as_a_word_must_be_edge():
+    """``edge`` is the one word ``pad_value`` takes; a typo is refused rather than padded with nothing."""
+    with pytest.raises(ConfigError, match="unknown pad_value 'replicate'"):
+        DatasetPatch(patch_size=[8, 8], pad_value="replicate")
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.int16, torch.uint8, torch.bool])
+def test_an_edge_pad_repeats_the_edge_voxel_of_any_dtype(dtype):
+    """``pad_value: edge`` pads a label map or a mask with its edge voxel too, not with 0 or its minimum."""
+    volume = torch.randint(0, 3, (1, 5, 6)).to(dtype)
+    patch = DatasetPatch(patch_size=[8, 6], pad_value="edge")
+    patch.load([5, 6])
+    padded = patch.get_data(volume, 0, 0, True)
+    assert torch.equal(padded, volume[:, [0, 0, 1, 2, 3, 4, 4, 4]])

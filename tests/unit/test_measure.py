@@ -1036,7 +1036,7 @@ class TestSSIMFromHaloPatches:
     def _grid(shape: tuple[int, ...], patch: list[int]) -> list[tuple[slice, ...]]:
         from konfai.utils.utils import get_patch_slices_from_shape
 
-        return get_patch_slices_from_shape(patch, list(shape), 0)
+        return get_patch_slices_from_shape(patch, list(shape), 0, inside=False)  # a reduction's disjoint slots
 
     @staticmethod
     def _streamed(metric: SSIM, tensors: list[torch.Tensor], patch: list[int]) -> float:
