@@ -18,54 +18,26 @@
 whether a mask restricts an image."""
 
 import contextlib
-import gc
 
 import numpy as np
 import SimpleITK as sitk
-import torch
 from konfai.metric.measure.impact import no_texpr_fuser
-from konfai.utils.dataset import Attribute, data_to_image
-from konfai.utils.vram import out_of_memory_as_torch
+from konfai.network.external import ExternalTool
 
 
-class EngineRegistration(torch.nn.Module):
+class EngineRegistration(ExternalTool):
     """Graph module: the fixed, moving and mask tensors with their geometry -> each sample's displacement field on the
-    fixed grid, from ``engine.register``. ``accepts_attributes`` has KonfAI hand it every branch's ``Attribute`` list,
-    since registration needs the physical geometry. A whole-image mask (the default) restricts nothing."""
-
-    accepts_attributes = True
+    fixed grid, from ``engine.register``: KonfAI's ``ExternalTool`` with IMPACT-Reg's engines' call. A whole-image mask
+    (the default) restricts nothing; each engine reads it as such."""
 
     def __init__(self, engine, fuse_texpr: bool = True) -> None:
-        super().__init__()
-        self._engine = engine
+        super().__init__(engine)
         self._fuse_texpr = fuse_texpr
 
-    def forward(
-        self,
-        fixed: torch.Tensor,
-        moving: torch.Tensor,
-        fixed_mask: torch.Tensor,
-        moving_mask: torch.Tensor,
-        attributes: list[list[Attribute]],
-    ) -> torch.Tensor:
-        device_index = fixed.device.index if fixed.device.type == "cuda" else -1
-        fields = []
-        # The engines optimise with autograd, and the predictor calls forward under inference_mode, which forbids it.
-        fuser = contextlib.nullcontext() if self._fuse_texpr else no_texpr_fuser()
-        with torch.inference_mode(False), torch.enable_grad(), fuser:
-            for b in range(fixed.shape[0]):
-                images = [
-                    data_to_image(tensor[b].detach().cpu().numpy(), branch[b])
-                    for tensor, branch in zip((fixed, moving, fixed_mask, moving_mask), attributes, strict=True)
-                ]
-                try:
-                    with out_of_memory_as_torch(device_index >= 0):
-                        field = self._engine.register(images[0], images[1], device_index, images[2], images[3])
-                finally:
-                    # FireANTs keeps CUDA tensors in reference cycles that only the cyclic collector frees.
-                    gc.collect()
-                fields.append(torch.from_numpy(field))
-        return torch.stack(fields, dim=0).to(fixed.device)
+    def call(self, images: list[sitk.Image | None], device_index: int) -> np.ndarray:
+        fixed, moving, fixed_mask, moving_mask = images
+        with contextlib.nullcontext() if self._fuse_texpr else no_texpr_fuser():
+            return self._engine.register(fixed, moving, device_index, fixed_mask, moving_mask)
 
 
 def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sitk.Image:

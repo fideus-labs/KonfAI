@@ -329,12 +329,12 @@ def test_an_out_of_memory_inside_the_engine_reaches_konfai_as_torch_s_class() ->
 
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="out of memory"):
-        EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes)
+        EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes=attributes)
 
 
 @_needs_cuda
 def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_class() -> None:
-    from impact_reg_konfai.models.elastix_engine import ElastixRegistration
+    from impact_reg_konfai.models.intensity import EngineRegistration
 
     class Engine:
         def register(self, *pair):
@@ -344,9 +344,7 @@ def test_an_out_of_memory_in_the_elastix_subprocess_reaches_konfai_as_torch_s_cl
 
     image, attributes = _registration_inputs("cuda")
     with pytest.raises(torch.cuda.OutOfMemoryError, match="CUDA out of memory"):
-        ElastixRegistration.forward(
-            SimpleNamespace(_engine=Engine(), _fuse_texpr=True), image, image, image, image, attributes
-        )
+        EngineRegistration(Engine())(image, image, image, image, attributes=attributes)
 
 
 def test_fireants_static_mode_reaches_the_engine() -> None:
