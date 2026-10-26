@@ -13,6 +13,7 @@ def test_a_tool_s_subprocess_runs_on_the_physical_gpu_behind_the_app_s_index(mon
 
 def test_a_release_is_unpacked_once_with_its_modes_and_a_wrong_hash_leaves_nothing(tmp_path, monkeypatch) -> None:
     import hashlib
+    import os
     import zipfile
 
     import pytest
@@ -27,7 +28,9 @@ def test_a_release_is_unpacked_once_with_its_modes_and_a_wrong_hash_leaves_nothi
     monkeypatch.setenv("KONFAI_TOOLS_CACHE", str(tmp_path / "cache"))
 
     root = pinned_archive("tool", archive.as_uri(), sha256)
-    assert (root / "tool/bin/run").stat().st_mode & 0o777 == 0o755 and not (root / "archive").exists()
+    assert (root / "tool/bin/run").is_file() and not (root / "archive").exists()
+    if os.name != "nt":  # Windows keeps no Unix modes
+        assert (root / "tool/bin/run").stat().st_mode & 0o777 == 0o755
     with pytest.raises(RuntimeError, match="hash"):
         pinned_archive("other", archive.as_uri(), "0" * 64)
     assert sorted(p.name for p in (tmp_path / "cache").iterdir()) == [root.name]
