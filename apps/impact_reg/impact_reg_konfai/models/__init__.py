@@ -18,7 +18,9 @@
 
 Each submodule is a self-contained KonfAI registration model (a ``network.Network`` subclass named
 ``RegistrationNet`` plus its ``ModelSpec`` config schema): ``convexadam`` (itk-impact ConvexAdam),
-``fireants`` (FireANTs), ``elastix`` (elastix parameter-map presets). A preset bundle carries only its
+``fireants`` (FireANTs), ``elastix`` (elastix parameter-map presets). ``tools`` is no engine: an app that runs
+another registration tool packs that tool's engine in its own ``model.py`` and imports from it ``ToolNet`` and the
+helpers that fetch the tool at its pin. A preset bundle carries only its
 config + weights and points its ``classpath`` at one of these, e.g.
 ``impact_reg_konfai.models.convexadam:RegistrationNet``; a custom app imports the class and subclasses it.
 
