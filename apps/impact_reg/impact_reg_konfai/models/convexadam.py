@@ -175,7 +175,7 @@ class ConvexAdamEngine:
     across cases.
     Masks restrict every stage's similarity to where they are not 0, the linear stage and its seed included, as in the
     FireANTs engine (the linear stage alone with deformable_masked off); a fixed mask with no voxel in it (a tile the
-    tissue does not reach) gives a zero field.
+    tissue does not reach) gives a zero field when a stage reads the masks, and is ignored with the image when none does.
     """
 
     def __init__(
@@ -557,8 +557,9 @@ class ConvexAdamEngine:
 
         ``fixed_mask`` and ``moving_mask`` (each on its image's grid, or resampled onto it by nearest neighbour)
         restrict every stage's similarity to where they are not 0, the linear stage and its seed included."""
-        reads_masks = self._deformable_masked or self._linear
-        if reads_masks and fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
+        if not (self._deformable_masked or self._linear):  # no stage reads them: nothing to prepare
+            fixed_mask = moving_mask = None
+        if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
             # A fixed mask with no voxel in it leaves nothing to register: a zero field, as the elastix engine
             # returns (in a tiled run, every tile the tissue does not reach).
             return np.zeros((DIM, *fixed.GetSize()[::-1]), dtype=np.float32)
@@ -622,7 +623,7 @@ class ConvexAdamEngine:
             _foreground_centre(moving, moving_mask),
         )
         moving_linear = _resampled(moving_itk, fixed_itk, affine, itk.LinearInterpolateImageFunction)
-        if moving_mask_itk is not None:
+        if moving_mask_itk is not None and self._deformable_masked:  # the deformable stages' alone
             moving_mask_itk = _resampled(
                 moving_mask_itk, fixed_itk, affine, itk.NearestNeighborInterpolateImageFunction
             )
