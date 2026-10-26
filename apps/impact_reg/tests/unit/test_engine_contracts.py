@@ -457,6 +457,7 @@ def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field(module_name: str
     engine_class = getattr(importlib.import_module(f"impact_reg_konfai.models.{module_name}"), class_name)
     engine = engine_class.__new__(engine_class)  # unconfigured: any step past the check would raise
     engine._linear_method = "none"  # as a tile: the tile pass runs no linear stage
+    engine._linear, engine._deformable_masked = False, True  # ConvexAdam's: no linear stage, masked stages
     image = sitk.GetImageFromArray(np.random.rand(4, 5, 6).astype(np.float32))
     empty = sitk.GetImageFromArray(np.zeros((4, 5, 6), dtype=np.uint8))
 
