@@ -96,6 +96,7 @@ dev = [
   "onnx",
   "onnxruntime",
   "onnxscript",
+  "jsonschema",
   "nvidia-ml-py",
   "tensorboard",
   "pytest",

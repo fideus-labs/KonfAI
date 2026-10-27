@@ -1724,7 +1724,12 @@ def package_app_from_session(
     onnx: Annotated[
         bool,
         Field(
-            description="Also export the newest packaged checkpoint as model.onnx inside the bundle (default False)."
+            description=(
+                "Also export every packaged checkpoint for the portable runtime inside the bundle (default False). "
+                "One checkpoint writes model.onnx + manifest.json; several (or test-time copies, or a Mask reading "
+                "a nested app) write one <stem>.onnx per checkpoint + program.json. The result's 'onnx' names "
+                "model.onnx or program.json."
+            )
         ),
     ] = False,
     onnx_patch_size: Annotated[

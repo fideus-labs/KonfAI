@@ -486,20 +486,22 @@ def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, mon
     workspace = layout.workspace_dir()
     (workspace / "Checkpoints" / "run").mkdir(parents=True)
     (workspace / "Checkpoints" / "run" / "model.pt").write_bytes(b"")
+    (workspace / "Checkpoints" / "run" / "fold_1.pt").write_bytes(b"")
     (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
 
     import konfai_apps.bundle as bundle_module
 
     def _fail_in_process(*args: object, **kwargs: object) -> object:
-        raise AssertionError("export_onnx_into_bundle must not run in the server process")
+        raise AssertionError("export_portable_into_bundle must not run in the server process")
 
-    monkeypatch.setattr(bundle_module, "export_onnx_into_bundle", _fail_in_process)
+    monkeypatch.setattr(bundle_module, "export_portable_into_bundle", _fail_in_process)
 
     calls: list[tuple[str, dict[str, object]]] = []
 
     def _fake_subprocess(target: str, kwargs: dict[str, object], *rest: object) -> str:
         calls.append((target, kwargs))
-        return kwargs["bundle"] + "/model.onnx"  # type: ignore[operator]
+        # Two checkpoints export as a program: one <stem>.onnx each plus the bundle's program.json.
+        return kwargs["bundle"] + "/program.json"  # type: ignore[operator]
 
     # Patch by dotted path so it lands on the live konfai_mcp.runner module (some suites reload it),
     # which is the exact object package_from_session's `from . import runner` resolves at call time.
@@ -511,10 +513,12 @@ def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, mon
 
     assert len(calls) == 1
     target, kwargs = calls[0]
-    assert target == "konfai_apps.bundle:export_onnx_into_bundle"
+    assert target == "konfai_apps.bundle:export_portable_into_bundle"
     assert kwargs["bundle"] == str(Path(result["bundle_path"]))
-    assert kwargs["checkpoint"].endswith("model.pt")  # type: ignore[union-attr]
-    assert result["onnx"].endswith("model.onnx")
+    # Every packaged checkpoint is exported: the program runs them as the ensemble konfai runs.
+    assert sorted(Path(path).name for path in kwargs["checkpoints"]) == ["fold_1.pt", "model.pt"]  # type: ignore[union-attr]
+    assert sorted(result["checkpoints"]) == ["fold_1.pt", "model.pt"]
+    assert result["onnx"].endswith("program.json")
 
 
 def test_server_registers_app_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

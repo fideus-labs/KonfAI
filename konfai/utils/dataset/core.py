@@ -282,9 +282,15 @@ class Dataset:
     def store_root(self) -> str:
         """Where the store lives, as text (a URI has no ``Path``): its root directory, or the ``.h5``
         file for a single-file store. :attr:`path_on_disk` is the local-only view."""
-        root = self.filename
-        suffix = self._backend.case_file_suffix
-        if self._backend.single_store and suffix and not root.endswith(suffix):
+        return Dataset.store_root_for(self.filename, self.file_format)
+
+    @staticmethod
+    def store_root_for(filename: str | Path, file_format: str) -> str:
+        """:attr:`store_root` of a dataset named ``filename`` in ``file_format``, without building one."""
+        root, _ = Dataset._normalize_path(filename, file_format)
+        backend = backend_for(file_format)
+        suffix = backend.case_file_suffix
+        if backend.single_store and suffix and not root.endswith(suffix):
             return f"{root}{suffix}"
         return root
 
