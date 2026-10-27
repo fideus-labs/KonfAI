@@ -93,6 +93,23 @@ def test_explicit_head_overrides_auto_selection(tmp_path):
     export_to_onnx(model, tmp_path, example, head, opset=18)
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["output_module"] == head
+    assert manifest["patch"]["overlap"] is None
+    assert manifest["blend"] == "Overwrite"
+
+
+def test_the_exported_graph_names_no_path_of_the_machine_that_exported_it(tmp_path):
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+
+    import konfai
+    from konfai.export import export_to_onnx
+    from konfai.models.python.segmentation.UNet import UNet
+
+    model = UNet(dim=2, channels=[1, 8, 16], nb_class=2).eval()
+    export_to_onnx(model, tmp_path, torch.randn(1, 1, 64, 64), "UNetBlock_0.Head.Softmax", opset=18)
+    graph = str(onnx.load(str(tmp_path / "model.onnx")))
+    for installed in (konfai, torch):
+        assert str(Path(installed.__file__).resolve().parent) not in graph, installed.__name__
 
 
 def test_fold_pre_bakes_a_custom_pointwise_op_into_the_graph(tmp_path):
