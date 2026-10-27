@@ -75,7 +75,8 @@ class ExternalTool(torch.nn.Module):
                 finally:
                     # A tool on torch may keep CUDA tensors in reference cycles that only the cyclic collector frees.
                     gc.collect()
-                results.append(torch.from_numpy(np.ascontiguousarray(result)))
+                # a copy: a tool may reuse its buffer for the next sample
+                results.append(torch.from_numpy(np.array(result)))
         return torch.stack(results, dim=0).to(tensors[0].device)
 
 

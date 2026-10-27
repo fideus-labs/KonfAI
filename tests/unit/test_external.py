@@ -17,11 +17,14 @@
 """An app that runs an external tool: what reaches the tool's engine, and what comes back."""
 
 import numpy as np
-import SimpleITK as sitk
+import pytest
 import torch
-from konfai.network import network
-from konfai.network.external import ExternalNet, ExternalTool, scalar
-from konfai.utils.dataset import Attribute
+
+sitk = pytest.importorskip("SimpleITK")
+
+from konfai.network import network  # noqa: E402
+from konfai.network.external import ExternalNet, ExternalTool, scalar  # noqa: E402
+from konfai.utils.dataset import Attribute  # noqa: E402
 
 
 def _geometry() -> Attribute:

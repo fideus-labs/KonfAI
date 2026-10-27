@@ -34,7 +34,7 @@ from pathlib import Path
 def cache_dir() -> Path:
     """Where the tools' code, binaries and environments live once fetched: ``$KONFAI_TOOLS_CACHE``, or
     ``~/.cache/konfai/tools``."""
-    return Path(os.environ.get("KONFAI_TOOLS_CACHE", Path.home() / ".cache" / "konfai" / "tools"))
+    return Path(os.environ.get("KONFAI_TOOLS_CACHE", "~/.cache/konfai/tools")).expanduser().resolve()
 
 
 @contextlib.contextmanager
@@ -52,8 +52,11 @@ def _staged(target: Path) -> Iterator[Path]:
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         yield part
-        with contextlib.suppress(OSError):  # a directory already in place: another process published it
+        try:
             part.rename(target)
+        except OSError:
+            if not target.exists():  # not another process's copy already in place
+                raise
     finally:
         clear()
 
