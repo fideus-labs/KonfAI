@@ -358,8 +358,10 @@ class ConvexAdamEngine:
         metric = new_metric()
         optimizer = itk.RegularStepGradientDescentOptimizerv4[itk.D].New()
         optimizer.SetNumberOfIterations(self._linear_iterations)
-        optimizer.SetLearningRate(1.0)
-        optimizer.SetMinimumStepLength(1e-5)
+        # Lengths in voxels of the fixed image (EngineRegistration): a half-voxel step, which is the 1 mm the stage was
+        # tuned with on 2 mm anatomy, and the smoothing below likewise.
+        optimizer.SetLearningRate(0.5)
+        optimizer.SetMinimumStepLength(5e-6)
         optimizer.SetRelaxationFactor(0.6)
         scales = itk.RegistrationParameterScalesFromPhysicalShift[metric_type].New()
         scales.SetMetric(metric)
@@ -369,7 +371,7 @@ class ConvexAdamEngine:
         )
         registration.SetNumberOfLevels(levels)
         registration.SetShrinkFactorsPerLevel([2 ** (levels - 1 - i) for i in range(levels)])
-        registration.SetSmoothingSigmasPerLevel([float(levels - 1 - i) for i in range(levels)])
+        registration.SetSmoothingSigmasPerLevel([(levels - 1 - i) / 2 for i in range(levels)])
         if self._linear_sampling < 1:
             # Every voxel at every iteration is most of a large pair's linear stage.
             registration.SetMetricSamplingStrategy(itk.ImageRegistrationMethodv4Enums.MetricSamplingStrategy_RANDOM)

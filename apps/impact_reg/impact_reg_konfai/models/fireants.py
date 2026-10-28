@@ -121,6 +121,26 @@ _LINEAR_METHODS = ("rigid_affine", "rigid", "none")
 _AFFINE_VOLUME_CHANGE = (0.2, 5.0)
 
 
+class _StepPerElement:
+    """A FireANTs linear stage's Adam with a step size per element: FireANTs gives the translation (a length, in
+    voxels here) and the rotation or the matrix (unitless) one. Adam's update does not depend on its step size until it
+    is applied, so the optimizer runs at a step of 1 and each element's update is scaled after it: exactly a step size
+    per element. ``steps`` pairs each parameter with its step size, a number or one per element."""
+
+    def __init__(self, optimizer, steps: list) -> None:
+        self._optimizer, self._steps = optimizer, steps
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        self._optimizer.zero_grad(*args, **kwargs)
+
+    def step(self, *args, **kwargs) -> None:
+        starts = [parameter.detach().clone() for parameter, _ in self._steps]
+        self._optimizer.step(*args, **kwargs)
+        with torch.no_grad():
+            for (parameter, size), start in zip(self._steps, starts, strict=True):
+                parameter.copy_(start + (parameter - start) * size)
+
+
 def _on_model_grid(
     moved: torch.Tensor, fixed: torch.Tensor, mask: torch.Tensor | None, size: tuple[int, ...]
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -669,6 +689,7 @@ class FireANTsEngine:
         lncc_kernel: int = 5,
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
+        translation_lr: float = 0.015,
     ) -> None:
         """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
 
@@ -682,6 +703,7 @@ class FireANTsEngine:
         self._cc_kernel = int(cc_kernel)
         self._affine_metric = affine_metric
         self._affine_lr = float(affine_lr)
+        self._translation_lr = float(translation_lr)
         self._moments_init = moments_init
         self._linear_method = linear_method
         self._deformable_method = deformable_method
@@ -1047,9 +1069,12 @@ class FireANTsEngine:
                 moving_images=bm,
                 loss_type=affine_loss,
                 optimizer="Adam",
-                optimizer_lr=self._affine_lr,
+                optimizer_lr=1.0,
                 cc_kernel_size=self._cc_kernel,
                 init_translation=init_translation,
+            )
+            rigid.optimizer = _StepPerElement(
+                rigid.optimizer, [(rigid.rotation, self._affine_lr), (rigid.transl, self._translation_lr)]
             )
             rigid.optimize()
             rigid_matrix = rigid.get_rigid_matrix().detach()
@@ -1068,10 +1093,13 @@ class FireANTsEngine:
                     moving_images=bm,
                     loss_type=affine_loss,
                     optimizer="Adam",
-                    optimizer_lr=self._affine_lr,
+                    optimizer_lr=1.0,
                     cc_kernel_size=self._cc_kernel,
                     init_rigid=rigid_matrix,
                 )
+                sizes = torch.full_like(affine.affine, self._affine_lr)
+                sizes[..., -1] = self._translation_lr  # the matrix's last column is its translation
+                affine.optimizer = _StepPerElement(affine.optimizer, [(affine.affine, sizes)])
                 affine.optimize()
                 affine_matrix = affine.get_affine_matrix().detach()
                 del affine
@@ -1090,7 +1118,7 @@ class FireANTsEngine:
             centre = np.asarray(fixed.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in fixed.GetSize()]))
             shift = matrix[:DIM, :DIM] @ centre + matrix[:DIM, DIM] - centre
             print(
-                f"[FireANTs] linear stage: {np.round(shift, 2).tolist()} mm at the fixed image centre, "
+                f"[FireANTs] linear stage: {np.round(shift, 2).tolist()} voxels at the fixed image centre, "
                 f"determinant {np.linalg.det(matrix[:DIM, :DIM]):.3f}.",
                 flush=True,
             )
@@ -1255,10 +1283,16 @@ class RegistrationNet(network.Network):
         affine_lr: Annotated[
             float,
             Range(0.0, 10.0),
-            "Adam's step per iteration in the rigid and affine stages: millimetres for the translation (the image's "
-            "physical unit), unitless for the rotation and the matrix. Each stage moves the translation at most about "
-            "affine_lr x sum(affine_iterations): 10 mm at 0.03 over 350 iterations, 1 mm at 0.003.",
+            "Adam's step per iteration for the rotation (rigid stage) and the matrix (affine stage), unitless; "
+            "the translation has its own, translation_lr.",
         ] = 0.03,
+        translation_lr: Annotated[
+            float,
+            Range(0.0, 10.0),
+            "Adam's step per iteration for the translation of the rigid and affine stages, in voxels of the fixed "
+            "image. Each stage moves it at most about translation_lr x sum(affine_iterations): 5 voxels at 0.015 over "
+            "350 iterations.",
+        ] = 0.015,
         moments_init: Annotated[
             Literal["auto", "cof", "com", "none"],
             "Initial translation seeding the rigid stage, mirroring ANTs' -r [fixed,moving,N]: 'cof' = centre "
@@ -1389,6 +1423,7 @@ class RegistrationNet(network.Network):
             lncc_kernel,
             mixed_precision,
             voxel_sampling,
+            translation_lr=translation_lr,
         )
         self.add_module("Registration", EngineRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"])
         # The output module the presets name.

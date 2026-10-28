@@ -146,12 +146,12 @@ def _extent_hint(captured: list[str], maps: list[Path], image: sitk.Image) -> st
     wider = [p * v for p, v, e in zip(patch, voxel, extent, strict=True) if p * v > e]
     if min(grid) >= 16 and not wider:
         return ""
-    spans = f", where its {max(patch)}-voxel patch spans {max(wider):g} mm" if wider else ""
+    spans = f", where its {max(patch)}-voxel patch spans {max(wider):g} voxels" if wider else ""
     return (
-        f"\nThe image, {' x '.join(f'{e:.1f}' for e in extent)} mm, is too small for the grid IMPACT's models see it "
-        f"on: {' x '.join(str(int(g)) for g in grid)} voxels at {' x '.join(f'{v:g}' for v in voxel)} mm (level "
-        f"{level}){spans}. The IMPACT presets are sized for CT and MR at millimetre scale: a small field of view "
-        "(microscopy, a crop) registers on its intensities (Generic_Rigid_BSpline, FireANTs_SyN), or on features at "
+        f"\nThe image, {' x '.join(f'{e:.1f}' for e in extent)} voxels, is too small for the grid IMPACT's models see it "
+        f"on: {' x '.join(str(int(g)) for g in grid)} voxels of {' x '.join(f'{v:g}' for v in voxel)} image voxels (level "
+        f"{level}){spans}. A small field of view "
+        "(a crop, a few hundred voxels) registers on its intensities (Generic_Rigid_BSpline, FireANTs_SyN), or on features at "
         "a finer grid, with a smaller voxel_size for each of the preset's models."
     )
 

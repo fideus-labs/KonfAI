@@ -18,7 +18,7 @@ is refused with the closest matches. A nested parameter takes its full path from
 
 | You see | Try first | Parameter, by engine |
 |---|---|---|
-| the images start far apart (centimetres) | a preset with a rigid stage; for FireANTs a larger linear step | FireANTs `affine_lr` (millimetres per step: 0.03 moves up to 10 mm per stage) |
+| the images start far apart (centimetres) | a preset with a rigid stage; for FireANTs a larger linear step | FireANTs `translation_lr` (voxels per step: 0.015 moves up to 5 voxels per stage) |
 | the alignment is right globally but local structures are off | more deformable iterations | FireANTs `deformable_iterations`, elastix `max_iterations`, ConvexAdam `iterations` |
 | the deformation folds or looks noisy | more regularisation | FireANTs `smooth_warp_sigma`, `smooth_grad_sigma`; ConvexAdam `regularization_weight`; elastix `final_grid_spacing` (larger is smoother) |
 | the deformation is too stiff | less regularisation, a finer grid | the same parameters the other way |
@@ -65,7 +65,7 @@ Each model under `models` (or under each entry of `levels`, which replaces `mode
 | `distance` | `L1`, `L2` (default), `Dice`, `Cosine`, `L1Cosine`, `NCC`, `LNCC`; Dice compares raw features and can be negative |
 | `pca` | principal components each kept layer is reduced to, fitted on the fixed image (0 keeps every channel) |
 | `subset_features` | channels of each kept layer drawn at random at every iteration (0 compares all of them) |
-| `voxel_size` | the resolution (mm) the image is resampled to before the model sees it; left out, the image as it is |
+| `voxel_size` | the resolution (in voxels of the fixed image) the image is resampled to before the model sees it; left out, the image as it is |
 | `feature_normalization` | `none`, `l2` or `standardized`, each voxel's feature vector, before the PCA |
 
 And for the loss as a whole: `mode` (`Static`: features extracted once, then warped; `Jacobian`: the network inside the

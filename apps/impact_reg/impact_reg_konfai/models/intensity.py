@@ -14,8 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""What the engines share: the graph module that runs one on a batch, the winsorised intensities they read, where a
-linear stage starts, and whether a mask restricts an image."""
+"""What the engines share: the graph module that runs one on a batch in voxel units, the winsorised intensities they
+read, where a linear stage starts, and whether a mask restricts an image."""
 
 import contextlib
 import gc
@@ -32,7 +32,11 @@ from konfai.utils.vram import out_of_memory_as_torch
 class EngineRegistration(torch.nn.Module):
     """Graph module: the fixed, moving and mask tensors with their geometry -> each sample's displacement field on the
     fixed grid, from ``engine.register``. ``accepts_attributes`` has KonfAI hand it every branch's ``Attribute`` list,
-    since registration needs the physical geometry. A whole-image mask (the default) restricts nothing."""
+    since registration needs the physical geometry. A whole-image mask (the default) restricts nothing.
+
+    The engine measures lengths in the fixed image's finest voxel, and its field is brought back to millimetres: every
+    length a preset sets (a step, a grid, a smoothing, a feature model's voxel) is a number of voxels, so a step of 1.2
+    is 1.2 mm on 1 mm voxels and 1.2 um on 1 um voxels."""
 
     accepts_attributes = True
 
@@ -59,9 +63,14 @@ class EngineRegistration(torch.nn.Module):
                     data_to_image(tensor[b].detach().cpu().numpy(), branch[b])
                     for tensor, branch in zip((fixed, moving, fixed_mask, moving_mask), attributes, strict=True)
                 ]
+                voxel = min(images[0].GetSpacing())
+                for image in images:  # the same voxels, measured in the fixed image's finest voxel
+                    image.SetSpacing([v / voxel for v in image.GetSpacing()])
+                    image.SetOrigin([v / voxel for v in image.GetOrigin()])
                 try:
                     with out_of_memory_as_torch(device_index >= 0):
                         field = self._engine.register(images[0], images[1], device_index, images[2], images[3])
+                    field = field * voxel
                 finally:
                     # FireANTs keeps CUDA tensors in reference cycles that only the cyclic collector frees.
                     gc.collect()

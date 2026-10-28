@@ -96,8 +96,9 @@ class ModelSpec:
     ] = 0
     voxel_size: Annotated[
         list[float] | None,
-        "Resolution (mm) the image is resampled to before this model sees it, by linear interpolation. Absent, the "
-        "model sees the image as it is. TotalSegmentator models hold at 1 to 2 mm and collapse at 4 to 6 mm.",
+        "Resolution the image is resampled to before this model sees it, by linear interpolation, in voxels of the "
+        "fixed image (its finest spacing is 1). Absent, the model sees the image as it is. TotalSegmentator models "
+        "hold at 1 to 2 mm and collapse at 4 to 6 mm: 0.5 to 1 and 2 to 3 on 2 mm voxels.",
     ] = None
     feature_normalization: Annotated[
         FeatureNormalization,

@@ -93,12 +93,12 @@ def _patch_size(mode: str, model: ImpactFeatureModel) -> str:
 def _voxel_size(
     spec: ModelSpec, model: ImpactFeatureModel, mode: str, native: Sequence[float], where: str
 ) -> list[float]:
-    """The grid (mm) ``spec``'s model sees the image on: its voxel_size, or the fixed image's own spacing without one.
-    Static resamples the image on its own axes, Jacobian feeds the model patches of its own dimension."""
+    """The grid (in voxels of the fixed image) ``spec``'s model sees the image on: its voxel_size, or the fixed image's
+    own spacing without one. Static resamples the image on its own axes, Jacobian feeds the model patches of its own dimension."""
     axes = model.dim if mode.lower() == "jacobian" else 3
     size = [float(v) for v in spec.voxel_size] if spec.voxel_size is not None else list(native)[:axes]
     if len(size) != axes:
-        raise ValueError(f"{where}: voxel_size needs {axes} values (mm) in {mode} mode, got {spec.voxel_size}.")
+        raise ValueError(f"{where}: voxel_size needs {axes} values (voxels) in {mode} mode, got {spec.voxel_size}.")
     return size
 
 
@@ -296,8 +296,8 @@ class RegistrationNet(network.Network):
         final_grid_spacing: Annotated[
             float,
             Range(0.0, 100.0),
-            "Final B-spline control-point spacing (mm) of the deformable map; smaller = a more flexible "
-            "deformation, 0 = keep the map's default.",
+            "Final B-spline control-point spacing of the deformable map, in voxels of the fixed image; smaller = a "
+            "more flexible deformation, 0 = keep the map's default.",
         ] = 0.0,
         spatial_samples: Annotated[
             int,
