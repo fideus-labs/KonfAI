@@ -29,13 +29,14 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import re
 import types
 from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin
 
-from konfai.utils.config import Config, Range, _resolve_annotation, _unwrap_optional
+from konfai.utils.config import Config, Range, _admits_none, _resolve_annotation, _unwrap_optional
 
 #: Each workflow's config file, root key and root class.
 WORKFLOWS: dict[str, tuple[str, str]] = {
@@ -159,14 +160,18 @@ class _SchemaBuilder:
             return {"anyOf": [{"type": "object", "additionalProperties": self.value(args[1])}, _NONE]}
         return {}  # Any, a tensor, or a type the binder passes through
 
-    def parameters(self, owner: type, skip: int = 0, exclude: Sequence[str] = ()) -> tuple[dict[str, Any], bool]:
-        """The properties ``owner``'s constructor binds, and whether it also takes ``**kwargs``."""
+    def parameters(
+        self, owner: type, skip: int = 0, exclude: Sequence[str] = ()
+    ) -> tuple[dict[str, Any], list[str], bool]:
+        """The properties ``owner``'s constructor binds, those the binder refuses to miss (no default, no
+        ``None``), and whether it also takes ``**kwargs``."""
         properties: dict[str, Any] = {}
+        required: list[str] = []
         open_ = False
         try:
             signature = inspect.signature(owner)
         except (TypeError, ValueError):
-            return properties, True
+            return properties, required, True
         for parameter in list(signature.parameters.values())[skip:]:
             if parameter.kind is parameter.VAR_KEYWORD:
                 open_ = True
@@ -178,12 +183,13 @@ class _SchemaBuilder:
             except Exception:
                 annotation = Any
             bare = get_args(annotation)[0] if hasattr(annotation, "__metadata__") else annotation
-            bare = _unwrap_optional(bare)[0]
+            bare, optional = _unwrap_optional(bare)
             if self._is_object(bare):
                 key = getattr(bare, "_key", None)
                 if key is None:  # bound at this same level
-                    nested, nested_open = self.parameters(bare)
+                    nested, nested_required, nested_open = self.parameters(bare)
                     properties.update(nested)
+                    required += nested_required
                     open_ = open_ or nested_open
                 else:
                     properties[key] = _nullable(self.reference(bare))
@@ -194,10 +200,17 @@ class _SchemaBuilder:
                 properties[parameter.name] = self.chain(self.chain_parameters[owner, parameter.name], None, lists=False)
             else:
                 properties[parameter.name] = self.value(annotation)
+                if (
+                    parameter.default is parameter.empty
+                    and parameter.annotation is not parameter.empty
+                    and not optional
+                    and not _admits_none(bare)
+                ):
+                    required.append(parameter.name)
             default = self._default(parameter.default)
             if default is not None:
                 properties[parameter.name] = {**properties[parameter.name], "default": default}
-        return properties, open_
+        return properties, required, open_
 
     @staticmethod
     def _is_object(annotation: object) -> bool:
@@ -227,18 +240,20 @@ class _SchemaBuilder:
             if cls is self.model_loader:
                 self.definitions[name] = self.model_block()
             else:
-                properties, open_ = self.parameters(cls)
+                properties, required, open_ = self.parameters(cls)
                 for shared in self.shared_blocks.get(cls, ()):
                     properties.update(self.parameters(shared)[0])
-                self.definitions[name] = self._object(properties, open_ or cls in self.open_blocks, cls)
+                self.definitions[name] = self._object(properties, required, open_ or cls in self.open_blocks, cls)
         return {"$ref": f"#/definitions/{name}"}
 
     @staticmethod
-    def _object(properties: dict[str, Any], open_: bool, cls: type | None = None) -> dict[str, Any]:
+    def _object(properties: dict[str, Any], required: list[str], open_: bool, cls: type) -> dict[str, Any]:
         schema: dict[str, Any] = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
         if not open_:
             schema["additionalProperties"] = False
-        doc = inspect.getdoc(cls) if cls is not None else None
+        doc = inspect.getdoc(cls)
         if doc:
             schema["description"] = doc.split("\n\n")[0]
         return schema
@@ -246,11 +261,11 @@ class _SchemaBuilder:
     def model_block(self) -> dict[str, Any]:
         """``Model:``: the loader's own keys, then one block named after the network, whose arguments are the
         network's (a YAML model's ``parameters``, its optimizer, schedulers and criteria)."""
-        properties, _ = self.parameters(self.model_loader)
-        network_properties, _ = self.parameters(
+        properties, required, _ = self.parameters(self.model_loader)
+        network_properties, _, _ = self.parameters(
             _class("konfai.utils.model_builder:YamlNetwork"), exclude=("name", "module_specs")
         )
-        schema = self._object(properties, True, self.model_loader)
+        schema = self._object(properties, required, True, self.model_loader)
         schema["additionalProperties"] = _nullable({"type": "object", "properties": network_properties})
         return schema
 
@@ -269,27 +284,37 @@ class _SchemaBuilder:
         name = f"chain:{':'.join(kinds)}:{base.__qualname__ if base else ''}"
         if name not in self.definitions:
             self.definitions[name] = {}
-            base_properties = self.parameters(base)[0] if base is not None else {}
+            base_properties, base_required, _ = self.parameters(base) if base is not None else ({}, [], False)
             entries: dict[str, list[dict[str, Any]]] = {}
             for component, skip in self._components(kinds):
-                properties, open_ = self.parameters(component, skip=skip)
+                properties, required, open_ = self.parameters(component, skip=skip)
                 entries.setdefault(component.__name__, []).append(
-                    self._object({**base_properties, **properties}, open_ or _binds_in_place(component), component)
+                    self._object(
+                        {**base_properties, **properties},
+                        base_required + required,
+                        open_ or _binds_in_place(component),
+                        component,
+                    )
                 )
-            properties = {
-                key: _nullable(schemas[0] if len(schemas) == 1 else {"anyOf": schemas})
-                for key, schemas in entries.items()
-            }
+            # Each component's schema once in `definitions`: its name and its occurrence keys (`Clip#2`) share it.
+            properties = {}
+            for key, schemas in entries.items():
+                self.definitions[f"{name}.{key}"] = _nullable(schemas[0] if len(schemas) == 1 else {"anyOf": schemas})
+                properties[key] = {"$ref": f"#/definitions/{name}.{key}"}
+            # A bare name, or its occurrence key, must be a shipped one; a `module:Class` is left open.
+            occurrence = f"^(?:{'|'.join(re.escape(key) for key in sorted(properties))})#[0-9]+$"
+            names = {"anyOf": [{"enum": sorted(properties)}, {"pattern": ":"}, {"pattern": occurrence}]}
             mapping = {
                 "type": "object",
                 "properties": properties,
-                # A bare name must be a shipped one; `module:Class` and an occurrence key (`Clip#2`) are left open.
-                "propertyNames": {"anyOf": [{"enum": sorted(properties)}, {"pattern": ":"}, {"pattern": "#[0-9]+$"}]},
+                "patternProperties": {f"^{re.escape(key)}#[0-9]+$": ref for key, ref in properties.items()},
+                "propertyNames": names,
                 "additionalProperties": _OPEN,
             }
             alternatives = [mapping, _NONE]
-            if lists:  # the list spelling of a chain: one single-entry mapping per stage
-                alternatives.insert(1, {"type": "array", "items": {**mapping, "minProperties": 1, "maxProperties": 1}})
+            if lists:  # the list spelling of a chain: one stage per item, a bare name or a single-entry mapping
+                item = {"anyOf": [{"type": "string", **names}, {**mapping, "minProperties": 1, "maxProperties": 1}]}
+                alternatives.insert(1, {"type": "array", "items": item})
             self.definitions[name] = {"anyOf": alternatives}
         return {"$ref": f"#/definitions/{name}"}
 

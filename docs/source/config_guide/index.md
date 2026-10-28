@@ -84,7 +84,9 @@ The tables in this documentation give the main arguments. For the complete list:
 
 Each config file has a JSON Schema, published with this documentation:
 `https://konfai.readthedocs.io/en/stable/schema/<File>.schema.json`, for `Config`, `Prediction`,
-`Evaluation` and `Transform`. In VS Code, install the YAML extension by Red Hat and add to your settings:
+`Evaluation` and `Transform`. `stable` matches the latest release; write `latest` if you run KonfAI from
+`main`, or the version you installed (`v1.9.0`). In VS Code, install the YAML extension by Red Hat and add
+to your settings:
 
 ```json
 "yaml.schemas": {

@@ -89,17 +89,31 @@ def test_a_mistake_is_flagged_where_it_is() -> None:
     _ct_chain(unknown_stage)["transforms"]["Standardise"] = None
     unknown_argument = _segmentation()
     _ct_chain(unknown_argument)["transforms"]["Standardize"]["means"] = 0
+    repeated_stage = _segmentation()
+    _ct_chain(repeated_stage)["transforms"]["Standardize#2"] = {"means": 0}
+    unknown_repeated_stage = _segmentation()
+    _ct_chain(unknown_repeated_stage)["transforms"]["Standardise#2"] = None
+    missing_argument = _segmentation()
+    _ct_chain(missing_argument)["transforms"]["OneHot"] = {}
 
     assert _errors(misspelled) == ["Trainer"]
     assert _errors(wrong_type) == ["Trainer/epochs"]
     assert _errors(unknown_stage) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms"]
     assert _errors(unknown_argument) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms/Standardize"]
+    assert _errors(repeated_stage) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms/Standardize#2"]
+    assert _errors(unknown_repeated_stage) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms"]
+    assert _errors(missing_argument) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms/OneHot"]
 
 
 def test_the_spellings_the_binder_accepts_are_valid() -> None:
     tree = _segmentation()
     chain = _ct_chain(tree)
-    chain["transforms"] = [{"Clip": {"min_value": "-1024"}}, {"Clip": None}, {"monai.transforms:ScaleIntensity": {}}]
+    chain["transforms"] = [
+        {"Clip": {"min_value": "-1024"}},
+        {"Clip": None},
+        "Canonical",
+        {"monai.transforms:ScaleIntensity": {}},
+    ]
     tree["Trainer"]["epochs"] = "5"
     tree["Trainer"]["manual_seed"] = "None"
     assert _errors(tree) == []
