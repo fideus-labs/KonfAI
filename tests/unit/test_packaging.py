@@ -460,8 +460,6 @@ def test_the_docker_entrypoint_runs_a_program_as_given_and_konfai_arguments_thro
 
 
 _SPDX_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".css", ".html", ".sh")
-# wasm-bindgen writes these; the README beside them pins their hashes.
-_GENERATED_SOURCES = "konfai-studio/frontend/src/konfai-rs/"
 
 
 def test_every_source_file_carries_the_spdx_header() -> None:
@@ -478,8 +476,7 @@ def test_every_source_file_carries_the_spdx_header() -> None:
     missing = [
         name
         for name in listing.stdout.splitlines()
-        if not name.startswith(_GENERATED_SOURCES)
-        and "SPDX-License-Identifier: Apache-2.0" not in (_REPO_ROOT / name).read_text(encoding="utf-8")[:2000]
+        if "SPDX-License-Identifier: Apache-2.0" not in (_REPO_ROOT / name).read_text(encoding="utf-8")[:2000]
     ]
     assert not missing, missing
 

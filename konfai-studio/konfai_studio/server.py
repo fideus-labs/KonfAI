@@ -1067,40 +1067,71 @@ async def app_icon(ref: str = Query(...)) -> FileResponse:
     return FileResponse(icon_path)
 
 
-def _app_bundle_file(ref: str, filename: str) -> Path:
-    """Local path to a file inside an app's bundle (for serving its ONNX deploy artifacts).
+#: The in-browser build of an app: the ``web/`` folder beside the apps of its repository, whose ``catalog.json``
+#: names, per app, its configs, its KonfAI Edge programs, their ``.bpk`` weights and the engine that runs them.
+_NO_WEB = "This app has no in-browser build yet: its repository has no web/ folder (they will be published later)."
 
-    Resolves the app repository and returns the file path WITHOUT importing the app's ``.py`` (only
-    the bundled files are touched). Raises 404 when the app is not an ONNX-deployable bundle.
+
+def _app_web_file(ref: str, path: str) -> Path:
+    """The file ``web/<path>`` of the repository holding app ``ref``, without importing the app's ``.py``.
+
+    ``path`` must stay inside ``web/``: no absolute path, backslash, empty, ``.`` or ``..`` part. 404 when the
+    repository has no such file, which for ``catalog.json`` means it has no in-browser build.
     """
+    parts = path.split("/")
+    if not path or "\\" in path or path.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        raise HTTPException(400, f"'{path}' is not a path inside the app's web/ folder")
     try:
-        from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, get_app_repository_info
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import HfHubHTTPError
+        from konfai_apps.app_repository import (
+            AppRepositoryError,
+            LocalAppRepositoryFromDirectory,
+            LocalAppRepositoryFromHF,
+            get_app_repository_info,
+        )
     except ImportError as exc:  # pragma: no cover - konfai-apps not installed
         raise HTTPException(503, "konfai-apps is not installed") from exc
+    missing = _NO_WEB if path == "catalog.json" else f"the app's web/ folder has no '{path}'"
     try:
         repo = get_app_repository_info(ref, force_update=False)
-        if not isinstance(repo, LocalAppRepository):  # only local/HF bundles hold downloadable files
-            raise HTTPException(404, f"app '{ref}' has no portable ONNX bundle")
-        path = Path(repo._download(filename))
-    except (AppRepositoryError, FileNotFoundError, OSError, KeyError, ValueError) as exc:
-        raise HTTPException(404, f"app '{ref}' has no portable ONNX bundle") from exc
-    if not path.is_file():
-        raise HTTPException(404, f"app '{ref}' has no '{filename}' (export one with `konfai-apps bundle --onnx`)")
-    return path
+        if isinstance(repo, LocalAppRepositoryFromDirectory):
+            root = (repo._app_directory / "web").resolve()
+            target = (root / path).resolve()
+            if not target.is_relative_to(root):
+                raise HTTPException(400, f"'{path}' is not a path inside the app's web/ folder")
+        elif isinstance(repo, LocalAppRepositoryFromHF):
+            repo_id, revision = LocalAppRepositoryFromHF._split_repo_reference(repo._repo_id)
+            target = Path(hf_hub_download(repo_id=repo_id, filename=f"web/{path}", revision=revision))  # nosec B615
+        else:  # a remote server's app holds no files to hand over
+            raise HTTPException(404, _NO_WEB)
+    except (AppRepositoryError, HfHubHTTPError, OSError, KeyError, ValueError) as exc:
+        raise HTTPException(404, missing) from exc
+    if not target.is_file():
+        raise HTTPException(404, missing)
+    return target
 
 
-@app.get("/api/apps/manifest")
-async def app_manifest(ref: str = Query(...)) -> dict[str, Any]:
-    """The deploy manifest of an app's ONNX bundle: the contract the in-tab runtime consumes."""
-    return json.loads(_app_bundle_file(ref, "manifest.json").read_text())
+@app.get("/api/apps/web")
+def app_web(ref: str = Query(...)) -> dict[str, Any]:
+    """The entry of app ``ref`` in its repository's ``web/catalog.json``: what the in-tab deployment loads.
+
+    Plain ``def``: a Hub download runs in the threadpool, not on the event loop.
+    """
+    catalog = json.loads(_app_web_file(ref, "catalog.json").read_text(encoding="utf-8"))
+    name = Path(ref).name if Path(ref).expanduser().exists() else ref.rpartition(":")[2]
+    if catalog.get("format") != 1:
+        raise HTTPException(404, f"web/catalog.json is format {catalog.get('format')!r}; Studio reads format 1")
+    for entry in catalog.get("apps") or []:
+        if entry.get("name") == name:
+            return entry
+    raise HTTPException(404, f"web/catalog.json lists no app '{name}'")
 
 
-@app.get("/api/apps/model")
-async def app_model(ref: str = Query(...)) -> FileResponse:
-    """The app's ``model.onnx`` (served to the browser for 100% client-side, zero-egress inference)."""
-    return FileResponse(
-        _app_bundle_file(ref, "model.onnx"), media_type="application/octet-stream", filename="model.onnx"
-    )
+@app.get("/api/apps/web/file")
+def app_web_file(ref: str = Query(...), path: str = Query(...)) -> FileResponse:
+    """A file of app ``ref``'s ``web/`` folder (engine, program, weights), served to run it in the tab."""
+    return FileResponse(_app_web_file(ref, path))
 
 
 async def _apps_after(session: str, source_tool: str, ref: str) -> dict[str, Any]:
