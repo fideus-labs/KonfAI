@@ -18,7 +18,7 @@
 
 import numpy as np
 import SimpleITK as sitk
-from impact_reg_konfai.models.intensity import best_translation
+from impact_reg_konfai.models.intensity import best_translation, foreground_centre
 
 
 def test_the_start_is_the_shift_that_overlaps_two_sparse_subjects() -> None:
@@ -60,3 +60,21 @@ def test_a_thin_mask_survives_the_coarser_copy() -> None:
     thin[31, 5:45, 5:45] = 1  # one plane through the fixed blob
     aligned, off = [60.0, 60.0, 0.0], [0.0, 0.0, 0.0]
     assert best_translation(fixed, moving, [off, aligned], sitk.GetImageFromArray(thin)) == aligned
+
+
+def test_a_mask_with_no_foreground_above_the_image_threshold_takes_its_own() -> None:
+    # Thresholded over the whole image, a bright structure outside the mask left the masked subject no foreground,
+    # and the start fell back to the grid centre.
+    array = np.zeros((40, 40), np.float32)
+    array[5:10, 5:10] = 100.0
+    array[25:35, 25:35] = 10.0
+    image = sitk.GetImageFromArray(array)
+    region = np.zeros((40, 40), np.uint8)
+    region[20:, 20:] = 1
+    mask = sitk.GetImageFromArray(region)
+    assert foreground_centre(image, mask) == (29.5, 29.5)
+    assert foreground_centre(image, mask * 0) == (19.5, 19.5)  # an empty mask: the grid's centre
+    # A mask holding some of the whole image's foreground keeps it: inside a body mask, the region's own threshold
+    # would split the body's tissues.
+    region[:20, :20] = 1
+    assert foreground_centre(image, sitk.GetImageFromArray(region)) == (7.0, 7.0)

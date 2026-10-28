@@ -85,15 +85,19 @@ def foreground_centre(image: sitk.Image, mask: sitk.Image | None) -> tuple[float
 
     Intensity moments divide by the total intensity, which is negative or near zero for a CT in HU or a z-scored
     MR, and clipping the negatives first weights a CT by its bone. An unweighted foreground holds for any intensity
-    range; an image with no foreground (a constant one) gives its grid's centre.
+    range; an image with no foreground (a constant one, or an empty mask) gives its grid's centre.
     """
     foreground = sitk.OtsuThreshold(image, 0, 1)
     if mask is not None:
         # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
-        region = sitk.Resample(
-            sitk.Cast(mask != 0, foreground.GetPixelID()), image, sitk.Transform(), sitk.sitkNearestNeighbor
-        )
+        region = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, sitk.Transform(), sitk.sitkNearestNeighbor)
+        if not sitk.GetArrayViewFromImage(region).any():
+            return grid_centre(image)
         foreground = sitk.Mask(foreground, region)
+        if not sitk.GetArrayViewFromImage(foreground).any():
+            # A brighter structure outside the mask set the threshold above the whole region: the region's own one.
+            # Not always: inside a body mask, the region's threshold would split the body's tissues.
+            foreground = sitk.OtsuThreshold(image, region, 0, 1, 128, True, 1)  # 0 outside the mask
     stats = sitk.LabelShapeStatisticsImageFilter()
     stats.SetComputePerimeter(False)
     stats.Execute(foreground)
