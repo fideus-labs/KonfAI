@@ -204,7 +204,7 @@ def export_to_onnx(
     output_group: str = "output",
     patch_overlap: list[int] | None = None,
     extend_slice: int = 0,
-    pad_value: float | None = None,
+    pad_value: float | str | None = None,
     fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
     model_filename: str = "model.onnx",
@@ -304,8 +304,9 @@ def export_to_onnx(
             "overlap": patch_overlap,
             "dim": dim,
             "extend_slice": extend_slice,
-            # The border-pad value for the last (ragged) patch of an axis; 0 unless the config pins one.
-            "pad_value": float(pad_value) if pad_value is not None else 0.0,
+            # What pads an axis shorter than the patch, on both sides: 0 unless the config pins a value,
+            # "edge" for the volume's edge voxel, or "min" for the minimum of the window read.
+            "pad_value": pad_value if isinstance(pad_value, str) else float(pad_value or 0.0),
         },
         "geometry": {"mode": "preserve_from_input"},
     }

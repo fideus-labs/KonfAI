@@ -340,6 +340,14 @@ def test_an_inverse_of_a_resample_carries_the_fill_its_stage_states() -> None:
     assert inverse == {"op": "inverse", "of": "Resample", "interpolation": "linear", "fill": -1000.0}
 
 
+def test_an_edge_fill_reaches_the_resample_and_its_inverse() -> None:
+    # `fill: edge` reads the source's edge pixel past it (MONAI's padding_mode: border), both ways.
+    manifest = _undone_resample({}, {"fill": "edge"})
+    (resample,) = [step for step in manifest["preprocessing"] if step["op"] == "resample"]
+    (inverse,) = [step for step in manifest["postprocessing"] if step["op"] == "inverse"]
+    assert resample["fill"] == inverse["fill"] == "edge"
+
+
 def test_a_linear_inverse_of_an_intensity_integer_reads_linear() -> None:
     # int16 is how scanners store intensities: konfai's Resample reads it linearly and casts the blend
     # back, which the runtime does from the dtype the cast leaves.
@@ -1917,6 +1925,15 @@ def test_an_explicitly_disabled_patch_combine_keeps_the_last_patch(value) -> Non
 
     config = _prediction({}, {"patch_combine": value})
     assert derive_blend(config, "Predictor") == "Overwrite"
+
+
+@pytest.mark.parametrize(("pad_value", "expected"), [(-1.0, -1.0), ("edge", "edge"), (None, "min")])
+def test_an_onnx_export_carries_the_pad_value_of_a_short_axis(pad_value: float | str | None, expected) -> None:
+    # A pad_value left null pads with the minimum of the window konfai reads, not with 0.
+    from konfai.portable import derive_onnx_params
+
+    config = {"Predictor": {"Dataset": {"Patch": {"patch_size": [16, 16], "pad_value": pad_value}}}}
+    assert derive_onnx_params(config, "Predictor")[3] == expected
 
 
 @pytest.mark.parametrize("size", [[0, 16, 16], [16, 0, 16], [16, 16, -1]])

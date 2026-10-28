@@ -117,9 +117,12 @@ def _op_resample(
             step["align"] = align
     step.update(field)
     step.update(stored)
-    fill = float(clean(p.get("fill")) or 0.0)
-    if fill:
+    # `edge` reads the source's edge pixel past it (MONAI's padding_mode: border), a number fills with it.
+    fill = clean(p.get("fill"))
+    if fill == "edge":
         step["fill"] = fill
+    elif float(fill or 0.0):
+        step["fill"] = float(fill)
     interpolation = clean(p.get("interpolation"))
     if interpolation is not None:
         if interpolation not in ("nearest", "linear", "cubic"):
@@ -1036,13 +1039,15 @@ def check_blend(overlap: list[int] | None, blend: str | None) -> None:
         )
 
 
-def derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | None, int | None, int, float | None]:
+def derive_onnx_params(
+    config: dict[str, Any], root: str
+) -> tuple[list[int] | None, int | None, int, float | str | None]:
     """Best-effort ``(patch_size, in_channels, extend_slice, pad_value)`` from a prediction config, ``None`` for
     what it does not state. ``patch_size`` drops a singleton slice dim (2.5D); ``in_channels`` reads the
     model's ``nb_channel``, else its ``in_channels``, else its first ``channels``."""
     patch_size: list[int] | None = None
     extend_slice = 0
-    pad_value: float | None = None
+    pad_value: float | str | None = None
     patch = inference_patch(config, root)
     if patch:
         raw = patch.get("patch_size")
@@ -1062,6 +1067,10 @@ def derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | N
         raw_pad = patch.get("pad_value")
         if isinstance(raw_pad, (int, float)) and not isinstance(raw_pad, bool):
             pad_value = float(raw_pad)
+        elif raw_pad == "edge":
+            pad_value = raw_pad
+        elif raw_pad is None:
+            pad_value = "min"  # konfai pads with the minimum of the window it reads (`Patch._pad_constant`)
 
     in_channels: int | None = None
     for model in map(_mapping, _mapping(_mapping(config.get(root)).get("Model")).values()):
