@@ -165,7 +165,7 @@ An output can carry several criteria: `examples/Segmentation` puts a cross entro
 | --- | --- | --- |
 | `patch_size` | `[128, 128, 128]` | The patch the model sees. A `0` lets KonfAI size that axis. |
 | `overlap` | `null` | Overlap between patches: voxels, a fraction, `"20%"`, or one per axis. `null`: 20%. |
-| `pad_value` | `null` | Padding past the volume. `null`: the data's minimum. |
+| `pad_value` | `null` | What pads an axis shorter than the patch, half before the volume and half after. `null`: the data's minimum; `edge`: the volume's edge voxel (MONAI's `padding_mode: replicate`). |
 | `extend_slice` | `0` | 2.5-D: neighbouring slices added as channels (with `patch_size[0] == 1`). |
 | `max_voxels` | `null` | The voxels a patch (`tile`) or a case's coarse grid (`resample`) holds. `null`: sized from the two costs below. |
 | `vram_bytes_per_voxel`, `ram_bytes_per_voxel` | `null` | What a voxel costs the pass on the GPU and in RAM. With `max_voxels` unset, KonfAI holds the tighter of the free GPU memory and the rank's RAM budget. |

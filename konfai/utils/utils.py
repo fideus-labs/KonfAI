@@ -289,7 +289,16 @@ def get_patch_slices_from_shape(
     multiple: list[int] | None = None,
     declared_free_axis: bool | None = None,
     sweep_axis: int = 0,
+    inside: bool = True,
 ) -> list[tuple[slice, ...]]:
+    """The patch grid of ``shape``, ordered with ``sweep_axis`` outermost.
+
+    Patches start every ``patch - overlap`` voxels, and the last one of an axis ends on the volume's last voxel, as
+    MONAI's ``dense_patch_slices`` places it: no patch reaches past the volume, so none is padded. An axis shorter
+    than the patch holds one patch, padded on both sides by the read. ``inside`` False keeps the last patch on the
+    stride, cut short at the volume's end: the slots of a reduction (``Patch.pad_to_patch`` False) then never
+    overlap, so no voxel reaches its sums twice.
+    """
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple``.
     template = [0] * len(shape) if patch_size is None else patch_size
@@ -339,6 +348,8 @@ def get_patch_slices_from_shape(
 
             end = start + patch_size[dim]
             if end >= shape[dim]:
+                if inside:
+                    start = max(shape[dim] - patch_size[dim], 0)
                 end = shape[dim]
                 slices[dim].append(slice(start, end))
                 break

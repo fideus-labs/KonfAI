@@ -18,7 +18,7 @@
 """Reassembly of a case from its patches: whole, or slab by slab as they complete."""
 
 from collections.abc import Callable
-from itertools import pairwise
+from itertools import pairwise, product
 from typing import cast
 
 import torch
@@ -61,8 +61,8 @@ class Accumulator:
         # Patches are blended into this running buffer as they arrive (add_layer), never kept.
         self._result: torch.Tensor | None = None
         self._weighted: torch.Tensor | None = None
-        # Blend-weight geometry, fixed for the accumulator's life (it survives _reset), per (axis, start).
-        self._geometry: tuple[list[list[torch.Tensor]], list[torch.Tensor]] | None = None
+        # Blend-weight geometry, fixed for the accumulator's life (it survives _reset), per axis.
+        self._geometry: tuple[list[torch.Tensor], list[torch.Tensor]] | None = None
         self._grid: list[dict[int, int]] | None = None
         self._shares: dict[tuple[int, int, int, torch.dtype, torch.device], torch.Tensor | None] = {}
         self._kept: dict[tuple[int, int], slice] = {}
@@ -92,7 +92,8 @@ class Accumulator:
                 data = data.unsqueeze(dim=dim + n)
         # Clamp each spatial destination to the volume and crop the patch to it, BEFORE weighting.
         dest = [slice(s.start, min(s.stop, self.shape[dim])) for dim, s in enumerate(patch_slice)]
-        data = data[tuple([slice(None)] * n + [slice(0, d.stop - d.start) for d in dest])]
+        crop = [self._inside(data.shape[n + dim], d.stop - d.start) for dim, d in enumerate(dest)]
+        data = data[tuple([slice(None)] * n + crop)]
         sweep = self.sweep_axis
         dest[sweep] = slice(dest[sweep].start - row_offset, dest[sweep].stop - row_offset)
         slices_dest = tuple([slice(cast(torch.Tensor, self._result).shape[i]) for i in range(n)] + dest)
@@ -113,42 +114,51 @@ class Accumulator:
         else:
             result[slices_dest] += self._weighted_patch(data, patch_slice)
 
+    @staticmethod
+    def _inside(length: int, extent: int) -> slice:
+        """Where the ``extent`` in-volume voxels of a patch of ``length`` sit in it: in its middle, the floor of
+        the padding before them (``Patch.get_read_plan``)."""
+        start = max(length - extent, 0) // 2
+        return slice(start, start + extent)
+
     def _kept_box(self, patch_slice: tuple[slice, ...]) -> tuple[slice, ...]:
         """The sub-box a selection keeps of this patch: the run of ones in its window, per axis, read
         from the host-side windows and cached per grid position."""
         return tuple(self._kept_span(dim, s.start) for dim, s in enumerate(patch_slice))
 
     def _kept_span(self, dim: int, start: int) -> slice:
+        """The run of the patch at ``start`` that holds voxels nearer its centre than any neighbour's: it reaches
+        halfway between the two centres, so the runs tile the axis however unevenly the patches sit (the last one
+        ends on the volume's end, nearer its neighbour than the stride). On an even grid it is ``Trim``'s band."""
         key = (dim, start)
         if key not in self._kept:
-            windows, _ = self._weight_geometry()
-            kept = windows[dim][self._position(dim, start)].nonzero().flatten()
-            self._kept[key] = slice(int(kept[0]), int(kept[-1]) + 1)
+            starts, position = list(self._positions()[dim]), self._position(dim, start)
+            length = self.patch_slices[0][dim].stop - self.patch_slices[0][dim].start
+            low = (starts[position - 1] + start + length) // 2 - start if position > 0 else 0
+            high = (start + starts[position + 1] + length) // 2 - start if position < len(starts) - 1 else length
+            self._kept[key] = slice(low, high)
         return self._kept[key]
 
-    def _weight_geometry(self) -> tuple[list[list[torch.Tensor]], list[torch.Tensor]]:
-        """Per axis: the blend window, and its sum over the patch grid.
+    def _weight_geometry(self) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Per axis: the blend window, the same for every patch, and its sum over the patch grid.
 
         The outer product of those sums is the total weight covering each voxel
         (``sum_p prod_d w_d == prod_d sum_k w_d``), so the total is one vector per axis. The patch
         extent comes from the slices, not from the window: a free axis carries a single broadcast
-        entry that must cover the whole extent. The window is asked for per grid position: a
-        selection opens its border patches to the volume edge (Trim).
+        entry that must cover the whole extent.
         """
         if self._geometry is None:
             combine = cast(PathCombine, self.patch_combine)
             windows, totals = [], []
             for dim, extent in enumerate(self.shape):
-                starts = list(self._positions()[dim])
                 length = self.patch_slices[0][dim].stop - self.patch_slices[0][dim].start
-                per_position, total = [], torch.zeros(extent)
-                for position, start in enumerate(starts):
-                    window = combine.window(dim, position, len(starts))
-                    window = window.expand(length) if window.numel() == 1 else window
+                window = combine.windows_1d[dim]
+                window = window.expand(length) if window.numel() == 1 else window
+                total = torch.zeros(extent)
+                for start in self._positions()[dim]:
                     stop = min(start + length, extent)
-                    total[start:stop] += window[: stop - start]
-                    per_position.append(window)
-                windows.append(per_position)
+                    total[start:stop] += window[self._inside(length, stop - start)]
+                windows.append(window)
                 totals.append(total)
             self._geometry = (windows, totals)
         return self._geometry
@@ -179,20 +189,24 @@ class Accumulator:
         key = (dim, start, extent, data.dtype, data.device)
         if key not in self._shares:
             windows, totals = self._weight_geometry()
-            window = windows[dim][self._position(dim, start)]
-            share = window[:extent] / totals[dim][start : start + extent]
-            # A bool share is True wherever the weight is not zero, so a bool layer blends as a union.
-            truncates = not (data.dtype.is_floating_point or data.dtype.is_complex or data.dtype == torch.bool)
-            if truncates and not torch.equal(share, share.round()):
-                raise PatchError(
-                    f"'{type(self.patch_combine).__name__}' weights overlapping patches, and this output is "
-                    f"{data.dtype}: a fractional weight cast to an integer is 0, which would erase the overlap band.",
-                    "Set 'patch_combine: Trim' (each voxel keeps one patch's value), or blend the "
-                    "floating-point output the integer one is taken from (the Softmax before the Argmax).",
-                )
-            share = share.to(device=data.device, dtype=data.dtype)
+            window = windows[dim]
+            share = window[self._inside(window.numel(), extent)] / totals[dim][start : start + extent]
+            share = self._castable(share, data).to(device=data.device, dtype=data.dtype)
             self._shares[key] = None if torch.equal(share, torch.ones_like(share)) else share
         return self._shares[key]
+
+    def _castable(self, share: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
+        """``share``, refused when ``data``'s dtype would truncate a fractional weight to 0. A bool share is True
+        wherever the weight is not zero, so a bool layer blends as a union."""
+        truncates = not (data.dtype.is_floating_point or data.dtype.is_complex or data.dtype == torch.bool)
+        if truncates and not torch.equal(share, share.round()):
+            raise PatchError(
+                f"'{type(self.patch_combine).__name__}' weights overlapping patches, and this output is "
+                f"{data.dtype}: a fractional weight cast to an integer is 0, which would erase the overlap band.",
+                "Set 'patch_combine: Trim' (each voxel keeps one patch's value), or blend the "
+                "floating-point output the integer one is taken from (the Softmax before the Argmax).",
+            )
+        return share
 
     def _weighted_patch(self, data: torch.Tensor, patch_slice: tuple[slice, ...]) -> torch.Tensor:
         """``data`` scaled by its SHARE of the blend weight at each voxel, one axis at a time.
@@ -201,6 +215,8 @@ class Accumulator:
         is not identically one are applied (``_share``). Out of place, into a staging buffer the
         patches share: the caller's tensor is never touched, so the OOM retry never re-weights it.
         """
+        if cast(PathCombine, self.patch_combine).min_weight is not None:
+            return data * self._castable(self._floored_share(data, patch_slice), data).to(data.dtype)
         shares = []
         for dim, s in enumerate(patch_slice):
             share = self._share(dim, s.start, data)
@@ -221,6 +237,50 @@ class Accumulator:
         for share in shares[1:]:
             self._weighted.mul_(share)
         return self._weighted
+
+    def _floored_share(self, data: torch.Tensor, patch_slice: tuple[slice, ...]) -> torch.Tensor:
+        """This patch's share of a floored weight (``PathCombine.min_weight``) at each of its in-volume voxels.
+
+        A patch weighs ``max(prod_d w_d, floor)``, which no longer factorises into one vector per axis, so its
+        share is that over the same sum across every patch covering the voxel: the grid is the product of one
+        list of starts per axis, so those are the combinations of the starts covering this patch on each axis.
+        ponytail: recomputed per patch (2^d products for an overlap under half the patch); cache it by the
+        patch's neighbourhood if a blend shows up in a profile.
+        """
+        windows, _ = self._weight_geometry()
+        floor = cast(float, cast(PathCombine, self.patch_combine).min_weight)
+        device = data.device
+        own: list[torch.Tensor] = []
+        covering: list[list[tuple[torch.Tensor, torch.Tensor]]] = []
+        for dim, s in enumerate(patch_slice):
+            length = s.stop - s.start
+            voxels = torch.arange(s.start, s.start + data.shape[self._n + dim], device=device)
+            axis = []
+            window = windows[dim].to(device=device, dtype=torch.float32)
+            for start in self._positions()[dim]:
+                inside = self._inside(length, min(start + length, self.shape[dim]) - start)
+                index = voxels - start
+                hit = (index >= 0) & (index < inside.stop - inside.start)
+                if not bool(hit.any()):
+                    continue
+                values = torch.where(hit, window[(index + inside.start).clamp(0, length - 1)], 0.0)
+                axis.append((values, hit.float()))
+                if start == s.start:
+                    own.append(values)
+            covering.append(axis)
+
+        def outer(vectors: list[torch.Tensor] | tuple[torch.Tensor, ...]) -> torch.Tensor:
+            result = vectors[0]
+            for vector in vectors[1:]:
+                result = result.unsqueeze(-1) * vector
+            return result
+
+        total = torch.zeros(tuple(vector.numel() for vector in own), device=device)
+        for combination in product(*covering):
+            total += outer([values for values, _ in combination]).clamp_min(floor) * outer(
+                [hit for _, hit in combination]
+            )
+        return outer(own).clamp_min(floor) / total
 
     def _along_sweep(self, span: slice, lead: int) -> tuple[slice, ...]:
         """Index a result tensor over ``span`` on the sweep axis and whole on every other."""

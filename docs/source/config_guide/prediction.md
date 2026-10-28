@@ -95,7 +95,7 @@ members load per batch, as described in [PyTorch's numerical accuracy notes](htt
 | --- | --- | --- |
 | `patch_size` | `[128, 128, 128]` | The patch the model sees. A `0` lets KonfAI size that axis. |
 | `overlap` | `null` | Voxels (`16`), a fraction (`0.2`), `"20%"`, or one per axis. `null`: 20%. |
-| `pad_value` | `null` | Padding past the volume. `null`: the data's minimum. |
+| `pad_value` | `null` | What pads an axis shorter than the patch, half before the volume and half after. `null`: the data's minimum; `edge`: the volume's edge voxel (MONAI's `padding_mode: replicate`). |
 | `extend_slice` | `0` | 2.5-D: neighbouring slices added as channels (with `patch_size[0] == 1`). |
 | `mode` | `tile` | What a case over `max_voxels` gets: `tile` cuts it into patches, `resample` runs it whole on a grid coarse enough and brings the output back onto the case's grid. |
 | `max_voxels` | `null` | The voxels a patch (`tile`) or a case's coarse grid (`resample`) holds. `null`: sized from the two costs below. |
@@ -144,7 +144,7 @@ The key is the model output to save ({doc}`../reference/components/models`).
 | `after_reduction_transforms` | Transforms after the merge. |
 | `final_transforms` | Transforms just before writing (an `Argmax`, an inverse normalisation). |
 | `attributes` | Header values to set, as `key=value` (`key=` removes one). |
-| `patch_combine` | How overlapping patches are blended: `Trim` (default), `Mean`, `Cosinus`, `Gaussian`. Label maps take only `Trim`. |
+| `patch_combine` | How overlapping patches are blended: `Trim` (default), `Mean`, `Cosinus`, `Gaussian` (`sigma_scale`, default `0.125`; a patch's weight is floored at `0.001`, as MONAI's importance map). Label maps take only `Trim`. |
 
 ### Writing a layer as it is
 

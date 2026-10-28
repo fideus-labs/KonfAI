@@ -81,7 +81,9 @@ fixed floor.
 
 - **`Dataset.Patch`** cuts what the loader hands the model. Keys: `patch_size` (default `[128, 128, 128]`),
   `overlap` (voxels, a fraction or a per-axis list; `null` means 20%), `pad_value` (`null` pads with the
-  minimum) and `extend_slice` (2.5-D context when `patch_size[0] == 1`).
+  minimum, `edge` with the edge voxel) and `extend_slice` (2.5-D context when `patch_size[0] == 1`). The last
+  patch of an axis ends on the volume's last voxel, as MONAI's sliding window places it, so only an axis shorter
+  than the patch is padded, on both sides.
 - **`Model.ModelPatch`** cuts again inside the network: for a heavy part of the network, or a 2-D model
   inside a 3-D workflow. `patch_combine` blends the overlaps: `Mean`, `Cosinus`, `Trim` or `Gaussian`.
 

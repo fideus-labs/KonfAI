@@ -30,6 +30,10 @@ from konfai.utils.utils import (
 class PathCombine(ABC):
     """Base class for overlap-aware weighting schemes applied during patch assembly."""
 
+    #: A floor under the patch's whole weight, the product of its per-axis windows (``Gaussian``: 1e-3). The weight
+    #: is then no longer a product of one vector per axis, and ``Accumulator`` normalises it voxel by voxel.
+    min_weight: float | None = None
+
     def __init__(self) -> None:
         self.windows_1d: list[torch.Tensor]
         self.overlap: int
@@ -72,15 +76,6 @@ class PathCombine(ABC):
         a weighted sum (``Accumulator._blend``).
         """
         return False
-
-    def window(self, dim: int, position: int, count: int) -> torch.Tensor:
-        """The 1-D window along ``dim`` for the patch at grid ``position`` of ``count`` on that axis.
-
-        A weighting is the same wherever the patch sits; a selection opens its border patches so the
-        kept bands still reach the volume edge (see :class:`Trim`).
-        """
-        del position, count
-        return self.windows_1d[dim]
 
     def weight(self, tensor: torch.Tensor) -> torch.Tensor:
         """The raw per-voxel window on ``tensor``'s device and dtype (cached per pair), unnormalised.
@@ -154,10 +149,11 @@ class Cosinus(PathCombine):
 class Trim(PathCombine):
     """Selection instead of weighting: each voxel comes from the patch that holds it most centrally.
 
-    An interior patch keeps its central ``patch - overlap`` band, so the kept bands tile the axis
-    exactly; the first and last patch of an axis open to the volume edge. The values are 0 or 1, so
-    the patch is selected rather than averaged: a discrete output (a label map, an argmax) survives
-    reassembly.
+    The accumulator keeps each patch up to halfway between its centre and each neighbour's
+    (``Accumulator._kept_span``), so the kept bands tile the axis exactly however the patches sit: an
+    interior patch of an even grid keeps its central ``patch - overlap`` band (the window below), the
+    first and last patch of an axis open to the volume edge. The values are 0 or 1, so the patch is
+    selected rather than averaged: a discrete output (a label map, an argmax) survives reassembly.
     """
 
     @property
@@ -173,24 +169,16 @@ class Trim(PathCombine):
         window[overlap // 2 : size - (overlap - overlap // 2)] = 1.0
         return window
 
-    def window(self, dim: int, position: int, count: int) -> torch.Tensor:
-        overlap = self.overlaps[dim]
-        window = self.windows_1d[dim]
-        if overlap <= 0 or (position > 0 and position < count - 1):
-            return window
-        window = window.clone()
-        if position == 0:
-            window[: overlap // 2] = 1.0
-        if position == count - 1:
-            window[window.shape[0] - (overlap - overlap // 2) :] = 1.0
-        return window
-
 
 class Gaussian(PathCombine):
     """nnU-Net-style Gaussian importance weighting.
 
-    Not a partition of unity: the accumulator blends each patch in with its share of the total weight.
+    Not a partition of unity: the accumulator blends each patch in with its share of the total weight. A patch's
+    weight, the product of the per-axis Gaussians, is floored at ``1e-3``, as MONAI's ``compute_importance_map``
+    clamps its map: the corners of overlapping patches then weigh as much as one another.
     """
+
+    min_weight = 1e-3
 
     def __init__(self, sigma_scale: float = 0.125) -> None:
         super().__init__()
