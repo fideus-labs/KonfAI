@@ -339,14 +339,32 @@ def current_free_vram(devices: list[int], remote_server: RemoteServer | None = N
     return min(frees) if frees else None
 
 
-def _installer() -> list[str]:
-    """The command that installs into THIS interpreter: its pip, or uv's when the environment has no pip (``uv venv``
-    makes one without it)."""
+def _installer() -> tuple[list[str], dict[str, str]]:
+    """The command that installs into THIS interpreter and its environment: its pip, or uv's when the environment has
+    no pip (``uv venv`` makes one without it)."""
+    env = dict(os.environ)
     if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip", "install"]
+        return [sys.executable, "-m", "pip", "install"], env
     uv = shutil.which("uv")
     if uv is not None:
-        return [uv, "pip", "install", "--python", sys.executable]
+        # uv does not read pip's package sources: an offline or private index set for pip stays the one used. They
+        # stay in the environment, out of the command line, since an index URL can hold credentials.
+        for pip_name, uv_name, separator in (
+            ("PIP_INDEX_URL", "UV_INDEX_URL", " "),
+            ("PIP_EXTRA_INDEX_URL", "UV_EXTRA_INDEX_URL", " "),
+            ("PIP_FIND_LINKS", "UV_FIND_LINKS", ","),
+        ):
+            if env.get(pip_name, "").split() and uv_name not in env:
+                env[uv_name] = separator.join(env[pip_name].split())
+                if uv_name == "UV_EXTRA_INDEX_URL":  # pip takes the best candidate across its indexes, uv the first's
+                    env.setdefault("UV_INDEX_STRATEGY", "unsafe-best-match")
+        no_index = env.get("PIP_NO_INDEX", "").lower()  # pip's strtobool
+        if no_index not in ("", "y", "yes", "t", "true", "on", "1", "n", "no", "f", "false", "off", "0"):
+            raise AppRepositoryError(
+                f"PIP_NO_INDEX={env['PIP_NO_INDEX']!r} is not a boolean.", "Set it to 1 or 0, as pip reads it."
+            )
+        no_index_flag = ["--no-index"] if no_index in ("y", "yes", "t", "true", "on", "1") else []
+        return [uv, "pip", "install", "--python", sys.executable, *no_index_flag], env
     raise AppRepositoryError(
         f"The environment of {sys.executable} has no pip and no uv is on PATH: an app's requirements cannot be"
         " installed.",
@@ -1285,9 +1303,12 @@ class LocalAppRepository(AppRepositoryInfo):
         with tempfile.TemporaryDirectory() as directory:
             constraints = Path(directory) / "constraints.txt"
             constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
-            command = [*_installer(), *flags, "-c", str(constraints), *requirements]
+            installer, env = _installer()
+            command = [*installer, *flags, "-c", str(constraints), *requirements]
             # pip's report is echoed as it comes, and kept: the lines that name a conflict go in the error.
-            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as pip:  # nosec B603
+            with subprocess.Popen(  # nosec B603
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
+            ) as pip:
                 report = []
                 for line in pip.stdout or []:
                     print(line, end="", flush=True)
