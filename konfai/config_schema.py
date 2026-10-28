@@ -389,7 +389,9 @@ def _validator(filename: str) -> Any:
     try:
         from jsonschema import Draft7Validator
     except ImportError:
-        raise ConfigError("Checking a config against its schema needs jsonschema.", "pip install jsonschema") from None
+        raise ConfigError(
+            "Checking a config against its schema needs jsonschema.", "pip install 'konfai[check]'"
+        ) from None
     return Draft7Validator(config_schema(filename))
 
 
