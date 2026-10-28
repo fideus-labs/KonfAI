@@ -1445,6 +1445,8 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     # Both folds run on the input, fold by the models' Mean, then decide the class once.
     steps = output["program"]["steps"]
     assert [step.get("model") for step in steps[:2]] == ["model_0", "model_1"]
+    # konfai blends the folds' float32 outputs in float16, which the runtime is told to do alike.
+    assert {step["manifest"]["accumulation_dtype"] for step in steps[:2]} == {"float16"}
     assert [step["op"] for step in steps[2:]] == ["mean", "argmax", "cast"]
     assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == [placement or "pad"] * 2
 
