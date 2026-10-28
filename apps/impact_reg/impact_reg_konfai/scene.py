@@ -23,6 +23,8 @@ unit, as float32. A field that is an affine map (a rigid or affine preset) is st
 registration (NCC 0.703 against 0.706) for an eighth of the bytes, 4 cost 0.02.
 """
 
+import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -60,9 +62,13 @@ def _oblique(path: Path):
 
 
 def _image(ngff_zarr, itk, path: Path, name: str):
-    """``path``'s finest level as a 3D NgffImage: an OME-Zarr store read lazily (a length-1 channel or time axis
-    dropped), any other image through ITK with its orientation, which a scene's transform is converted through. An
-    oblique grid is refused: converted as the nearest axis-aligned one, a rigid result landed 19 voxels off."""
+    """``path``'s finest level as a 3D NgffImage, and the RFC-4 orientation the scene declares for it on top.
+
+    An image file is read through ITK with its orientation, which a scene's transform is converted through. An
+    OME-Zarr store is read lazily (a length-1 channel or time axis dropped) without its orientation, as KonfAI
+    registered it: the transform is converted on its grid alone, and the orientation comes back for the scene to
+    declare. An oblique grid is refused: converted as the nearest axis-aligned one, a rigid result landed 19 voxels
+    off."""
     if path.is_dir():
         if not _grid_is_axis_aligned(_read_konfai_attributes(path)):
             # ponytail: a KonfAI store keeps an oriented grid's Direction in its sidecar; refused, as nothing yet
@@ -79,7 +85,7 @@ def _image(ngff_zarr, itk, path: Path, name: str):
             )
         spatial = [dim for dim in image.dims if dim in ("z", "y", "x")]
         data = image.data[tuple(0 if dim in extra else slice(None) for dim in image.dims)]
-        units = image.axes_units or {}
+        units, orientations = image.axes_units or {}, image.axes_orientations or {}
         return ngff_zarr.NgffImage(
             data=data,
             dims=spatial,
@@ -87,30 +93,39 @@ def _image(ngff_zarr, itk, path: Path, name: str):
             translation={dim: image.translation[dim] for dim in spatial},
             axes_units={dim: units.get(dim) for dim in spatial} if units else None,
             name=name,
-        )
+        ), {dim: orientations[dim] for dim in spatial if dim in orientations} or None
     itk_image = itk.imread(str(path))
-    magnitudes = np.abs(itk.array_from_matrix(itk_image.GetDirection()))
-    # RFC-4 holds a signed permutation: one unit entry per row and column.
-    if not (
-        np.allclose(magnitudes, magnitudes.round(), atol=1e-6)
-        and np.allclose(magnitudes.sum(0), 1)
-        and np.allclose(magnitudes.sum(1), 1)
-    ):
+    if not _signed_permutation(itk.array_from_matrix(itk_image.GetDirection())):
         raise _oblique(path)
     image = ngff_zarr.itk_image_to_ngff_image(itk_image, add_anatomical_orientation=True)
     image.name = name
-    return image
+    return image, None
 
 
-def _field(itk, transform: Path, unit: str | None):
-    """``transform``'s displacement field (ITK convention: fixed -> moving points) in ``unit`` rather than in mm."""
+def _signed_permutation(direction: np.ndarray) -> bool:
+    """Whether ``direction`` only flips or swaps axes, as RFC-4 can: one unit entry per row and column."""
+    magnitudes = np.abs(direction)
+    return bool(
+        np.allclose(magnitudes, magnitudes.round(), atol=1e-6)
+        and np.allclose(magnitudes.sum(0), 1)
+        and np.allclose(magnitudes.sum(1), 1)
+    )
+
+
+def _field(itk, transform: Path, per_mm: np.ndarray):
+    """``transform``'s displacement field (ITK convention: fixed -> moving points) in ``per_mm`` units a millimetre
+    along x, y and z rather than in mm."""
     field = itk.transformread(str(transform))[0].GetDisplacementField()
-    per_mm = 1.0 / (millimetres_per_unit(unit) or 1.0)
-    # ponytail: the field is read whole (24 bytes a voxel); a chunked read when fields outgrow the RAM
-    vectors = itk.array_from_image(field) * per_mm  # z, y, x, (dx, dy, dz)
-    origin = np.asarray(field.GetOrigin()) * per_mm
-    spacing = np.asarray(field.GetSpacing()) * per_mm
     direction = itk.array_from_matrix(field.GetDirection())
+    if not _signed_permutation(direction):
+        raise _oblique(transform)
+    # ponytail: the field is read whole, as register held it (24 bytes a voxel), and converted in place; reading it
+    # by blocks needs a chunked field source and a chunked conversion in ngff-zarr
+    vectors = itk.array_view_from_image(field)  # z, y, x, (dx, dy, dz)
+    vectors *= per_mm
+    origin = np.asarray(field.GetOrigin()) * per_mm
+    # An index axis runs along the physical axis its direction column selects.
+    spacing = np.asarray(field.GetSpacing()) * per_mm[np.abs(direction).argmax(axis=0)]
     return vectors, origin, spacing, direction
 
 
@@ -152,12 +167,22 @@ def _coarser(vectors, origin, spacing, direction, factor: int):
 
 def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor: int = 1) -> str:
     """Write the scene of one registration to ``output`` (a directory store, or a single ``.ozx`` file); return the
-    RFC-5 type of the transformation it holds."""
-    if output.suffix != ".ozx" and output.is_dir() and any(output.iterdir()) and not (output / "zarr.json").is_file():
+    RFC-5 type of the transformation it holds. The scene replaces ``output`` only once it is written whole."""
+    target = output.resolve()
+    for path in (fixed, moving, transform):
+        source = path.resolve()
+        if target == source or target in source.parents or source in target.parents:
+            raise KonfAIError(
+                "ImpactReg",
+                f"'{output}' overlaps the input '{path}': the scene would replace it, or be written into it.",
+                "Name the scene elsewhere: a new directory or a .ozx file (e.g. -o Output/P000/Scene.ozx).",
+            )
+    empty = output.is_dir() and not any(output.iterdir())
+    if output.suffix != ".ozx" and output.exists() and not (empty or _is_scene(output)):
         # Only a scene written before is replaced: '-o Output/P000' must not take the case's results with it.
         raise KonfAIError(
             "ImpactReg",
-            f"'{output}' is a directory that holds something other than an OME-Zarr store.",
+            f"'{output}' holds something other than an OME-Zarr scene.",
             "Name the scene itself: a new directory or a .ozx file (e.g. -o Output/P000/Scene.ozx).",
         )
     itk, ngff_zarr = _require()
@@ -168,14 +193,13 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
         itk_transform_to_ngff_transform,
     )
 
-    fixed_image, moving_image = _image(ngff_zarr, itk, fixed, "fixed"), _image(ngff_zarr, itk, moving, "moving")
+    fixed_image, fixed_orientations = _image(ngff_zarr, itk, fixed, "fixed")
+    moving_image, moving_orientations = _image(ngff_zarr, itk, moving, "moving")
     dims = list(fixed_image.dims)
-    unit = (fixed_image.axes_units or {}).get("x")
-    vectors, origin, spacing, direction = _field(itk, transform, unit)
-    # ITK's Gaussian, not ngff-zarr's default itkwasm one: dask runs several itkwasm pipelines at once in its threads,
-    # and wasmtime then dies of a bus error setting up their environment (ngff-zarr 7019b0b, itkwasm 1.0b201).
-    fixed_ms = ngff_zarr.to_multiscales(fixed_image, method=ngff_zarr.Methods.ITK_GAUSSIAN)
-    moving_ms = ngff_zarr.to_multiscales(moving_image, method=ngff_zarr.Methods.ITK_GAUSSIAN)
+    # Per axis, as KonfAI read them.
+    units = fixed_image.axes_units or {}
+    per_mm = np.array([1.0 / (millimetres_per_unit(units.get(dim)) or 1.0) for dim in ("x", "y", "z")])
+    vectors, origin, spacing, direction = _field(itk, transform, per_mm)
     affine = _affine_fit(vectors, origin, spacing, direction)
     field_ms = None
     if affine is not None:
@@ -196,26 +220,60 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
             displacement, dims, path=_PATH, fixed=fixed_image, moving=moving_image
         )
         field_image.data = field_image.data.astype(np.float32)
+        field_image.axes_orientations = fixed_orientations or field_image.axes_orientations
         field_ms = ngff_zarr.to_multiscales(field_image, scale_factors=[])
+    fixed_image.axes_orientations = fixed_orientations or fixed_image.axes_orientations
+    moving_image.axes_orientations = moving_orientations or moving_image.axes_orientations
+    # ITK's Gaussian, not ngff-zarr's default itkwasm one: dask runs several itkwasm pipelines at once in its threads,
+    # and wasmtime then dies of a bus error setting up their environment (ngff-zarr 7019b0b, itkwasm 1.0b201).
+    fixed_ms = ngff_zarr.to_multiscales(fixed_image, method=ngff_zarr.Methods.ITK_GAUSSIAN)
+    moving_ms = ngff_zarr.to_multiscales(moving_image, method=ngff_zarr.Methods.ITK_GAUSSIAN)
     ngff_transform.input = CoordinateSystemIdentifier(
         path="fixed", name=fixed_ms.metadata.intrinsic_coordinate_system.name
     )
     ngff_transform.output = CoordinateSystemIdentifier(
         path="moving", name=moving_ms.metadata.intrinsic_coordinate_system.name
     )
-    zipped = output.suffix == ".ozx"
-    store = Path(tempfile.mkdtemp(prefix=".scene_", dir=output.parent)) / "scene.zarr" if zipped else output
-    shutil.rmtree(store, ignore_errors=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".scene_", dir=output.parent))
+    store = staging / "scene.zarr"
     try:
         if field_ms is not None:
             ngff_zarr.to_ome_zarr(str(store / _PATH), field_ms, version="0.6")
         NgffScene(
             images={"fixed": fixed_ms, "moving": moving_ms}, coordinateTransformations=[ngff_transform]
         ).to_ome_zarr(str(store), overwrite=False)
-        if zipped:
-            output.unlink(missing_ok=True)
-            ngff_zarr.write_store_to_zip(str(store), str(output), version="0.6")
+        if output.suffix == ".ozx":
+            ngff_zarr.write_store_to_zip(str(store), str(staging / "scene.ozx"), version="0.6")
+            os.replace(staging / "scene.ozx", output)
+        else:
+            # The scene before is moved aside, not deleted, until the new one has taken its place.
+            previous = staging / "previous"
+            if output.exists():
+                os.replace(output, previous)
+            try:
+                os.replace(store, output)
+            except OSError as error:
+                try:
+                    if previous.exists():
+                        os.replace(previous, output)
+                except OSError:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"'{output}' could not be replaced ({error}), nor the scene before put back.",
+                        f"The scene before is kept in '{previous}': move it back to '{output}'.",
+                    ) from error
+                raise
     finally:
-        if zipped:
-            shutil.rmtree(store.parent, ignore_errors=True)
+        if output.exists() or not (staging / "previous").exists():  # the only copy of the scene before stays
+            shutil.rmtree(staging, ignore_errors=True)
     return ngff_transform.type
+
+
+def _is_scene(store: Path) -> bool:
+    """Whether ``store`` is an OME-Zarr scene: its root names one (RFC-8)."""
+    try:
+        attributes = json.loads((store / "zarr.json").read_text(encoding="utf-8")).get("attributes") or {}
+    except (OSError, ValueError):
+        return False
+    return isinstance(attributes.get("ome"), dict) and "scene" in attributes["ome"]
