@@ -49,6 +49,19 @@ Consequences worth knowing:
   register the other way round.
 - **Ensembles** average the members' fields voxel by voxel on the common fixed grid (not a diffeomorphic mean).
 
+### Lengths are in voxels
+
+A preset's lengths (a step, a B-spline grid, a smoothing, a feature model's `voxel_size`) are numbers of voxels of the
+fixed image, its finest axis: a step of 1.2 is 1.2 mm on 1 mm voxels and 1.2 µm on 1 µm voxels. The engine measures the
+pair in that voxel and brings the field back to millimetres, so one preset registers a CT and a micrometre organoid
+alike. The unit conversion (an OME-Zarr in micrometres read as millimetres) is exact and separate. A `--set` of a length
+is in voxels too: `--set final_grid_spacing=8` is a grid of 8 voxels.
+
+The presets were tuned in millimetres on ~2 mm anatomy, so their lengths are half the millimetres they were tuned in:
+the B-spline grid of `Generic_Rigid_BSpline` is 8 voxels, 16 mm on that anatomy. On the tutorial MR/CT pair (2 mm) the
+presets give what they gave in millimetres. FireANTs moves its translation with its own step, `translation_lr`
+(voxels), apart from `affine_lr`, the step of the rotation and the matrix, which have no unit.
+
 ## IMPACT: registering on what a network sees
 
 Intensity metrics compare grey values, which works when both images show anatomy with the same contrast (CT/CT, MR/MR

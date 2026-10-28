@@ -167,7 +167,9 @@ def test_an_image_too_small_for_the_impact_grid_says_so(monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError) as raised:
         _elastix_run(monkeypatch, [no_sample], 1, impact_map, brain)
-    assert "8 x 6 x 3 voxels at 6 x 6 x 6 mm (level 0), where its 11-voxel patch spans 66 mm" in str(raised.value)
+    assert "8 x 6 x 3 voxels of 6 x 6 x 6 image voxels (level 0), where its 11-voxel patch spans 66 voxels" in str(
+        raised.value
+    )
 
     # Static mode: whole images (patch 0), one voxel size per model on a line.
     static_map = "(ImpactPatchSize0 0 0 0 0 0 0)\n(ImpactVoxelSize0 6 6 6 6 6 6)\n"
