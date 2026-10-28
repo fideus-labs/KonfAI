@@ -1367,37 +1367,25 @@ def test_a_prediction_program_applies_no_mask(tmp_path: Path) -> None:
         export_checkpoints(config, "Predictor", [None], tmp_path, ["model"], patch_size=[4, 4], in_channels=1)
 
 
-@pytest.mark.parametrize("placement", [None, "pad", "monai", "spread"])
-def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement: str | None
-) -> None:
-    # A real Prediction.yml over the tests' tiny segmentation model and two of its checkpoints: the predictor
-    # builds, each checkpoint exports beside the program, and the autouse check holds the program to the schema.
-    # Each model's manifest carries the Patch.placement konfai places its windows with, pad when unstated.
-    pytest.importorskip("onnx")
-    pytest.importorskip("onnxscript")
+def _tiny_prediction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, classpath: str, head: str, placement: str | None = None
+) -> Path:
+    """A Prediction.yml over two 16 x 16 cases, the model ``classpath`` writing ``head`` as a label map."""
     import numpy as np
-    import torch
-    from konfai.portable import compile_prediction
     from konfai.utils.dataset import Attribute, Dataset
 
-    assets = Path(__file__).resolve().parents[1] / "assets" / "Workflows"
-    monkeypatch.syspath_prepend(str(assets))
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "assets" / "Workflows"))
     monkeypatch.chdir(tmp_path)
     for case in ("CASE_000", "CASE_001"):
         Dataset(str(tmp_path / "Dataset"), "mha").write("MR", case, np.ones((1, 1, 16, 16), np.float32), Attribute())
-    from TinySeg import TinySegNet
-
-    checkpoints = [tmp_path / f"fold_{index}.pt" for index in range(2)]
-    for checkpoint in checkpoints:
-        torch.save({"Model": TinySegNet().network_states()}, checkpoint)
     group = {"transforms": "None", "patch_transforms": "None", "is_input": True}
+    name = classpath.split(":")[-1]
     config = tmp_path / "Prediction.yml"
     config.write_text(
         json.dumps(
             {
                 "Predictor": {
-                    "Model": {"classpath": "TinySeg:TinySegNet", "TinySegNet": {"outputs_criterions": "None"}},
+                    "Model": {"classpath": classpath, name: {"outputs_criterions": "None"}},
                     "autocast": True,
                     "Dataset": {
                         "groups_src": {"MR": {"groups_dest": {"MR": group}}},
@@ -1408,7 +1396,7 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
                         "num_workers": 0,
                     },
                     "outputs_dataset": {
-                        "Head:Softmax": {
+                        head: {
                             "OutputDataset": {
                                 "before_reduction_transforms": "None",
                                 "after_reduction_transforms": "None",
@@ -1423,6 +1411,27 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
             }
         )
     )
+    return config
+
+
+@pytest.mark.parametrize("placement", [None, "pad", "monai", "spread"])
+def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement: str | None
+) -> None:
+    # A real Prediction.yml over the tests' tiny segmentation model and two of its checkpoints: the predictor
+    # builds, each checkpoint exports beside the program, and the autouse check holds the program to the schema.
+    # Each model's manifest carries the Patch.placement konfai places its windows with, pad when unstated.
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+    import torch
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax", placement)
+    from TinySeg import TinySegNet
+
+    checkpoints = [tmp_path / f"fold_{index}.pt" for index in range(2)]
+    for checkpoint in checkpoints:
+        torch.save({"Model": TinySegNet().network_states()}, checkpoint)
     program = compile_prediction(config, checkpoints, tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
 
     assert json.loads((tmp_path / "out" / "prediction.json").read_text()) == program
@@ -1438,6 +1447,45 @@ def test_a_prediction_config_and_its_checkpoints_compile_to_a_program(
     assert [step.get("model") for step in steps[:2]] == ["model_0", "model_1"]
     assert [step["op"] for step in steps[2:]] == ["mean", "argmax", "cast"]
     assert [step["manifest"]["patch"]["placement"] for step in steps[:2]] == [placement or "pad"] * 2
+
+
+def test_a_model_with_weights_and_no_checkpoint_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only a parameter-free model compiles without checkpoints: another would export its random weights.
+    from konfai.portable import compile_prediction
+
+    config = _tiny_prediction(tmp_path, monkeypatch, "TinySeg:TinySegNet", "Head:Softmax")
+    with pytest.raises(ConfigError, match="needs the checkpoints to export"):
+        compile_prediction(config, None, tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
+
+
+def test_a_weightless_model_running_python_on_the_case_is_refused_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An app without checkpoints whose graph hands the case's attributes to a module (a wrapper running a
+    # tool on the image): refused before any forward runs, by what the exported graph could not carry.
+    from konfai.portable import compile_prediction
+
+    (tmp_path / "Reader.py").write_text(
+        "import torch\n"
+        "from konfai.network import network\n\n"
+        "class Geometry(torch.nn.Module):\n"
+        "    accepts_attributes = True\n\n"
+        "    def forward(self, x, attributes):\n"
+        "        raise AssertionError('a compile ran the forward')\n\n"
+        "class ReaderNet(network.Network):\n"
+        "    def __init__(\n"
+        "        self,\n"
+        "        optimizer: network.OptimizerLoader = network.OptimizerLoader(),\n"
+        "        schedulers: dict[str, network.LRSchedulersLoader] = {'default:ReduceLROnPlateau': network.LRSchedulersLoader(0)},\n"
+        "        outputs_criterions: dict[str, network.TargetCriterionsLoader] = {'default': network.TargetCriterionsLoader()},\n"
+        "    ) -> None:\n"
+        "        super().__init__(in_channels=1, optimizer=optimizer, schedulers=schedulers, outputs_criterions=outputs_criterions, dim=2)\n"
+        "        self.add_module('Tool', Geometry())\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _tiny_prediction(tmp_path, monkeypatch, "Reader:ReaderNet", "Tool")
+    with pytest.raises(ConfigError, match="module 'Tool' reads the case's attributes"):
+        compile_prediction(config, None, tmp_path / "Predictions", tmp_path / "out" / "prediction.json")
 
 
 def _reducing_config(tmp_path: Path, transforms: str) -> Path:
