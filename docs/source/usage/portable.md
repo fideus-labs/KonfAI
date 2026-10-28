@@ -116,6 +116,14 @@ channel, with test-time copies or with config overrides, and an output and a tar
 on two pixel grids (KonfAI's `Dice` puts a target of another shape on the output's
 grid; the runtime does not).
 
+An app's `Uncertainty.yml` (the evaluation `konfai-apps uncertainty` runs on the
+inference stack, one channel per member) compiles the same way, with
+`compile_uncertainty` writing under `Uncertainties/`. `Variance`, `StandardDeviation`
+and `SegmentationDisagreement` fold the stack's members and `Mean` scores the output
+alone. The prediction program writes that stack when its output opens
+`after_reduction_transforms` with an `InferenceStack`, and records its `members`
+(each copy's checkpoint and test-time pass), so a runtime can run a subset of them.
+
 ## What the compiler warns about
 
 A refusal is for a chain the two engines would read differently. Where the
@@ -126,7 +134,6 @@ key, as a `KonfAIWarning`:
 |---|---|---|
 | `Predictor.autocast: true` | Runs the forward in float16 | The ONNX graph runs in float32 |
 | `Resample.precision: fast` | Computes the sampling coordinates in float32 | Computes them in float64; a voxel at a rounding boundary can read its neighbour |
-| `InferenceStack` (`dataset`, `name`) | Writes every stacked member under the group `InferenceStack` | Writes the fold only |
 | `Reduce.provenance: true` | Records the operator and the cases folded in the output's header | Writes the geometry alone |
 | `OutputDataset.attributes` | Writes the listed entries into the output's header | Writes the geometry alone |
 | `channels_last`, `cudnn_benchmark`, `torch_compile`, `gpu_checkpoints`, `data_log`, `check_training_transforms`, `checkpoint_cache_gib`, `Dataset.num_workers`, `pin_memory`, `prefetch_factor`, `persistent_workers` | Change how konfai runs, and nothing it writes | No counterpart; one grouped warning names the keys that left their default |

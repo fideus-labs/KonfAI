@@ -2095,12 +2095,11 @@ def _warnings_of(config: dict, root: str = "Predictor") -> list[str]:
             "Predictor.channels_last, Predictor.Dataset.num_workers",
         ),
         ({"outputs_dataset": {"H": {"OutputDataset": {"attributes": ["Modality=CT"]}}}}, "OutputDataset.attributes"),
-        ({"outputs_dataset": {"H": {"OutputDataset": {"after_reduction_transforms": _STACK}}}}, "InferenceStack"),
     ],
 )
 def test_a_prediction_key_the_program_cannot_carry_is_warned_by_key(section: dict, key: str) -> None:
-    # konfai reads these keys and the program has no counterpart: a header attribute, the stacked members a
-    # stack writes, a setting that changes how konfai runs. Each is said by key, so the
+    # konfai reads these keys and the program has no counterpart: a header attribute, a setting that changes
+    # how konfai runs. Each is said by key, so the
     # author can decide, where a refusal would name a chain the two engines read differently.
     from konfai.portable import warn_unportable_keys
     from konfai.utils.errors import KonfAIWarning

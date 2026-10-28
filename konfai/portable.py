@@ -681,11 +681,6 @@ def warn_unportable_keys(config: dict[str, Any], root: str) -> None:
                 f"{root}.{path}.precision: fast computes the sampling coordinates in float32 where the portable"
                 " runtime computes them in float64, so a voxel at a rounding boundary can read its neighbour."
             )
-    for path, _params in _stages_named(section, "InferenceStack"):
-        _warn(
-            f"{root}.{path}: konfai writes every stacked member under the group 'InferenceStack' of the dataset its"
-            " 'dataset' and 'name' keys point at, and the program writes the fold only."
-        )
     for path, params in _stages_named(section, "Reduce"):
         if clean(params.get("provenance", True)) is not False:
             _warn(
@@ -1511,14 +1506,16 @@ def split_post(post: list[dict[str, Any]], preprocessing: list[dict[str, Any]], 
 
 
 def hoist_ensemble_tail(
-    manifests: list[dict[str, Any]], per_copy: int
+    manifests: list[dict[str, Any]], per_copy: int, stacked: bool = False
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """``(stripped_manifests, tail_ops)``: a same-class ensemble reduces raw logits, so everything the predictor
-    runs once moves past the reduction as program ops, in the chain's order, and each fold keeps the rest."""
+    runs once moves past the reduction as program ops, in the chain's order, and each fold keeps the rest.
+    ``stacked``: konfai's ``InferenceStack`` takes each copy before the case's inverses, so an undone ``Padding``
+    moves past the reduction too, as the ``pad`` of the margins it added taken back."""
     post, preprocessing = manifests[0].get("postprocessing", []), manifests[0].get("preprocessing", [])
     op_of = _op_of(preprocessing)
     undone = {step["id"]: step for step in preprocessing if "id" in step}
-    split = split_post(post, preprocessing, per_copy)
+    split = per_copy if stacked else split_post(post, preprocessing, per_copy)
 
     tail: list[dict[str, Any]] = []
     for step in post[split:]:
@@ -1526,6 +1523,16 @@ def hoist_ensemble_tail(
         if op == "cast":
             # A cast sets the dtype the rest of the tail reads and the output is written in.
             tail.append({"op": "cast", "dtype": step["dtype"]})
+            continue
+        if op == "inverse" and stacked and op_of.get(step.get("of")) in INDEX_SELECTIONS:
+            of = step.get("of")
+            if op_of.get(of) != "pad":
+                raise ConfigError(
+                    f"assemble_program: the InferenceStack takes each copy before the inverse of '{of}'"
+                    f" ({op_of.get(of)}), which a program undoes on each copy only.",
+                    _or_konfai("Drop the InferenceStack", _PREDICT),
+                )
+            tail.append({"op": "pad", "padding": [-margin for margin in undone[of]["padding"]], "mode": "constant"})
             continue
         if op == "inverse":
             of = step.get("of")
@@ -1594,6 +1601,8 @@ def assemble_program(
     classes: list[int] | None = None,
     per_copy: int = 0,
     fold_models: bool = False,
+    stack: str | None = None,
+    checkpoints: list[str] | None = None,
 ) -> dict[str, Any]:
     """The program: every model (``{"id", "manifest"}``) on every test-time pass, each into a buffer of its own,
     reduced once, then the tail the predictor runs once. A pass is the ops that make a copy from the input
@@ -1606,6 +1615,11 @@ def assemble_program(
     ``mean`` hoists the run-once tail past the reduction (:func:`hoist_ensemble_tail`); ``merge_labels`` keeps
     each model's post and merges the classes its head outputs, unless ``classes`` states them. One model on one
     pass, with nothing to mask, is one step: konfai's reduction of a single copy hands it back.
+
+    ``stack`` is the mode of the ``InferenceStack`` the reduction stands for: the program then also writes the
+    buffer ``stack``, one float32 channel per copy, each the copy as konfai stacks it (its label for ``Seg``) after
+    the masks, its row taken as soon as the copy is written. ``checkpoints`` names each model's checkpoint, and
+    the program's ``members`` maps each copy's buffer to its checkpoint and its pass, the runtime's selection.
     """
     if not models:
         raise ConfigError("assemble_program: at least one model is required")
@@ -1645,15 +1659,27 @@ def assemble_program(
     if reduce == "merge_labels" and copies_of > 1:
         _refuse_values_past_the_merge(manifests[0], per_copy)
     elif copies_of > 1 or masks:
-        manifests, tail = hoist_ensemble_tail(manifests, per_copy)
+        manifests, tail = hoist_ensemble_tail(manifests, per_copy, stacked=bool(stack) and copies_of > 1)
 
     steps, copies = _model_steps(models, manifests, passes, aux)
+    members = (
+        {
+            copy: {"checkpoint": checkpoints[at % len(models)], "pass": at // len(models)}
+            for at, copy in enumerate(copies)
+        }
+        if checkpoints
+        else {}
+    )
     # Every copy sits on the same grid, the one each mask's buffer is resampled onto.
     mask_buffers = _mask_buffers(aux, copies[0], steps)
+    rows = _stack_rows(steps, copies, len(aux), stack, masks, mask_buffers) if stack and len(copies) > 1 else []
     if folded:
         copies = _fold_models(steps, copies, len(models), folded)
     if len(copies) == 1 and not tail and not masks:
-        return {"steps": [*steps[:-1], {**steps[-1], "out": "output"}], "output": "output"}
+        only = {**members[copies[0]]} if members else None
+        return {"steps": [*steps[:-1], {**steps[-1], "out": "output"}], "output": "output"} | (
+            {"members": {"output": only}} if only else {}
+        )
 
     # A cast opening the tail is the dtype konfai folds the copies into, so it runs before the masks.
     casts = len(list(takewhile(lambda step: step["op"] == "cast", tail)))
@@ -1666,7 +1692,45 @@ def assemble_program(
             op["classes"] = classes if classes is not None else [int(mf["output"]["channels"]) for mf in manifests]
         steps.append(op)
     _append_tail(steps, ordered, cursor, mask_buffers)
-    return {"steps": steps, "output": "output"}
+    program: dict[str, Any] = {"steps": steps, "output": "output"}
+    if rows:
+        steps.append({"op": "concat", "in": rows, "out": "stack"})
+        program["stack"] = "stack"
+    return program | ({"members": members} if members else {})
+
+
+def _stack_rows(
+    steps: list[dict[str, Any]],
+    copies: list[str],
+    nested: int,
+    mode: str,
+    masks: list[dict[str, Any]],
+    mask_buffers: dict[str, str],
+) -> list[str]:
+    """Reorder ``steps`` (the ``nested`` models, the copies, then the ops building the masks' buffers on the first
+    copy's grid) so each copy's stack row follows the copy, the masks' buffers built after the first, and name the
+    rows: the copy, its label for ``Seg`` (konfai's ``InferenceStack`` takes it of the blended logits), each mask, in
+    float32. A copy is then held until its row is taken, not until the stack is."""
+    models, built = steps[nested : nested + len(copies)], steps[nested + len(copies) :]
+    del steps[nested:]
+    rows = []
+    for at, step in enumerate(models):
+        steps.append(step)
+        if at == 0:
+            steps.extend(built)
+        cursor = step["out"]
+        ops: list[dict[str, Any]] = [{"op": "argmax"}] if mode == "Seg" else []
+        ops += [
+            {"op": "mask", "value_outside": spec["value_outside"], "extra": [mask_buffers[spec["group"]]]}
+            for spec in masks
+        ]
+        for index, op in enumerate([*ops, {"op": "cast", "dtype": "float32"}]):
+            out = f"{step['out']}__s{index}"
+            args = {key: value for key, value in op.items() if key != "extra"}
+            steps.append({**args, "in": [cursor, *op.get("extra", [])], "out": out})
+            cursor = out
+        rows.append(cursor)
+    return rows
 
 
 def _model_steps(
@@ -2194,8 +2258,17 @@ def compile_output(
     )
     reduce = program_reduction(config, root, len(checkpoints), passes, output)
     fold = models_fold_first(config, root, len(checkpoints), output)
+    stack, _ = _split_stack(config, root, output_spec(config, root, output))
     program = assemble_program(
-        models, reduce=reduce, passes=passes, aux=aux, masks=masks, per_copy=per_copy, fold_models=fold
+        models,
+        reduce=reduce,
+        passes=passes,
+        aux=aux,
+        masks=masks,
+        per_copy=per_copy,
+        fold_models=fold,
+        stack=None if stack is None else str(stack.get("mode", "mean")),
+        checkpoints=names if len(names := [c.name for c in checkpoints if c is not None]) == len(checkpoints) else None,
     )
     return models, written, program
 
@@ -2323,5 +2396,21 @@ def _compile_heads(
         )
         exported += models
         destination = _destination(_portable_root(sink.filename), sink.file_format, sink.group)
-        written.append({"program": program, "write": destination})
+        written.append({"program": program, "write": destination} | _stack_write(config, root, head, sink))
     return exported, written
+
+
+def _stack_write(config: dict[str, Any], root: str, head: str, sink: Any) -> dict[str, Any]:
+    """Where the output's ``InferenceStack`` writes the copies, as konfai names it: its ``dataset``, else the
+    output's, under the group ``InferenceStack``; nothing for an output that stacks none."""
+    from konfai.utils.utils import split_path_spec
+
+    stack, _ = _split_stack(config, root, output_spec(config, root, head))
+    if stack is None:
+        return {}
+    dataset = clean(stack.get("dataset"))
+    if dataset:
+        filename, _flag, file_format = split_path_spec(str(dataset), default_format="mha")
+    else:
+        filename, file_format = sink.filename, sink.file_format
+    return {"stack": _destination(_portable_root(filename), file_format, "InferenceStack")}

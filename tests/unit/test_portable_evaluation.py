@@ -140,3 +140,53 @@ def test_impact_reg_has_a_portable_form_on_a_whole_volume_only(tmp_path: Path) -
     tiled = SimpleNamespace(model=feature, loss=torch.nn.MSELoss(), pca=0)
     with pytest.raises(EvaluatorError, match="IMPACTReg with a distance, a PCA, a tile"):
         _impact_reg(tiled, "Output", tmp_path)
+
+
+def test_an_uncertainty_compiles_the_member_folds_the_mean_and_a_nested_app_per_channel(tmp_path: Path) -> None:
+    # An app's Uncertainty.yml, as konfai-apps runs it on a two-member stack: no target, a fold over the members.
+    import numpy as np
+    import SimpleITK as sitk
+    from konfai.portable_evaluation import _group_steps, compile_uncertainty
+    from konfai.portable_schema import program_schema
+
+    (tmp_path / "Dataset" / "P000").mkdir(parents=True)
+    stack = sitk.GetImageFromArray(np.zeros((4, 5, 6, 2), np.float32), isVector=True)
+    sitk.WriteImage(stack, str(tmp_path / "Dataset" / "P000" / "Volume_0.mha"))
+    config = tmp_path / "Uncertainty.yml"
+    config.write_text(
+        "Evaluator:\n  train_name: T\n  metrics:\n    Uncertainty:\n      targets_criterions:\n"
+        "        None:\n          criterions_loader:\n            Mean: {name: Uncertainty}\n"
+        "  Dataset:\n    groups_src:\n      Volume_0:\n        groups_dest:\n          Uncertainty:\n"
+        "            transforms:\n              Variance: {}\n              Percentage: {baseline: 1822.49}\n"
+        f"              Save: {{dataset: '{tmp_path}/Uncertainties/T/Output:mha', group: None}}\n"
+        f"    dataset_filenames: ['{tmp_path / 'Dataset'}:mha']\n    validation: None\n"
+    )
+    program = compile_uncertainty(config, tmp_path / "Uncertainties", tmp_path / "uncertainty.json")
+    (group,) = program["groups"]
+    assert [step["op"] for step in group["steps"]] == ["variance", "percentage", "save"]
+    assert group["steps"][2]["destination"]["group"] == "Uncertainty"
+    assert program["metrics"] == [
+        {
+            "output": "Uncertainty",
+            "targets": [],
+            "criteria": [{"key": "Uncertainty:None:Uncertainty", "maximize": False, "metric": "mean"}],
+        }
+    ]
+    import jsonschema
+
+    jsonschema.validate(program, program_schema())
+
+    def exporter(group: str, params: dict, out: Path) -> dict:
+        return {"id": group, "manifest": {"model": f"{group}.onnx"}}
+
+    steps = _group_steps(
+        "Comformity",
+        {"KonfAIInference": {"repo_id": "a", "model_name": "b", "per_channel": True}, "SegmentationDisagreement": {}},
+        tmp_path,
+        {},
+        exporter,
+    )
+    assert steps == [
+        {"model": "Comformity", "manifest": {"model": "Comformity.onnx"}, "per_channel": True},
+        {"op": "segmentation_disagreement"},
+    ]
