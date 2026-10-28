@@ -1315,9 +1315,10 @@ class LocalAppRepository(AppRepositoryInfo):
                     report.append(line.strip())
         if pip.returncode:
             conflict = list(dict.fromkeys(line for line in report if " depends on " in line or "(constraint)" in line))
+            name = "pip" if installer[0] == sys.executable else "uv pip"
             raise AppRepositoryError(
                 f"Failed to install {', '.join(requirements)}"
-                + (f": {'; '.join(conflict)}." if conflict else f" (pip exited with {pip.returncode}).")
+                + (f": {'; '.join(conflict)}." if conflict else f" ({name} exited with {pip.returncode}).")
                 + f" An app's requirements never replace the installed {', '.join(pins) or 'core packages'}.",
                 "Install versions of these core packages that the app's requirements accept, or set"
                 " KONFAI_APPS_INSTALL_REQUIREMENTS=0 and install them yourself.",
