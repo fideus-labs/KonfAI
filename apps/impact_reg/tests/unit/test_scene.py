@@ -111,6 +111,45 @@ def test_a_store_keeps_its_orientation_each_axis_its_unit_and_a_failed_write_the
     assert not list(tmp_path.glob(".scene_*"))
 
 
+def test_a_moving_image_in_other_units_takes_the_points_in_its_own(tmp_path: Path) -> None:
+    # The transform was converted with the fixed image's unit alone: between a fixed store in micrometres and a moving
+    # one in nanometres, a fixed point at 1 um came out at 1 nm rather than 1000.
+    itk = pytest.importorskip("itk")
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    from impact_reg_konfai.scene import write_scene
+
+    data = np.zeros((4, 5, 6), np.float32)
+    for name, unit, size in (("fixed", "micrometer", 1.0), ("moving", "nanometer", 1000.0)):
+        image = ngff_zarr.to_ngff_image(
+            data,
+            dims=["z", "y", "x"],
+            scale=dict.fromkeys("zyx", size),
+            translation=dict.fromkeys("zyx", 0.0),
+            axes_units=dict.fromkeys("zyx", unit),
+        )
+        ngff_zarr.to_ome_zarr(str(tmp_path / f"{name}.ome.zarr"), ngff_zarr.to_multiscales(image, scale_factors=[]))
+    vectors = np.zeros((4, 5, 6, 3))  # z, y, x, (dx, dy, dz) in mm
+    scenes = {}
+    for name in ("affine", "field"):
+        if name == "field":
+            vectors[2, 3, 4] = [1e-3, 0, 0]  # 1 um along x at one voxel: no longer an affine map
+        field = itk.image_from_array(vectors.copy(), is_vector=True)
+        field.SetSpacing([1e-3] * 3)
+        transform = itk.DisplacementFieldTransform[itk.D, 3].New()
+        transform.SetDisplacementField(field)
+        itk.transformwrite([transform], str(tmp_path / f"{name}.h5"))
+        output = tmp_path / f"{name}.zarr"
+        write_scene(tmp_path / "fixed.ome.zarr", tmp_path / "moving.ome.zarr", tmp_path / f"{name}.h5", output)
+        scenes[name] = ngff_zarr.NgffScene.from_ome_zarr(str(output))
+    mapping = scenes["affine"].coordinateTransformations[0]  # a scale, should ngff-zarr simplify it to one
+    affine = np.asarray(mapping.affine) if mapping.type == "affine" else np.diag([*mapping.scale, 0.0])[:3]
+    np.testing.assert_allclose(affine, np.hstack([1000 * np.eye(3), np.zeros((3, 1))]), atol=1e-9)
+    path = tmp_path / "field.zarr" / scenes["field"].coordinateTransformations[0].path
+    displacements = np.asarray(ngff_zarr.from_ngff_zarr(str(path)).images[0].data)  # (dz, dy, dx), z, y, x
+    np.testing.assert_allclose(displacements[:, 1, 2, 3], 999 * np.array([1.0, 2.0, 3.0]))  # output - input
+    np.testing.assert_allclose(displacements[:, 2, 3, 4], 1000 * np.array([2.0, 3.0, 5.0]) - [2.0, 3.0, 4.0])
+
+
 def test_a_permuted_field_grid_takes_each_axis_unit_and_an_oblique_one_is_refused(tmp_path: Path) -> None:
     # The spacing was scaled by the physical axes in index order: a grid whose first index runs along z took x's unit.
     itk = pytest.importorskip("itk")

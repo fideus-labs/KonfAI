@@ -129,25 +129,27 @@ def _field(itk, transform: Path, per_mm: np.ndarray):
     return vectors, origin, spacing, direction
 
 
+def _points(shape, origin, spacing, direction, z: slice, step: int = 1) -> np.ndarray:
+    """The physical points (x, y, z) of a field's nodes in the planes ``z``, every ``step`` along y and x."""
+    depth, height, width = shape[:3]
+    grid = np.meshgrid(np.arange(depth)[z], np.arange(height)[::step], np.arange(width)[::step], indexing="ij")
+    index = np.stack(grid[::-1], axis=-1)  # x, y, z
+    return origin + (index * spacing) @ direction.T
+
+
 def _affine_fit(vectors, origin, spacing, direction) -> np.ndarray | None:
     """The 3 x 4 map ``q = A p + b`` the field is, or ``None`` when one voxel departs from it by more than
     ``_AFFINE_TOLERANCE`` of the finest voxel. Checked a plane at a time: the points of a whole field would cost three
     times the field."""
 
-    def points(z: slice, step: int = 1) -> np.ndarray:
-        depth, height, width = vectors.shape[:3]
-        grid = np.meshgrid(np.arange(depth)[z], np.arange(height)[::step], np.arange(width)[::step], indexing="ij")
-        index = np.stack(grid[::-1], axis=-1)  # x, y, z
-        return origin + (index * spacing) @ direction.T
-
     step = max(1, max(vectors.shape[:3]) // 16)
     sample = slice(None, None, step)
-    p = points(sample, step).reshape(-1, 3)
+    p = _points(vectors.shape, origin, spacing, direction, sample, step).reshape(-1, 3)
     q = p + vectors[sample, sample, sample].reshape(-1, 3)
     solution, *_ = np.linalg.lstsq(np.hstack([p, np.ones((len(p), 1))]), q, rcond=None)
     tolerance = _AFFINE_TOLERANCE * spacing.min()
     for z in range(vectors.shape[0]):
-        plane = points(slice(z, z + 1))
+        plane = _points(vectors.shape, origin, spacing, direction, slice(z, z + 1))
         if np.abs(plane @ solution[:3] + solution[3] - plane - vectors[z : z + 1]).max() > tolerance:
             return None
     return solution.T  # rows: x, y, z; columns: A | b
@@ -196,13 +198,14 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
     fixed_image, fixed_orientations = _image(ngff_zarr, itk, fixed, "fixed")
     moving_image, moving_orientations = _image(ngff_zarr, itk, moving, "moving")
     dims = list(fixed_image.dims)
-    # Per axis, as KonfAI read them.
-    units = fixed_image.axes_units or {}
-    per_mm = np.array([1.0 / (millimetres_per_unit(units.get(dim)) or 1.0) for dim in ("x", "y", "z")])
+    # Per axis, as KonfAI read them: the transform takes a point in the fixed image's units to the moving image's.
+    per_mm = _per_mm(fixed_image)
+    to_moving = _per_mm(moving_image) / per_mm
     vectors, origin, spacing, direction = _field(itk, transform, per_mm)
     affine = _affine_fit(vectors, origin, spacing, direction)
     field_ms = None
     if affine is not None:
+        affine = to_moving[:, None] * affine
         linear = itk.AffineTransform[itk.D, 3].New()
         linear.SetMatrix(itk.matrix_from_array(np.ascontiguousarray(affine[:, :3])))
         linear.SetTranslation([float(v) for v in affine[:, 3]])
@@ -210,6 +213,11 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
     else:
         if factor > 1:
             vectors, origin, spacing = _coarser(vectors, origin, spacing, direction, factor)
+        if not np.allclose(to_moving, 1):
+            # RFC-5 displaces to output - input: a change of unit moves the point itself, not only its displacement.
+            for z in range(vectors.shape[0]):
+                p = _points(vectors.shape, origin, spacing, direction, slice(z, z + 1))[0]
+                vectors[z] = to_moving * (p + vectors[z]) - p
         field = itk.image_from_array(np.ascontiguousarray(vectors, dtype=np.float64), is_vector=True)
         field.SetOrigin(origin.tolist())
         field.SetSpacing(spacing.tolist())
@@ -268,6 +276,12 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
         if output.exists() or not (staging / "previous").exists():  # the only copy of the scene before stays
             shutil.rmtree(staging, ignore_errors=True)
     return ngff_transform.type
+
+
+def _per_mm(image) -> np.ndarray:
+    """``image``'s units a millimetre along x, y and z; an axis with no known unit is in mm."""
+    units = image.axes_units or {}
+    return np.array([1.0 / (millimetres_per_unit(units.get(dim)) or 1.0) for dim in ("x", "y", "z")])
 
 
 def _is_scene(store: Path) -> bool:
