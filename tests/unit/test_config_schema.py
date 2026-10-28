@@ -20,31 +20,25 @@ from __future__ import annotations
 
 import copy
 import sys
-from functools import cache
 from pathlib import Path
 
 import jsonschema
 import konfai.main as main_module
 import pytest
-from konfai.config_schema import WORKFLOWS, config_schema
+from konfai.config_schema import WORKFLOWS, config_errors, config_schema
 from ruamel.yaml import YAML
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 ROOTS = {root: filename for filename, (root, _) in WORKFLOWS.items()}
 
 
-@cache
-def _validator(filename: str) -> jsonschema.Draft7Validator:
-    schema = config_schema(filename)
-    jsonschema.Draft7Validator.check_schema(schema)
-    return jsonschema.Draft7Validator(schema)
+def _errors(tree: dict) -> list[tuple[str, str]]:
+    return [(mistake.path, mistake.message) for mistake in config_errors(tree, ROOTS[next(iter(tree))])]
 
 
-def _errors(tree: dict) -> list[str]:
-    """Where each error is, as an editor reports it: at the deepest key that explains it."""
-    validator = _validator(ROOTS[next(iter(tree))])
-    errors = [jsonschema.exceptions.best_match([error]) for error in validator.iter_errors(tree)]
-    return ["/".join(map(str, error.absolute_path)) for error in errors]
+@pytest.mark.parametrize("filename", sorted(WORKFLOWS))
+def test_each_schema_is_a_valid_draft_7_schema(filename: str) -> None:
+    jsonschema.Draft7Validator.check_schema(config_schema(filename))
 
 
 def _load(path: Path) -> dict:
@@ -80,7 +74,7 @@ def _ct_chain(tree: dict) -> dict:
     return tree["Trainer"]["Dataset"]["groups_src"]["CT"]["groups_dest"]["CT"]
 
 
-def test_a_mistake_is_flagged_where_it_is() -> None:
+def test_each_mistake_is_reported_at_its_key_with_the_nearest_valid_name() -> None:
     misspelled = _segmentation()
     misspelled["Trainer"]["epoch"] = misspelled["Trainer"].pop("epochs")
     wrong_type = _segmentation()
@@ -93,16 +87,20 @@ def test_a_mistake_is_flagged_where_it_is() -> None:
     _ct_chain(repeated_stage)["transforms"]["Standardize#2"] = {"means": 0}
     unknown_repeated_stage = _segmentation()
     _ct_chain(unknown_repeated_stage)["transforms"]["Standardise#2"] = None
+    list_stage = _segmentation()
+    _ct_chain(list_stage)["transforms"] = ["Standardise"]
     missing_argument = _segmentation()
     _ct_chain(missing_argument)["transforms"]["OneHot"] = {}
 
-    assert _errors(misspelled) == ["Trainer"]
-    assert _errors(wrong_type) == ["Trainer/epochs"]
-    assert _errors(unknown_stage) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms"]
-    assert _errors(unknown_argument) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms/Standardize"]
-    assert _errors(repeated_stage) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms/Standardize#2"]
-    assert _errors(unknown_repeated_stage) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms"]
-    assert _errors(missing_argument) == ["Trainer/Dataset/groups_src/CT/groups_dest/CT/transforms/OneHot"]
+    chain = "Trainer.Dataset.groups_src.CT.groups_dest.CT.transforms"
+    assert _errors(misspelled) == [("Trainer", "unknown key 'epoch' (did you mean 'epochs'?)")]
+    assert _errors(wrong_type) == [("Trainer.epochs", "'ten' is not an integer")]
+    assert _errors(unknown_stage) == [(chain, "unknown 'Standardise' (did you mean 'Standardize'?)")]
+    assert _errors(unknown_argument) == [(f"{chain}.Standardize", "unknown key 'means' (did you mean 'mean'?)")]
+    assert _errors(repeated_stage) == [(f"{chain}.Standardize#2", "unknown key 'means' (did you mean 'mean'?)")]
+    assert _errors(unknown_repeated_stage) == [(chain, "unknown 'Standardise#2' (did you mean 'Standardize'?)")]
+    assert _errors(list_stage) == [(f"{chain}.0", "unknown 'Standardise' (did you mean 'Standardize'?)")]
+    assert _errors(missing_argument) == [(f"{chain}.OneHot", "missing key 'num_classes'")]
 
 
 def test_the_spellings_the_binder_accepts_are_valid() -> None:

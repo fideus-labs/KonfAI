@@ -86,5 +86,7 @@ setup(
         "fastmcp>=2.10.2",
         "ruamel.yaml",
         "numpy",
+        # Checks a written config against KonfAI's schema (konfai.config_schema.config_errors).
+        "jsonschema",
     ],
 )

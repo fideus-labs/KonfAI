@@ -27,6 +27,8 @@ binder accepts.
 
 from __future__ import annotations
 
+import difflib
+import functools
 import importlib
 import inspect
 import re
@@ -34,9 +36,10 @@ import types
 from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal, NamedTuple, Union, get_args, get_origin
 
 from konfai.utils.config import Config, Range, _admits_none, _resolve_annotation, _unwrap_optional
+from konfai.utils.errors import ConfigError
 
 #: Each workflow's config file, root key and root class.
 WORKFLOWS: dict[str, tuple[str, str]] = {
@@ -358,3 +361,99 @@ def config_schema(filename: str) -> dict[str, Any]:
         "additionalProperties": False,
         "definitions": builder.definitions,
     }
+
+
+class ConfigMistake(NamedTuple):
+    """One mistake of a config: the dotted path of the key it is about, what is wrong, and whether it is a key
+    nothing reads (the engine warns about it, except TRANSFORM, which refuses it) rather than one it refuses."""
+
+    path: str
+    message: str
+    unread: bool
+
+
+def config_errors(tree: Any, filename: str) -> list[ConfigMistake]:
+    """Every mistake of a config against its schema, each at its key (``Trainer.Dataset.batch_size``), with the
+    nearest valid name for a misspelled one. An empty list when the config is valid. ``tree`` is the YAML as
+    loaded."""
+    leaves = [leaf for error in _validator(filename).iter_errors(tree) for leaf in _leaves(error)]
+    mistakes = {
+        ConfigMistake(".".join(map(str, leaf.absolute_path)), _message(leaf), leaf.validator == "additionalProperties")
+        for leaf in leaves
+    }
+    return sorted(mistakes)
+
+
+@functools.cache
+def _validator(filename: str) -> Any:
+    try:
+        from jsonschema import Draft7Validator
+    except ImportError:
+        raise ConfigError("Checking a config against its schema needs jsonschema.", "pip install jsonschema") from None
+    return Draft7Validator(config_schema(filename))
+
+
+def _leaves(error: Any) -> list[Any]:
+    """The mistakes under an ``anyOf`` that failed: those of the alternative the value was written for (a
+    mapping is a block, not ``None``), not one message for the whole block."""
+    if not error.context or not isinstance(error.instance, dict | list):
+        return [error]
+    branches: dict[Any, list[Any]] = {}
+    for sub in error.context:
+        branches.setdefault(sub.relative_schema_path[0], []).append(sub)
+    branch = max(
+        branches.values(),
+        key=lambda subs: (
+            any(sub.validator not in {"type", "const"} for sub in subs),
+            max(len(sub.absolute_path) for sub in subs),
+        ),
+    )
+    return [leaf for sub in branch for leaf in _leaves(sub)]
+
+
+_KINDS = {
+    "integer": "an integer",
+    "number": "a number",
+    "boolean": "true or false",
+    "array": "a list",
+    "object": "a mapping",
+    "string": "a string",
+    "null": "None",
+}
+
+
+def _message(error: Any) -> str:
+    instance, schema = error.instance, error.schema
+    if error.validator == "additionalProperties":
+        known = schema.get("properties", {})
+        patterns = schema.get("patternProperties", {})
+        unknown = [key for key in instance if key not in known and not any(re.search(p, key) for p in patterns)]
+        return "; ".join(f"unknown key '{key}'{_nearest(key, known)}" for key in unknown)
+    if error.validator == "required":
+        return "; ".join(f"missing key '{key}'" for key in schema["required"] if key not in instance)
+    names = _names(schema)
+    if isinstance(instance, str) and names:
+        return f"unknown '{instance}'{_nearest(instance, names)}"
+    kinds = list(dict.fromkeys(_kinds(schema)))
+    return f"{instance!r} is not {' or '.join(kinds)}" if kinds else error.message
+
+
+def _names(schema: dict[str, Any]) -> list[Any]:
+    """The names a value may take, however deep the alternatives that list them."""
+    return [*schema.get("enum", []), *(name for option in schema.get("anyOf", []) for name in _names(option))]
+
+
+def _kinds(schema: dict[str, Any]) -> list[str]:
+    if "anyOf" in schema:
+        return [kind for option in schema["anyOf"] for kind in _kinds(option)]
+    if "const" in schema:
+        return [repr(schema["const"])]
+    kind = schema.get("type")
+    if kind == "string" and "pattern" in schema:  # a quoted number or bool: the unquoted kind already says it
+        return []
+    return [_KINDS.get(item, item) for item in ([kind] if isinstance(kind, str) else kind or [])]
+
+
+def _nearest(word: str, names: Any) -> str:
+    match = difflib.get_close_matches(word, [str(name) for name in names], n=1, cutoff=0.5)
+    return f" (did you mean '{match[0]}'?)" if match else ""

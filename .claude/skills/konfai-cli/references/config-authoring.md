@@ -83,6 +83,33 @@ conventions), and the base classes in `konfai/` (e.g. `konfai/metric/measure/` f
   downstream module (e.g. a 3D discriminator) must see the reassembled chunk.
 - A `forward` returns a `Tensor` for a loss or a `(value, dict)` tuple for a metric.
 
+## Check a config before running it
+
+Every config file has a JSON Schema, read off KonfAI's constructors. A mistake it catches
+(misspelled key, wrong type, unknown transform or loss, missing argument) otherwise only
+shows when the workflow builds, one at a time.
+
+- **In an editor**: VS Code's YAML extension completes and checks as you type, once its
+  `yaml.schemas` setting points at the published schemas (the configuration guide, section
+  "Completion in your editor", has the exact setting).
+- **From Python** (needs `pip install jsonschema`): every mistake at once, each at its key
+  with the nearest valid name.
+
+  ```python
+  from ruamel.yaml import YAML
+  from konfai.config_schema import config_errors
+
+  for mistake in config_errors(YAML(typ="safe").load(open("Config.yml")), "Config.yml"):
+      print(f"{mistake.path}: {mistake.message}")
+  # Trainer: unknown key 'epoch' (did you mean 'epochs'?)
+  ```
+
+  The second argument is the file kind (`Config.yml`, `Prediction.yml`, `Evaluation.yml`,
+  `Transform.yml`), whatever the file is called.
+
+The schema checks the shape of the config, not what only the run knows: missing files, a
+channel count the model does not take, a model's own arguments.
+
 ## What to adapt first for a new project
 
 From either example: `dataset_filenames`, `train_name` (keys every output folder), patch size,

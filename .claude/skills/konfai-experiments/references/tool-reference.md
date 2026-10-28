@@ -176,7 +176,7 @@ Request an on-demand validation pass on a running training job. Sends SIGUSR1 to
 
 ### `review_config_semantics`
 
-Use immediately after writing or editing a workflow config. This performs lightweight semantic checks and returns warnings plus blocking issues. It does not instantiate KonfAI runtime objects. Outputs: summary, warnings, blocking_issues, next_checks, and next_actions. Next: validate_config_semantics if there are no blocking issues.
+Use immediately after writing or editing a workflow config. This checks the config against KonfAI's schema (every misspelled key, wrong type, unknown component name and missing argument, each at its key with the nearest valid name) and performs lightweight semantic checks. A mistake KonfAI would refuse is a blocking issue (code config_schema); a key it does not read is a warning (code config_key_unread), blocking for a transform. It does not instantiate KonfAI runtime objects. Outputs: summary, warnings, blocking_issues, next_checks, and next_actions. Next: validate_config_semantics if there are no blocking issues.
 
 ### `run_app`
 
@@ -244,7 +244,7 @@ Use for session-side support files such as local model code, custom losses, tran
 
 ### `write_workflow_config`
 
-Use to author or replace one workflow YAML file. This validates the top-level KonfAI root key and writes the config into the current session workspace. It does not patch YAML structurally for you. Outputs: written path, byte count, and next_actions. Next: review_config_semantics.
+Use to author or replace one workflow YAML file. This validates the top-level KonfAI root key, writes the config into the current session workspace, and checks it against KonfAI's schema: schema_errors lists every mistake at once, one 'path: message' line each ("Trainer: unknown key 'epoch' (did you mean 'epochs'?)"). The file is written either way. It does not patch YAML structurally for you. Outputs: written path, byte count, schema_errors when there are any, and next_actions. Next: fix every schema_errors line and write again; then review_config_semantics.
 
 ## Prompts
 
