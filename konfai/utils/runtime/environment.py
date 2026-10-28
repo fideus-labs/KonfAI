@@ -240,21 +240,21 @@ def get_device(device: int):
 def checkpoint_source(entry: str | Path, error: type[KonfAIError]) -> str | Path:
     """A checkpoint named on the command line: an ``https://`` URL as given, else an existing file.
 
-    A missing path or a directory is refused with ``error``; a directory lists the ``.pt`` files it holds.
+    A missing path or a directory is refused with ``error``; a directory lists the checkpoints it holds.
     """
     if isinstance(entry, str) and entry.startswith("https://"):
         return entry
     path = Path(entry)
     if path.is_dir():
-        held = sorted(child.name for child in path.glob("*.pt"))
+        held = sorted(child.name for child in path.iterdir() if child.name.endswith((".pt", ".safetensors")))
         raise error(
             f"'{entry}' is a directory, not a checkpoint.",
-            f"Name one of its checkpoints: {', '.join(held)}." if held else "It holds no '.pt' file.",
+            f"Name one of its checkpoints: {', '.join(held)}." if held else "It holds no '.pt' or '.safetensors' file.",
         )
     if not path.exists():
         raise error(
             f"Checkpoint '{entry}' does not exist (resolved: '{path.resolve()}').",
-            "Name a '.pt' file, or an https:// URL.",
+            "Name a '.pt' or '.safetensors' file, or an https:// URL.",
         )
     return path
 
@@ -268,8 +268,46 @@ def _cut_short(source: str) -> bool:
         return False
 
 
+def save_weights(checkpoint: dict[str, Any], path: str | Path) -> None:
+    """Write the ``Model`` weights of ``checkpoint`` as ``.safetensors``: what inference and a fine-tune read,
+    without the pickle of a ``.pt``. Each tensor is named ``Model/<network>/<parameter>``; the run's scalars
+    (``epoch``, ``it``, ``loss``) are kept as metadata. The optimizer and scheduler states are not written."""
+    from safetensors.torch import save_file
+
+    if "Model" not in checkpoint:
+        raise KonfAIError("Checkpoint", f"'{path}': the checkpoint has no 'Model' weights to publish.")
+    tensors = {
+        # A copy each: safetensors refuses tensors that share storage (a tied weight).
+        f"Model/{network}/{key}": value.detach().cpu().contiguous().clone()
+        for network, state in checkpoint["Model"].items()
+        for key, value in state.items()
+    }
+    metadata = {key: str(value) for key, value in checkpoint.items() if isinstance(value, int | float | str)}
+    save_file(tensors, str(path), metadata=metadata)
+
+
+def _load_weights(source: str, map_location: Any) -> dict[str, Any]:
+    """A ``.safetensors`` file :func:`save_weights` wrote, as the ``{"Model": {network: state_dict}}`` it holds."""
+    from safetensors.torch import load_file
+
+    checkpoint: dict[str, Any] = {}
+    for name, tensor in load_file(source, device=str(map_location)).items():
+        try:
+            top, network, key = name.split("/", 2)
+        except ValueError:
+            raise KonfAIError(
+                "Checkpoint",
+                f"'{source}' holds '{name}', not a KonfAI weight name ('Model/<network>/<parameter>').",
+                "Write it with 'konfai-apps bundle' or konfai.utils.runtime.save_weights.",
+            ) from None
+        checkpoint.setdefault(top, {}).setdefault(network, {})[key] = tensor
+    return checkpoint
+
+
 def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = False) -> Any:
     """Load a checkpoint from a local path or an ``https://`` URL, preferring ``weights_only=True``.
+
+    A local ``.safetensors`` file holds weights only and is read without unpickling (:func:`save_weights`).
 
     A local (trusted) checkpoint falls back to ``weights_only=False`` when the safe unpickler refuses
     it. A remote ``https://`` checkpoint is untrusted and is loaded with ``weights_only=True`` only.
@@ -279,6 +317,8 @@ def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = 
     source = str(path_or_url)
     if source.startswith("https://"):
         return torch.hub.load_state_dict_from_url(source, map_location=map_location, weights_only=True)
+    if source.endswith(".safetensors"):
+        return _load_weights(source, map_location)
     # Windows refuses to replace or delete a mapped file.
     load_options = {"mmap": True} if mmap and sys.platform != "win32" and is_zipfile(source) else {}
     try:

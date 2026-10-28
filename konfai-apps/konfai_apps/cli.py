@@ -792,7 +792,12 @@ def main_apps() -> None:
         required=True,
         help="Config file(s), space-separated: Prediction.yml Evaluation.yml …",
     )
-    bundle_p.add_argument("--checkpoint", nargs="+", required=True, help="Checkpoint .pt file(s): CV_0.pt CV_1.pt …")
+    bundle_p.add_argument(
+        "--checkpoint",
+        nargs="+",
+        required=True,
+        help="Checkpoint file(s): CV_0.pt CV_1.pt …, written to the bundle as .safetensors weights.",
+    )
     bundle_p.add_argument("--model-py", help="Optional custom Model.py to include.")
     bundle_p.add_argument(
         "--support-file",

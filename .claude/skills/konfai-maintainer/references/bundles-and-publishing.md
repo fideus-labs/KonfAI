@@ -11,7 +11,7 @@ repos (which you must have for the grep step below).
 ## What a bundle is
 
 A bundle is a directory in **HF layout**: `app.json` (metadata) + one or more configs (`Prediction.yml`,
-optional `Evaluation.yml`) + checkpoint `.pt` file(s) + an optional custom `Model.py` + `requirements.txt`,
+optional `Evaluation.yml`) + `.safetensors` weights (one per model; `konfai-apps bundle` writes them from a run's `.pt`) + an optional custom `Model.py` + `requirements.txt`,
 optionally `model.onnx` + `manifest.json` for the portable runtime. Its configs use **bundle-relative
 classpaths** (`ResidualEncoderUNet.yml`, `Model:RegistrationNet`), never KonfAI's internal module paths, that is why the `models`→`models.python` move did not break bundles. A bundle resolves from a **Local dir**,
 an **HF repo** (`repo_id:app_name`), or a **Remote server**.

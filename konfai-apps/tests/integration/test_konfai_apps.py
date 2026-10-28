@@ -25,6 +25,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from konfai.utils.runtime import save_weights
+from safetensors import safe_open
 
 pytestmark = pytest.mark.slow
 
@@ -82,7 +84,7 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
                 "short_description": "Tiny synth",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny_0.pt", "tiny_1.pt"],
+                "models": ["tiny_0.safetensors", "tiny_1.safetensors"],
                 "inputs": {
                     "Volume_0": {
                         "display_name": "MR",
@@ -246,8 +248,8 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
         model.Projection.bias.zero_()
 
     checkpoint = {"Model": model.network_states()}
-    torch.save(checkpoint, app_dir / "tiny_0.pt")
-    torch.save(checkpoint, app_dir / "tiny_1.pt")
+    save_weights(checkpoint, app_dir / "tiny_0.safetensors")
+    save_weights(checkpoint, app_dir / "tiny_1.safetensors")
 
 
 def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None:
@@ -386,7 +388,7 @@ def _write_local_finetune_app(app_dir: Path) -> None:
                 "short_description": "Tiny synth",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny_0.pt", "tiny_1.pt"],
+                "models": ["tiny_0.safetensors", "tiny_1.safetensors"],
                 "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
                 "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
             }
@@ -416,8 +418,8 @@ def _write_local_finetune_app(app_dir: Path) -> None:
         "loss": 0.0,
         "Model": model.network_states(),
     }
-    torch.save(checkpoint, app_dir / "tiny_0.pt")
-    torch.save(checkpoint, app_dir / "tiny_1.pt")
+    save_weights(checkpoint, app_dir / "tiny_0.safetensors")
+    save_weights(checkpoint, app_dir / "tiny_1.safetensors")
 
 
 def _build_finetune_dataset(dataset_dir: Path) -> None:
@@ -475,9 +477,10 @@ def _run_finetune(
 def _assert_finetuned_from_checkpoint(checkpoint_path: Path) -> None:
     """A fine-tuned checkpoint must start fresh (counters reset) yet have actually trained."""
     assert checkpoint_path.exists(), checkpoint_path
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    assert state["epoch"] < _PRETRAINED_EPOCH, f"epoch not reset: {state['epoch']}"
-    assert 0 < state["it"] < _PRETRAINED_IT, f"training did not run from a fresh counter: it={state['it']}"
+    with safe_open(str(checkpoint_path), "pt") as file:
+        epoch, it = int(file.metadata()["epoch"]), int(file.metadata()["it"])
+    assert epoch < _PRETRAINED_EPOCH, f"epoch not reset: {epoch}"
+    assert 0 < it < _PRETRAINED_IT, f"training did not run from a fresh counter: it={it}"
 
 
 def test_finetune_single_model_resumes_from_checkpoint_and_trains(tmp_path: Path) -> None:
@@ -492,11 +495,11 @@ def test_finetune_single_model_resumes_from_checkpoint_and_trains(tmp_path: Path
 
     meta = _read_json(output_dir / "app.json")
     assert meta["display_name"] == "FT"
-    assert meta["models"] == ["tiny_0.pt"]
+    assert meta["models"] == ["tiny_0.safetensors"]
 
-    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.pt")
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.safetensors")
     # Only the selected checkpoint is packaged, and the bundle is clean (no training artifacts).
-    assert not (output_dir / "tiny_1.pt").exists()
+    assert not (output_dir / "tiny_1.safetensors").exists()
     for artifact in ("Checkpoints", "Statistics", "Dataset"):
         assert not (output_dir / artifact).exists(), artifact
 
@@ -512,9 +515,9 @@ def test_finetune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
     assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
 
     meta = _read_json(output_dir / "app.json")
-    assert meta["models"] == ["tiny_0.pt"]
-    assert (output_dir / "tiny_0.pt").exists()
-    assert not (output_dir / "tiny_1.pt").exists()
+    assert meta["models"] == ["tiny_0.safetensors"]
+    assert (output_dir / "tiny_0.safetensors").exists()
+    assert not (output_dir / "tiny_1.safetensors").exists()
 
 
 def test_finetune_multiple_models_produces_one_checkpoint_each(tmp_path: Path) -> None:
@@ -528,6 +531,6 @@ def test_finetune_multiple_models_produces_one_checkpoint_each(tmp_path: Path) -
     assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
 
     meta = _read_json(output_dir / "app.json")
-    assert meta["models"] == ["tiny_0.pt", "tiny_1.pt"]
-    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.pt")
-    _assert_finetuned_from_checkpoint(output_dir / "tiny_1.pt")
+    assert meta["models"] == ["tiny_0.safetensors", "tiny_1.safetensors"]
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.safetensors")
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_1.safetensors")

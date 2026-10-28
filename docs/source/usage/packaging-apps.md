@@ -60,7 +60,9 @@ konfai-apps bundle CT_SEG \
   --checkpoint Checkpoints/CT_TWO_CLASSES/[0-9]*.pt
 ```
 
-The result is `dist/CT_SEG/`. The quickstart uses the shipped YAML model, so there
+The result is `dist/CT_SEG/`. Each checkpoint is written as a `.safetensors` file
+holding the model weights only: the optimizer state and the training counters stay in
+the run's `.pt`. The quickstart uses the shipped YAML model, so there
 is no custom Python file to include. For your own model, add `--model-py Model.py`.
 Use `--support-file DESTINATION=SOURCE` with `--support-root` for helper files.
 Check the generated `requirements.txt` before distributing the app.

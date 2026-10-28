@@ -50,6 +50,7 @@ from konfai.utils.runtime.environment import gpu_info as gpu_info
 from konfai.utils.runtime.environment import is_interactive_session as is_interactive_session
 from konfai.utils.runtime.environment import memory_forecast as memory_forecast
 from konfai.utils.runtime.environment import safe_torch_load as safe_torch_load
+from konfai.utils.runtime.environment import save_weights as save_weights
 from konfai.utils.runtime.logging import ANSI_ESCAPE_RE as ANSI_ESCAPE_RE
 from konfai.utils.runtime.logging import DataLog as DataLog
 from konfai.utils.runtime.logging import Log as Log
@@ -98,6 +99,7 @@ __all__ = [
     "return_freed_heap",
     "run_distributed_app",
     "safe_torch_load",
+    "save_weights",
     "seed_all",
     "setup_gpu",
     "synchronize_data",

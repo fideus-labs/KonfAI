@@ -8,7 +8,7 @@ custom `.py`, resolved from a local directory, a Hugging Face repository or a
 remote server. See {doc}`../usage/apps`.
 
 **Bundle.** Two things. An *app bundle* is the directory or Hugging Face
-repository an app is resolved from (`app.json`, the config, the `.pt` files),
+repository an app is resolved from (`app.json`, the config, the `.safetensors` weights),
 which `konfai-apps bundle` assembles. A *MONAI bundle* is the model-zoo format
 `konfai.import_bundle` and `konfai.export_bundle` read and write.
 

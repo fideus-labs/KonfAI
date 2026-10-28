@@ -1127,7 +1127,8 @@ class AppService:
 
         result: dict[str, Any] = {
             "bundle_path": str(bundle_path),
-            "checkpoints": [Path(path).name for path in resolved_checkpoints],
+            # As the bundle names them: a run's .pt is published as .safetensors.
+            "checkpoints": json.loads((bundle_path / "app.json").read_text(encoding="utf-8"))["models"],
             "configs": [Path(path).name for path in resolved_configs],
             "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],

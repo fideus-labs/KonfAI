@@ -542,6 +542,26 @@ def _check_file_layout(files: dict[str, Any]) -> None:
                 raise AppMetadataError(f"Bundle paths collide: {parent.as_posix()!r} is both a file and a directory.")
 
 
+def _published(name: str) -> str:
+    """The bundle filename of a checkpoint: a ``.pt`` is published as ``.safetensors`` weights."""
+    return name.removesuffix(".pt") + ".safetensors" if name.endswith(".pt") else name
+
+
+def _publish_weights(checkpoint: Path, target: Path) -> None:
+    """Write a run's checkpoint as weights only. Read without unpickling objects: packaging may run in a
+    server process, and a run's checkpoint holds tensors and primitives only."""
+    import torch
+    from konfai.utils.runtime import save_weights
+
+    try:
+        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise AppMetadataError(
+            f"'{checkpoint}' does not load as weights only ({exc}): it holds objects a KonfAI run does not write."
+        ) from exc
+    save_weights(state, target)
+
+
 def assemble_bundle(
     name: str,
     out_dir: str | Path,
@@ -574,7 +594,8 @@ def assemble_bundle(
     if missing:
         raise AppMetadataError(f"app.json is missing required keys: {', '.join(missing)}")
 
-    checkpoint_names = [Path(c).name for c in checkpoints]
+    # A run's .pt is published as weights only (.safetensors), under its own stem.
+    checkpoint_names = [_published(Path(c).name) for c in checkpoints]
     config_names = [Path(c).name for c in configs]
     for kind, names in (("checkpoints", checkpoint_names), ("configs", config_names)):
         colliding = sorted({item for item in names if names.count(item) > 1})
@@ -583,13 +604,12 @@ def assemble_bundle(
                 f"Two {kind} would land under the same bundle filename {colliding} and overwrite each other. "
                 "Rename them (fold0_best.pt, fold1_best.pt) before packaging."
             )
-    declared = [str(m) for m in metadata.get("models", [])]
+    declared = [_published(str(m)) for m in metadata.get("models", [])]
     if declared and sorted(declared) != sorted(checkpoint_names):
         raise AppMetadataError(
             f"app.json 'models' {declared} does not match the provided checkpoints {checkpoint_names}",
         )
-    if not declared:
-        metadata["models"] = checkpoint_names
+    metadata["models"] = declared or checkpoint_names
 
     if _support_relative(name, "bundle name").name != name:
         raise AppMetadataError("Bundle name must be a single directory name.")
@@ -602,8 +622,10 @@ def assemble_bundle(
             raise AppMetadataError(f"Different bundle files would overwrite {destination!r}.")
         files[destination] = path
 
-    for source in [*configs, *checkpoints]:
+    for source in configs:
         add(Path(source).name, source)
+    for source, published in zip(checkpoints, checkpoint_names, strict=True):
+        add(published, source)
     if model_py is not None:
         add("Model.py", model_py)
     if requirements is not None:
@@ -623,7 +645,10 @@ def assemble_bundle(
             if staged is not None:
                 target = staging / destination
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(staged, target)
+                if staged.suffix == ".pt" and destination.endswith(".safetensors"):
+                    _publish_weights(staged, target)
+                else:
+                    shutil.copy(staged, target)
         _replace_bundle(staging, bundle, metadata["models"])
     finally:
         shutil.rmtree(staging, ignore_errors=True)

@@ -37,7 +37,9 @@ dependencies = [
   "tqdm",
   "numpy",
   "ruamel.yaml",
-  "psutil"
+  "psutil",
+  # Published weights (apps) are .safetensors: read and written without pickle.
+  "safetensors"
 ]
 
 [project.urls]
