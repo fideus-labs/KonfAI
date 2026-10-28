@@ -16,8 +16,8 @@
 
 """The portable program contract, as a JSON Schema (draft 2020-12) written once and checked on both sides.
 
-A document is a TRANSFORM program, a PREDICTION program, a bundle's assembled ``program.json`` or a single
-model's ``manifest.json``. Every op a step may name, the keys it may carry and the ones it must, sit in
+A document is a TRANSFORM program, a PREDICTION program, an EVALUATION program, a bundle's assembled
+``program.json`` or a single model's ``manifest.json``. Every op a step may name, the keys it may carry and the ones it must, sit in
 :data:`CHAIN_OPS` and :data:`BODY_OPS`: a key outside them is one no compiler writes, and the runtime
 refuses it by name rather than reading around it. The Python tests validate every program the compilers
 emit against :func:`program_schema`; the runtime's tests validate their fixtures against the copy committed
@@ -33,6 +33,7 @@ from typing import Any
 
 from konfai.export import MANIFEST_VERSION
 from konfai.portable import PREDICTION_PROGRAM_VERSION, TRANSFORM_PROGRAM_VERSION
+from konfai.portable_evaluation import EVALUATION_PROGRAM_VERSION
 
 _STRING: dict[str, Any] = {"type": "string"}
 _INTEGER: dict[str, Any] = {"type": "integer"}
@@ -130,6 +131,55 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
 }
 
 
+#: Criterion name -> (the keys an evaluation's criterion of it carries beside its ``key``, ``maximize`` and
+#: ``metric``, the ones it must): the criteria ``konfai.portable_evaluation.CRITERIA`` compiles.
+CRITERIA: dict[str, tuple[dict[str, Any], list[str]]] = {
+    "dice": (
+        {"labels": {"type": ["array", "null"], "items": _INTEGER}, "map": {"$ref": "#/$defs/destination"}},
+        ["labels"],
+    ),
+    "mae": ({"reduction": {"enum": ["mean", "sum"]}, "map": {"$ref": "#/$defs/destination"}}, ["reduction"]),
+    "psnr": ({"dynamic_range": _NUMBER}, ["dynamic_range"]),
+    "ssim": ({"dynamic_range": _NUMBER}, ["dynamic_range"]),
+    "sam_perceptual": (
+        {
+            "model": _STRING,
+            "tile": _array(_INTEGER),
+            "layers": _array({"type": "array", "items": _INTEGER, "minItems": 2, "maxItems": 2}),
+            "weights": _array(_NUMBER),
+        },
+        ["model", "tile", "layers", "weights"],
+    ),
+    # konfai-impact's configuration, as the compiler writes it: one model and the layers it weighs.
+    "impact_reg": (
+        {
+            "impact": _object(
+                {
+                    "models": {
+                        "type": "object",
+                        "additionalProperties": _object(
+                            {
+                                "ref": _STRING,
+                                "layers_mask": {"type": "string", "pattern": "^[01]+$"},
+                                "layers_weight": _array(_NUMBER),
+                                "distance": {"enum": ["L1", "L2"]},
+                                "direction": {"type": "boolean"},
+                            },
+                            ["ref", "layers_mask", "layers_weight", "distance", "direction"],
+                        ),
+                    },
+                    "mode": {"const": "Jacobian"},
+                    "normalize": {"type": "boolean"},
+                },
+                ["models", "mode", "normalize"],
+            ),
+            "activations": _NUMBER,
+        },
+        ["impact", "activations"],
+    ),
+}
+
+
 def _step(op: str, spec: tuple[dict[str, Any], list[str]], fixed: dict[str, Any]) -> dict[str, Any]:
     properties, required = spec
     return _object({"op": {"const": op}, **fixed, **properties}, ["op", *fixed, *required])
@@ -138,6 +188,7 @@ def _step(op: str, spec: tuple[dict[str, Any], list[str]], fixed: dict[str, Any]
 def program_schema() -> dict[str, Any]:
     """The contract, as a JSON Schema whose ``$defs`` name every part a test may validate on its own."""
     location = {"root": _STRING, "format": _STRING, "store": _STRING}
+    criterion = {"key": _STRING, "maximize": _BOOLEAN}
     buffers = {"in": _array(_STRING), "out": _STRING}
     model_step = _object(
         {
@@ -249,6 +300,62 @@ def program_schema() -> dict[str, Any]:
             },
             ["konfai_edge_transform", "name", "memory_budget", "on_fallback", "sources", "cases", "chains"],
         ),
+        "criterion": {
+            "oneOf": [
+                _object({**criterion, "metric": {"const": metric}, **fields}, ["key", "maximize", "metric", *required])
+                for metric, (fields, required) in CRITERIA.items()
+            ]
+        },
+        "evaluation": _object(
+            {
+                "konfai_edge_evaluation": {"const": EVALUATION_PROGRAM_VERSION},
+                "name": _STRING,
+                "memory_budget": {"type": ["integer", "null"]},
+                "sources": _array(_ref("source")),
+                "cases": _array(_STRING),
+                "evaluations": _STRING,
+                "groups": _array(
+                    _object(
+                        {
+                            "group_src": _STRING,
+                            "group_dest": _STRING,
+                            "steps": _array(
+                                {
+                                    "oneOf": [
+                                        _ref("chain_step"),
+                                        # Where konfai's Statistics records the volume's minimum and maximum.
+                                        _object({"op": {"const": "statistics"}}, ["op"]),
+                                        # A KonfAIInference: the nested app's model on the whole volume.
+                                        _object(
+                                            {"model": _STRING, "manifest": _ref("manifest")}, ["model", "manifest"]
+                                        ),
+                                    ]
+                                }
+                            ),
+                        },
+                        ["group_src", "group_dest", "steps"],
+                    )
+                ),
+                "models": {"type": "object", "additionalProperties": _STRING},
+                "metrics": _array(
+                    _object(
+                        {"output": _STRING, "targets": _array(_STRING), "criteria": _array(_ref("criterion"))},
+                        ["output", "targets", "criteria"],
+                    )
+                ),
+            },
+            [
+                "konfai_edge_evaluation",
+                "name",
+                "memory_budget",
+                "sources",
+                "cases",
+                "evaluations",
+                "groups",
+                "models",
+                "metrics",
+            ],
+        ),
         "prediction": _object(
             {
                 "konfai_edge_prediction": {"const": PREDICTION_PROGRAM_VERSION},
@@ -269,9 +376,9 @@ def program_schema() -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "KonfAI portable programs",
-        "description": "A TRANSFORM program, a PREDICTION program, a bundle's assembled program or one model's manifest,"
-        " as konfai.portable emits them and the portable runtime reads them.",
-        "oneOf": [_ref("transform"), _ref("prediction"), _ref("program"), _ref("manifest")],
+        "description": "A TRANSFORM program, a PREDICTION program, an EVALUATION program, a bundle's assembled program"
+        " or one model's manifest, as konfai.portable emits them and the portable runtime reads them.",
+        "oneOf": [_ref("transform"), _ref("prediction"), _ref("evaluation"), _ref("program"), _ref("manifest")],
         "$defs": defs,
     }
 
