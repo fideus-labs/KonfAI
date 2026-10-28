@@ -39,8 +39,8 @@ _PRETRAINED_IT = 125134
 
 
 def _write_finetunable_app(app_dir: Path) -> None:
-    """A minimal REAL app bundle: manifest + train config + model code + a genuine checkpoint."""
-    import torch
+    """A minimal REAL app bundle: manifest + train config + model code + genuine weights."""
+    from konfai.utils.runtime import save_weights
 
     app_dir.mkdir(parents=True, exist_ok=True)
     (app_dir / "app.json").write_text(
@@ -52,7 +52,7 @@ def _write_finetunable_app(app_dir: Path) -> None:
                 "task": "synthesis",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny_0.pt"],
+                "models": ["tiny_0.safetensors"],
                 "inputs": {"MR": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
                 "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
             }
@@ -70,21 +70,21 @@ def _write_finetunable_app(app_dir: Path) -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    torch.save(
+    save_weights(
         {
             "epoch": _PRETRAINED_EPOCH,
             "it": _PRETRAINED_IT,
             "loss": 0.0,
             "Model": module.TinySynthNet().network_states(),
         },
-        app_dir / "tiny_0.pt",
+        app_dir / "tiny_0.safetensors",
     )
 
 
 def _model_tensors(checkpoint_path: Path) -> dict[str, "object"]:
-    import torch
+    from konfai.utils.runtime import safe_torch_load
 
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = safe_torch_load(checkpoint_path, "cpu")
     flat: dict[str, object] = {}
     for network_name, network_state in state["Model"].items():
         for key, tensor in network_state.items():
@@ -97,6 +97,7 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
     tmp_path: Path, load_mcp_server: Callable[[], ModuleType]
 ) -> None:
     import torch
+    from safetensors import safe_open
 
     app_dir = tmp_path / "TinySynthApp"
     dataset_dir = tmp_path / "dataset"
@@ -143,17 +144,18 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
 
     # The produced bundle is a resolvable app: manifest + train config + code + fine-tuned checkpoint.
     metadata = json.loads((output_dir / "app.json").read_text(encoding="utf-8"))
-    assert metadata["models"] == ["tiny_0.pt"]
+    assert metadata["models"] == ["tiny_0.safetensors"]
     assert (output_dir / "Config.yml").is_file()
     assert (output_dir / "TinySynth.py").is_file()
 
     # The training really ran: counters restarted from the sanitized weights-only checkpoint...
-    produced = torch.load(output_dir / "tiny_0.pt", map_location="cpu", weights_only=False)
-    assert produced["epoch"] < _PRETRAINED_EPOCH
-    assert 0 < produced["it"] < _PRETRAINED_IT
+    with safe_open(str(output_dir / "tiny_0.safetensors"), "pt") as produced:
+        counters = produced.metadata()
+    assert int(counters["epoch"]) < _PRETRAINED_EPOCH
+    assert 0 < int(counters["it"]) < _PRETRAINED_IT
 
     # ...and at least one weight tensor moved away from the input app's checkpoint.
-    before = _model_tensors(app_dir / "tiny_0.pt")
-    after = _model_tensors(output_dir / "tiny_0.pt")
+    before = _model_tensors(app_dir / "tiny_0.safetensors")
+    after = _model_tensors(output_dir / "tiny_0.safetensors")
     assert set(after) == set(before)
     assert any(not torch.equal(before[key], after[key]) for key in before), "fine-tune left every weight unchanged"

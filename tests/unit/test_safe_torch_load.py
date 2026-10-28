@@ -144,8 +144,9 @@ def test_published_weights_keep_the_model_and_drop_the_training_state(tmp_path: 
         assert file.metadata() == {"epoch": "3", "loss": "0.25"}
 
 
-def test_a_safetensors_file_konfai_did_not_write_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["conv.weight", "Other/Net/weight", "Model//weight"])
+def test_a_safetensors_file_konfai_did_not_write_is_refused(tmp_path: Path, name: str) -> None:
     path = tmp_path / "foreign.safetensors"
-    save_file({"conv.weight": torch.zeros(1)}, str(path))
+    save_file({name: torch.zeros(1)}, str(path))
     with pytest.raises(KonfAIError, match="not a KonfAI weight name"):
         safe_torch_load(path, "cpu")

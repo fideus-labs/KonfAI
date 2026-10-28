@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
+from konfai.utils.runtime import save_weights
 from konfai_apps import app_repository as app_repository_module
 from konfai_apps.errors import AppMetadataError, AppRepositoryError
 from ruamel.yaml import YAML
@@ -443,9 +445,19 @@ def test_local_hf_initial_model_availability_comes_from_cache(
     assert repo.get_checkpoints_name_available() == []
 
 
+@pytest.mark.parametrize(
+    ("declared", "files", "available"),
+    [
+        ("model.safetensors", ["weights/model.safetensors"], ["model.safetensors"]),
+        ("model.pt", ["model.pt"], []),  # a bundle exported before safetensors: re-exported, never loaded
+    ],
+)
 def test_local_hf_nested_cached_model_is_reported_available(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    declared: str,
+    files: list[str],
+    available: list[str],
 ) -> None:
     app_json = tmp_path / "app.json"
     app_json.write_text(
@@ -456,7 +468,7 @@ def test_local_hf_nested_cached_model_is_reported_available(
                 "short_description": "Demo",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["model.safetensors"],
+                "models": [declared],
             }
         ),
         encoding="utf-8",
@@ -465,14 +477,12 @@ def test_local_hf_nested_cached_model_is_reported_available(
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
         "get_filenames",
-        staticmethod(
-            lambda repo_id, app_name, force_update: ["Inference.yml", "app.json", "weights/model.safetensors"]
-        ),
+        staticmethod(lambda repo_id, app_name, force_update: ["Inference.yml", "app.json", *files]),
     )
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
         "get_cached_filenames",
-        staticmethod(lambda repo_id, app_name: ["Inference.yml", "app.json", "weights/model.safetensors"]),
+        staticmethod(lambda repo_id, app_name: ["Inference.yml", "app.json", *files]),
     )
     monkeypatch.setattr(
         app_repository_module.LocalAppRepositoryFromHF,
@@ -482,7 +492,7 @@ def test_local_hf_nested_cached_model_is_reported_available(
 
     repo = app_repository_module.LocalAppRepositoryFromHF("org/demo", "demo_app", True)
 
-    assert repo.get_checkpoints_name_available() == ["model.safetensors"]
+    assert repo.get_checkpoints_name_available() == available
 
 
 def test_local_hf_download_inference_refreshes_selected_remote_model(
@@ -1675,7 +1685,7 @@ def test_a_bundle_with_a_declared_helper_package_imports_it_from_a_fresh_workspa
     (source / "helpers" / "util.py").write_text("SCALE = 3\n", encoding="utf-8")
     (source / "Model.py").write_text("from helpers.util import SCALE\n\nVALUE = SCALE * 2\n", encoding="utf-8")
     (source / "Prediction.yml").write_text("Predictor:\n  Model:\n    classpath: Model:Net\n", encoding="utf-8")
-    (source / "CV_0.safetensors").write_bytes(b"weights")
+    save_weights({"Model": {"Net": {"weight": torch.zeros(1)}}}, source / "CV_0.safetensors")
     (source / "app.json").write_text(
         json.dumps(
             {"display_name": "Demo", "description": "Demo", "short_description": "Demo", "tta": 0, "mc_dropout": 0}

@@ -5,7 +5,7 @@
   "tta": 0,
   "mc_dropout": 0,
   "models": [
-    "tiny.pt"
+    "tiny.safetensors"
   ],
   "inputs": {
     "Volume_0": {

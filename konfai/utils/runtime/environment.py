@@ -286,22 +286,37 @@ def save_weights(checkpoint: dict[str, Any], path: str | Path) -> None:
     save_file(tensors, str(path), metadata=metadata)
 
 
+def _weight_name(source: str, name: str) -> tuple[str, str]:
+    """The network and parameter of a tensor name :func:`save_weights` wrote (``Model/<network>/<parameter>``)."""
+    top, _, rest = name.partition("/")
+    network, _, key = rest.partition("/")
+    if top != "Model" or not network or not key:
+        raise KonfAIError(
+            "Checkpoint",
+            f"'{source}' holds '{name}', not a KonfAI weight name ('Model/<network>/<parameter>').",
+            "Write it with 'konfai-apps bundle' or konfai.utils.runtime.save_weights.",
+        )
+    return network, key
+
+
+def check_weights(source: str | Path) -> None:
+    """Refuse a ``.safetensors`` file that holds anything but KonfAI weights, reading its header only."""
+    from safetensors import safe_open
+
+    with safe_open(str(source), "pt") as file:
+        for name in file.keys():
+            _weight_name(str(source), name)
+
+
 def _load_weights(source: str, map_location: Any) -> dict[str, Any]:
     """A ``.safetensors`` file :func:`save_weights` wrote, as the ``{"Model": {network: state_dict}}`` it holds."""
     from safetensors.torch import load_file
 
-    checkpoint: dict[str, Any] = {}
+    models: dict[str, dict[str, Any]] = {}
     for name, tensor in load_file(source, device=str(map_location)).items():
-        try:
-            top, network, key = name.split("/", 2)
-        except ValueError:
-            raise KonfAIError(
-                "Checkpoint",
-                f"'{source}' holds '{name}', not a KonfAI weight name ('Model/<network>/<parameter>').",
-                "Write it with 'konfai-apps bundle' or konfai.utils.runtime.save_weights.",
-            ) from None
-        checkpoint.setdefault(top, {}).setdefault(network, {})[key] = tensor
-    return checkpoint
+        network, key = _weight_name(source, name)
+        models.setdefault(network, {})[key] = tensor
+    return {"Model": models}
 
 
 def safe_torch_load(path_or_url: str | Path, map_location: Any, *, mmap: bool = False) -> Any:

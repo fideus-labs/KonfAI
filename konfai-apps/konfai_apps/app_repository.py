@@ -733,9 +733,9 @@ class LocalAppRepository(AppRepositoryInfo):
     def _find_repo_filename(
         self, requested_filename: str, filenames: list[str], suffix: str | None = None
     ) -> str | None:
-        candidates = [PurePosixPath(requested_filename).as_posix()]
-        if suffix is not None and not candidates[0].endswith(suffix):
-            candidates.append(candidates[0] + suffix)
+        requested = PurePosixPath(requested_filename).as_posix()
+        # With a suffix, only a file carrying it: a model.pt beside the weights is never the app's model.
+        candidates = [requested] if suffix is None or requested.endswith(suffix) else [requested + suffix]
 
         for candidate in candidates:
             if candidate in filenames:

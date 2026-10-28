@@ -548,18 +548,21 @@ def _published(name: str) -> str:
 
 
 def _publish_weights(checkpoint: Path, target: Path) -> None:
-    """Write a run's checkpoint as weights only. Read without unpickling objects: packaging may run in a
-    server process, and a run's checkpoint holds tensors and primitives only."""
+    """Publish a checkpoint as weights only. A run's ``.pt`` is read without unpickling objects
+    (packaging may run in a server process, and a run's checkpoint holds tensors and primitives only);
+    a ``.safetensors`` is copied as it is once its names are KonfAI weight names, so one in another
+    layout is refused here rather than at inference."""
     import torch
-    from konfai.utils.runtime import save_weights
+    from konfai.utils.runtime import check_weights, save_weights
 
     try:
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        if checkpoint.suffix != ".safetensors":
+            save_weights(torch.load(checkpoint, map_location="cpu", weights_only=True), target)
+            return
+        check_weights(checkpoint)
     except Exception as exc:
-        raise AppMetadataError(
-            f"'{checkpoint}' does not load as weights only ({exc}): it holds objects a KonfAI run does not write."
-        ) from exc
-    save_weights(state, target)
+        raise AppMetadataError(f"'{checkpoint}' does not load as KonfAI weights: {exc}") from exc
+    shutil.copy(checkpoint, target)
 
 
 def assemble_bundle(
@@ -645,7 +648,7 @@ def assemble_bundle(
             if staged is not None:
                 target = staging / destination
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if staged.suffix == ".pt" and destination.endswith(".safetensors"):
+                if destination in checkpoint_names:
                     _publish_weights(staged, target)
                 else:
                     shutil.copy(staged, target)

@@ -36,6 +36,7 @@ from konfai.utils.runtime.distributed import setup_gpu as setup_gpu
 from konfai.utils.runtime.distributed import synchronize_data as synchronize_data
 from konfai.utils.runtime.environment import ClusterKwargs as ClusterKwargs
 from konfai.utils.runtime.environment import NeedDevice as NeedDevice
+from konfai.utils.runtime.environment import check_weights as check_weights
 from konfai.utils.runtime.environment import checkpoint_source as checkpoint_source
 from konfai.utils.runtime.environment import clear_directory_except_logs as clear_directory_except_logs
 from konfai.utils.runtime.environment import configure_workflow_environment as configure_workflow_environment
@@ -74,6 +75,7 @@ __all__ = [
     "TensorBoard",
     "apply_cpu_thread_budget",
     "bound_allocator_growth",
+    "check_weights",
     "checkpoint_source",
     "cleanup",
     "clear_directory_except_logs",

@@ -23,7 +23,7 @@ import sys
 
 import pytest
 import torch
-from konfai.utils.runtime import safe_torch_load
+from konfai.utils.runtime import safe_torch_load, save_weights
 from konfai_apps.bundle import assemble_bundle
 from konfai_apps.errors import AppMetadataError
 
@@ -57,12 +57,16 @@ def ascii_locale():
         locale.setlocale(locale.LC_CTYPE, previous)
 
 
+def _weights(path, value=0.0):
+    save_weights({"Model": {"Net": {"weight": torch.full((1,), value)}}}, path)
+
+
 def test_assemble_bundle_layout(tmp_path):
     app_json = _write(tmp_path / "app.json", VALID_META)
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
     checkpoint = tmp_path / "CV_0.safetensors"
-    checkpoint.write_bytes(b"weights")
+    _weights(checkpoint)
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("torch\n")
     model_py = tmp_path / "Model.py"
@@ -109,8 +113,41 @@ def test_a_checkpoint_holding_objects_is_refused_not_unpickled(tmp_path):
     app_json = _write(tmp_path / "app.json", VALID_META)
     checkpoint = tmp_path / "CV_0.pt"
     torch.save({"Model": {"Net": {}}, "object": _Pickled()}, checkpoint)
-    with pytest.raises(AppMetadataError, match="does not load as weights only"):
+    with pytest.raises(AppMetadataError, match="does not load as KonfAI weights"):
         assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
+
+
+def test_safetensors_weights_in_another_layout_are_refused(tmp_path):
+    from safetensors.torch import save_file
+
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    weights = tmp_path / "CV_0.safetensors"
+    save_file({"conv.weight": torch.zeros(1)}, str(weights))
+    with pytest.raises(AppMetadataError, match="not a KonfAI weight name"):
+        assemble_bundle("MR", tmp_path / "out", app_json, [], [str(weights)])
+
+
+def test_safetensors_weights_are_published_as_they_are_and_support_files_untouched(tmp_path):
+    from safetensors.torch import save_file
+
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    checkpoint = tmp_path / "CV_0.safetensors"
+    save_weights({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": 3}, checkpoint)
+    (tmp_path / "assets").mkdir()
+    save_file({"table": torch.ones(2)}, str(tmp_path / "assets" / "lut.safetensors"))
+    bundle = assemble_bundle(
+        "MR",
+        tmp_path / "out",
+        app_json,
+        [],
+        [str(checkpoint)],
+        support_files={"assets/lut.safetensors": "assets/lut.safetensors"},
+        support_root=tmp_path,
+    )
+    assert (bundle / "CV_0.safetensors").read_bytes() == checkpoint.read_bytes()
+    assert (bundle / "assets" / "lut.safetensors").read_bytes() == (
+        tmp_path / "assets" / "lut.safetensors"
+    ).read_bytes()
 
 
 def test_missing_required_keys_raises(tmp_path):
@@ -588,12 +625,12 @@ def test_a_repackaged_bundle_drops_the_previous_checkpoint_and_keeps_user_files(
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
     first = tmp_path / "first.safetensors"
-    first.write_bytes(b"first")
+    _weights(first)
     bundle = assemble_bundle("MR", tmp_path / "out", app_json, [str(config)], [str(first)])
     (bundle / "notes.txt").write_text("mine\n")
 
     new = tmp_path / "new.safetensors"
-    new.write_bytes(b"new")
+    _weights(new)
     assert assemble_bundle("MR", tmp_path / "out", app_json, [str(config)], [str(new)]) == bundle
     assert sorted(path.name for path in bundle.glob("*.safetensors")) == ["new.safetensors"]
     assert json.loads((bundle / "app.json").read_text())["models"] == ["new.safetensors"]
@@ -607,7 +644,7 @@ def test_repackaging_refuses_previous_checkpoints_outside_the_bundle(tmp_path, r
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
     checkpoint = tmp_path / "new.safetensors"
-    checkpoint.write_bytes(b"new")
+    _weights(checkpoint)
     bundle = tmp_path / "out" / "MR"
     bundle.mkdir(parents=True)
     neighbor = bundle.parent / "neighbor.safetensors"
@@ -637,11 +674,11 @@ def test_portable_asset_roles_preserve_other_native_onnx_dependencies(tmp_path, 
     monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
     bundle = tmp_path / "MR"
     bundle.mkdir()
-    metadata = {**VALID_META, "models": ["best.pt"], "portable_assets": ["legacy.onnx.data"]}
+    metadata = {**VALID_META, "models": ["best.safetensors"], "portable_assets": ["legacy.onnx.data"]}
     (bundle / "app.json").write_text(json.dumps(metadata))
     (bundle / "Prediction.yml").write_text("Predictor: {}\n")
     for name in (
-        "best.pt",
+        "best.safetensors",
         "model.onnx",
         "model.onnx.data",
         "manifest.json",
@@ -712,7 +749,7 @@ def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, en
 def test_repackaging_preserves_a_checkpoint_declared_with_a_relative_prefix(tmp_path):
     app_json = _write(tmp_path / "app.json", VALID_META)
     source = tmp_path / "current.safetensors"
-    source.write_bytes(b"replacement weights")
+    _weights(source, 1.0)
     bundle = tmp_path / "out" / "MR"
     bundle.mkdir(parents=True)
     (bundle / "app.json").write_text(json.dumps({**VALID_META, "models": ["./current.safetensors"]}))
@@ -720,7 +757,7 @@ def test_repackaging_preserves_a_checkpoint_declared_with_a_relative_prefix(tmp_
 
     assemble_bundle("MR", bundle.parent, app_json, [], [str(source)])
 
-    assert (bundle / "current.safetensors").read_bytes() == b"replacement weights"
+    assert safe_torch_load(bundle / "current.safetensors", "cpu")["Model"]["Net"]["weight"].item() == 1.0
     assert json.loads((bundle / "app.json").read_text())["models"] == ["current.safetensors"]
 
 
@@ -732,7 +769,7 @@ def _support_workspace(tmp_path):
     (root / "assets").mkdir()
     (root / "assets" / "table.csv").write_text("a,b\n")
     (root / "Prediction.yml").write_text("Predictor: {}\n")
-    (root / "CV_0.safetensors").write_bytes(b"weights")
+    _weights(root / "CV_0.safetensors")
     _write(root / "app.json", VALID_META)
     return root
 
