@@ -349,6 +349,25 @@ inverse is computed for the other direction.""",
     add_device(app_, download=False)
     add_tmp_dir(app_, tmp_dir_help)
 
+    scene = subparsers.add_parser(
+        "scene",
+        help="Write a registration as an OME-Zarr 0.6 scene (images + RFC-5 transformation).",
+        description="""Put the fixed image, the moving image and the transform 'register' wrote into one OME-Zarr
+0.6 store (a directory, or one .ozx file): the transformation as NGFF RFC-5 metadata, in the images' own unit, so
+a viewer or ngff_zarr.resample applies it without a resampled copy. An affine field is stored as its matrix; a
+deformable one as a float32 displacement field, --factor times coarser if asked.""",
+        epilog="""example:
+  impact-reg-konfai scene --transform Output/P000/Transform.h5 -f fixed.ome.zarr -m moving.ome.zarr -o pair.ozx""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    scene.add_argument("--transform", type=local_path, required=True, help="The transform 'register' wrote.")
+    scene.add_argument("-f", "--fixed-image", type=local_path, required=True, help="The fixed image.")
+    scene.add_argument("-m", "--moving-image", type=local_path, required=True, help="The moving image.")
+    scene.add_argument("-o", "--output", type=local_path, required=True, help="The scene: a directory or a .ozx.")
+    scene.add_argument(
+        "--factor", type=at_least(1), default=1, help="Store a deformable field this many times coarser."
+    )
+
     args = parser.parse_args()
     if args.command == "register":
         args.presets += args.preset_options
@@ -448,6 +467,11 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
         )
         if args.keep_fields and not args.quiet:
             _report_ensemble(args.output, args.presets)
+    elif args.command == "scene":
+        from impact_reg_konfai.scene import write_scene
+
+        kind = write_scene(args.fixed_image, args.moving_image, args.transform, args.output, args.factor)
+        print(f"[ImpactReg] scene {args.output} ({kind})", flush=True)
 
     elif args.command == "eval":
         # Nothing is mandatory except at least one complete modality (image / seg / fid).
