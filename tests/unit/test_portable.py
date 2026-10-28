@@ -1477,6 +1477,19 @@ TensorCast: {dtype: int16}
     assert chain["write"]["format"] == "mha"
 
 
+def test_compiling_leaves_the_callers_config_as_it_was(tmp_path: Path) -> None:
+    # building the workflow writes its defaults back into the config it reads; the compiler restores the
+    # caller's file, and the defaults still reach the program
+    from konfai.portable import compile_transform
+
+    config = _reducing_config(tmp_path, "Reduce: {operator: Median, output: template}")
+    config.write_bytes(config.read_bytes().replace(b"\n", b"\r\n"))  # its line endings too
+    before = config.read_bytes()
+    (chain,) = compile_transform(config, tmp_path / "Transforms")["chains"]
+    assert config.read_bytes() == before
+    assert chain["reduce"]["grid"] == "strict"
+
+
 @pytest.mark.parametrize(
     ("operator", "op"),
     [
