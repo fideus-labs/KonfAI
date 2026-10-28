@@ -339,6 +339,22 @@ def current_free_vram(devices: list[int], remote_server: RemoteServer | None = N
     return min(frees) if frees else None
 
 
+def _installer() -> list[str]:
+    """The command that installs into THIS interpreter: its pip, or uv's when the environment has no pip (``uv venv``
+    makes one without it)."""
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install"]
+    uv = shutil.which("uv")
+    if uv is not None:
+        return [uv, "pip", "install", "--python", sys.executable]
+    raise AppRepositoryError(
+        f"The environment of {sys.executable} has no pip and no uv is on PATH: an app's requirements cannot be"
+        " installed.",
+        f"Install pip into it ('{sys.executable} -m ensurepip'), or set KONFAI_APPS_INSTALL_REQUIREMENTS=0 and"
+        " install them yourself.",
+    )
+
+
 class VolumeType(Enum):
     SEGMENTATION = "SEGMENTATION"
     VOLUME = "VOLUME"
@@ -1269,7 +1285,7 @@ class LocalAppRepository(AppRepositoryInfo):
         with tempfile.TemporaryDirectory() as directory:
             constraints = Path(directory) / "constraints.txt"
             constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
-            command = [sys.executable, "-m", "pip", "install", *flags, "-c", str(constraints), *requirements]
+            command = [*_installer(), *flags, "-c", str(constraints), *requirements]
             # pip's report is echoed as it comes, and kept: the lines that name a conflict go in the error.
             with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as pip:  # nosec B603
                 report = []
