@@ -76,7 +76,29 @@ The tables in this documentation give the main arguments. For the complete list:
 
 - run `konfai <COMMAND> --init`: the config is filled with every argument and its default;
 - run `konfai list <kind>` for the exact names;
+- let your editor complete them ({ref}`below <config-editor>`);
 - or read the class's `__init__`.
+
+(config-editor)=
+## Completion in your editor
+
+Each config file has a JSON Schema, published with this documentation:
+`https://konfai.readthedocs.io/en/stable/schema/<File>.schema.json`, for `Config`, `Prediction`,
+`Evaluation` and `Transform`. In VS Code, install the YAML extension by Red Hat and add to your settings:
+
+```json
+"yaml.schemas": {
+  "https://konfai.readthedocs.io/en/stable/schema/Config.schema.json": "**/Config.yml",
+  "https://konfai.readthedocs.io/en/stable/schema/Prediction.schema.json": "**/Prediction.yml",
+  "https://konfai.readthedocs.io/en/stable/schema/Evaluation.schema.json": "**/Evaluation.yml",
+  "https://konfai.readthedocs.io/en/stable/schema/Transform.schema.json": "**/Transform.yml"
+}
+```
+
+The editor then completes keys and the names of transforms, augmentations, losses and schedulers, shows each
+default, and underlines a misspelled key or a value of the wrong type. A model's own arguments and a class
+named as `module:Class` are not checked. For a file with another name, put
+`# yaml-language-server: $schema=<schema URL>` on its first line.
 
 ## `classpath`
 

@@ -101,6 +101,7 @@ dev = [
   "pytest",
   "pytest-cov",
   "pytest-xdist",
+  "jsonschema",
   "pre-commit",
   "ruff==0.15.2",
   "mypy",
