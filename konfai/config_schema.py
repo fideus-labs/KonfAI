@@ -454,6 +454,6 @@ def _kinds(schema: dict[str, Any]) -> list[str]:
     return [_KINDS.get(item, item) for item in ([kind] if isinstance(kind, str) else kind or [])]
 
 
-def _nearest(word: str, names: Any) -> str:
-    match = difflib.get_close_matches(word, [str(name) for name in names], n=1, cutoff=0.5)
+def _nearest(word: Any, names: Any) -> str:
+    match = difflib.get_close_matches(str(word), [str(name) for name in names], n=1, cutoff=0.5)
     return f" (did you mean '{match[0]}'?)" if match else ""
