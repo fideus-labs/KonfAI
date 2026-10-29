@@ -26,7 +26,7 @@ import re
 from math import prod
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -132,6 +132,12 @@ def _sweep_first(slices: list[list[slice]], sweep_axis: int) -> list[tuple[slice
 DEFAULT_OVERLAP_FRACTION = 0.2
 
 OverlapSpec = int | float | str | list[int | float | str] | None
+
+#: Where the windows of an axis sit (``Patch.placement``): ``pad`` on the stride, the last one cut at the volume's end
+#: and padded; ``monai`` on the stride, the last one moved back to end on the last voxel (MONAI's
+#: ``dense_patch_slices``); ``spread`` evenly from the first voxel to the last (nnU-Net's
+#: ``compute_steps_for_sliding_window``).
+Placement = Literal["pad", "monai", "spread"]
 
 
 def concretize_patch_size(
@@ -282,6 +288,17 @@ def resolve_patch(
     return concrete
 
 
+def _spread(extent: int, length: int, overlap: int) -> list[int]:
+    """nnU-Net's window starts on one axis (``compute_steps_for_sliding_window``), its step ``length - overlap``:
+    the fewest windows that step covers ``extent`` with, spread evenly from 0 to ``extent - length``, each start
+    rounded as numpy rounds. One window when the axis is no longer than it."""
+    if extent <= length:
+        return [0]
+    count = -(-(extent - length) // (length - overlap)) + 1
+    step = (extent - length) / (count - 1)
+    return [int(np.round(step * i)) for i in range(count)]
+
+
 def get_patch_slices_from_shape(
     patch_size: list[int],
     shape: list[int],
@@ -289,15 +306,17 @@ def get_patch_slices_from_shape(
     multiple: list[int] | None = None,
     declared_free_axis: bool | None = None,
     sweep_axis: int = 0,
-    inside: bool = True,
+    placement: Placement = "pad",
 ) -> list[tuple[slice, ...]]:
-    """The patch grid of ``shape``, ordered with ``sweep_axis`` outermost.
+    """The patch grid of ``shape``, ordered with ``sweep_axis`` outermost, its windows placed by ``placement``.
 
-    Patches start every ``patch - overlap`` voxels, and the last one of an axis ends on the volume's last voxel, as
-    MONAI's ``dense_patch_slices`` places it: no patch reaches past the volume, so none is padded. An axis shorter
-    than the patch holds one patch, padded on both sides by the read. ``inside`` False keeps the last patch on the
-    stride, cut short at the volume's end: the slots of a reduction (``Patch.pad_to_patch`` False) then never
-    overlap, so no voxel reaches its sums twice.
+    ``pad`` starts a patch every ``patch - overlap`` voxels and cuts the last one of an axis at the volume's end (the
+    read pads it after the volume): the slots of a reduction (``Patch.pad_to_patch`` False) never overlap there, so
+    no voxel reaches its sums twice. ``monai`` moves that last patch back to end on the volume's last voxel, as
+    MONAI's ``dense_patch_slices`` places it. ``spread`` takes as many patches as a step of ``patch - overlap`` needs
+    and spreads them evenly from the first voxel to the last, as nnU-Net's ``compute_steps_for_sliding_window`` with
+    ``tile_step_size = (patch - overlap) / patch``. Under both, only an axis shorter than the patch is padded, on both
+    sides, by the read.
     """
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple``.
@@ -342,13 +361,17 @@ def get_patch_slices_from_shape(
 
     for dim in range(len(shape)):
         slices.append([])
+        if placement == "spread":
+            length, extent = patch_size[dim], shape[dim]
+            slices[dim] = [slice(start, min(start + length, extent)) for start in _spread(extent, length, overlap[dim])]
+            continue
         index = 0
         while True:
             start = (patch_size[dim] - overlap[dim]) * index
 
             end = start + patch_size[dim]
             if end >= shape[dim]:
-                if inside:
+                if placement == "monai":
                     start = max(shape[dim] - patch_size[dim], 0)
                 end = shape[dim]
                 slices[dim].append(slice(start, end))

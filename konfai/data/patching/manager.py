@@ -177,6 +177,7 @@ class DatasetManager:
                 overlap=patch.overlap,
                 pad_value=patch.pad_value,
                 extend_slice=patch.extend_slice,
+                placement=patch.placement,
             )
             if patch
             else DatasetPatch(_shape)
