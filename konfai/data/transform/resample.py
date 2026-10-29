@@ -441,7 +441,7 @@ def _resample_with_sitk(
     stages: SpatialStages,
     region_starts: list[int],
     mode: str,
-    fill: float,
+    fill: float | str,
     sitk_input: _SitkInput | None = None,
 ) -> torch.Tensor | None:
     """One region of a resample through ITK's own filter, on the host.
@@ -455,8 +455,8 @@ def _resample_with_sitk(
     """
     from konfai.utils.ITK import encode_transform_stages
 
-    if payload.dtype in (torch.bool, torch.bfloat16, torch.float16):
-        return None
+    if payload.dtype in (torch.bool, torch.bfloat16, torch.float16) or fill == "edge":
+        return None  # ITK has no pixel type for it, or no border extrapolation: the walk takes it
     interpolator = {"nearest": sitk.sitkNearestNeighbor, "linear": sitk.sitkLinear, "cubic": sitk.sitkBSpline}
     if mode == "cubic":
         return None  # ITK's BSpline is not Keys' Catmull-Rom: the walk keeps its own cubic
@@ -764,7 +764,8 @@ class Resample(TransformInverse):
     field group) declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled. One that
     no route can serve refuses as the plan is built, before a byte is written. A case reaching only
     PART of the target grid is legal and common (the rest takes ``fill``), and the plan prints how
-    much of the grid it covers.
+    much of the grid it covers. ``fill: edge`` gives it the volume's edge voxel instead, as MONAI's
+    ``Spacingd`` does (``padding_mode: border``).
     """
 
     working_multiple = 6.5  # the sampling grid, the taps, and the widening a stored integer forces
@@ -781,11 +782,16 @@ class Resample(TransformInverse):
         field_group: str | None = None,
         align: str = "extent",
         interpolation: str | None = None,
-        fill: float = 0.0,
+        fill: float | str = 0.0,
         inverse: bool = True,
         precision: str = "exact",
     ) -> None:
         super().__init__(inverse)
+        if isinstance(fill, str) and fill != "edge":
+            raise TransformError(
+                f"'Resample' has an unknown fill '{fill}'.",
+                "Give a number, or 'edge' for the volume's edge voxel past it (MONAI's padding_mode: border).",
+            )
         if interpolation is not None and interpolation not in ("linear", "nearest", "cubic"):
             raise TransformError(
                 f"'Resample' has an unknown interpolation '{interpolation}'.",
@@ -807,7 +813,7 @@ class Resample(TransformInverse):
             )
         self.precision = precision
         self.interpolation = interpolation
-        self.fill_value = float(fill)
+        self.fill_value = fill if fill == "edge" else float(fill)
         self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align)
         if transforms is not None and not transforms:
             raise TransformError(
@@ -1691,7 +1697,7 @@ class Resample(TransformInverse):
                 if covered < self._WORTH_SAYING:
                     notes.append(
                         f"case '{name}' covers {covered * 100:.1f}% of {self._target.describe()};"
-                        f" the rest of what it writes is fill ({self.fill_value:g})"
+                        f" the rest of what it writes is fill ({self.fill_value})"
                     )
         except TransformError:
             pass

@@ -552,6 +552,7 @@ class OutputDataset(Dataset, NeedDevice):
             self.patch_combine,
             batch=False,
             sweep_axis=input_dataset.patch.get_sweep_axis(index_augmentation),
+            placement=input_dataset.patch.placement,
         )
 
     def _inverses(self, dataset: DatasetIter, patch: bool) -> list[TransformInverse]:
@@ -1434,7 +1435,11 @@ class OutputLayerDataset(OutputDataset):
                 [int(overlap * r) for overlap, r in zip(window.overlaps, ratio, strict=True)],
             )
         self.output_layer_accumulator[index_dataset][index_augmentation] = Accumulator(
-            scaled, [int(size) for size in layer.shape[1:]], window, batch=False
+            scaled,
+            [int(size) for size in layer.shape[1:]],
+            window,
+            batch=False,
+            placement=input_dataset.patch.placement,
         )
 
 
