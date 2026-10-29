@@ -822,3 +822,49 @@ def test_browse_dataset_depth_is_inclusive_and_bounded(tmp_path: Path) -> None:
     assert max(entry["depth"] for entry in depth2["entries"]) == 2
     assert "A/B" in paths
     assert "A/B/C" not in paths
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
+    load_mcp_server: Callable[[], ModuleType],
+) -> None:
+    """Every mistake comes back at once, at its key: a component KonfAI refuses blocks the run, a key it
+    does not read is a warning, as the engine itself treats them."""
+    mcp_server = load_mcp_server()
+    segmentation = Path(__file__).resolve().parents[2] / "examples" / "Segmentation"
+    example = (segmentation / "Config.yml").read_text()
+    content = example.replace("  epochs:", "  epoch:", 1).replace("Standardize:", "Standardise:", 1)
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("initialize_session", {"overwrite": True})
+            model = (segmentation / "UNet.yml").read_text()
+            await client.call_tool("write_session_file", {"relative_path": "UNet.yml", "content": model})
+            written = await client.call_tool("write_workflow_config", {"workflow": "train", "content": content})
+            errors = written.structured_content["schema_errors"]
+            assert "Trainer: unknown key 'epoch' (did you mean 'epochs'?)" in errors
+            assert any("unknown 'Standardise' (did you mean 'Standardize'?)" in error for error in errors)
+            assert written.structured_content["next_actions"][0] == "write_workflow_config"
+
+            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            blocking = [issue["message"] for issue in review["blocking_issues"] if issue["code"] == "config_schema"]
+            unread = [warning["message"] for warning in review["warnings"] if warning["code"] == "config_key_unread"]
+            assert len(blocking) == 1 and "Standardise" in blocking[0]
+            assert unread == ["Trainer: unknown key 'epoch' (did you mean 'epochs'?)"]
+            assert review["ok"] is False
+
+            # A value of the wrong type is reported, not read by the semantic checks that follow.
+            wrong_type = example.replace("extend_slice: 0", "extend_slice: [1, 2]", 1)
+            await client.call_tool("write_workflow_config", {"workflow": "train", "content": wrong_type})
+            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            assert [issue["code"] for issue in review["blocking_issues"]] == ["config_schema"]
+            assert "extend_slice" in review["blocking_issues"][0]["message"]
+
+            await client.call_tool("write_workflow_config", {"workflow": "train", "content": "Trainer: []\n"})
+            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            assert [issue["message"] for issue in review["blocking_issues"]] == ["Trainer: [] is not a mapping"]
+
+            fixed = await client.call_tool("write_workflow_config", {"workflow": "train", "content": example})
+            assert "schema_errors" not in fixed.structured_content
+
+    asyncio.run(scenario())

@@ -102,6 +102,21 @@ default, and underlines a misspelled key or a value of the wrong type. A model's
 named as `module:Class` are not checked. For a file with another name, put
 `# yaml-language-server: $schema=<schema URL>` on its first line.
 
+Without an editor, the same check lists every mistake at once (it needs `pip install jsonschema`):
+
+```python
+from ruamel.yaml import YAML
+from konfai.config_schema import config_errors
+
+for mistake in config_errors(YAML(typ="safe").load(open("Config.yml")), "Config.yml"):
+    print(f"{mistake.path}: {mistake.message}")
+```
+
+```text
+Trainer: unknown key 'epoch' (did you mean 'epochs'?)
+Trainer.Dataset.groups_src.CT.groups_dest.CT.transforms: unknown 'Standardise' (did you mean 'Standardize'?)
+```
+
 ## `classpath`
 
 A `classpath` picks the class to build:
