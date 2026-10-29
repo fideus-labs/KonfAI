@@ -532,6 +532,12 @@ def resolve_support_files(
             set(),
         )
     _check_file_layout(planned)
+    weights = sorted(name for name in planned if name.endswith((".pt", ".safetensors")))
+    if weights:
+        raise AppMetadataError(
+            f"Support files {weights} carry a weight suffix (.pt, .safetensors), which an app reserves for its "
+            "models: pass them as checkpoints, or store the data under another extension."
+        )
     return dict(sorted(planned.items()))
 
 

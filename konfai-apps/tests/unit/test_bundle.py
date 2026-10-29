@@ -127,27 +127,27 @@ def test_safetensors_weights_in_another_layout_are_refused(tmp_path):
         assemble_bundle("MR", tmp_path / "out", app_json, [], [str(weights)])
 
 
-def test_safetensors_weights_are_published_as_they_are_and_support_files_untouched(tmp_path):
-    from safetensors.torch import save_file
-
+def test_safetensors_weights_are_published_as_they_are(tmp_path):
     app_json = _write(tmp_path / "app.json", VALID_META)
     checkpoint = tmp_path / "CV_0.safetensors"
     save_weights({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": 3}, checkpoint)
-    (tmp_path / "assets").mkdir()
-    save_file({"table": torch.ones(2)}, str(tmp_path / "assets" / "lut.safetensors"))
-    bundle = assemble_bundle(
-        "MR",
-        tmp_path / "out",
-        app_json,
-        [],
-        [str(checkpoint)],
-        support_files={"assets/lut.safetensors": "assets/lut.safetensors"},
-        support_root=tmp_path,
-    )
+    bundle = assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
     assert (bundle / "CV_0.safetensors").read_bytes() == checkpoint.read_bytes()
-    assert (bundle / "assets" / "lut.safetensors").read_bytes() == (
-        tmp_path / "assets" / "lut.safetensors"
-    ).read_bytes()
+
+
+def test_a_support_file_with_a_weight_suffix_is_refused(tmp_path):
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    (tmp_path / "lut.safetensors").write_bytes(b"data")
+    with pytest.raises(AppMetadataError, match="reserves for its models"):
+        assemble_bundle(
+            "MR",
+            tmp_path / "out",
+            app_json,
+            [],
+            [],
+            support_files={"lut.safetensors": "lut.safetensors"},
+            support_root=tmp_path,
+        )
 
 
 def test_missing_required_keys_raises(tmp_path):

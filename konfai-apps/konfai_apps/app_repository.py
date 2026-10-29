@@ -1387,9 +1387,9 @@ class LocalAppRepository(AppRepositoryInfo):
         Resolve the checkpoint(s) to fine-tune into ``(basename, source_path)`` pairs.
 
         If ``name_of_models`` is provided, each requested name is resolved to a ``.safetensors`` file.
-        Otherwise the first checkpoint advertised in ``app.json`` (falling back to the first
-        available weights) is selected. Missing files trigger a Hugging Face refresh, mirroring
-        :meth:`download_inference`.
+        Otherwise the first weights ``app.json`` declares are selected, and only an app.json that declares
+        none falls back to the first available weights. Missing files trigger a Hugging Face refresh,
+        mirroring :meth:`download_inference`.
         """
         selected: list[str] = []
         if name_of_models:
@@ -1397,12 +1397,19 @@ class LocalAppRepository(AppRepositoryInfo):
                 filenames = self._refreshed_filenames() or filenames
             selected = [self._require_repo_filename(name, filenames, suffix=WEIGHTS) for name in name_of_models]
         else:
-            default_name: str | None = None
-            for candidate in self._checkpoints_name:
-                resolved = self._find_repo_filename(candidate, filenames, suffix=WEIGHTS)
-                if resolved is not None:
-                    default_name = resolved
-                    break
+
+            def declared(names: list[str]) -> str | None:
+                resolved = (self._find_repo_filename(str(c), names, suffix=WEIGHTS) for c in self._checkpoints_name)
+                return next((name for name in resolved if name is not None), None)
+
+            default_name = declared(filenames)
+            if default_name is None and self._checkpoints_name:
+                filenames = self._refreshed_filenames() or filenames
+                default_name = declared(filenames)
+                if default_name is None:
+                    raise AppRepositoryError(
+                        f"None of the weights app.json declares {self._checkpoints_name} is in app '{self._app_name}'."
+                    )
             if default_name is None:
                 available = sorted(name for name in filenames if name.endswith(WEIGHTS))
                 if not available:

@@ -64,7 +64,8 @@ The result is `dist/CT_SEG/`. Each checkpoint is written as a `.safetensors` fil
 holding the model weights only: the optimizer state and the training counters stay in
 the run's `.pt`. The quickstart uses the shipped YAML model, so there
 is no custom Python file to include. For your own model, add `--model-py Model.py`.
-Use `--support-file DESTINATION=SOURCE` with `--support-root` for helper files.
+Use `--support-file DESTINATION=SOURCE` with `--support-root` for helper files. A helper
+file cannot end in `.pt` or `.safetensors`: an app reserves those for its models.
 Check the generated `requirements.txt` before distributing the app.
 
 ## Check the packaged result
