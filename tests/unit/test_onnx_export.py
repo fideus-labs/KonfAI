@@ -168,6 +168,26 @@ def test_any_module_exposing_named_forward_exports(tmp_path):
         np.testing.assert_allclose(produced, torch.tanh(model.conv(example)).numpy(), atol=1e-5)
 
 
+def test_a_model_reading_two_groups_names_each_in_its_manifest_and_keeps_a_stated_blend(tmp_path):
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+
+    from konfai.export import export_to_onnx
+
+    class Masked(torch.nn.Module):
+        def named_forward(self, x, mask):
+            yield "masked", torch.tanh(x) * mask
+
+    examples = (torch.randn(1, 2, 16, 16), torch.ones(1, 1, 16, 16))
+    _, manifest = export_to_onnx(
+        Masked(), tmp_path, examples, input_group=["CT", "MASK"], extra_manifest={"blend": "Gaussian"}
+    )
+
+    assert manifest["input"]["group"] == "CT" and manifest["input"]["channels"] == 2
+    assert manifest["reads"] == [{"group": "MASK", "channels": 1, "preprocessing": []}]
+    assert manifest["blend"] == "Gaussian"
+
+
 def test_export_unknown_head_raises(tmp_path):
     pytest.importorskip("onnx")
     pytest.importorskip("onnxscript")
