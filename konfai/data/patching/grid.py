@@ -19,7 +19,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, get_args
 
 import numpy as np
 import torch
@@ -66,6 +66,8 @@ class Patch(ABC):
                 "Give a number, 'edge' (the volume's edge voxel, MONAI's padding_mode: replicate), or None (the"
                 " data's minimum).",
             )
+        if placement not in get_args(Placement):
+            raise ConfigError(f"Patch has an unknown placement '{placement}'.", f"Give one of {get_args(Placement)}.")
         if extend_slice != 0 and patch_size is not None and patch_size[0] != 1:
             raise ValueError(
                 "`extend_slice` can only be used when patch_size[0] == 1 "
