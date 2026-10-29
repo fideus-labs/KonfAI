@@ -280,7 +280,7 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool = False) -> l
             apps = sorted(_apps_in(files))
             if force_update or _cached_apps(base_repo_id, revision) != apps:
                 prefixes = tuple(f"{app}/" for app in apps)
-                small = [path for path in files if path.startswith(prefixes) and not path.endswith(CHECKPOINTS)]
+                small = [path for path in files if path.startswith(prefixes) and not path.endswith(WEIGHTS)]
                 snapshot_download(repo_id=base_repo_id, repo_type="model", revision=revision, allow_patterns=small)  # nosec B615
             return apps
         except Exception as exc:
@@ -356,10 +356,19 @@ class TerminologyEntry:
 # volume when the caller omits it (all-ones = whole-image, e.g. a no-restriction mask; all-zeros = empty).
 INPUT_DEFAULTS = ("ones", "zeros")
 
-#: An app's weights: a run's .pt is published as .safetensors by 'konfai-apps bundle'.
-WEIGHTS = ".safetensors"
-#: What an app never fetches as a plain asset: its weights, and a checkpoint an older bundle still holds.
-CHECKPOINTS = (".pt", WEIGHTS)
+#: An app's weights, preferred first: 'konfai-apps bundle' writes .safetensors, an older bundle holds a .pt.
+WEIGHTS = (".safetensors", ".pt")
+
+
+def _weight_files(filenames: list[str]) -> list[str]:
+    """Each model of a listing once, in listing order: its .safetensors, else its .pt."""
+    safetensors, pt = WEIGHTS
+    return [
+        name
+        for name in filenames
+        if name.endswith(safetensors) or (name.endswith(pt) and name.removesuffix(pt) + safetensors not in filenames)
+    ]
+
 
 # Training knobs a caller names directly, and the config key each one writes. Sugar over ``--set``:
 # one path applies them, so a knob costs a row here rather than its own YAML-writing branch.
@@ -629,7 +638,7 @@ class LocalAppRepository(AppRepositoryInfo):
 
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
         for filename in filenames:
-            if not filename.endswith(CHECKPOINTS):
+            if not filename.endswith(WEIGHTS):
                 self._download(filename)
         metadata_file_path = self._download("app.json")
         with open(metadata_file_path, encoding="utf-8") as file:
@@ -731,31 +740,32 @@ class LocalAppRepository(AppRepositoryInfo):
         ]
 
     def _find_repo_filename(
-        self, requested_filename: str, filenames: list[str], suffix: str | None = None
+        self, requested_filename: str, filenames: list[str], suffix: tuple[str, ...] = ()
     ) -> str | None:
         requested = PurePosixPath(requested_filename).as_posix()
-        # With a suffix, only a file carrying it: a model.pt beside the weights is never the app's model.
-        candidates = [requested] if suffix is None or requested.endswith(suffix) else [requested + suffix]
+        # With suffixes, only a file carrying one, in their order of preference, whichever one the name carries.
+        stem = next((requested.removesuffix(s) for s in suffix if requested.endswith(s)), requested)
+        candidates = [stem + s for s in suffix] if suffix else [requested]
 
         for candidate in candidates:
             if candidate in filenames:
                 return candidate
 
-        basename_matches = [
-            filename
-            for filename in filenames
-            if PurePosixPath(filename).name in {PurePosixPath(c).name for c in candidates}
-        ]
-        if len(basename_matches) == 1:
-            return basename_matches[0]
-        if len(basename_matches) > 1:
-            raise AppRepositoryError(
-                f"Multiple files match '{requested_filename}' in app '{self._app_name}'. "
-                "Please use an explicit relative path in the app metadata."
-            )
+        for candidate in candidates:
+            name = PurePosixPath(candidate).name
+            basename_matches = [filename for filename in filenames if PurePosixPath(filename).name == name]
+            if len(basename_matches) == 1:
+                return basename_matches[0]
+            if len(basename_matches) > 1:
+                raise AppRepositoryError(
+                    f"Multiple files match '{requested_filename}' in app '{self._app_name}'. "
+                    "Please use an explicit relative path in the app metadata."
+                )
         return None
 
-    def _require_repo_filename(self, requested_filename: str, filenames: list[str], suffix: str | None = None) -> str:
+    def _require_repo_filename(
+        self, requested_filename: str, filenames: list[str], suffix: tuple[str, ...] = ()
+    ) -> str:
         resolved = self._find_repo_filename(requested_filename, filenames, suffix=suffix)
         if resolved is None:
             raise AppRepositoryError(f"File '{requested_filename}' was not found in app '{self._app_name}'.")
@@ -1144,7 +1154,7 @@ class LocalAppRepository(AppRepositoryInfo):
         filenames = self._get_filenames()
         files_path: list[Path] = []
         for filename in filenames:
-            if not filename.endswith(CHECKPOINTS):
+            if not filename.endswith(WEIGHTS):
                 files_path.append(self._download(filename))
         return files_path
 
@@ -1159,7 +1169,7 @@ class LocalAppRepository(AppRepositoryInfo):
         codes_path: list[tuple[str, Path]] = []
 
         inference_file_path = self._download(self._require_repo_filename(prediction_file, filenames))
-        available_models = [name for name in filenames if name.endswith(WEIGHTS)]
+        available_models = _weight_files(filenames)
         if len(name_of_models):
             if any(self._find_repo_filename(name, filenames, suffix=WEIGHTS) is None for name in name_of_models):
                 filenames = self._refreshed_filenames() or filenames
@@ -1173,7 +1183,7 @@ class LocalAppRepository(AppRepositoryInfo):
                 filenames = self._refreshed_filenames() or filenames
             if len(declared) < number_of_model:
                 raise AppRepositoryError(
-                    f"Expected {number_of_model} model files (.safetensors), but app.json declares {len(declared)}: {declared}."
+                    f"Expected {number_of_model} model files, but app.json declares {len(declared)}: {declared}."
                 )
             for name in declared[:number_of_model]:
                 models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=WEIGHTS)))
@@ -1183,27 +1193,26 @@ class LocalAppRepository(AppRepositoryInfo):
             models_to_download = available_models
             remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
             if remote_filenames is not None:
-                remote_models = [name for name in remote_filenames if name.endswith(WEIGHTS)]
+                remote_models = _weight_files(remote_filenames)
                 models_to_download = available_models + [name for name in remote_models if name not in available_models]
                 filenames = remote_filenames
             if len(models_to_download) < number_of_model:
                 raise AppRepositoryError(
-                    f"Expected {number_of_model} model files (.safetensors), but found "
-                    f"{len(models_to_download)} in the repository. An app ships its weights as .safetensors: "
-                    "'konfai-apps bundle' writes them from a run's .pt."
+                    f"Expected {number_of_model} model files (.safetensors or .pt), but found "
+                    f"{len(models_to_download)} in the repository."
                 )
             for name in models_to_download[:number_of_model]:
                 models_path.append(self._download(name))
 
         # Make every bundle asset (custom .py, elastix parameter maps, lookup tables, …) available in
         # the run workspace, as documented ("files can live in the app directory and will be available
-        # at runtime"). Model weights (.safetensors) are handled separately via ``models_path``, and the
+        # at runtime"). Model weights (.safetensors, .pt) are handled separately via ``models_path``, and the
         # files app.json declares under "portable_assets" (an ONNX export and its tensor data) are the
         # portable runtime's: the native path does not copy them. A bundle that declares none keeps
         # the inclusive contract, since its assets' consumers are unknown.
         portable = set(self._portable_assets)
         for filename in filenames:
-            if not filename.endswith(CHECKPOINTS) and filename not in portable:
+            if not filename.endswith(WEIGHTS) and filename not in portable:
                 codes_path.append((filename, self._download(filename)))
 
         self._install_requirements(filenames)
@@ -1306,7 +1315,7 @@ class LocalAppRepository(AppRepositoryInfo):
         config_filename = self._require_repo_filename(evaluation_file, filenames)
         evaluation_file_path = self._download(config_filename)
         for filename in filenames:
-            if filename != config_filename and not filename.endswith(CHECKPOINTS):
+            if filename != config_filename and not filename.endswith(WEIGHTS):
                 codes_path.append((filename, self._download(filename)))
         self._install_requirements(filenames)
         return evaluation_file_path, codes_path
@@ -1317,7 +1326,7 @@ class LocalAppRepository(AppRepositoryInfo):
         config_filename = self._require_repo_filename(uncertainty_file, filenames)
         uncertainty_file_path = self._download(config_filename)
         for filename in filenames:
-            if filename != config_filename and not filename.endswith(CHECKPOINTS):
+            if filename != config_filename and not filename.endswith(WEIGHTS):
                 codes_path.append((filename, self._download(filename)))
         self._install_requirements(filenames)
         return uncertainty_file_path, codes_path
@@ -1386,7 +1395,7 @@ class LocalAppRepository(AppRepositoryInfo):
         """
         Resolve the checkpoint(s) to fine-tune into ``(basename, source_path)`` pairs.
 
-        Each name of ``name_of_models`` is resolved to a ``.safetensors`` file; with none, the first weights
+        Each name of ``name_of_models`` is resolved to a ``.safetensors`` file, else a ``.pt``; with none, the first weights
         ``app.json`` declares are, and only an app.json that declares none falls back to the first available
         weights. Missing files trigger a Hugging Face refresh, mirroring :meth:`download_inference`.
         """
@@ -1397,12 +1406,14 @@ class LocalAppRepository(AppRepositoryInfo):
                 filenames = self._refreshed_filenames() or filenames
             selected = [self._require_repo_filename(name, filenames, suffix=WEIGHTS) for name in name_of_models]
         else:
-            available = sorted(name for name in filenames if name.endswith(WEIGHTS))
+            available = sorted(_weight_files(filenames))
             if not available:
                 filenames = self._refreshed_filenames() or filenames
-                available = sorted(name for name in filenames if name.endswith(WEIGHTS))
+                available = sorted(_weight_files(filenames))
             if not available:
-                raise AppRepositoryError(f"No weights (.safetensors) found to fine-tune in app '{self._app_name}'.")
+                raise AppRepositoryError(
+                    f"No weights (.safetensors or .pt) found to fine-tune in app '{self._app_name}'."
+                )
             selected = [available[0]]
 
         return [(PurePosixPath(repo_name).name, self._download(repo_name)) for repo_name in selected]
@@ -1437,7 +1448,7 @@ class LocalAppRepository(AppRepositoryInfo):
         models = self._resolve_fine_tune_models(filenames, name_of_models)
 
         for filename in filenames:
-            if filename.endswith(CHECKPOINTS):
+            if filename.endswith(WEIGHTS):
                 continue
             dest = path / filename
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1584,7 +1595,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
             if isinstance(entry, RepoFolder):
                 continue
             entry_path = PurePosixPath(entry.path)
-            if entry_path.suffix not in CHECKPOINTS:
+            if entry_path.suffix not in WEIGHTS:
                 sync_patterns.add(entry_path.as_posix())
 
         return sorted(sync_patterns)

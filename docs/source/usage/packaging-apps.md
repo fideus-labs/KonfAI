@@ -62,7 +62,8 @@ konfai-apps bundle CT_SEG \
 
 The result is `dist/CT_SEG/`. Each checkpoint is written as a `.safetensors` file
 holding the model weights only: the optimizer state and the training counters stay in
-the run's `.pt`. The quickstart uses the shipped YAML model, so there
+the run's `.pt`. An app still reads the `.pt` weights of an older bundle, and takes the
+`.safetensors` when both are there. The quickstart uses the shipped YAML model, so there
 is no custom Python file to include. For your own model, add `--model-py Model.py`.
 Use `--support-file DESTINATION=SOURCE` with `--support-root` for helper files. A helper
 file cannot end in `.pt` or `.safetensors`: an app reserves those for its models.
