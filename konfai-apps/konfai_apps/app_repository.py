@@ -1193,8 +1193,9 @@ class LocalAppRepository(AppRepositoryInfo):
             models_to_download = available_models
             remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
             if remote_filenames is not None:
-                remote_models = _weight_files(remote_filenames)
-                models_to_download = available_models + [name for name in remote_models if name not in available_models]
+                # One entry per model across both listings: a local CV_0.pt and a remote CV_0.safetensors are one.
+                merged = list(dict.fromkeys(available_models + _weight_files(remote_filenames)))
+                models_to_download = _weight_files(merged)
                 filenames = remote_filenames
             if len(models_to_download) < number_of_model:
                 raise AppRepositoryError(
