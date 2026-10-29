@@ -224,7 +224,7 @@ class TestPatchedReductionIdentity:
         rng = np.random.default_rng(0)
         out = rng.random((37, 41, 29))
         tgt = rng.random((37, 41, 29))
-        slices = get_patch_slices_from_shape(patch, [37, 41, 29], 0, inside=False)  # a reduction's disjoint slots
+        slices = get_patch_slices_from_shape(patch, [37, 41, 29], 0)
 
         abs_sum, sq_sum, count = 0.0, 0.0, 0
         for sl in slices:
@@ -242,7 +242,7 @@ class TestMetricReductionContract:
 
     @staticmethod
     def _patches(shape, patch):
-        slices = get_patch_slices_from_shape(patch, list(shape), 0, inside=False)  # a reduction's disjoint slots
+        slices = get_patch_slices_from_shape(patch, list(shape), 0)
         return [(slice(None), slice(None), *sl) for sl in slices]
 
     @staticmethod

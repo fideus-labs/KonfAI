@@ -25,6 +25,7 @@ import torch
 
 from konfai.data.patching.blend import PathCombine
 from konfai.utils.errors import PatchError
+from konfai.utils.utils import Placement
 
 
 class Accumulator:
@@ -37,7 +38,11 @@ class Accumulator:
         patch_combine: PathCombine | None = None,
         batch: bool = True,
         sweep_axis: int = 0,
+        placement: Placement = "pad",
     ) -> None:
+        #: The grid's ``Patch.placement``: where a padded patch holds its in-volume voxels (``_inside``), and whether
+        #: a floored blend weight applies (``monai``).
+        self.placement = placement
         # Which spatial axis the window slides along: the patch grid is emitted with this axis outermost.
         self.sweep_axis = sweep_axis
         self.patch_slices: list[tuple[slice, ...]] = []
@@ -114,11 +119,10 @@ class Accumulator:
         else:
             result[slices_dest] += self._weighted_patch(data, patch_slice)
 
-    @staticmethod
-    def _inside(length: int, extent: int) -> slice:
-        """Where the ``extent`` in-volume voxels of a patch of ``length`` sit in it: in its middle, the floor of
-        the padding before them (``Patch.get_read_plan``)."""
-        start = max(length - extent, 0) // 2
+    def _inside(self, length: int, extent: int) -> slice:
+        """Where the ``extent`` in-volume voxels of a patch of ``length`` sit in it (``Patch.get_read_plan``): first
+        under ``pad``, else in its middle, the floor of the padding before them."""
+        start = 0 if self.placement == "pad" else max(length - extent, 0) // 2
         return slice(start, start + extent)
 
     def _kept_box(self, patch_slice: tuple[slice, ...]) -> tuple[slice, ...]:
@@ -215,7 +219,7 @@ class Accumulator:
         is not identically one are applied (``_share``). Out of place, into a staging buffer the
         patches share: the caller's tensor is never touched, so the OOM retry never re-weights it.
         """
-        if cast(PathCombine, self.patch_combine).min_weight is not None:
+        if self.placement == "monai" and cast(PathCombine, self.patch_combine).min_weight is not None:
             return data * self._castable(self._floored_share(data, patch_slice), data).to(data.dtype)
         shares = []
         for dim, s in enumerate(patch_slice):
@@ -340,8 +344,9 @@ class StreamingAccumulator(Accumulator):
         patch_combine: PathCombine | None = None,
         batch: bool = True,
         sweep_axis: int = 0,
+        placement: Placement = "pad",
     ) -> None:
-        super().__init__(patch_slices, patch_size, patch_combine, batch, sweep_axis)
+        super().__init__(patch_slices, patch_size, patch_combine, batch, sweep_axis, placement)
         sweep = self.sweep_axis
         self._window = min(
             max(patch[sweep].stop - patch[sweep].start for patch in self.patch_slices), self.shape[sweep]

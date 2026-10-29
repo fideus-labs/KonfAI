@@ -31,6 +31,7 @@ from konfai.utils.config import apply_config, config
 from konfai.utils.errors import ConfigError
 from konfai.utils.utils import (
     OverlapSpec,
+    Placement,
     best_sweep_axis,
     concretize_patch_size,
     free_axis_rounding,
@@ -57,6 +58,7 @@ class Patch(ABC):
         overlap: OverlapSpec = None,
         pad_value: float | str | None = 0,
         extend_slice: int = 0,
+        placement: Placement = "pad",
     ) -> None:
         if isinstance(pad_value, str) and pad_value != "edge":
             raise ConfigError(
@@ -78,10 +80,12 @@ class Patch(ABC):
         self._shapes: dict[int, list[int]] = {}
         #: The cut itself, made on first use and left out of the pickle (``__getstate__``).
         self._grids: dict[int, _PatchGrid] = {}
-        #: What pads a patch past the volume, on both sides of it: a value, ``edge`` (the edge voxel), or None
-        #: (the data's minimum).
+        #: What pads a patch past the volume (on both sides of it unless ``placement`` is ``pad``): a value, ``edge``
+        #: (the edge voxel), or None (the data's minimum).
         self.pad_value = pad_value
         self.extend_slice = extend_slice
+        #: Where the windows of an axis sit (``get_patch_slices_from_shape``): ``pad``, ``monai`` or ``spread``.
+        self.placement = placement
         # The last patch of an axis is padded up to the patch size for a model. A consumer that REDUCES
         # patches (streamed evaluation) must see only in-volume voxels and turns this off.
         self.pad_to_patch = True
@@ -108,6 +112,11 @@ class Patch(ABC):
         """Copy ``a``'s cut, made once from the recorded shape (``__getstate__`` drops it)."""
         grid = self._grids.get(a)
         if grid is None:
+            if not self.pad_to_patch and self.placement != "pad":
+                raise ConfigError(
+                    f"A reduction's patches cannot be placed '{self.placement}'.",
+                    "Its slots must not overlap, or a voxel reaches its sums twice: give it placement 'pad'.",
+                )
             shape = self._shapes[a]
             # The grid decides its own sweep axis and the reassembly reads it back (get_sweep_axis).
             sweep_axis = best_sweep_axis(concretize_patch_size(self.patch_size, shape, self.free_axis_multiple), shape)
@@ -118,7 +127,7 @@ class Patch(ABC):
                 self.free_axis_multiple,
                 self._declared_free_axis,
                 sweep_axis,
-                inside=self.pad_to_patch,
+                placement=self.placement,
             )
             grid = self._grids[a] = _PatchGrid(sweep_axis, slices)
         return grid
@@ -191,8 +200,9 @@ class Patch(ABC):
                     m = free_axis_rounding(self.free_axis_multiple, axis, nspatial)
                     target = ((extent + m - 1) // m) * m if m > 1 else extent
                 p = 0 if _slice.start + target <= extent else target - (extent - _slice.start)
-                # The volume sits in the middle of its patch: half the padding before it (the floor).
-                before = p // 2
+                # Placed as MONAI or nnU-Net place it, the volume sits in the middle of its patch: half the padding
+                # before it (the floor). Placed on the stride, all of it comes after.
+                before = 0 if self.placement == "pad" else p // 2
                 constant_padding.append(before)
                 constant_padding.append(p - before)
 
@@ -271,6 +281,14 @@ class DatasetPatch(Patch):
     sized before the run. Left unset, it is the tighter of what the GPU holds at ``vram_bytes_per_voxel`` and what the
     rank's host budget holds at ``ram_bytes_per_voxel``, the peak costs per voxel the prediction declares
     (``konfai.utils.vram.max_voxels``); with neither, only an out-of-memory makes either happen.
+
+    ``placement`` says where the patches of an axis sit, so a port reads the windows its source model was run on:
+    ``pad`` (the default) every ``patch - overlap`` voxels, the last one cut at the volume's end and padded after it;
+    ``monai`` the same, the last one moved back to end on the volume's last voxel (MONAI's sliding window, which
+    also floors a ``Gaussian`` blend's weight at ``1e-3``); ``spread`` the fewest patches that step covers the axis
+    with, spread evenly from its first voxel to its last (nnU-Net's, ``overlap: 0.5`` its ``tile_step_size: 0.5``).
+    Under ``monai`` and ``spread`` only an axis shorter than the patch is padded, half before the volume and half
+    after.
     """
 
     def __init__(
@@ -283,8 +301,9 @@ class DatasetPatch(Patch):
         max_voxels: int | None = None,
         vram_bytes_per_voxel: float | None = None,
         ram_bytes_per_voxel: float | None = None,
+        placement: Placement = "pad",
     ) -> None:
-        super().__init__(patch_size, overlap, pad_value, extend_slice)
+        super().__init__(patch_size, overlap, pad_value, extend_slice, placement)
         if mode not in ("tile", "resample"):
             raise ConfigError(
                 f"Patch has an unknown mode '{mode}'.",
@@ -313,7 +332,8 @@ class DatasetPatch(Patch):
 
 @config()
 class ModelPatch(Patch):
-    """Patch definition applied inside model graphs during prediction or training."""
+    """Patch definition applied inside model graphs during prediction or training. ``placement`` is
+    ``DatasetPatch``'s."""
 
     def __init__(
         self,
@@ -322,8 +342,9 @@ class ModelPatch(Patch):
         patch_combine: str | None = None,
         pad_value: float | None = None,
         extend_slice: int = 0,
+        placement: Placement = "pad",
     ) -> None:
-        super().__init__(patch_size, overlap, pad_value, extend_slice)
+        super().__init__(patch_size, overlap, pad_value, extend_slice, placement)
         self._patch_combine = patch_combine
         self.patch_combine: PathCombine | None = None
 

@@ -30,8 +30,9 @@ from konfai.utils.utils import (
 class PathCombine(ABC):
     """Base class for overlap-aware weighting schemes applied during patch assembly."""
 
-    #: A floor under the patch's whole weight, the product of its per-axis windows (``Gaussian``: 1e-3). The weight
-    #: is then no longer a product of one vector per axis, and ``Accumulator`` normalises it voxel by voxel.
+    #: A floor under the patch's whole weight, the product of its per-axis windows (``Gaussian``: 1e-3), applied on a
+    #: grid placed ``monai`` only. The weight is then no longer a product of one vector per axis, and ``Accumulator``
+    #: normalises it voxel by voxel.
     min_weight: float | None = None
 
     def __init__(self) -> None:
@@ -173,9 +174,10 @@ class Trim(PathCombine):
 class Gaussian(PathCombine):
     """nnU-Net-style Gaussian importance weighting.
 
-    Not a partition of unity: the accumulator blends each patch in with its share of the total weight. A patch's
-    weight, the product of the per-axis Gaussians, is floored at ``1e-3``, as MONAI's ``compute_importance_map``
-    clamps its map: the corners of overlapping patches then weigh as much as one another.
+    Not a partition of unity: the accumulator blends each patch in with its share of the total weight. On a grid
+    placed ``monai`` (``Patch.placement``), a patch's weight, the product of the per-axis Gaussians, is floored at
+    ``1e-3``, as MONAI's ``compute_importance_map`` clamps its map: the corners of overlapping patches then weigh as
+    much as one another.
     """
 
     min_weight = 1e-3
