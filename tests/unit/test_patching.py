@@ -1198,6 +1198,8 @@ def test_a_placed_grid_counts_on_the_unrounded_step_and_defaults_to_twenty_perce
     # nnU-Net's tile_step_size 0.2: the float error of 10 * (1 - 0.8) adds no window.
     starts = [s[0].start for s in get_patch_slices_from_shape([10], [20], 0.8, placement="spread")]
     assert starts == [0, 2, 4, 6, 8, 10]
+    # A stride truly short of 2 still takes the extra window nnU-Net's ceiling takes.
+    assert len(get_patch_slices_from_shape([10], [20], 0.800000000008, placement="spread")) == 7
     monai = [s[0].start for s in get_patch_slices_from_shape([128], [350], None, placement="monai")]
     assert monai == [0, 102, 204, 222]  # MONAI steps int(128 * 0.8)
     with pytest.raises(ConfigError, match="unknown placement 'mona'"):
