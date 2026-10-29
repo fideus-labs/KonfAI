@@ -72,6 +72,8 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
   const [models, setModels] = useState(0);
   const [ensemble, setEnsemble] = useState(0);
   const [result, setResult] = useState<{ url: string; name: string } | null>(null);
+  // The blob URL of the result the Save link points at: freed when a new run replaces it or the pane closes.
+  const resultUrl = useRef<string | null>(null);
   const [volume, setVolume] = useState<File | null>(null);
   const [stage, setStage] = useState<Stage>("loading");
   const [message, setMessage] = useState("reading the app's in-browser build…");
@@ -83,6 +85,9 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
     const nv = new Niivue({ backColor: [0.035, 0.08, 0.09, 1], show3Dcrosshair: true, loadingText: "" });
     nv.attachToCanvas(canvasRef.current!);
     nvRef.current = nv;
+    return () => {
+      if (resultUrl.current) URL.revokeObjectURL(resultUrl.current);
+    };
   }, []);
 
   // Escape leaves: this pane covers the whole app, and an app with no in-browser build offers nothing to
@@ -166,8 +171,15 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       if (!output) throw new Error(`the run wrote no ${write.group}`);
 
       const nv = nvRef.current!;
-      await nv.loadVolumes([{ url: URL.createObjectURL(volume), name: volume.name }]);
+      const input = URL.createObjectURL(volume);
+      try {
+        await nv.loadVolumes([{ url: input, name: volume.name }]);
+      } finally {
+        URL.revokeObjectURL(input);
+      }
       const url = URL.createObjectURL(new Blob([output.bytes as BlobPart]));
+      if (resultUrl.current) URL.revokeObjectURL(resultUrl.current);
+      resultUrl.current = url;
       setResult({ url, name: output.path.split("/").pop()! });
       await nv.addVolumeFromUrl({
         url,
