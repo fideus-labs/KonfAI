@@ -69,15 +69,16 @@ konfai TRAIN --check -c Config.yml
 ```
 
 ```text
-Trainer: unknown key 'epoch' (did you mean 'epochs'?) (warning: ignored)
+Trainer: unknown key 'epoch' (did you mean 'epochs'?)
 Trainer.Dataset.groups_src.CT.groups_dest.CT.transforms: unknown 'Standardise' (did you mean 'Standardize'?)
-[KonfAI] 1 error(s), 1 warning(s) in 'Config.yml'.
+[KonfAI] 2 error(s), 0 warning(s) in 'Config.yml'.
 ```
 
 `--check` lists every mistake of the file at once: misspelled keys, wrong types, unknown transforms or losses,
 missing arguments. It builds nothing, reads no data and leaves the file as written. It exits 1 when the run
 would refuse the config, so it fits a CI job. A key KonfAI does not read is only a warning, except for
-`TRANSFORM`, which refuses it. Files, channels and a model's own arguments are checked when the workflow runs.
+`TRANSFORM`, which refuses it, and a misspelling of a key the file leaves out, whose value the default would
+replace. Files, channels and a model's own arguments are checked when the workflow runs.
 
 ### Listing components
 

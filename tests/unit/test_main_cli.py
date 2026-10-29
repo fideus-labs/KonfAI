@@ -582,7 +582,9 @@ def test_check_lists_every_mistake_and_leaves_the_config_as_written(
     """A refused value exits 1, a key nothing reads is a warning; nothing is built and the file is not rewritten."""
     example = (Path(__file__).resolve().parents[2] / "examples" / "Segmentation" / "Config.yml").read_text()
     config = tmp_path / "Config.yml"
-    config.write_text(example.replace("  epochs:", "  epoch:", 1).replace("Standardize:", "Standardise:", 1))
+    config.write_text(
+        example.replace("  epochs:", "  epoch: 3\n  epochs:", 1).replace("Standardize:", "Standardise:", 1)
+    )
     written = config.read_bytes()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--check"])

@@ -833,7 +833,7 @@ def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
     mcp_server = load_mcp_server()
     segmentation = Path(__file__).resolve().parents[2] / "examples" / "Segmentation"
     example = (segmentation / "Config.yml").read_text()
-    content = example.replace("  epochs:", "  epoch:", 1).replace("Standardize:", "Standardise:", 1)
+    content = example.replace("  epochs:", "  epoch: 3\n  epochs:", 1).replace("Standardize:", "Standardise:", 1)
 
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:

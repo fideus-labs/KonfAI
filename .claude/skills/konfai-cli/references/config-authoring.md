@@ -97,7 +97,7 @@ shows when the workflow builds, one at a time.
 
   ```bash
   konfai TRAIN --check -c Config.yml
-  # Trainer: unknown key 'epoch' (did you mean 'epochs'?) (warning: ignored)
+  # Trainer: unknown key 'epoch' (did you mean 'epochs'?)
   ```
 
   Run it after every edit, before spending a GPU on the workflow. From Python,
