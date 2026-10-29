@@ -22,6 +22,8 @@ import locale
 import sys
 
 import pytest
+import torch
+from konfai.utils.runtime import safe_torch_load, save_weights
 from konfai_apps.bundle import assemble_bundle
 from konfai_apps.errors import AppMetadataError
 
@@ -55,12 +57,16 @@ def ascii_locale():
         locale.setlocale(locale.LC_CTYPE, previous)
 
 
+def _weights(path, value=0.0):
+    save_weights({"Model": {"Net": {"weight": torch.full((1,), value)}}}, path)
+
+
 def test_assemble_bundle_layout(tmp_path):
     app_json = _write(tmp_path / "app.json", VALID_META)
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
-    checkpoint = tmp_path / "CV_0.pt"
-    checkpoint.write_bytes(b"weights")
+    checkpoint = tmp_path / "CV_0.safetensors"
+    _weights(checkpoint)
     requirements = tmp_path / "requirements.txt"
     requirements.write_text("torch\n")
     model_py = tmp_path / "Model.py"
@@ -77,10 +83,71 @@ def test_assemble_bundle_layout(tmp_path):
     )
 
     assert bundle == tmp_path / "out" / "MR"
-    for expected in ("app.json", "Prediction.yml", "CV_0.pt", "Model.py", "requirements.txt"):
+    for expected in ("app.json", "Prediction.yml", "CV_0.safetensors", "Model.py", "requirements.txt"):
         assert (bundle / expected).exists(), expected
     # `models` auto-filled from the provided checkpoints
-    assert json.loads((bundle / "app.json").read_text())["models"] == ["CV_0.pt"]
+    assert json.loads((bundle / "app.json").read_text())["models"] == ["CV_0.safetensors"]
+
+
+def test_a_runs_checkpoint_is_published_as_weights_only(tmp_path):
+    app_json = _write(tmp_path / "app.json", {**VALID_META, "models": ["CV_0.pt"]})
+    weights = {"conv.weight": torch.randn(2, 3)}
+    checkpoint = tmp_path / "CV_0.pt"
+    torch.save({"Model": {"Net": weights}, "epoch": 3, "Net_optimizer_state_dict": {"state": {}}}, checkpoint)
+
+    bundle = assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
+
+    assert not (bundle / "CV_0.pt").exists()
+    assert json.loads((bundle / "app.json").read_text())["models"] == ["CV_0.safetensors"]
+    published = safe_torch_load(bundle / "CV_0.safetensors", "cpu")
+    assert published.keys() == {"Model"} and torch.equal(
+        published["Model"]["Net"]["conv.weight"], weights["conv.weight"]
+    )
+
+
+class _Pickled:
+    pass
+
+
+def test_a_checkpoint_holding_objects_is_refused_not_unpickled(tmp_path):
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    checkpoint = tmp_path / "CV_0.pt"
+    torch.save({"Model": {"Net": {}}, "object": _Pickled()}, checkpoint)
+    with pytest.raises(AppMetadataError, match="does not load as KonfAI weights"):
+        assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
+
+
+def test_safetensors_weights_in_another_layout_are_refused(tmp_path):
+    from safetensors.torch import save_file
+
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    weights = tmp_path / "CV_0.safetensors"
+    save_file({"conv.weight": torch.zeros(1)}, str(weights))
+    with pytest.raises(AppMetadataError, match="not a KonfAI weight name"):
+        assemble_bundle("MR", tmp_path / "out", app_json, [], [str(weights)])
+
+
+def test_safetensors_weights_are_published_as_they_are(tmp_path):
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    checkpoint = tmp_path / "CV_0.safetensors"
+    save_weights({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": 3}, checkpoint)
+    bundle = assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
+    assert (bundle / "CV_0.safetensors").read_bytes() == checkpoint.read_bytes()
+
+
+def test_a_support_file_with_a_weight_suffix_is_refused(tmp_path):
+    app_json = _write(tmp_path / "app.json", VALID_META)
+    (tmp_path / "lut.safetensors").write_bytes(b"data")
+    with pytest.raises(AppMetadataError, match="reserves for its models"):
+        assemble_bundle(
+            "MR",
+            tmp_path / "out",
+            app_json,
+            [],
+            [],
+            support_files={"lut.safetensors": "lut.safetensors"},
+            support_root=tmp_path,
+        )
 
 
 def test_missing_required_keys_raises(tmp_path):
@@ -90,8 +157,8 @@ def test_missing_required_keys_raises(tmp_path):
 
 
 def test_models_mismatch_raises(tmp_path):
-    app_json = _write(tmp_path / "app.json", {**VALID_META, "models": ["CV_0.pt", "CV_1.pt"]})
-    checkpoint = tmp_path / "CV_0.pt"
+    app_json = _write(tmp_path / "app.json", {**VALID_META, "models": ["CV_0.safetensors", "CV_1.safetensors"]})
+    checkpoint = tmp_path / "CV_0.safetensors"
     checkpoint.write_bytes(b"w")
     with pytest.raises(AppMetadataError):
         assemble_bundle("MR", tmp_path / "out", app_json, [], [str(checkpoint)])
@@ -529,22 +596,22 @@ def test_an_input_group_without_a_chain_takes_no_other_groups_chain(volume, resa
 
 
 def test_colliding_bundle_filenames_are_refused_before_anything_is_written(tmp_path):
-    """fold0/best.pt and fold1/best.pt flattened to one best.pt: the second overwrote the first and
+    """fold0/best.safetensors and fold1/best.safetensors flattened to one best.safetensors: the second overwrote the first and
     app.json named both."""
     app_json = _write(tmp_path / "app.json", VALID_META)
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
     (tmp_path / "fold0").mkdir()
     (tmp_path / "fold1").mkdir()
-    (tmp_path / "fold0" / "best.pt").write_bytes(b"zero")
-    (tmp_path / "fold1" / "best.pt").write_bytes(b"one")
-    with pytest.raises(AppMetadataError, match=r"best\.pt"):
+    (tmp_path / "fold0" / "best.safetensors").write_bytes(b"zero")
+    (tmp_path / "fold1" / "best.safetensors").write_bytes(b"one")
+    with pytest.raises(AppMetadataError, match=r"best\.safetensors"):
         assemble_bundle(
             "MR",
             tmp_path / "out",
             app_json,
             [str(config)],
-            [str(tmp_path / "fold0/best.pt"), str(tmp_path / "fold1/best.pt")],
+            [str(tmp_path / "fold0/best.safetensors"), str(tmp_path / "fold1/best.safetensors")],
         )
     assert not (tmp_path / "out" / "MR").exists()
     assert not list((tmp_path / "out").glob(".MR.staging-*")) if (tmp_path / "out").exists() else True
@@ -557,16 +624,16 @@ def test_a_repackaged_bundle_drops_the_previous_checkpoint_and_keeps_user_files(
     app_json = _write(tmp_path / "app.json", VALID_META)
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
-    first = tmp_path / "first.pt"
-    first.write_bytes(b"first")
+    first = tmp_path / "first.safetensors"
+    _weights(first)
     bundle = assemble_bundle("MR", tmp_path / "out", app_json, [str(config)], [str(first)])
     (bundle / "notes.txt").write_text("mine\n")
 
-    new = tmp_path / "new.pt"
-    new.write_bytes(b"new")
+    new = tmp_path / "new.safetensors"
+    _weights(new)
     assert assemble_bundle("MR", tmp_path / "out", app_json, [str(config)], [str(new)]) == bundle
-    assert sorted(path.name for path in bundle.glob("*.pt")) == ["new.pt"]
-    assert json.loads((bundle / "app.json").read_text())["models"] == ["new.pt"]
+    assert sorted(path.name for path in bundle.glob("*.safetensors")) == ["new.safetensors"]
+    assert json.loads((bundle / "app.json").read_text())["models"] == ["new.safetensors"]
     assert (bundle / "notes.txt").read_text() == "mine\n"
     assert not list((tmp_path / "out").glob(".MR.staging-*"))
 
@@ -576,16 +643,16 @@ def test_repackaging_refuses_previous_checkpoints_outside_the_bundle(tmp_path, r
     app_json = _write(tmp_path / "app.json", VALID_META)
     config = tmp_path / "Prediction.yml"
     config.write_text("Predictor: {}\n")
-    checkpoint = tmp_path / "new.pt"
-    checkpoint.write_bytes(b"new")
+    checkpoint = tmp_path / "new.safetensors"
+    _weights(checkpoint)
     bundle = tmp_path / "out" / "MR"
     bundle.mkdir(parents=True)
-    neighbor = bundle.parent / "neighbor.pt"
+    neighbor = bundle.parent / "neighbor.safetensors"
     neighbor.write_bytes(b"must survive")
-    previous = "../neighbor.pt" if reference_kind == "parent" else str(neighbor)
+    previous = "../neighbor.safetensors" if reference_kind == "parent" else str(neighbor)
     if reference_kind == "symlink":
-        (bundle / "old.pt").symlink_to(neighbor)
-        previous = "old.pt"
+        (bundle / "old.safetensors").symlink_to(neighbor)
+        previous = "old.safetensors"
     manifest = json.dumps({**VALID_META, "models": [previous]})
     (bundle / "app.json").write_text(manifest)
     (bundle / "Prediction.yml").write_text("old config\n")
@@ -596,7 +663,7 @@ def test_repackaging_refuses_previous_checkpoints_outside_the_bundle(tmp_path, r
     assert neighbor.read_bytes() == b"must survive"
     assert (bundle / "app.json").read_text() == manifest
     assert (bundle / "Prediction.yml").read_text() == "old config\n"
-    assert not (bundle / "new.pt").exists()
+    assert not (bundle / "new.safetensors").exists()
     assert not list(bundle.parent.glob(".MR.staging-*"))
 
 
@@ -607,11 +674,11 @@ def test_portable_asset_roles_preserve_other_native_onnx_dependencies(tmp_path, 
     monkeypatch.setenv("KONFAI_APPS_INSTALL_REQUIREMENTS", "0")
     bundle = tmp_path / "MR"
     bundle.mkdir()
-    metadata = {**VALID_META, "models": ["best.pt"], "portable_assets": ["legacy.onnx.data"]}
+    metadata = {**VALID_META, "models": ["best.safetensors"], "portable_assets": ["legacy.onnx.data"]}
     (bundle / "app.json").write_text(json.dumps(metadata))
     (bundle / "Prediction.yml").write_text("Predictor: {}\n")
     for name in (
-        "best.pt",
+        "best.safetensors",
         "model.onnx",
         "model.onnx.data",
         "manifest.json",
@@ -681,17 +748,17 @@ def test_portable_export_declares_only_its_own_outputs(tmp_path, monkeypatch, en
 
 def test_repackaging_preserves_a_checkpoint_declared_with_a_relative_prefix(tmp_path):
     app_json = _write(tmp_path / "app.json", VALID_META)
-    source = tmp_path / "current.pt"
-    source.write_bytes(b"replacement weights")
+    source = tmp_path / "current.safetensors"
+    _weights(source, 1.0)
     bundle = tmp_path / "out" / "MR"
     bundle.mkdir(parents=True)
-    (bundle / "app.json").write_text(json.dumps({**VALID_META, "models": ["./current.pt"]}))
-    (bundle / "current.pt").write_bytes(b"old weights")
+    (bundle / "app.json").write_text(json.dumps({**VALID_META, "models": ["./current.safetensors"]}))
+    (bundle / "current.safetensors").write_bytes(b"old weights")
 
     assemble_bundle("MR", bundle.parent, app_json, [], [str(source)])
 
-    assert (bundle / "current.pt").read_bytes() == b"replacement weights"
-    assert json.loads((bundle / "app.json").read_text())["models"] == ["current.pt"]
+    assert safe_torch_load(bundle / "current.safetensors", "cpu")["Model"]["Net"]["weight"].item() == 1.0
+    assert json.loads((bundle / "app.json").read_text())["models"] == ["current.safetensors"]
 
 
 def _support_workspace(tmp_path):
@@ -702,7 +769,7 @@ def _support_workspace(tmp_path):
     (root / "assets").mkdir()
     (root / "assets" / "table.csv").write_text("a,b\n")
     (root / "Prediction.yml").write_text("Predictor: {}\n")
-    (root / "CV_0.pt").write_bytes(b"weights")
+    _weights(root / "CV_0.safetensors")
     _write(root / "app.json", VALID_META)
     return root
 
@@ -713,7 +780,7 @@ def _assemble_with_support(root, support_files):
         root.parent / "out",
         root / "app.json",
         [str(root / "Prediction.yml")],
-        [str(root / "CV_0.pt")],
+        [str(root / "CV_0.safetensors")],
         support_files=support_files,
         support_root=root,
     )
@@ -787,7 +854,7 @@ def test_support_files_outside_their_root_are_refused_before_anything_is_written
             out,
             root / "app.json",
             [str(root / "Prediction.yml")],
-            [str(root / "CV_0.pt")],
+            [str(root / "CV_0.safetensors")],
             support_files=support_files,
             support_root=None if support_root is None else root,
         )
@@ -816,7 +883,7 @@ def test_bundle_cli_maps_support_files_and_drops_local_packages_from_the_require
             "out": str(root.parent / "out"),
             "app_json": str(root / "app.json"),
             "config": [str(root / "Prediction.yml")],
-            "checkpoint": [str(root / "CV_0.pt")],
+            "checkpoint": [str(root / "CV_0.safetensors")],
             "model_py": str(root / "Model.py"),
             "support_file": ["helpers=helpers"],
             "support_root": str(root),
@@ -835,7 +902,7 @@ def test_bundle_cli_maps_support_files_and_drops_local_packages_from_the_require
                 "out": str(root.parent / "out"),
                 "app_json": str(root / "app.json"),
                 "config": [str(root / "Prediction.yml")],
-                "checkpoint": [str(root / "CV_0.pt")],
+                "checkpoint": [str(root / "CV_0.safetensors")],
                 "support_file": ["helpers"],
                 "support_root": str(root),
             }

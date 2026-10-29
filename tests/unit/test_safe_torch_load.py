@@ -19,8 +19,11 @@ from pathlib import Path
 
 import pytest
 import torch
+from konfai.utils.errors import KonfAIError
 from konfai.utils.runtime import environment as runtime_module
-from konfai.utils.runtime import safe_torch_load
+from konfai.utils.runtime import safe_torch_load, save_weights
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 
 class _NonSafeState:
@@ -125,3 +128,26 @@ def test_mmap_opt_in_preserves_legacy_and_trusted_object_loading(
     assert loaded["loss"] == 0.25
     if custom_object:
         assert loaded["state"].value == 7
+
+
+def test_published_weights_keep_the_model_and_drop_the_training_state(tmp_path: Path) -> None:
+    weights = {"conv.weight": torch.randn(2, 3), "conv.bias": torch.randn(2)}
+    checkpoint = {"Model": {"Net": weights}, "epoch": 3, "loss": 0.25, "Net_optimizer_state_dict": {"state": {}}}
+    path = tmp_path / "CV_0.safetensors"
+
+    save_weights(checkpoint, path)
+    loaded = safe_torch_load(path, "cpu")
+    assert safe_torch_load(path, None)["Model"]["Net"].keys() == weights.keys()
+
+    assert loaded.keys() == {"Model"} and loaded["Model"].keys() == {"Net"}
+    assert all(torch.equal(loaded["Model"]["Net"][key], value) for key, value in weights.items())
+    with safe_open(str(path), "pt") as file:
+        assert file.metadata() == {"epoch": "3", "loss": "0.25"}
+
+
+@pytest.mark.parametrize("name", ["conv.weight", "Other/Net/weight", "Model//weight"])
+def test_a_safetensors_file_konfai_did_not_write_is_refused(tmp_path: Path, name: str) -> None:
+    path = tmp_path / "foreign.safetensors"
+    save_file({name: torch.zeros(1)}, str(path))
+    with pytest.raises(KonfAIError, match="not a KonfAI weight name"):
+        safe_torch_load(path, "cpu")
