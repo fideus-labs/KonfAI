@@ -91,6 +91,8 @@ def test_each_mistake_is_reported_at_its_key_with_the_nearest_valid_name() -> No
     _ct_chain(list_stage)["transforms"] = ["Standardise"]
     missing_argument = _segmentation()
     _ct_chain(missing_argument)["transforms"]["OneHot"] = {}
+    integer_key = _segmentation()
+    integer_key["Trainer"][42] = 1
 
     chain = "Trainer.Dataset.groups_src.CT.groups_dest.CT.transforms"
     assert _errors(misspelled) == [("Trainer", "unknown key 'epoch' (did you mean 'epochs'?)")]
@@ -101,6 +103,7 @@ def test_each_mistake_is_reported_at_its_key_with_the_nearest_valid_name() -> No
     assert _errors(unknown_repeated_stage) == [(chain, "unknown 'Standardise#2' (did you mean 'Standardize'?)")]
     assert _errors(list_stage) == [(f"{chain}.0", "unknown 'Standardise' (did you mean 'Standardize'?)")]
     assert _errors(missing_argument) == [(f"{chain}.OneHot", "missing key 'num_classes'")]
+    assert _errors(integer_key) == [("Trainer", "unknown key '42'")]
 
 
 def test_the_spellings_the_binder_accepts_are_valid() -> None:
