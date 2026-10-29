@@ -312,8 +312,10 @@ def _load_weights(source: str, map_location: Any) -> dict[str, Any]:
     """A ``.safetensors`` file :func:`save_weights` wrote, as the ``{"Model": {network: state_dict}}`` it holds."""
     from safetensors.torch import load_file
 
+    # torch.load's None keeps the saved device, which a safetensors file does not record: the CPU.
+    device = "cpu" if map_location is None else map_location if isinstance(map_location, int) else str(map_location)
     models: dict[str, dict[str, Any]] = {}
-    for name, tensor in load_file(source, device=str(map_location)).items():
+    for name, tensor in load_file(source, device=device).items():
         network, key = _weight_name(source, name)
         models.setdefault(network, {})[key] = tensor
     return {"Model": models}

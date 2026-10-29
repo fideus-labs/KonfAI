@@ -137,6 +137,7 @@ def test_published_weights_keep_the_model_and_drop_the_training_state(tmp_path: 
 
     save_weights(checkpoint, path)
     loaded = safe_torch_load(path, "cpu")
+    assert safe_torch_load(path, None)["Model"]["Net"].keys() == weights.keys()
 
     assert loaded.keys() == {"Model"} and loaded["Model"].keys() == {"Net"}
     assert all(torch.equal(loaded["Model"]["Net"][key], value) for key, value in weights.items())
