@@ -1195,6 +1195,9 @@ def test_a_placed_grid_counts_on_the_unrounded_step_and_defaults_to_twenty_perce
     take the documented 20% when ``overlap`` is unset, ``pad`` keeps its remainder rule."""
     starts = [s[0].start for s in get_patch_slices_from_shape([5], [17], 0.25, placement="spread")]
     assert starts == [0, 3, 6, 9, 12]
+    # nnU-Net's tile_step_size 0.2: the float error of 10 * (1 - 0.8) adds no window.
+    starts = [s[0].start for s in get_patch_slices_from_shape([10], [20], 0.8, placement="spread")]
+    assert starts == [0, 2, 4, 6, 8, 10]
     monai = [s[0].start for s in get_patch_slices_from_shape([128], [350], None, placement="monai")]
     assert monai == [0, 102, 204, 222]  # MONAI steps int(128 * 0.8)
     with pytest.raises(ConfigError, match="unknown placement 'mona'"):

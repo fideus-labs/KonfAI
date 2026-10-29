@@ -302,7 +302,8 @@ def _spread(extent: int, length: int, stride: float) -> list[int]:
     rounded as numpy rounds. One window when the axis is no longer than it."""
     if extent <= length:
         return [0]
-    count = int(np.ceil((extent - length) / stride)) + 1
+    # A fractional stride carries float error (10 * (1 - 0.8) is 1.9999999999999996): no window is added for it.
+    count = int(np.ceil(round((extent - length) / stride, 9))) + 1
     step = (extent - length) / (count - 1)
     return [int(np.round(step * i)) for i in range(count)]
 
