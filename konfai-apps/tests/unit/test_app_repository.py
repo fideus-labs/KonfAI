@@ -449,7 +449,7 @@ def test_local_hf_initial_model_availability_comes_from_cache(
     ("declared", "files", "available"),
     [
         ("model.safetensors", ["weights/model.safetensors"], ["model.safetensors"]),
-        ("model.pt", ["model.pt"], []),  # a bundle exported before safetensors: re-exported, never loaded
+        ("model.pt", ["model.pt"], ["model.pt"]),  # a bundle exported before safetensors
     ],
 )
 def test_local_hf_nested_cached_model_is_reported_available(
@@ -753,6 +753,16 @@ def test_install_fine_tune_never_falls_back_past_the_first_declared_weights(tmp_
 
     with pytest.raises(AppRepositoryError, match="CV_0"):
         _install_fine_tune(app_root, tmp_path / "workspace", [])
+
+
+def test_install_fine_tune_prefers_safetensors_and_reads_a_pt(tmp_path: Path) -> None:
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_two_checkpoint_app(app_root)
+    (app_root / "CV_0.pt").write_text("weights", encoding="utf-8")
+
+    assert [name for name, _ in _install_fine_tune(app_root, tmp_path / "both", [])] == ["CV_0.safetensors"]
+    (app_root / "CV_0.safetensors").unlink()
+    assert [name for name, _ in _install_fine_tune(app_root, tmp_path / "pt", [])] == ["CV_0.pt"]
 
 
 def test_install_fine_tune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
