@@ -2205,8 +2205,11 @@ def _portable_root(path: str | Path) -> str:
     sits below it, absolute otherwise."""
     import os
 
-    text = str(path).rstrip("/")
-    relative = os.path.relpath(text, Path.cwd())
+    text = str(path).rstrip("/") or "/"
+    try:
+        relative = os.path.relpath(text, Path.cwd())
+    except ValueError:  # on another Windows drive: no relative path reaches it
+        return text
     return text if relative.startswith("..") else relative
 
 
