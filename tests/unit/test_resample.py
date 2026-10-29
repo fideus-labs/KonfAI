@@ -501,3 +501,16 @@ def test_an_edge_fill_reads_the_edge_voxel_past_the_volume(mode: str) -> None:
         assert torch.equal(gather_separable(source, axes, [0, 0, 0], [1, 1, 4], mode, fill), want)
     with pytest.raises(TransformError, match="unknown fill 'border'"):
         Resample(spacing=[1.5, 1.5, 1.5], fill="border")
+
+
+def test_an_edge_fill_clamps_a_cubic_sample_to_the_volume() -> None:
+    """Under ``fill: edge`` a cubic sample past the volume is the edge voxel, its weights included."""
+    from konfai.data.sampling import gather, gather_separable
+
+    source = torch.arange(4, dtype=torch.float32).reshape(1, 1, 1, 4)
+    x = torch.tensor([-0.75, 1.0, 4.2])
+    want = torch.tensor([0.0, 1.0, 3.0]).reshape(1, 1, 1, 3)
+    coordinates = torch.stack([x, torch.zeros(3), torch.zeros(3)], dim=-1).reshape(1, 1, 3, 3)
+    assert torch.allclose(gather(source, coordinates, [0, 0, 0], [1, 1, 4], "cubic", "edge"), want)
+    axes = [torch.zeros(1), torch.zeros(1), x]
+    assert torch.allclose(gather_separable(source, axes, [0, 0, 0], [1, 1, 4], "cubic", "edge"), want)

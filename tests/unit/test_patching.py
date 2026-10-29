@@ -1190,6 +1190,17 @@ def test_each_placement_starts_its_windows(placement, starts):
     assert [s[0].stop for s in slices] == [min(start + 128, 300) for start in starts]
 
 
+def test_a_placed_grid_counts_on_the_unrounded_step_and_defaults_to_twenty_percent():
+    """``spread`` counts its windows on nnU-Net's fractional step (3.75 voxels here, not 4); ``monai`` and ``spread``
+    take the documented 20% when ``overlap`` is unset, ``pad`` keeps its remainder rule."""
+    starts = [s[0].start for s in get_patch_slices_from_shape([5], [17], 0.25, placement="spread")]
+    assert starts == [0, 3, 6, 9, 12]
+    monai = [s[0].start for s in get_patch_slices_from_shape([128], [350], None, placement="monai")]
+    assert monai == [0, 102, 204, 222]  # MONAI steps int(128 * 0.8)
+    with pytest.raises(ConfigError, match="unknown placement 'mona'"):
+        DatasetPatch(patch_size=[4, 4], placement="mona")
+
+
 def test_a_patch_places_on_the_stride_unless_told_and_carries_its_placement(streaming_dataset_stub):
     """``pad`` is the default of both patch configs, and the manager's per-case copy keeps a declared placement."""
     assert DatasetPatch().placement == "pad" and ModelPatch().placement == "pad"

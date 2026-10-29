@@ -196,15 +196,19 @@ def size_free_axes(
     return sized if sized != concretize_patch_size(template, worst) else None
 
 
-def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int] | tuple[int, ...]) -> list[int]:
+def resolve_overlap(
+    overlap: OverlapSpec, patch_size: list[int], shape: list[int] | tuple[int, ...], step: bool = False
+) -> list[Any]:
     """Resolve an overlap spec into per-axis voxels for a CONCRETE ``patch_size``.
 
     Accepted forms: ``None`` -> ``DEFAULT_OVERLAP_FRACTION`` of the patch per axis; an ``int`` ->
     absolute voxels on every axis; a ``float`` in [0,1[ or a ``"20%"`` string -> that fraction of the
-    patch; a per-axis list mixing those forms. An axis that is not tiled resolves to 0.
+    patch; a per-axis list mixing those forms. An axis that is not tiled resolves to 0. ``step`` returns
+    the unrounded step between windows instead, a fraction's ``patch * (1 - fraction)``, as MONAI and
+    nnU-Net step.
     """
 
-    def one(spec: int | float | str, size: int) -> int:
+    def one(spec: int | float | str) -> int | float:
         if isinstance(spec, str):
             text = spec.strip()
             if not text.endswith("%"):
@@ -216,7 +220,7 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
         if isinstance(spec, float):
             if not 0.0 <= spec < 1.0:
                 raise ConfigError(f"overlap: fraction {spec} must be in [0, 1[.")
-            return int(size * spec)
+            return spec
         if spec < 0:
             raise ConfigError(f"overlap: {spec} must be >= 0 voxels.")
         return int(spec)
@@ -228,13 +232,17 @@ def resolve_overlap(overlap: OverlapSpec, patch_size: list[int], shape: list[int
     )
     if len(specs) != len(patch_size):
         raise ConfigError(f"overlap: {len(specs)} entries for {len(patch_size)} axes; give one per axis or a scalar.")
-    resolved = []
+    resolved: list[Any] = []
     for spec, size, extent in zip(specs, patch_size, shape, strict=True):
         # No overlap on an axis that is not tiled (one patch spans it) nor on a length-1 patch axis.
-        voxels = one(spec, size) if 1 < size < extent else 0
+        fraction = one(spec) if 1 < size < extent else 0
+        voxels = int(size * fraction) if isinstance(fraction, float) else fraction
         if voxels >= size:
             raise ConfigError(f"overlap: {voxels} voxels must be smaller than the patch size {size}.")
-        resolved.append(voxels)
+        if step:
+            resolved.append(size * (1 - fraction) if isinstance(fraction, float) else size - voxels)
+        else:
+            resolved.append(voxels)
     return resolved
 
 
@@ -288,13 +296,13 @@ def resolve_patch(
     return concrete
 
 
-def _spread(extent: int, length: int, overlap: int) -> list[int]:
-    """nnU-Net's window starts on one axis (``compute_steps_for_sliding_window``), its step ``length - overlap``:
+def _spread(extent: int, length: int, stride: float) -> list[int]:
+    """nnU-Net's window starts on one axis (``compute_steps_for_sliding_window``), its step ``stride``:
     the fewest windows that step covers ``extent`` with, spread evenly from 0 to ``extent - length``, each start
     rounded as numpy rounds. One window when the axis is no longer than it."""
     if extent <= length:
         return [0]
-    count = -(-(extent - length) // (length - overlap)) + 1
+    count = int(np.ceil((extent - length) / stride)) + 1
     step = (extent - length) / (count - 1)
     return [int(np.round(step * i)) for i in range(count)]
 
@@ -337,7 +345,7 @@ def get_patch_slices_from_shape(
     slices: list[list[slice]] = []
     overlap: np.ndarray | list[int]
     if overlap_tmp is None:
-        if has_free_axis:
+        if has_free_axis or placement != "pad":
             # DEFAULT_OVERLAP_FRACTION of the patch on tiled axes, 0 on untiled ones.
             overlap = np.array(resolve_overlap(None, patch_size, shape), dtype=np.int_)
         else:
@@ -359,15 +367,18 @@ def get_patch_slices_from_shape(
                 f" ≥ patch_size={patch_size[dim]} at dim={dim}",
             )
 
+    # MONAI and nnU-Net step on a fraction's unrounded step: MONAI truncates it, nnU-Net counts its windows on it.
+    steps = resolve_overlap(overlap_tmp, patch_size, shape, step=True) if placement != "pad" else []
     for dim in range(len(shape)):
         slices.append([])
         if placement == "spread":
             length, extent = patch_size[dim], shape[dim]
-            slices[dim] = [slice(start, min(start + length, extent)) for start in _spread(extent, length, overlap[dim])]
+            slices[dim] = [slice(start, min(start + length, extent)) for start in _spread(extent, length, steps[dim])]
             continue
+        stride = max(int(steps[dim]), 1) if placement == "monai" else patch_size[dim] - overlap[dim]
         index = 0
         while True:
-            start = (patch_size[dim] - overlap[dim]) * index
+            start = stride * index
 
             end = start + patch_size[dim]
             if end >= shape[dim]:
