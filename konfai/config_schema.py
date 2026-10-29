@@ -377,11 +377,25 @@ def config_errors(tree: Any, filename: str) -> list[ConfigMistake]:
     nearest valid name for a misspelled one. An empty list when the config is valid. ``tree`` is the YAML as
     loaded."""
     leaves = [leaf for error in _validator(filename).iter_errors(tree) for leaf in _leaves(error)]
-    mistakes = {
-        ConfigMistake(".".join(map(str, leaf.absolute_path)), _message(leaf), leaf.validator == "additionalProperties")
-        for leaf in leaves
-    }
-    return sorted(mistakes)
+    return sorted({mistake for leaf in leaves for mistake in _mistakes(leaf)})
+
+
+def _mistakes(error: Any) -> list[ConfigMistake]:
+    path = ".".join(map(str, error.absolute_path))
+    if error.validator != "additionalProperties":
+        return [ConfigMistake(path, _message(error), False)]
+    instance, schema = error.instance, error.schema
+    known = schema.get("properties", {})
+    patterns = schema.get("patternProperties", {})
+    unknown = [key for key in instance if key not in known and not any(re.search(p, str(key)) for p in patterns)]
+    # The binder refuses a key close to one the file left out, whose default would silently replace it.
+    absent = [str(name) for name in known if name not in instance]
+    return [
+        ConfigMistake(
+            path, f"unknown key '{key}'{_nearest(key, known)}", not difflib.get_close_matches(str(key), absent)
+        )
+        for key in unknown
+    ]
 
 
 @functools.cache
@@ -389,7 +403,9 @@ def _validator(filename: str) -> Any:
     try:
         from jsonschema import Draft7Validator
     except ImportError:
-        raise ConfigError("Checking a config against its schema needs jsonschema.", "pip install jsonschema") from None
+        raise ConfigError(
+            "Checking a config against its schema needs jsonschema.", "pip install 'konfai[check]'"
+        ) from None
     return Draft7Validator(config_schema(filename))
 
 
@@ -424,11 +440,6 @@ _KINDS = {
 
 def _message(error: Any) -> str:
     instance, schema = error.instance, error.schema
-    if error.validator == "additionalProperties":
-        known = schema.get("properties", {})
-        patterns = schema.get("patternProperties", {})
-        unknown = [key for key in instance if key not in known and not any(re.search(p, key) for p in patterns)]
-        return "; ".join(f"unknown key '{key}'{_nearest(key, known)}" for key in unknown)
     if error.validator == "required":
         return "; ".join(f"missing key '{key}'" for key in schema["required"] if key not in instance)
     names = _names(schema)

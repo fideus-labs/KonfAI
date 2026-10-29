@@ -92,20 +92,16 @@ shows when the workflow builds, one at a time.
 - **In an editor**: VS Code's YAML extension completes and checks as you type, once its
   `yaml.schemas` setting points at the published schemas (the configuration guide, section
   "Completion in your editor", has the exact setting).
-- **From Python** (needs `pip install jsonschema`): every mistake at once, each at its key
-  with the nearest valid name.
+- **From the command line** (needs `pip install 'konfai[check]'`): every mistake at once,
+  each at its key with the nearest valid name, exit 1 if the run would refuse the config.
 
-  ```python
-  from ruamel.yaml import YAML
-  from konfai.config_schema import config_errors
-
-  for mistake in config_errors(YAML(typ="safe").load(open("Config.yml")), "Config.yml"):
-      print(f"{mistake.path}: {mistake.message}")
+  ```bash
+  konfai TRAIN --check -c Config.yml
   # Trainer: unknown key 'epoch' (did you mean 'epochs'?)
   ```
 
-  The second argument is the file kind (`Config.yml`, `Prediction.yml`, `Evaluation.yml`,
-  `Transform.yml`), whatever the file is called.
+  Run it after every edit, before spending a GPU on the workflow. From Python,
+  `konfai.config_schema.config_errors(tree, "Config.yml")` returns the same list.
 
 The schema checks the shape of the config, not what only the run knows: missing files, a
 channel count the model does not take, a model's own arguments.

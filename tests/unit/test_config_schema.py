@@ -106,6 +106,16 @@ def test_each_mistake_is_reported_at_its_key_with_the_nearest_valid_name() -> No
     assert _errors(integer_key) == [("Trainer", "unknown key '42'")]
 
 
+def test_a_misspelled_key_blocks_only_beside_the_key_it_would_default() -> None:
+    misspelled = _segmentation()
+    misspelled["Trainer"]["epoch"] = misspelled["Trainer"].pop("epochs")
+    beside = _segmentation()
+    beside["Trainer"]["epoch"] = 3
+    filename = ROOTS["Trainer"]
+    assert [mistake.unread for mistake in config_errors(misspelled, filename)] == [False]
+    assert [mistake.unread for mistake in config_errors(beside, filename)] == [True]
+
+
 def test_the_spellings_the_binder_accepts_are_valid() -> None:
     tree = _segmentation()
     chain = _ct_chain(tree)

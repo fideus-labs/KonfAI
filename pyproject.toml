@@ -68,6 +68,8 @@ omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
 export = ["onnx", "onnxruntime", "onnxscript"]
+# `konfai <WORKFLOW> --check`: a config against its JSON Schema (konfai.config_schema.config_errors).
+check = ["jsonschema"]
 # MONAI Bundles (konfai.bundle) and the MONAI networks the docs wrap (monai.networks.nets:UNet).
 monai = ["monai"]
 all = [
@@ -82,6 +84,7 @@ all = [
   "konfai[omezarr]",
   "konfai[s3]",
   "konfai[export]",
+  "konfai[check]",
   "konfai[smp]",
   # The IMPACT criteria download their feature extractors from the Hub; imported lazily,
   # and their refusal names this extra.
