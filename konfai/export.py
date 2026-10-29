@@ -254,12 +254,19 @@ def export_to_onnx(
     model.eval()
     examples = example_input if isinstance(example_input, tuple) else (example_input,)
     groups = [input_group] if isinstance(input_group, str) else list(input_group)
-    # Each input past the first is bound to its group by a `reads` entry, in graph order, unless the caller
-    # states its own.
-    own_reads = len(examples) > 1 and "reads" not in (extra_manifest or {})
-    if not groups or (own_reads and len(groups) != len(examples)):
-        raise PredictorError(f"{len(examples)} example inputs and {len(groups)} input group(s): pass one per example.")
-    read_groups = groups[1:] if own_reads else []
+    # Each input past the first is bound to its group by a `reads` entry, in graph order: the caller's (which may
+    # also name companions past them), else one per group past the first.
+    stated = (extra_manifest or {}).get("reads")
+    if stated is None:
+        covered = len(groups) == len(examples)
+    else:
+        covered = len(groups) in (1, len(examples)) and len(stated) >= len(examples) - 1
+    if not covered:
+        raise PredictorError(
+            f"{len(examples)} example inputs, {len(groups)} input group(s), {len(stated or [])} stated reads:"
+            " give one group per example, or a read per input past the first."
+        )
+    read_groups = groups[1:] if stated is None else []
     if output_module is None:
         output_module = select_inference_head(model, *examples)
     available = list_output_modules(model, *examples)

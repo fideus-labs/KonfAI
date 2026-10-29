@@ -186,6 +186,13 @@ def test_a_model_reading_two_groups_names_each_in_its_manifest_and_keeps_a_state
     assert manifest["input"]["group"] == "CT" and manifest["input"]["channels"] == 2
     assert manifest["reads"] == [{"group": "MASK", "channels": 1, "preprocessing": []}]
     assert manifest["blend"] == "Gaussian"
+    # An input no group nor stated read binds is refused before anything is written.
+    from konfai.utils.errors import PredictorError
+
+    for group, extra in ((["CT"], {}), ("CT", {"reads": []})):
+        with pytest.raises(PredictorError, match="example inputs"):
+            export_to_onnx(Masked(), tmp_path / "refused", examples, input_group=group, extra_manifest=extra)
+    assert not (tmp_path / "refused").exists()
 
 
 def test_export_unknown_head_raises(tmp_path):
