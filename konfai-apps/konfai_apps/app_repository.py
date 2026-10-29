@@ -1386,39 +1386,24 @@ class LocalAppRepository(AppRepositoryInfo):
         """
         Resolve the checkpoint(s) to fine-tune into ``(basename, source_path)`` pairs.
 
-        If ``name_of_models`` is provided, each requested name is resolved to a ``.safetensors`` file.
-        Otherwise the first weights ``app.json`` declares are selected, and only an app.json that declares
-        none falls back to the first available weights. Missing files trigger a Hugging Face refresh,
-        mirroring :meth:`download_inference`.
+        Each name of ``name_of_models`` is resolved to a ``.safetensors`` file; with none, the first weights
+        ``app.json`` declares are, and only an app.json that declares none falls back to the first available
+        weights. Missing files trigger a Hugging Face refresh, mirroring :meth:`download_inference`.
         """
-        selected: list[str] = []
+        if not name_of_models and self._checkpoints_name:
+            name_of_models = [str(self._checkpoints_name[0])]
         if name_of_models:
             if any(self._find_repo_filename(name, filenames, suffix=WEIGHTS) is None for name in name_of_models):
                 filenames = self._refreshed_filenames() or filenames
             selected = [self._require_repo_filename(name, filenames, suffix=WEIGHTS) for name in name_of_models]
         else:
-
-            def declared(names: list[str]) -> str | None:
-                resolved = (self._find_repo_filename(str(c), names, suffix=WEIGHTS) for c in self._checkpoints_name)
-                return next((name for name in resolved if name is not None), None)
-
-            default_name = declared(filenames)
-            if default_name is None and self._checkpoints_name:
+            available = sorted(name for name in filenames if name.endswith(WEIGHTS))
+            if not available:
                 filenames = self._refreshed_filenames() or filenames
-                default_name = declared(filenames)
-                if default_name is None:
-                    raise AppRepositoryError(
-                        f"None of the weights app.json declares {self._checkpoints_name} is in app '{self._app_name}'."
-                    )
-            if default_name is None:
                 available = sorted(name for name in filenames if name.endswith(WEIGHTS))
-                if not available:
-                    filenames = self._refreshed_filenames() or filenames
-                    available = sorted(name for name in filenames if name.endswith(WEIGHTS))
-                if not available:
-                    raise AppRepositoryError(f"No weights (.safetensors) found to fine-tune in app '{self._app_name}'.")
-                default_name = available[0]
-            selected = [default_name]
+            if not available:
+                raise AppRepositoryError(f"No weights (.safetensors) found to fine-tune in app '{self._app_name}'.")
+            selected = [available[0]]
 
         return [(PurePosixPath(repo_name).name, self._download(repo_name)) for repo_name in selected]
 

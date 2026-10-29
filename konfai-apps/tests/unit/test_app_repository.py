@@ -745,14 +745,13 @@ def _install_fine_tune(
     )
 
 
-def test_install_fine_tune_never_falls_back_past_the_declared_weights(tmp_path: Path) -> None:
+def test_install_fine_tune_never_falls_back_past_the_first_declared_weights(tmp_path: Path) -> None:
     app_root = tmp_path / "repo" / "demo_app"
     _write_two_checkpoint_app(app_root)
-    for name in ("CV_0.safetensors", "CV_1.safetensors"):
-        (app_root / name).unlink()
+    (app_root / "CV_0.safetensors").unlink()
     (app_root / "other.safetensors").write_text("weights", encoding="utf-8")
 
-    with pytest.raises(AppRepositoryError, match=r"None of the weights app\.json declares"):
+    with pytest.raises(AppRepositoryError, match="CV_0"):
         _install_fine_tune(app_root, tmp_path / "workspace", [])
 
 
