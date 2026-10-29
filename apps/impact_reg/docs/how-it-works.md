@@ -36,7 +36,7 @@ and ANTs:
 | Direction | maps a point of the **fixed** image to the matching point of the **moving** image (ITK's pull-back convention) |
 | Moved image | `moved(x) = moving(x + D(x))` for every fixed voxel `x`: resampling the moving image through the transform |
 | Vector components | physical x, y, z (LPS, as ITK), not voxel axes; the direction matrix is already applied |
-| Units | the images' physical unit: millimetres for NIfTI, MHA, NRRD, DICOM; what the store declares for OME-Zarr |
+| Units | millimetres: NIfTI, MHA, NRRD and DICOM are read as such, and an OME-Zarr store in another unit (micrometres) is converted on read |
 | Outside the grid | zero displacement |
 | Size on disk | 24 bytes per fixed voxel (float64), whatever the preset: 175 MB for 240 × 180 × 176 |
 
@@ -48,6 +48,15 @@ Consequences worth knowing:
   nearest-neighbour interpolation. There is no inverse transform: to bring fixed-side data onto the moving image,
   register the other way round.
 - **Ensembles** average the members' fields voxel by voxel on the common fixed grid (not a diffeomorphic mean).
+
+### The scene: the result in OME-Zarr
+
+`impact-reg-konfai scene --transform Output/P000/Transform.h5 -f fixed -m moving -o Scene.ozx` writes one
+OME-Zarr 0.6 store holding the fixed image, the moving image and the transformation between them as NGFF RFC-5
+metadata, in the images' own unit. A viewer or `ngff_zarr.resample` applies it lazily, without a resampled copy. A field
+that is an affine map (any rigid or affine preset) is stored as the RFC-5 `affine` it is, 12 numbers instead of 24 bytes
+a voxel; a deformable one as a float32 `displacements` field, `--factor` times coarser if asked: on idr0044's embryo,
+2 kept the registration (NCC 0.703 against 0.706) for an eighth of the bytes, 4 cost 0.02. It needs `ngff-zarr[itk]`.
 
 ## IMPACT: registering on what a network sees
 
