@@ -270,6 +270,8 @@ def program_schema() -> dict[str, Any]:
                 "dim": _INTEGER,
                 "extend_slice": _INTEGER,
                 "pad_value": _PAD,
+                # Where the windows of an axis sit (konfai's Patch.placement); absent, pad, as before the key.
+                "placement": {"enum": ["pad", "monai", "spread"]},
                 "batch": _INTEGER,
             },
             ["size", "overlap", "dim", "extend_slice", "pad_value"],

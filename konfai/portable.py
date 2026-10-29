@@ -36,11 +36,14 @@ from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from itertools import chain, combinations, islice, repeat, takewhile
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast, get_args
 
 from ruamel.yaml import YAML
 
 from konfai.utils.errors import ConfigError, KonfAIError, KonfAIWarning, TransformError
+
+if TYPE_CHECKING:
+    from konfai.utils.utils import Placement
 
 #: The program format the portable runtime parses. Raised when a field's meaning changes.
 TRANSFORM_PROGRAM_VERSION = 4
@@ -1037,6 +1040,20 @@ def check_blend(overlap: list[int] | None, blend: str | None) -> None:
             " patch holding it most centrally, which has no portable runtime op.",
             _or_konfai("Declare a patch_combine (Mean, Gaussian or Cosinus), set the overlap to 0", _PREDICT),
         )
+
+
+def derive_placement(config: dict[str, Any], root: str) -> Placement:
+    """The ``Dataset.Patch.placement`` the run places its windows with (``pad`` when unstated), refused when konfai
+    knows no such placement: the runtime would place them otherwise."""
+    from konfai.utils.utils import Placement
+
+    placement = clean(inference_patch(config, root).get("placement")) or "pad"
+    if placement not in get_args(Placement):
+        raise ConfigError(
+            f"Patch.placement '{placement}' is none of {', '.join(get_args(Placement))}.",
+            "Set placement to pad (the default), monai or spread.",
+        )
+    return cast(Placement, placement)
 
 
 def derive_onnx_params(
@@ -2095,6 +2112,7 @@ def export_checkpoints(
             patch_overlap=overlap,
             extend_slice=extend_slice,
             pad_value=pad_value,
+            placement=derive_placement(config, root),
             extra_manifest=dict(extra),
             fold_pre=folds,
             model_filename=f"{model_id}.onnx",

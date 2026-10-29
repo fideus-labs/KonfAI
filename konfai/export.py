@@ -38,6 +38,7 @@ from konfai.utils.errors import PredictorError
 
 if TYPE_CHECKING:
     from konfai.network.network.network import ModuleArgsDict
+    from konfai.utils.utils import Placement
 
 MANIFEST_VERSION = 4
 
@@ -205,6 +206,7 @@ def export_to_onnx(
     patch_overlap: list[int] | None = None,
     extend_slice: int = 0,
     pad_value: float | str | None = None,
+    placement: Placement = "pad",
     fold_pre: list[Callable[[torch.Tensor], torch.Tensor]] | None = None,
     extra_manifest: dict[str, Any] | None = None,
     model_filename: str = "model.onnx",
@@ -229,6 +231,8 @@ def export_to_onnx(
     patch_overlap:
         Per-axis voxel overlap. None retains KonfAI's case-dependent fixed-patch
         overlap and last-patch assignment. An explicit zero list means disjoint patches.
+    placement:
+        The ``Patch.placement`` the config states, written into the manifest's patch.
     opset:
         ONNX opset (>= 18 recommended; the dynamo exporter implements 18).
     model_filename:
@@ -304,9 +308,13 @@ def export_to_onnx(
             "overlap": patch_overlap,
             "dim": dim,
             "extend_slice": extend_slice,
-            # What pads an axis shorter than the patch, on both sides: 0 unless the config pins a value,
-            # "edge" for the volume's edge voxel, or "min" for the minimum of the window read.
+            # What pads a patch past the volume (after it under placement pad, on both sides otherwise): 0 unless
+            # the config pins a value, "edge" for the volume's edge voxel, or "min" for the minimum of the window read.
             "pad_value": pad_value if isinstance(pad_value, str) else float(pad_value or 0.0),
+            # Where the windows of an axis sit, konfai's Patch.placement: pad, monai or spread
+            # (konfai.utils.utils.get_patch_slices_from_shape). Under monai a Gaussian blend's weight is floored at
+            # its min_weight, 1e-3.
+            "placement": placement,
         },
         "geometry": {"mode": "preserve_from_input"},
     }
