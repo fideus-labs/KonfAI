@@ -534,6 +534,29 @@ def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Heade
                 )
 
 
+#: The physical sizes of a pair this far apart, on every axis, are more likely a matter of units than of anatomy.
+_SIZE_RATIO = 20.0
+
+
+def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None:
+    """Warn of a pair whose physical sizes differ a lot on every axis: a store in micrometres against a file whose
+    numbers mean millimetres registers to nothing, silently (NCC 0.14 against 0.93 on the same pair)."""
+    if quiet:
+        return
+    for index, case in enumerate(headers):
+        fixed, moving = (
+            [count * step for count, step in zip(case[group][0][:0:-1], case[group][1], strict=False)]
+            for group in ("Fixed", "Moving")
+        )
+        ratios = [max(f / m, m / f) for f, m in zip(fixed, moving, strict=False) if f > 0 and m > 0]
+        if ratios and min(ratios) >= _SIZE_RATIO:
+            print(
+                f"[ImpactReg] P{index:03d}: the fixed and moving images differ x{min(ratios):.3g} or more in physical "
+                f"size on every axis ({fixed} and {moving} mm): check each image's unit and spacing.",
+                flush=True,
+            )
+
+
 def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attribute]:
     """``source``'s shape and attributes, from its header alone, staged as a one-case dataset under ``base``."""
     root, _, backend = _stage_group(base, group, {"P000": source}).rpartition(":")
@@ -1002,6 +1025,7 @@ class ImpactRegKonfAIApp:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
             headers = self._headers(inputs, work)
+            _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
             _check_space(work, headers, len(presets))
             on_grid = None

@@ -490,6 +490,20 @@ def test_register_refuses_what_is_not_a_3d_scalar_volume(tmp_path: Path, name: s
         app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True)
 
 
+def test_a_pair_of_very_different_physical_sizes_is_warned_of(capsys: pytest.CaptureFixture) -> None:
+    """A store in micrometres against a file whose numbers mean millimetres registered to nothing, silently."""
+
+    def case(spacing: float) -> dict:
+        header = ([1, 50, 680, 535], [spacing] * 3, [0.0] * 3, np.eye(3).ravel().tolist())
+        return {"Fixed": ([1, 50, 680, 535], [0.0002] * 3, *header[2:]), "Moving": header}
+
+    reg._warn_of_other_units([case(0.2)], quiet=False)
+    assert "x1e+03 or more in physical size" in capsys.readouterr().out
+    reg._warn_of_other_units([case(0.0002), case(0.001)], quiet=False)  # the same size, and a five times larger field
+    reg._warn_of_other_units([case(0.2)], quiet=True)
+    assert not capsys.readouterr().out
+
+
 def test_case_order_is_numeric_past_p999() -> None:
     """`sorted` alone puts P1000 before P101 and pairs the wrong moving unit."""
     assert sorted(["P101", "P1000", "P099"], key=reg._case_key) == ["P099", "P101", "P1000"]
