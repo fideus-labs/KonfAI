@@ -128,7 +128,7 @@ def _unwritable(image: sitk.Image, final: str, file_format: str, reason: str) ->
     )
 
 
-def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> None:
+def _write_image(image: sitk.Image, path: str, final: str, file_format: str, compress: bool = False) -> None:
     """``sitk.WriteImage`` of the entry published as ``final``: a format with no writer for this
     volume is refused by name, not by ITK's trace naming the staging file. Any other failure (a
     permission, a full disk) keeps ITK's error.
@@ -138,7 +138,7 @@ def _write_image(image: sitk.Image, path: str, final: str, file_format: str) -> 
     four, and none of them raises: the header of what was written is what says so. It is read back
     for the formats that may hold less, a header read being a tenth to half of a small write."""
     try:
-        sitk.WriteImage(image, path)
+        sitk.WriteImage(image, path, useCompression=compress)
     except RuntimeError as error:
         message = str(error)
         if not any(refusal in message.replace(path, "") for refusal in _UNWRITABLE_VOLUME):
@@ -229,6 +229,9 @@ _STREAMS: dict[str, tuple[Callable[..., DataStream], dict[str, Any]]] = {
 #: The formats whose region writer leaves a file that reads back as the one ITK's writer leaves:
 #: voxels, geometry and every attribute. A NIfTI's spells its header otherwise (no qform).
 _WHOLE_BY_STREAM = ("mha", "nrrd")
+#: Format tokens that ask for compressed pixels in a file carrying another suffix: the formats whose
+#: compression lives inside the file, where NIfTI and GIPL gzip the file itself.
+_COMPRESSED_FORMS = {f"{extension}.gz": extension for extension in ("mha", "mhd", "nrrd", "tif", "tiff")}
 
 
 class SitkFile(AbstractFile):
@@ -238,7 +241,8 @@ class SitkFile(AbstractFile):
     def __init__(self, filename: str, read: bool, file_format: str) -> None:
         self.filename = filename
         self.read = read
-        self.file_format = file_format
+        self.compress = file_format in _COMPRESSED_FORMS
+        self.file_format = _COMPRESSED_FORMS.get(file_format, file_format)
 
     @classmethod
     def open(
@@ -576,7 +580,7 @@ class SitkFile(AbstractFile):
                 old_pixels = _mhd_pixels(final) if self.file_format == "mhd" else None
                 moved: list[str] = []
                 try:
-                    _write_image(data, os.path.join(staging, written), final, self.file_format)
+                    _write_image(data, os.path.join(staging, written), final, self.file_format, self.compress)
                     for part in sorted(os.listdir(staging), key=lambda part: part == written):
                         target = os.path.join(os.path.dirname(final), header if part == written else part)
                         os.replace(os.path.join(staging, part), target)
@@ -594,7 +598,7 @@ class SitkFile(AbstractFile):
                         os.remove(os.path.join(os.path.dirname(final), old_pixels))
             else:
                 try:
-                    _write_image(data, staging, final, self.file_format)
+                    _write_image(data, staging, final, self.file_format, self.compress)
                     if self.file_format in ("nii", "nii.gz"):
                         _check_nifti_written(staging, final)
                 except BaseException:
@@ -667,8 +671,8 @@ class SitkFile(AbstractFile):
         attributes: Attribute,
         region_shape: list[int] | None = None,
     ) -> DataStream | None:
-        # A format outside _STREAMS writes whole in one WriteImage call.
-        if self.file_format not in _STREAMS or not is_an_image(attributes) or len(shape) < 3:
+        # A format outside _STREAMS, or one asked compressed, writes whole in one WriteImage call.
+        if self.compress or self.file_format not in _STREAMS or not is_an_image(attributes) or len(shape) < 3:
             return None
         element_dtype = np.dtype(dtype)
         if element_dtype == np.float16:

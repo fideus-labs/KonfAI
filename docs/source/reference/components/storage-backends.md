@@ -6,7 +6,7 @@ case and group layout.
 
 | Backend | Formats | Layout | Region reads | Region writes | Extra |
 | --- | --- | --- | --- | --- | --- |
-| `SitkFile` | `mha`, `mhd`, `nii`, `nii.gz`, `nrrd`, `nrrd.gz`, `gipl`, `hdr`, `img`, `dcm`, `tif`, `png`, `jpg`, `bmp`, `itk.txt`, `fcsv`, `xml`, `vtk`, `npy` | one file per case and group (the default) | MetaImage, NIfTI and NRRD (compressed ones through a decompressed copy) | `mha`, `nii`, `nii.gz` and `nrrd` | `konfai[itk]` |
+| `SitkFile` | `mha`, `mhd`, `nii`, `nrrd`, `gipl`, `tif` (each also with `.gz`), `hdr`, `img`, `dcm`, `png`, `jpg`, `bmp`, `itk.txt`, `fcsv`, `xml`, `vtk`, `npy` | one file per case and group (the default) | MetaImage, NIfTI and NRRD (compressed ones through a decompressed copy) | `mha`, `nii`, `nii.gz` and `nrrd` | `konfai[itk]` |
 | `H5File` | `h5` | one HDF5 file for the whole dataset | yes | yes | `konfai[hdf5]` |
 | `OmeZarrFile` | `omezarr` (also `ome-zarr`, `zarr`), `omezarr@<level>` | one store per case and group | yes | yes, pyramids included | `konfai[omezarr]` |
 | `DicomFile` | `dicom` | one series folder per case and group | slice by slice | no | `konfai[dicom]` |
@@ -21,6 +21,10 @@ things.
 ```
 
 ## Compressed files
+
+A `.gz` on the format writes the files compressed: `./Predictions:mha.gz`. NIfTI and GIPL gzip the file
+(`CT.nii.gz`). MetaImage, NRRD and TIFF compress inside the file, which keeps its name (`CT.mha`) and reads
+back under `mha` too. Apart from `nii.gz`, a compressed file is written whole, not by region.
 
 A `.nii.gz`, a compressed MetaImage or a compressed NRRD cannot be read by region: the whole stream must be
 decoded from the start. So the first time a run reads a region of such a file, KonfAI decompresses it once into
