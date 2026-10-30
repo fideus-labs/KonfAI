@@ -93,6 +93,23 @@ def test_explicit_head_overrides_auto_selection(tmp_path):
     export_to_onnx(model, tmp_path, example, head, opset=18)
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["output_module"] == head
+    assert manifest["patch"]["overlap"] is None
+    assert manifest["blend"] == "Overwrite"
+
+
+def test_the_exported_graph_names_no_path_of_the_machine_that_exported_it(tmp_path):
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+
+    import konfai
+    from konfai.export import export_to_onnx
+    from konfai.models.python.segmentation.UNet import UNet
+
+    model = UNet(dim=2, channels=[1, 8, 16], nb_class=2).eval()
+    export_to_onnx(model, tmp_path, torch.randn(1, 1, 64, 64), "UNetBlock_0.Head.Softmax", opset=18)
+    graph = str(onnx.load(str(tmp_path / "model.onnx")))
+    for installed in (konfai, torch):
+        assert str(Path(installed.__file__).resolve().parent) not in graph, installed.__name__
 
 
 def test_fold_pre_bakes_a_custom_pointwise_op_into_the_graph(tmp_path):
@@ -149,6 +166,33 @@ def test_any_module_exposing_named_forward_exports(tmp_path):
     )[0]
     with torch.no_grad():
         np.testing.assert_allclose(produced, torch.tanh(model.conv(example)).numpy(), atol=1e-5)
+
+
+def test_a_model_reading_two_groups_names_each_in_its_manifest_and_keeps_a_stated_blend(tmp_path):
+    pytest.importorskip("onnx")
+    pytest.importorskip("onnxscript")
+
+    from konfai.export import export_to_onnx
+
+    class Masked(torch.nn.Module):
+        def named_forward(self, x, mask):
+            yield "masked", torch.tanh(x) * mask
+
+    examples = (torch.randn(1, 2, 16, 16), torch.ones(1, 1, 16, 16))
+    _, manifest = export_to_onnx(
+        Masked(), tmp_path, examples, input_group=["CT", "MASK"], extra_manifest={"blend": "Gaussian"}
+    )
+
+    assert manifest["input"]["group"] == "CT" and manifest["input"]["channels"] == 2
+    assert manifest["reads"] == [{"group": "MASK", "channels": 1, "preprocessing": []}]
+    assert manifest["blend"] == "Gaussian"
+    # An input no group nor stated read binds is refused before anything is written.
+    from konfai.utils.errors import PredictorError
+
+    for group, extra in ((["CT"], {}), ("CT", {"reads": []})):
+        with pytest.raises(PredictorError, match="example inputs"):
+            export_to_onnx(Masked(), tmp_path / "refused", examples, input_group=group, extra_manifest=extra)
+    assert not (tmp_path / "refused").exists()
 
 
 def test_export_unknown_head_raises(tmp_path):
