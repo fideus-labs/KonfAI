@@ -18,21 +18,20 @@
 
 :func:`assemble_bundle` writes the bundle folder (``app.json`` + configs + checkpoints +
 optional ``Model.py`` / ``requirements.txt``) and validates the metadata. With ``--onnx``,
-:func:`export_onnx_into_bundle` also emits ``model.onnx`` + ``manifest.json`` for the
-Python-free runtime.
+:func:`export_portable_into_bundle` also emits the portable runtime's artifacts: ``model.onnx`` +
+``manifest.json`` for one checkpoint, one ``.onnx`` per checkpoint + ``program.json`` otherwise.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import random
-import re
 import shutil
 import sys
-from collections.abc import Callable
 from pathlib import Path, PureWindowsPath
 from typing import Any
+
+from konfai.portable import aux_mask_groups, compile_output, config_environment, tta_passes, warn_unportable_keys
 
 from .errors import AppMetadataError
 
@@ -57,7 +56,6 @@ def derive_requirements(py_files: list[str | Path]) -> list[str]:
     (``segmentation_models_pytorch`` kept, ``torch``/``numpy`` dropped). A draft to review.
     """
     import ast
-    import sys
 
     stdlib = set(sys.stdlib_module_names)
     found: set[str] = set()
@@ -75,400 +73,6 @@ def derive_requirements(py_files: list[str | Path]) -> list[str]:
                     continue
                 found.add(_IMPORT_TO_PYPI.get(top, top.replace("_", "-")))
     return sorted(found)
-
-
-def _find_inference_patch(node: Any) -> dict[str, Any] | None:
-    """The inference ``Patch`` sub-dict (sliding-window geometry), skipping the model's ``ModelPatch``."""
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key == "ModelPatch":
-                continue
-            if key == "Patch" and isinstance(value, dict) and "patch_size" in value:
-                return value
-            found = _find_inference_patch(value)
-            if found is not None:
-                return found
-    return None
-
-
-def _derive_overlap(patch: dict[str, Any], patch_size: list[int]) -> list[int] | None:
-    """The inference ``Patch.overlap`` in voxels per kept axis, read by KonfAI's own ``resolve_overlap``:
-    a scalar broadcasts; a full-rank list drops the same 2.5D singleton axes ``patch_size`` dropped."""
-    from konfai.utils.utils import resolve_overlap
-
-    raw = patch.get("overlap")
-    if isinstance(raw, bool) or _clean(raw) is None:
-        return None
-    if isinstance(raw, list) and len(raw) != len(patch_size):
-        dims = [int(d) for d in patch.get("patch_size", [])]
-        if len(raw) != len(dims):
-            return None
-        # full-rank overlap incl. the singleton slice axis: keep dim>1 axes
-        raw = [v for v, d in zip(raw, dims, strict=True) if d > 1] or raw
-    elif not isinstance(raw, (int, float, str, list)):
-        return None
-    # An extent past the patch: the overlap of an axis the runtime tiles.
-    return resolve_overlap(raw, patch_size, [size + 1 for size in patch_size])
-
-
-def _derive_blend(config: dict[str, Any], root: str) -> str | None:
-    """The output's ``patch_combine`` window (Gaussian/Cosinus/Mean) -> the manifest ``blend``."""
-
-    def walk(node: Any) -> str | None:
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key == "patch_combine" and isinstance(value, str) and value not in ("None", "none", ""):
-                    return value
-                found = walk(value)
-                if found is not None:
-                    return found
-        elif isinstance(node, list):
-            for item in node:
-                found = walk(item)
-                if found is not None:
-                    return found
-        return None
-
-    return walk(config.get(root))
-
-
-def _derive_onnx_params(config: dict[str, Any], root: str) -> tuple[list[int] | None, int | None, int, float | None]:
-    """Best-effort ``(patch_size, in_channels, extend_slice, pad_value)`` from a prediction config.
-
-    ``patch_size`` drops a singleton slice dim (2.5D); ``in_channels`` reads the model's
-    ``nb_channel`` / ``in_channels`` / first ``channels``. ``None`` for anything not derivable.
-    """
-
-    patch_size: list[int] | None = None
-    extend_slice = 0
-    pad_value: float | None = None
-    patch = _find_inference_patch(config)
-    if patch is not None:
-        raw = patch.get("patch_size")
-        if isinstance(raw, list):
-            dims = [int(d) for d in raw]
-            patch_size = [d for d in dims if d > 1] or dims
-        raw_extend = patch.get("extend_slice", 0)
-        if isinstance(raw_extend, int):
-            extend_slice = raw_extend
-        elif isinstance(raw_extend, str) and raw_extend.lstrip("-").isdigit():
-            extend_slice = int(raw_extend)
-        raw_pad = patch.get("pad_value")
-        if isinstance(raw_pad, (int, float)) and not isinstance(raw_pad, bool):
-            pad_value = float(raw_pad)
-
-    in_channels: int | None = None
-    model_cfg = config.get(root, {}).get("Model", {}) if isinstance(config.get(root), dict) else {}
-    for value in model_cfg.values() if isinstance(model_cfg, dict) else []:
-        if not isinstance(value, dict):
-            continue
-        if isinstance(value.get("nb_channel"), int):
-            in_channels = value["nb_channel"]
-            break
-        if isinstance(value.get("in_channels"), int):
-            in_channels = value["in_channels"]
-            break
-        channels = value.get("channels")
-        if isinstance(channels, list) and channels and isinstance(channels[0], int):
-            in_channels = channels[0]
-            break
-    return patch_size, in_channels, extend_slice, pad_value
-
-
-# KonfAI transform name -> runtime op. A transform outside this curated map is refused by the export. The
-# export reads the raw config, so an unset parameter takes the default the core stage binds.
-def _op_cast(p: dict[str, Any]) -> dict[str, Any]:
-    return {"op": "cast", "dtype": str(p.get("dtype", "float32"))}
-
-
-def _op_resample(p: dict[str, Any]) -> dict[str, Any]:
-    step = {"op": "resample", "spacing": [float(s) for s in p["spacing"]], "inverse": bool(p.get("inverse", True))}
-    return _with_fill(step, p)
-
-
-def _with_fill(step: dict[str, Any], p: dict[str, Any]) -> dict[str, Any]:
-    """``step`` with the stage's ``fill``, the value it writes outside the source, unless it is the default 0."""
-    fill = float(_clean(p.get("fill")) or 0.0)
-    return {**step, "fill": fill} if fill else step
-
-
-def _clean(value: Any) -> Any:
-    return None if value in (None, "None") else value
-
-
-def _op_standardize(p: dict[str, Any]) -> dict[str, Any]:
-    step: dict[str, Any] = {"op": "standardize"}
-    if _clean(p.get("mean")) is not None:
-        step["mean"] = float(p["mean"]) if not isinstance(p["mean"], list) else p["mean"]
-    if _clean(p.get("std")) is not None:
-        step["std"] = float(p["std"]) if not isinstance(p["std"], list) else p["std"]
-    return step
-
-
-def _op_normalize(p: dict[str, Any]) -> dict[str, Any]:
-    return {"op": "normalize", "min_value": float(p.get("min_value", -1)), "max_value": float(p.get("max_value", 1))}
-
-
-def _op_unnormalize(p: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "op": "unnormalize",
-        "min_value": float(p.get("min_value", -1024)),
-        "max_value": float(p.get("max_value", 3071)),
-    }
-
-
-def _op_clip(p: dict[str, Any]) -> dict[str, Any]:
-    # Bounds are a fixed number or a data-dependent spec ("min"/"max"/"percentile:<q>") the runtime resolves.
-    def bound(v: Any) -> Any:
-        return v if isinstance(v, str) else float(v)
-
-    return {"op": "clip", "min_value": bound(p.get("min_value", -1024)), "max_value": bound(p.get("max_value", 1024))}
-
-
-_OP_MAP = {
-    "TensorCast": _op_cast,
-    "Clip": _op_clip,
-    "Resample": _op_resample,
-    # Canonical reorients from the volume's own direction cosines at runtime; the op carries its inverse flag and fill.
-    "Canonical": lambda p: _with_fill({"op": "canonical", "inverse": bool(p.get("inverse", True))}, p),
-    "Standardize": _op_standardize,
-    "Normalize": _op_normalize,
-    "UnNormalize": _op_unnormalize,
-    "Softmax": lambda p: {"op": "softmax", "dim": int(p.get("dim", 0))},
-    "Argmax": lambda p: {"op": "argmax", "dim": int(p.get("dim", 0))},
-}
-
-
-# Transforms never compiled into per-buffer manifest pipeline ops. `_pipeline` skips `Save` and
-# `InferenceStack` wherever they sit. The others are PROGRAM steps (cross-buffer, or a buffer produced by
-# a nested model): the program applies a `Mask` only by an auxiliary group it produces, and `Dilate` /
-# `KonfAIInference` only in that group's own chain, so anywhere else `_pipeline` refuses them.
-_SKIPPED_TRANSFORMS = {"Save", "InferenceStack"}
-_PROGRAM_TRANSFORMS = {"Mask", "KonfAIInference", "Dilate"}
-
-
-def _input_group_transforms(config: dict[str, Any], root: str) -> dict[str, Any] | None:
-    """The transform chain of the input dest group (``is_input``, true when unset as in the core): the
-    model's actual input pipeline. A config may carry auxiliary groups (a mask, a conditioning image)
-    whose transforms are NOT the model preprocessing, so an input group without a chain has none. Falls
-    back to the first ``transforms`` block when the config names no input group."""
-    dataset = config.get(root, {}).get("Dataset", {})
-    groups = [
-        group
-        for src in (dataset.get("groups_src") or {}).values()
-        if isinstance(src, dict)
-        for group in (src.get("groups_dest") or {}).values()
-        if isinstance(group, dict)
-    ]
-    # An explicit ``is_input: true`` ahead of a group that leaves it to the default.
-    inputs = [g for g in groups if g.get("is_input")] + [g for g in groups if "is_input" not in g]
-    if not inputs:
-        return _find_transforms(dataset, "transforms")
-    return next((chain for group in inputs if (chain := _chain(group.get("transforms"))) is not None), None)
-
-
-def _chain(node: Any) -> dict[str, Any] | None:
-    """A chain as the core binds it: a mapping, or a YAML list under its occurrence keys (``Clip#2``)."""
-    if isinstance(node, list):
-        from konfai.utils.config import _occurrence_mapping
-
-        return _occurrence_mapping(node, "chain")
-    return node if isinstance(node, dict) else None
-
-
-def _base(name: str) -> str:
-    """The KonfAI stage a chain key names. ``Clip#2`` (the key a list chain binds a repeat under) and
-    ``konfai.data.transform:Clip`` (a repeat in a mapping) are ``Clip``; a class of another module keeps
-    its classpath, so it is never taken for the KonfAI stage of the same name."""
-    classpath = re.sub(r"#\d+$", "", name).split("/", 1)[0]
-    module, _, cls_name = classpath.rpartition(":")
-    module = module.replace(":", ".")
-    stage_modules = ("konfai.data.transform", "konfai_apps.transforms")
-    return cls_name if module in stage_modules or module.startswith("konfai.data.transform.") else classpath
-
-
-def _find_transforms(node: Any, key: str) -> dict[str, Any] | None:
-    """First ``key`` chain of a mapping value (the input ``transforms`` / output ``final_transforms``)."""
-    if isinstance(node, dict):
-        found = _chain(node.get(key))
-        if found is not None:
-            return found
-        for value in node.values():
-            nested = _find_transforms(value, key)
-            if nested is not None:
-                return nested
-    elif isinstance(node, list):
-        for item in node:
-            nested = _find_transforms(item, key)
-            if nested is not None:
-                return nested
-    return None
-
-
-def _try_fold(name: str, params: Any) -> Callable[[Any], Any] | None:
-    """A tensor->tensor callable for the exporter's ``fold_pre`` if ``name`` is a POINTWISE,
-    torch-instantiable transform (bakeable into the ONNX graph), else ``None``."""
-    from konfai.data.transform import LocalityKind, Transform
-    from konfai.utils.dataset import Attribute
-    from konfai.utils.utils import get_module
-
-    base = _base(name)
-    try:
-        module, cls_name = get_module(base, "konfai.data.transform")
-        cls = getattr(module, cls_name)
-    except Exception:
-        return None
-    if not (isinstance(cls, type) and issubclass(cls, Transform)):
-        return None
-    kwargs = {k: _clean(v) for k, v in params.items()} if isinstance(params, dict) else {}
-    try:
-        inst = cls(**kwargs)
-        if inst.patch_locality(Attribute()).kind is not LocalityKind.POINTWISE:
-            return None
-    except Exception:
-        return None
-    return lambda tensor: inst("fold", tensor, Attribute())
-
-
-def _pipeline(
-    transforms: dict[str, Any] | None, *, fold: bool = False, masks: frozenset[str] = frozenset()
-) -> tuple[list[dict[str, Any]], list[Callable[[Any], Any]]]:
-    """Map an ordered KonfAI transform chain to runtime ops. With ``fold=True``, a POINTWISE + torch
-    transform not in the registry is baked into the ONNX graph. Folds must form a SUFFIX: a runtime
-    op after a fold is refused. ``masks`` are the groups the program masks the output by."""
-    steps: list[dict[str, Any]] = []
-    folds: list[Callable[[Any], Any]] = []
-    for name, params in (transforms or {}).items():
-        base = _base(name)
-        if base in _SKIPPED_TRANSFORMS or (base == "Mask" and isinstance(params, dict) and params.get("path") in masks):
-            continue  # a side effect, or a step the program compiles; never a per-buffer pipeline op
-        if base in _PROGRAM_TRANSFORMS:
-            raise AppMetadataError(
-                f"transform '{name}' would be skipped by the portable runtime: its program applies a Mask only "
-                "in before_reduction_transforms, by a group a nested KonfAIInference model produces, and a "
-                "Dilate or KonfAIInference only in that group's chain. Remove it from the inference config."
-            )
-        if _clean(params) is None and base not in _OP_MAP:
-            continue
-        if base in _OP_MAP:
-            if folds:
-                raise AppMetadataError(
-                    f"transform '{name}' is a runtime op but follows a folded transform; move folded "
-                    "(pointwise custom) transforms to the end of the inference pipeline."
-                )
-            steps.append(_OP_MAP[base](params if isinstance(params, dict) else {}))
-            continue
-        folded = _try_fold(name, params) if fold else None
-        if folded is None:
-            raise AppMetadataError(
-                f"transform '{name}' has no portable runtime op and is not a foldable pointwise transform; "
-                "the ONNX bundle is not deployable in a Python-free runtime. Remove it from the inference "
-                "config or extend the runtime op registry."
-            )
-        folds.append(folded)
-    return steps, folds
-
-
-def _transform_manifest(config: dict[str, Any], root: str) -> tuple[dict[str, Any], list[Callable[[Any], Any]]]:
-    """The pre/post op pipeline the portable runtime applies around the tiled forward, plus the
-    ``fold_pre`` callables (POINTWISE preprocessing transforms baked into the ONNX graph)."""
-    section = config.get(root, {})
-    pre, folds = _pipeline(_input_group_transforms(config, root), fold=True)
-    # Post is `before_reduction_transforms` (disjoint ensemble: argmax per fold before merge) or
-    # `final_transforms` (same-class ensemble: runs once after the mean); read both.
-    before, _ = _pipeline(
-        _find_transforms(section.get("outputs_dataset"), "before_reduction_transforms"),
-        masks=frozenset(_aux_mask_groups(config, root)),
-    )
-    final, _ = _pipeline(_find_transforms(section.get("outputs_dataset"), "final_transforms"))
-    return {"preprocessing": pre, "postprocessing": before + final}, folds
-
-
-def _hoist_ensemble_tail(
-    manifests: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Hoist the post-reduction tail out of a same-class (``mean``) ensemble's per-fold manifests.
-
-    A mean ensemble reduces RAW LOGITS, then applies softmax/argmax and the inverse resample once. So
-    each fold is stripped of its ``postprocessing`` and its resample made forward-only; the removed
-    steps become program ops after the ``mean`` (softmax/argmax, then a resample back onto ``input`` --
-    nearest for a label map, linear otherwise).
-
-    Returns ``(stripped_manifests, tail_ops)``.
-    """
-    rep = manifests[0]
-    tail: list[dict[str, Any]] = []
-    for step in rep.get("postprocessing", []):
-        op = step["op"]
-        if op == "cast":
-            continue  # a dtype cast is a no-op in the float program; the final NIfTI write handles dtype
-        if op not in ("softmax", "argmax"):
-            raise AppMetadataError(
-                f"assemble_program: cannot hoist post op '{op}' across the reduction (only softmax/argmax "
-                "are channel-axis buffer ops; a per-voxel intensity op belongs in each fold's manifest)."
-            )
-        if int(step.get("dim", 0)) != 0:
-            raise AppMetadataError(
-                f"assemble_program: ensemble post op '{op}' has dim={step['dim']}; the program reduction "
-                "runs on the channel axis (dim 0), so it cannot be hoisted across the reduction."
-            )
-        tail.append({"op": op})
-    has_argmax = any(s["op"] == "argmax" for s in rep.get("postprocessing", []))
-    if any(s.get("op") == "resample" and s.get("inverse") for s in rep.get("preprocessing", [])):
-        tail.append({"op": "resample_nearest" if has_argmax else "resample_linear", "extra": ["input"]})
-
-    stripped: list[dict[str, Any]] = []
-    for mf in manifests:
-        fold = dict(mf)
-        fold["postprocessing"] = []
-        fold["preprocessing"] = [
-            {**step, "inverse": False} if step.get("op") == "resample" else step for step in mf.get("preprocessing", [])
-        ]
-        stripped.append(fold)
-    return stripped, tail
-
-
-def assemble_program(models: list[dict[str, Any]], *, reduce: str, classes: list[int] | None = None) -> dict[str, Any]:
-    """Assemble the multi-model program JSON (Model steps + a reduction Op over named buffers).
-
-    Each ``models[i]`` is ``{"id": str, "manifest": <single-model manifest>}``; every model runs on
-    ``input`` into its own buffer, then a reduction combines them. ``mean`` (same-class ensemble)
-    hoists each fold's post nonlinearity + inverse resample past the reduction (see
-    :func:`_hoist_ensemble_tail`); ``merge_labels`` (disjoint ensemble) keeps each fold's post. A single
-    model is one step, no reduction.
-    """
-    if not models:
-        raise AppMetadataError("assemble_program: at least one model is required")
-    if reduce not in ("mean", "median", "merge_labels"):
-        raise AppMetadataError(
-            f"assemble_program: unknown reduction '{reduce}' (expected 'mean', 'median' or 'merge_labels')",
-        )
-
-    manifests = [m["manifest"] for m in models]
-    tail: list[dict[str, Any]] = []
-    if reduce in ("mean", "median") and len(models) > 1:
-        manifests, tail = _hoist_ensemble_tail(manifests)
-
-    buffers = [f"m{i}" for i in range(len(models))]
-    steps: list[dict[str, Any]] = [
-        {"model": m["id"], "in": "input", "out": buf, "manifest": mf}
-        for m, buf, mf in zip(models, buffers, manifests, strict=True)
-    ]
-    if len(models) == 1:
-        return {"steps": [{**steps[0], "out": "output"}], "output": "output"}
-
-    reduced = "r" if tail else "output"
-    op: dict[str, Any] = {"op": reduce, "in": buffers, "out": reduced}
-    if reduce == "merge_labels":
-        op["classes"] = classes if classes is not None else [int(m["classes"]) for m in models]
-    chain: list[dict[str, Any]] = [*steps, op]
-
-    cursor = reduced
-    for i, t in enumerate(tail):
-        out = "output" if i == len(tail) - 1 else f"t{i}"
-        chain.append({"op": t["op"], "in": [cursor, *t.get("extra", [])], "out": out})
-        cursor = out
-    return {"steps": chain, "output": "output"}
 
 
 def _support_relative(value: str, role: str) -> Path:
@@ -682,164 +286,7 @@ def _replace_bundle(staging: Path, bundle: Path, models: list[str]) -> None:
     shutil.rmtree(staging)
 
 
-def _derive_reduction(config: dict[str, Any], root: str) -> str | None:
-    """The ensemble reduction a multi-model program applies, read from the output transforms:
-    ``MergeLabels`` (models with disjoint label spaces) -> ``merge_labels``; ``InferenceStack``
-    (same-class probability ensemble) -> ``mean``. ``None`` when the config declares no reduction."""
-    after = _find_transforms(config.get(root, {}).get("outputs_dataset"), "after_reduction_transforms") or {}
-    if "MergeLabels" in {_base(name) for name in after}:
-        return "merge_labels"
-    stack = next((p for name, p in after.items() if _base(name) == "InferenceStack"), None)
-    if stack is not None:
-        return "median" if isinstance(stack, dict) and stack.get("mode") == "median" else "mean"
-    return None
-
-
-def _tta_passes(config: dict[str, Any], root: str) -> list[list[int]]:
-    """Flip test-time-augmentation passes: identity plus each augmentation's ``nb`` random draws, matching
-    the config's pass count and per-axis Flip probabilities. Randomness is embraced: the exact draw is
-    not KonfAI's (whose torch RNG is not reproducible here), so the result is CLOSE, not byte-identical --
-    but it is reproducible from the config's ``manual_seed``. A non-Flip TTA augmentation is skipped (the
-    runtime has no portable op for it yet), leaving the TTA lighter but never wrong. ``f_prob`` index ``i``
-    maps to channel-first tensor dim ``i + 1`` and hence to spatial axis ``i``; ``[[]]`` when there is no
-    TTA."""
-    predictor = config.get(root, {})
-    augmentations = predictor.get("Dataset", {}).get("augmentations")
-    if not isinstance(augmentations, dict) or not augmentations:
-        return [[]]
-    rng = random.Random(int(predictor.get("manual_seed") or 0))  # nosec B311 - TTA sampling, not security
-    passes: list[list[int]] = [[]]  # the identity pass is always present
-    for aug in augmentations.values():
-        chain = _chain(aug.get("data_augmentations")) if isinstance(aug, dict) else None
-        # Only Flip has a portable runtime op; other augmentations are skipped (the TTA is a bit lighter,
-        # never wrong) rather than blocking the export: extend the runtime registry to add them.
-        f_prob = next(
-            (p.get("f_prob") for n, p in (chain or {}).items() if n.split("/", 1)[0] == "Flip" and isinstance(p, dict)),
-            None,
-        )
-        if not f_prob:
-            continue
-        for _ in range(int(aug.get("nb", 0))):
-            passes.append([i for i, p in enumerate(f_prob) if rng.random() < float(p)])
-    return passes
-
-
-def _aux_mask_groups(config: dict[str, Any], root: str) -> dict[str, dict[str, Any]]:
-    """Auxiliary dest groups (``is_input`` false) a ``Mask`` references: each is produced by a nested
-    model (``KonfAIInference``) then pipeline ops (resample onto the primary grid, dilate). Returns
-    ``{group_name: {"inference": <KonfAIInference params>, "ops": [("resample"|"dilate", param)]}}``."""
-    dataset = config.get(root, {}).get("Dataset", {})
-    groups: dict[str, dict[str, Any]] = {}
-    for src in (dataset.get("groups_src") or {}).values():
-        for name, group in (src.get("groups_dest") or {}).items() if isinstance(src, dict) else []:
-            transforms = _chain(group.get("transforms")) if isinstance(group, dict) else None
-            if transforms is None or group.get("is_input"):
-                continue
-            inference, ops = None, []
-            for tname, params in transforms.items():
-                base = _base(tname)
-                if base == "KonfAIInference":
-                    inference = params
-                elif base == "Resample":
-                    ops.append(("resample", params))
-                elif base == "Dilate":
-                    ops.append(("dilate", int((params or {}).get("dilate", 0))))
-            if inference is not None:
-                groups[name] = {"inference": inference, "ops": ops}
-    return groups
-
-
-def _mask_specs(config: dict[str, Any], root: str) -> list[dict[str, Any]]:
-    """``Mask`` ops in ``before_reduction`` (masking the primary output by an auxiliary group's buffer):
-    ``[{"group": <aux group name>, "value_outside": float}]``."""
-    before = _find_transforms(config.get(root, {}).get("outputs_dataset"), "before_reduction_transforms") or {}
-    return [
-        {"group": params.get("path"), "value_outside": float((params or {}).get("value_outside", 0))}
-        for name, params in before.items()
-        if _base(name) == "Mask" and isinstance(params, dict)
-    ]
-
-
-def _assemble_masked_tta_program(
-    fold_models: list[dict[str, Any]],
-    tta_passes: list[list[int]],
-    aux: dict[str, dict[str, Any]],
-    mask_specs: list[dict[str, Any]],
-    reduce: str = "mean",
-) -> dict[str, Any]:
-    """The synthesis-with-mask program: nested mask model(s) -> primary folds x TTA flip passes ->
-    mean -> mask -> hoisted inverse resample -> final integer cast.
-
-    ``fold_models``/``aux`` values carry an ``id`` and a single-model ``manifest``. Each fold keeps its
-    per-fold post (unnormalize + truncating cast) and its inverse resample is hoisted to a single tail op
-    after the reduction. Each TTA pass flips the input, runs every fold, and unflips the output; the mask
-    model's buffer is resampled onto the primary grid and dilated, then applied to the mean.
-    """
-    rep = fold_models[0]["manifest"]
-    final_dtype = next((s.get("dtype") for s in reversed(rep.get("postprocessing", [])) if s["op"] == "cast"), None)
-    has_inverse = any(s.get("op") == "resample" and s.get("inverse") for s in rep.get("preprocessing", []))
-
-    def hoisted(manifest: dict[str, Any]) -> dict[str, Any]:
-        fold = json.loads(json.dumps(manifest))
-        for step in fold.get("preprocessing", []):
-            if step.get("op") == "resample":
-                step["inverse"] = False
-        return fold
-
-    steps: list[dict[str, Any]] = [
-        {"model": g["id"], "in": "input", "out": f"{name}__raw", "manifest": g["manifest"]} for name, g in aux.items()
-    ]
-    copies: list[str] = []
-    grid_ref: str | None = None
-    for p, axes in enumerate(tta_passes):
-        flipped = "input" if not axes else f"in{p}"
-        if axes:
-            steps.append({"op": "flip", "in": ["input"], "out": flipped, "axes": axes})
-        for model in fold_models:
-            raw = f"{model['id']}__p{p}"
-            steps.append({"model": model["id"], "in": flipped, "out": raw, "manifest": hoisted(model["manifest"])})
-            out = raw
-            if axes:
-                out = f"{model['id']}__u{p}"
-                steps.append({"op": "flip", "in": [raw], "out": out, "axes": axes})  # undo the flip
-            copies.append(out)
-            grid_ref = grid_ref or out  # any fold output sits on the primary (post-resample) grid
-    mask_buffers: dict[str, str] = {}
-    for name, g in aux.items():
-        cur = f"{name}__raw"
-        for kind, param in g["ops"]:
-            nxt = f"{name}__{kind[:1]}"
-            if kind == "resample":
-                steps.append({"op": "resample_nearest", "in": [cur, grid_ref], "out": nxt})
-            else:  # dilate
-                steps.append({"op": "dilate", "in": [cur], "out": nxt, "radius": param})
-            cur = nxt
-        mask_buffers[name] = cur
-
-    steps.append({"op": reduce, "in": copies, "out": "synth"})
-    cur = "synth"
-    for i, spec in enumerate(mask_specs):
-        nxt = f"masked{i}"
-        steps.append(
-            {
-                "op": "mask",
-                "in": [cur, mask_buffers[spec["group"]]],
-                "out": nxt,
-                **{"value_outside": spec["value_outside"]},
-            }
-        )
-        cur = nxt
-    if has_inverse:
-        steps.append({"op": "resample_linear", "in": [cur, "input"], "out": "resampled"})
-        cur = "resampled"
-    if final_dtype:
-        steps.append({"op": "cast", "in": [cur], "out": "output", "dtype": final_dtype})
-    else:
-        steps[-1]["out"] = "output"
-    return {"steps": steps, "output": "output"}
-
-
-def _export_nested_model(main_bundle: Path, group_name: str, inference: dict[str, Any]) -> dict[str, Any]:
+def export_nested_model(group_name: str, inference: dict[str, Any], out_dir: Path) -> dict[str, Any]:
     """Resolve the app a ``KonfAIInference`` references (``repo_id:model_name``), export its single-model
     onnx + manifest, copy the onnx into the main bundle as ``<group>.onnx``, and return ``{id, manifest}``
     for the program. The nested model's own transforms (resample / argmax / inverse) live in its manifest."""
@@ -849,7 +296,9 @@ def _export_nested_model(main_bundle: Path, group_name: str, inference: dict[str
 
     # Several checkpoints would make the nested export emit `program.json` + per-fold onnx instead of the
     # `model.onnx` + `manifest.json` this step copies, so refuse it here rather than fail on a missing file.
-    nested_checkpoints = inference.get("checkpoints_name") or []
+    # KonfAIInference reads ["fold_0"] where the config names none: the same default, or the nested export
+    # would load no weights at all.
+    nested_checkpoints = list(inference.get("checkpoints_name") or ["fold_0"])
     if len(nested_checkpoints) > 1:
         raise AppMetadataError(
             f"nested model '{group_name}' declares {len(nested_checkpoints)} checkpoints; the portable "
@@ -865,9 +314,16 @@ def _export_nested_model(main_bundle: Path, group_name: str, inference: dict[str
             dest = nested_dir / name
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(path, dest)
-        export_portable_into_bundle(nested_dir, checkpoints=inference.get("checkpoints_name"))
-        shutil.copy(nested_dir / "model.onnx", main_bundle / f"{group_name}.onnx")
-        manifest = json.loads((nested_dir / "manifest.json").read_text())
+        artifact = export_portable_into_bundle(nested_dir, checkpoints=nested_checkpoints)
+        # Test-time copies or a mask of its own make the nested export a program, which this step cannot nest.
+        # The export's result says so: the app may publish a program.json of its own.
+        if artifact.name == "program.json":
+            raise AppMetadataError(
+                f"nested model '{group_name}' compiles to a program (test-time copies or a mask of its own); the"
+                " portable runtime nests one plain model."
+            )
+        shutil.copy(artifact, out_dir / f"{group_name}.onnx")
+        manifest = json.loads((nested_dir / "manifest.json").read_text(encoding="utf-8"))
     return {"id": group_name, "manifest": manifest}
 
 
@@ -883,17 +339,13 @@ def export_portable_into_bundle(
 ) -> Path:
     """Write the bundle's portable-runtime artifacts from its prediction config.
 
-    One checkpoint -> ``model.onnx`` + ``manifest.json``. Several checkpoints combined by the ensemble
-    reduction the config declares (``MergeLabels`` / ``InferenceStack``) -> one ``<fold>.onnx`` per
-    checkpoint plus ``program.json``, the multi-model dataflow the konfai-rs runtime executes. The patch
-    geometry, transforms, blend, and reduction are all read from the config: nothing is per-app. The
-    config file is restored afterwards because reading it mutates it.
+    One checkpoint, no test-time copy and no mask -> ``model.onnx`` + ``manifest.json``. Otherwise one
+    ``<id>.onnx`` per checkpoint plus ``program.json``: the program :func:`konfai.portable.compile_output`
+    assembles, every checkpoint on every test-time pass, the nested models a ``Mask`` reads, folded by the
+    reduction the config declares. The patch geometry, transforms, blend, and reduction are all read from
+    the config: nothing is per-app. The config file is restored afterwards because reading it mutates it.
     """
-    import torch
     import yaml
-    from konfai.export import export_to_onnx, select_inference_head
-    from konfai.network.network import ModelLoader
-    from konfai.utils.runtime import safe_torch_load
 
     bundle = Path(bundle)
     config_path = bundle / prediction_config
@@ -901,127 +353,62 @@ def export_portable_into_bundle(
         raise AppMetadataError(f"prediction config '{prediction_config}' not found in bundle {bundle}")
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    try:
-        classpath = config[root]["Model"]["classpath"]
-    except (KeyError, TypeError) as exc:
-        raise AppMetadataError(f"could not read {root}.Model.classpath from {config_path}") from exc
+    model_section = (config.get(root) or {}).get("Model") if isinstance(config, dict) else None
+    if not isinstance(model_section, dict) or "classpath" not in model_section:
+        raise AppMetadataError(f"could not read {root}.Model.classpath from {config_path}")
+    warn_unportable_keys(config, root)
 
-    derived_patch, derived_channels, extend_slice, pad_value = _derive_onnx_params(config, root)
-    patch_size = patch_size or derived_patch
-    in_channels = in_channels if in_channels is not None else derived_channels
-    if not patch_size:
-        raise AppMetadataError("could not derive patch_size from the config; pass --patch-size")
-
-    inference_patch = _find_inference_patch(config)
-    patch_overlap = _derive_overlap(inference_patch, patch_size) if inference_patch else None
-    blend = _derive_blend(config, root)
-    reduction = _derive_reduction(config, root)
-    # `None` stands for "the config's own checkpoint", so the loop below is uniform over both cases.
+    # `None` stands for "the config's own checkpoint", so the export is uniform over both cases.
     selected: list[str | None] = list(checkpoints) if checkpoints else [None]
     ensemble = len(selected) > 1
-    if ensemble and reduction is None:
-        raise AppMetadataError(
-            "several checkpoints were given but the config declares no ensemble reduction "
-            "(MergeLabels / InferenceStack in outputs_dataset); cannot assemble a multi-model program.",
+    with config_environment(config_path, root=root, state="PREDICTION", keep_file=True):
+        # A relative checkpoint is the bundle's own file; `None` is the weights the model builds with.
+        weights = [
+            None
+            if checkpoint is None
+            else Path(checkpoint)
+            if Path(checkpoint).is_absolute()
+            else _bundle_checkpoint(bundle, checkpoint)
+            for checkpoint in selected
+        ]
+        ids = [Path(checkpoint).stem if ensemble and checkpoint is not None else "model" for checkpoint in selected]
+        # The nested models a Mask reads, exported first: a chain the program cannot run is refused before
+        # the bundle's own models are.
+        aux = {
+            name: {**export_nested_model(name, group["inference"], bundle), "ops": group["ops"]}
+            for name, group in aux_mask_groups(config, root).items()
+        }
+        passes = tta_passes(config, root)
+        _models, written, program = compile_output(
+            config,
+            root,
+            weights,
+            bundle,
+            ids,
+            passes=passes,
+            aux=aux,
+            head=output_module,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            write_manifest=not ensemble,
         )
-    # Guarded above, so the fallback never applies on the ensemble path; it only names the reduction of
-    # the single-model masked/TTA program, which has nothing to combine.
-    ensemble_reduction = reduction or "mean"
+    portable_assets = set(written) | {bundle / f"{name}.onnx" for name in aux}
+    if not ensemble:
+        portable_assets.add(bundle / "manifest.json")
+    # One model on the identity pass, masked by nothing, is its manifest: konfai's reduction of a single copy
+    # hands it back. The test-time copies and a mask ride on a program.
+    if not (ensemble or aux or len(passes) > 1):
+        return _declare_portable_assets(bundle, written[-1], portable_assets)
+    program_path = bundle / "program.json"
+    program_path.write_text(json.dumps(program, indent=2))
+    portable_assets.add(program_path)
+    return _declare_portable_assets(bundle, program_path, portable_assets)
 
-    config_snapshot = config_path.read_bytes()
-    env_keys = ("KONFAI_config_file", "KONFAI_CONFIG_MODE", "KONFAI_ROOT", "KONFAI_STATE")
-    env_backup = {key: os.environ.get(key) for key in env_keys}
-    sys.path.insert(0, str(bundle))
-    try:
-        os.environ["KONFAI_config_file"] = str(config_path)
-        os.environ["KONFAI_CONFIG_MODE"] = "Done"
-        os.environ["KONFAI_ROOT"] = root
-        os.environ["KONFAI_STATE"] = "PREDICTION"
 
-        extra_manifest, fold_pre = _transform_manifest(config, root)
-        if blend is not None:
-            extra_manifest["blend"] = blend
-
-        models: list[dict[str, Any]] = []
-        portable_assets: set[Path] = set()
-        onnx_path = bundle / "model.onnx"
-        for checkpoint in selected:
-            model = ModelLoader(classpath).get_model(train=False)
-            # Export the per-patch network; the runtime does the sliding-window tiling.
-            model.patch = None
-            model.eval()
-            if checkpoint is not None:
-                ckpt_path = Path(checkpoint)
-                if not ckpt_path.is_absolute():
-                    ckpt_path = bundle / ckpt_path.name
-                model.load(safe_torch_load(ckpt_path, "cpu"), init=False)
-
-            # The input channel count is intrinsic to the architecture; read it off the loaded model
-            # when the config does not declare it.
-            if not in_channels:
-                in_channels = getattr(model, "in_channels", None)
-            if not in_channels:
-                raise AppMetadataError("could not derive in_channels from the config or model; pass --in-channels")
-            example = torch.randn(1, in_channels, *patch_size)
-            # Default to the terminal float head; the graph's last output is often an integer Argmax.
-            head = output_module or select_inference_head(model, example)
-            # `ensemble` implies a real checkpoint name; the None check only narrows the type.
-            fold_id = Path(checkpoint).stem if ensemble and checkpoint is not None else "model"
-            onnx_path, manifest = export_to_onnx(
-                model,
-                bundle,
-                example,
-                head,
-                patch_overlap=patch_overlap,
-                extend_slice=extend_slice,
-                pad_value=pad_value,
-                extra_manifest=dict(extra_manifest),
-                fold_pre=fold_pre,
-                model_filename="model.onnx" if not ensemble else f"{fold_id}.onnx",
-                write_manifest=not ensemble,
-            )
-            portable_assets.add(onnx_path)
-            if not ensemble:
-                portable_assets.add(bundle / "manifest.json")
-            models.append({"id": fold_id, "manifest": manifest})
-
-        # A config with an auxiliary mask group (a nested KonfAIInference model + a Mask on the output) is a
-        # masked / TTA synthesis, not a plain ensemble: nested model(s) + folds x TTA passes -> mean -> mask.
-        aux_groups = _aux_mask_groups(config, root)
-        if aux_groups:
-            aux = {
-                name: {**_export_nested_model(bundle, name, g["inference"]), "ops": g["ops"]}
-                for name, g in aux_groups.items()
-            }
-            portable_assets.update(bundle / f"{name}.onnx" for name in aux)
-            program = _assemble_masked_tta_program(
-                models, _tta_passes(config, root), aux, _mask_specs(config, root), reduce=ensemble_reduction
-            )
-            program_path = bundle / "program.json"
-            program_path.write_text(json.dumps(program, indent=2))
-            portable_assets.add(program_path)
-            return _declare_portable_assets(bundle, program_path, portable_assets)
-
-        if not ensemble:
-            return _declare_portable_assets(bundle, onnx_path, portable_assets)
-
-        program = assemble_program(
-            models,
-            reduce=ensemble_reduction,
-            classes=[int(m["manifest"]["output"]["channels"]) for m in models],
-        )
-        program_path = bundle / "program.json"
-        program_path.write_text(json.dumps(program, indent=2))
-        portable_assets.add(program_path)
-        return _declare_portable_assets(bundle, program_path, portable_assets)
-    finally:
-        sys.path.remove(str(bundle))
-        config_path.write_bytes(config_snapshot)
-        for key, value in env_backup.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+def _bundle_checkpoint(bundle: Path, name: str) -> Path:
+    """The bundle's checkpoint ``name``, found as konfai-apps finds it: as spelled, else with ``.pt`` added."""
+    path = bundle / Path(name).name
+    return path if path.exists() or path.name.endswith(".pt") else path.with_name(f"{path.name}.pt")
 
 
 def _declare_portable_assets(bundle: Path, artifact: Path, produced: set[Path]) -> Path:
@@ -1042,29 +429,6 @@ def _declare_portable_assets(bundle: Path, artifact: Path, produced: set[Path]) 
     metadata["portable_assets"] = sorted(set(declared) | set(portable))
     metadata_path.write_text(json.dumps(metadata, indent=2))
     return artifact
-
-
-def export_onnx_into_bundle(
-    bundle: str | Path,
-    *,
-    patch_size: list[int] | None = None,
-    in_channels: int | None = None,
-    prediction_config: str = "Prediction.yml",
-    checkpoint: str | None = None,
-    output_module: str | None = None,
-    root: str = "Predictor",
-) -> Path:
-    """Single-checkpoint portable export (``model.onnx`` + ``manifest.json``); a thin wrapper over
-    :func:`export_portable_into_bundle`, which also handles the ensemble (``program.json``) form."""
-    return export_portable_into_bundle(
-        bundle,
-        checkpoints=[checkpoint] if checkpoint is not None else None,
-        patch_size=patch_size,
-        in_channels=in_channels,
-        prediction_config=prediction_config,
-        output_module=output_module,
-        root=root,
-    )
 
 
 def run_bundle_cli(args: dict[str, Any]) -> None:

@@ -809,7 +809,13 @@ def main_apps() -> None:
         "--requirements", help="Optional requirements.txt; if omitted, a draft is derived from Model.py imports."
     )
     bundle_p.add_argument(
-        "--onnx", action="store_true", help="Also export model.onnx + manifest.json (portable runtime)."
+        "--onnx",
+        action="store_true",
+        help=(
+            "Also export the portable program: model.onnx + manifest.json for one model; program.json for an"
+            " ensemble, test-time copies or a Mask reading a nested app, with one onnx per checkpoint and a"
+            " <group>.onnx per nested app."
+        ),
     )
     bundle_p.add_argument(
         "--patch-size", type=int, nargs="+", help="Override --onnx patch size (else read from config)."

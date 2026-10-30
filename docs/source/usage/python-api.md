@@ -166,19 +166,20 @@ On a server, the `--apps` list decides which apps can run.
 `konfai_apps.bundle` builds an app folder from Python, and can export an ONNX model (experimental):
 
 ```python
-from konfai_apps.bundle import assemble_bundle, export_onnx_into_bundle
+from konfai_apps.bundle import assemble_bundle, export_portable_into_bundle
 
 bundle = assemble_bundle(
     "MR", "dist", "app.json",
     ["Prediction.yml", "Evaluation.yml"], ["CV_0.pt", "CV_1.pt"],
     model_py="Model.py",
 )
-export_onnx_into_bundle(bundle, checkpoint="CV_0.pt")   # writes model.onnx and manifest.json
+export_portable_into_bundle(bundle, checkpoints=["CV_0.pt", "CV_1.pt"])   # one onnx per checkpoint + program.json
 ```
 
-`konfai-apps bundle <name> --onnx` does the same from the command line. The export takes one output of fixed
-shape from a feed-forward model; models with a custom `forward` (diffusion, StyleGAN) do not export. It uses
-the `Patch.overlap` of the inference config: declare it, or the exported model tiles without overlap.
+`konfai-apps bundle <name> --onnx` does the same from the command line. One checkpoint, with no test-time copy
+and no mask, writes `model.onnx` and `manifest.json`; anything else writes one onnx per checkpoint and a
+`program.json`, compiled by `konfai.portable` from the inference config. The export takes one output of fixed
+shape from a feed-forward model; models with a custom `forward` (diffusion, StyleGAN) do not export.
 
 ### App signatures
 

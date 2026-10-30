@@ -521,11 +521,16 @@ def split_format_level(file_format: str) -> tuple[str, int]:
     return file_format, 0
 
 
+#: The flags a dataset spec may carry between its path and its format: ``a`` appends the source, ``i``
+#: reads it without appending.
+DATASET_FLAGS = frozenset({"a", "i"})
+
+
 def split_path_spec(
     value: str,
     *,
     default_format: str = "mha",
-    allowed_flags: set[str] | None = None,
+    allowed_flags: set[str] | frozenset[str] | None = None,
     supported_formats: list[str] | None = None,
 ) -> tuple[str, str | None, str]:
     """Split a KonfAI ``path[:flag]:format`` spec over a path holding colons of its own.
@@ -543,7 +548,7 @@ def split_path_spec(
 def _split_spec(
     value: str,
     default_format: str,
-    allowed_flags: set[str] | None,
+    allowed_flags: set[str] | frozenset[str] | None,
     supported_formats: list[str] | None,
 ) -> tuple[str, str | None, str]:
     """The spec grammar itself, on a path that carries no scheme: parsed from the right."""
