@@ -2202,7 +2202,7 @@ def compile_output(
 
 def _portable_root(path: str | Path) -> str:
     """A path the runtime resolves against its ``--root``: relative to the working directory when it
-    sits below it, absolute otherwise."""
+    sits below it, with slashes whatever the system compiling, absolute otherwise."""
     import os
 
     text = str(path).rstrip("/") or "/"
@@ -2210,7 +2210,7 @@ def _portable_root(path: str | Path) -> str:
         relative = os.path.relpath(text, Path.cwd())
     except ValueError:  # on another Windows drive: no relative path reaches it
         return text
-    return text if relative.startswith("..") else relative
+    return text if relative.startswith("..") else Path(relative).as_posix()
 
 
 def compile_prediction(

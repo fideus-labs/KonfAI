@@ -2,9 +2,10 @@
 # Run a KonfAI workflow without Python
 
 `konfai.portable` compiles a TRANSFORM or PREDICTION config into a versioned JSON
-program. The portable runtime executes that program on native platforms or in a
-browser. Python is needed to compile the config and export the models, but not
-to execute the compiled program. Training and evaluation remain Python workflows.
+program, and `konfai.portable_evaluation` an EVALUATION config. The portable runtime
+executes that program on native platforms or in a browser. Python is needed to
+compile the config and export the models, but not to execute the compiled program.
+Training remains a Python workflow.
 
 This is a source-build feature prepared for 1.9 (state of 2026-09-26). The runtime, KonfAI Edge (crate `konfai-edge`), is
 distributed apart from the Python package, with its own README for the build
@@ -18,6 +19,7 @@ runtime that reads these programs, KonfAI Edge, and carry their version.
 | --- | --- | --- | --- |
 | TRANSFORM | `konfai_edge_transform` | 4 | KonfAI Edge at 2026-09-26 (unreleased) |
 | PREDICTION | `konfai_edge_prediction` | 2 | the same |
+| EVALUATION | `konfai_edge_evaluation` | 1 | KonfAI Edge at 2026-10-22 (unreleased) |
 | one model's manifest | `konfai_edge_manifest` | 4 | the same |
 
 A bump on one side is a line in this table and in the runtime's README.
@@ -69,6 +71,50 @@ The program's format is a JSON Schema, `konfai.portable_schema.program_schema()`
 committed beside the runtime's test fixtures. Every op a step may name, the keys
 it may carry and the ones it must, are in that schema: a key outside it is one no
 compiler writes, and the runtime refuses it by name rather than reading around it.
+
+## Evaluate
+
+`compile_evaluation` compiles an `Evaluation.yml`. Like a prediction, it builds the
+workflow first, so it needs the dataset the config names, and it writes the ONNX of
+every network the evaluation runs beside the program: the network of
+`SAM_Perceptual` and the model of each nested app (`KonfAIInference`, resolved by
+konfai-apps). `IMPACTReg` runs on the networks konfai-impact bakes, so the program
+names its network instead.
+
+```python
+from konfai.portable_evaluation import compile_evaluation
+from konfai_apps.bundle import export_nested_model
+
+compile_evaluation(
+    "Evaluation.yml",
+    output="portable/evaluation.json",
+    nested_exporter=export_nested_model,
+)
+```
+
+The runtime writes what KonfAI writes: `Evaluations/<name>/Metric_TRAIN.json`, with
+the same keys, values and layout, the map of each `DiceSaveMap` and `MAESaveMap`, and
+what each `Save` of a group's chain writes. `konfai-edge-program --program
+evaluation.json --root .` runs a program; `konfai-edge-apps eval` takes the arguments
+of `konfai-apps eval`. A case whose groups are served region by region (`STREAM`) is
+scored a slab at a time and its maps are written as they are scored; any other case
+is held whole (`LOAD`, or `WHOLE-VOLUME` when a group runs a nested model or a
+criterion runs its network on the whole volume, as `IMPACTReg` does).
+
+| Criterion | Portable form |
+|---|---|
+| `Dice`, `DiceSaveMap` | `dice`: a label map counted exactly, a probability map per channel |
+| `MAE`, `MAESaveMap` | `mae`, reduced by `mean` or `sum` |
+| `PSNR` | `psnr` |
+| `SSIM` | `ssim` |
+| `SAM_Perceptual` | `sam_perceptual`: its network as ONNX, with `L1Loss` on an input of three channels |
+| `IMPACTReg` | `impact_reg`: konfai-impact's configuration of the criterion, an encoder layer of a TotalSegmentator model normalized by fixed CT statistics (`TS/M291.pt`) on the whole volume (`shape` of zeros), with an `MSELoss` or `L1Loss` mean, no `distance` and no `pca`; KonfAI Edge scores it under its `impact` feature |
+| Any other | Refused by name |
+
+Also refused: a split into `TRAIN` and `VALIDATION`, a `KonfAIInference` run per
+channel, with test-time copies or with config overrides, and an output and a target
+on two pixel grids (KonfAI's `Dice` puts a target of another shape on the output's
+grid; the runtime does not).
 
 ## What the compiler warns about
 

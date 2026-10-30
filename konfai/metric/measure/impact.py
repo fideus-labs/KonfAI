@@ -1097,6 +1097,7 @@ class IMPACTReg(CriterionWithAttribute):
             loss_module, loss_class = get_module(loss, "konfai.metric.measure")
             self.loss = apply_config(os.environ.get("KONFAI_CONFIG_PATH"))(module_attribute(loss_module, loss_class))()
         self.pca = int(pca)
+        self.model_name = model_name
         self.model = ImpactFeatureModel.download(model_name, in_channels, weights, shape)
 
     def get_name(self):
