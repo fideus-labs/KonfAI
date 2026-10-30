@@ -591,19 +591,57 @@ class TestSSIM:
 
         assert value == pytest.approx(expected, abs=1e-6)
 
-    def test_a_mask_multiplies_the_pair_and_scores_the_whole_extent(self):
-        # The masked mode: both volumes are zeroed outside the mask and the mean still runs over the
-        # whole cropped extent, exactly what skimage sees when handed the masked volumes.
-        structural_similarity = pytest.importorskip("skimage.metrics").structural_similarity
+    def test_a_mask_scores_its_own_voxels_as_synthrad_does(self):
+        # SynthRAD's masked SSIM: both volumes set to 0 outside the mask, skimage's map averaged over
+        # the mask's voxels of the cropped extent (``crop(ssim_map, 3)[crop(mask, 3)].mean()``).
+        metrics = pytest.importorskip("skimage.metrics")
+        crop = pytest.importorskip("skimage.util").crop
         x, y = self._pair("random", (18, 21, 17))
         mask = (np.random.default_rng(1).random(x.shape) > 0.4).astype(np.uint8)
-        expected = float(structural_similarity(x * mask, y * mask, data_range=4095.0))
+        _, ssim_map = metrics.structural_similarity(x * mask, y * mask, data_range=4095.0, full=True)
+        expected = float(crop(ssim_map, 3)[crop(mask, 3).astype(bool)].mean(dtype=np.float64))
 
         _, value = SSIM(dynamic_range=4095.0)(
             torch.tensor(x)[None, None], torch.tensor(y)[None, None], torch.tensor(mask)[None, None]
         )
 
         assert value == pytest.approx(expected, abs=1e-6)
+
+    def test_the_voxels_outside_the_mask_are_not_scored(self):
+        # A constant guess inside a body of an eighth of the volume scores 0.24; scored on the whole
+        # extent, the zeros against zeros around it lifted it to 0.58.
+        rng = np.random.default_rng(2)
+        target = rng.normal(40.0, 300.0, (24, 24, 24)).astype(np.float32)
+        mask = np.zeros(target.shape, np.uint8)
+        mask[4:16, 4:16, 4:16] = 1
+        guess = np.full(target.shape, float(np.median(target)), np.float32)
+
+        _, value = SSIM(dynamic_range=4095.0)(
+            torch.tensor(guess)[None, None], torch.tensor(target)[None, None], torch.tensor(mask)[None, None]
+        )
+
+        assert value < 0.3
+
+    def test_an_item_masked_on_its_border_alone_is_skipped_by_the_metric_the_loss_and_the_stream(self):
+        # The map is cropped by three voxels: a mask that lives there scores nothing, and must not count as 0.
+        x1, y1 = self._pair("random", (12, 14, 13))
+        x2, y2 = self._pair("smooth", (12, 14, 13))
+        x = torch.tensor(np.stack([x1, x2]))[:, None]
+        y = torch.tensor(np.stack([y1, y2]))[:, None]
+        mask = torch.ones(2, 1, 12, 14, 13, dtype=torch.uint8)
+        mask[1] = 0
+        mask[1, 0, :2] = 1  # the second item: its first two planes only
+        metric = SSIM(dynamic_range=4095.0)
+        first = metric(x[:1], y[:1])[1]
+
+        _, value = metric(x, y, mask)
+        loss_form = SSIM(dynamic_range=4095.0)
+        loss_form.as_loss = True
+        loss, kept = loss_form(x.requires_grad_(), y, mask)
+        _, streamed = metric.combine_metric([metric.partial_metric(x.detach(), y, mask)])
+
+        assert value == pytest.approx(first, abs=1e-12) == pytest.approx(float(kept), abs=1e-6)
+        assert streamed == pytest.approx(first, abs=1e-12) and float(loss) == pytest.approx(1 - first, abs=1e-6)
 
     def test_batch_items_are_averaged_and_an_empty_mask_item_skipped(self):
         x1, y1 = self._pair("random", (12, 14, 13))

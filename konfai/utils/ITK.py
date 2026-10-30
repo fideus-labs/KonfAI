@@ -105,7 +105,8 @@ def open_field(
             return np.asarray(whole[region], dtype=np.float64)
 
     origin, spacing = attributes.get_np_array("Origin"), attributes.get_np_array("Spacing")
-    direction = attributes.get_np_array("Direction").reshape(3, 3)
+    rank = len(shape) - 1
+    direction = attributes.get_np_array("Direction").reshape(rank, rank)
     return read, shape, origin, direction, spacing, np.linalg.inv(direction @ np.diag(spacing))
 
 
@@ -164,22 +165,22 @@ def displace_points(points: np.ndarray, dataset: Dataset, group: str, name: str)
     """``points`` (``[N, 3]``, LPS) moved by a stored displacement field, read at the voxels around each point
     alone: a 2x2x2 block that SimpleITK interpolates where it sits in the field, with the same voxels, weights and
     outside-the-field rule as ``DisplacementFieldTransform`` on the whole field, so a few points never hold the
-    whole field in memory."""
+    whole field in memory. A 2D field moves the first two coordinates (a 2D point is ``x, y, 0``)."""
     _require_simpleitk()
     read, shape, origin, direction, spacing, to_index = open_field(dataset, group, name)
-    size = np.array(shape[:0:-1])  # (x, y, z)
+    rank, size = len(shape) - 1, np.array(shape[:0:-1])  # (x, y[, z])
     moved = np.array(points, dtype=np.double)
     for point in moved:
         # The voxel below the point and the next one, pulled inside the field at its faces, where ITK clamps
         # to the face voxel and returns no displacement beyond it.
-        start = np.clip(np.floor(to_index @ (point - origin)).astype(int), 0, np.maximum(size - 2, 0))
+        start = np.clip(np.floor(to_index @ (point[:rank] - origin)).astype(int), 0, np.maximum(size - 2, 0))
         stop = np.minimum(start + 2, size)
         block = read((slice(None), *map(slice, start[::-1], stop[::-1])))
         local = sitk.GetImageFromArray(np.moveaxis(block, 0, -1), isVector=True)
         local.SetSpacing(spacing.tolist())
         local.SetDirection(direction.ravel().tolist())
         local.SetOrigin((origin + direction @ (spacing * start)).tolist())
-        point[:] = sitk.DisplacementFieldTransform(local).TransformPoint(point.tolist())
+        point[:rank] = sitk.DisplacementFieldTransform(local).TransformPoint(point[:rank].tolist())
     return moved
 
 
