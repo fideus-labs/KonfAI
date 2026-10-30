@@ -975,6 +975,8 @@ def _capture_pip(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
             return None
 
     monkeypatch.setattr(app_repository_module.subprocess, "Popen", _Pip)
+    # An environment with pip, whichever one runs the suite (an 'uv venv' has none).
+    monkeypatch.setattr(app_repository_module.importlib.util, "find_spec", lambda name: object())
     return captured
 
 
@@ -991,6 +993,47 @@ def test_install_requirements_runs_by_default(tmp_path: Path, monkeypatch: pytes
     assert len(captured) == 1
     assert captured[0][:5] == [sys.executable, "-m", "pip", "install", "-c"]
     assert captured[0][6:] == ["konfai-nonexistent-xyz==1.2.3"]
+
+
+def test_install_requirements_go_through_uv_in_an_environment_without_pip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 'uv venv' makes an environment without pip: every preset needing a package failed in it, at its first run.
+    app_root = tmp_path / "repo" / "demo_app"
+    _write_app_with_requirements(app_root, "konfai-nonexistent-xyz==1.2.3\n")
+    repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
+    for env in ("KONFAI_APPS_INSTALL_REQUIREMENTS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS"):
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("PIP_NO_INDEX", "0")
+    captured = _capture_pip(monkeypatch)
+    monkeypatch.setattr(app_repository_module.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(app_repository_module.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
+
+    repo._install_requirements(repo._get_filenames())
+
+    assert captured[0][:6] == ["/bin/uv", "pip", "install", "--python", sys.executable, "-c"]
+    assert captured[0][-1] == "konfai-nonexistent-xyz==1.2.3"
+
+    # An offline deployment keeps its sources, which uv does not read from pip's, off the command line.
+    monkeypatch.delenv("UV_FIND_LINKS", raising=False)
+    monkeypatch.setenv("PIP_NO_INDEX", "t")
+    monkeypatch.setenv("PIP_FIND_LINKS", "/wheels /more")
+    command, env = app_repository_module._installer()
+    assert command[5:] == ["--no-index"] and env["UV_FIND_LINKS"] == "/wheels,/more"
+    for env_name in ("UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://user:token@private.example/simple")
+    command, env = app_repository_module._installer()
+    assert env["UV_INDEX_STRATEGY"] == "unsafe-best-match" and "token" not in " ".join(command)
+    monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://private.example/simple")  # uv's own setup is the operator's
+    assert "UV_INDEX_STRATEGY" not in app_repository_module._installer()[1]
+    monkeypatch.setenv("PIP_NO_INDEX", "maybe")
+    with pytest.raises(AppRepositoryError, match="not a boolean"):
+        app_repository_module._installer()
+
+    monkeypatch.setattr(app_repository_module.shutil, "which", lambda name: None)
+    with pytest.raises(AppRepositoryError, match="no pip and no uv"):
+        repo._install_requirements(repo._get_filenames())
 
 
 def test_install_requirements_opt_out_is_a_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1070,6 +1113,7 @@ def test_install_requirements_refuses_a_dependency_that_would_replace_torch(
     import importlib.metadata
     import zipfile
 
+    pytest.importorskip("pip", reason="a real pip run: an environment without pip installs through uv")
     links = tmp_path / "links"
     links.mkdir()
     with zipfile.ZipFile(links / "konfai_probe_dep-1.0-py3-none-any.whl", "w") as wheel:
