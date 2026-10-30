@@ -534,6 +534,26 @@ def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Heade
                 )
 
 
+def _check_time_points(inputs: dict[str, list[Path]]) -> None:
+    """Refuse a store of several time points: KonfAI reads the first, so a time series given twice registered its
+    first time point onto itself, silently."""
+    from konfai.utils.ome_zarr import get_ome_zarr_info
+
+    for group, units in inputs.items():
+        for unit in units:
+            if _backend(unit) != "omezarr":
+                continue
+            info = get_ome_zarr_info(unit)
+            count = info["shape"][info["axes"].index("t")] if "t" in info["axes"] else 1
+            if count > 1:
+                raise KonfAIError(
+                    "ImpactReg",
+                    f"the {group} store {unit} has {count} time points, and a preset registers one image.",
+                    "Write the time point to a store of its own, e.g. with ngff_zarr: image.data[t] with the dims "
+                    "that remain, and register each pair in turn.",
+                )
+
+
 def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attribute]:
     """``source``'s shape and attributes, from its header alone, staged as a one-case dataset under ``base``."""
     root, _, backend = _stage_group(base, group, {"P000": source}).rpartition(":")
@@ -1001,6 +1021,7 @@ class ImpactRegKonfAIApp:
         try:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
+            _check_time_points(inputs)
             headers = self._headers(inputs, work)
             _check_volumes(inputs, headers)
             _check_space(work, headers, len(presets))
