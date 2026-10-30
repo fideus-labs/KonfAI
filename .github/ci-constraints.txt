@@ -1,0 +1,7 @@
+# The test and type-check tools CI runs, held so that their next release breaks no branch at once. pytest 9.2.0 did: every
+# branch went red the day it came out, on code nothing had changed. A bump is a pull request of its own.
+mypy==2.4.1
+pytest==9.2.0
+pytest-cov==7.1.0
+pytest-xdist==3.8.0
+types-requests==2.33.0.20261030
