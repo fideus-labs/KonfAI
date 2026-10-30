@@ -295,6 +295,38 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
     assert (out / "P000" / "DVF.mha").is_file()
 
 
+@pytest.mark.parametrize("name", ["plate.zarr/C/02/1", "link"])
+def test_a_store_moving_named_without_a_suffix_keeps_its_moved_image(tmp_path: Path, name: str) -> None:
+    """An HCS well's image (``plate.zarr/C/02/1``) and a symlink, which inputs are resolved through, carry no suffix:
+    their form must still be the store's, or the moved image the writer puts down as ``Moved.ome.zarr`` is removed
+    as another form and register fails after the whole run."""
+    ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
+    volume = np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)
+    store = tmp_path / "moving.ome.zarr"
+    ome_zarr.write_ome_zarr(store, volume[None], spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
+    moving = tmp_path / name
+    moving.parent.mkdir(parents=True, exist_ok=True)
+    if name == "link":
+        moving.symlink_to(store, target_is_directory=True)
+    else:
+        store.rename(moving)
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    assert (out / "P000" / "Moved.ome.zarr").is_dir()
+
+
 def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
     """A preset names its output; the pipeline follows. An official preset calls its transform
     ``Transform`` (where Slicer looks for it), and ``register`` must not rename it ``DVF``."""
