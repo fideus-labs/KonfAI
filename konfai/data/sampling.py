@@ -532,7 +532,7 @@ def gather_separable(
     source_starts_zyx: list[int],
     source_shape_zyx: list[int],
     mode: str,
-    fill: float,
+    fill: float | str,
     blend: list[int] | None = None,
 ) -> torch.Tensor:
     """:func:`gather`'s rules over a map that factorises, one index per axis, no volume.
@@ -547,7 +547,16 @@ def gather_separable(
     extent_zyx = [int(axis.numel()) for axis in axes]
     device = source.device
 
-    inside_axes = [(axis >= -0.5) & (axis < source_shape_zyx[array_axis] - 0.5) for array_axis, axis in enumerate(axes)]
+    edge = fill == "edge"
+    fill = 0.0 if isinstance(fill, str) else fill  # past the volume an edge sample is inside: no fill lands
+    if edge:  # MONAI's border: a sample clamps to the volume, so a cubic's weights see the edge too
+        axes = [axis.clamp(0, source_shape_zyx[array_axis] - 1) for array_axis, axis in enumerate(axes)]
+    inside_axes = [
+        torch.full_like(axis, True, dtype=torch.bool)
+        if edge
+        else (axis >= -0.5) & (axis < source_shape_zyx[array_axis] - 0.5)
+        for array_axis, axis in enumerate(axes)
+    ]
     out_shape = [int(source.shape[0]), *extent_zyx]
     if not all(bool(mask.any()) for mask in inside_axes):
         # Working dtype then cast, as the masked tail fills: a float32 detour quantizes a float64 fill.
@@ -634,7 +643,7 @@ def gather(
     source_starts_zyx: list[int],
     source_shape_zyx: list[int],
     mode: str,
-    fill: float,
+    fill: float | str,
     itk_blend: bool = False,
 ) -> torch.Tensor:
     """ITK's sampler at an arbitrary coordinate per voxel, over the region actually read.
@@ -642,7 +651,8 @@ def gather(
     The rule is ``sitk.Resample``'s, and it is the same one the separable samplers in
     ``konfai.data.transform`` obey: a sample is inside while its continuous source index lies in
     ``[-0.5, n - 0.5)``; inside, the interpolation taps clamp to the buffer, so the half-voxel rim
-    past the outermost voxel centres reproduces the border value; outside, the sample is ``fill``.
+    past the outermost voxel centres reproduces the border value; outside, the sample is ``fill``, or with
+    ``fill: "edge"`` the border value too (MONAI's ``padding_mode: border``): no sample is outside.
 
     ``source`` covers ``source_starts_zyx`` onward of a volume of ``source_shape_zyx``; the
     coordinates are GLOBAL indices of that volume.
@@ -669,8 +679,13 @@ def gather(
             )
         return out.reshape(int(source.shape[0]), *extent_zyx)
 
+    edge = fill == "edge"
+    fill = 0.0 if isinstance(fill, str) else fill  # past the volume an edge sample is inside: no fill lands
+    if edge:  # MONAI's border: a sample clamps to the volume, so a cubic's weights see the edge too
+        upper = [source_shape_zyx[rank - 1 - axis] - 1 for axis in range(rank)]
+        coordinates_xyz = torch.minimum(coordinates_xyz.clamp(min=0), coordinates_xyz.new_tensor(upper))
     inside = torch.ones(extent_zyx, dtype=torch.bool, device=device)
-    for axis in range(rank):
+    for axis in range(0 if edge else rank):
         array_axis = rank - 1 - axis
         coordinate = coordinates_xyz[..., axis]
         inside &= (coordinate >= -0.5) & (coordinate < source_shape_zyx[array_axis] - 0.5)

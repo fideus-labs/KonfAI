@@ -350,7 +350,7 @@ blended into values that are no label.
 
 `Resample` refuses a case without geometry (`Origin`, `Spacing`, `Direction`), a reference whose direction
 differs from the case's (run `Canonical` first), and a case that does not overlap the reference grid at all.
-A partial overlap is fine: the rest is `fill`, and the plan prints how much of the grid each case covers.
+A partial overlap is fine: the rest is `fill` (`edge`: the volume's edge voxel, MONAI's `padding_mode: border`), and the plan prints how much of the grid each case covers.
 
 ## Reproducibility
 

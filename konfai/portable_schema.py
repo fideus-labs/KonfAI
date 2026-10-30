@@ -39,6 +39,10 @@ _STRING: dict[str, Any] = {"type": "string"}
 _INTEGER: dict[str, Any] = {"type": "integer"}
 _NUMBER: dict[str, Any] = {"type": "number"}
 _BOOLEAN: dict[str, Any] = {"type": "boolean"}
+#: A fill or a pad value: a number, or "edge" for the volume's edge pixel.
+_FILL: dict[str, Any] = {"oneOf": [_NUMBER, {"const": "edge"}]}
+#: A pad value: a fill, or "min" for the minimum of the window a patch reads.
+_PAD: dict[str, Any] = {"oneOf": [_NUMBER, {"enum": ["edge", "min"]}]}
 #: A clip bound: a number, or "min", "max" or "percentile:<q>", resolved against the volume in hand.
 _BOUND: dict[str, Any] = {"type": ["number", "string"]}
 _INTERPOLATION: dict[str, Any] = {"enum": ["nearest", "linear"]}
@@ -71,7 +75,7 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
             "shape": _array(_INTEGER),
             "reference": _ref("reference"),
             "align": _ALIGN,
-            "fill": _NUMBER,
+            "fill": _FILL,
             "interpolation": _INTERPOLATION,
             # The group holding the displacement field, one entry per case; beside the case, or in the store
             # field_dataset names.
@@ -111,7 +115,7 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "mask": ({"mask_group": _STRING, "value_outside": _NUMBER}, ["mask_group", "value_outside"]),
     "brightness": ({"b_std": _NUMBER}, ["b_std"]),
     "save": ({"destination": _ref("destination")}, ["destination"]),
-    "inverse": ({"of": _STRING, "interpolation": _INTERPOLATION, "vector_field": _BOOLEAN, "fill": _NUMBER}, ["of"]),
+    "inverse": ({"of": _STRING, "interpolation": _INTERPOLATION, "vector_field": _BOOLEAN, "fill": _FILL}, ["of"]),
 }
 
 #: Op name -> (the keys a program step of it carries beside ``in`` and ``out``, the ones it must). A program
@@ -124,8 +128,8 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "concat": ({}, []),
     "merge_labels": ({"classes": _array(_INTEGER)}, ["classes"]),
     # Aligned on the origin, the align, the spacing and the fill of the resample undone onto the reference buffer.
-    "resample_linear": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _NUMBER}, []),
-    "resample_nearest": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _NUMBER}, []),
+    "resample_linear": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),
+    "resample_nearest": ({"align": _ALIGN, "spacing": _array(_NUMBER), "fill": _FILL}, []),
     "softmax": ({}, []),
     "argmax": ({}, []),
     "cast": ({"dtype": _STRING}, ["dtype"]),
@@ -265,7 +269,9 @@ def program_schema() -> dict[str, Any]:
                 "overlap": {"type": ["array", "null"], "items": _INTEGER},
                 "dim": _INTEGER,
                 "extend_slice": _INTEGER,
-                "pad_value": _NUMBER,
+                "pad_value": _PAD,
+                # Where the windows of an axis sit (konfai's Patch.placement); absent, pad, as before the key.
+                "placement": {"enum": ["pad", "monai", "spread"]},
                 "batch": _INTEGER,
             },
             ["size", "overlap", "dim", "extend_slice", "pad_value"],
