@@ -126,7 +126,7 @@ def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field_through_the_grap
     image = torch.rand(1, 1, 4, 5, 6)
 
     field = EngineRegistration(engine, fuse_texpr=False)(
-        image, image, torch.zeros_like(image), torch.ones_like(image), [[geometry] for _ in range(4)]
+        image, image, torch.zeros_like(image), torch.ones_like(image), attributes=[[geometry] for _ in range(4)]
     )
 
     assert field.shape == (1, 3, 4, 5, 6) and not field.any()
