@@ -37,7 +37,7 @@ The names below are those of the shipped presets; `show NAME` gives each preset'
 | Metric | intensity: the parameter map; IMPACT: the `models` of each level | `affine_metric`, `deformable_metric`, `cc_kernel`, `deformable_masked` | the distance of `models`, `balance_coarse_layers` (each coarse-search layer divided by its spread over the candidate displacements, times `layers_weight`) |
 | Features | the IMPACT loss (below) | the IMPACT loss (below); `feature_patch`, `feature_chunk`, `feature_overlap` (Static extraction) | the IMPACT loss (below) |
 | Regularisation | `final_grid_spacing` | `smooth_warp_sigma`, `smooth_grad_sigma` | `regularization_weight`, `control_grid_smoothing` |
-| Initialisation | the rigid map | `moments_init` (cof, com, none) | `linear`, `linear_iterations`, `linear_sampling` |
+| Initialisation | the rigid map, started from the better of the grids' centres and the foreground centres by mutual information | `moments_init` (auto: the better of cof and com by mutual information; cof, com, none) | `linear`, `linear_iterations`, `linear_sampling` |
 | Sampling | `spatial_samples` | | |
 | Random draws | `seed` | `seed` | `seed` |
 | Escape hatch | `parameter_overrides` (any elastix parameter) | | |

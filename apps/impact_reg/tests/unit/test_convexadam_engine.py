@@ -326,7 +326,7 @@ def test_each_mask_restricts_the_linear_stage_and_its_seed(tmp_path: Path) -> No
     array[..., :24] = 1
     half = sitk.GetImageFromArray(array)
     half.CopyInformation(fixed)  # the phantoms share one grid
-    centre = convexadam._foreground_centre(fixed, None)
+    centre = convexadam.foreground_centre(fixed, None)
     fixed_itk, moving_itk, half_itk = (
         convexadam._sitk_to_itk(fixed),
         convexadam._sitk_to_itk(moving),
@@ -340,7 +340,7 @@ def test_each_mask_restricts_the_linear_stage_and_its_seed(tmp_path: Path) -> No
     free = affine(None, None)
     assert np.allclose(affine(None, None), free)  # the threads' sums vary in their last bits, not more
     assert not np.allclose(affine(half_itk, None), free) and not np.allclose(affine(None, half_itk), free)
-    assert not np.allclose(convexadam._foreground_centre(fixed, half), centre)
+    assert not np.allclose(convexadam.foreground_centre(fixed, half), centre)
 
 
 def test_a_mask_takes_its_image_s_grid_where_it_lies_on_it_and_is_resampled_onto_it_elsewhere() -> None:

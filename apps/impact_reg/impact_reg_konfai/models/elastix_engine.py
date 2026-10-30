@@ -40,7 +40,7 @@ from konfai.utils.vram import device_out_of_memory
 from .elastix import generate_impact_parameter_map, has_impact_block, sampled_spatial_samples
 from .elastix_install import cuda_upgrade_available, get_elastix_bin, install_elastix_impact, loader_env, try_elastix
 from .impact_loss import check_models, feature_model, sorted_specs
-from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .intensity import EngineRegistration, best_translation, foreground_centre, grid_centre, is_partial_mask, winsorized
 from .orientation import world_aligned_pair
 
 # Elastix + IMPACT binary is cached once here (with its own LibTorch when the environment's torch is another
@@ -434,6 +434,36 @@ class ElastixEngine:
             fixed, moving = winsorized(fixed), winsorized(moving)
         work = Path(tempfile.mkdtemp(prefix="konfai_reg_"))
         try:
+            # A voxel_size-less model sees the fixed image's grid, as elastix gets it. voxel_sampling counts the
+            # voxels the sampler draws from: the fixed mask's, when there is one.
+            voxels = math.prod(fixed.GetSize())
+            if is_partial_mask(fixed_mask):
+                voxels = int(np.count_nonzero(sitk.GetArrayViewFromImage(fixed_mask)))
+            staged = self._stage_parameter_maps(work, device_index, fixed.GetSpacing(), voxels)
+            # Where the linear stage starts. elastix's own initialisation centres the two grids, which leaves two
+            # sparse subjects (organoids, nuclei) side by side where no optimiser finds them: the start is the better
+            # of that and the foreground centres, the moving image is moved there (its origin, no resampling), the
+            # initialisation is turned off, and the shift is added back to the field.
+            shift = None
+            initialising = '(AutomaticTransformInitialization "true")'
+            if any(initialising in path.read_text(encoding="utf-8") for path in staged):
+                # Only a mask that restricts is one: konfai-apps fills an absent one with ones on the FIXED grid.
+                regions = [mask if is_partial_mask(mask) else None for mask in (fixed_mask, moving_mask)]
+                centres = [
+                    np.subtract(grid_centre(moving), grid_centre(fixed)).tolist(),
+                    np.subtract(foreground_centre(moving, regions[1]), foreground_centre(fixed, regions[0])).tolist(),
+                ]
+                shift = best_translation(fixed, moving, centres, *regions)
+                moving = sitk.Image(moving)
+                moving.SetOrigin([o - t for o, t in zip(moving.GetOrigin(), shift, strict=True)])
+                if moving_mask is not None:
+                    moving_mask = sitk.Image(moving_mask)
+                    moving_mask.SetOrigin([o - t for o, t in zip(moving_mask.GetOrigin(), shift, strict=True)])
+                for path in staged:
+                    text = path.read_text(encoding="utf-8")
+                    path.write_text(
+                        text.replace(initialising, '(AutomaticTransformInitialization "false")'), encoding="utf-8"
+                    )
             fixed_path, moving_path = work / "Fixed.mha", work / "Moving.mha"
             sitk.WriteImage(fixed, str(fixed_path))
             sitk.WriteImage(moving, str(moving_path))
@@ -449,12 +479,6 @@ class ElastixEngine:
                     sitk.WriteImage(sitk.Cast(mask != 0, sitk.sitkUInt8), str(mask_path))
                     args += [flag, str(mask_path)]
             args += ["-out", str(work)]
-            # A model without a voxel_size sees the fixed image's grid, as elastix gets it.
-            # voxel_sampling counts the voxels the sampler draws from: the fixed mask's, when there is one.
-            voxels = math.prod(fixed.GetSize())
-            if is_partial_mask(fixed_mask):
-                voxels = int(np.count_nonzero(sitk.GetArrayViewFromImage(fixed_mask)))
-            staged = self._stage_parameter_maps(work, device_index, fixed.GetSpacing(), voxels)
             for pmap in staged:
                 args += ["-p", str(pmap)]
 
@@ -523,7 +547,10 @@ class ElastixEngine:
             )
             if not transforms:
                 raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
-            return _displacement_on(grid, sitk.ReadTransform(str(transforms[-1])))
+            field = _displacement_on(grid, sitk.ReadTransform(str(transforms[-1])))
+            if shift is not None:
+                field += np.asarray(shift, dtype=field.dtype).reshape(-1, *([1] * (field.ndim - 1)))
+            return field
         finally:
             shutil.rmtree(work, ignore_errors=True)
 

@@ -109,7 +109,7 @@ from .impact_loss import (
     layer_weights,
     level_models,
 )
-from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .intensity import EngineRegistration, best_translation, grid_centre, is_partial_mask, winsorized
 from .orientation import world_aligned_pair
 
 DIM = 3
@@ -117,6 +117,8 @@ DIM = 3
 #: Linear stages a preset may ask for. The engine checks against this rather than trusting the
 #: ``Literal`` annotation, which only binds a config-driven call and not a direct Python one.
 _LINEAR_METHODS = ("rigid_affine", "rigid", "none")
+#: The volume change (the affine's determinant) past which the affine stage is taken to have collapsed, not aligned.
+_AFFINE_VOLUME_CHANGE = (0.2, 5.0)
 
 
 def _on_model_grid(
@@ -1016,7 +1018,7 @@ class FireANTsEngine:
             if self._moments_init == "none":
                 # Identity, not a seed: the pair arrives centred and the rigid starts where it is.
                 init_translation = torch.zeros((1, 3), device=device, dtype=torch.float32)
-            elif self._moments_init == "com":
+            elif self._moments_init in ("com", "auto"):
                 init_translation = self._center_of_mass_translation(
                     fixed,
                     moving,
@@ -1024,6 +1026,20 @@ class FireANTsEngine:
                     moving_mask if use_moving_mask else None,
                     device,
                 )
+                if self._moments_init == "auto":
+                    # The better of the two starts, by mutual information: aligned frames leave two sparse subjects
+                    # side by side, where neither the rigid nor the affine finds them; centres of mass mislead
+                    # where the two images cover different lengths of a body.
+                    frames = np.subtract(grid_centre(moving), grid_centre(fixed)).tolist()
+                    masses = init_translation.reshape(-1).tolist()
+                    best = best_translation(
+                        winsorized(fixed),
+                        winsorized(moving),
+                        [frames, masses],
+                        fixed_mask if use_fixed_mask else None,
+                        moving_mask if use_moving_mask else None,
+                    )
+                    init_translation = torch.tensor(best, device=device, dtype=torch.float32).reshape(1, 3)
             rigid = RigidRegistration(
                 scales=self._scales,
                 iterations=self._affine_iterations,
@@ -1059,6 +1075,15 @@ class FireANTsEngine:
                 affine.optimize()
                 affine_matrix = affine.get_affine_matrix().detach()
                 del affine
+                determinant = float(torch.linalg.det(affine_matrix[0, :DIM, :DIM].double()))
+                if not _AFFINE_VOLUME_CHANGE[0] < determinant < _AFFINE_VOLUME_CHANGE[1]:
+                    # MI rewards an affine that shrinks the moving subject onto a corner of the fixed one: a volume
+                    # change no pair of the same subject or species has. The rigid it started from is kept.
+                    print(
+                        f"[FireANTs] the affine changes the volume x{determinant:.3g}: kept the rigid instead.",
+                        flush=True,
+                    )
+                    affine_matrix = rigid_matrix
             # What the linear stages found, where a stage capped by its step size shows as a short shift and a
             # determinant away from 1 (rotation and shear standing in for the translation it could not reach).
             matrix = affine_matrix.double().cpu().numpy()[0]
@@ -1235,14 +1260,14 @@ class RegistrationNet(network.Network):
             "affine_lr x sum(affine_iterations): 10 mm at 0.03 over 350 iterations, 1 mm at 0.003.",
         ] = 0.03,
         moments_init: Annotated[
-            Literal["cof", "com", "none"],
+            Literal["auto", "cof", "com", "none"],
             "Initial translation seeding the rigid stage, mirroring ANTs' -r [fixed,moving,N]: 'cof' = centre "
-            "of frame (N=0), 'com' = intensity-weighted centre of mass (N=1). Prefer 'com' when the subject "
-            "sits off its frame centre, where aligning frames starts the chain misplaced. 'none' seeds "
-            "nothing and starts the rigid from identity: for a pair the caller has already centred, where "
-            "'com' re-estimates a translation that is zero and 'cof' undoes the centring by aligning "
-            "frames instead of subjects.",
-        ] = "cof",
+            "of frame (N=0), 'com' = intensity-weighted centre of mass (N=1), 'auto' = whichever of the two "
+            "matches better by mutual information (two sparse subjects side by side need 'com'; two scans of "
+            "different lengths of a body 'cof'). 'none' seeds nothing and starts the rigid from identity: for "
+            "a pair the caller has already centred, where 'com' re-estimates a translation that is zero and "
+            "'cof' undoes the centring by aligning frames instead of subjects.",
+        ] = "auto",
         linear_method: Annotated[
             Literal["rigid_affine", "rigid", "none"],
             "Linear stage before the deformable: 'rigid_affine' (rigid then affine, as ANTs), 'rigid' to stop "

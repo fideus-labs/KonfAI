@@ -63,7 +63,7 @@ from .impact_loss import (
     level_models,
     per_kept_layer,
 )
-from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .intensity import EngineRegistration, foreground_centre, is_partial_mask, winsorized
 from .orientation import world_aligned_pair
 
 DIM = 3
@@ -140,23 +140,6 @@ def _itk_field_to_sitk_transform(field: "itk.Image", reference: sitk.Image) -> s
     sitk_field = sitk.GetImageFromArray(itk.array_view_from_image(field).astype(np.float64), isVector=True)
     sitk_field.CopyInformation(reference)
     return sitk.DisplacementFieldTransform(sitk_field)
-
-
-def _foreground_centre(image: sitk.Image, mask: sitk.Image | None) -> tuple[float, ...]:
-    """Physical centre of ``image``'s foreground (Otsu threshold, unweighted), inside ``mask`` (0/1, on its grid) if
-    there is one: where the linear stage seeds from.
-
-    Intensity moments divide by the total intensity, which is negative or near zero for a CT in HU or a z-scored
-    MR, and clipping the negatives first weights a CT by its bone. An unweighted foreground holds for any intensity
-    range; an image with no foreground (a constant one) gives its grid's centre.
-    """
-    foreground = sitk.OtsuThreshold(image, 0, 1)
-    stats = sitk.LabelShapeStatisticsImageFilter()
-    stats.SetComputePerimeter(False)
-    stats.Execute(foreground if mask is None else sitk.Mask(foreground, mask))
-    if stats.HasLabel(1):
-        return stats.GetCentroid(1)
-    return image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()])
 
 
 def _itk_affine_to_sitk(affine: "itk.AffineTransform") -> sitk.AffineTransform:
@@ -334,7 +317,7 @@ class ConvexAdamEngine:
         moving_centre: tuple[float, ...],
     ) -> "itk.AffineTransform":
         """Affine (Mattes MI) mapping fixed -> moving physical points, seeded by the translation between the
-        foreground centres (``_foreground_centre``) or by none, whichever matches better, and centred on the fixed
+        foreground centres (``foreground_centre``) or by none, whichever matches better, and centred on the fixed
         one; the metric counts only the points the masks hold, when there are masks."""
         # The scales estimator samples the image at random through ITK's global Mersenne Twister, which ITK seeds from
         # the clock in every process: seeded, two runs give the same affine.
@@ -612,8 +595,8 @@ class ConvexAdamEngine:
             moving_itk,
             fixed_mask_itk,
             moving_mask_itk,
-            _foreground_centre(fixed, fixed_mask),
-            _foreground_centre(moving, moving_mask),
+            foreground_centre(fixed, fixed_mask),
+            foreground_centre(moving, moving_mask),
         )
         moving_linear = _resampled(moving_itk, fixed_itk, affine, itk.LinearInterpolateImageFunction)
         if moving_mask_itk is not None:

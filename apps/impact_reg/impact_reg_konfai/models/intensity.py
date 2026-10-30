@@ -14,11 +14,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""What the engines share: the graph module that runs one on a batch, the winsorised intensities they read, and
-whether a mask restricts an image."""
+"""What the engines share: the graph module that runs one on a batch, the winsorised intensities they read, where a
+linear stage starts, and whether a mask restricts an image."""
 
 import contextlib
 import gc
+import math
 
 import numpy as np
 import SimpleITK as sitk
@@ -76,6 +77,80 @@ def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sit
     if top <= bottom:
         return image  # background almost everywhere (a tile past the tissue): clamped, it would be constant
     return sitk.Clamp(image, image.GetPixelID(), float(bottom), float(top))
+
+
+def foreground_centre(image: sitk.Image, mask: sitk.Image | None) -> tuple[float, ...]:
+    """Physical centre of ``image``'s foreground (Otsu threshold, unweighted), inside ``mask`` (0/1, on its grid) if
+    there is one: where a linear stage seeds from.
+
+    Intensity moments divide by the total intensity, which is negative or near zero for a CT in HU or a z-scored
+    MR, and clipping the negatives first weights a CT by its bone. An unweighted foreground holds for any intensity
+    range; an image with no foreground (a constant one, or an empty mask) gives its grid's centre.
+    """
+    foreground = sitk.OtsuThreshold(image, 0, 1)
+    if mask is not None:
+        # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
+        region = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, sitk.Transform(), sitk.sitkNearestNeighbor)
+        if not sitk.GetArrayViewFromImage(region).any():
+            return grid_centre(image)
+        foreground = sitk.Mask(foreground, region)
+        if not sitk.GetArrayViewFromImage(foreground).any():
+            # A brighter structure outside the mask set the threshold above the whole region: the region's own one.
+            # Not always: inside a body mask, the region's threshold would split the body's tissues.
+            foreground = sitk.OtsuThreshold(image, region, 0, 1, 128, True, 1)  # 0 outside the mask
+    stats = sitk.LabelShapeStatisticsImageFilter()
+    stats.SetComputePerimeter(False)
+    stats.Execute(foreground)
+    if stats.HasLabel(1):
+        return stats.GetCentroid(1)
+    return grid_centre(image)
+
+
+def grid_centre(image: sitk.Image) -> tuple[float, ...]:
+    """Physical centre of ``image``'s grid: where elastix's geometric initialisation and ANTs' ``-r [f,m,0]`` start."""
+    return image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()])
+
+
+def best_translation(
+    fixed: sitk.Image,
+    moving: sitk.Image,
+    candidates: list[list[float]],
+    fixed_mask: sitk.Image | None = None,
+    moving_mask: sitk.Image | None = None,
+) -> list[float]:
+    """The candidate translation (fixed -> moving points) whose mutual information is best: where a linear stage
+    starts. The centres' shift is only a guess: two scans covering different lengths of a body have their foreground
+    centres apart where the anatomy is not, and two sparse subjects (organoids, nuclei) do not overlap at all when the
+    grids are centred, which no local optimiser recovers from."""
+    method = sitk.ImageRegistrationMethod()
+    method.SetMetricAsMattesMutualInformation(32)
+    method.SetInterpolator(sitk.sitkLinear)
+    fixed, moving = sitk.Cast(fixed, sitk.sitkFloat32), sitk.Cast(moving, sitk.sitkFloat32)
+    # MetricEvaluate reads every voxel, whatever the sampling it is set: the candidates are scored on a copy of about
+    # 200,000 voxels.
+    shrink = [
+        max(1, math.ceil((math.prod(fixed.GetSize()) / 200_000) ** (1 / fixed.GetDimension())))
+    ] * fixed.GetDimension()
+    if shrink[0] > 1:
+        fixed, moving = sitk.BinShrink(fixed, shrink), sitk.BinShrink(moving, shrink)
+
+    # A block holding any voxel of a mask is in it: subsampled, a region thinner than a block could vanish.
+    def coarse(mask: sitk.Image) -> sitk.Image:
+        return sitk.Cast(sitk.BinShrink(sitk.Cast(mask != 0, sitk.sitkFloat32), shrink) > 0, sitk.sitkUInt8)
+
+    if is_partial_mask(fixed_mask):
+        method.SetMetricFixedMask(coarse(fixed_mask))
+    if is_partial_mask(moving_mask):
+        method.SetMetricMovingMask(coarse(moving_mask))
+
+    def cost(translation: list[float]) -> float:
+        method.SetInitialTransform(sitk.TranslationTransform(fixed.GetDimension(), list(translation)))
+        try:
+            return float(method.MetricEvaluate(fixed, moving))
+        except RuntimeError:  # too few samples fall inside the moving image
+            return math.inf
+
+    return list(min(candidates, key=cost))
 
 
 def is_partial_mask(mask: sitk.Image | None) -> bool:
