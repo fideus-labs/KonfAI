@@ -39,6 +39,8 @@ export function init_webgpu(): Promise<any>;
 export function last_panic(): string;
 /** Hand the WebGPU device's memory pool back. */
 export function release_device_memory(): void;
+/** The capabilities a page declares (JSON) as the engine settles them: JSON `{budget, whole_limit, region_cache}`, in bytes. */
+export function resolve_capabilities(capabilities: string): string;
 /** The `<stem>.bpk` weight files a run of `program` needs on the members `checkpoints` and `tta` pick. */
 export function selected_weights(program: string, checkpoints: string[], tta: number): string[];
 /** The volume `bytes` hold, a `source_format` file, as the bytes of a `target_format` file. */

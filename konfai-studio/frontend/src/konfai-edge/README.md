@@ -10,5 +10,5 @@ names, per app, its `app.json`, its programs, their `<stem>.bpk` weights and the
 has no `web/` folder is refused by the pane, with the reason.
 
 `konfai_edge.d.ts` declares the part of the engine's API the pane calls, copied from the `konfai_edge.d.ts`
-of KonfAI Edge 0c39de131 (wasm-bindgen 0.2.129, rustc 1.96.0). A rebuild of the engine that changes those
+of KonfAI Edge d4be8d68f (wasm-bindgen 0.2.129). A rebuild of the engine that changes those
 signatures updates this file and the revision above.

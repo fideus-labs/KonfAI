@@ -150,9 +150,13 @@ export default function Deploy({ app, onClose }: { app: StudioApp; onClose: () =
       const weights = await Promise.all(
         names.map(async (n) => new Uint8Array(await (await fetched(app.ref, `${dir}/${n}`)).arrayBuffer())),
       );
-      // The page's share of the machine's memory caps the program's own budget.
+      // The engine settles what the tab may hold from what it declares of its memory.
       const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-      const budget = memory ? Math.min(3 * 2 ** 30, memory * 2 ** 29) : undefined;
+      const { budget } = JSON.parse(
+        engine.resolve_capabilities(
+          JSON.stringify({ device_memory: memory ? memory * 2 ** 30 : undefined, address_space: 2 ** 32 }),
+        ),
+      );
       predictor = engine.Predictor.selected(
         programText, chosen.checkpoints, chosen.tta, names, weights, "webgpu", undefined, budget, undefined,
       );
