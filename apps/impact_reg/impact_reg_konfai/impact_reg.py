@@ -534,6 +534,13 @@ def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Heade
                 )
 
 
+def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attribute]:
+    """``source``'s shape and attributes, from its header alone, staged as a one-case dataset under ``base``."""
+    root, _, backend = _stage_group(base, group, {"P000": source}).rpartition(":")
+    shape, attributes = Dataset(root, backend).get_infos(group, "P000")
+    return list(shape), attributes
+
+
 #: The physical sizes of a pair this far apart, on every axis, are more likely a matter of units than of anatomy.
 _SIZE_RATIO = 20.0
 
@@ -555,13 +562,6 @@ def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None
                 f"size on every axis ({fixed} and {moving} mm): check each image's unit and spacing.",
                 flush=True,
             )
-
-
-def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attribute]:
-    """``source``'s shape and attributes, from its header alone, staged as a one-case dataset under ``base``."""
-    root, _, backend = _stage_group(base, group, {"P000": source}).rpartition(":")
-    shape, attributes = Dataset(root, backend).get_infos(group, "P000")
-    return list(shape), attributes
 
 
 def _same_grid(first: _Header, second: _Header) -> bool:
