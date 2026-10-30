@@ -2326,18 +2326,22 @@ def compile_prediction(
     app and writes its ONNX: only konfai-apps resolves an app."""
     from konfai.predictor.workflow import Predictor, build_predict
 
-    if not models:
-        raise ConfigError("compile_prediction needs the checkpoints to export.", "Pass models=[...], as --models.")
     root = "Predictor"
     output = Path(output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    checkpoints = [Path(model).resolve() for model in models]
+    checkpoints = [Path(model).resolve() for model in models or []]
 
     with _built(
         prediction_file,
         lambda file: build_predict(models=checkpoints, prediction_file=file, predictions_dir=Path(predictions_dir)),
     ) as (built, resolved):
         predictor = cast(Predictor, built)
+        _refuse_python_on_the_case(predictor.model)
+        if not checkpoints and any(parameter.numel() for parameter in predictor.model.parameters()):
+            raise ConfigError(
+                "compile_prediction needs the checkpoints to export: the model has trainable weights.",
+                "Pass models=[...], as --models.",
+            )
         warn_unportable_keys(resolved, root)
         dataset_section = (resolved.get(root) or {}).get("Dataset") or {}
 
@@ -2350,8 +2354,10 @@ def compile_prediction(
             )
         passes = tta_passes(resolved, root)
         aux = _nested_models(resolved, root, list(predictor.outputs_dataset), nested_exporter, output.parent)
+        # A model without checkpoints (a parameter-free one) is exported once, as it builds.
+        weights: list[Path | None] = [*checkpoints] or [None]
         exported, written = _compile_heads(
-            resolved, root, predictor.outputs_dataset, checkpoints, passes, aux, output.parent
+            resolved, root, predictor.outputs_dataset, weights, passes, aux, output.parent
         )
         predictor.dataset.prepare()
         # What each case is read from: the model's first input group, then every group the manifest names,
@@ -2372,6 +2378,20 @@ def compile_prediction(
 
     output.write_text(json.dumps(prediction, indent=2))
     return prediction
+
+
+def _refuse_python_on_the_case(model: Any) -> None:
+    """Refuse, before anything runs, a graph whose module reads the case's attributes (its geometry): that
+    module runs Python on the case, which an exported graph, handed tensors alone, cannot carry."""
+    reader = next(
+        (name for name, module in model.named_modules() if getattr(module, "accepts_attributes", False)), None
+    )
+    if reader is not None:
+        raise ConfigError(
+            f"the model's module '{reader}' reads the case's attributes, which an exported graph is never handed:"
+            " it runs Python on the case rather than a network the portable runtime carries.",
+            "Predict this app with konfai itself (konfai-apps infer).",
+        )
 
 
 def _nested_models(
@@ -2402,7 +2422,7 @@ def _compile_heads(
     config: dict[str, Any],
     root: str,
     heads: dict[str, Any],
-    checkpoints: list[Path],
+    checkpoints: list[Path | None],
     passes: list[list[dict[str, Any]]],
     aux: dict[str, dict[str, Any]],
     out_dir: Path,
@@ -2419,7 +2439,7 @@ def _compile_heads(
             else [f"{prefix}model_{index}" for index in range(len(checkpoints))]
         )
         models, _files, program = compile_output(
-            config, root, list[Path | None](checkpoints), out_dir, ids, passes=passes, aux=aux, head=head, output=head
+            config, root, checkpoints, out_dir, ids, passes=passes, aux=aux, head=head, output=head
         )
         exported += models
         destination = _destination(_portable_root(sink.filename), sink.file_format, sink.group)
