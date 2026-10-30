@@ -18,7 +18,6 @@
 """The configured prediction workflow and its Python entrypoints."""
 
 import hashlib
-import itertools
 import json
 import math
 import multiprocessing
@@ -555,7 +554,8 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             if not headers or any(goal is None for goal in goals.values()):
                 continue  # a case that fits is read whole, at level 0
             chosen = 0
-            for level in itertools.count(1):
+            # A store of one level answers every level with it, and never comes to one too coarse: its count ends this.
+            for level in range(1, max(dataset.level_count(*key) for key in goals)):
                 dataset.level = level
                 dataset._infos_cache.clear()
                 try:
@@ -566,7 +566,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                             dataset.get_infos(group, name)[1].get_np_array("Spacing"), coarse or [], strict=True
                         )
                     )
-                except Exception:  # nosec B112 - past the store's last level
+                except Exception:  # nosec B112 - past the last level of a store shorter than another
                     break
                 if not fine_enough:
                     break
