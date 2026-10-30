@@ -541,6 +541,35 @@ def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attri
     return list(shape), attributes
 
 
+#: The physical sizes of a pair this far apart, on every axis, are more likely a matter of units than of anatomy.
+_SIZE_RATIO = 20.0
+
+
+def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None:
+    """Warn of a pair whose physical sizes differ a lot on every axis: a store in micrometres against a file whose
+    numbers mean millimetres registers to nothing, silently (NCC 0.14 against 0.93 on the same pair)."""
+    if quiet:
+        return
+    for index, case in enumerate(headers):
+        extents = []
+        for group in ("Fixed", "Moving"):
+            shape, spacing, _, direction = case[group]
+            if len(shape) - 1 != len(spacing):
+                break  # not an image: _check_volumes says so
+            axes = np.reshape(direction, (len(spacing), len(spacing)))
+            extents.append(np.abs(axes) @ (np.array(shape[:0:-1]) * spacing))  # along the physical axes
+        if len(extents) < 2 or extents[0].size != extents[1].size:
+            continue
+        fixed, moving = extents
+        ratios = np.maximum(fixed / moving, moving / fixed)
+        if ratios.min() * (1 + 1e-9) >= _SIZE_RATIO:
+            print(
+                f"[ImpactReg] P{index:03d}: the fixed and moving images differ x{ratios.min():.3g} or more in physical "
+                f"size on every axis ({fixed.tolist()} and {moving.tolist()} mm): check each image's unit and spacing.",
+                flush=True,
+            )
+
+
 def _same_grid(first: _Header, second: _Header) -> bool:
     """Whether two images lie on one voxel grid: the same extent, spacing, origin and direction."""
     return first[0][-3:] == second[0][-3:] and all(
@@ -1002,6 +1031,7 @@ class ImpactRegKonfAIApp:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
             headers = self._headers(inputs, work)
+            _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
             _check_space(work, headers, len(presets))
             on_grid = None
