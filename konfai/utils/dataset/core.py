@@ -482,7 +482,13 @@ class Dataset:
         )
 
     def level_count(self, groups: str, name: str) -> int:
-        """How many resolution levels ``(groups, name)`` is stored at."""
+        """How many resolution levels ``(groups, name)`` is stored at. Raises when it is not there, which a backend of
+        one level, asked of nothing on disk, would not."""
+        if self.exists_on_disk() and not self.is_dataset_exist(groups, name):
+            raise DatasetManagerError(
+                f"The entry '{groups}/{name}' is not in '{self.filename}'.",
+                "Check the groups_src spelling and that the case carries every group it names.",
+            )
         return self._resolve_entry(groups, name, lambda file, group, entry: file.level_count(entry))
 
     def read_granularity(self, groups: str, name: str) -> tuple[int, ...] | None:

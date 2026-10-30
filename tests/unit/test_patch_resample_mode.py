@@ -28,7 +28,7 @@ from konfai.data.patching import DatasetPatch
 from konfai.data.transform import Resample
 from konfai.data.transform.resample import CoarseLabelDilate, coarse_spacing
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, DatasetManagerError
 from oracle_support import geometry
 
 _CASE = "CASE_000"
@@ -138,6 +138,10 @@ def test_a_store_of_one_level_is_read_at_it(tmp_path: Path) -> None:
     )
     assert not Predictor._read_coarse_levels(fake, 5**3)
     assert dataset.level == 0
+
+    assert dataset.level_count("Volume", _CASE) == 1
+    with pytest.raises(DatasetManagerError, match="is not in"):
+        dataset.level_count("Mask", _CASE)
 
     # Two levels of one spacing are not the end of a pyramid, wherever they sit in it.
     for scale_factors, target, expected in (([2, 1, 2], 3**3, 3), ([1, 2], 5**3, 2)):
