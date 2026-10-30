@@ -21,6 +21,7 @@ the ``register`` single-preset (reuse) vs multi-preset (ensemble-and-warp) branc
 import itertools
 import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -488,6 +489,31 @@ def test_register_refuses_what_is_not_a_3d_scalar_volume(tmp_path: Path, name: s
 
     with pytest.raises(KonfAIError, match="3-D single-channel"):
         app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True)
+
+
+def test_register_refuses_a_store_of_several_time_points(tmp_path: Path) -> None:
+    """KonfAI reads a time series' first time point: the same series as fixed and moving registered it onto itself."""
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    for name, times in (("series", 2), ("one", 1)):
+        image = ngff_zarr.to_ngff_image(
+            np.zeros((times, 8, 8, 8), dtype=np.float32),
+            dims=["t", "z", "y", "x"],
+            scale=dict.fromkeys("tzyx", 1.0),
+            translation=dict.fromkeys("tzyx", 0.0),
+        )
+        ngff_zarr.to_ngff_zarr(str(tmp_path / f"{name}.ome.zarr"), ngff_zarr.to_multiscales(image, scale_factors=[]))
+    app = reg.ImpactRegKonfAIApp()
+    app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
+
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        app.register(
+            ["A"], [tmp_path / "series.ome.zarr"], [tmp_path / "one.ome.zarr"], output=tmp_path / "O", quiet=True
+        )
+    reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})  # one time point is an image
+    shutil.rmtree(tmp_path / "one.ome.zarr")  # the series written over it, in this process: read anew
+    shutil.copytree(tmp_path / "series.ome.zarr", tmp_path / "one.ome.zarr")
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})
 
 
 def test_case_order_is_numeric_past_p999() -> None:
