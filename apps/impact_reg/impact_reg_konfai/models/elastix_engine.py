@@ -420,6 +420,9 @@ class ElastixEngine:
             # Nothing to register: in a tiled run, a patch the tissue does not reach.
             return _displacement_on(fixed, sitk.Transform(fixed.GetDimension(), sitk.sitkIdentity))
         grid = fixed  # the field is sampled on the fixed image as it came
+        if self._feature_models and fixed.GetDimension() == 2:
+            # ponytail: elastix's IMPACT metric reads its models from the map, 3-D here; ConvexAdam swaps them
+            raise ValueError("The elastix IMPACT presets are 3-D: register a 2-D image with ConvexAdam or Generic_*.")
         if self._feature_models:
             for model in self._feature_models.values() if self._unchecked else ():
                 model.check(gradient=True)

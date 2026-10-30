@@ -25,6 +25,14 @@ Moved image · eval (MAE, Dice, TRE, Jacobian) · uncertainty (spread of an ense
 A pair larger than a preset registers whole is split: the preset runs once on a coarse copy of the whole pair, then
 its deformable stage refines the result on native-resolution tiles (see [Large images](large-images.md)).
 
+### 2-D images
+
+A 2-D image registers as a volume does: `register`, `apply`, `eval` and `uncertainty` take a single-channel image of any
+form, and `register` gives back a 2-D transform and a 2-D moved image in that form. The presets' configurations and
+KonfAI's patches are 3-D, so the pair goes through them one plane thick, and the engine registers the plane itself:
+elastix and FireANTs in 2-D, ConvexAdam on the 2-D version of its MIND model. The IMPACT presets on elastix and
+FireANTs, and the presets on a model with no 2-D version (TotalSegmentator), are refused.
+
 ## The transform and its conventions
 
 `Output/<case>/Transform.h5` is an ITK `DisplacementFieldTransform` stored as HDF5, readable by SimpleITK, ITK, 3D Slicer

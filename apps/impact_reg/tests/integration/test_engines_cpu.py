@@ -119,6 +119,74 @@ def test_elastix_recovers_a_translation(pair: tuple, tmp_path: Path, monkeypatch
     _assert_shift(net.Registration._engine.register(fixed, moving, -1), inside)
 
 
+#: The moving disk sits here relative to the fixed one, in mm (x, y): the field must be this inside it.
+_SHIFT_2D = np.array([3.0, -2.0])
+
+
+def _disk(center: np.ndarray) -> sitk.Image:
+    """An anisotropic blob on a 64^2 grid of 1 mm, centred at ``center`` (mm)."""
+    y, x = np.mgrid[:64, :64].astype(np.float32)
+    r2 = ((x - center[0]) / 14) ** 2 + ((y - center[1]) / 9) ** 2
+    return sitk.GetImageFromArray((100 * np.exp(-2 * r2) + 100 * (r2 < 1)).astype(np.float32))
+
+
+@pytest.fixture(scope="module")
+def flat_pair() -> tuple[sitk.Image, sitk.Image, np.ndarray]:
+    center = np.array([32.0, 32.0])
+    fixed = _disk(center)
+    return fixed, _disk(center + _SHIFT_2D), sitk.GetArrayFromImage(fixed) > 50
+
+
+def _assert_shift_2d(field: np.ndarray, inside: np.ndarray) -> None:
+    assert field.shape == (2, *inside.shape)
+    np.testing.assert_allclose([field[axis][inside].mean() for axis in range(2)], _SHIFT_2D, atol=0.75)
+
+
+def test_fireants_recovers_a_translation_in_2d(flat_pair: tuple) -> None:
+    from impact_reg_konfai.models.fireants import RegistrationNet
+
+    fixed, moving, inside = flat_pair
+    net = RegistrationNet(scales=[2, 1], affine_iterations=[200, 100], deformable_iterations=[30, 15])
+    _assert_shift_2d(net.Registration._engine.register(fixed, moving, -1), inside)
+
+
+def test_convexadam_recovers_a_translation_in_2d_on_the_2d_version_of_its_model(flat_pair: tuple) -> None:
+    from impact_reg_konfai.models.convexadam import ModelSpec, RegistrationNet
+
+    fixed, moving, inside = flat_pair
+    mind = ModelSpec(ref="VBoussot/impact-torchscript-models:MIND/R1D2_3D.pt", voxel_size=[1.0, 1.0, 1.0])
+    net = RegistrationNet(models={"0": mind}, iterations=80, linear_iterations=50, displacement_half_width=3)
+    _assert_shift_2d(net.Registration._engine.register(fixed, moving, -1), inside)
+
+
+def test_elastix_recovers_a_translation_in_2d(
+    flat_pair: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from impact_reg_konfai.models.elastix import RegistrationNet
+
+    fixed, moving, inside = flat_pair
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Translation.txt").write_text(_TRANSLATION_MAP)
+    net = RegistrationNet(engine="elastix", parameter_maps=["Translation.txt"])
+    _assert_shift_2d(net.Registration._engine.register(fixed, moving, -1), inside)
+
+
+def test_register_end_to_end_on_a_2d_pair(flat_pair: tuple, tmp_path: Path) -> None:
+    # A 2-D pair was refused: the transform and the moved image now come back in 2-D.
+    fixed, moving, _ = flat_pair
+    sitk.WriteImage(fixed, str(tmp_path / "fixed.mha"))
+    sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
+    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Generic_Rigid"]
+    command += ["-f", str(tmp_path / "fixed.mha"), "-m", str(tmp_path / "moving.mha"), "-o", str(tmp_path / "out")]
+    subprocess.run([*command, "--cpu", "1", "--tmp-dir", str(tmp_path / "tmp")], check=True)
+    transform = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Transform.h5"))
+    assert transform.GetDimension() == 2
+    np.testing.assert_allclose(np.subtract(transform.TransformPoint((32.0, 32.0)), (32.0, 32.0)), _SHIFT_2D, atol=0.75)
+    moved = sitk.ReadImage(str(tmp_path / "out" / "P000" / "Moved.mha"))
+    assert moved.GetDimension() == 2
+    assert np.corrcoef(sitk.GetArrayFromImage(fixed).ravel(), sitk.GetArrayFromImage(moved).ravel())[0, 1] > 0.95
+
+
 def test_register_end_to_end_on_the_cpu(pair: tuple, tmp_path: Path) -> None:
     # The CLI as SlicerImpactReg drives it, on a published preset: the transform and the moved image come back.
     fixed, moving, inside = pair

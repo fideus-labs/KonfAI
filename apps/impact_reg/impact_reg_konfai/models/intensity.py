@@ -59,10 +59,18 @@ class EngineRegistration(torch.nn.Module):
         fuser = contextlib.nullcontext() if self._fuse_texpr else no_texpr_fuser()
         with torch.inference_mode(False), torch.enable_grad(), fuser:
             for b in range(fixed.shape[0]):
+                # A 2-D image comes as a volume one plane thick (``plane.py``), and a tile of it without its z axis, which
+                # KonfAI drops from a patch one plane thick and adds back to what comes out: the engine registers the plane.
                 images = [
-                    data_to_image(tensor[b].detach().cpu().numpy(), branch[b])
+                    data_to_image(
+                        (tensor[b] if tensor.ndim == 5 else tensor[b].unsqueeze(1)).detach().cpu().numpy(), branch[b]
+                    )
                     for tensor, branch in zip((fixed, moving, fixed_mask, moving_mask), attributes, strict=True)
                 ]
+                flat = images[0].GetSize()[2] == 1
+                if flat:
+                    z_shift = images[1].GetOrigin()[2] - images[0].GetOrigin()[2]
+                    images = [image[:, :, 0] for image in images]
                 voxel = min(images[0].GetSpacing())
                 for image in images:  # the same voxels, measured in the fixed image's finest voxel
                     image.SetSpacing([v / voxel for v in image.GetSpacing()])
@@ -71,6 +79,8 @@ class EngineRegistration(torch.nn.Module):
                     with out_of_memory_as_torch(device_index >= 0):
                         field = self._engine.register(images[0], images[1], device_index, images[2], images[3])
                     field = field * voxel
+                    if flat:  # the plane's (dx, dy), and along z from one plane to the other
+                        field = np.concatenate([field, np.full_like(field[:1], z_shift)])
                 finally:
                     # FireANTs keeps CUDA tensors in reference cycles that only the cyclic collector frees.
                     gc.collect()
