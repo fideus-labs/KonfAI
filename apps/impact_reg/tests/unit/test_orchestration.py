@@ -508,6 +508,24 @@ def test_a_pair_of_very_different_physical_sizes_is_warned_of(capsys: pytest.Cap
     reg._warn_of_other_units([case(0.2)], quiet=True)
     assert not capsys.readouterr().out
 
+    def pair(fixed: dict, moving: dict) -> dict:
+        return {"Fixed": tuple(fixed.values()), "Moving": tuple(moving.values())}
+
+    def header(shape: list[int], spacing: float, direction: np.ndarray) -> dict:
+        return {"shape": shape, "spacing": [spacing] * 3, "origin": [0.0] * 3, "direction": direction.ravel().tolist()}
+
+    # The sizes are compared along the physical axes: the moving grid swaps x and z, 20 times larger on each of them.
+    swap = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    reg._warn_of_other_units(
+        [pair(header([1, 25, 500, 500], 1.0, np.eye(3)), header([1, 10000, 10000, 500], 1.0, swap))], quiet=False
+    )
+    assert "x20 or more" in capsys.readouterr().out
+    # Exactly 20 times apart, whatever the rounding: 0.7 / 0.035 is 19.999999999999996.
+    reg._warn_of_other_units(
+        [pair(header([1, 10, 10, 10], 0.035, np.eye(3)), header([1, 10, 10, 10], 0.7, np.eye(3)))], quiet=False
+    )
+    assert "x20 or more" in capsys.readouterr().out
+
 
 def test_register_refuses_a_preset_output_named_moved(tmp_path: Path) -> None:
     """The derived image is written under 'Moved'; a preset using that name would be deleted by

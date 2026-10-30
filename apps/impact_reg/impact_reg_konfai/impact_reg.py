@@ -551,15 +551,21 @@ def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None
     if quiet:
         return
     for index, case in enumerate(headers):
-        fixed, moving = (
-            [count * step for count, step in zip(case[group][0][:0:-1], case[group][1], strict=False)]
-            for group in ("Fixed", "Moving")
-        )
-        ratios = [max(f / m, m / f) for f, m in zip(fixed, moving, strict=False) if f > 0 and m > 0]
-        if ratios and min(ratios) >= _SIZE_RATIO:
+        extents = []
+        for group in ("Fixed", "Moving"):
+            shape, spacing, _, direction = case[group]
+            if len(shape) - 1 != len(spacing):
+                break  # not an image: _check_volumes says so
+            axes = np.reshape(direction, (len(spacing), len(spacing)))
+            extents.append(np.abs(axes) @ (np.array(shape[:0:-1]) * spacing))  # along the physical axes
+        if len(extents) < 2 or extents[0].size != extents[1].size:
+            continue
+        fixed, moving = extents
+        ratios = np.maximum(fixed / moving, moving / fixed)
+        if ratios.min() * (1 + 1e-9) >= _SIZE_RATIO:
             print(
-                f"[ImpactReg] P{index:03d}: the fixed and moving images differ x{min(ratios):.3g} or more in physical "
-                f"size on every axis ({fixed} and {moving} mm): check each image's unit and spacing.",
+                f"[ImpactReg] P{index:03d}: the fixed and moving images differ x{ratios.min():.3g} or more in physical "
+                f"size on every axis ({fixed.tolist()} and {moving.tolist()} mm): check each image's unit and spacing.",
                 flush=True,
             )
 
