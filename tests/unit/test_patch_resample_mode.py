@@ -139,6 +139,17 @@ def test_a_store_of_one_level_is_read_at_it(tmp_path: Path) -> None:
     assert not Predictor._read_coarse_levels(fake, 5**3)
     assert dataset.level == 0
 
+    # Two levels of one spacing are not the end of a pyramid, wherever they sit in it.
+    for scale_factors, target, expected in (([2, 1, 2], 3**3, 3), ([1, 2], 5**3, 2)):
+        root = tmp_path / f"Pyramid{len(scale_factors)}"
+        Dataset(root, "omezarr", scale_factors=scale_factors).write(
+            "Volume", _CASE, np.zeros((1, 16, 16, 16), np.float32), geometry([0.0] * 3, [1.0] * 3)
+        )
+        dataset = Dataset(root, "omezarr")
+        fake.dataset.datasets = {str(root): dataset}
+        Predictor._read_coarse_levels(fake, target)
+        assert dataset.level == expected
+
 
 def test_a_store_is_read_from_its_finest_level_still_finer_than_the_target_and_answered_on_level_0(
     tmp_path: Path,

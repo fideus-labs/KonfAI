@@ -18,7 +18,6 @@
 """The configured prediction workflow and its Python entrypoints."""
 
 import hashlib
-import itertools
 import json
 import math
 import multiprocessing
@@ -555,22 +554,23 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             if not headers or any(goal is None for goal in goals.values()):
                 continue  # a case that fits is read whole, at level 0
             chosen = 0
-            finer = {key: tuple(dataset.get_infos(*key)[1].get_np_array("Spacing")) for key in goals}
-            for level in itertools.count(1):
+            # A store of one level answers every level with it, and never comes to one too coarse: its count ends this.
+            for level in range(1, max(dataset.level_count(*key) for key in goals)):
                 dataset.level = level
                 dataset._infos_cache.clear()
                 try:
-                    spacings = {key: tuple(dataset.get_infos(*key)[1].get_np_array("Spacing")) for key in goals}
-                except Exception:  # nosec B112 - past the store's last level
+                    fine_enough = all(
+                        step <= goal * (1 + 1e-6)
+                        for (group, name), coarse in goals.items()
+                        for step, goal in zip(
+                            dataset.get_infos(group, name)[1].get_np_array("Spacing"), coarse or [], strict=True
+                        )
+                    )
+                except Exception:  # nosec B112 - past the last level of a store shorter than another
                     break
-                # A store of one level answers every level with it, and never comes to one too coarse.
-                if spacings == finer or not all(
-                    step <= goal * (1 + 1e-6)
-                    for key, coarse in goals.items()
-                    for step, goal in zip(spacings[key], coarse or [], strict=True)
-                ):
+                if not fine_enough:
                     break
-                chosen, finer = level, spacings
+                chosen = level
             dataset.level = chosen
             dataset._infos_cache.clear()
             if chosen:
