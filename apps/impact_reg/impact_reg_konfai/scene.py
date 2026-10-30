@@ -62,7 +62,7 @@ def _oblique(path: Path):
 
 
 def _image(ngff_zarr, itk, path: Path, name: str):
-    """``path``'s finest level as a 3D NgffImage, and the RFC-4 orientation the scene declares for it on top.
+    """``path``'s finest level as a 2D or 3D NgffImage, and the RFC-4 orientation the scene declares for it on top.
 
     An image file is read through ITK with its orientation, which a scene's transform is converted through. An
     OME-Zarr store is read lazily (a length-1 channel or time axis dropped) without its orientation, as KonfAI
@@ -114,14 +114,14 @@ def _signed_permutation(direction: np.ndarray) -> bool:
 
 def _field(itk, transform: Path, per_mm: np.ndarray):
     """``transform``'s displacement field (ITK convention: fixed -> moving points) in ``per_mm`` units a millimetre
-    along x, y and z rather than in mm."""
+    along x, y and, in 3D, z rather than in mm."""
     field = itk.transformread(str(transform))[0].GetDisplacementField()
     direction = itk.array_from_matrix(field.GetDirection())
     if not _signed_permutation(direction):
         raise _oblique(transform)
     # ponytail: the field is read whole, as register held it (24 bytes a voxel), and converted in place; reading it
     # by blocks needs a chunked field source and a chunked conversion in ngff-zarr
-    vectors = itk.array_view_from_image(field)  # z, y, x, (dx, dy, dz)
+    vectors = itk.array_view_from_image(field)  # [z,] y, x, (dx, dy[, dz])
     vectors *= per_mm
     origin = np.asarray(field.GetOrigin()) * per_mm
     # An index axis runs along the physical axis its direction column selects.
@@ -129,11 +129,11 @@ def _field(itk, transform: Path, per_mm: np.ndarray):
     return vectors, origin, spacing, direction
 
 
-def _points(shape, origin, spacing, direction, z: slice, step: int = 1) -> np.ndarray:
-    """The physical points (x, y, z) of a field's nodes in the planes ``z``, every ``step`` along y and x."""
-    depth, height, width = shape[:3]
-    grid = np.meshgrid(np.arange(depth)[z], np.arange(height)[::step], np.arange(width)[::step], indexing="ij")
-    index = np.stack(grid[::-1], axis=-1)  # x, y, z
+def _points(shape, origin, spacing, direction, first: slice, step: int = 1) -> np.ndarray:
+    """The physical points (x, y[, z]) of a field's nodes at the indices ``first`` of its slowest axis, every ``step``
+    along the others."""
+    axes = [np.arange(shape[0])[first], *(np.arange(n)[::step] for n in shape[1:-1])]
+    index = np.stack(np.meshgrid(*axes, indexing="ij")[::-1], axis=-1)  # x, y[, z]
     return origin + (index * spacing) @ direction.T
 
 
@@ -142,28 +142,30 @@ def _affine_fit(vectors, origin, spacing, direction) -> np.ndarray | None:
     ``_AFFINE_TOLERANCE`` of the finest voxel. Checked a plane at a time: the points of a whole field would cost three
     times the field."""
 
-    step = max(1, max(vectors.shape[:3]) // 16)
+    dimension = vectors.shape[-1]
+    step = max(1, max(vectors.shape[:-1]) // 16)
     sample = slice(None, None, step)
-    p = _points(vectors.shape, origin, spacing, direction, sample, step).reshape(-1, 3)
-    q = p + vectors[sample, sample, sample].reshape(-1, 3)
+    p = _points(vectors.shape, origin, spacing, direction, sample, step).reshape(-1, dimension)
+    q = p + vectors[(sample,) * dimension].reshape(-1, dimension)
     solution, *_ = np.linalg.lstsq(np.hstack([p, np.ones((len(p), 1))]), q, rcond=None)
     tolerance = _AFFINE_TOLERANCE * spacing.min()
     for z in range(vectors.shape[0]):
         plane = _points(vectors.shape, origin, spacing, direction, slice(z, z + 1))
-        if np.abs(plane @ solution[:3] + solution[3] - plane - vectors[z : z + 1]).max() > tolerance:
+        if np.abs(plane @ solution[:dimension] + solution[dimension] - plane - vectors[z : z + 1]).max() > tolerance:
             return None
-    return solution.T  # rows: x, y, z; columns: A | b
+    return solution.T  # rows: x, y[, z]; columns: A | b
 
 
 def _coarser(vectors, origin, spacing, direction, factor: int):
     """The field averaged over blocks of ``factor`` voxels a side (its edge repeated to fill the last ones), on the grid
     of the blocks' centres, plus one node of edge values each side: the blocks' centres alone stop short of the fixed
     image's first and last voxels, where RFC-5 leaves what a reader does to the reader."""
-    pad = [(0, -n % factor) for n in vectors.shape[:3]] + [(0, 0)]
+    pad = [(0, -n % factor) for n in vectors.shape[:-1]] + [(0, 0)]
     padded = np.pad(vectors, pad, mode="edge")
-    z, y, x = (n // factor for n in padded.shape[:3])
-    blocks = padded.reshape(z, factor, y, factor, x, factor, 3).mean(axis=(1, 3, 5))
-    blocks = np.pad(blocks, [(1, 1)] * 3 + [(0, 0)], mode="edge")
+    sizes = [n // factor for n in padded.shape[:-1]]
+    pairs = [value for n in sizes for value in (n, factor)]
+    blocks = padded.reshape(*pairs, vectors.shape[-1]).mean(axis=tuple(range(1, 2 * len(sizes), 2)))
+    blocks = np.pad(blocks, [(1, 1)] * len(sizes) + [(0, 0)], mode="edge")
     return blocks, origin + direction @ (spacing * ((factor - 1) / 2 - factor)), spacing * factor
 
 
@@ -198,6 +200,7 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
     fixed_image, fixed_orientations = _image(ngff_zarr, itk, fixed, "fixed")
     moving_image, moving_orientations = _image(ngff_zarr, itk, moving, "moving")
     dims = list(fixed_image.dims)
+    dimension = len(dims)
     # Per axis, as KonfAI read them: the transform takes a point in the fixed image's units to the moving image's.
     per_mm = _per_mm(fixed_image)
     to_moving = _per_mm(moving_image) / per_mm
@@ -206,9 +209,9 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
     field_ms = None
     if affine is not None:
         affine = to_moving[:, None] * affine
-        linear = itk.AffineTransform[itk.D, 3].New()
-        linear.SetMatrix(itk.matrix_from_array(np.ascontiguousarray(affine[:, :3])))
-        linear.SetTranslation([float(v) for v in affine[:, 3]])
+        linear = itk.AffineTransform[itk.D, dimension].New()
+        linear.SetMatrix(itk.matrix_from_array(np.ascontiguousarray(affine[:, :dimension])))
+        linear.SetTranslation([float(v) for v in affine[:, dimension]])
         ngff_transform = itk_transform_to_ngff_transform(linear, dims, fixed=fixed_image, moving=moving_image)
     else:
         if factor > 1:
@@ -222,7 +225,7 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
         field.SetOrigin(origin.tolist())
         field.SetSpacing(spacing.tolist())
         field.SetDirection(itk.matrix_from_array(np.ascontiguousarray(direction)))
-        displacement = itk.DisplacementFieldTransform[itk.D, 3].New()
+        displacement = itk.DisplacementFieldTransform[itk.D, dimension].New()
         displacement.SetDisplacementField(field)
         ngff_transform, field_image = itk_displacement_field_to_ngff_transform(
             displacement, dims, path=_PATH, fixed=fixed_image, moving=moving_image
@@ -279,9 +282,11 @@ def write_scene(fixed: Path, moving: Path, transform: Path, output: Path, factor
 
 
 def _per_mm(image) -> np.ndarray:
-    """``image``'s units a millimetre along x, y and z; an axis with no known unit is in mm."""
+    """``image``'s units a millimetre along x, y and, in 3D, z; an axis with no known unit is in mm."""
     units = image.axes_units or {}
-    return np.array([1.0 / (millimetres_per_unit(units.get(dim)) or 1.0) for dim in ("x", "y", "z")])
+    return np.array(
+        [1.0 / (millimetres_per_unit(units.get(dim)) or 1.0) for dim in ("x", "y", "z") if dim in image.dims]
+    )
 
 
 def _is_scene(store: Path) -> bool:
