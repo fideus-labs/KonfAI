@@ -161,10 +161,12 @@ class _RawBlockStream(DataStream):
 
     def _write_block(self, index: tuple[slice, ...], values: np.ndarray) -> None:
         """Land ``values`` at ``index`` of the raw block and release the pages they landed on."""
-        region = self._block[index]
-        region[...] = values
+        # No view of the map before the write lands: a failed write's traceback keeps this frame, and
+        # a view left in it would keep the map from closing when the stream is then aborted.
+        self._block[index] = values
         if _MADV_DONTNEED is None:
             return
+        region = self._block[index]
         first = self._offset + region.ctypes.data - self._block.ctypes.data
         span = sum((extent - 1) * stride for extent, stride in zip(region.shape, region.strides, strict=True))
         page = first - first % mmap.PAGESIZE
