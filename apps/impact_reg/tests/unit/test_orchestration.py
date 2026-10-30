@@ -21,6 +21,7 @@ the ``register`` single-preset (reuse) vs multi-preset (ensemble-and-warp) branc
 import itertools
 import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -509,6 +510,10 @@ def test_register_refuses_a_store_of_several_time_points(tmp_path: Path) -> None
             ["A"], [tmp_path / "series.ome.zarr"], [tmp_path / "one.ome.zarr"], output=tmp_path / "O", quiet=True
         )
     reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})  # one time point is an image
+    shutil.rmtree(tmp_path / "one.ome.zarr")  # the series written over it, in this process: read anew
+    shutil.copytree(tmp_path / "series.ome.zarr", tmp_path / "one.ome.zarr")
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})
 
 
 def test_case_order_is_numeric_past_p999() -> None:

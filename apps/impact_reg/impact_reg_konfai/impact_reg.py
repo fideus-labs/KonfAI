@@ -537,12 +537,13 @@ def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Heade
 def _check_time_points(inputs: dict[str, list[Path]]) -> None:
     """Refuse a store of several time points: KonfAI reads the first, so a time series given twice registered its
     first time point onto itself, silently."""
-    from konfai.utils.ome_zarr import get_ome_zarr_info
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache, get_ome_zarr_info
 
     for group, units in inputs.items():
         for unit in units:
             if _backend(unit) != "omezarr":
                 continue
+            clear_ome_zarr_cache(unit)  # a store replaced at this path since an earlier call in this process
             info = get_ome_zarr_info(unit)
             count = info["shape"][info["axes"].index("t")] if "t" in info["axes"] else 1
             if count > 1:
