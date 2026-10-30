@@ -294,6 +294,7 @@ def program_schema() -> dict[str, Any]:
                 "preprocessing": _ref("chain"),
                 "postprocessing": _ref("chain"),
                 "blend": _STRING,
+                "accumulation_dtype": {"enum": ["float32", "float16"]},
                 "reads": _array(_ref("read")),
             },
             ["konfai_edge_manifest", "model", "opset", "output_module", "input", "output", "patch", "geometry"],
