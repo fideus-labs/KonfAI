@@ -862,8 +862,11 @@ def test_an_unmasked_export_runs_every_checkpoint_on_every_test_time_copy(tmp_pa
     # The identity and the two drawn copies, each run by both folds, folded once.
     models = [step for step in program["steps"] if "model" in step]
     assert len(models) == 2 * 3
-    assert [step["op"] for step in program["steps"] if "op" in step] == ["mean"]
-    assert program["steps"][-1]["in"] == [step["out"] for step in models]
+    ops = [step for step in program["steps"] if "op" in step]
+    means = [step for step in ops if step["op"] == "mean"]
+    assert len(means) == 1 and means[0]["in"] == [step["out"] for step in models]
+    # The InferenceStack writes every copy, cast to float32, as one stack.
+    assert ops[-1]["op"] == "concat" and ops[-1]["out"] == "stack" and len(ops[-1]["in"]) == len(models)
 
 
 def test_a_masked_export_applies_the_mask_it_leaves_out_of_the_manifest(tmp_path, monkeypatch):

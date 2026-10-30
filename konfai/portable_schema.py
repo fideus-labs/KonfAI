@@ -105,6 +105,9 @@ CHAIN_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "magnitude": ({}, []),
     "histogram_match": ({"reference_group": _STRING}, ["reference_group"]),
     "percentage": ({"baseline": _NUMBER}, ["baseline"]),
+    "variance": ({}, []),
+    "standard_deviation": ({}, []),
+    "segmentation_disagreement": ({}, []),
     "mask": ({"mask_group": _STRING, "value_outside": _NUMBER}, ["mask_group", "value_outside"]),
     "brightness": ({"b_std": _NUMBER}, ["b_std"]),
     "save": ({"destination": _ref("destination")}, ["destination"]),
@@ -128,6 +131,8 @@ BODY_OPS: dict[str, tuple[dict[str, Any], list[str]]] = {
     "cast": ({"dtype": _STRING}, ["dtype"]),
     "mask": ({"value_outside": _NUMBER}, ["value_outside"]),
     "dilate": ({"radius": _INTEGER}, ["radius"]),
+    # A copy's Padding undone past the reduction, its margins taken back: the one program op that moves the grid.
+    "pad": ({"padding": _array(_INTEGER), "mode": _STRING}, ["padding", "mode"]),
 }
 
 
@@ -140,6 +145,7 @@ CRITERIA: dict[str, tuple[dict[str, Any], list[str]]] = {
     ),
     "mae": ({"reduction": {"enum": ["mean", "sum"]}, "map": {"$ref": "#/$defs/destination"}}, ["reduction"]),
     "psnr": ({"dynamic_range": _NUMBER}, ["dynamic_range"]),
+    "mean": ({}, []),
     "ssim": ({"dynamic_range": _NUMBER}, ["dynamic_range"]),
     "sam_perceptual": (
         {
@@ -287,7 +293,20 @@ def program_schema() -> dict[str, Any]:
             ["konfai_edge_manifest", "model", "opset", "output_module", "input", "output", "patch", "geometry"],
         ),
         "program_step": {"oneOf": [model_step, *(_step(op, spec, buffers) for op, spec in BODY_OPS.items())]},
-        "program": _object({"steps": _array(_ref("program_step")), "output": _STRING}, ["steps", "output"]),
+        "program": _object(
+            {
+                "steps": _array(_ref("program_step")),
+                "output": _STRING,
+                # The buffer of one float32 channel per copy, konfai's InferenceStack.
+                "stack": _STRING,
+                # Each copy's buffer -> its checkpoint and its test-time pass, what a run selects by.
+                "members": {
+                    "type": "object",
+                    "additionalProperties": _object({"checkpoint": _STRING, "pass": _INTEGER}, ["checkpoint", "pass"]),
+                },
+            },
+            ["steps", "output"],
+        ),
         "transform": _object(
             {
                 "konfai_edge_transform": {"const": TRANSFORM_PROGRAM_VERSION},
@@ -325,9 +344,11 @@ def program_schema() -> dict[str, Any]:
                                         _ref("chain_step"),
                                         # Where konfai's Statistics records the volume's minimum and maximum.
                                         _object({"op": {"const": "statistics"}}, ["op"]),
-                                        # A KonfAIInference: the nested app's model on the whole volume.
+                                        # A KonfAIInference: the nested app's model on the whole volume, or on
+                                        # each channel as a case of its own.
                                         _object(
-                                            {"model": _STRING, "manifest": _ref("manifest")}, ["model", "manifest"]
+                                            {"model": _STRING, "manifest": _ref("manifest"), "per_channel": _BOOLEAN},
+                                            ["model", "manifest"],
                                         ),
                                     ]
                                 }
@@ -367,7 +388,10 @@ def program_schema() -> dict[str, Any]:
                 "input_group": {"type": ["string", "array"], "items": _STRING},
                 "models": {"type": "object", "additionalProperties": _STRING},
                 "outputs": _array(
-                    _object({"program": _ref("program"), "write": _ref("destination")}, ["program", "write"])
+                    _object(
+                        {"program": _ref("program"), "write": _ref("destination"), "stack": _ref("destination")},
+                        ["program", "write"],
+                    )
                 ),
             },
             ["konfai_edge_prediction", "name", "memory_budget", "sources", "cases", "input_group", "models", "outputs"],
