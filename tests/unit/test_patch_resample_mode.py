@@ -140,8 +140,13 @@ def test_a_store_of_one_level_is_read_at_it(tmp_path: Path) -> None:
     assert dataset.level == 0
 
     assert dataset.level_count("Volume", _CASE) == 1
-    with pytest.raises(DatasetManagerError, match="is not in"):
+    with pytest.raises(DatasetManagerError):
         dataset.level_count("Mask", _CASE)
+    files = Dataset(tmp_path / "Files", "mha")  # a backend of one level says so of what it holds, and only of that
+    files.write("Volume", _CASE, np.zeros((1, 4, 4, 4), np.float32), geometry([0.0] * 3, [1.0] * 3))
+    assert files.level_count("Volume", _CASE) == 1
+    with pytest.raises(DatasetManagerError):
+        files.level_count("Mask", _CASE)
 
     # Two levels of one spacing are not the end of a pyramid, wherever they sit in it.
     for scale_factors, target, expected in (([2, 1, 2], 3**3, 3), ([1, 2], 5**3, 2)):
