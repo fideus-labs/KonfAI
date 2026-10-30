@@ -719,9 +719,10 @@ def _built(config_file: str | Path, build: Callable[[Path], Any]) -> Iterator[tu
     """The workflow ``build`` makes of ``config_file``, inside the environment its builders need, so KonfAI's own
     refusals run first, and the file as the build left it: every default the build bound is written in it. A
     TRANSFORM binds its stages as it builds; a PREDICTION binds them only when its dataset is prepared, so the
-    stages of a prediction's file hold the parameters their author spelled and each op supplies the rest."""
+    stages of a prediction's file hold the parameters their author spelled and each op supplies the rest. The
+    caller's file is restored as it was once the block ends."""
     config_file = Path(config_file).resolve()
-    with config_environment(config_file):
+    with config_environment(config_file, keep_file=True):
         workflow = build(config_file)
         yield workflow, YAML(typ="safe").load(config_file.read_text())
 
@@ -737,7 +738,7 @@ def config_environment(
     import sys
 
     previous = {key: value for key, value in os.environ.items() if key.startswith("KONFAI_")}
-    snapshot = config_file.read_text() if keep_file else None
+    snapshot = config_file.read_bytes() if keep_file else None
     os.environ["KONFAI_config_file"] = str(config_file)
     os.environ["KONFAI_CONFIG_MODE"] = "Done"
     if root is not None:
@@ -750,7 +751,7 @@ def config_environment(
     finally:
         sys.path.remove(str(config_file.parent))
         if snapshot is not None:
-            config_file.write_text(snapshot)
+            config_file.write_bytes(snapshot)
         for key in [key for key in os.environ if key.startswith("KONFAI_")]:
             if key not in previous:
                 del os.environ[key]
