@@ -174,7 +174,8 @@ class ConvexAdamEngine:
     The IMPACT feature models are fetched and probed once, by KonfAI (``repo:filename`` on Hugging Face), and reused
     across cases.
     Masks restrict every stage's similarity to where they are not 0, the linear stage and its seed included, as in the
-    FireANTs engine; a fixed mask with no voxel in it (a tile the tissue does not reach) gives a zero field.
+    FireANTs engine (the linear stage alone with deformable_masked off); a fixed mask with no voxel in it (a tile the
+    tissue does not reach) gives a zero field when a stage reads the masks, and is ignored with the image when none does.
     """
 
     def __init__(
@@ -199,6 +200,7 @@ class ConvexAdamEngine:
         lncc_kernel: int = 5,
         voxel_sampling: float = 1.0,
         balance_coarse_layers: bool = False,
+        deformable_masked: bool = True,
     ) -> None:
         # Checked here, before any download: past this point a bad value fails at the first case, or not at all.
         if stages and _itk_impact_predates_its_stages():
@@ -293,6 +295,7 @@ class ConvexAdamEngine:
         self._feature_map_update_interval = feature_map_update_interval
         self._lncc_kernel = lncc_kernel
         self._balance_coarse_layers = balance_coarse_layers
+        self._deformable_masked = deformable_masked
 
     def _model_configurations(self, stage: str) -> list:
         """One model configuration per feature model of ``stage``, built once and reused across cases.
@@ -396,9 +399,11 @@ class ConvexAdamEngine:
         registration.Update()
         return affine
 
-    @staticmethod
-    def _restrict(stage, fixed_mask: "itk.Image | None", moving_mask: "itk.Image | None") -> None:
-        """Hand ``stage`` the masks there are, each on its image's grid: without one, the filter runs unmasked."""
+    def _restrict(self, stage, fixed_mask: "itk.Image | None", moving_mask: "itk.Image | None") -> None:
+        """Hand ``stage`` the masks there are, each on its image's grid: without one, or with deformable_masked off,
+        the filter runs unmasked."""
+        if not self._deformable_masked:
+            return
         if fixed_mask is not None:
             stage.SetFixedMask(fixed_mask)
         if moving_mask is not None:
@@ -552,6 +557,8 @@ class ConvexAdamEngine:
 
         ``fixed_mask`` and ``moving_mask`` (each on its image's grid, or resampled onto it by nearest neighbour)
         restrict every stage's similarity to where they are not 0, the linear stage and its seed included."""
+        if not (self._deformable_masked or self._linear):  # no stage reads them: nothing to prepare
+            fixed_mask = moving_mask = None
         if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
             # A fixed mask with no voxel in it leaves nothing to register: a zero field, as the elastix engine
             # returns (in a tiled run, every tile the tissue does not reach).
@@ -616,7 +623,7 @@ class ConvexAdamEngine:
             _foreground_centre(moving, moving_mask),
         )
         moving_linear = _resampled(moving_itk, fixed_itk, affine, itk.LinearInterpolateImageFunction)
-        if moving_mask_itk is not None:
+        if moving_mask_itk is not None and self._deformable_masked:  # the deformable stages' alone
             moving_mask_itk = _resampled(
                 moving_mask_itk, fixed_itk, affine, itk.NearestNeighborInterpolateImageFunction
             )
@@ -709,6 +716,12 @@ class RegistrationNet(network.Network):
             "the search alike, their total spread staying the raw one the coupling is calibrated on; a layer that "
             "does not vary weighs 0 (off = the raw costs, weighed by layers_weight alone). Experimental.",
         ] = False,
+        deformable_masked: Annotated[
+            bool,
+            "Restrict the coarse and fine stages to the masks as well. False keeps them for the affine "
+            "pre-alignment and its seed only, and the deformable stages read the whole image, as ConvexAdam's "
+            "authors run it (use_mask=False).",
+        ] = True,
         iterations: Annotated[
             int,
             Range(0, 100000),
@@ -810,6 +823,7 @@ class RegistrationNet(network.Network):
             lncc_kernel,
             voxel_sampling,
             balance_coarse_layers,
+            deformable_masked,
         )
         self.add_module(
             "Registration",
