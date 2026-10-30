@@ -555,22 +555,22 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
             if not headers or any(goal is None for goal in goals.values()):
                 continue  # a case that fits is read whole, at level 0
             chosen = 0
+            finer = {key: tuple(dataset.get_infos(*key)[1].get_np_array("Spacing")) for key in goals}
             for level in itertools.count(1):
                 dataset.level = level
                 dataset._infos_cache.clear()
                 try:
-                    fine_enough = all(
-                        step <= goal * (1 + 1e-6)
-                        for (group, name), coarse in goals.items()
-                        for step, goal in zip(
-                            dataset.get_infos(group, name)[1].get_np_array("Spacing"), coarse or [], strict=True
-                        )
-                    )
+                    spacings = {key: tuple(dataset.get_infos(*key)[1].get_np_array("Spacing")) for key in goals}
                 except Exception:  # nosec B112 - past the store's last level
                     break
-                if not fine_enough:
+                # A store of one level answers every level with it, and never comes to one too coarse.
+                if spacings == finer or not all(
+                    step <= goal * (1 + 1e-6)
+                    for key, coarse in goals.items()
+                    for step, goal in zip(spacings[key], coarse or [], strict=True)
+                ):
                     break
-                chosen = level
+                chosen, finer = level, spacings
             dataset.level = chosen
             dataset._infos_cache.clear()
             if chosen:

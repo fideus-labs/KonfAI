@@ -122,6 +122,24 @@ def test_a_label_thinner_than_the_coarse_spacing_survives_the_coarsening() -> No
     assert dilate(_CASE, image, attribute) is image  # an image is not a label map
 
 
+def test_a_store_of_one_level_is_read_at_it(tmp_path: Path) -> None:
+    """A store with one level answers every level with it, and never comes to one too coarse: the search for the
+    coarsest level still fine enough looped forever on a store written without a pyramid, past the voxel budget."""
+    pytest.importorskip("zarr")
+    from konfai.predictor.workflow import Predictor
+
+    root = tmp_path / "Dataset"
+    Dataset(root, "omezarr").write(
+        "Volume", _CASE, np.zeros((1, 16, 16, 16), np.float32), geometry([0.0] * 3, [1.0] * 3)
+    )
+    dataset = Dataset(root, "omezarr")
+    fake = SimpleNamespace(
+        dataset=SimpleNamespace(datasets={str(root): dataset}, groups_src={"Volume": {}}), _declared_levels={}
+    )
+    assert not Predictor._read_coarse_levels(fake, 5**3)
+    assert dataset.level == 0
+
+
 def test_a_store_is_read_from_its_finest_level_still_finer_than_the_target_and_answered_on_level_0(
     tmp_path: Path,
 ) -> None:
