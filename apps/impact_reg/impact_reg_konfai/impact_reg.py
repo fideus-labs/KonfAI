@@ -628,6 +628,14 @@ def _publish_output(src: Path, dest: Path, move: bool = False) -> Path:
     ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a full-resolution
     grid is tens of gigabytes, and a copy wrote it twice."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.name.lower().endswith(".hdr") and dest.exists():
+        # An Analyze pair cannot be replaced whole (staged_entry): the new one is made complete first, the old one goes.
+        with tempfile.TemporaryDirectory(dir=dest.parent, prefix=f".{dest.name}.") as scratch:
+            ready = Path(scratch) / dest.name
+            transfer_entry(src, ready, move)
+            for part in entry_files(dest):
+                part.unlink()
+            return _publish_output(ready, dest, move=True)
     with staged_entry(dest) as staged:
         transfer_entry(src, staged, move)
     if dest.is_dir():
@@ -1413,7 +1421,8 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Reduce, Write
 
         members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
-        suffixes, backend = _form(dvf_paths[0]), _backend(dvf_paths[0])
+        # Written apart, as the moved image is: see _derive_moved.
+        root = work / f"ensemble_{case}_mean"
         _run_transform(
             f"impact_reg_ensemble_{case}",
             [members],
@@ -1421,7 +1430,7 @@ class ImpactRegKonfAIApp:
                 "DVF": {
                     group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{output}:{backend}"),
+                        Write(dataset=f"{root}:{_backend(dvf_paths[0])}"),
                     ]
                 }
             },
@@ -1430,7 +1439,7 @@ class ImpactRegKonfAIApp:
             cpu,
             quiet,
         )
-        _drop_other_forms(output / case, group, suffixes)
+        _copy_output(_the_output(root / case, group), output / case, group, move=True)
 
     def _derive_moved(
         self,
@@ -1462,10 +1471,12 @@ class ImpactRegKonfAIApp:
         # The moved image is written in the MOVING's own form: the fields' form may be an ITK
         # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort.
-        moving = next(iter(cases.values()))
-        suffixes, backend = _form(moving), _backend(moving)
+        backend = _backend(next(iter(cases.values())))
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
         field_root = _stage_group(work / "moved_stage", "DVF", fields)
+        # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside a
+        # store, here or left by an earlier run, a moved file would come out as a store.
+        root = work / "moved"
         _run_transform(
             "impact_reg_moved",
             [moving_root, field_root],
@@ -1474,7 +1485,7 @@ class ImpactRegKonfAIApp:
                     "Moved": [
                         Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear"),
                         Write(
-                            dataset=f"{output}:{backend}",
+                            dataset=f"{root}:{backend}",
                             scale_factors="auto" if backend == "omezarr" else None,
                         ),
                     ]
@@ -1486,7 +1497,7 @@ class ImpactRegKonfAIApp:
             quiet,
         )
         for case in fields:
-            _drop_other_forms(output / case, "Moved", suffixes)
+            _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
 
     # ------------------------------------------------------------------ evaluate
 

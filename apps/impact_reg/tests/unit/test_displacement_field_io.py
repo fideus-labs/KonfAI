@@ -21,6 +21,7 @@ A preset may emit its DVF in either form, and every step that follows (locating 
 beside the results, averaging an ensemble, exporting ``Transform.h5``) used to assume ``DVF.mha``.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -28,13 +29,14 @@ import pytest
 
 sitk = pytest.importorskip("SimpleITK")
 pytest.importorskip("zarr")
-pytest.importorskip("ngff_zarr")
+ngff_zarr = pytest.importorskip("ngff_zarr")
 
 from impact_reg_konfai.impact_reg import (  # noqa: E402
     ImpactRegKonfAIApp,
     _copy_output,
     _find_outputs,
 )
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE  # noqa: E402
 from konfai.utils.errors import TransformError  # noqa: E402
 from konfai.utils.ITK import read_displacement_field  # noqa: E402
 from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr  # noqa: E402
@@ -255,6 +257,87 @@ def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path
     averaged = sitk.GetArrayFromImage(read_displacement_field(out))
     expected = (sitk.GetArrayFromImage(_field(1)) + sitk.GetArrayFromImage(_field(2))) / 2
     np.testing.assert_allclose(averaged, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_a_moved_file_stands_beside_a_field_in_a_store(tmp_path: Path) -> None:
+    """A root has one backend, read off what it holds: written beside the store, the moved file came out as a store,
+    and was then dropped as another form of itself."""
+    output, work = tmp_path / "out", tmp_path / "work"
+    (output / "P000").mkdir(parents=True)
+    work.mkdir()
+    _write_store(output / "P000" / "Transform.ome.zarr", _field())
+    moving = sitk.GetImageFromArray(np.arange(120.0, dtype=np.float32).reshape(4, 5, 6))
+    moving.CopyInformation(_field())
+    sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
+
+    ImpactRegKonfAIApp()._derive_moved({"P000": tmp_path / "moving.mha"}, "Transform", output, work, [], 1, True)
+
+    assert sorted(path.name for path in (output / "P000").iterdir()) == ["Moved.mha", "Transform.ome.zarr"]
+    assert sitk.ReadImage(str(output / "P000" / "Moved.mha")).GetSize() == (6, 5, 4)
+
+
+def test_an_analyze_pair_is_replaced_by_the_next_run_or_kept_if_it_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(value: float) -> None:
+        source = tmp_path / str(value) / "Moved.hdr"
+        source.parent.mkdir()
+        sitk.WriteImage(sitk.GetImageFromArray(np.full((2, 3, 4), value, dtype=np.float32)), str(source))
+        _copy_output(source, tmp_path / "out", "Moved", move=True)
+
+    def standing() -> tuple[list[str], float]:
+        image = sitk.ReadImage(str(tmp_path / "out" / "Moved.hdr"))
+        return sorted(path.name for path in (tmp_path / "out").iterdir()), sitk.GetArrayFromImage(image).max()
+
+    run(1.0)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "impact_reg_konfai.impact_reg.transfer_entry", lambda *args: (_ for _ in ()).throw(OSError("full"))
+        )
+        with pytest.raises(OSError, match="full"):
+            run(2.0)
+    assert standing() == (["Moved.hdr", "Moved.img"], 1.0)
+
+    run(3.0)
+    assert standing() == (["Moved.hdr", "Moved.img"], 3.0)
+
+
+def test_a_mean_in_a_file_stands_beside_a_store_of_an_earlier_run(tmp_path: Path) -> None:
+    output, work = tmp_path / "out", tmp_path / "work"
+    (output / "P000").mkdir(parents=True)
+    work.mkdir()
+    _write_store(output / "P000" / "Moved.ome.zarr", _field())
+    members = []
+    for index in (1, 2):
+        (tmp_path / f"m{index}").mkdir()
+        members.append(tmp_path / f"m{index}" / "DVF.mha")
+        _write_displacement_field(_field(index), members[-1])
+
+    ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], members, output, work, [], 1, True)
+
+    assert sorted(path.name for path in (output / "P000").iterdir()) == ["DVF.mha", "Moved.ome.zarr"]
+
+
+def test_the_uncertainty_of_declared_fields_is_an_image(tmp_path: Path) -> None:
+    """Reduce(Std) and Magnitude inherit the members' header. Their map has one channel, in mm: declared a field, a
+    reader would take it for a transformation, and the writer would convert its values to the grid's unit."""
+    members = []
+    for index in (1, 2):
+        (tmp_path / f"m{index}").mkdir()
+        members.append(_write_store(tmp_path / f"m{index}" / "DVF.ome.zarr", _field(index)))
+    output, work = tmp_path / "out", tmp_path / "work"
+
+    ImpactRegKonfAIApp().uncertainty(members, output, cpu=1, quiet=True, tmp_dir=work)
+
+    out = output / "uncertainty" / "Uncertainty.ome.zarr"
+    assert not is_displacement_field(out)
+    assert (
+        DISPLACEMENT_FIELD_ATTRIBUTE
+        not in json.loads((out / "zarr.json").read_text())["attributes"]["konfai"]["attributes"]
+    )
+    fields = np.stack([sitk.GetArrayFromImage(_field(index)) for index in (1, 2)])
+    spread = np.asarray(ngff_zarr.from_ngff_zarr(str(out)).images[0].data)[0]
+    np.testing.assert_allclose(spread, np.linalg.norm(fields.std(axis=0, ddof=1), axis=-1), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("suffix", [".mha", ".ome.zarr"])
