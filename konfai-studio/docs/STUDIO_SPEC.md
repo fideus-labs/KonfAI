@@ -1,7 +1,7 @@
 # KonfAI Studio. Spec of the final result
 
 > What a user will be able to do. Grounded in the actual `konfai-mcp` surface,
-> the `konfai-apps` remote server, and the `konfai-rs`/`konfai-web` deploy work.
+> the `konfai-apps` remote server, and the KonfAI Edge/`konfai-web` deploy work.
 > Visual version with UI mockups: [`spec-visual.html`](spec-visual.html). Strategy brief: [`brief-for-matt.html`](brief-for-matt.html).
 
 ![KonfAI Studio: the agent authors an MR→CT synthesis run while the live training feed, multi-run loss curves, and model-output samples stream beside the chat.](screenshot.png)
@@ -35,7 +35,7 @@ Status legend: **[MCP]** already drivable on today's MCP API · **[build]** UI/e
 | 6 | **See the result** | CT/MR with the prediction overlaid on the scan, prediction-vs-GT | `preview_volume` (PNG today); **NiiVue** for interactive 3D overlays | **[build]** viewer |
 | 7 | **Compare & rank** | Metric-by-metric comparison, config diff, leaderboard across runs and sessions | `get_run_metrics`, `compare_runs`, `diff_run_configs`, `leaderboard` | **[MCP]** |
 | 8 | **Keep & reproduce** | Every run is frozen (exact command + environment + config); export a Methods-grade record; a colleague re-imports and re-runs it | `export_run_record`, `import_experiment` (+ auto config-snapshots & manifest) | **[MCP]** |
-| 9 | **Package & deploy** | Turn a trained model into a shareable app; run it in Slicer, on an on-prem server, or export to ONNX to run 100% in a browser tab, offline | `package_app_from_session`, `export_app`; `konfai export` → `konfai-web`/`konfai-rs` | **[spike]** export = Phase 1 |
+| 9 | **Package & deploy** | Turn a trained model into a shareable app; run it in Slicer, on an on-prem server, or export to ONNX to run 100% in a browser tab, offline | `package_app_from_session`, `export_app`; `konfai export` → `konfai-web`/KonfAI Edge | **[spike]** export = Phase 1 |
 
 The MCP surface is **the tools + prompts + read-only resources** (`konfai-mcp/konfai_mcp/server.py`;
 generated reference `konfai-mcp/scripts/generate_tool_reference.py`). Three modeling entry points the
@@ -88,14 +88,14 @@ bearer: a non-loopback deployment needs TLS).
 - **Portable subset only:** frozen **feed-forward** models (segmentation / synthesis). **3D
   registration stays Python**: Burn's `grid_sample` is 2D-only, so VoxelMorph-style models can't run
   on Burn. TTA/ensemble/MC-dropout/diffusion also stay Python (MVP = single deterministic forward).
-- **Spike GO** (`konfai-rs`, 2026-06-29): `KonfAI → ONNX(dynamo) → burn-onnx → Burn` runs with
+- **Spike GO** (KonfAI Edge, 2026-06-29): `KonfAI → ONNX(dynamo) → burn-onnx → Burn` runs with
   near bit-exact parity. MAE **6.3e-6** (CPU) / **5.5e-6** (WGPU) on `impact_synth` (UNet++ resnet34,
   2.5D, 26M params) vs ONNX Runtime. WGPU is the backend that compiles to WASM/WebGPU.
 - **Two runtimes:** `konfai-web` (ONNX-Runtime-Web + WebGPU, generic: any bundle, no per-model
-  build; JS runtime complete, testable via `onnxruntime-node`) and `konfai-rs` (native Burn, one
+  build; JS runtime complete, testable via `onnxruntime-node`) and KonfAI Edge (native Burn, one
   artifact per architecture; CPU+WGPU proven natively).
 - **Hard gate. Phase 1 `konfai export`:** both runtimes consume `model.onnx` + `manifest.json`;
-  neither ships one (konfai-rs `build.rs` *panics* without it). Phase 1 = a pure-Python
+  neither ships one (KonfAI Edge `build.rs` *panics* without it). Phase 1 = a pure-Python
   `konfai/export/onnx.py` + an `EXPORT` CLI state, folding pre/post into the graph, keeping the
   runtimes thin (file parse + geometry + tiling only). Manifest = input/output `{name,group,channels,
   dtype}`, `patch {size,overlap,dim}`, `preprocess/postprocess_in_graph`, `geometry: preserve_from_input`.
@@ -108,11 +108,11 @@ bearer: a non-loopback deployment needs TLS).
 
 | Milestone | Effort | Deliverable |
 |---|---|---|
-| Foundation | done | konfai-mcp (v1.6.0) + config-by-reflection + konfai-rs spike (GO) |
+| Foundation | done | konfai-mcp (v1.6.0) + config-by-reflection + KonfAI Edge spike (GO) |
 | **M0** | ~1–2 d | BFF FastAPI holding the MCP session + a static front on localhost |
 | **M1** | ~1–2 w | Demo-able core: dataset (NiiVue) → chat/config → `run_train` → live curves → prediction-vs-GT overlay |
 | **Phase 1** | ~3–5 d | `konfai export → model.onnx + manifest.json` (Python): unlocks browser deploy |
-| **M3** | ~2–3 w | In-tab deployment: konfai-rs/web infers client-side → NiiVue renders; volume tiling + geometry |
+| **M3** | ~2–3 w | In-tab deployment: KonfAI Edge/web infers client-side → NiiVue renders; volume tiling + geometry |
 
 M0/M1 need **no new core code**: only today's MCP API.
 

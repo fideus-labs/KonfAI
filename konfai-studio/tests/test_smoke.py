@@ -151,3 +151,27 @@ def test_an_hf_app_icon_comes_from_what_the_catalogue_downloaded(
         response = client.get("/api/apps/icon", params={"ref": "org/seg:CT"})
     assert (response.status_code, response.content) == (200, b"png")
     assert "hf_hub_download" not in calls and "snapshot_download" not in calls
+
+
+def test_the_deploy_pane_reads_an_apps_web_folder_and_nothing_outside_it(tmp_path: Path) -> None:
+    import json
+
+    pytest.importorskip("konfai_apps")
+    manifest = {"display_name": "CT", "description": "CT", "short_description": "CT", "tta": 0, "mc_dropout": 0}
+    (tmp_path / "CT").mkdir()
+    (tmp_path / "CT" / "app.json").write_text(json.dumps(manifest), encoding="utf-8")
+    ref = str(tmp_path / "CT")
+    with TestClient(app) as client:
+        refused = client.get("/api/apps/web", params={"ref": ref})
+        assert refused.status_code == 404 and "no in-browser build" in refused.json()["detail"]
+
+        entry = {"name": "CT", "engine": "konfai-edge", "runtime": "CT/engine", "variants": [{"weights": "CT"}]}
+        (tmp_path / "web" / "CT").mkdir(parents=True)
+        (tmp_path / "web" / "catalog.json").write_text(json.dumps({"format": 1, "apps": [entry]}), encoding="utf-8")
+        (tmp_path / "web" / "CT" / "prediction.json").write_text("{}", encoding="utf-8")
+        assert client.get("/api/apps/web", params={"ref": ref}).json() == entry
+        served = client.get("/api/apps/web/file", params={"ref": ref, "path": "CT/prediction.json"})
+        assert (served.status_code, served.text) == (200, "{}")
+        assert client.get("/api/apps/web/file", params={"ref": ref, "path": "CT/model_0.bpk"}).status_code == 404
+        for outside in ("../CT/app.json", "/etc/passwd", "CT//prediction.json", "CT\\prediction.json"):
+            assert client.get("/api/apps/web/file", params={"ref": ref, "path": outside}).status_code == 400
