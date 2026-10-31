@@ -29,9 +29,10 @@ models/<engine>.py        the preset's model class (Prediction.yml names it): Re
 
 - **A preset's only output is the displacement field**, on the fixed grid, pull-back convention, physical components
   (see [How it works](how-it-works.md)). The engines return a channel-first array on the fixed image they were given;
-  KonfAI writes it as `Transform.h5` through its `:itktransform` backend, or as `Transform.ome.zarr`, an NGFF RFC-5
-  `displacements` field, when the preset's output dataset declares `Transform:omezarr`. Everything else (moved image,
-  ensemble, evaluation) is the orchestrator's, computed from the field.
+  KonfAI writes it as `Transform.h5` through its `:itktransform` backend, or as `Transform.ome.zarr` when the preset's
+  output dataset declares `Transform:omezarr`: an NGFF RFC-5 `displacements` field on an axis-aligned grid, a field only
+  KonfAI reads on an oblique one. Everything else (moved image, ensemble, evaluation) is the orchestrator's, computed
+  from the field.
 - **One subprocess per preset.** KonfAI's configuration and runtime state are per process, so each preset (and each
   pass of a tiled run) is its own `konfai-apps infer`. The orchestrator stages inputs and collects outputs in a work
   directory (`--tmp-dir`, or hidden beside `--output`), kept when a run fails.

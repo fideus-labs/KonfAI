@@ -42,7 +42,9 @@ and ANTs:
 
 `Transform:omezarr` in the preset's output dataset writes the same field as `Output/<case>/Transform.ome.zarr`, an NGFF
 RFC-5 `displacements` store: float32, its components in the axes' order (dz, dy, dx) and in the images' unit. A reader
-such as ngff-zarr applies it, and `NgffScene` puts it with the two images in one OME-Zarr 0.6 store, as it is.
+such as ngff-zarr applies it, and `NgffScene` puts it with the two images in one OME-Zarr 0.6 store, as it is. On an
+oblique grid the store has no `displacements` entry: RFC-5 places a field by a scale and a translation, and the rotation
+stays in a sidecar only KonfAI reads.
 
 Consequences worth knowing:
 

@@ -136,7 +136,8 @@ impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o 
 
 The transform too: the preset's output dataset says where it goes, and `Transform:omezarr` writes
 `Output/P000/Transform.ome.zarr`, an NGFF RFC-5 `displacements` field in the images' unit, in place of the `.h5`. RFC-5
-places a field by a scale and a translation: on an oblique grid, the rotation stays in a sidecar only KonfAI reads.
+places a field by a scale and a translation: on an oblique grid, the store has no `displacements` entry, and its rotation
+stays in a sidecar only KonfAI reads.
 
 ```bash
 impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0 \
