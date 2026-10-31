@@ -36,9 +36,13 @@ and ANTs:
 | Direction | maps a point of the **fixed** image to the matching point of the **moving** image (ITK's pull-back convention) |
 | Moved image | `moved(x) = moving(x + D(x))` for every fixed voxel `x`: resampling the moving image through the transform |
 | Vector components | physical x, y, z (LPS, as ITK), not voxel axes; the direction matrix is already applied |
-| Units | the images' physical unit: millimetres for NIfTI, MHA, NRRD, DICOM; what the store declares for OME-Zarr |
+| Units | millimetres: NIfTI, MHA, NRRD and DICOM are read as such, and an OME-Zarr store in another unit (micrometres) is converted on read |
 | Outside the grid | zero displacement |
 | Size on disk | 24 bytes per fixed voxel (float64), whatever the preset: 175 MB for 240 × 180 × 176 |
+
+`Transform:omezarr` in the preset's output dataset writes the same field as `Output/<case>/Transform.ome.zarr`, an NGFF
+RFC-5 `displacements` store: float32, its components in the axes' order (dz, dy, dx) and in the images' unit. A reader
+such as ngff-zarr applies it, and `NgffScene` puts it with the two images in one OME-Zarr 0.6 store, as it is.
 
 Consequences worth knowing:
 
