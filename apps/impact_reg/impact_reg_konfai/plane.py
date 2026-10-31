@@ -18,14 +18,18 @@
 are not. The image goes through as a volume one plane thick, ``EngineRegistration`` hands the engine the plane itself,
 and the field is brought back to 2-D at the end, for the moved image and every later use of the transform."""
 
+import os
 import shutil
 from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
+from konfai.utils.dataset import image_to_data
+from konfai.utils.dataset.staging import publish
 from konfai.utils.errors import KonfAIError
-from konfai.utils.ome_zarr import NO_UNIT, millimetres_per_unit, write_ome_zarr
-from konfai.utils.utils import path_format_token
+from konfai.utils.ITK import read_displacement_field
+from konfai.utils.ome_zarr import NO_UNIT, clear_ome_zarr_cache, millimetres_per_unit, write_ome_zarr
+from konfai.utils.utils import path_format_token, storage_form
 
 
 def is_flat(shape: list[int]) -> bool:
@@ -62,12 +66,15 @@ def lift_plane(path: Path, dest: Path, z_mm: float) -> Path:
 
 
 def lift_field(path: Path, dest: Path) -> Path:
-    """The 2-D displacement field of the transform file ``path`` as a field one plane thick under ``dest``: a
-    registration's later steps read it as they read every field."""
-    transform = sitk.ReadTransform(str(path))
-    if transform.GetName() != "DisplacementFieldTransform":
-        raise ValueError(f"'{path}' is a 2-D {transform.GetName()}: the 2-D pipeline reads displacement fields.")
-    field = sitk.DisplacementFieldTransform(transform).GetDisplacementField()
+    """The 2-D displacement field ``path``, a transform file or an OME-Zarr store, as a transform file one plane thick
+    under ``dest``: a registration's later steps read it as they read every field."""
+    if path.is_dir():
+        field = read_displacement_field(path)
+    else:
+        transform = sitk.ReadTransform(str(path))
+        if transform.GetName() != "DisplacementFieldTransform":
+            raise ValueError(f"'{path}' is a 2-D {transform.GetName()}: the 2-D pipeline reads displacement fields.")
+        field = sitk.DisplacementFieldTransform(transform).GetDisplacementField()
     array = sitk.GetArrayFromImage(field)
     volume = sitk.GetImageFromArray(
         np.concatenate([array, np.zeros_like(array[..., :1])], axis=-1)[None], isVector=True
@@ -78,24 +85,61 @@ def lift_field(path: Path, dest: Path) -> Path:
     volume.SetOrigin((*field.GetOrigin(), 0.0))
     volume.SetDirection(direction.ravel().tolist())
     dest.mkdir(parents=True, exist_ok=True)
-    target = dest / path.name
+    target = dest / (f"{path.name.removesuffix(storage_form(path))}.h5" if path.is_dir() else path.name)
     sitk.WriteTransform(sitk.DisplacementFieldTransform(volume), str(target))
     return target
 
 
-def project_field(path: Path) -> None:
-    """Rewrite the one-plane field of the transform file ``path`` as the 2-D field it is."""
-    if path.suffix.lower() not in (".h5", ".tfm", ".txt"):
-        raise KonfAIError(
-            "ImpactReg",
-            f"a 2-D image needs a preset that writes its field as an ITK transform file, not '{path.name}'.",
-            "Every published preset does: name one of them.",
-        )
-    field = sitk.DisplacementFieldTransform(sitk.ReadTransform(str(path))).GetDisplacementField()
+def _plane_of(field: sitk.Image) -> sitk.Image:
+    """The 2-D field of a field one plane thick: its plane, without its component along z."""
     plane = field[:, :, 0]
     flat = sitk.GetImageFromArray(sitk.GetArrayFromImage(plane)[..., :2].astype(np.float64), isVector=True)
     flat.CopyInformation(plane)
-    sitk.WriteTransform(sitk.DisplacementFieldTransform(flat), str(path))
+    return flat
+
+
+def _project_store(path: Path) -> None:
+    """Rewrite the one-plane field store ``path`` as the 2-D field it is, in its dtype and its unit."""
+    import ngff_zarr
+
+    source = ngff_zarr.from_ngff_zarr(str(path)).images[0]
+    # ponytail: the field is read whole, as a transform file is and as project_image reads the plane; by regions if
+    # slides outgrow the RAM
+    flat = _plane_of(read_displacement_field(path))
+    data, attributes = image_to_data(flat)
+    if source.axes_units:
+        attributes["OMEUnits"] = " ".join(source.axes_units.get(dim) or NO_UNIT for dim in ("x", "y"))
+    staging = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        write_ome_zarr(
+            staging,
+            data.astype(source.data.dtype),
+            spacing=flat.GetSpacing(),
+            origin=flat.GetOrigin(),
+            attributes=dict(attributes),
+            displacement_field=True,
+        )
+        publish(staging, path)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    clear_ome_zarr_cache(path)  # the reader memoises a store by its path
+
+
+def project_field(path: Path) -> None:
+    """Rewrite the one-plane field ``path``, a transform file or an OME-Zarr store, as the 2-D field it is."""
+    if path.is_dir():
+        _project_store(path)
+    elif path.suffix.lower() in (".h5", ".tfm", ".txt"):
+        field = sitk.DisplacementFieldTransform(sitk.ReadTransform(str(path))).GetDisplacementField()
+        sitk.WriteTransform(sitk.DisplacementFieldTransform(_plane_of(field)), str(path))
+    else:
+        raise KonfAIError(
+            "ImpactReg",
+            f"a 2-D image needs a preset that writes its field as an ITK transform file or an OME-Zarr store, not "
+            f"'{path.name}'.",
+            "Declare 'Transform:itktransform' or 'Transform:omezarr' in the preset's output dataset.",
+        )
 
 
 def project_image(path: Path, target: Path) -> None:

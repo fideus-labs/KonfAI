@@ -16,17 +16,20 @@
 
 """A 2-D image through the 3-D presets: lifted to one plane, registered as a plane, brought back to 2-D."""
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 import torch
+from impact_reg_konfai.impact_reg import _is_flat_field
 from impact_reg_konfai.models.impact_loss import ModelSpec, plane_model
 from impact_reg_konfai.models.intensity import EngineRegistration
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 from konfai.utils.dataset import Attribute
-from konfai.utils.errors import KonfAIError
+from konfai.utils.errors import KonfAIError, TransformError
+from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr
 
 
 def _flat(values: np.ndarray, spacing=(0.5, 0.25), origin=(3.0, -2.0)) -> sitk.Image:
@@ -143,13 +146,56 @@ def test_a_2d_field_goes_one_plane_thick_for_the_later_steps(tmp_path: Path) -> 
     project_field(lifted)
     np.testing.assert_allclose(sitk.ReadTransform(str(lifted)).TransformPoint((3.5, -1.5)), (5.0, -3.5))
 
-    with pytest.raises(KonfAIError, match="ITK transform file"):
-        project_field(tmp_path / "Field.ome.zarr")
+    with pytest.raises(KonfAIError, match="ITK transform file or an OME-Zarr store"):
+        project_field(tmp_path / "Field.mha")
 
     rigid = tmp_path / "Rigid.tfm"
     sitk.WriteTransform(sitk.Euler2DTransform(), str(rigid))
     with pytest.raises(ValueError, match="reads displacement fields"):
         lift_field(rigid, tmp_path / "planes")
+
+
+def test_a_one_plane_store_comes_back_as_a_2d_rfc5_field_and_goes_one_plane_thick_again(tmp_path: Path) -> None:
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    # KonfAI hands a field in millimetres, (dx, dy, dz): 1.5 and -2 mm, on a grid in micrometres.
+    values = np.stack([np.full((1, 4, 5), 1.5), np.full((1, 4, 5), -2.0), np.full((1, 4, 5), 7.0)]).astype(np.float32)
+    path = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr(
+        path,
+        values,
+        spacing=(0.5, 0.25, 0.25),
+        origin=(3.0, -2.0, 0.0),
+        attributes={"OMEUnits": "micrometer micrometer micrometer"},
+        displacement_field=True,
+    )
+    assert not _is_flat_field(path)
+
+    project_field(path)
+
+    assert _is_flat_field(path) and is_displacement_field(path)
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]  # nothing left beside it
+    ome = json.loads((path / "zarr.json").read_text(encoding="utf-8"))["attributes"]["ome"]
+    assert ome["multiscales"][0]["coordinateTransformations"][0]["type"] == "displacements"
+    field = ngff_zarr.from_ome_zarr(str(path)).images[0]
+    assert list(field.dims) == ["c", "y", "x"] and field.data.dtype == np.float32
+    assert field.scale["x"] == pytest.approx(500.0) and field.axes_units["y"] == "micrometer"
+    assert field.translation["x"] == pytest.approx(3000.0)
+    # RFC-5: the components in the axes' order and unit, the one along z gone.
+    np.testing.assert_allclose(np.asarray(field.data), np.stack([np.full((4, 5), -2000.0), np.full((4, 5), 1500.0)]))
+
+    lifted = lift_field(path, tmp_path / "planes")
+    assert lifted.name == "Transform.h5"
+    transform = sitk.DisplacementFieldTransform(sitk.ReadTransform(str(lifted)))
+    assert transform.GetDisplacementField().GetSize() == (5, 4, 1)
+    np.testing.assert_allclose(transform.TransformPoint((3.5, -1.5, 0.0)), (5.0, -3.5, 0.0))
+
+
+def test_an_image_store_is_no_flat_field_to_lift(tmp_path: Path) -> None:
+    path = tmp_path / "Image.ome.zarr"
+    write_ome_zarr(path, np.zeros((1, 4, 5), dtype=np.float32), spacing=(0.5, 0.25), origin=(0.0, 0.0))
+    assert _is_flat_field(path)
+    with pytest.raises(TransformError, match="not a displacement field"):
+        lift_field(path, tmp_path / "planes")
 
 
 def test_a_3d_model_gives_way_to_its_2d_version_or_is_refused() -> None:

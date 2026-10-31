@@ -126,8 +126,12 @@ def _transform_kinds(path: Path) -> list[str]:
         return [line.split(":", 1)[1].strip() for line in file if line.startswith("Transform:")]
 
 
-def _is_flat_transform(path: Path) -> bool:
-    """Whether a transform file holds a 2-D transform, read off the file alone."""
+def _is_flat_field(path: Path) -> bool:
+    """Whether a stored registration, a transform file or an OME-Zarr store, is 2-D, read off its header alone."""
+    if _backend(path) == "omezarr":
+        from konfai.utils.ome_zarr import get_ome_zarr_info
+
+        return "z" not in get_ome_zarr_info(path)["axes"]
     return _is_transform_file(path) and _transform_kinds(path)[0].endswith("_2_2")
 
 
@@ -138,7 +142,7 @@ def _is_field(path: Path) -> bool:
 
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
     """A stored displacement field staged as a dataset entry, for KonfAI's field readers."""
-    if _is_flat_transform(path):  # See plane.py.
+    if _is_flat_field(path):  # See plane.py.
         path = lift_field(path, work / "plane_field")
     root, _, backend = _stage_group(work / "field", "Reg", {"P000": path}).rpartition(":")
     return Dataset(root, backend), "Reg", "P000"
@@ -1712,9 +1716,7 @@ class ImpactRegKonfAIApp:
             kind,
             lift_plane(fixed, planes / "Fixed", z_mm),
             lift_plane(moving, planes / "Moving", z_mm),
-            lift_field(transform_path, planes)
-            if transform_path and _is_flat_transform(transform_path)
-            else transform_path,
+            lift_field(transform_path, planes) if transform_path and _is_flat_field(transform_path) else transform_path,
             gpu,
             cpu,
             quiet,
@@ -1797,11 +1799,11 @@ class ImpactRegKonfAIApp:
             from konfai.data.transform import Magnitude, Reduce, Write
 
             members = _units(list(dvfs))
-            flat = _is_flat_transform(members[0])
+            suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
+            flat = _is_flat_field(members[0])
             if flat:  # See plane.py.
                 members = [lift_field(dvf, work / "planes" / f"M{index:03d}") for index, dvf in enumerate(members)]
             spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
-            suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
             _run_transform(
                 "impact_reg_uncertainty",
                 [spec],
