@@ -24,7 +24,7 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from konfai.metric.measure.impact import no_texpr_fuser
-from konfai.utils.dataset import Attribute, data_to_image
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, data_to_image
 from konfai.utils.vram import out_of_memory_as_torch
 
 
@@ -65,6 +65,8 @@ class EngineRegistration(torch.nn.Module):
                     # FireANTs keeps CUDA tensors in reference cycles that only the cyclic collector frees.
                     gc.collect()
                 fields.append(torch.from_numpy(field))
+                # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
+                attributes[0][b][DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         return torch.stack(fields, dim=0).to(fixed.device)
 
 

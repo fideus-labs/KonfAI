@@ -134,6 +134,15 @@ stores go in and come out the same way:
 impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0
 ```
 
+The transform too: the preset's output dataset says where it goes, and `Transform:omezarr` writes
+`Output/P000/Transform.ome.zarr`, an NGFF RFC-5 `displacements` field in the images' unit, in place of the `.h5`. RFC-5
+places a field by a scale and a translation: on an oblique grid, the rotation stays in a sidecar only KonfAI reads.
+
+```bash
+impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o ./Output --gpu 0 \
+  --set Predictor.outputs_dataset.DisplacementField.OutputDataset.dataset_filename=Transform:omezarr
+```
+
 Evaluate a registration on any subset of modalities, always from the original moving data (the transform warps it);
 without `--transform` it scores the pair as it came:
 
