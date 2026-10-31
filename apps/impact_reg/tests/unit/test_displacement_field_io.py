@@ -276,15 +276,30 @@ def test_a_moved_file_stands_beside_a_field_in_a_store(tmp_path: Path) -> None:
     assert sitk.ReadImage(str(output / "P000" / "Moved.mha")).GetSize() == (6, 5, 4)
 
 
-def test_an_analyze_pair_is_replaced_by_the_next_run(tmp_path: Path) -> None:
-    for value in (1.0, 2.0):
+def test_an_analyze_pair_is_replaced_by_the_next_run_or_kept_if_it_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(value: float) -> None:
         source = tmp_path / str(value) / "Moved.hdr"
         source.parent.mkdir()
         sitk.WriteImage(sitk.GetImageFromArray(np.full((2, 3, 4), value, dtype=np.float32)), str(source))
         _copy_output(source, tmp_path / "out", "Moved", move=True)
 
-    assert sorted(path.name for path in (tmp_path / "out").iterdir()) == ["Moved.hdr", "Moved.img"]
-    assert sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "Moved.hdr"))).max() == 2.0
+    def standing() -> tuple[list[str], float]:
+        image = sitk.ReadImage(str(tmp_path / "out" / "Moved.hdr"))
+        return sorted(path.name for path in (tmp_path / "out").iterdir()), sitk.GetArrayFromImage(image).max()
+
+    run(1.0)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "impact_reg_konfai.impact_reg.transfer_entry", lambda *args: (_ for _ in ()).throw(OSError("full"))
+        )
+        with pytest.raises(OSError, match="full"):
+            run(2.0)
+    assert standing() == (["Moved.hdr", "Moved.img"], 1.0)
+
+    run(3.0)
+    assert standing() == (["Moved.hdr", "Moved.img"], 3.0)
 
 
 def test_a_mean_in_a_file_stands_beside_a_store_of_an_earlier_run(tmp_path: Path) -> None:

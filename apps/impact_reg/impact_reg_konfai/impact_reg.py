@@ -628,10 +628,14 @@ def _publish_output(src: Path, dest: Path, move: bool = False) -> Path:
     ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a full-resolution
     grid is tens of gigabytes, and a copy wrote it twice."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.name.lower().endswith(".hdr"):
-        # An Analyze pair cannot be replaced whole (staged_entry): the old one goes, the new one being complete in src.
-        for part in entry_files(dest):
-            part.unlink(missing_ok=True)
+    if dest.name.lower().endswith(".hdr") and dest.exists():
+        # An Analyze pair cannot be replaced whole (staged_entry): the new one is made complete first, the old one goes.
+        with tempfile.TemporaryDirectory(dir=dest.parent, prefix=f".{dest.name}.") as scratch:
+            ready = Path(scratch) / dest.name
+            transfer_entry(src, ready, move)
+            for part in entry_files(dest):
+                part.unlink()
+            return _publish_output(ready, dest, move=True)
     with staged_entry(dest) as staged:
         transfer_entry(src, staged, move)
     if dest.is_dir():
