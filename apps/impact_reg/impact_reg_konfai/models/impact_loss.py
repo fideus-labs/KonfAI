@@ -32,7 +32,7 @@ A setting an engine cannot honour is refused with a message rather than ignored.
 NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine reads runtime annotations.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Annotated, Literal
 
 from konfai.metric.measure.impact import MODELS_REPO, ImpactFeatureModel, models_registry
@@ -170,6 +170,16 @@ def sorted_specs(mapping: dict) -> list:
 def feature_model(spec: ModelSpec) -> ImpactFeatureModel:
     """KonfAI's feature model of ``spec``, its layers_mask the layer weights."""
     return ImpactFeatureModel.from_ref(spec.ref, [float(bit == "1") for bit in spec.layers_mask])
+
+
+def plane_model(spec: ModelSpec) -> ModelSpec:
+    """``spec`` with the 2-D version of its 3-D model, for a 2-D image: a model that has none is refused."""
+    if "_3D" not in spec.ref:
+        raise ValueError(
+            f"model '{spec.ref}' is 3-D and has no 2-D version: register a 2-D image with a preset on MIND or on "
+            "intensities, or give a 2-D model."
+        )
+    return replace(spec, ref=spec.ref.replace("_3D", "_2D"))
 
 
 def kept_layers(spec: ModelSpec) -> int:

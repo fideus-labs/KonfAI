@@ -62,6 +62,7 @@ NOTE: do NOT add ``from __future__ import annotations``: KonfAI's config engine 
 runtime-evaluated annotations (``get_origin``); PEP 563 stringized annotations break binding.
 """
 
+import functools
 import gc
 import math
 import os
@@ -69,6 +70,7 @@ import tempfile
 from collections.abc import Callable
 from functools import reduce
 from typing import Annotated, Literal, cast
+from unittest import mock
 
 import numpy as np
 import SimpleITK as sitk
@@ -772,7 +774,7 @@ class FireANTsEngine:
         tens of times over soft tissue and a stray bright voxel over whole organs.
         Only the centroid is used: a near-symmetric subject has ambiguous principal axes.
 
-        Returns the ``[1, 3]`` physical-space translation ``RigidRegistration(init_translation=...)``
+        Returns the ``[1, dimension]`` physical-space translation ``RigidRegistration(init_translation=...)``
         expects.
         """
 
@@ -786,17 +788,13 @@ class FireANTsEngine:
                 # centre is the only defensible answer and matches what "cof" would have done.
                 size = img.GetSize()
                 return np.asarray(img.TransformContinuousIndexToPhysicalPoint([(extent - 1) / 2.0 for extent in size]))
-            index = np.array(np.nonzero(positive))  # (3, N) in z, y, x
+            index = np.array(np.nonzero(positive))  # (dimension, N), from the slowest axis
             weight = array[positive]
-            centre_voxel = (index * weight).sum(axis=1) / weight.sum()  # z, y, x
-            return np.asarray(
-                img.TransformContinuousIndexToPhysicalPoint(
-                    [float(centre_voxel[2]), float(centre_voxel[1]), float(centre_voxel[0])]
-                )
-            )
+            centre_voxel = (index * weight).sum(axis=1) / weight.sum()
+            return np.asarray(img.TransformContinuousIndexToPhysicalPoint([float(v) for v in centre_voxel[::-1]]))
 
         translation = com_phys(moving, moving_mask) - com_phys(fixed, fixed_mask)
-        return torch.tensor(translation, device=device, dtype=torch.float32).reshape(1, 3)
+        return torch.tensor(translation, device=device, dtype=torch.float32).reshape(1, -1)
 
     def _impact_loss(self) -> ImpactFeatureLoss:
         """The IMPACT feature models, fetched, probed and loaded by the first registration and kept: register runs
@@ -819,9 +817,10 @@ class FireANTsEngine:
         """FireANTs' physical (LPS) linear matrix -> SimpleITK AffineTransform (fixed -> moving points),
         the same convention FireANTs writes into an ANTs ``0GenericAffine.mat``."""
         matrix = affine_matrix.float().cpu().numpy()[0]
-        affine = sitk.AffineTransform(DIM)
-        affine.SetMatrix(matrix[:DIM, :DIM].flatten().astype(np.float64))
-        affine.SetTranslation(matrix[:DIM, DIM].astype(np.float64))
+        dimension = matrix.shape[1] - 1
+        affine = sitk.AffineTransform(dimension)
+        affine.SetMatrix(matrix[:dimension, :dimension].flatten().astype(np.float64))
+        affine.SetTranslation(matrix[:dimension, dimension].astype(np.float64))
         return affine
 
     @staticmethod
@@ -931,7 +930,13 @@ class FireANTsEngine:
         with tempfile.TemporaryDirectory() as tmp:
             # Uncompressed: the file is read back at once.
             warp_path = os.path.join(tmp, "total_warp.nii")
-            reg.save_as_ants_transforms(warp_path)
+            if reg.dims == 2:
+                # FireANTs' writer takes a 2-D field's (H, W, 2) array for a scalar volume: only 4 axes read as vectors.
+                as_vectors = functools.partial(sitk.GetImageFromArray, isVector=True)
+                with mock.patch.object(sitk, "GetImageFromArray", as_vectors):
+                    reg.save_as_ants_transforms(warp_path)
+            else:
+                reg.save_as_ants_transforms(warp_path)
             return sitk.ReadImage(warp_path, sitk.sitkVectorFloat32)
 
     def register(
@@ -955,13 +960,18 @@ class FireANTsEngine:
             # but a wrong mask, and said so.
             if self._linear_method != "none":
                 print("[FireANTs] the fixed mask is empty: nothing registered, the field is zero.", flush=True)
-            return np.zeros((DIM, *fixed.GetSize()[::-1]), dtype=np.float32)
+            return np.zeros((fixed.GetDimension(), *fixed.GetSize()[::-1]), dtype=np.float32)
         # Only a mask that restricts (some voxels in, some out) is one, decided on the mask as given: konfai-apps
         # writes an all-ones default on the FIXED grid for both sides, which would sit on another grid than the moving
         # image.
         fixed_mask = fixed_mask if is_partial_mask(fixed_mask) else None
         moving_mask = moving_mask if is_partial_mask(moving_mask) else None
         grid = fixed  # the field is sampled on the fixed image as it came
+        if self._deformable_metric == "impact" and fixed.GetDimension() == 2:
+            # ponytail: ImpactFeatureLoss lays its grids and patches out in 3-D; ConvexAdam swaps the models
+            raise ValueError(
+                "The FireANTs IMPACT presets are 3-D: register a 2-D image with ConvexAdam or FireANTs_SyN."
+            )
         if self._deformable_metric == "impact":
             # Feature networks compute their channels along the voxel axes they are given: both images go in with
             # their voxel axes in one order, so the fixed and moving features compare the same descriptors.
@@ -1039,7 +1049,7 @@ class FireANTsEngine:
             init_translation: str | torch.Tensor = "cof"
             if self._moments_init == "none":
                 # Identity, not a seed: the pair arrives centred and the rigid starts where it is.
-                init_translation = torch.zeros((1, 3), device=device, dtype=torch.float32)
+                init_translation = torch.zeros((1, fixed.GetDimension()), device=device, dtype=torch.float32)
             elif self._moments_init in ("com", "auto"):
                 init_translation = self._center_of_mass_translation(
                     fixed,
@@ -1061,7 +1071,7 @@ class FireANTsEngine:
                         fixed_mask if use_fixed_mask else None,
                         moving_mask if use_moving_mask else None,
                     )
-                    init_translation = torch.tensor(best, device=device, dtype=torch.float32).reshape(1, 3)
+                    init_translation = torch.tensor(best, device=device, dtype=torch.float32).reshape(1, -1)
             rigid = RigidRegistration(
                 scales=self._scales,
                 iterations=self._affine_iterations,
@@ -1103,7 +1113,8 @@ class FireANTsEngine:
                 affine.optimize()
                 affine_matrix = affine.get_affine_matrix().detach()
                 del affine
-                determinant = float(torch.linalg.det(affine_matrix[0, :DIM, :DIM].double()))
+                dimension = fixed.GetDimension()
+                determinant = float(torch.linalg.det(affine_matrix[0, :dimension, :dimension].double()))
                 if not _AFFINE_VOLUME_CHANGE[0] < determinant < _AFFINE_VOLUME_CHANGE[1]:
                     # MI rewards an affine that shrinks the moving subject onto a corner of the fixed one: a volume
                     # change no pair of the same subject or species has. The rigid it started from is kept.
@@ -1115,11 +1126,12 @@ class FireANTsEngine:
             # What the linear stages found, where a stage capped by its step size shows as a short shift and a
             # determinant away from 1 (rotation and shear standing in for the translation it could not reach).
             matrix = affine_matrix.double().cpu().numpy()[0]
+            dimension = fixed.GetDimension()
             centre = np.asarray(fixed.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in fixed.GetSize()]))
-            shift = matrix[:DIM, :DIM] @ centre + matrix[:DIM, DIM] - centre
+            shift = matrix[:dimension, :dimension] @ centre + matrix[:dimension, dimension] - centre
             print(
                 f"[FireANTs] linear stage: {np.round(shift, 2).tolist()} voxels at the fixed image centre, "
-                f"determinant {np.linalg.det(matrix[:DIM, :DIM]):.3f}.",
+                f"determinant {np.linalg.det(matrix[:dimension, :dimension]):.3f}.",
                 flush=True,
             )
 

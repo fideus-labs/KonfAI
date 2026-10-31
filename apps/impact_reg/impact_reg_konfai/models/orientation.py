@@ -34,7 +34,8 @@ def world_aligned(image: sitk.Image) -> sitk.Image:
     sample physically: resampling it onto world axes would pad the image by up to a third with filler that the
     metric then samples as content.
     """
-    if np.allclose(np.array(image.GetDirection()).reshape(3, 3), np.eye(3), atol=1e-6):
+    dimension = image.GetDimension()
+    if np.allclose(np.array(image.GetDirection()).reshape(dimension, dimension), np.eye(dimension), atol=1e-6):
         return image
     return sitk.DICOMOrient(image, "LPS")
 

@@ -471,22 +471,24 @@ def test_register_checks_its_presets_and_inputs_before_any_preset_runs(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("name", "array", "vector"),
+    ("name", "array", "vector", "message"),
     [
-        ("flat.png", np.zeros((8, 8), dtype=np.uint8), False),
-        ("rgb.mha", np.zeros((8, 8, 8, 3), dtype=np.uint8), True),
-        ("series.nii.gz", np.zeros((2, 8, 8, 8), dtype=np.float32), False),
+        ("flat.mha", np.zeros((8, 8), dtype=np.float32), False, "mix 2-D images and 3-D volumes"),
+        ("rgb.mha", np.zeros((8, 8, 8, 3), dtype=np.uint8), True, "single-channel"),
+        ("series.nii.gz", np.zeros((2, 8, 8, 8), dtype=np.float32), False, "single-channel"),
     ],
 )
-def test_register_refuses_what_is_not_a_3d_scalar_volume(tmp_path: Path, name: str, array, vector: bool) -> None:
-    """A 2-D image, a colour volume or a time series failed deep inside an engine, after the presets before it."""
+def test_register_refuses_what_is_not_a_scalar_image_or_mixes_kinds(
+    tmp_path: Path, name: str, array, vector: bool, message: str
+) -> None:
+    """A colour volume or a time series failed deep inside an engine, after the presets before it."""
     fixed, moving = tmp_path / "fixed.mha", tmp_path / name
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
     sitk.WriteImage(sitk.GetImageFromArray(array, isVector=vector), str(moving))
     app = reg.ImpactRegKonfAIApp()
     app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
 
-    with pytest.raises(KonfAIError, match="3-D single-channel"):
+    with pytest.raises(KonfAIError, match=message):
         app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True)
 
 

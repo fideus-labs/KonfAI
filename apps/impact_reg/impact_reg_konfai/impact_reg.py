@@ -63,6 +63,7 @@ from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, c
 from konfai_apps.cli import app_file, app_id, app_names
 
 from impact_reg_konfai import PRESETS_REPO
+from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 
 # Preset apps live on this Hugging Face repo, at the revision this release pins; KONFAI_IMPACTREG_REPO points
 # it at a local directory of preset folders (each with an app.json) for development / offline use.
@@ -125,6 +126,15 @@ def _transform_kinds(path: Path) -> list[str]:
         return [line.split(":", 1)[1].strip() for line in file if line.startswith("Transform:")]
 
 
+def _is_flat_field(path: Path) -> bool:
+    """Whether a stored registration, a transform file or an OME-Zarr store, is 2-D, read off its header alone."""
+    if _backend(path) == "omezarr":
+        from konfai.utils.ome_zarr import get_ome_zarr_info
+
+        return "z" not in get_ome_zarr_info(path)["axes"]
+    return _is_transform_file(path) and _transform_kinds(path)[0].endswith("_2_2")
+
+
 def _is_field(path: Path) -> bool:
     """Whether a stored registration is a displacement field: an image or store, or a field transform file."""
     return not _is_transform_file(path) or _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
@@ -132,6 +142,8 @@ def _is_field(path: Path) -> bool:
 
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
     """A stored displacement field staged as a dataset entry, for KonfAI's field readers."""
+    if _is_flat_field(path):  # See plane.py.
+        path = lift_field(path, work / "plane_field")
     root, _, backend = _stage_group(work / "field", "Reg", {"P000": path}).rpartition(":")
     return Dataset(root, backend), "Reg", "P000"
 
@@ -522,16 +534,22 @@ def _check_inputs(inputs: dict[str, list[Path]], output: Path) -> None:
 
 
 def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Header]]) -> None:
-    """Refuse, before any preset runs, a volume the presets cannot register: the engines are 3-D and single-channel,
-    and a 2-D image, a colour one or a time series failed deep inside one of them."""
+    """Refuse, before any preset runs, an image the presets cannot register: the engines are single-channel, and a
+    colour image or a time series failed deep inside one of them."""
     for index, case in enumerate(headers):
         for group, (shape, *_) in case.items():
-            if len(shape) != 4 or shape[0] != 1:
+            if len(shape) not in (3, 4) or shape[0] != 1:
                 raise KonfAIError(
                     "ImpactReg",
-                    f"the {group} volume {inputs[group][index]} has the shape {shape}, channels first.",
-                    "The presets register 3-D single-channel volumes: extract the channel or the time point first.",
+                    f"the {group} image {inputs[group][index]} has the shape {shape}, channels first.",
+                    "The presets register single-channel 2-D or 3-D images: extract the channel or the time point first.",
                 )
+    if len({is_flat(shape) for case in headers for shape, *_ in case.values()}) > 1:
+        raise KonfAIError(
+            "ImpactReg",
+            "the inputs mix 2-D images and 3-D volumes.",
+            "Register them in separate runs: a run's images are all 2-D or all 3-D.",
+        )
 
 
 def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attribute]:
@@ -1003,6 +1021,16 @@ class ImpactRegKonfAIApp:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
             headers = self._headers(inputs, work)
             _check_volumes(inputs, headers)
+            lifted, flat = inputs, is_flat(headers[0]["Fixed"][0])
+            if flat:  # The presets run on volumes one plane thick, on one z grid: see plane.py.
+                lifted = {
+                    group: [
+                        lift_plane(unit, work / "planes" / group / f"{index:03d}", min(headers[index]["Fixed"][1]))
+                        for index, unit in enumerate(units)
+                    ]
+                    for group, units in inputs.items()
+                }
+                headers = self._headers(lifted, work / "planes")
             _check_space(work, headers, len(presets))
             on_grid = None
             fields_by_preset = {}
@@ -1020,8 +1048,8 @@ class ImpactRegKonfAIApp:
                 # before them) and wherever it is flipped.
                 onto_fixed = bool(tta or (tiled and not tiling.get("global")))
                 if onto_fixed:
-                    on_grid = on_grid or self._onto_fixed_grid(inputs, headers, work, gpu, cpu, quiet)
-                pair = on_grid if onto_fixed else (inputs, headers)
+                    on_grid = on_grid or self._onto_fixed_grid(lifted, headers, work, gpu, cpu, quiet)
+                pair = on_grid if onto_fixed else (lifted, headers)
                 if tiled:
                     fields_by_preset[preset] = self._register_tiled(
                         preset,
@@ -1109,7 +1137,7 @@ class ImpactRegKonfAIApp:
                 # the grid of that case's own field (a field is defined ON the fixed grid) and reads
                 # the field as the map.
                 self._derive_moved(
-                    dict(zip(cases, moving_units, strict=True)),
+                    dict(zip(cases, lifted["Moving"], strict=True)),
                     group,
                     output,
                     work,
@@ -1117,6 +1145,12 @@ class ImpactRegKonfAIApp:
                     cpu,
                     quiet,
                 )
+            if flat:
+                for case, moving in zip(cases, moving_units, strict=True):
+                    for field in (_the_output(output / case, group), *(output / case / _ENSEMBLE_DIR).glob("*")):
+                        project_field(field)
+                    if not fields_only:
+                        project_image(_the_output(output / case, "Moved"), output / case / f"Moved{_form(moving)}")
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1671,6 +1705,40 @@ class ImpactRegKonfAIApp:
         With no transform the map is the identity and this is a change of grid alone.
         Written as MHA, or with ``keep_form`` in the moving's own form (file, OME-Zarr store, DICOM series).
         """
+        shape, attributes = _read_header(work / f"plane_{kind}", "Fixed", fixed)
+        if not is_flat(shape):
+            return self._warp_volume(work, kind, fixed, moving, transform_path, gpu, cpu, quiet, keep_form)
+        # Through the 3-D stream one plane thick, as register runs a 2-D pair: see plane.py.
+        planes = work / f"planes_{kind}"
+        z_mm = float(min(attributes.get_np_array("Spacing")))
+        moved = self._warp_volume(
+            work,
+            kind,
+            lift_plane(fixed, planes / "Fixed", z_mm),
+            lift_plane(moving, planes / "Moving", z_mm),
+            lift_field(transform_path, planes) if transform_path and _is_flat_field(transform_path) else transform_path,
+            gpu,
+            cpu,
+            quiet,
+            keep_form,
+        )
+        target = moved.with_name(f"Moved{_form(moving) if keep_form else '.mha'}")
+        project_image(moved, target)
+        return target
+
+    def _warp_volume(
+        self,
+        work: Path,
+        kind: str,
+        fixed: Path,
+        moving: Path,
+        transform_path: Path | None,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        keep_form: bool,
+    ) -> Path:
+        """``_warp_onto_fixed`` on volumes."""
         from konfai.data.transform import Resample, Write
 
         base = work / f"warp_{kind}"
@@ -1731,8 +1799,11 @@ class ImpactRegKonfAIApp:
             from konfai.data.transform import Magnitude, Reduce, Write
 
             members = _units(list(dvfs))
-            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
             suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
+            flat = _is_flat_field(members[0])
+            if flat:  # See plane.py.
+                members = [lift_field(dvf, work / "planes" / f"M{index:03d}") for index, dvf in enumerate(members)]
+            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
             _run_transform(
                 "impact_reg_uncertainty",
                 [spec],
@@ -1751,6 +1822,9 @@ class ImpactRegKonfAIApp:
                 quiet,
             )
             _drop_other_forms(output / "uncertainty", "Uncertainty", suffixes)
+            if flat:
+                written = _the_output(output / "uncertainty", "Uncertainty")
+                project_image(written, written)
         except BaseException as error:
             _leave(work, error)
             raise
