@@ -276,6 +276,17 @@ def test_a_moved_file_stands_beside_a_field_in_a_store(tmp_path: Path) -> None:
     assert sitk.ReadImage(str(output / "P000" / "Moved.mha")).GetSize() == (6, 5, 4)
 
 
+def test_an_analyze_pair_is_replaced_by_the_next_run(tmp_path: Path) -> None:
+    for value in (1.0, 2.0):
+        source = tmp_path / str(value) / "Moved.hdr"
+        source.parent.mkdir()
+        sitk.WriteImage(sitk.GetImageFromArray(np.full((2, 3, 4), value, dtype=np.float32)), str(source))
+        _copy_output(source, tmp_path / "out", "Moved", move=True)
+
+    assert sorted(path.name for path in (tmp_path / "out").iterdir()) == ["Moved.hdr", "Moved.img"]
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "out" / "Moved.hdr"))).max() == 2.0
+
+
 def test_a_mean_in_a_file_stands_beside_a_store_of_an_earlier_run(tmp_path: Path) -> None:
     output, work = tmp_path / "out", tmp_path / "work"
     (output / "P000").mkdir(parents=True)
