@@ -259,6 +259,39 @@ def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path
     np.testing.assert_allclose(averaged, expected, rtol=1e-5, atol=1e-5)
 
 
+def test_a_moved_file_stands_beside_a_field_in_a_store(tmp_path: Path) -> None:
+    """A root has one backend, read off what it holds: written beside the store, the moved file came out as a store,
+    and was then dropped as another form of itself."""
+    output, work = tmp_path / "out", tmp_path / "work"
+    (output / "P000").mkdir(parents=True)
+    work.mkdir()
+    _write_store(output / "P000" / "Transform.ome.zarr", _field())
+    moving = sitk.GetImageFromArray(np.arange(120.0, dtype=np.float32).reshape(4, 5, 6))
+    moving.CopyInformation(_field())
+    sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
+
+    ImpactRegKonfAIApp()._derive_moved({"P000": tmp_path / "moving.mha"}, "Transform", output, work, [], 1, True)
+
+    assert sorted(path.name for path in (output / "P000").iterdir()) == ["Moved.mha", "Transform.ome.zarr"]
+    assert sitk.ReadImage(str(output / "P000" / "Moved.mha")).GetSize() == (6, 5, 4)
+
+
+def test_a_mean_in_a_file_stands_beside_a_store_of_an_earlier_run(tmp_path: Path) -> None:
+    output, work = tmp_path / "out", tmp_path / "work"
+    (output / "P000").mkdir(parents=True)
+    work.mkdir()
+    _write_store(output / "P000" / "Moved.ome.zarr", _field())
+    members = []
+    for index in (1, 2):
+        (tmp_path / f"m{index}").mkdir()
+        members.append(tmp_path / f"m{index}" / "DVF.mha")
+        _write_displacement_field(_field(index), members[-1])
+
+    ImpactRegKonfAIApp()._ensemble_mean("P000", "DVF", ["a", "b"], members, output, work, [], 1, True)
+
+    assert sorted(path.name for path in (output / "P000").iterdir()) == ["DVF.mha", "Moved.ome.zarr"]
+
+
 def test_the_uncertainty_of_declared_fields_is_an_image(tmp_path: Path) -> None:
     """Reduce(Std) and Magnitude inherit the members' header. Their map has one channel, in mm: declared a field, a
     reader would take it for a transformation, and the writer would convert its values to the grid's unit."""
