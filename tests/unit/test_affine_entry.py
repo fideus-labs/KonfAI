@@ -1,3 +1,19 @@
+# Copyright (c) 2025 Valentin Boussot
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
 """A linear registration result as a dataset entry. The field's header declares the map (``AFFINE_ATTRIBUTE``), or
 a linear transform is handed over, and the ``:itktransform`` and ``:omezarr`` backends write the transform in place
 of the field: an ITK ``AffineTransform`` file, an OME-Zarr 0.6 store holding the RFC-5 ``affine`` alone. Either
