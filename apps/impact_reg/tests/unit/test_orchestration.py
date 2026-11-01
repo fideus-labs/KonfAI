@@ -307,7 +307,10 @@ def test_a_store_moving_named_without_a_suffix_keeps_its_moved_image(tmp_path: P
     moving = tmp_path / name
     moving.parent.mkdir(parents=True, exist_ok=True)
     if name == "link":
-        moving.symlink_to(store, target_is_directory=True)
+        try:
+            moving.symlink_to(store, target_is_directory=True)
+        except OSError:
+            pytest.skip("this machine refuses symlinks (Windows without Developer Mode)")
     else:
         store.rename(moving)
     fixed = tmp_path / "fixed.mha"
