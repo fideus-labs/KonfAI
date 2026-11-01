@@ -70,6 +70,7 @@ def _elastix_run(monkeypatch, lines: list[str], code: int, parameter_map: str = 
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
         _feature_models={},
+        _moments_init="cof",
         _elastix_bin="elastix",
         _elastix_root=Path("/opt/elastix-impact"),
         _stage_parameter_maps=stage,
@@ -100,6 +101,7 @@ def test_an_intensity_run_hands_elastix_its_images_winsorised(monkeypatch, impac
     monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", lambda *args, **kwargs: Process())
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
+        _moments_init="cof",
         _feature_models={("TS/M730.pt", "1"): object()} if impact else {},
         _unchecked=False,
         _elastix_bin="elastix",

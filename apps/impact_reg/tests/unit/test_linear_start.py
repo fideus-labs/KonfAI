@@ -14,67 +14,87 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Where a linear stage starts: two sparse subjects side by side have to find each other."""
+"""Where a linear stage starts, when a preset declares ``moments_init: com``."""
+
+from pathlib import Path
 
 import numpy as np
+import pytest
 import SimpleITK as sitk
-from impact_reg_konfai.models.intensity import best_translation, foreground_centre
+from impact_reg_konfai.models import elastix_engine
+from impact_reg_konfai.models.elastix_engine import ElastixEngine
+from impact_reg_konfai.models.intensity import center_of_mass_translation
 
 
-def test_the_start_is_the_shift_that_overlaps_two_sparse_subjects() -> None:
-    # Two blobs a field of view apart: centring the grids leaves them side by side, where no local optimiser finds
-    # them (elastix's rigid stood still on the organoid's two rounds, 36 um apart).
-    fixed_array = np.zeros((20, 40, 40), np.float32)
-    moving_array = np.zeros_like(fixed_array)
-    fixed_array[8:12, 5:12, 5:12] = 1.0
-    moving_array[8:12, 25:32, 25:32] = 1.0
-    fixed, moving = sitk.GetImageFromArray(fixed_array), sitk.GetImageFromArray(moving_array)
-    aligned, off = [20.0, 20.0, 0.0], [0.0, 0.0, 0.0]
-    assert best_translation(fixed, moving, [off, aligned]) == aligned
-    assert best_translation(fixed, moving, [aligned, off]) == aligned
+def _two_sparse_subjects() -> tuple[sitk.Image, sitk.Image]:
+    """Two blobs a field of view apart, on the background a microscope records."""
+    fixed = np.full((20, 40, 40), 100.0, np.float32)
+    moving = fixed.copy()
+    fixed[8:12, 5:12, 5:12] = 1000.0
+    moving[8:12, 25:32, 25:32] = 1000.0
+    return sitk.GetImageFromArray(fixed), sitk.GetImageFromArray(moving)
 
 
-def test_a_large_pair_is_scored_on_a_coarser_copy_and_still_overlaps() -> None:
-    # MetricEvaluate reads every voxel whatever the sampling it is set; a million-voxel pair is scored on a copy of
-    # about 200,000, masks included.
-    fixed_array = np.zeros((64, 128, 128), np.float32)
-    moving_array = np.zeros_like(fixed_array)
-    fixed_array[24:40, 10:40, 10:40] = 1.0
-    moving_array[24:40, 70:100, 70:100] = 1.0
-    fixed, moving = sitk.GetImageFromArray(fixed_array), sitk.GetImageFromArray(moving_array)
-    mask = sitk.GetImageFromArray((fixed_array > -1).astype(np.uint8))
-    mask[0, 0, 0] = 0  # partial, so that it is used
-    aligned, off = [60.0, 60.0, 0.0], [0.0, 0.0, 0.0]
-    assert best_translation(fixed, moving, [off, aligned], mask) == aligned
+def test_the_centres_of_mass_overlap_two_sparse_subjects_over_a_background() -> None:
+    fixed, moving = _two_sparse_subjects()
+    np.testing.assert_allclose(center_of_mass_translation(fixed, moving), [20.0, 20.0, 0.0])
 
 
-def test_a_thin_mask_survives_the_coarser_copy() -> None:
-    # One voxel thick, a mask subsampled by blocks of five would have lost every voxel, and both candidates scored
-    # infinity: the first one won, whatever the overlap.
-    fixed_array = np.zeros((64, 128, 128), np.float32)
-    moving_array = np.zeros_like(fixed_array)
-    fixed_array[24:40, 10:40, 10:40] = 1.0
-    moving_array[24:40, 70:100, 70:100] = 1.0
-    fixed, moving = sitk.GetImageFromArray(fixed_array), sitk.GetImageFromArray(moving_array)
-    thin = np.zeros_like(fixed_array, dtype=np.uint8)
-    thin[31, 5:45, 5:45] = 1  # one plane through the fixed blob
-    aligned, off = [60.0, 60.0, 0.0], [0.0, 0.0, 0.0]
-    assert best_translation(fixed, moving, [off, aligned], sitk.GetImageFromArray(thin)) == aligned
-
-
-def test_a_mask_with_no_foreground_above_the_image_threshold_takes_its_own() -> None:
-    # Thresholded over the whole image, a bright structure outside the mask left the masked subject no foreground,
-    # and the start fell back to the grid centre.
-    array = np.zeros((40, 40), np.float32)
-    array[5:10, 5:10] = 100.0
-    array[25:35, 25:35] = 10.0
-    image = sitk.GetImageFromArray(array)
-    region = np.zeros((40, 40), np.uint8)
-    region[20:, 20:] = 1
+def test_a_mask_on_another_grid_restricts_the_centre() -> None:
+    fixed, moving = _two_sparse_subjects()
+    both = sitk.GetArrayFromImage(moving)
+    both[8:12, 5:12, 5:12] = 1000.0  # the moving image holds the fixed blob too
+    region = np.zeros((10, 20, 20), np.uint8)
+    region[:, 10:, 10:] = 1  # the half of the image, on a grid twice as coarse, around the moving blob
     mask = sitk.GetImageFromArray(region)
-    assert foreground_centre(image, mask) == (29.5, 29.5)
-    assert foreground_centre(image, mask * 0) == (19.5, 19.5)  # an empty mask: the grid's centre
-    # A mask holding some of the whole image's foreground keeps it: inside a body mask, the region's own threshold
-    # would split the body's tissues.
-    region[:20, :20] = 1
-    assert foreground_centre(image, sitk.GetImageFromArray(region)) == (7.0, 7.0)
+    mask.SetSpacing((2.0, 2.0, 2.0))
+    translation = center_of_mass_translation(fixed, sitk.GetImageFromArray(both), None, mask)
+    np.testing.assert_allclose(translation, [20.0, 20.0, 0.0])
+
+
+def test_a_constant_image_starts_from_its_grid_centre() -> None:
+    constant = sitk.Image([8, 8, 8], sitk.sitkFloat32) + 5.0
+    assert center_of_mass_translation(constant, constant) == [0.0, 0.0, 0.0]
+
+
+@pytest.mark.parametrize(("moments_init", "shifted"), [("cof", False), ("com", True)])
+def test_elastix_starts_where_the_preset_declares(
+    monkeypatch, tmp_path: Path, moments_init: str, shifted: bool
+) -> None:
+    # 'com' goes to the moving image's origin and comes back in the field, with elastix's own start off; 'cof' leaves
+    # the images and the map as they are. elastix answers with an identity, so the field is the start.
+    (tmp_path / "Rigid.txt").write_text('(Transform "EulerTransform")\n(AutomaticTransformInitialization "true")\n')
+    monkeypatch.chdir(tmp_path)
+    fixed, moving = _two_sparse_subjects()
+    seen = {}
+
+    class Process:
+        stdout = iter([])
+
+        def __init__(self, args, **kwargs) -> None:
+            work = Path(args[args.index("-out") + 1])
+            seen["origin"] = sitk.ReadImage(args[args.index("-m") + 1]).GetOrigin()
+            seen["map"] = Path(args[args.index("-p") + 1]).read_text()
+            sitk.WriteTransform(
+                sitk.Transform(3, sitk.sitkIdentity), str(work / "TransformParameters.0-Composite.itk.txt")
+            )
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(elastix_engine.subprocess, "Popen", Process)
+    monkeypatch.setattr(elastix_engine, "loader_env", lambda root: {})
+    monkeypatch.setattr(ElastixEngine, "_ensure_binary", lambda self: Path("elastix"))
+    engine = ElastixEngine(["Rigid.txt"], moments_init=moments_init)
+    engine._elastix_root = Path("/opt/elastix-impact")
+    field = engine.register(fixed, moving, -1)
+
+    expected = [20.0, 20.0, 0.0] if shifted else [0.0, 0.0, 0.0]
+    np.testing.assert_allclose(seen["origin"], [-v for v in expected], atol=1e-6)
+    np.testing.assert_allclose([component.mean() for component in field], expected, atol=1e-5)
+    assert (f'(AutomaticTransformInitialization "{"false" if shifted else "true"}")') in seen["map"]
+
+
+def test_elastix_refuses_an_unknown_start() -> None:
+    with pytest.raises(ValueError, match="Unknown moments_init 'auto'"):
+        ElastixEngine(["Rigid.txt"], moments_init="auto")
