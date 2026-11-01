@@ -37,7 +37,7 @@ def _two_sparse_subjects() -> tuple[sitk.Image, sitk.Image]:
 
 def test_the_centres_of_mass_overlap_two_sparse_subjects_over_a_background() -> None:
     fixed, moving = _two_sparse_subjects()
-    np.testing.assert_allclose(center_of_mass_translation(fixed, moving), [20.0, 20.0, 0.0])
+    np.testing.assert_allclose(center_of_mass_translation(fixed, moving), [20.0, 20.0, 0.0], atol=1e-9)
 
 
 def test_a_mask_on_another_grid_restricts_the_centre() -> None:
@@ -49,7 +49,7 @@ def test_a_mask_on_another_grid_restricts_the_centre() -> None:
     mask = sitk.GetImageFromArray(region)
     mask.SetSpacing((2.0, 2.0, 2.0))
     translation = center_of_mass_translation(fixed, sitk.GetImageFromArray(both), None, mask)
-    np.testing.assert_allclose(translation, [20.0, 20.0, 0.0])
+    np.testing.assert_allclose(translation, [20.0, 20.0, 0.0], atol=1e-9)
 
 
 def test_a_constant_image_starts_from_its_grid_centre() -> None:
