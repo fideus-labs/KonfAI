@@ -21,6 +21,7 @@ the ``register`` single-preset (reuse) vs multi-preset (ensemble-and-warp) branc
 import itertools
 import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -295,6 +296,41 @@ def test_register_reads_a_store_moving_against_an_itk_field(tmp_path: Path) -> N
     assert (out / "P000" / "DVF.mha").is_file()
 
 
+@pytest.mark.parametrize("name", ["plate.zarr/C/02/1", "link"])
+def test_a_store_moving_named_without_a_suffix_keeps_its_moved_image(tmp_path: Path, name: str) -> None:
+    """An HCS well's image (``plate.zarr/C/02/1``) and a symlink, which inputs are resolved through, carry no suffix:
+    their form must still be the store's, or the moved image the writer puts down as ``Moved.ome.zarr`` is removed
+    as another form and register fails after the whole run."""
+    ome_zarr = pytest.importorskip("konfai.utils.ome_zarr")
+    volume = np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)
+    store = tmp_path / "moving.ome.zarr"
+    ome_zarr.write_ome_zarr(store, volume[None], spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
+    moving = tmp_path / name
+    moving.parent.mkdir(parents=True, exist_ok=True)
+    if name == "link":
+        try:
+            moving.symlink_to(store, target_is_directory=True)
+        except OSError:
+            pytest.skip("this machine refuses symlinks (Windows without Developer Mode)")
+    else:
+        store.rename(moving)
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    reference = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
+    app = reg.ImpactRegKonfAIApp()
+
+    def field_only(preset, fixed_i, moving_i, fixed_masks, moving_masks, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        _write_dvf(out / "DVF.mha", (2.0, 0.0, 0.0), reference)
+        return "DVF", {"P000": out / "DVF.mha"}
+
+    app._infer_preset = field_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+    assert (out / "P000" / "Moved.ome.zarr").is_dir()
+
+
 def test_register_adopts_the_presets_output_name(tmp_path: Path) -> None:
     """A preset names its output; the pipeline follows. An official preset calls its transform
     ``Transform`` (where Slicer looks for it), and ``register`` must not rename it ``DVF``."""
@@ -490,9 +526,66 @@ def test_register_refuses_what_is_not_a_3d_scalar_volume(tmp_path: Path, name: s
         app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True)
 
 
+def test_register_refuses_a_store_of_several_time_points(tmp_path: Path) -> None:
+    """KonfAI reads a time series' first time point: the same series as fixed and moving registered it onto itself."""
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    for name, times in (("series", 2), ("one", 1)):
+        image = ngff_zarr.to_ngff_image(
+            np.zeros((times, 8, 8, 8), dtype=np.float32),
+            dims=["t", "z", "y", "x"],
+            scale=dict.fromkeys("tzyx", 1.0),
+            translation=dict.fromkeys("tzyx", 0.0),
+        )
+        ngff_zarr.to_ngff_zarr(str(tmp_path / f"{name}.ome.zarr"), ngff_zarr.to_multiscales(image, scale_factors=[]))
+    app = reg.ImpactRegKonfAIApp()
+    app._infer_preset = lambda *args, **kwargs: pytest.fail("a preset ran")  # type: ignore[method-assign]
+
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        app.register(
+            ["A"], [tmp_path / "series.ome.zarr"], [tmp_path / "one.ome.zarr"], output=tmp_path / "O", quiet=True
+        )
+    reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})  # one time point is an image
+    shutil.rmtree(tmp_path / "one.ome.zarr")  # the series written over it, in this process: read anew
+    shutil.copytree(tmp_path / "series.ome.zarr", tmp_path / "one.ome.zarr")
+    with pytest.raises(KonfAIError, match="has 2 time points"):
+        reg._check_time_points({"Fixed": [tmp_path / "one.ome.zarr"]})
+
+
 def test_case_order_is_numeric_past_p999() -> None:
     """`sorted` alone puts P1000 before P101 and pairs the wrong moving unit."""
     assert sorted(["P101", "P1000", "P099"], key=reg._case_key) == ["P099", "P101", "P1000"]
+
+
+def test_a_pair_of_very_different_physical_sizes_is_warned_of(capsys: pytest.CaptureFixture) -> None:
+    """A store in micrometres against a file whose numbers mean millimetres registered to nothing, silently."""
+
+    def case(spacing: float) -> dict:
+        header = ([1, 50, 680, 535], [spacing] * 3, [0.0] * 3, np.eye(3).ravel().tolist())
+        return {"Fixed": ([1, 50, 680, 535], [0.0002] * 3, *header[2:]), "Moving": header}
+
+    reg._warn_of_other_units([case(0.2)], quiet=False)
+    assert "x1e+03 or more in physical size" in capsys.readouterr().out
+    reg._warn_of_other_units([case(0.0002), case(0.001)], quiet=False)  # the same size, and a five times larger field
+    reg._warn_of_other_units([case(0.2)], quiet=True)
+    assert not capsys.readouterr().out
+
+    def pair(fixed: dict, moving: dict) -> dict:
+        return {"Fixed": tuple(fixed.values()), "Moving": tuple(moving.values())}
+
+    def header(shape: list[int], spacing: float, direction: np.ndarray) -> dict:
+        return {"shape": shape, "spacing": [spacing] * 3, "origin": [0.0] * 3, "direction": direction.ravel().tolist()}
+
+    # The sizes are compared along the physical axes: the moving grid swaps x and z, 20 times larger on each of them.
+    swap = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+    reg._warn_of_other_units(
+        [pair(header([1, 25, 500, 500], 1.0, np.eye(3)), header([1, 10000, 10000, 500], 1.0, swap))], quiet=False
+    )
+    assert "x20 or more" in capsys.readouterr().out
+    # Exactly 20 times apart, whatever the rounding: 0.7 / 0.035 is 19.999999999999996.
+    reg._warn_of_other_units(
+        [pair(header([1, 10, 10, 10], 0.035, np.eye(3)), header([1, 10, 10, 10], 0.7, np.eye(3)))], quiet=False
+    )
+    assert "x20 or more" in capsys.readouterr().out
 
 
 def test_register_refuses_a_preset_output_named_moved(tmp_path: Path) -> None:

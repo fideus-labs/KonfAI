@@ -1494,7 +1494,7 @@ class TestMaskedStreamedDenominator:
         mask = torch.ones(2, 1, 2, 2, dtype=torch.uint8)
         mask[1, 0, 0, :] = 0  # a partial mask on the second item
         metric = metric_cls()
-        eager = metric(output, target, mask)[1]
+        eager = float(metric(output, target, mask)[1])  # pytest.approx iterates a tensor (9.2)
         halves = [metric.partial_metric(output[..., :1, :], target[..., :1, :], mask[..., :1, :])]
         halves.append(metric.partial_metric(output[..., 1:, :], target[..., 1:, :], mask[..., 1:, :]))
         assert metric.combine_metric(halves)[1] == pytest.approx(eager, rel=1e-6)  # float32 sums

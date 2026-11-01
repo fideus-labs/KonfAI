@@ -86,8 +86,13 @@ _TRANSFORM_FORMS = {".h5", ".tfm"}
 
 
 def _form(path: Path) -> str:
-    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name."""
-    return storage_form(path)
+    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name. An OME-Zarr store whose
+    name carries no suffix (an HCS well's image, ``plate.zarr/C/02/1``) is ``.ome.zarr``, the form it is written back
+    in: a bare form would name the moved image another output than the one its writer produces."""
+    form = storage_form(path)
+    if not form and path.is_dir() and path_format_token(path) == "omezarr":
+        return ".ome.zarr"
+    return form
 
 
 def _format_token(form: str) -> str:
@@ -534,11 +539,61 @@ def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Heade
                 )
 
 
+def _check_time_points(inputs: dict[str, list[Path]]) -> None:
+    """Refuse a store of several time points: KonfAI reads the first, so a time series given twice registered its
+    first time point onto itself, silently."""
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache, get_ome_zarr_info
+
+    for group, units in inputs.items():
+        for unit in units:
+            if _backend(unit) != "omezarr":
+                continue
+            clear_ome_zarr_cache(unit)  # a store replaced at this path since an earlier call in this process
+            info = get_ome_zarr_info(unit)
+            count = info["shape"][info["axes"].index("t")] if "t" in info["axes"] else 1
+            if count > 1:
+                raise KonfAIError(
+                    "ImpactReg",
+                    f"the {group} store {unit} has {count} time points, and a preset registers one image.",
+                    "Write the time point to a store of its own, e.g. with ngff_zarr: image.data[t] with the dims "
+                    "that remain, and register each pair in turn.",
+                )
+
+
 def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attribute]:
     """``source``'s shape and attributes, from its header alone, staged as a one-case dataset under ``base``."""
     root, _, backend = _stage_group(base, group, {"P000": source}).rpartition(":")
     shape, attributes = Dataset(root, backend).get_infos(group, "P000")
     return list(shape), attributes
+
+
+#: The physical sizes of a pair this far apart, on every axis, are more likely a matter of units than of anatomy.
+_SIZE_RATIO = 20.0
+
+
+def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None:
+    """Warn of a pair whose physical sizes differ a lot on every axis: a store in micrometres against a file whose
+    numbers mean millimetres registers to nothing, silently (NCC 0.14 against 0.93 on the same pair)."""
+    if quiet:
+        return
+    for index, case in enumerate(headers):
+        extents = []
+        for group in ("Fixed", "Moving"):
+            shape, spacing, _, direction = case[group]
+            if len(shape) - 1 != len(spacing):
+                break  # not an image: _check_volumes says so
+            axes = np.reshape(direction, (len(spacing), len(spacing)))
+            extents.append(np.abs(axes) @ (np.array(shape[:0:-1]) * spacing))  # along the physical axes
+        if len(extents) < 2 or extents[0].size != extents[1].size:
+            continue
+        fixed, moving = extents
+        ratios = np.maximum(fixed / moving, moving / fixed)
+        if ratios.min() * (1 + 1e-9) >= _SIZE_RATIO:
+            print(
+                f"[ImpactReg] P{index:03d}: the fixed and moving images differ x{ratios.min():.3g} or more in physical "
+                f"size on every axis ({fixed.tolist()} and {moving.tolist()} mm): check each image's unit and spacing.",
+                flush=True,
+            )
 
 
 def _same_grid(first: _Header, second: _Header) -> bool:
@@ -628,6 +683,14 @@ def _publish_output(src: Path, dest: Path, move: bool = False) -> Path:
     ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a full-resolution
     grid is tens of gigabytes, and a copy wrote it twice."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.name.lower().endswith(".hdr") and dest.exists():
+        # An Analyze pair cannot be replaced whole (staged_entry): the new one is made complete first, the old one goes.
+        with tempfile.TemporaryDirectory(dir=dest.parent, prefix=f".{dest.name}.") as scratch:
+            ready = Path(scratch) / dest.name
+            transfer_entry(src, ready, move)
+            for part in entry_files(dest):
+                part.unlink()
+            return _publish_output(ready, dest, move=True)
     with staged_entry(dest) as staged:
         transfer_entry(src, staged, move)
     if dest.is_dir():
@@ -1001,7 +1064,9 @@ class ImpactRegKonfAIApp:
         try:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
+            _check_time_points(inputs)
             headers = self._headers(inputs, work)
+            _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
             _check_space(work, headers, len(presets))
             on_grid = None
@@ -1413,7 +1478,8 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Reduce, Write
 
         members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
-        suffixes, backend = _form(dvf_paths[0]), _backend(dvf_paths[0])
+        # Written apart, as the moved image is: see _derive_moved.
+        root = work / f"ensemble_{case}_mean"
         _run_transform(
             f"impact_reg_ensemble_{case}",
             [members],
@@ -1421,7 +1487,7 @@ class ImpactRegKonfAIApp:
                 "DVF": {
                     group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{output}:{backend}"),
+                        Write(dataset=f"{root}:{_backend(dvf_paths[0])}"),
                     ]
                 }
             },
@@ -1430,7 +1496,7 @@ class ImpactRegKonfAIApp:
             cpu,
             quiet,
         )
-        _drop_other_forms(output / case, group, suffixes)
+        _copy_output(_the_output(root / case, group), output / case, group, move=True)
 
     def _derive_moved(
         self,
@@ -1462,10 +1528,12 @@ class ImpactRegKonfAIApp:
         # The moved image is written in the MOVING's own form: the fields' form may be an ITK
         # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
         # below, so the first case's form speaks for the cohort.
-        moving = next(iter(cases.values()))
-        suffixes, backend = _form(moving), _backend(moving)
+        backend = _backend(next(iter(cases.values())))
         moving_root = _stage_group(work / "moved_stage", "Moving", cases)
         field_root = _stage_group(work / "moved_stage", "DVF", fields)
+        # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside a
+        # store, here or left by an earlier run, a moved file would come out as a store.
+        root = work / "moved"
         _run_transform(
             "impact_reg_moved",
             [moving_root, field_root],
@@ -1474,7 +1542,7 @@ class ImpactRegKonfAIApp:
                     "Moved": [
                         Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear"),
                         Write(
-                            dataset=f"{output}:{backend}",
+                            dataset=f"{root}:{backend}",
                             scale_factors="auto" if backend == "omezarr" else None,
                         ),
                     ]
@@ -1486,7 +1554,7 @@ class ImpactRegKonfAIApp:
             quiet,
         )
         for case in fields:
-            _drop_other_forms(output / case, "Moved", suffixes)
+            _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
 
     # ------------------------------------------------------------------ evaluate
 

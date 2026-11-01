@@ -28,7 +28,7 @@ import torch
 from impact_reg_konfai.models import elastix_engine as elastix_engine_module
 from impact_reg_konfai.models.elastix_engine import ElastixEngine
 from konfai.metric.measure.impact import _statistics
-from konfai.utils.dataset import Attribute
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute
 from konfai.utils.errors import MeasureError
 
 
@@ -70,6 +70,7 @@ def _elastix_run(monkeypatch, lines: list[str], code: int, parameter_map: str = 
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
         _feature_models={},
+        _moments_init="cof",
         _elastix_bin="elastix",
         _elastix_root=Path("/opt/elastix-impact"),
         _stage_parameter_maps=stage,
@@ -100,6 +101,7 @@ def test_an_intensity_run_hands_elastix_its_images_winsorised(monkeypatch, impac
     monkeypatch.setattr(elastix_engine_module.subprocess, "Popen", lambda *args, **kwargs: Process())
     monkeypatch.setattr(elastix_engine_module, "loader_env", lambda root: {})
     engine = SimpleNamespace(
+        _moments_init="cof",
         _feature_models={("TS/M730.pt", "1"): object()} if impact else {},
         _unchecked=False,
         _elastix_bin="elastix",
@@ -315,6 +317,20 @@ def test_only_an_engine_s_cuda_out_of_memory_becomes_torch_s_class(
     with pytest.raises(RuntimeError) as raised, out_of_memory_as_torch(on_cuda):
         raise RuntimeError(message)
     assert isinstance(raised.value, torch.cuda.OutOfMemoryError) is translated
+
+
+def test_the_engine_output_is_declared_a_displacement_field() -> None:
+    """Its header is the fixed image's, so an ':omezarr' output dataset writes an RFC-5 field, not a 3-channel image."""
+    pytest.importorskip("itk")
+    from impact_reg_konfai.models.intensity import EngineRegistration
+
+    class Engine:
+        def register(self, fixed, moving, device, fixed_mask, moving_mask):
+            return np.zeros((3, 4, 4, 4), dtype=np.float32)
+
+    image, attributes = _registration_inputs()
+    EngineRegistration(Engine(), fuse_texpr=False)(image, image, image, image, attributes)
+    assert DISPLACEMENT_FIELD_ATTRIBUTE in attributes[0][0]
 
 
 _needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="the translation is for a CUDA run")

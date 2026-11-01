@@ -1192,6 +1192,12 @@ def create_ome_zarr_store(
     ngff_zarr = _require_ngff_zarr()
     import dask.array
 
+    if displacement_field and shape[0] == 1:
+        # A scalar computed from a field (its magnitude) inherits the field's header, and is an image.
+        from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE
+
+        displacement_field = False
+        attributes = {key: value for key, value in (attributes or {}).items() if key != DISPLACEMENT_FIELD_ATTRIBUTE}
     spatial_axes, scale_values, translation_values = _spatial_geometry(
         len(shape), f"shape {list(shape)}", spacing, origin
     )

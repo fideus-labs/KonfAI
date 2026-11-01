@@ -481,6 +481,12 @@ class Dataset:
             groups, name, lambda file, group, entry: file.file_to_data_slice(group, entry, slices)
         )
 
+    def level_count(self, groups: str, name: str) -> int:
+        """How many resolution levels ``(groups, name)`` is stored at. Raises when it is not there, as reading it does:
+        a backend of one level would answer 1 for anything."""
+        self.get_infos(groups, name)
+        return self._resolve_entry(groups, name, lambda file, group, entry: file.level_count(entry))
+
     def read_granularity(self, groups: str, name: str) -> tuple[int, ...] | None:
         """The stored block reads of ``(groups, name)`` are served in, or ``None`` when a read costs
         exactly what it asks for."""
