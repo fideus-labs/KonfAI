@@ -28,7 +28,7 @@ from konfai.data.patching import DatasetPatch
 from konfai.data.transform import Resample
 from konfai.data.transform.resample import CoarseLabelDilate, coarse_spacing
 from konfai.utils.dataset import Attribute, Dataset
-from konfai.utils.errors import ConfigError
+from konfai.utils.errors import ConfigError, DatasetManagerError
 from oracle_support import geometry
 
 _CASE = "CASE_000"
@@ -120,6 +120,48 @@ def test_a_label_thinner_than_the_coarse_spacing_survives_the_coarsening() -> No
     assert coarse[..., 0].all() and not coarse[..., 1:].any()
     image = torch.rand(1, 16, 16, 16)
     assert dilate(_CASE, image, attribute) is image  # an image is not a label map
+
+
+def test_a_store_of_one_level_is_read_at_it(tmp_path: Path) -> None:
+    """A store with one level answers every level with it, and never comes to one too coarse: the search for the
+    coarsest level still fine enough looped forever on a store written without a pyramid, past the voxel budget."""
+    pytest.importorskip("zarr")
+    from konfai.predictor.workflow import Predictor
+
+    root = tmp_path / "Dataset"
+    Dataset(root, "omezarr").write(
+        "Volume", _CASE, np.zeros((1, 16, 16, 16), np.float32), geometry([0.0] * 3, [1.0] * 3)
+    )
+    dataset = Dataset(root, "omezarr")
+    fake = SimpleNamespace(
+        dataset=SimpleNamespace(datasets={str(root): dataset}, groups_src={"Volume": {}}), _declared_levels={}
+    )
+    assert not Predictor._read_coarse_levels(fake, 5**3)
+    assert dataset.level == 0
+
+    assert dataset.level_count("Volume", _CASE) == 1
+    with pytest.raises(DatasetManagerError):
+        dataset.level_count("Mask", _CASE)
+
+    # Two levels of one spacing are not the end of a pyramid, wherever they sit in it.
+    for scale_factors, target, expected in (([2, 1, 2], 3**3, 3), ([1, 2], 5**3, 2)):
+        root = tmp_path / f"Pyramid{len(scale_factors)}"
+        Dataset(root, "omezarr", scale_factors=scale_factors).write(
+            "Volume", _CASE, np.zeros((1, 16, 16, 16), np.float32), geometry([0.0] * 3, [1.0] * 3)
+        )
+        dataset = Dataset(root, "omezarr")
+        fake.dataset.datasets = {str(root): dataset}
+        Predictor._read_coarse_levels(fake, target)
+        assert dataset.level == expected
+
+
+def test_a_backend_of_one_level_counts_what_it_holds_and_only_that(tmp_path: Path) -> None:
+    pytest.importorskip("SimpleITK")
+    files = Dataset(tmp_path / "Files", "mha")
+    files.write("Volume", _CASE, np.zeros((1, 4, 4, 4), np.float32), geometry([0.0] * 3, [1.0] * 3))
+    assert files.level_count("Volume", _CASE) == 1
+    with pytest.raises(DatasetManagerError):
+        files.level_count("Mask", _CASE)
 
 
 def test_a_store_is_read_from_its_finest_level_still_finer_than_the_target_and_answered_on_level_0(

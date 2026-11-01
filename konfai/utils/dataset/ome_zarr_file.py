@@ -260,6 +260,11 @@ class OmeZarrFile(AbstractFile):
 
         plan_ome_zarr_reads(self._path(name), windows, level=self.level)
 
+    def level_count(self, name: str) -> int:
+        from konfai.utils.ome_zarr import get_ome_zarr_info
+
+        return int(get_ome_zarr_info(self._path(name), level=0)["n_levels"])
+
     def read_granularity(self, name: str) -> tuple[int, ...] | None:
         from konfai.utils.ome_zarr import ome_zarr_read_granularity
 
