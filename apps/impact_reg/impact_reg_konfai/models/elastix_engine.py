@@ -40,7 +40,7 @@ from konfai.utils.vram import device_out_of_memory
 from .elastix import generate_impact_parameter_map, has_impact_block, sampled_spatial_samples
 from .elastix_install import cuda_upgrade_available, get_elastix_bin, install_elastix_impact, loader_env, try_elastix
 from .impact_loss import check_models, feature_model, sorted_specs
-from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .intensity import EngineRegistration, center_of_mass_translation, is_partial_mask, winsorized
 from .orientation import world_aligned_pair
 
 # Elastix + IMPACT binary is cached once here (with its own LibTorch when the environment's torch is another
@@ -178,7 +178,11 @@ class ElastixEngine:
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
         seed: int = 42,
+        moments_init: str = "cof",
     ) -> None:
+        if moments_init not in ("cof", "com"):
+            raise ValueError(f"Unknown moments_init '{moments_init}': 'cof' or 'com'.")
+        self._moments_init = moments_init
         # The parameter-map .txt files are per-preset config staged into the run's working directory (KonfAIApp
         # chdir's into the app workspace before building the model), so resolve them against cwd, not this
         # module's directory, which is the installed package, not next to the .txt.
@@ -284,7 +288,10 @@ class ElastixEngine:
             per_token["FinalGridSpacingInPhysicalUnits"] = str(float(self._final_grid_spacing))
         if self._spatial_samples > 0:
             per_token["NumberOfSpatialSamples"] = str(int(self._spatial_samples))
-        exact: list[tuple[str, str]] = []
+        # First, so that it wins: register adds its start back to the field, which holds only with this one off.
+        exact: list[tuple[str, str]] = (
+            [("AutomaticTransformInitialization", '"false"')] if self._moments_init == "com" else []
+        )
         for entry in self._parameter_overrides:
             key, sep, value = entry.partition("=")
             if not sep or not key.strip():
@@ -432,6 +439,16 @@ class ElastixEngine:
             # Grey values alone, compared through mutual information: a few hot voxels no longer squeeze the tissue
             # into one bin. IMPACT's models read the intensities they were trained on, so an IMPACT run keeps them.
             fixed, moving = winsorized(fixed), winsorized(moving)
+        shift = None
+        if self._moments_init == "com":
+            # The moving image goes there by its origin, without resampling, and the shift is added back to the field.
+            regions = [mask if is_partial_mask(mask) else None for mask in (fixed_mask, moving_mask)]
+            shift = center_of_mass_translation(fixed, moving, *regions)
+            moving = sitk.Image(moving)
+            moving.SetOrigin([o - t for o, t in zip(moving.GetOrigin(), shift, strict=True)])
+            if moving_mask is not None:
+                moving_mask = sitk.Image(moving_mask)
+                moving_mask.SetOrigin([o - t for o, t in zip(moving_mask.GetOrigin(), shift, strict=True)])
         work = Path(tempfile.mkdtemp(prefix="konfai_reg_"))
         try:
             fixed_path, moving_path = work / "Fixed.mha", work / "Moving.mha"
@@ -523,7 +540,10 @@ class ElastixEngine:
             )
             if not transforms:
                 raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
-            return _displacement_on(grid, sitk.ReadTransform(str(transforms[-1])))
+            field = _displacement_on(grid, sitk.ReadTransform(str(transforms[-1])))
+            if shift is not None:
+                field += np.asarray(shift, dtype=field.dtype).reshape(-1, *([1] * (field.ndim - 1)))
+            return field
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -547,6 +567,7 @@ class ElastixRegistration(EngineRegistration):
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
         seed: int = 42,
+        moments_init: str = "cof",
     ) -> None:
         if engine != "elastix":
             raise NotImplementedError(f"ElastixRegistration engine '{engine}' is not implemented yet.")
@@ -565,5 +586,6 @@ class ElastixRegistration(EngineRegistration):
                 mixed_precision,
                 voxel_sampling,
                 seed,
+                moments_init,
             )
         )

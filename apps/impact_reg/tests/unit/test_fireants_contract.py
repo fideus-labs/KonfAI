@@ -380,8 +380,7 @@ def test_the_centre_of_mass_seed_is_not_dragged_by_a_bright_voxel() -> None:
     fixed, moving = sitk.GetImageFromArray(body), sitk.GetImageFromArray(outlier)
     for image in (fixed, moving):
         image.SetSpacing((2.0, 2.0, 2.0))
-    seed = fireants.FireANTsEngine._center_of_mass_translation(fixed, moving, None, None, "cpu")
-    assert float(seed.norm()) < 0.5  # mm
+    assert np.linalg.norm(fireants.center_of_mass_translation(fixed, moving)) < 0.5  # mm
 
 
 class _ThreeChannels(torch.nn.Module):

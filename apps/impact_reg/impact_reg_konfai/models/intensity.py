@@ -14,8 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""What the engines share: the graph module that runs one on a batch, the winsorised intensities they read, and
-whether a mask restricts an image."""
+"""What the engines share: the graph module that runs one on a batch, the winsorised intensities they read, the
+translation between two subjects' centres of mass, and whether a mask restricts an image."""
 
 import contextlib
 import gc
@@ -78,6 +78,39 @@ def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sit
     if top <= bottom:
         return image  # background almost everywhere (a tile past the tissue): clamped, it would be constant
     return sitk.Clamp(image, image.GetPixelID(), float(bottom), float(top))
+
+
+def center_of_mass_translation(
+    fixed: sitk.Image, moving: sitk.Image, fixed_mask: sitk.Image | None = None, moving_mask: sitk.Image | None = None
+) -> list[float]:
+    """The translation from ``fixed``'s centre of mass to ``moving``'s: where a linear stage starts for a preset that
+    declares ``moments_init: com``.
+
+    Each centre is taken in its image's own physical space, inside its mask if it has one, on intensities winsorised
+    to their 0.5-99.5 percentiles and rescaled to [0, 1]. Raw, a background outweighs a sparse subject (the 36 um
+    between an organoid's two rounds come out as 11), CT clipped at 0 weighs bone tens of times over soft tissue, and
+    a stray bright voxel weighs more than whole organs. Only the centroid is used: a near-symmetric subject has
+    ambiguous principal axes.
+    """
+
+    def centre(image: sitk.Image, mask: sitk.Image | None) -> np.ndarray:
+        rescaled = sitk.RescaleIntensity(winsorized(sitk.Cast(image, sitk.sitkFloat32), 0.5, 99.5), 0.0, 1.0)
+        if mask is None:
+            region = sitk.Image(image.GetSize(), sitk.sitkUInt8) + 1
+            region.CopyInformation(image)
+        else:
+            # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
+            identity = sitk.Transform(image.GetDimension(), sitk.sitkIdentity)
+            region = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, identity, sitk.sitkNearestNeighbor)
+        stats = sitk.LabelIntensityStatisticsImageFilter()
+        stats.SetComputePerimeter(False)
+        stats.Execute(region, rescaled)
+        if stats.HasLabel(1) and stats.GetSum(1) > 0:
+            return np.asarray(stats.GetCenterOfGravity(1))
+        # A constant subject (all 0 once rescaled) has no centre of mass: its grid's centre, as centring frames.
+        return np.asarray(image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()]))
+
+    return (centre(moving, moving_mask) - centre(fixed, fixed_mask)).tolist()
 
 
 def is_partial_mask(mask: sitk.Image | None) -> bool:

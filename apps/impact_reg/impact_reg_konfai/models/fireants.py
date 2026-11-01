@@ -109,7 +109,7 @@ from .impact_loss import (
     layer_weights,
     level_models,
 )
-from .intensity import EngineRegistration, is_partial_mask, winsorized
+from .intensity import EngineRegistration, center_of_mass_translation, is_partial_mask, winsorized
 from .orientation import world_aligned_pair
 
 DIM = 3
@@ -729,51 +729,6 @@ class FireANTsEngine:
             )
         self._update_interval = int(feature_map_update_interval)
 
-    @staticmethod
-    def _center_of_mass_translation(
-        fixed: sitk.Image,
-        moving: sitk.Image,
-        fixed_mask: "sitk.Image | None",
-        moving_mask: "sitk.Image | None",
-        device: str,
-    ) -> torch.Tensor:
-        """Seed translation ``com_moving - com_fixed`` from intensity-weighted centres of mass.
-
-        Computed here rather than through FireANTs' ``MomentsRegistration``, which mis-estimates the centre of
-        mass on anisotropic-spacing volumes.
-
-        Each subject's centre is taken in its OWN physical space (mask-restricted when a real mask is
-        given), so origin/spacing/direction differences between the two frames are handled exactly, and on
-        its intensities winsorised and rescaled to [0, 1] (``_unit_range``): raw CT clipped at 0 weighs bone
-        tens of times over soft tissue and a stray bright voxel over whole organs.
-        Only the centroid is used: a near-symmetric subject has ambiguous principal axes.
-
-        Returns the ``[1, 3]`` physical-space translation ``RigidRegistration(init_translation=...)``
-        expects.
-        """
-
-        def com_phys(img: sitk.Image, mask: "sitk.Image | None") -> np.ndarray:
-            array = sitk.GetArrayFromImage(_unit_range(img)).astype(np.float64)  # (z, y, x), in [0, 1]
-            if mask is not None:
-                array = array * (sitk.GetArrayFromImage(mask).astype(np.float64) > 0.5)
-            positive = array > 0
-            if not positive.any():
-                # A constant subject (all 0 once rescaled) has no centre of mass to speak of; the frame
-                # centre is the only defensible answer and matches what "cof" would have done.
-                size = img.GetSize()
-                return np.asarray(img.TransformContinuousIndexToPhysicalPoint([(extent - 1) / 2.0 for extent in size]))
-            index = np.array(np.nonzero(positive))  # (3, N) in z, y, x
-            weight = array[positive]
-            centre_voxel = (index * weight).sum(axis=1) / weight.sum()  # z, y, x
-            return np.asarray(
-                img.TransformContinuousIndexToPhysicalPoint(
-                    [float(centre_voxel[2]), float(centre_voxel[1]), float(centre_voxel[0])]
-                )
-            )
-
-        translation = com_phys(moving, moving_mask) - com_phys(fixed, fixed_mask)
-        return torch.tensor(translation, device=device, dtype=torch.float32).reshape(1, 3)
-
     def _impact_loss(self) -> ImpactFeatureLoss:
         """The IMPACT feature models, fetched, probed and loaded by the first registration and kept: register runs
         for every case and every native tile of a run, all in one process."""
@@ -1017,13 +972,12 @@ class FireANTsEngine:
                 # Identity, not a seed: the pair arrives centred and the rigid starts where it is.
                 init_translation = torch.zeros((1, 3), device=device, dtype=torch.float32)
             elif self._moments_init == "com":
-                init_translation = self._center_of_mass_translation(
-                    fixed,
-                    moving,
-                    fixed_mask if use_fixed_mask else None,
-                    moving_mask if use_moving_mask else None,
-                    device,
-                )
+                # Not FireANTs' MomentsRegistration, which mis-estimates the centre of mass on anisotropic spacings.
+                init_translation = torch.tensor(
+                    center_of_mass_translation(fixed, moving, fixed_mask, moving_mask),
+                    device=device,
+                    dtype=torch.float32,
+                ).reshape(1, 3)
             rigid = RigidRegistration(
                 scales=self._scales,
                 iterations=self._affine_iterations,
