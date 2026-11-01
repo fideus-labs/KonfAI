@@ -339,6 +339,41 @@ def current_free_vram(devices: list[int], remote_server: RemoteServer | None = N
     return min(frees) if frees else None
 
 
+def _installer() -> list[str]:
+    """The command that installs into THIS interpreter and its environment: its pip, or uv's when the environment has
+    no pip (``uv venv`` makes one without it)."""
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install"]
+    uv = shutil.which("uv")
+    if uv is not None:
+        # uv does not read pip's package sources, and searches indexes in another order: an install set up for pip alone
+        # would reach another index than the one set (pip.conf is pip's own too, uv has uv.toml).
+        unread = [
+            pip_name
+            for pip_name, uv_name in (
+                ("PIP_INDEX_URL", "UV_INDEX_URL"),
+                ("PIP_EXTRA_INDEX_URL", "UV_EXTRA_INDEX_URL"),
+                ("PIP_FIND_LINKS", "UV_FIND_LINKS"),
+                ("PIP_NO_INDEX", "UV_NO_INDEX"),
+            )
+            if os.environ.get(pip_name, "").strip() and uv_name not in os.environ
+        ]
+        if unread:
+            raise AppRepositoryError(
+                f"The environment of {sys.executable} has no pip, so uv installs an app's requirements, and uv does not"
+                f" read {', '.join(unread)}.",
+                f"Set uv's own (UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_NO_INDEX), or install pip into it"
+                f" ('{sys.executable} -m ensurepip').",
+            )
+        return [uv, "pip", "install", "--python", sys.executable]
+    raise AppRepositoryError(
+        f"The environment of {sys.executable} has no pip and no uv is on PATH: an app's requirements cannot be"
+        " installed.",
+        f"Install pip into it ('{sys.executable} -m ensurepip'), or set KONFAI_APPS_INSTALL_REQUIREMENTS=0 and"
+        " install them yourself.",
+    )
+
+
 class VolumeType(Enum):
     SEGMENTATION = "SEGMENTATION"
     VOLUME = "VOLUME"
@@ -1285,7 +1320,8 @@ class LocalAppRepository(AppRepositoryInfo):
         with tempfile.TemporaryDirectory() as directory:
             constraints = Path(directory) / "constraints.txt"
             constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
-            command = [sys.executable, "-m", "pip", "install", *flags, "-c", str(constraints), *requirements]
+            installer = _installer()
+            command = [*installer, *flags, "-c", str(constraints), *requirements]
             # pip's report is echoed as it comes, and kept: the lines that name a conflict go in the error.
             with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as pip:  # nosec B603
                 report = []
@@ -1294,9 +1330,10 @@ class LocalAppRepository(AppRepositoryInfo):
                     report.append(line.strip())
         if pip.returncode:
             conflict = list(dict.fromkeys(line for line in report if " depends on " in line or "(constraint)" in line))
+            name = "pip" if installer[0] == sys.executable else "uv pip"
             raise AppRepositoryError(
                 f"Failed to install {', '.join(requirements)}"
-                + (f": {'; '.join(conflict)}." if conflict else f" (pip exited with {pip.returncode}).")
+                + (f": {'; '.join(conflict)}." if conflict else f" ({name} exited with {pip.returncode}).")
                 + f" An app's requirements never replace the installed {', '.join(pins) or 'core packages'}.",
                 "Install versions of these core packages that the app's requirements accept, or set"
                 " KONFAI_APPS_INSTALL_REQUIREMENTS=0 and install them yourself.",
