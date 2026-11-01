@@ -66,6 +66,7 @@ every extra but `monai`, `[dev]` adds the test, lint and docs tooling.
 | `lpips` | `lpips` | the `LPIPS` metric |
 | `vtk` | `vtk` | VTK rendering and mesh features |
 | `export` | `onnx`, `onnxruntime`, `onnxscript` | ONNX export, see {doc}`../usage/python-api` |
+| `check` | `jsonschema` | `konfai <WORKFLOW> --check`, see {doc}`../reference/cli` |
 | `cluster` | `submitit` | the `konfai-cluster` submitter |
 | `all` | everything above but `monai`, plus `huggingface_hub` | one shot; `huggingface_hub` serves the `IMPACT*` criteria's feature-extractor downloads |
 | `dev` | pytest, ruff, mypy, sphinx, … | working on KonfAI itself |

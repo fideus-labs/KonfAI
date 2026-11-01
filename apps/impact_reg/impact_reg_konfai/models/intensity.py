@@ -15,17 +15,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What the engines share: the graph module that runs one on a batch in voxel units, the winsorised intensities they
-read, where a linear stage starts, and whether a mask restricts an image."""
+read, the translation between two subjects' centres of mass, and whether a mask restricts an image."""
 
 import contextlib
 import gc
-import math
 
 import numpy as np
 import SimpleITK as sitk
 import torch
 from konfai.metric.measure.impact import no_texpr_fuser
-from konfai.utils.dataset import Attribute, data_to_image
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, data_to_image
 from konfai.utils.vram import out_of_memory_as_torch
 
 
@@ -85,6 +84,8 @@ class EngineRegistration(torch.nn.Module):
                     # FireANTs keeps CUDA tensors in reference cycles that only the cyclic collector frees.
                     gc.collect()
                 fields.append(torch.from_numpy(field))
+                # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
+                attributes[0][b][DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
         return torch.stack(fields, dim=0).to(fixed.device)
 
 
@@ -98,74 +99,37 @@ def winsorized(image: sitk.Image, low: float = 0.01, high: float = 99.99) -> sit
     return sitk.Clamp(image, image.GetPixelID(), float(bottom), float(top))
 
 
-def foreground_centre(image: sitk.Image, mask: sitk.Image | None) -> tuple[float, ...]:
-    """Physical centre of ``image``'s foreground (Otsu threshold, unweighted), inside ``mask`` (0/1, on its grid) if
-    there is one: where a linear stage seeds from.
-
-    Intensity moments divide by the total intensity, which is negative or near zero for a CT in HU or a z-scored
-    MR, and clipping the negatives first weights a CT by its bone. An unweighted foreground holds for any intensity
-    range; an image with no foreground (a constant one) gives its grid's centre.
-    """
-    foreground = sitk.OtsuThreshold(image, 0, 1)
-    if mask is not None:
-        # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
-        region = sitk.Resample(
-            sitk.Cast(mask != 0, foreground.GetPixelID()), image, sitk.Transform(), sitk.sitkNearestNeighbor
-        )
-        foreground = sitk.Mask(foreground, region)
-    stats = sitk.LabelShapeStatisticsImageFilter()
-    stats.SetComputePerimeter(False)
-    stats.Execute(foreground)
-    if stats.HasLabel(1):
-        return stats.GetCentroid(1)
-    return grid_centre(image)
-
-
-def grid_centre(image: sitk.Image) -> tuple[float, ...]:
-    """Physical centre of ``image``'s grid: where elastix's geometric initialisation and ANTs' ``-r [f,m,0]`` start."""
-    return image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()])
-
-
-def best_translation(
-    fixed: sitk.Image,
-    moving: sitk.Image,
-    candidates: list[list[float]],
-    fixed_mask: sitk.Image | None = None,
-    moving_mask: sitk.Image | None = None,
+def center_of_mass_translation(
+    fixed: sitk.Image, moving: sitk.Image, fixed_mask: sitk.Image | None = None, moving_mask: sitk.Image | None = None
 ) -> list[float]:
-    """The candidate translation (fixed -> moving points) whose mutual information is best: where a linear stage
-    starts. The centres' shift is only a guess: two scans covering different lengths of a body have their foreground
-    centres apart where the anatomy is not, and two sparse subjects (organoids, nuclei) do not overlap at all when the
-    grids are centred, which no local optimiser recovers from."""
-    method = sitk.ImageRegistrationMethod()
-    method.SetMetricAsMattesMutualInformation(32)
-    method.SetInterpolator(sitk.sitkLinear)
-    fixed, moving = sitk.Cast(fixed, sitk.sitkFloat32), sitk.Cast(moving, sitk.sitkFloat32)
-    # MetricEvaluate reads every voxel, whatever the sampling it is set: the candidates are scored on a copy of about
-    # 200,000 voxels.
-    shrink = [
-        max(1, math.ceil((math.prod(fixed.GetSize()) / 200_000) ** (1 / fixed.GetDimension())))
-    ] * fixed.GetDimension()
-    if shrink[0] > 1:
-        fixed, moving = sitk.BinShrink(fixed, shrink), sitk.BinShrink(moving, shrink)
+    """The translation from ``fixed``'s centre of mass to ``moving``'s: where a linear stage starts for a preset that
+    declares ``moments_init: com``.
 
-    # A block holding any voxel of a mask is in it: subsampled, a region thinner than a block could vanish.
-    def coarse(mask: sitk.Image) -> sitk.Image:
-        return sitk.Cast(sitk.BinShrink(sitk.Cast(mask != 0, sitk.sitkFloat32), shrink) > 0, sitk.sitkUInt8)
+    Each centre is taken in its image's own physical space, inside its mask if it has one, on intensities winsorised
+    to their 0.5-99.5 percentiles and rescaled to [0, 1]. Raw, a background outweighs a sparse subject (the 36 um
+    between an organoid's two rounds come out as 11), CT clipped at 0 weighs bone tens of times over soft tissue, and
+    a stray bright voxel weighs more than whole organs. Only the centroid is used: a near-symmetric subject has
+    ambiguous principal axes.
+    """
 
-    if is_partial_mask(fixed_mask):
-        method.SetMetricFixedMask(coarse(fixed_mask))
-    if is_partial_mask(moving_mask):
-        method.SetMetricMovingMask(coarse(moving_mask))
+    def centre(image: sitk.Image, mask: sitk.Image | None) -> np.ndarray:
+        rescaled = sitk.RescaleIntensity(winsorized(sitk.Cast(image, sitk.sitkFloat32), 0.5, 99.5), 0.0, 1.0)
+        if mask is None:
+            region = sitk.Image(image.GetSize(), sitk.sitkUInt8) + 1
+            region.CopyInformation(image)
+        else:
+            # On the image's grid (a mask may come on another): onto the same grid, the resample is a copy.
+            identity = sitk.Transform(image.GetDimension(), sitk.sitkIdentity)
+            region = sitk.Resample(sitk.Cast(mask != 0, sitk.sitkUInt8), image, identity, sitk.sitkNearestNeighbor)
+        stats = sitk.LabelIntensityStatisticsImageFilter()
+        stats.SetComputePerimeter(False)
+        stats.Execute(region, rescaled)
+        if stats.HasLabel(1) and stats.GetSum(1) > 0:
+            return np.asarray(stats.GetCenterOfGravity(1))
+        # A constant subject (all 0 once rescaled) has no centre of mass: its grid's centre, as centring frames.
+        return np.asarray(image.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in image.GetSize()]))
 
-    def cost(translation: list[float]) -> float:
-        method.SetInitialTransform(sitk.TranslationTransform(fixed.GetDimension(), list(translation)))
-        try:
-            return float(method.MetricEvaluate(fixed, moving))
-        except RuntimeError:  # too few samples fall inside the moving image
-            return math.inf
-
-    return list(min(candidates, key=cost))
+    return (centre(moving, moving_mask) - centre(fixed, fixed_mask)).tolist()
 
 
 def is_partial_mask(mask: sitk.Image | None) -> bool:

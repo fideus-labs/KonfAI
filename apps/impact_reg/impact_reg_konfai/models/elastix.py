@@ -33,7 +33,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 import torch
 from konfai.metric.measure.impact import ImpactFeatureModel
@@ -334,6 +334,13 @@ class RegistrationNet(network.Network):
             "metric's channels (subset_features), patches and 2D planes, which 0 leaves to the clock. The 'Random' "
             "sampler does not read it.",
         ] = 42,
+        moments_init: Annotated[
+            Literal["cof", "com"],
+            "Where the linear stage starts: 'cof' leaves it to the parameter map, whose "
+            "AutomaticTransformInitialization aligns the frames; 'com' starts from the subjects' centres of mass, as "
+            "FireANTs' 'com' does, for two sparse subjects that aligned frames leave side by side. Two images covering "
+            "different lengths of a body have their centres of mass apart where the anatomy is not: 'cof' there.",
+        ] = "cof",
     ) -> None:
         # The IMPACT metric is described by ``models`` / ``levels`` (config = source of truth); the download list
         # is derived from them. Global knobs override the generated map (final_grid_spacing ->
@@ -366,6 +373,7 @@ class RegistrationNet(network.Network):
                 mixed_precision,
                 voxel_sampling,
                 seed,
+                moments_init,
             ),
             in_branch=[0, 1, 2, 3],
             out_branch=["registration"],

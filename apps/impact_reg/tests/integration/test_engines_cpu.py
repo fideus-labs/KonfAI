@@ -109,13 +109,16 @@ def test_convexadam_recovers_a_translation(pair: tuple) -> None:
     _assert_shift(net.Registration._engine.register(fixed, moving, -1), inside)
 
 
-def test_elastix_recovers_a_translation(pair: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("moments_init", ["cof", "com"])
+def test_elastix_recovers_a_translation(
+    pair: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, moments_init: str
+) -> None:
     from impact_reg_konfai.models.elastix import RegistrationNet
 
     fixed, moving, inside = pair
     monkeypatch.chdir(tmp_path)  # a preset's parameter maps are staged in the working directory
     (tmp_path / "Translation.txt").write_text(_TRANSLATION_MAP)
-    net = RegistrationNet(engine="elastix", parameter_maps=["Translation.txt"])
+    net = RegistrationNet(engine="elastix", parameter_maps=["Translation.txt"], moments_init=moments_init)
     _assert_shift(net.Registration._engine.register(fixed, moving, -1), inside)
 
 
