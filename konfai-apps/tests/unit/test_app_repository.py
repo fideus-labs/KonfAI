@@ -981,13 +981,12 @@ def test_install_requirements_go_through_uv_in_an_environment_without_pip(
     monkeypatch.setenv("PIP_FIND_LINKS", "/wheels /more")
     command, env = app_repository_module._installer()
     assert command[5:] == ["--no-index"] and env["UV_FIND_LINKS"] == "/wheels,/more"
-    for env_name in ("UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
-        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+    monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
     monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://user:token@private.example/simple")
     command, env = app_repository_module._installer()
-    assert env["UV_INDEX_STRATEGY"] == "unsafe-best-match" and "token" not in " ".join(command)
-    monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://private.example/simple")  # uv's own setup is the operator's
-    assert "UV_INDEX_STRATEGY" not in app_repository_module._installer()[1]
+    assert env["UV_EXTRA_INDEX_URL"].endswith("private.example/simple") and "token" not in " ".join(command)
+    assert "UV_INDEX_STRATEGY" not in env  # a higher public version must not win over a private package
     monkeypatch.setenv("PIP_NO_INDEX", "maybe")
     with pytest.raises(AppRepositoryError, match="not a boolean"):
         app_repository_module._installer()

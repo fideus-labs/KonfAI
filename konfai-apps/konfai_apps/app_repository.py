@@ -347,8 +347,10 @@ def _installer() -> tuple[list[str], dict[str, str]]:
         return [sys.executable, "-m", "pip", "install"], env
     uv = shutil.which("uv")
     if uv is not None:
-        # uv does not read pip's package sources: an offline or private index set for pip stays the one used. They
-        # stay in the environment, out of the command line, since an index URL can hold credentials.
+        # uv does not read pip's package sources: an offline or private index set for pip in the environment stays the
+        # one used (pip.conf is pip's own, uv has uv.toml). They stay in the environment, out of the command line, since
+        # an index URL can hold credentials. uv's first-index strategy stays: a public package never outranks a private
+        # one.
         for pip_name, uv_name, separator in (
             ("PIP_INDEX_URL", "UV_INDEX_URL", " "),
             ("PIP_EXTRA_INDEX_URL", "UV_EXTRA_INDEX_URL", " "),
@@ -356,8 +358,6 @@ def _installer() -> tuple[list[str], dict[str, str]]:
         ):
             if env.get(pip_name, "").split() and uv_name not in env:
                 env[uv_name] = separator.join(env[pip_name].split())
-                if uv_name == "UV_EXTRA_INDEX_URL":  # pip takes the best candidate across its indexes, uv the first's
-                    env.setdefault("UV_INDEX_STRATEGY", "unsafe-best-match")
         no_index = env.get("PIP_NO_INDEX", "").lower()  # pip's strtobool
         if no_index not in ("", "y", "yes", "t", "true", "on", "1", "n", "no", "f", "false", "off", "0"):
             raise AppRepositoryError(
