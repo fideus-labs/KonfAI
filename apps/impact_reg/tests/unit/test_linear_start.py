@@ -98,3 +98,56 @@ def test_elastix_starts_where_the_preset_declares(
 def test_elastix_refuses_an_unknown_start() -> None:
     with pytest.raises(ValueError, match="Unknown moments_init 'auto'"):
         ElastixEngine(["Rigid.txt"], moments_init="auto")
+
+
+def _elastix_answering(monkeypatch, tmp_path: Path, transform: sitk.Transform, maps: dict[str, str]) -> None:
+    """elastix as a subprocess that writes ``transform`` as its composite result, the preset's ``maps`` staged."""
+    for name, text in maps.items():
+        (tmp_path / name).write_text(text)
+    monkeypatch.chdir(tmp_path)
+
+    class Process:
+        stdout = iter([])
+
+        def __init__(self, args, **kwargs) -> None:
+            work = Path(args[args.index("-out") + 1])
+            sitk.WriteTransform(transform, str(work / "TransformParameters.0-Composite.itk.txt"))
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(elastix_engine.subprocess, "Popen", Process)
+    monkeypatch.setattr(elastix_engine, "loader_env", lambda root: {})
+    monkeypatch.setattr(ElastixEngine, "_ensure_binary", lambda self: Path("elastix"))
+
+
+def test_elastix_returns_the_affine_a_preset_declares_with_its_start_added_back(monkeypatch, tmp_path: Path) -> None:
+    rigid = sitk.Euler3DTransform()
+    rigid.SetRotation(0.0, 0.0, 0.2)
+    rigid.SetTranslation((1.5, -2.0, 0.5))
+    _elastix_answering(monkeypatch, tmp_path, rigid, {"Rigid.txt": '(Transform "EulerTransform")\n'})
+    fixed, moving = _two_sparse_subjects()
+
+    def registered(transform_type: str):
+        engine = ElastixEngine(["Rigid.txt"], moments_init="com", transform_type=transform_type)
+        engine._elastix_root = Path("/opt/elastix-impact")
+        return engine.register(fixed, moving, -1)
+
+    affine, field = registered("affine"), registered("field")
+
+    # One map: the same registration, as the affine the maps found or as that affine sampled on the fixed grid.
+    assert isinstance(affine, sitk.AffineTransform)
+    np.testing.assert_allclose(affine.GetTranslation(), (21.5, 18.0, 0.5), atol=1e-9)  # the centres' shift added back
+    np.testing.assert_allclose(affine.GetMatrix(), rigid.GetMatrix(), atol=1e-12)
+    from impact_reg_konfai.models.intensity import displacement_on
+
+    np.testing.assert_allclose(displacement_on(fixed, affine), field, atol=1e-9)
+
+
+def test_elastix_refuses_an_affine_for_a_map_with_no_affine_form(monkeypatch, tmp_path: Path) -> None:
+    maps = {"Rigid.txt": '(Transform "EulerTransform")\n', "BSpline.txt": '(Transform "BSplineTransform")\n'}
+    _elastix_answering(monkeypatch, tmp_path, sitk.Transform(3, sitk.sitkIdentity), maps)
+    with pytest.raises(ValueError, match=r"BSpline\.txt declares"):
+        ElastixEngine(list(maps), transform_type="affine")
+    with pytest.raises(ValueError, match="Unknown transform_type 'matrix'"):
+        ElastixEngine(["Rigid.txt"], transform_type="matrix")

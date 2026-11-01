@@ -134,15 +134,22 @@ def _transform_kinds(path: Path) -> list[str]:
 def _is_flat_field(path: Path) -> bool:
     """Whether a stored registration, a transform file or an OME-Zarr store, is 2-D, read off its header alone."""
     if _backend(path) == "omezarr":
-        from konfai.utils.ome_zarr import get_ome_zarr_info
+        from konfai.utils.ome_zarr import get_ome_zarr_info, is_affine_store, read_ome_zarr_affine
 
+        if is_affine_store(path):
+            return read_ome_zarr_affine(path).GetDimension() == 2
         return "z" not in get_ome_zarr_info(path)["axes"]
     return _is_transform_file(path) and _transform_kinds(path)[0].endswith("_2_2")
 
 
 def _is_field(path: Path) -> bool:
-    """Whether a stored registration is a displacement field: an image or store, or a field transform file."""
-    return not _is_transform_file(path) or _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
+    """Whether a stored registration is a displacement field: an image, a field store or a field transform file. A
+    linear transform file or an RFC-5 affine store (a preset's ``transform_type: affine``) is not one."""
+    if _is_transform_file(path):
+        return _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
+    from konfai.utils.ome_zarr import is_affine_store
+
+    return not (_backend(path) == "omezarr" and is_affine_store(path))
 
 
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
@@ -177,7 +184,9 @@ def _displace(points: np.ndarray, path: Path, work: Path) -> np.ndarray:
     """``points`` (``[N, 3]``, LPS) moved by the stored registration, fixed -> moving, whatever its form: a field
     read around the points alone (KonfAI's ``displace_points``), any other transform read and applied whole."""
     if not _is_field(path):
-        transform = sitk.ReadTransform(str(path))
+        from konfai.utils.ome_zarr import read_ome_zarr_affine
+
+        transform = read_ome_zarr_affine(path) if _backend(path) == "omezarr" else sitk.ReadTransform(str(path))
         return np.array([transform.TransformPoint(point) for point in points.astype(np.float64).tolist()])
     return displace_points(points, *_field(path, work))
 
@@ -349,6 +358,22 @@ def _preset_overrides(
                     f" config root, and --set {preset}:NAME=VALUE sets it for this preset alone.",
                 ) from None
     return passes
+
+
+def _declares_affine(preset: str, overrides: list[str]) -> bool:
+    """Whether the preset's global pass writes its transform as an affine: ``transform_type`` in its config, or the
+    ``--set`` of it. A config that cannot be read (offline, nothing cached) declares nothing here: the preset's own
+    process reads it."""
+    declared = {name.strip(): value.strip() for name, _, value in (o.partition("=") for o in overrides)}.get(
+        "transform_type"
+    )
+    if declared is None:
+        try:
+            tiling = _manifest(preset).get("tiling") or {}
+            declared = _config_value(_preset_config(preset, tiling.get("global") or "Prediction.yml"), "transform_type")
+        except Exception:
+            return False
+    return declared == "affine"
 
 
 def _plan(
@@ -1076,6 +1101,15 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
+        # An affine is one pass's result: an ensemble and a test-time augmentation average fields.
+        affine_presets = [preset for preset in presets if _declares_affine(preset, overrides[preset]["global"])]
+        if affine_presets and (len(presets) > 1 or tta):
+            raise KonfAIError(
+                "ImpactReg",
+                f"the preset '{affine_presets[0]}' writes its transform as an affine, which "
+                f"{'an ensemble' if len(presets) > 1 else '--tta'} cannot average.",
+                "Run it alone and without --tta, or --set transform_type=field.",
+            )
         self._applied, self._plans, self._ran = {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
@@ -1108,6 +1142,12 @@ class ImpactRegKonfAIApp:
                 self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
                 largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
                 tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
+                if tiled and preset in affine_presets:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"the pair outgrows the device, and the tile pass of '{preset}' refines a field, not an affine.",
+                        "--set transform_type=field, or --max-voxels to register the pair whole.",
+                    )
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
@@ -1203,6 +1243,7 @@ class ImpactRegKonfAIApp:
                 # the field as the map.
                 self._derive_moved(
                     dict(zip(cases, lifted["Moving"], strict=True)),
+                    dict(zip(cases, lifted["Fixed"], strict=True)),
                     group,
                     output,
                     work,
@@ -1535,6 +1576,7 @@ class ImpactRegKonfAIApp:
     def _derive_moved(
         self,
         cases: dict[str, Path],
+        fixed: dict[str, Path],
         group: str,
         output: Path,
         work: Path,
@@ -1544,10 +1586,11 @@ class ImpactRegKonfAIApp:
     ) -> None:
         """The moved images, derived from the transforms, one streamed run over the whole cohort.
 
-        A preset that emits only a field is complete: everything else IS that field. The moved
+        A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
         fixed grid) and the field is the map (``field_group``): one interpolation, streamed, each
-        slab's source window sized from the field values it reads.
+        slab's source window sized from the field values it reads. An affine (``transform_type: affine``) has no
+        grid of its own: the fixed image lends it, and the affine is the map KonfAI decodes (``transforms``).
 
         NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads (an ITK
         transform file where Slicer picks it up, an RFC-5 store where this pipeline streams it) so
@@ -1561,20 +1604,26 @@ class ImpactRegKonfAIApp:
         fields = {case: _the_output(output / case, group) for case in cases}
         # The moved image is written in the MOVING's own form: the fields' form may be an ITK
         # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
-        # below, so the first case's form speaks for the cohort.
+        # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
         backend = _backend(next(iter(cases.values())))
-        moving_root = _stage_group(work / "moved_stage", "Moving", cases)
-        field_root = _stage_group(work / "moved_stage", "DVF", fields)
+        roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
+        if _is_field(next(iter(fields.values()))):
+            resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")
+        else:
+            roots.append(_stage_group(work / "moved_stage", "Fixed", fixed))
+            resample = Resample(
+                reference="{case}", reference_group="Fixed", transforms={"DVF": False}, interpolation="linear"
+            )
         # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside a
         # store, here or left by an earlier run, a moved file would come out as a store.
         root = work / "moved"
         _run_transform(
             "impact_reg_moved",
-            [moving_root, field_root],
+            roots,
             {
                 "Moving": {
                     "Moved": [
-                        Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear"),
+                        resample,
                         Write(
                             dataset=f"{root}:{backend}",
                             scale_factors="auto" if backend == "omezarr" else None,
@@ -1820,7 +1869,7 @@ class ImpactRegKonfAIApp:
             "interpolation": "nearest" if kind == "seg" else "linear",
         }
         if transform_path is not None:
-            if _is_transform_file(transform_path):
+            if not _is_field(transform_path):
                 resample["transforms"] = {"Reg": False}
             else:
                 resample["field_group"] = "Reg"

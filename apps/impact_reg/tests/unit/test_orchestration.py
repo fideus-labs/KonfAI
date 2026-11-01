@@ -1381,3 +1381,72 @@ def test_a_preset_out_of_gpu_memory_raises_its_own_error(tmp_path: Path, monkeyp
     app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
     with pytest.raises(reg._OutOfMemory):
         app._infer_preset("A", *arguments, tmp_path, [], None, True)
+
+
+def _write_affine(path: Path, translation: tuple[float, float, float]) -> Path:
+    """A linear transform as a preset declaring ``transform_type: affine`` writes it: an ITK AffineTransform file, or an
+    RFC-5 affine store (the shift along x in millimetres, the store's unit)."""
+    affine = sitk.AffineTransform(3)
+    affine.SetTranslation(translation)
+    if path.suffix == ".h5":
+        sitk.WriteTransform(affine, str(path))
+    else:
+        from konfai.utils.ome_zarr import write_ome_zarr_affine
+
+        write_ome_zarr_affine(path, affine, {"OMEUnits": "millimeter millimeter millimeter"})
+    return path
+
+
+@pytest.mark.parametrize("name", ["Transform.h5", "Transform.ome.zarr"])
+def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name: str) -> None:
+    """A preset that writes its transform as an affine is complete too: the moved image is the moving image resampled
+    through the affine, on the fixed grid, the one the affine has none of its own."""
+    if name.endswith(".zarr"):
+        pytest.importorskip("ngff_zarr")
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+
+    def affine_only(preset, fixed, moving, fixed_masks, moving_masks, work, *args, **kwargs):
+        out = Path(work) / preset / "P000"
+        out.mkdir(parents=True, exist_ok=True)
+        return "Transform", {"P000": _write_affine(out / name, (2.0, 0.0, 0.0))}
+
+    app._infer_preset = affine_only  # type: ignore[method-assign]
+    out = tmp_path / "Output"
+    app.register(["FireANTs_SyN"], [fixed], [moving], output=out)
+
+    case = out / "P000"
+    assert (case / name).exists() and not reg._is_field(case / name)
+    moved = sitk.GetArrayFromImage(sitk.ReadImage(str(case / "Moved.mha")))
+    np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)  # moving is z*64 + y*8 + x, shifted by +2 along x
+    np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)
+    record = json.loads((out / "register.json").read_text(encoding="utf-8"))
+    assert record["cases"]["P000"]["transform"] == f"P000/{name}"
+
+
+def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
+    """An ensemble and a test-time augmentation average fields: a preset declaring an affine runs alone, or is set back
+    to a field for the run."""
+    (Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "Prediction.yml").write_text(
+        "Predictor:\n  Model:\n    classpath: impact_reg_konfai.models.elastix:RegistrationNet\n"
+        "    RegistrationNet:\n      transform_type: affine\n",
+        encoding="utf-8",
+    )
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0), "B": (3.0, 0.0, 0.0)})
+    out = tmp_path / "Output"
+
+    with pytest.raises(KonfAIError, match="an ensemble cannot average"):
+        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
+    with pytest.raises(KonfAIError, match="--tta cannot average"):
+        app.register(["A"], [fixed], [moving], output=out, quiet=True, tta=1)
+    # --set speaks for the run: declared a field, the preset joins the ensemble.
+    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=["A:transform_type=field"])
+    assert (out / "P000" / "Moved.mha").is_file()

@@ -111,7 +111,13 @@ from .impact_loss import (
     layer_weights,
     level_models,
 )
-from .intensity import EngineRegistration, center_of_mass_translation, is_partial_mask, winsorized
+from .intensity import (
+    EngineRegistration,
+    center_of_mass_translation,
+    check_transform_type,
+    is_partial_mask,
+    winsorized,
+)
 from .orientation import world_aligned_pair
 
 DIM = 3
@@ -690,6 +696,7 @@ class FireANTsEngine:
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
         translation_lr: float = 0.015,
+        transform_type: str = "field",
     ) -> None:
         """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
 
@@ -719,6 +726,14 @@ class FireANTsEngine:
         if linear_method == "none" and deformable_method == "none":
             # It would optimise nothing and return an identity no downstream check tells from a result.
             raise ValueError("linear_method='none' with deformable_method='none' leaves nothing to optimise.")
+        check_transform_type(transform_type)
+        if transform_type == "affine" and (deformable_method != "none" or linear_method == "none"):
+            # The affine is what the linear stages find; a deformable stage's result has no affine form.
+            raise ValueError(
+                "transform_type 'affine' is the linear stages' result: it takes a linear_method with "
+                "deformable_method 'none'; a deformable registration is written as a field."
+            )
+        self._transform_type = transform_type
         self._deformable_metric = deformable_metric
         self._deformable_lr = float(deformable_lr)
         self._smooth_warp_sigma = float(smooth_warp_sigma)
@@ -773,7 +788,7 @@ class FireANTsEngine:
     def _affine_to_sitk(affine_matrix: "torch.Tensor") -> sitk.AffineTransform:
         """FireANTs' physical (LPS) linear matrix -> SimpleITK AffineTransform (fixed -> moving points),
         the same convention FireANTs writes into an ANTs ``0GenericAffine.mat``."""
-        matrix = affine_matrix.float().cpu().numpy()[0]
+        matrix = affine_matrix.double().cpu().numpy()[0]
         dimension = matrix.shape[1] - 1
         affine = sitk.AffineTransform(dimension)
         affine.SetMatrix(matrix[:dimension, :dimension].flatten().astype(np.float64))
@@ -903,9 +918,10 @@ class FireANTsEngine:
         device_index: int,
         fixed_mask: sitk.Image | None = None,
         moving_mask: sitk.Image | None = None,
-    ) -> np.ndarray:
+    ) -> np.ndarray | sitk.Transform:
         """Register ``moving`` onto ``fixed``; return the displacement field, channel-first float32, on the fixed
-        grid."""
+        grid, or with ``transform_type: affine`` the linear transform the stages found, fixed points to moving points.
+        """
         # A mask is a region whatever values it holds: a label map (SlicerImpactReg exports segments as labels
         # 1..N) would otherwise weight FireANTs' masked cc/mse by the product of label values, and the stages
         # below threshold it at 0, 0.5 or >= 0.5, which only agree on a 0/1 image.
@@ -917,6 +933,8 @@ class FireANTsEngine:
             # but a wrong mask, and said so.
             if self._linear_method != "none":
                 print("[FireANTs] the fixed mask is empty: nothing registered, the field is zero.", flush=True)
+            if self._transform_type == "affine":
+                return sitk.AffineTransform(fixed.GetDimension())
             return np.zeros((fixed.GetDimension(), *fixed.GetSize()[::-1]), dtype=np.float32)
         # Only a mask that restricts (some voxels in, some out) is one, decided on the mask as given: konfai-apps
         # writes an all-ones default on the FIXED grid for both sides, which would sit on another grid than the moving
@@ -1070,7 +1088,10 @@ class FireANTsEngine:
         # Deformable stage (or none). SyN and Greedy share the same constructor surface; both warm-start
         # from the affine so their TOTAL transform already bakes in the linear pre-align.
         if self._deformable_method == "none":
-            field = self._field_on(self._affine_to_sitk(affine_matrix), grid)
+            linear = self._affine_to_sitk(affine_matrix)
+            if self._transform_type == "affine":
+                return linear
+            field = self._field_on(linear, grid)
         else:
             if self._deformable_method == "syn":
                 from fireants.registration.syn import SyNRegistration as Deformable
@@ -1259,6 +1280,13 @@ class RegistrationNet(network.Network):
             "stage, whichever 'linear_method' selected, with linear_method='rigid' that is a rigid-only "
             "registration. Both set to 'none' is refused: it would optimise nothing.",
         ] = "syn",
+        transform_type: Annotated[
+            Literal["field", "affine"],
+            "The form the transform is written in: 'field', its displacement on the fixed grid; 'affine', the one "
+            "matrix the linear stages found, for deformable_method 'none' alone. An affine is written as an ITK "
+            "AffineTransform file or as an RFC-5 'affine' store, where a field of the same registration weighs "
+            "megabytes.",
+        ] = "field",
         deformable_metric: Annotated[
             Literal["cc", "mi", "mse", "impact"],
             "Similarity metric for the deformable stage; 'impact' uses the IMPACT feature models under 'models'.",
@@ -1368,6 +1396,7 @@ class RegistrationNet(network.Network):
             mixed_precision,
             voxel_sampling,
             translation_lr=translation_lr,
+            transform_type=transform_type,
         )
         self.add_module("Registration", EngineRegistration(engine), in_branch=[0, 1, 2, 3], out_branch=["registration"])
         # The output module the presets name.

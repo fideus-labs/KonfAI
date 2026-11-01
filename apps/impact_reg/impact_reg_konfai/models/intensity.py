@@ -24,8 +24,41 @@ import numpy as np
 import SimpleITK as sitk
 import torch
 from konfai.metric.measure.impact import no_texpr_fuser
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, data_to_image
+from konfai.utils.dataset import (
+    AFFINE_ATTRIBUTE,
+    DISPLACEMENT_FIELD_ATTRIBUTE,
+    Attribute,
+    affine_to_attribute,
+    data_to_image,
+    image_to_data,
+)
 from konfai.utils.vram import out_of_memory_as_torch
+
+#: The forms a preset declares its transform written in: its displacement on the fixed grid, or the affine it is.
+TRANSFORM_TYPES = ("field", "affine")
+
+
+def check_transform_type(transform_type: str) -> None:
+    if transform_type not in TRANSFORM_TYPES:
+        raise ValueError(f"Unknown transform_type '{transform_type}': {' or '.join(map(repr, TRANSFORM_TYPES))}.")
+
+
+def displacement_on(grid: sitk.Image, transform: sitk.Transform) -> np.ndarray:
+    """``transform`` sampled as a displacement field on ``grid``, channel-first, float64."""
+    field = sitk.TransformToDisplacementField(
+        transform, sitk.sitkVectorFloat64, grid.GetSize(), grid.GetOrigin(), grid.GetSpacing(), grid.GetDirection()
+    )
+    return image_to_data(field)[0]
+
+
+def _world_affine(linear: sitk.Transform, voxel: float, z_shift: float | None) -> np.ndarray:
+    """``linear``, found in voxel units, as ``AFFINE_ATTRIBUTE`` records it, in millimetres. A plane's transform
+    gets the z row of a volume one plane thick: the shift from one plane to the other, as its field does."""
+    matrix = affine_to_attribute(linear).reshape(linear.GetDimension(), -1)
+    matrix[:, -1] *= voxel
+    if z_shift is not None:
+        matrix = np.block([[matrix[:, :2], np.zeros((2, 1)), matrix[:, 2:]], [np.array([[0.0, 0.0, 1.0, z_shift]])]])
+    return matrix.ravel()
 
 
 class EngineRegistration(torch.nn.Module):
@@ -35,7 +68,11 @@ class EngineRegistration(torch.nn.Module):
 
     The engine measures lengths in the fixed image's finest voxel, and its field is brought back to millimetres: every
     length a preset sets (a step, a grid, a smoothing, a feature model's voxel) is a number of voxels, so a step of 1.2
-    is 1.2 mm on 1 mm voxels and 1.2 um on 1 um voxels."""
+    is 1.2 mm on 1 mm voxels and 1.2 um on 1 um voxels.
+
+    An engine whose preset declares ``transform_type: affine`` returns the linear transform itself. The field KonfAI
+    carries is that transform sampled, and the output's header records the map (``AFFINE_ATTRIBUTE``), which the
+    output dataset writes in place of the field."""
 
     accepts_attributes = True
 
@@ -76,8 +113,9 @@ class EngineRegistration(torch.nn.Module):
                     image.SetOrigin([v / voxel for v in image.GetOrigin()])
                 try:
                     with out_of_memory_as_torch(device_index >= 0):
-                        field = self._engine.register(images[0], images[1], device_index, images[2], images[3])
-                    field = field * voxel
+                        result = self._engine.register(images[0], images[1], device_index, images[2], images[3])
+                    linear = result if isinstance(result, sitk.Transform) else None
+                    field = (displacement_on(images[0], linear) if linear is not None else result) * voxel
                     if flat:  # the plane's (dx, dy), and along z from one plane to the other
                         field = np.concatenate([field, np.full_like(field[:1], z_shift)])
                 finally:
@@ -86,6 +124,8 @@ class EngineRegistration(torch.nn.Module):
                 fields.append(torch.from_numpy(field))
                 # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
                 attributes[0][b][DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+                if linear is not None:
+                    attributes[0][b][AFFINE_ATTRIBUTE] = _world_affine(linear, voxel, z_shift if flat else None)
         return torch.stack(fields, dim=0).to(fixed.device)
 
 
