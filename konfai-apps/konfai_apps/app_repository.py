@@ -339,32 +339,33 @@ def current_free_vram(devices: list[int], remote_server: RemoteServer | None = N
     return min(frees) if frees else None
 
 
-def _installer() -> tuple[list[str], dict[str, str]]:
+def _installer() -> list[str]:
     """The command that installs into THIS interpreter and its environment: its pip, or uv's when the environment has
     no pip (``uv venv`` makes one without it)."""
-    env = dict(os.environ)
     if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip", "install"], env
+        return [sys.executable, "-m", "pip", "install"]
     uv = shutil.which("uv")
     if uv is not None:
-        # uv does not read pip's package sources: an offline or private index set for pip in the environment stays the
-        # one used (pip.conf is pip's own, uv has uv.toml). They stay in the environment, out of the command line, since
-        # an index URL can hold credentials. uv's first-index strategy stays: a public package never outranks a private
-        # one.
-        for pip_name, uv_name, separator in (
-            ("PIP_INDEX_URL", "UV_INDEX_URL", " "),
-            ("PIP_EXTRA_INDEX_URL", "UV_EXTRA_INDEX_URL", " "),
-            ("PIP_FIND_LINKS", "UV_FIND_LINKS", ","),
-        ):
-            if env.get(pip_name, "").split() and uv_name not in env:
-                env[uv_name] = separator.join(env[pip_name].split())
-        no_index = env.get("PIP_NO_INDEX", "").lower()  # pip's strtobool
-        if no_index not in ("", "y", "yes", "t", "true", "on", "1", "n", "no", "f", "false", "off", "0"):
-            raise AppRepositoryError(
-                f"PIP_NO_INDEX={env['PIP_NO_INDEX']!r} is not a boolean.", "Set it to 1 or 0, as pip reads it."
+        # uv does not read pip's package sources, and searches indexes in another order: an install set up for pip alone
+        # would reach another index than the one set (pip.conf is pip's own too, uv has uv.toml).
+        unread = [
+            pip_name
+            for pip_name, uv_name in (
+                ("PIP_INDEX_URL", "UV_INDEX_URL"),
+                ("PIP_EXTRA_INDEX_URL", "UV_EXTRA_INDEX_URL"),
+                ("PIP_FIND_LINKS", "UV_FIND_LINKS"),
+                ("PIP_NO_INDEX", "UV_NO_INDEX"),
             )
-        no_index_flag = ["--no-index"] if no_index in ("y", "yes", "t", "true", "on", "1") else []
-        return [uv, "pip", "install", "--python", sys.executable, *no_index_flag], env
+            if os.environ.get(pip_name, "").strip() and uv_name not in os.environ
+        ]
+        if unread:
+            raise AppRepositoryError(
+                f"The environment of {sys.executable} has no pip, so uv installs an app's requirements, and uv does not"
+                f" read {', '.join(unread)}.",
+                f"Set uv's own (UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_NO_INDEX), or install pip into it"
+                f" ('{sys.executable} -m ensurepip').",
+            )
+        return [uv, "pip", "install", "--python", sys.executable]
     raise AppRepositoryError(
         f"The environment of {sys.executable} has no pip and no uv is on PATH: an app's requirements cannot be"
         " installed.",
@@ -1303,12 +1304,10 @@ class LocalAppRepository(AppRepositoryInfo):
         with tempfile.TemporaryDirectory() as directory:
             constraints = Path(directory) / "constraints.txt"
             constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
-            installer, env = _installer()
+            installer = _installer()
             command = [*installer, *flags, "-c", str(constraints), *requirements]
             # pip's report is echoed as it comes, and kept: the lines that name a conflict go in the error.
-            with subprocess.Popen(  # nosec B603
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
-            ) as pip:
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as pip:  # nosec B603
                 report = []
                 for line in pip.stdout or []:
                     print(line, end="", flush=True)

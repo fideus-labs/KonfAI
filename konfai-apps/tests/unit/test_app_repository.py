@@ -965,7 +965,7 @@ def test_install_requirements_go_through_uv_in_an_environment_without_pip(
     repo = app_repository_module.LocalAppRepositoryFromDirectory(app_root.parent, app_root.name)
     for env in ("KONFAI_APPS_INSTALL_REQUIREMENTS", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS"):
         monkeypatch.delenv(env, raising=False)
-    monkeypatch.setenv("PIP_NO_INDEX", "0")
+    monkeypatch.delenv("PIP_NO_INDEX", raising=False)
     captured = _capture_pip(monkeypatch)
     monkeypatch.setattr(app_repository_module.importlib.util, "find_spec", lambda name: None)
     monkeypatch.setattr(app_repository_module.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None)
@@ -975,21 +975,14 @@ def test_install_requirements_go_through_uv_in_an_environment_without_pip(
     assert captured[0][:6] == ["/bin/uv", "pip", "install", "--python", sys.executable, "-c"]
     assert captured[0][-1] == "konfai-nonexistent-xyz==1.2.3"
 
-    # An offline deployment keeps its sources, which uv does not read from pip's, off the command line.
-    monkeypatch.delenv("UV_FIND_LINKS", raising=False)
-    monkeypatch.setenv("PIP_NO_INDEX", "t")
-    monkeypatch.setenv("PIP_FIND_LINKS", "/wheels /more")
-    command, env = app_repository_module._installer()
-    assert command[5:] == ["--no-index"] and env["UV_FIND_LINKS"] == "/wheels,/more"
-    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
-    monkeypatch.delenv("UV_INDEX_STRATEGY", raising=False)
-    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://user:token@private.example/simple")
-    command, env = app_repository_module._installer()
-    assert env["UV_EXTRA_INDEX_URL"].endswith("private.example/simple") and "token" not in " ".join(command)
-    assert "UV_INDEX_STRATEGY" not in env  # a higher public version must not win over a private package
-    monkeypatch.setenv("PIP_NO_INDEX", "maybe")
-    with pytest.raises(AppRepositoryError, match="not a boolean"):
+    # A private or offline source set for pip alone: uv would reach another index than the one set.
+    monkeypatch.delenv("UV_INDEX_URL", raising=False)
+    monkeypatch.setenv("PIP_INDEX_URL", "https://user:token@private.example/simple")
+    with pytest.raises(AppRepositoryError, match="does not read PIP_INDEX_URL") as refused:
         app_repository_module._installer()
+    assert "token" not in str(refused.value)
+    monkeypatch.setenv("UV_INDEX_URL", "https://private.example/simple")  # uv's own setup is the operator's
+    assert app_repository_module._installer() == ["/bin/uv", "pip", "install", "--python", sys.executable]
 
     monkeypatch.setattr(app_repository_module.shutil, "which", lambda name: None)
     with pytest.raises(AppRepositoryError, match="no pip and no uv"):
