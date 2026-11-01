@@ -86,8 +86,13 @@ _TRANSFORM_FORMS = {".h5", ".tfm"}
 
 
 def _form(path: Path) -> str:
-    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name."""
-    return storage_form(path)
+    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name. An OME-Zarr store whose
+    name carries no suffix (an HCS well's image, ``plate.zarr/C/02/1``) is ``.ome.zarr``, the form it is written back
+    in: a bare form would name the moved image another output than the one its writer produces."""
+    form = storage_form(path)
+    if not form and path.is_dir() and path_format_token(path) == "omezarr":
+        return ".ome.zarr"
+    return form
 
 
 def _format_token(form: str) -> str:
