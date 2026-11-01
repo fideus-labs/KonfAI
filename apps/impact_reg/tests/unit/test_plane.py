@@ -23,9 +23,11 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 import torch
+from impact_reg_konfai import plane
 from impact_reg_konfai.impact_reg import _is_flat_field
 from impact_reg_konfai.models.impact_loss import ModelSpec, plane_model
 from impact_reg_konfai.models.intensity import EngineRegistration
+from impact_reg_konfai.models.orientation import world_aligned
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import KonfAIError, TransformError
@@ -111,6 +113,36 @@ def test_a_store_goes_through_one_plane_and_comes_back_a_2d_pyramid_in_its_unit(
     assert len(moved.images) > 1 and "z" not in finest.dims and finest.axes_units["x"] == "micrometer"
     assert finest.scale["x"] == pytest.approx(0.5) and finest.translation["y"] == pytest.approx(-2.0)
     np.testing.assert_array_equal(np.squeeze(np.asarray(finest.data)), values)
+
+
+def test_a_store_rewritten_in_place_survives_a_failed_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The uncertainty step rewrites its own output: that store is the only copy of the plane.
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    store = tmp_path / "Uncertainty.ome.zarr"
+    write_ome_zarr(store, np.ones((1, 1, 8, 8), np.float32), spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
+
+    def fails(path: Path, *args, **kwargs) -> None:
+        Path(path).mkdir()
+        raise OSError("no space left")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(plane, "write_ome_zarr", fails)
+        with pytest.raises(OSError, match="no space left"):
+            project_image(store, store)
+    assert ngff_zarr.from_ngff_zarr(str(store)).images[0].data.shape == (1, 1, 8, 8)
+    assert [path.name for path in tmp_path.iterdir()] == [store.name]
+
+    project_image(store, store)
+    assert "z" not in ngff_zarr.from_ngff_zarr(str(store)).images[0].dims
+
+
+def test_a_flipped_2d_image_is_put_in_lps_order_with_its_content_in_place() -> None:
+    image = _flat(np.arange(12.0).reshape(3, 4))
+    image.SetDirection((-1.0, 0.0, 0.0, 1.0))
+    aligned = world_aligned(image)
+    assert aligned.GetDirection() == (1.0, 0.0, 0.0, 1.0) and aligned.GetDimension() == 2
+    corner = image.TransformIndexToPhysicalPoint((0, 0))
+    assert aligned.GetPixel(aligned.TransformPhysicalPointToIndex(corner)) == image.GetPixel((0, 0))
 
 
 def test_a_one_plane_field_comes_back_as_the_2d_field_it_is(tmp_path: Path) -> None:

@@ -37,6 +37,8 @@ def world_aligned(image: sitk.Image) -> sitk.Image:
     dimension = image.GetDimension()
     if np.allclose(np.array(image.GetDirection()).reshape(dimension, dimension), np.eye(dimension), atol=1e-6):
         return image
+    if dimension == 2:  # DICOMOrient takes volumes alone
+        return sitk.DICOMOrient(sitk.JoinSeries([image], 0.0, 1.0), "LPS")[:, :, 0]
     return sitk.DICOMOrient(image, "LPS")
 
 

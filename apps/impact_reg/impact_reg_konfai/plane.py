@@ -98,6 +98,19 @@ def _plane_of(field: sitk.Image) -> sitk.Image:
     return flat
 
 
+def _write_store(path: Path, data: np.ndarray, **settings) -> None:
+    """Write the store ``path``, staged beside it and published once complete: ``path`` may hold the only copy of the
+    plane being rewritten."""
+    staging = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        write_ome_zarr(staging, data, **settings)
+        publish(staging, path)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    clear_ome_zarr_cache(path)  # the reader memoises a store by its path
+
+
 def _project_store(path: Path) -> None:
     """Rewrite the one-plane field store ``path`` as the 2-D field it is, in its dtype and its unit."""
     import ngff_zarr
@@ -109,21 +122,14 @@ def _project_store(path: Path) -> None:
     data, attributes = image_to_data(flat)
     if source.axes_units:
         attributes["OMEUnits"] = " ".join(source.axes_units.get(dim) or NO_UNIT for dim in ("x", "y"))
-    staging = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        write_ome_zarr(
-            staging,
-            data.astype(source.data.dtype),
-            spacing=flat.GetSpacing(),
-            origin=flat.GetOrigin(),
-            attributes=dict(attributes),
-            displacement_field=True,
-        )
-        publish(staging, path)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-    clear_ome_zarr_cache(path)  # the reader memoises a store by its path
+    _write_store(
+        path,
+        data.astype(source.data.dtype),
+        spacing=flat.GetSpacing(),
+        origin=flat.GetOrigin(),
+        attributes=dict(attributes),
+        displacement_field=True,
+    )
 
 
 def project_field(path: Path) -> None:
@@ -154,7 +160,7 @@ def project_image(path: Path, target: Path) -> None:
         per_mm = {dim: millimetres_per_unit(units.get(dim)) or 1.0 for dim in ("y", "x")}
         # ponytail: the plane is read whole, which a 2-D image affords; by blocks if slides outgrow the RAM
         data = np.squeeze(np.asarray(image.data))[None]
-        write_ome_zarr(
+        _write_store(
             target,
             data,
             spacing=[image.scale[dim] * per_mm[dim] for dim in ("x", "y")],
