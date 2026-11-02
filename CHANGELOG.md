@@ -65,8 +65,10 @@ name. `--set transform_type=field` gives the field back.
 ### 🐛 Bug Fixes
 
 - impact-reg: `Transform:omezarr` wrote an ordinary 3-channel image in millimetres, which no RFC-5
-  reader could apply. It now writes an OME-Zarr 0.6 store with a `displacements` entry, in the axes'
-  order and unit. `Transform.h5` stays the default and is unchanged for a field.
+  reader could apply. On an axis-aligned grid it now writes an OME-Zarr 0.6 store with a
+  `displacements` entry, in the axes' order and unit. An oblique grid gets no such entry: RFC-5 places
+  a field by a scale and a translation, so its rotation stays in a sidecar only KonfAI reads.
+  `Transform.h5` stays the default and is unchanged for a field.
 - impact-reg: the moved image and the ensemble mean are written in a root of their own: a `.mha`
   written beside a store was lost.
 - impact-reg: the moved image of an OME-Zarr store without a suffix, an HCS well or a symlink, is kept.
