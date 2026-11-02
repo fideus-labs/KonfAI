@@ -278,6 +278,7 @@ def clear_ome_zarr_cache(store_path: str | Path | None = None) -> None:
     """
     _multiscales.cache_clear()
     _level_array.cache_clear()
+    _affine_document.cache_clear()
     if _CHUNK_CACHE is not None:
         _CHUNK_CACHE.forget(None if store_path is None else store_identity(store_path))
 
@@ -1412,8 +1413,11 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
 # --------------------------------------------------------------------------------------------------
 
 
-def _affine_document(store_path: str | Path) -> dict[str, Any] | None:
-    """The ``ome`` metadata of ``store_path`` when it holds one ``affine`` transformation and no image."""
+@lru_cache(maxsize=_MEMOISED_STORES)
+def _affine_document(store_path: str) -> dict[str, Any] | None:
+    """The ``ome`` metadata of ``store_path`` when it holds one ``affine`` transformation and no image. Memoised per
+    path, as the store parses are: the backend asks before every region it reads, and ``clear_ome_zarr_cache`` forgets
+    a store replaced at its path."""
     # ponytail: a local store alone; the transforms this reads are the ones register wrote beside its outputs
     try:
         with open(Path(store_path) / "zarr.json", encoding="utf-8") as file:
@@ -1427,7 +1431,7 @@ def _affine_document(store_path: str | Path) -> dict[str, Any] | None:
 def is_affine_store(store_path: str | Path) -> bool:
     """Whether ``store_path`` holds an RFC-5 ``affine`` transformation on its own, as ``write_ome_zarr_affine``
     writes it: an entry the backend reads as a linear transform, not as an image. Never raises."""
-    return _affine_document(store_path) is not None
+    return _affine_document(str(store_path)) is not None
 
 
 def _axis_permutation(axes: Sequence[str]) -> np.ndarray:
@@ -1488,7 +1492,7 @@ def write_ome_zarr_affine(store_path: str | Path, transform: Any, attributes: di
 def _affine_entry(store_path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """An affine store's transformation entry and the axes of its input coordinate system (Zarr order, with the units
     they declare); a store that is no affine store is refused."""
-    ome = _affine_document(store_path)
+    ome = _affine_document(str(store_path))
     if ome is None:
         raise DatasetManagerError(
             f"'{store_path}' holds no affine transformation.", "Write it with write_ome_zarr_affine."

@@ -364,9 +364,10 @@ def _declares_affine(preset: str, overrides: list[str]) -> bool:
     """Whether the preset's global pass writes its transform as an affine: ``transform_type`` in its config, or the
     ``--set`` of it. A config that cannot be read (offline, nothing cached) declares nothing here: the preset's own
     process reads it."""
-    declared = {name.strip(): value.strip() for name, _, value in (o.partition("=") for o in overrides)}.get(
-        "transform_type"
-    )
+    # Bare or dotted from the config root (Predictor.Model.RegistrationNet.transform_type), as konfai-apps resolves it.
+    declared = {
+        name.strip().rpartition(".")[2]: value.strip() for name, _, value in (o.partition("=") for o in overrides)
+    }.get("transform_type")
     if declared is None:
         try:
             tiling = _manifest(preset).get("tiling") or {}

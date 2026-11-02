@@ -1424,7 +1424,7 @@ def test_register_derives_the_moved_image_through_an_affine(tmp_path: Path, name
     np.testing.assert_allclose(moved[0, 0, 0], 2.0, atol=1e-6)  # moving is z*64 + y*8 + x, shifted by +2 along x
     np.testing.assert_allclose(moved[1, 1, 0], 74.0, atol=1e-6)
     record = json.loads((out / "register.json").read_text(encoding="utf-8"))
-    assert record["cases"]["P000"]["transform"] == f"P000/{name}"
+    assert record["cases"]["P000"]["transform"].replace("\\", "/") == f"P000/{name}"  # Windows writes backslashes
 
 
 def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
@@ -1447,6 +1447,9 @@ def test_register_refuses_to_average_an_affine(tmp_path: Path) -> None:
         app.register(["A", "B"], [fixed], [moving], output=out, quiet=True)
     with pytest.raises(KonfAIError, match="--tta cannot average"):
         app.register(["A"], [fixed], [moving], output=out, quiet=True, tta=1)
-    # --set speaks for the run: declared a field, the preset joins the ensemble.
-    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=["A:transform_type=field"])
+    # --set speaks for the run, bare or dotted from the config root: B declared an affine is refused in its turn.
+    overrides = ["A:transform_type=field", "B:Predictor.Model.RegistrationNet.transform_type=affine"]
+    with pytest.raises(KonfAIError, match="'B' writes its transform as an affine"):
+        app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides)
+    app.register(["A", "B"], [fixed], [moving], output=out, quiet=True, config_overrides=overrides[:1])
     assert (out / "P000" / "Moved.mha").is_file()
