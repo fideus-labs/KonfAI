@@ -24,14 +24,14 @@ import pytest
 import SimpleITK as sitk
 import torch
 from impact_reg_konfai import plane
-from impact_reg_konfai.impact_reg import _is_flat_field
+from impact_reg_konfai.impact_reg import _is_field, _is_flat_field
 from impact_reg_konfai.models.impact_loss import ModelSpec, plane_model
 from impact_reg_konfai.models.intensity import EngineRegistration
 from impact_reg_konfai.models.orientation import world_aligned
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 from konfai.utils.dataset import Attribute
 from konfai.utils.errors import KonfAIError, TransformError
-from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr
+from konfai.utils.ome_zarr import is_affine_store, is_displacement_field, write_ome_zarr, write_ome_zarr_affine
 
 
 def _flat(values: np.ndarray, spacing=(0.5, 0.25), origin=(3.0, -2.0)) -> sitk.Image:
@@ -181,10 +181,10 @@ def test_a_2d_field_goes_one_plane_thick_for_the_later_steps(tmp_path: Path) -> 
     with pytest.raises(KonfAIError, match="ITK transform file or an OME-Zarr store"):
         project_field(tmp_path / "Field.mha")
 
-    rigid = tmp_path / "Rigid.tfm"
-    sitk.WriteTransform(sitk.Euler2DTransform(), str(rigid))
-    with pytest.raises(ValueError, match="reads displacement fields"):
-        lift_field(rigid, tmp_path / "planes")
+    spline = tmp_path / "Spline.tfm"
+    sitk.WriteTransform(sitk.BSplineTransform(2), str(spline))
+    with pytest.raises(ValueError, match="reads displacement fields and linear transforms"):
+        lift_field(spline, tmp_path / "planes")
 
 
 def test_a_one_plane_store_comes_back_as_a_2d_rfc5_field_and_goes_one_plane_thick_again(tmp_path: Path) -> None:
@@ -239,3 +239,60 @@ def test_a_3d_model_gives_way_to_its_2d_version_or_is_refused() -> None:
 
 def test_a_header_tells_a_2d_image_from_a_volume_one_plane_thick() -> None:
     assert is_flat([1, 680, 535]) and not is_flat([1, 1, 680, 535])
+
+
+def _plane_rigid() -> sitk.Euler2DTransform:
+    rigid = sitk.Euler2DTransform()
+    rigid.SetAngle(0.3)
+    rigid.SetTranslation((1.5, -2.0))
+    return rigid
+
+
+def _one_plane_affine() -> sitk.AffineTransform:
+    """A plane's rigid as the engine hands it over for a volume one plane thick: the identity along z, with the shift
+    from one plane to the other in the translation."""
+    matrix = np.eye(3)
+    matrix[:2, :2] = np.reshape(_plane_rigid().GetMatrix(), (2, 2))
+    affine = sitk.AffineTransform(3)
+    affine.SetMatrix(matrix.ravel().tolist())
+    affine.SetTranslation((1.5, -2.0, 7.0))
+    return affine
+
+
+def test_a_one_plane_affine_comes_back_as_the_2d_affine_it_is_and_goes_one_plane_thick_again(tmp_path: Path) -> None:
+    path = tmp_path / "Transform.h5"
+    sitk.WriteTransform(_one_plane_affine(), str(path))
+    assert not _is_flat_field(path) and not _is_field(path)
+
+    project_field(path)
+    flat = sitk.ReadTransform(str(path))
+    assert flat.GetDimension() == 2 and _is_flat_field(path) and not _is_field(path)
+    np.testing.assert_allclose(flat.TransformPoint((3.0, -1.0)), _plane_rigid().TransformPoint((3.0, -1.0)))
+
+    lifted = lift_field(path, tmp_path / "planes")
+    volume = sitk.ReadTransform(str(lifted))
+    assert volume.GetDimension() == 3 and volume.IsLinear()
+    want = (*_plane_rigid().TransformPoint((3.0, -1.0)), 0.5)
+    np.testing.assert_allclose(volume.TransformPoint((3.0, -1.0, 0.5)), want)
+
+
+def test_a_one_plane_affine_store_comes_back_as_a_2d_rfc5_affine_in_its_unit(tmp_path: Path) -> None:
+    ngff_zarr = pytest.importorskip("ngff_zarr")
+    path = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr_affine(path, _one_plane_affine(), {"OMEUnits": "micrometer micrometer micrometer"})
+    assert not _is_flat_field(path) and not _is_field(path)
+
+    project_field(path)
+
+    assert _is_flat_field(path) and is_affine_store(path) and not is_displacement_field(path)
+    assert [entry.name for entry in tmp_path.iterdir()] == [path.name]  # nothing left beside it
+    transformation = ngff_zarr.from_ome_zarr(str(path), kind="transformation")
+    # RFC-5: over (y, x) in micrometres, the row and column along z gone.
+    matrix = np.asarray(transformation.affine)
+    np.testing.assert_allclose(matrix[:, :2], np.reshape(_plane_rigid().GetMatrix(), (2, 2))[::-1, ::-1])
+    np.testing.assert_allclose(matrix[:, 2], [-2000.0, 1500.0])
+
+    lifted = lift_field(path, tmp_path / "planes")
+    assert lifted.name == "Transform.h5"
+    want = (*_plane_rigid().TransformPoint((3.0, -1.0)), 0.0)
+    np.testing.assert_allclose(sitk.ReadTransform(str(lifted)).TransformPoint((3.0, -1.0, 0.0)), want)

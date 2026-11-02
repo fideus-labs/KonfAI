@@ -39,8 +39,11 @@ except ImportError:
 from konfai.utils import uri
 from konfai.utils.dataset.abstract import AbstractFile
 from konfai.utils.dataset.attribute import (
+    AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
     Attribute,
+    _encode_transform_leaves,
+    affine_from_attributes,
     displacement_field_to_data,
     image_to_data,
     ome_zarr_attributes,
@@ -223,9 +226,21 @@ class OmeZarrFile(AbstractFile):
     def _attributes(metadata: dict[str, Any]) -> Attribute:
         return ome_zarr_attributes(metadata)
 
+    def _affine_entry(self, path: str, name: str) -> tuple[np.ndarray, Attribute] | None:
+        """An affine store as the entry ``read_transform`` decodes: the leaves' parameters and type keys, as an
+        ITK transform file of a linear transform reads. None for an image or a field."""
+        from konfai.utils.ome_zarr import is_affine_store, read_ome_zarr_affine
+
+        if not is_affine_store(path):
+            return None
+        attributes = Attribute()
+        return _encode_transform_leaves(read_ome_zarr_affine(path), name, attributes), attributes
+
     def file_to_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
         from konfai.utils.ome_zarr import is_displacement_field
 
+        if (affine := self._affine_entry(self._path(name), name)) is not None:
+            return affine
         info_shape, _ = self.get_infos(group, name)
         data, attributes = self.file_to_data_slice(group, name, tuple(slice(None) for _ in info_shape))
         # Not in file_to_data_slice: a transform is only ever rebuilt from a whole entry.
@@ -237,6 +252,8 @@ class OmeZarrFile(AbstractFile):
         from konfai.utils.ome_zarr import read_ome_zarr_data_slice
 
         path = self._path(name)
+        if (affine := self._affine_entry(path, name)) is not None:
+            return affine  # a matrix has no region: the whole entry, whatever the slices
         data, metadata = read_ome_zarr_data_slice(path, slices, level=self.level)
         attributes = self._attributes(metadata)
         shape = metadata["shape"]
@@ -276,37 +293,45 @@ class OmeZarrFile(AbstractFile):
         data: sitk.Image | sitk.Transform | np.ndarray,
         attributes: Attribute | None = None,
     ) -> None:
-        from konfai.utils.ome_zarr import clear_ome_zarr_cache, write_ome_zarr
+        from konfai.utils.ome_zarr import clear_ome_zarr_cache, write_ome_zarr, write_ome_zarr_affine
 
         attributes = attributes or Attribute()
-        # A field is a DisplacementFieldTransform handed over, or an array with the attribute marked.
+        # A field is a DisplacementFieldTransform handed over, or an array with the attribute marked; an affine
+        # is a linear transform handed over, or the map a field's header declares, and is written as RFC-5
+        # metadata alone, in place of the array.
         displacement_field = DISPLACEMENT_FIELD_ATTRIBUTE in attributes
+        affine: sitk.Transform | None = affine_from_attributes(attributes) if AFFINE_ATTRIBUTE in attributes else None
         if sitk is not None and isinstance(data, sitk.Image):
             data, image_attributes = image_to_data(data)
             attributes.update(image_attributes)
+        elif sitk is not None and isinstance(data, sitk.Transform) and affine is None and data.IsLinear():
+            affine = data
         elif sitk is not None and isinstance(data, sitk.Transform):
-            # A displacement field is the one transform kind with an OME-NGFF form.
+            # A displacement field is the other transform kind with an OME-NGFF form.
             data, field_attributes = displacement_field_to_data(data, name)
             attributes.update(field_attributes)
             displacement_field = True
-        if not isinstance(data, np.ndarray):
-            raise DatasetManagerError("OME-Zarr datasets can only store image arrays.")
         # Staged beside the final store and renamed over it; the .replaced hop keeps a complete
         # store on disk at every instant.
         final = Path(self._path(name, writing=True))
         staging = final.with_name(f"{final.name}.{os.getpid()}.tmp")
         if staging.exists():
             shutil.rmtree(staging)
-        write_ome_zarr(
-            staging,
-            data,
-            spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
-            origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
-            attributes=dict(attributes),
-            displacement_field=displacement_field,
-            scale_factors=self.scale_factors,
-            downsample_method=self.downsample_method,
-        )
+        if affine is not None:
+            write_ome_zarr_affine(staging, affine, dict(attributes))
+        elif not isinstance(data, np.ndarray):
+            raise DatasetManagerError("OME-Zarr datasets can only store image arrays.")
+        else:
+            write_ome_zarr(
+                staging,
+                data,
+                spacing=attributes.get_np_array("Spacing") if "Spacing" in attributes else None,
+                origin=attributes.get_np_array("Origin") if "Origin" in attributes else None,
+                attributes=dict(attributes),
+                displacement_field=displacement_field,
+                scale_factors=self.scale_factors,
+                downsample_method=self.downsample_method,
+            )
         try:
             publish(staging, final)
         except BaseException:
@@ -383,6 +408,8 @@ class OmeZarrFile(AbstractFile):
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
         from konfai.utils.ome_zarr import get_ome_zarr_info, is_displacement_field
 
+        if (affine := self._affine_entry(self._path(name), name)) is not None:
+            return [int(extent) for extent in affine[0].shape], affine[1]
         metadata = get_ome_zarr_info(self._path(name), level=self.level)
         axes = [str(axis).lower() for axis in metadata["axes"]]
         axis_sizes = dict(zip(axes, metadata["shape"], strict=True))

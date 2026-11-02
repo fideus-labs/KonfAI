@@ -341,6 +341,13 @@ class RegistrationNet(network.Network):
             "FireANTs' 'com' does, for two sparse subjects that aligned frames leave side by side. Two images covering "
             "different lengths of a body have their centres of mass apart where the anatomy is not: 'cof' there.",
         ] = "cof",
+        transform_type: Annotated[
+            Literal["field", "affine"],
+            "The form the transform is written in: 'field', its displacement on the fixed grid, whatever the maps; "
+            "'affine', the one matrix the maps found, which takes linear maps alone (translation, Euler, similarity, "
+            "affine) and refuses a B-spline. An affine is written as an ITK AffineTransform file or as an RFC-5 "
+            "'affine' store, where a field of the same registration weighs megabytes.",
+        ] = "field",
     ) -> None:
         # The IMPACT metric is described by ``models`` / ``levels`` (config = source of truth); the download list
         # is derived from them. Global knobs override the generated map (final_grid_spacing ->
@@ -374,6 +381,7 @@ class RegistrationNet(network.Network):
                 voxel_sampling,
                 seed,
                 moments_init,
+                transform_type,
             ),
             in_branch=[0, 1, 2, 3],
             out_branch=["registration"],

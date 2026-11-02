@@ -21,8 +21,12 @@ The storage backends live one per module and are addressed as ``Dataset.<Backend
 the package is re-exported here; the backends are public as ``Dataset.<Backend>``."""
 
 from konfai.utils.dataset.abstract import AbstractFile as AbstractFile
+from konfai.utils.dataset.attribute import AFFINE_ATTRIBUTE as AFFINE_ATTRIBUTE
 from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE as DISPLACEMENT_FIELD_ATTRIBUTE
 from konfai.utils.dataset.attribute import Attribute as Attribute
+from konfai.utils.dataset.attribute import affine_from_attributes as affine_from_attributes
+from konfai.utils.dataset.attribute import affine_to_attribute as affine_to_attribute
+from konfai.utils.dataset.attribute import as_affine as as_affine
 from konfai.utils.dataset.attribute import as_channel_first as as_channel_first
 from konfai.utils.dataset.attribute import data_to_image as data_to_image
 from konfai.utils.dataset.attribute import data_to_transform as data_to_transform
@@ -56,11 +60,15 @@ from konfai.utils.dataset.statistics import chunk_hull_voxels as chunk_hull_voxe
 from konfai.utils.dataset.stream import DataStream as DataStream
 
 __all__ = [
+    "AFFINE_ATTRIBUTE",
     "BACKENDS",
     "DISPLACEMENT_FIELD_ATTRIBUTE",
     "Attribute",
     "DataStream",
     "Dataset",
+    "affine_from_attributes",
+    "affine_to_attribute",
+    "as_affine",
     "as_channel_first",
     "backend_for",
     "chunk_hull_voxels",
