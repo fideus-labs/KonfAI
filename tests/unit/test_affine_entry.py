@@ -126,18 +126,17 @@ def test_a_2d_affine_round_trips_through_a_store(tmp_path: Path) -> None:
     _same_map(got, plane, [(0.0, 0.0), (3.0, -7.0)])
 
 
-def test_a_store_replaced_at_its_path_is_told_apart_again_once_the_cache_is_cleared(tmp_path: Path) -> None:
-    # The detection is memoised per path, as the store parses are, under the same contract: whoever puts another store
-    # at a path already read clears the cache.
+def test_an_affine_store_written_over_an_image_store_is_told_apart_at_once(tmp_path: Path) -> None:
+    # The detection is memoised per path, as the store parses are, and the writer clears the memo: a path probed as an
+    # image, or as nothing, answers for the affine as soon as it is written.
     pytest.importorskip("zarr")
-    from konfai.utils.ome_zarr import clear_ome_zarr_cache, is_affine_store, write_ome_zarr, write_ome_zarr_affine
+    from konfai.utils.ome_zarr import is_affine_store, write_ome_zarr, write_ome_zarr_affine
 
     store = tmp_path / "Transform.ome.zarr"
+    assert not is_affine_store(store)  # nothing there yet
     write_ome_zarr(store, np.zeros((1, 4, 5, 6), np.float32), spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0))
     assert not is_affine_store(store)
     write_ome_zarr_affine(store, _rigid())
-    assert not is_affine_store(store)  # the memo answers
-    clear_ome_zarr_cache(store)
     assert is_affine_store(store)
 
 

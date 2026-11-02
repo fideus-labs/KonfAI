@@ -1487,6 +1487,7 @@ def write_ome_zarr_affine(store_path: str | Path, transform: Any, attributes: di
         ],
     }
     zarr.create_group(str(store_path), overwrite=True).attrs["ome"] = document
+    clear_ome_zarr_cache(store_path)  # the path may have been probed, or held another store
 
 
 def _affine_entry(store_path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
