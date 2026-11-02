@@ -3,6 +3,81 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
+## v1.8.8 (2026-11-02)
+
+### 💥 Breaking changes
+
+#### Preset lengths in voxels
+
+IMPACT-Reg now measures a preset's lengths (a step, a B-spline grid, a smoothing, a feature model's
+`voxel_size`) in voxels of the fixed image's finest level: a length of 1 is one voxel, where it was
+one millimetre. The shipped presets are rewritten, and on 2 mm anatomy give what they gave. A preset
+of your own, or a length passed to `--set`, written in millimetres must be divided by the fixed
+image's finest spacing. In FireANTs, the new `translation_lr` steps the translation; `affine_lr` now
+steps the rotation and the matrix alone.
+
+#### Generic_Rigid writes an affine
+
+`Generic_Rigid` declares `transform_type: affine`: its `Transform.h5` holds an ITK `AffineTransform`
+instead of a displacement field, and `Transform:omezarr` an RFC-5 `affine`. A reader that takes any
+ITK transform is unaffected; one that reads displacement vectors out of the file is not, and `eval`
+reports no Jacobian for it. An ensemble, `--tta` and a tile pass work on fields, so they refuse it by
+name. `--set transform_type=field` gives the field back.
+
+### ✨ Features
+
+- impact-reg: a preset declares the form of its transform with `transform_type`, `field` or `affine`,
+  on elastix and on FireANTs without a deformable stage; a non-linear map is refused. An affine is
+  written as an ITK `AffineTransform` or, with `Transform:omezarr`, as an OME-Zarr 0.6 store holding
+  the RFC-5 `affine` alone, which ngff-zarr reads. The moved image, `apply`, `eval` and 2-D runs read
+  both forms. On a 50 × 680 × 535 organoid `Transform.ome.zarr` goes from 95 MB to 4 kB, for the same
+  registration.
+- impact-reg: 2-D images register as they come, on elastix, FireANTs and ConvexAdam's 2-D MIND model.
+  The field and the moved image come back in 2-D, and `apply`, `eval` and `uncertainty` read them. A
+  pair mixing 2-D and 3-D, a 3-D model with no 2-D version, and the IMPACT presets on elastix and
+  FireANTs are refused with a message.
+- impact-reg: elastix takes `moments_init` as FireANTs does, `cof` by default or `com`, the centres of
+  mass. `Generic_Rigid`, `Generic_Rigid_BSpline` and `FireANTs_SyN` declare `com`, so two sparse
+  subjects far apart find each other: on an organoid pair 36 µm apart, `Generic_Rigid` goes from a
+  correlation of -0.06 to 0.90. On the MR/CT tutorial pair `Generic_Rigid` holds (Dice 0.858, TRE
+  2.62 mm) and `FireANTs_SyN` moves from Dice 0.690, TRE 2.98 mm to 0.679, 3.31 mm. A pair covering
+  different lengths of a body has its centres of mass apart where the anatomy is not: keep `cof` there
+  with `--set moments_init=cof`.
+- impact-reg: `register` takes `--host`, `--port` and `--token` and runs each preset pass on a
+  konfai-apps server, its budgets sized on that server's GPU and RAM.
+- impact-reg: `register` warns of a pair 20 times apart or more on every axis, more likely a matter of
+  units than of anatomy. It prints the two sizes and runs.
+- konfai-apps: `konfai-apps-server --ssl-certfile --ssl-keyfile` serves HTTPS. Clients take `--https`
+  and `--ca-cert` (or `KONFAI_API_CA_CERT`), and an app id prefixed `https://` reaches its server that
+  way. The server's certificate is always checked. Without these, a server is reached over HTTP as
+  before.
+- Each workflow config has a published JSON Schema (`schema/<File>.schema.json` in the docs), so an
+  editor completes keys and stage names and flags mistakes as you type.
+  `konfai <WORKFLOW> --check`, with `konfai[check]`, lists every mistake in one pass without building
+  anything and exits 1 when the run would refuse the config. konfai-mcp's `write_workflow_config`
+  returns them as `schema_errors`, and `review_config_semantics` starts from them.
+- Published apps ship their weights as `.safetensors`, read without pickle. `konfai-apps bundle` and
+  konfai-mcp's `package_app_from_session` write them, fine-tuning reads and writes them, and the
+  bundles tagged `v1.8.8` hold them. A bundle holding only `.pt` still loads. Training checkpoints stay
+  `.pt`, since RESUME needs the optimizer state. `safetensors` joins the core dependencies.
+- Python 3.14 joins the test matrix.
+
+### 🐛 Bug Fixes
+
+- impact-reg: `Transform:omezarr` wrote an ordinary 3-channel image in millimetres, which no RFC-5
+  reader could apply. It now writes an OME-Zarr 0.6 store with a `displacements` entry, in the axes'
+  order and unit. `Transform.h5` stays the default and is unchanged for a field.
+- impact-reg: the moved image and the ensemble mean are written in a root of their own: a `.mha`
+  written beside a store was lost.
+- impact-reg: the moved image of an OME-Zarr store without a suffix, an HCS well or a symlink, is kept.
+  It was deleted with the intermediates.
+- impact-reg: `register` refuses a store of several time points, which registered its first time point
+  without a word, and says how to get one out.
+- Prediction no longer hangs at 100 % of one core on an OME-Zarr store without a pyramid past the
+  voxel budget in `mode: resample`.
+- konfai-apps: an app's requirements install with `uv` in an environment without pip, as `uv venv`
+  makes. pip's package sources set without uv's own are refused rather than ignored.
+
 ## v1.8.7 (2026-10-05)
 
 ### 💥 Breaking changes
