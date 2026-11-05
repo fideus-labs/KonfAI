@@ -14,6 +14,7 @@ on:
       - "benchmarks/perf/**"
       - "pyproject.toml"
       - ".github/workflows/perf_pr_gate.yml"
+      - ".github/ci-constraints.txt"
 
 permissions:
   contents: read
@@ -23,6 +24,10 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
+
+# Holds the tools CI tests with (the file says why).
+env:
+  PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
 
 jobs:
   facts:
@@ -46,8 +51,14 @@ jobs:
       # --force: the load gate is for a dev box; a runner's load is recorded beside the numbers.
       # The prediction lane runs synthetic 256^3 cases with a seeded random model: the identity of
       # the two routes needs no trained checkpoint and no data to download.
+      # The transform lane writes large HDF5 files, and /tmp ran out of quota on some runners (errno 122, a rerun passes):
+      # the scratch goes to the runner's temp folder, and the log says what each had free.
       - name: The CPU lanes of the series
-        run: python benchmarks/perf/run_all.py --only startup,transform,predict,stages,reads --cpu --synthetic --force
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          df -h "$TMPDIR" /tmp
+          python benchmarks/perf/run_all.py --only startup,transform,predict,stages,reads --cpu --synthetic --force
 
       # After a failed lane too: run_all writes its series first, and the failed bench is a violated fact.
       - name: The facts
