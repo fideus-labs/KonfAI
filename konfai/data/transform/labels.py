@@ -316,6 +316,70 @@ class Softmax(Transform):
         return torch.softmax(tensor if tensor.is_floating_point() else tensor.float(), dim=self.dim)
 
 
+class Otsu(Transform):
+    """A body mask: 1 where the image is above Otsu's threshold, 0 elsewhere, one ``uint8`` channel.
+
+    The threshold is ITK's (``OtsuThresholdImageFilter``, 128 bins) of the whole case, the image in float32 and a
+    multichannel image (a colour photograph) as the mean of its channels. It needs the whole volume, which the
+    loader hands it: the stage is ``WHOLE_VOLUME``.
+    """
+
+    # in volumes of an int16 case: the float32 grey copy (2), SimpleITK's own of it (2) and the uint8 mask (0.5)
+    working_multiple = 4.5
+
+    def patch_locality(self, cache_attribute: Attribute) -> PatchLocality:
+        return PatchLocality(LocalityKind.WHOLE_VOLUME, reason="Otsu's threshold is computed on the whole volume")
+
+    def output_channels(self, channels: int) -> int:
+        return 1
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        _require_simpleitk()
+        grey = tensor.float().mean(0)
+        calculator = sitk.OtsuThresholdImageFilter()
+        calculator.Execute(sitk.GetImageFromArray(grey.cpu().numpy()))
+        # ITK compares in the image's own type: the float32 the volume is thresholded in
+        return (grey > float(np.float32(calculator.GetThreshold()))).to(torch.uint8).unsqueeze(0)
+
+
+class KeepLabels(Transform):
+    """The labels another group of the case also holds; every other voxel 0.
+
+    A label is then scored only when both maps hold it: on the fixed labels, ``group`` names the moving
+    labels before any warp, so that a label the warp erases still counts. The other map's labels are read once per
+    case, block by block; the stage is then voxel by voxel.
+    """
+
+    locality = LocalityKind.POINTWISE
+    working_multiple = 1.0
+
+    def __init__(self, group: str = "default") -> None:
+        super().__init__()
+        self.group = group
+        self._held: dict[str, torch.Tensor] = {}
+
+    def held(self, name: str) -> torch.Tensor:
+        """The labels the case's other map holds, background included."""
+        if name not in self._held:
+            dataset = self.dataset_holding(self.group, name)
+            if dataset is None:
+                raise TransformError(
+                    f"'KeepLabels' found no map of group '{self.group}' for case '{name}'.",
+                    "Name a group every case holds: KeepLabels: {group: MOVING_LABELS}.",
+                )
+            labels: set[int] = set()
+            for block in dataset.iter_data_blocks(self.group, name)():
+                labels.update(int(label) for label in np.unique(block))
+            self._held[name] = torch.tensor(sorted(labels), dtype=torch.int64)
+        return self._held[name]
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        held = self.held(name)
+        if not tensor.is_floating_point():  # a label this map's type cannot hold is not in it
+            held = held[(held >= torch.iinfo(tensor.dtype).min) & (held <= torch.iinfo(tensor.dtype).max)]
+        return torch.where(torch.isin(tensor, held.to(device=tensor.device, dtype=tensor.dtype)), tensor, 0)
+
+
 class FlatLabel(Transform):
     working_multiple = 1.0
 

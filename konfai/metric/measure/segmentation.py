@@ -338,6 +338,27 @@ class Dice(Criterion):
         return torch.tensor(value), result
 
 
+class MissingLabels(Criterion):
+    """How many labels of the reference the output lacks: the structures a segmentation did not find, or those a
+    registration's warp lost. ``labels`` restricts the count to those labels, where the reference holds them;
+    without it every label of the reference but 0 counts. Extra targets are masks, as for ``Dice``. Metric only."""
+
+    def __init__(self, labels: list[int] | None = None) -> None:
+        super().__init__()
+        self._labels = labels
+
+    def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> CriterionOutput:
+        output, target = Dice._masked(output, targets)
+        target = Dice.on_grid(output, target)
+        missing = []
+        for item in range(output.shape[0]):
+            held = set(torch.unique(target[item].round().long()).tolist()) - {0}
+            written = set(torch.unique(output[item].round().long()).tolist())
+            missing.append(len((held if self._labels is None else held & set(self._labels)) - written))
+        value = float(np.mean(missing))
+        return torch.tensor(value, dtype=torch.float32, device=output.device), value
+
+
 class DiceSaveMap(Dice):
     def __init__(self, labels: list[int] | None = None, dataset: str | None = None, group: str | None = None) -> None:
         super().__init__(labels)

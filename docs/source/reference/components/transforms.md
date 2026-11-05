@@ -41,6 +41,7 @@ loaded whole.
 | Name | Purpose | Key arguments (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
 | `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0`, `inverse=True` | yes | yes (the grid change) | yes |
+| `Displace` | Move a point set (`.fcsv` landmarks) by the case's displacement field, read at each point as SimpleITK's `DisplacementFieldTransform` reads it, from the voxels around the point alone. | `field_group="DVF"` | no | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
 | `Crop` | Crop to the foreground bounding box. Must come before any stage that changes the grid. | `inverse=True` | yes | yes | yes |
 | `Canonical` | Reorient to RAS (3-D). An oblique volume is resampled onto the nearest axis-aligned grid. | `inverse=True, fill=0.0` | yes | yes | yes, if not oblique |
@@ -64,6 +65,8 @@ loaded whole.
 | `FlatLabel` | Set the chosen labels (or all non-zero) to 1. | `labels=None` | no | no | yes |
 | `SelectLabel` | Remap labels, given as `"(old,new)"`. | `labels` | no | no | yes |
 | `Mask` | Set voxels outside a mask to `value_outside`. The mask is a group or a file. | `path="./default.mha", value_outside=0` | no | no | yes |
+| `KeepLabels` | Keep the labels another group of the case also holds, set the others to 0: a label is then scored only when both maps hold it. | `group` | no | no | yes |
+| `Otsu` | A body mask: 1 above Otsu's threshold of the whole case (ITK's, 128 bins), one `uint8` channel; a multichannel image is the mean of its channels. | | no | no | no |
 | `Dilate` | Binary dilation. | `dilate=1` | no | no | yes |
 | `Sum` | Sum over `dim`. | `dim=0` | no † | no | yes over channels |
 | `MergeLabels` | Merge the label maps of a `combine: Concat` ensemble of disjoint tasks into one (TotalSegmentator's five tasks). | | no | no | yes |

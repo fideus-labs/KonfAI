@@ -143,6 +143,14 @@ class CriterionWithAttribute(Criterion):
     def __init__(self) -> None:
         super().__init__()
 
+    @staticmethod
+    def output_grid(attributes: list[list[Attribute]], output_attributes: list[Attribute] | None) -> list[Attribute]:
+        """The per-item attributes the output's geometry is read from: its own, or in training, where a model
+        output has none, the first target's, which lies on the output's grid."""
+        if output_attributes is not None:
+            return output_attributes
+        return attributes[0] if attributes else []
+
     @abstractmethod
     def forward(  # type: ignore[override]  # the added keyword is this subclass's contract
         self, output: torch.Tensor, *targets: torch.Tensor, attributes: list[list[Attribute]]
