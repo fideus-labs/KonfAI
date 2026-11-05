@@ -194,6 +194,21 @@ def test_a_matrix_of_another_shape_is_refused(tmp_path: Path, array_shape: tuple
         read_ome_zarr_affine(store)
 
 
+def test_a_store_declaring_no_axes_is_refused(tmp_path: Path) -> None:
+    zarr = pytest.importorskip("zarr")
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache, read_ome_zarr_affine, write_ome_zarr_affine
+
+    store = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr_affine(store, _rigid())
+    group = zarr.open_group(str(store), mode="r+")
+    ome = group.attrs["ome"]
+    ome["coordinateSystems"][0]["axes"] = []
+    group.attrs["ome"] = ome
+    clear_ome_zarr_cache(store)
+    with pytest.raises(DatasetManagerError, match="no N x \\(N\\+1\\) matrix"):
+        read_ome_zarr_affine(store)
+
+
 def test_an_affine_store_written_over_an_image_store_is_told_apart_at_once(tmp_path: Path) -> None:
     # The detection is memoised per path, as the store parses are, and the writer clears the memo: a path probed as an
     # image, or as nothing, answers for the affine as soon as it is written.

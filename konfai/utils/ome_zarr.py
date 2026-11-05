@@ -1518,10 +1518,11 @@ def _affine_matrix(store_path: str | Path) -> tuple[np.ndarray, list[dict[str, A
 
             with contextlib.suppress(OSError, ValueError):  # zarr's not-found errors are both
                 array = zarr.open_array(str(path), mode="r")
-                rank = declared or (array.shape[0] if array.ndim == 2 else 0)
+                rank = declared if declared is not None else (array.shape[0] if array.ndim == 2 else 0)
                 if 0 < rank <= len(_SPATIAL) and array.shape == (rank, rank + 1):  # its shape, before reading it
                     values = np.asarray(array[:], dtype=np.float64)
-    rank = declared or (values.shape[0] if values is not None and values.ndim == 2 else 0)
+    # A store that declares its axes is held to them, an empty list included.
+    rank = declared if declared is not None else (values.shape[0] if values is not None and values.ndim == 2 else 0)
     if values is None or not 0 < rank <= len(_SPATIAL) or values.shape != (rank, rank + 1):
         raise DatasetManagerError(
             f"'{store_path}': the affine is no N x (N+1) matrix over its axes, inline or in an array of the store "
