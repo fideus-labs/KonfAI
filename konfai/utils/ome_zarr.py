@@ -1407,9 +1407,10 @@ def get_ome_zarr_info(store_path: str | Path, level: int = 0) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------------------------------
-# An affine transformation store: RFC-5 metadata alone, no array. OME-Zarr 0.6 lets a store hold one
+# An affine transformation store: RFC-5 metadata, no image. OME-Zarr 0.6 lets a store hold one
 # ``coordinateTransformations`` entry on its own (ngff-zarr reads it with ``kind="transformation"``);
 # KonfAI writes a linear registration result that way, where a field would be that affine sampled.
+# KonfAI writes the matrix inline; ngff-zarr 0.52 keeps it in an array the entry names by ``path``.
 # --------------------------------------------------------------------------------------------------
 
 
@@ -1492,13 +1493,31 @@ def write_ome_zarr_affine(store_path: str | Path, transform: Any, attributes: di
 
 def _affine_entry(store_path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """An affine store's transformation entry and the axes of its input coordinate system (Zarr order, with the units
-    they declare); a store that is no affine store is refused."""
+    they declare); a store that is no affine store is refused. A matrix kept in an array of the store, which the entry
+    names by ``path`` (ngff-zarr writes it so from 0.52), is read into the entry's ``affine``."""
     ome = _affine_document(str(store_path))
     if ome is None:
         raise DatasetManagerError(
             f"'{store_path}' holds no affine transformation.", "Write it with write_ome_zarr_affine."
         )
     entry = ome["coordinateTransformations"][0]
+    if "affine" not in entry:
+        root = Path(store_path).resolve()
+        matrix = (root / str(entry.get("path") or "")).resolve()
+        values = None
+        if matrix != root and matrix.is_relative_to(root):
+            _require_zarr()
+            import zarr
+
+            with contextlib.suppress(OSError, ValueError):  # zarr's not-found errors are both
+                values = np.asarray(zarr.open_array(str(matrix), mode="r")[:], dtype=np.float64)
+        if values is None or values.ndim != 2:
+            raise DatasetManagerError(
+                f"'{store_path}': the affine's matrix is neither inline nor a 2-D array of the store "
+                f"(path {entry.get('path')!r}).",
+                "RFC-5 names a matrix array by a path relative to the store.",
+            )
+        entry = {**entry, "affine": values.tolist()}
     systems = {system["name"]: system for system in ome.get("coordinateSystems", [])}
     system = systems.get((entry.get("input") or {}).get("name"))
     return entry, system["axes"] if system else [{"name": axis} for axis in _SPATIAL[-len(entry["affine"]) :]]

@@ -126,6 +126,50 @@ def test_a_2d_affine_round_trips_through_a_store(tmp_path: Path) -> None:
     _same_map(got, plane, [(0.0, 0.0), (3.0, -7.0)])
 
 
+def _matrix_in_an_array(store: Path, path: str, written_at: str | None = None) -> None:
+    """Rewrite a store ``write_ome_zarr_affine`` wrote as ngff-zarr 0.52 writes one: the matrix in an array, at
+    ``written_at`` (``path`` by default) relative to the store, which the entry names by ``path``."""
+    import zarr
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache
+
+    group = zarr.open_group(str(store), mode="r+")
+    ome = group.attrs["ome"]
+    entry = ome["coordinateTransformations"][0]
+    zarr.create_array(str((store / (written_at or path)).resolve()), data=np.asarray(entry.pop("affine")))
+    entry["path"] = path
+    group.attrs["ome"] = ome
+    clear_ome_zarr_cache(store)
+
+
+def test_an_affine_kept_in_an_array_reads_as_the_same_map(tmp_path: Path) -> None:
+    pytest.importorskip("zarr")
+    from konfai.utils.ome_zarr import ome_zarr_affine_units, read_ome_zarr_affine, write_ome_zarr_affine
+
+    store = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr_affine(store, _rigid(), {"OMEUnits": "micrometer micrometer micrometer"})
+    _matrix_in_an_array(store, "coordinateTransformations/affine")
+    _same_map(read_ome_zarr_affine(store), _rigid())
+    assert ome_zarr_affine_units(store) == {"z": "micrometer", "y": "micrometer", "x": "micrometer"}
+
+
+@pytest.mark.parametrize(
+    ("path", "written_at"),
+    [
+        ("../coordinateTransformations/affine", None),  # a real array, out of the store
+        ("coordinateTransformations/missing", "coordinateTransformations/affine"),  # nothing there
+    ],
+)
+def test_a_matrix_path_to_no_array_of_the_store_is_refused(tmp_path: Path, path: str, written_at: str | None) -> None:
+    pytest.importorskip("zarr")
+    from konfai.utils.ome_zarr import read_ome_zarr_affine, write_ome_zarr_affine
+
+    store = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr_affine(store, _rigid())
+    _matrix_in_an_array(store, path, written_at)
+    with pytest.raises(DatasetManagerError, match="neither inline nor a 2-D array of the store"):
+        read_ome_zarr_affine(store)
+
+
 def test_an_affine_store_written_over_an_image_store_is_told_apart_at_once(tmp_path: Path) -> None:
     # The detection is memoised per path, as the store parses are, and the writer clears the memo: a path probed as an
     # image, or as nothing, answers for the affine as soon as it is written.
