@@ -1504,6 +1504,18 @@ def _affine_matrix(store_path: str | Path) -> tuple[np.ndarray, list[dict[str, A
     entry = ome["coordinateTransformations"][0]
     systems = {system["name"]: system for system in ome.get("coordinateSystems", [])}
     system = systems.get((entry.get("input") or {}).get("name"))
+    output = systems.get((entry.get("output") or {}).get("name"))
+
+    def frame(declared_system: dict[str, Any]) -> list[tuple[Any, Any]]:
+        return [(axis.get("name"), axis.get("unit")) for axis in declared_system["axes"]]
+
+    # The transform is rebuilt in the input system's units on both sides: an output in other axes or units
+    # (um in, mm out) would come back without its change of scale, so it is refused.
+    if system is not None and output is not None and frame(output) != frame(system):
+        raise DatasetManagerError(
+            f"'{store_path}': the affine maps '{system['name']}' to '{output['name']}', whose axes or units differ.",
+            "KonfAI reads an affine within one coordinate system; express its output in the input's axes and units.",
+        )
     declared = len(system["axes"]) if system else None
     values: np.ndarray | None = None
     if "affine" in entry:

@@ -209,6 +209,26 @@ def test_a_store_declaring_no_axes_is_refused(tmp_path: Path) -> None:
         read_ome_zarr_affine(store)
 
 
+def test_an_affine_into_other_units_is_refused(tmp_path: Path) -> None:
+    # An identity from micrometres to millimetres is a 1000x scale, which a matrix read in one unit would drop.
+    zarr = pytest.importorskip("zarr")
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache, read_ome_zarr_affine, write_ome_zarr_affine
+
+    store = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr_affine(store, _rigid(), {"OMEUnits": "micrometer micrometer micrometer"})
+    group = zarr.open_group(str(store), mode="r+")
+    ome = group.attrs["ome"]
+    system = ome["coordinateSystems"][0]
+    ome["coordinateSystems"].append(
+        {"name": "out", "axes": [{**axis, "unit": "millimeter"} for axis in system["axes"]]}
+    )
+    ome["coordinateTransformations"][0]["output"] = {"name": "out"}
+    group.attrs["ome"] = ome
+    clear_ome_zarr_cache(store)
+    with pytest.raises(DatasetManagerError, match="whose axes or units differ"):
+        read_ome_zarr_affine(store)
+
+
 def test_an_affine_store_written_over_an_image_store_is_told_apart_at_once(tmp_path: Path) -> None:
     # The detection is memoised per path, as the store parses are, and the writer clears the memo: a path probed as an
     # image, or as nothing, answers for the affine as soon as it is written.
