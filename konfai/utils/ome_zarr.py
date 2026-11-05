@@ -1491,41 +1491,47 @@ def write_ome_zarr_affine(store_path: str | Path, transform: Any, attributes: di
     clear_ome_zarr_cache(store_path)  # the path may have been probed, or held another store
 
 
-def _affine_entry(store_path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """An affine store's transformation entry and the axes of its input coordinate system (Zarr order, with the units
-    they declare); a store that is no affine store is refused. A matrix kept in an array of the store, which the entry
-    names by ``path`` (ngff-zarr writes it so from 0.52), is read into the entry's ``affine``."""
+def _affine_matrix(store_path: str | Path) -> tuple[np.ndarray, list[dict[str, Any]]]:
+    """An affine store's matrix, N x (N+1) with the translation last, and the axes of its input coordinate system
+    (Zarr order, with the units they declare). The matrix is inline, or in an array of the store that the entry names
+    by ``path`` (ngff-zarr writes it so from 0.52). A store that is no affine store, a path out of the store, or a
+    matrix of another shape is refused."""
     ome = _affine_document(str(store_path))
     if ome is None:
         raise DatasetManagerError(
             f"'{store_path}' holds no affine transformation.", "Write it with write_ome_zarr_affine."
         )
     entry = ome["coordinateTransformations"][0]
-    if "affine" not in entry:
+    systems = {system["name"]: system for system in ome.get("coordinateSystems", [])}
+    system = systems.get((entry.get("input") or {}).get("name"))
+    values: np.ndarray | None = None
+    if "affine" in entry:
+        with contextlib.suppress(TypeError, ValueError):  # a ragged or non-numeric matrix
+            values = np.asarray(entry["affine"], dtype=np.float64)
+    else:
         root = Path(store_path).resolve()
-        matrix = (root / str(entry.get("path") or "")).resolve()
-        values = None
-        if matrix != root and matrix.is_relative_to(root):
+        path = (root / str(entry.get("path") or "")).resolve()
+        if path != root and path.is_relative_to(root):
             _require_zarr()
             import zarr
 
             with contextlib.suppress(OSError, ValueError):  # zarr's not-found errors are both
-                values = np.asarray(zarr.open_array(str(matrix), mode="r")[:], dtype=np.float64)
-        if values is None or values.ndim != 2:
-            raise DatasetManagerError(
-                f"'{store_path}': the affine's matrix is neither inline nor a 2-D array of the store "
-                f"(path {entry.get('path')!r}).",
-                "RFC-5 names a matrix array by a path relative to the store.",
-            )
-        entry = {**entry, "affine": values.tolist()}
-    systems = {system["name"]: system for system in ome.get("coordinateSystems", [])}
-    system = systems.get((entry.get("input") or {}).get("name"))
-    return entry, system["axes"] if system else [{"name": axis} for axis in _SPATIAL[-len(entry["affine"]) :]]
+                array = zarr.open_array(str(path), mode="r")
+                if array.ndim == 2 and array.shape[1] == array.shape[0] + 1:  # its shape, before reading it
+                    values = np.asarray(array[:], dtype=np.float64)
+    rank = len(system["axes"]) if system else (values.shape[0] if values is not None and values.ndim == 2 else 0)
+    if values is None or rank == 0 or values.shape != (rank, rank + 1):
+        raise DatasetManagerError(
+            f"'{store_path}': the affine is no N x (N+1) matrix over its axes, inline or in an array of the store "
+            f"(path {entry.get('path')!r}).",
+            "RFC-5 stores an affine as N x (N+1), the translation last; an array is named by a path in the store.",
+        )
+    return values, system["axes"] if system else [{"name": axis} for axis in _SPATIAL[-rank:]]
 
 
 def ome_zarr_affine_units(store_path: str | Path) -> dict[str, str]:
     """The unit of each spatial axis of an affine store, absent where it declares none."""
-    return {axis["name"]: axis["unit"] for axis in _affine_entry(store_path)[1] if axis.get("unit")}
+    return {axis["name"]: axis["unit"] for axis in _affine_matrix(store_path)[1] if axis.get("unit")}
 
 
 def read_ome_zarr_affine(store_path: str | Path) -> Any:
@@ -1533,9 +1539,8 @@ def read_ome_zarr_affine(store_path: str | Path) -> Any:
     points in millimetres and ``(x, y, z)``: ``write_ome_zarr_affine``'s inverse."""
     import SimpleITK as sitk
 
-    entry, axes = _affine_entry(store_path)
+    values, axes = _affine_matrix(store_path)
     names = [axis["name"] for axis in axes]
-    values = np.asarray(entry["affine"], dtype=np.float64)
     rank = values.shape[0]
     to_itk = _axis_permutation(names)
     in_mm = _unit_factors({axis["name"]: axis["unit"] for axis in axes if axis.get("unit")}, names)

@@ -166,7 +166,28 @@ def test_a_matrix_path_to_no_array_of_the_store_is_refused(tmp_path: Path, path:
     store = tmp_path / "Transform.ome.zarr"
     write_ome_zarr_affine(store, _rigid())
     _matrix_in_an_array(store, path, written_at)
-    with pytest.raises(DatasetManagerError, match="neither inline nor a 2-D array of the store"):
+    with pytest.raises(DatasetManagerError, match="no N x \\(N\\+1\\) matrix"):
+        read_ome_zarr_affine(store)
+
+
+@pytest.mark.parametrize("in_an_array", [False, True])
+def test_a_matrix_of_another_shape_is_refused(tmp_path: Path, in_an_array: bool) -> None:
+    # RFC-5 stores an affine as N x (N+1), the translation last; ngff-zarr refuses any other shape too.
+    zarr = pytest.importorskip("zarr")
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache, read_ome_zarr_affine, write_ome_zarr_affine
+
+    store = tmp_path / "Transform.ome.zarr"
+    write_ome_zarr_affine(store, _rigid())
+    if in_an_array:
+        _matrix_in_an_array(store, "coordinateTransformations/affine")
+        zarr.create_array(str(store / "coordinateTransformations" / "affine"), data=np.zeros((3, 5)), overwrite=True)
+    else:
+        group = zarr.open_group(str(store), mode="r+")
+        ome = group.attrs["ome"]
+        ome["coordinateTransformations"][0]["affine"] = np.eye(3).tolist()
+        group.attrs["ome"] = ome
+        clear_ome_zarr_cache(store)
+    with pytest.raises(DatasetManagerError, match="no N x \\(N\\+1\\) matrix"):
         read_ome_zarr_affine(store)
 
 
