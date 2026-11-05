@@ -1504,6 +1504,7 @@ def _affine_matrix(store_path: str | Path) -> tuple[np.ndarray, list[dict[str, A
     entry = ome["coordinateTransformations"][0]
     systems = {system["name"]: system for system in ome.get("coordinateSystems", [])}
     system = systems.get((entry.get("input") or {}).get("name"))
+    declared = len(system["axes"]) if system else None
     values: np.ndarray | None = None
     if "affine" in entry:
         with contextlib.suppress(TypeError, ValueError):  # a ragged or non-numeric matrix
@@ -1517,10 +1518,11 @@ def _affine_matrix(store_path: str | Path) -> tuple[np.ndarray, list[dict[str, A
 
             with contextlib.suppress(OSError, ValueError):  # zarr's not-found errors are both
                 array = zarr.open_array(str(path), mode="r")
-                if array.ndim == 2 and array.shape[1] == array.shape[0] + 1:  # its shape, before reading it
+                rank = declared or (array.shape[0] if array.ndim == 2 else 0)
+                if 0 < rank <= len(_SPATIAL) and array.shape == (rank, rank + 1):  # its shape, before reading it
                     values = np.asarray(array[:], dtype=np.float64)
-    rank = len(system["axes"]) if system else (values.shape[0] if values is not None and values.ndim == 2 else 0)
-    if values is None or rank == 0 or values.shape != (rank, rank + 1):
+    rank = declared or (values.shape[0] if values is not None and values.ndim == 2 else 0)
+    if values is None or not 0 < rank <= len(_SPATIAL) or values.shape != (rank, rank + 1):
         raise DatasetManagerError(
             f"'{store_path}': the affine is no N x (N+1) matrix over its axes, inline or in an array of the store "
             f"(path {entry.get('path')!r}).",
