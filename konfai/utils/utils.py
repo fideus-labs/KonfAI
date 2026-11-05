@@ -381,9 +381,15 @@ SUPPORTED_EXTENSIONS = [
 ]
 
 # Backend tokens that are not suffixes: an ':itktransform' entry is one ITK transform file written as
-# `<group>.h5`, legal wherever a format is declared and never probed on disk.
+# `<group>.h5`, and a '.gz' on a format whose compression lives inside the file (':mha.gz', with
+# ':nrrd.gz' above) writes it compressed under its own suffix, `<group>.mha`. Legal wherever a format
+# is declared and never probed on disk.
 SUPPORTED_BACKEND_FORMATS = [
     "itktransform",
+    "mha.gz",
+    "mhd.gz",
+    "tif.gz",
+    "tiff.gz",
 ]
 
 # Everything a `path[:flag]:format` spec may name.
