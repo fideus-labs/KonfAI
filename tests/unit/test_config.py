@@ -1701,3 +1701,120 @@ def test_a_prediction_dataset_without_batch_size_measures_its_batch(write_config
     write_config("Predictor:\n  Dataset:\n    num_workers: 0\n    batch_size: 1\n")
     dataset = apply_config("Predictor")(DataPrediction)()
     assert (dataset.batch_size, dataset.measures_batch) == (1, False)
+
+
+def test_an_included_block_binds_and_the_reference_is_written_back(write_config) -> None:
+    """``!include FILE#KEY`` binds the block another file holds, and the write-back keeps the reference, not the
+    block: the included file stays the one place the block is written, untouched by the run."""
+    config_path = write_config("Root:\n  child: !include shared.yml#Blocks.child\n  name: here\n")
+    shared = config_path.parent / "shared.yml"
+    shared.write_text("Blocks:\n  child:\n    value: 3\n", encoding="utf-8")
+
+    @config("child")
+    class Child:
+        def __init__(self, value: int = 1, scale: float = 2.0) -> None:
+            self.value, self.scale = value, scale
+
+    class Root:
+        def __init__(self, child: Child = Child(), name: str = "") -> None:
+            self.child, self.name = child, name
+
+    with strict_config("Root"):
+        root = apply_config("Root")(Root)()
+
+    assert (root.child.value, root.child.scale, root.name) == (3, 2.0, "here")
+    written = config_path.read_text(encoding="utf-8")
+    assert "child: !include shared.yml#Blocks.child" in written and "value: 3" not in written
+    assert shared.read_text(encoding="utf-8") == "Blocks:\n  child:\n    value: 3\n"
+
+
+def test_an_include_that_names_nothing_or_closes_a_cycle_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "a.yml").write_text("Root: !include b.yml#Root\n", encoding="utf-8")
+    (tmp_path / "b.yml").write_text("Root: !include a.yml#Root\n", encoding="utf-8")
+    (tmp_path / "c.yml").write_text("Root: !include e.yml#Absent\n", encoding="utf-8")
+    (tmp_path / "d.yml").write_text("Root: !include e.yml#Root.value\n", encoding="utf-8")
+    (tmp_path / "e.yml").write_text("Root:\n  value: 3\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="cycle"):
+        _load_tree(tmp_path / "a.yml")
+    with pytest.raises(ConfigError, match="holds no 'Absent'"):
+        _load_tree(tmp_path / "c.yml")
+    with pytest.raises(ConfigError, match="not a block"):
+        _load_tree(tmp_path / "d.yml")
+
+
+def _fake_hub(monkeypatch: pytest.MonkeyPatch, repository: Path) -> list[tuple[str, str, str | None]]:
+    """A ``huggingface_hub`` that serves ``repository``'s files and records what it was asked for."""
+    import types
+
+    asked: list[tuple[str, str, str | None]] = []
+
+    class EntryNotFoundError(Exception):
+        pass
+
+    def hf_hub_download(repo_id: str, filename: str, revision: str | None = None) -> str:
+        asked.append((repo_id, filename, revision))
+        if not (repository / filename).is_file():
+            raise EntryNotFoundError(filename)
+        return str(repository / filename)
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.hf_hub_download = hf_hub_download  # type: ignore[attr-defined]
+    utils = types.ModuleType("huggingface_hub.utils")
+    utils.EntryNotFoundError, utils.HfHubHTTPError = EntryNotFoundError, OSError  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    monkeypatch.setitem(sys.modules, "huggingface_hub.utils", utils)
+    return asked
+
+
+def test_a_hub_file_includes_its_neighbours_from_the_same_repository(tmp_path: Path, monkeypatch) -> None:
+    """A relative include inside a file read from the Hub is fetched from that repository at that revision, and a
+    file the Hub does not hold is a ConfigError that names the include."""
+    repository = tmp_path / "cache"
+    (repository / "App").mkdir(parents=True)
+    (repository / "App" / "parent.yml").write_text("Root: !include ../shared/child.yml#Block\n", encoding="utf-8")
+    (repository / "shared").mkdir()
+    (repository / "shared" / "child.yml").write_text("Block:\n  value: 3\n", encoding="utf-8")
+    asked = _fake_hub(monkeypatch, repository)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "config.yml").write_text("Top: !include owner/name@v1:App/parent.yml#Root\n", encoding="utf-8")
+    assert _load_tree(work / "config.yml")["Top"]["value"] == 3
+    assert asked == [("owner/name", "App/parent.yml", "v1"), ("owner/name", "shared/child.yml", "v1")]
+    (work / "absent.yml").write_text("Top: !include owner/name@v1:App/none.yml\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="the Hub does not give"):
+        _load_tree(work / "absent.yml")
+    (repository / "App" / "parent.yml").write_text("Root: !include ../../outside.yml\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="leaves the repository"):
+        _load_tree(work / "config.yml")
+
+
+def test_the_includes_being_read_belong_to_one_load(tmp_path: Path) -> None:
+    """Another load reading a file is not a cycle: a thread that includes it reads it."""
+    from konfai.utils.config import _including
+
+    (tmp_path / "shared.yml").write_text("Block:\n  value: 3\n", encoding="utf-8")
+    (tmp_path / "config.yml").write_text("Top: !include shared.yml#Block\n", encoding="utf-8")
+    token = _including.set((((tmp_path / "shared.yml").resolve(), None),))  # this load is reading shared.yml
+    try:
+        with pytest.raises(ConfigError, match="cycle"):
+            _load_tree(tmp_path / "config.yml")
+        read: list[int] = []
+        thread = threading.Thread(target=lambda: read.append(_load_tree(tmp_path / "config.yml")["Top"]["value"]))
+        thread.start()
+        thread.join()
+        assert read == [3]
+    finally:
+        _including.reset(token)
+
+
+def test_the_api_anchors_a_relative_include_to_the_config_files_directory(tmp_path: Path) -> None:
+    from konfai.api import _config_copy
+
+    folder = tmp_path / "experiment"
+    folder.mkdir()
+    (folder / "shared.yml").write_text("Dataset:\n  batch_size: 2\n", encoding="utf-8")
+    (folder / "Evaluation.yml").write_text("Evaluator:\n  Dataset: !include shared.yml#Dataset\n", encoding="utf-8")
+    copy = Path(_config_copy(folder / "Evaluation.yml"))
+    assert copy.parent != folder
+    assert f"Dataset: !include {(folder / 'shared.yml').resolve()}#Dataset" in copy.read_text(encoding="utf-8")
+    assert _load_tree(copy)["Evaluator"]["Dataset"]["batch_size"] == 2
