@@ -519,6 +519,7 @@ def _drive_prediction(tmp_path, transforms, volume, monkeypatch, streamed=True, 
 
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [1, model_volume.shape[2], model_volume.shape[3]]
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):

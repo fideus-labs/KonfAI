@@ -202,6 +202,7 @@ def test_model_composite_refuses_empty_sources_for_a_model_with_weights() -> Non
 def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> None:
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
@@ -260,6 +261,7 @@ def test_output_dataset_uses_batch_attributes_when_manager_cache_is_cold() -> No
 def test_output_dataset_offloads_patch_predictions_to_cpu_before_accumulating() -> None:
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
@@ -340,6 +342,7 @@ def _single_patch_dataset_iter() -> DatasetIter:
 
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
@@ -376,6 +379,7 @@ def _three_patch_dataset_iter(patch_transforms: list[object]) -> DatasetIter:
 
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
@@ -1146,6 +1150,7 @@ def test_a_grid_swept_off_axis_zero_takes_the_whole_volume_path(monkeypatch: pyt
 
     class DummyPatch:
         patch_size: ClassVar[list[int]] = [2, 2]
+        placement = "pad"
 
         @staticmethod
         def get_patch_slices(index_augmentation: int):
