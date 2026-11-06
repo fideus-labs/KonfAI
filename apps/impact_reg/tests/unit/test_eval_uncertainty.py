@@ -347,45 +347,6 @@ def test_eval_warps_through_a_translation_chained_with_a_spline(
     assert mae == pytest.approx(_metrics(tmp_path / "Reference")["FixedImage:MovingImage;Mask:MAE"], rel=1e-5)
 
 
-@pytest.mark.parametrize("name", ["Transform.h5", "field.mha", "compressed.mha", "field.ome.zarr"])
-def test_landmarks_move_as_through_the_whole_field(tmp_path: Path, name: str) -> None:
-    """Landmarks move through a field read around them alone (sliced from it read once, when compressed) exactly
-    as through the whole field in SimpleITK: inside, at the faces, between a face and the half voxel past it,
-    and outside, on an oblique grid."""
-    from impact_reg_konfai.impact_reg import _displace
-    from konfai.utils.dataset import image_to_data
-    from konfai.utils.ome_zarr import write_ome_zarr
-
-    rng = np.random.default_rng(1)
-    values = rng.normal(0.0, 3.0, (9, 7, 6, 3))  # [z, y, x, component]
-    field = sitk.GetImageFromArray(values, isVector=True)
-    field.SetSpacing((1.5, 2.0, 2.5))
-    field.SetOrigin((-4.0, 3.0, 10.0))
-    field.SetDirection(sitk.VersorTransform((0.2, 0.3, 0.9), 0.4).GetMatrix())
-    if name.endswith(".h5"):
-        sitk.WriteTransform(sitk.DisplacementFieldTransform(sitk.Image(field)), str(tmp_path / name))
-    elif name.endswith(".mha"):
-        sitk.WriteImage(field, str(tmp_path / name), useCompression=name.startswith("compressed"))
-    else:
-        data, attributes = image_to_data(field)
-        write_ome_zarr(
-            tmp_path / name,
-            data,
-            spacing=field.GetSpacing(),
-            origin=field.GetOrigin(),
-            attributes=dict(attributes),
-            displacement_field=True,
-        )
-    extent = np.array(field.GetSize())
-    indices = np.concatenate([rng.uniform(-0.5, extent - 0.5, (40, 3)), [[0, 0, 0], extent - 1, [-0.4, 3, 2.7]]])
-    indices = np.concatenate([indices, [[-0.6, 1, 1], [2, 3, extent[2] - 0.45], [-3.0, -2.0, 40.0]]])
-    points = np.array([field.TransformContinuousIndexToPhysicalPoint(index.tolist()) for index in indices])
-    whole = sitk.DisplacementFieldTransform(sitk.Image(field))
-    expected = np.array([whole.TransformPoint(point.tolist()) for point in points])
-
-    np.testing.assert_allclose(_displace(points, tmp_path / name, tmp_path / "work"), expected, atol=1e-5)
-
-
 def test_eval_summarizes_the_cohort(tmp_path: Path, toy: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
     """Two cases, two modalities: one summary holds each metric of each case under its real id, and the
     cohort's aggregates, readable by the evaluator's own reader (what SlicerImpactReg reads)."""
@@ -412,68 +373,6 @@ def test_eval_summarizes_the_cohort(tmp_path: Path, toy: dict[str, Path], monkey
     assert Statistics(out / "Evaluation_summary.json").read()[tre] == pytest.approx(1.0)
 
 
-def _oblique_field(values: np.ndarray) -> sitk.Image:
-    field = sitk.GetImageFromArray(values, isVector=True)
-    field.SetSpacing((1.5, 2.0, 2.5))
-    field.SetOrigin((-4.0, 3.0, 10.0))
-    field.SetDirection(sitk.VersorTransform((0.2, 0.3, 0.9), 0.4).GetMatrix())
-    return field
-
-
-@pytest.mark.parametrize("gradient", [np.diag([0.2, -0.1, 0.3]), np.diag([-1.5, 0.0, 0.0])])
-def test_jacobian_of_a_linear_map_is_its_determinant_everywhere(tmp_path: Path, gradient: np.ndarray) -> None:
-    """u(x) = G x on an oblique, anisotropic grid: det(I + G) at every voxel, folded wherever it is negative.
-    Differences are exact on a linear field, so any slip in the spacing or direction shows."""
-    from impact_reg_konfai.impact_reg import _jacobian_statistics
-
-    field = _oblique_field(np.zeros((6, 5, 4, 3)))
-    points = np.array(
-        [[field.TransformIndexToPhysicalPoint((x, y, z)) for x in range(4)] for z in range(6) for y in range(5)]
-    )
-    sitk.WriteImage(_oblique_field((points @ gradient.T).reshape(6, 5, 4, 3)), str(tmp_path / "field.mha"))
-
-    statistics = _jacobian_statistics(tmp_path / "field.mha", tmp_path / "work")
-
-    determinant = np.linalg.det(np.eye(3) + gradient)
-    assert statistics["Transform:Jacobian:min"] == pytest.approx(determinant)
-    assert statistics["Transform:Jacobian:folded_fraction"] == (1.0 if determinant <= 0 else 0.0)
-    assert statistics["Transform:Jacobian:sd_log"] == pytest.approx(0.0, abs=1e-6)
-
-
-def test_jacobian_read_in_slabs_is_the_whole_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Slabs of one plane with their halo give the statistics of the field read whole."""
-    from impact_reg_konfai import impact_reg
-
-    values = np.random.default_rng(2).normal(0.0, 1.5, (7, 6, 5, 3))
-    sitk.WriteTransform(sitk.DisplacementFieldTransform(_oblique_field(values)), str(tmp_path / "Transform.h5"))
-    whole = impact_reg._jacobian_statistics(tmp_path / "Transform.h5", tmp_path / "whole")
-    monkeypatch.setattr("konfai.utils.ITK.FIELD_SLAB_VOXELS", 1)
-
-    assert impact_reg._jacobian_statistics(tmp_path / "Transform.h5", tmp_path / "slabs") == pytest.approx(whole)
-    assert 0 < whole["Transform:Jacobian:folded_fraction"] < 1
-
-
-def test_a_compressed_field_is_read_by_regions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A compressed MetaImage decoded the whole volume for every region asked of it (300 landmarks, 300 whole
-    decodes): it is read through its uncompressed twin, so the landmarks and the Jacobian slabs read regions."""
-    from impact_reg_konfai import impact_reg
-    from konfai.utils.dataset import Dataset
-
-    values = np.random.default_rng(4).normal(0.0, 1.0, (7, 6, 5, 3))
-    sitk.WriteImage(_oblique_field(values), str(tmp_path / "field.mha"), useCompression=True)
-    reads: list[str] = []
-    for name in ("read_data", "read_data_slice"):
-        original = getattr(Dataset, name)
-        monkeypatch.setattr(
-            Dataset, name, lambda self, *a, _read=original, _name=name: reads.append(_name) or _read(self, *a)
-        )
-    monkeypatch.setattr("konfai.utils.ITK.FIELD_SLAB_VOXELS", 1)
-    impact_reg._displace(np.random.default_rng(5).uniform(-5.0, 15.0, (20, 3)), tmp_path / "field.mha", tmp_path / "a")
-    impact_reg._jacobian_statistics(tmp_path / "field.mha", tmp_path / "b")
-
-    assert reads and set(reads) == {"read_data_slice"}
-
-
 def test_eval_reports_the_jacobian_of_a_field_transform(
     tmp_path: Path, toy: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,10 +388,12 @@ def test_eval_reports_the_jacobian_of_a_field_transform(
         assert _main(monkeypatch, [*argv, "-o", str(tmp_path / out), "-q"]) == 0
 
     metrics = _metrics(tmp_path / "Field")
-    assert metrics["Transform:Jacobian:min"] == pytest.approx(1.0)
-    assert metrics["Transform:Jacobian:folded_fraction"] == 0.0
+    assert metrics["Transform:Transform:JacobianMin"] == pytest.approx(1.0)
+    assert metrics["Transform:Transform:JacobianFolding"] == 0.0
     summary = json.loads((tmp_path / "Field" / "Evaluation_summary.json").read_text())["case"]
-    assert {"Transform:Jacobian:sd_log", "FixedImage:MovingImage;Mask:MAE", "FixedFid:MovingFid:TRE"} <= set(summary)
+    assert {"Transform:Transform:JacobianLogStd", "FixedImage:MovingImage;Mask:MAE", "FixedFid:MovingFid:TRE"} <= set(
+        summary
+    )
     assert not any("Jacobian" in key for key in _metrics(tmp_path / "Affine"))
 
 
@@ -507,14 +408,63 @@ def test_one_field_given_for_every_case_is_measured_once(
     field.SetSpacing((2.0, 2.0, 2.0))
     sitk.WriteTransform(sitk.DisplacementFieldTransform(field), str(tmp_path / "Transform.h5"))
     measured: list[Path] = []
-    original = impact_reg._jacobian_statistics
-    monkeypatch.setattr(
-        impact_reg, "_jacobian_statistics", lambda path, work: measured.append(path) or original(path, work)
-    )
+    original = impact_reg.KonfAIApp.evaluate
+
+    def evaluate(self, *args, **kwargs):
+        if kwargs.get("evaluation_file") == "Evaluation_with_jacobian.yml":
+            measured.append(kwargs["inputs"][0][0])
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(impact_reg.KonfAIApp, "evaluate", evaluate)
     pair = ["-f", str(toy["fixed"]), str(toy["fixed"]), "-m", str(toy["moving"]), str(toy["moving"])]
     argv = ["eval", *pair, "--transform", str(tmp_path / "Transform.h5"), "-o", str(tmp_path / "Evaluation"), "-q"]
 
     assert _main(monkeypatch, argv) == 0
     assert len(measured) == 1
     summary = json.loads((tmp_path / "Evaluation" / "Evaluation_summary.json").read_text())["case"]
-    assert set(summary["Transform:Jacobian:min"]) == {"P000", "P001"}
+    assert set(summary["Transform:Transform:JacobianMin"]) == {"P000", "P001"}
+
+
+def test_eval_of_a_2d_pair_is_simpleitks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 2-D pair through a 2-D field: the MAE, the Dice and the TRE are SimpleITK's own, and the field's Jacobian is
+    measured. KonfAI resamples a 2-D image through a 2-D map: no plane is lifted."""
+    yy, xx = np.mgrid[0:40, 0:48].astype(np.float64)
+
+    def plane(array: np.ndarray, name: str) -> Path:
+        image = sitk.GetImageFromArray(array)
+        image.SetSpacing((0.8, 1.1))
+        image.SetOrigin((12.0, -5.0))
+        sitk.WriteImage(image, str(tmp_path / name))
+        return tmp_path / name
+
+    fixed = plane((np.sin(xx / 5) * np.cos(yy / 6) * 100 + 200).astype(np.float32), "fixed.mha")
+    moving = plane((np.sin((xx + 2) / 5) * np.cos(yy / 6) * 100 + 200).astype(np.float32), "moving.mha")
+    fixed_seg = plane(((np.sin(xx / 5) + np.cos(yy / 6)) > 0.4).astype(np.uint8) * 2, "fixed_seg.mha")
+    moving_seg = plane(((np.sin((xx + 2) / 5) + np.cos(yy / 6)) > 0.4).astype(np.uint8) * 2, "moving_seg.mha")
+    grid = sitk.ReadImage(str(fixed))
+    field_image = sitk.GetImageFromArray(np.stack([2 * np.sin(yy / 9), 1.5 * np.cos(xx / 11)], axis=-1), isVector=True)
+    field_image.CopyInformation(grid)
+    field = sitk.DisplacementFieldTransform(sitk.Image(field_image))
+    sitk.WriteTransform(field, str(tmp_path / "Transform.h5"))
+    points = np.array([[20.0, 3.0, 0.0], [40.0, 20.0, 0.0], [30.0, 30.0, 0.0]])
+    offset = np.array([0.5, -0.3, 0.0])
+    write_landmarks(points, tmp_path / "fixed.fcsv")
+    write_landmarks(points + offset, tmp_path / "moving.fcsv")
+    out = tmp_path / "Evaluation"
+    argv = ["eval", "-f", str(fixed), "-m", str(moving), "--transform", str(tmp_path / "Transform.h5")]
+    argv += ["--gt-fixed-seg", str(fixed_seg), "--gt-moving-seg", str(moving_seg)]
+    argv += ["--gt-fixed-fid", str(tmp_path / "fixed.fcsv"), "--gt-moving-fid", str(tmp_path / "moving.fcsv")]
+
+    assert _main(monkeypatch, [*argv, "-o", str(out), "-q"]) == 0
+    metrics = _metrics(out)
+    warped = sitk.GetArrayFromImage(sitk.Resample(sitk.ReadImage(str(moving)), grid, field, sitk.sitkLinear, 0.0))
+    assert metrics["FixedImage:MovingImage;Mask:MAE"] == pytest.approx(
+        np.abs(warped - sitk.GetArrayFromImage(grid)).mean(), rel=1e-5
+    )
+    moved_seg = sitk.Resample(sitk.ReadImage(str(moving_seg)), grid, field, sitk.sitkNearestNeighbor, 0)
+    a, b = sitk.GetArrayFromImage(moved_seg) == 2, sitk.GetArrayFromImage(sitk.ReadImage(str(fixed_seg))) == 2
+    assert metrics["MovingSeg:FixedSeg:Dice"] == pytest.approx(2 * (a & b).sum() / (a.sum() + b.sum()), abs=1e-3)
+    pushed = np.array([[*field.TransformPoint(point[:2].tolist()), 0.0] for point in points])
+    tre = np.linalg.norm(pushed - (points + offset), axis=1).mean()
+    assert metrics["FixedFid:MovingFid:TRE"] == pytest.approx(tre, abs=1e-6)
+    assert metrics["Transform:Transform:JacobianFolding"] == 0.0
