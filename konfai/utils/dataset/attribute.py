@@ -446,29 +446,38 @@ def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
     return [transform]
 
 
-def _transform_codec() -> list[tuple[type, str, Any]]:
-    """(sitk class, serialized type tag, decode factory) for every supported transform kind."""
+def _transform_codec() -> list[tuple[type, int, str, Any]]:
+    """(sitk class, dimension, serialized type tag, decode factory) for every supported transform kind, in 2-D and
+    3-D: the tag names the dimension, as ITK's own type names do."""
     return [
-        (sitk.Euler3DTransform, "Euler3DTransform_double_3_3", sitk.Euler3DTransform),
-        (sitk.AffineTransform, "AffineTransform_double_3_3", lambda: sitk.AffineTransform(3)),
-        (sitk.BSplineTransform, "BSplineTransform_double_3_3", lambda: sitk.BSplineTransform(3)),
+        (sitk.Euler3DTransform, 3, "Euler3DTransform_double_3_3", sitk.Euler3DTransform),
+        (sitk.Euler2DTransform, 2, "Euler2DTransform_double_2_2", sitk.Euler2DTransform),
+        *(
+            (kind, rank, f"{kind.__name__}_double_{rank}_{rank}", lambda kind=kind, rank=rank: kind(rank))
+            for kind in (sitk.AffineTransform, sitk.BSplineTransform)
+            for rank in (3, 2)
+        ),
     ]
 
 
 def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> np.ndarray:
     """Serialize a (possibly composite) transform: record each leaf's type tag and fixed parameters
     into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the leaves'
-    parameters, one row per leaf in application order, the shorter rows padded with NaN. A 3-D linear leaf the
+    parameters, one row per leaf in application order, the shorter rows padded with NaN. A 2-D or 3-D linear leaf the
     codec has no tag for (a translation, a versor, a similarity) is stored as the affine map it is, exactly."""
     from konfai.utils.ITK import _linear_map
 
     datas: list[np.ndarray] = []
     for i, leaf in enumerate(_flatten_transforms(transform)):
-        type_tag = next((tag for sitk_class, tag, _ in _transform_codec() if isinstance(leaf, sitk_class)), None)
-        if type_tag is None and leaf.IsLinear() and leaf.GetDimension() == 3:
+        rank = leaf.GetDimension()
+        type_tag = next(
+            (tag for kind, dimension, tag, _ in _transform_codec() if isinstance(leaf, kind) and dimension == rank),
+            None,
+        )
+        if type_tag is None and leaf.IsLinear() and rank in (2, 3):
             linear = _linear_map(leaf)
             leaf = sitk.AffineTransform(linear.matrix.ravel().tolist(), linear.translation.tolist())
-            type_tag = "AffineTransform_double_3_3"
+            type_tag = f"AffineTransform_double_{rank}_{rank}"
         if type_tag is None:
             raise DatasetManagerError(f"Unsupported transform type '{type(leaf).__name__}' for entry '{name}'.")
         attributes[f"{i}:Transform"] = type_tag
@@ -481,7 +490,7 @@ def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: A
 
 def _decode_transform(transform_type: str, name: str) -> sitk.Transform:
     """A fresh transform instance for a serialized type tag."""
-    for _, type_tag, factory in _transform_codec():
+    for _, _, type_tag, factory in _transform_codec():
         if transform_type == type_tag:
             return factory()
     raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")

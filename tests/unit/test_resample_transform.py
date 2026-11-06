@@ -905,3 +905,53 @@ if __name__ == "__main__":  # the golden fixture's regeneration entry point
     GOLDEN.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(GOLDEN, **_golden_resamples())
     print(f"wrote {GOLDEN} ({GOLDEN.stat().st_size / 1024:.0f} KiB)")
+
+
+SIZE_2D = (40, 52)
+
+
+def _image_2d(oblique: bool = True) -> "sitk.Image":
+    """A high-frequency 2-D phantom on an anisotropic grid off the origin, its direction a rotation."""
+    y, x = np.meshgrid(*[np.arange(extent, dtype=np.float64) for extent in SIZE_2D], indexing="ij")
+    image = sitk.GetImageFromArray((100.0 * np.sin(1.3 * y) + 80.0 * np.cos(1.9 * x)).astype(np.float32))
+    image.SetSpacing((0.8, 1.2))
+    image.SetOrigin((10.0, -5.0))
+    if oblique:
+        a = np.deg2rad(20.0)
+        image.SetDirection((np.cos(a), -np.sin(a), np.sin(a), np.cos(a)))
+    return image
+
+
+def _families_2d(image) -> list[tuple[str, "sitk.Transform"]]:
+    centre = image.TransformContinuousIndexToPhysicalPoint([(s - 1) / 2 for s in image.GetSize()])
+    euler = sitk.Euler2DTransform()
+    euler.SetCenter(centre)
+    euler.SetAngle(0.17)
+    euler.SetTranslation((2.0, -1.5))
+    affine = sitk.AffineTransform(2)
+    affine.SetCenter(centre)
+    affine.SetMatrix((1.08, 0.06, -0.04, 0.93))
+    affine.SetTranslation((3.0, -2.0))
+    bspline = sitk.BSplineTransformInitializer(image, [5, 5], 3)
+    size = np.asarray(bspline.GetParameters()).size
+    bspline.SetParameters(list(np.random.RandomState(3).uniform(-4.0, 4.0, size)))
+    filt = sitk.TransformToDisplacementFieldFilter()
+    filt.SetReferenceImage(image)
+    field = sitk.DisplacementFieldTransform(sitk.Cast(filt.Execute(bspline), sitk.sitkVectorFloat64))
+    return [("euler", euler), ("affine", affine), ("bspline", bspline), ("field", field)]
+
+
+@pytest.mark.parametrize("oblique", [False, True], ids=["axis-aligned", "oblique"])
+def test_a_2d_image_is_warped_through_a_2d_map_as_simpleitk_warps_it(oblique: bool) -> None:
+    """A 2-D map (rigid, affine, BSpline or displacement field) warps a 2-D image without passing it through a volume
+    one plane thick."""
+    image = _image_2d(oblique)
+    plane = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
+    for label, transform in _families_2d(image):
+        stage = Resample(transforms={"reg": False})
+        stage.set_datasets([_StoredTransform("reg", transform)])
+        stage.transform_shape("", CASE, list(SIZE_2D), _attribute(image))
+        want = sitk.GetArrayFromImage(sitk.Resample(image, image, transform, sitk.sitkLinear, 0.0))
+        got = stage(CASE, plane, _attribute(image)).squeeze(0).numpy()
+        deviation = float(np.abs(want - got).max())
+        assert deviation <= 1e-3 * float(np.abs(want).max()), f"{label}: {deviation:.4g}"

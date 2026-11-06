@@ -334,3 +334,66 @@ def test_a_whole_read_of_a_field_entry_is_what_itk_decodes_off_the_same_file(tmp
     assert data.dtype == np.float32 and want.dtype == np.float64 and data.flags.c_contiguous
     assert data.tobytes() == want.astype(np.float32).tobytes()
     assert dict(attributes) == dict(want_attributes)
+
+
+def _maps_2d() -> list[tuple[str, "sitk.Transform"]]:
+    """The 2-D maps a registration writes: SimpleITK's own files, as elastix and impact-reg-konfai leave them."""
+    image = sitk.Image([12, 9], sitk.sitkFloat32)
+    image.SetSpacing((0.8, 1.2))
+    image.SetOrigin((10.0, -5.0))
+    image.SetDirection((np.cos(0.3), -np.sin(0.3), np.sin(0.3), np.cos(0.3)))
+    euler = sitk.Euler2DTransform((14.0, -1.0), 0.2, (1.5, -0.5))
+    affine = sitk.AffineTransform((1.1, 0.05, -0.03, 0.92), (2.0, -1.0), (14.0, -1.0))
+    bspline = sitk.BSplineTransformInitializer(image, [3, 3], 3)
+    bspline.SetParameters(list(np.random.RandomState(5).uniform(-2.0, 2.0, len(bspline.GetParameters()))))
+    filt = sitk.TransformToDisplacementFieldFilter()
+    filt.SetReferenceImage(image)
+    field = sitk.DisplacementFieldTransform(sitk.Cast(filt.Execute(bspline), sitk.sitkVectorFloat64))
+    return [("euler", euler), ("affine", affine), ("bspline", bspline), ("field", field)]
+
+
+@pytest.mark.parametrize("suffix", [".h5", ".tfm"])
+def test_a_2d_transform_file_reads_back_as_its_map(tmp_path: Path, suffix: str) -> None:
+    """A 2-D registration's transform file (rigid, affine, BSpline, displacement field) reads back through the backend,
+    with its own dimension: its header and its points, as SimpleITK reads them."""
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    for label, transform in _maps_2d():
+        if label == "field" and suffix == ".tfm":
+            continue  # a field goes as HDF5
+        case = tmp_path / "out" / label
+        case.mkdir(parents=True)
+        sitk.WriteTransform(transform, str(case / f"Reg{suffix}"))
+        dataset.get_infos("Reg", label)
+        back = dataset.read_transform("Reg", label)
+        assert back.GetDimension() == 2, label
+        for point in ((12.0, -3.0), (15.5, 2.0)):
+            assert back.TransformPoint(point) == pytest.approx(transform.TransformPoint(point)), label
+
+
+def test_a_2d_field_is_written_and_read_back(tmp_path: Path) -> None:
+    """A 2-component 2-D displacement field is an entry too: written as the file SimpleITK writes, read back whole and
+    by region."""
+    field = np.random.RandomState(6).uniform(-1.5, 1.5, (2, 7, 9))
+    attributes = Attribute()
+    attributes["Origin"] = np.asarray((4.0, -2.0))
+    attributes["Spacing"] = np.asarray((0.9, 1.3))
+    attributes["Direction"] = np.asarray((np.cos(0.2), -np.sin(0.2), np.sin(0.2), np.cos(0.2)))
+    dataset = Dataset(tmp_path / "out", "itktransform")
+    dataset.write("Transform", "P000", field, attributes)
+
+    shape, back_attributes = dataset.get_infos("Transform", "P000")
+    assert shape == [2, 7, 9]
+    np.testing.assert_allclose(back_attributes.get_np_array("Direction"), attributes.get_np_array("Direction"))
+    oracle = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Transform.h5"))
+    image = sitk.GetImageFromArray(np.moveaxis(field, 0, -1), isVector=True)
+    image.SetOrigin((4.0, -2.0))
+    image.SetSpacing((0.9, 1.3))
+    image.SetDirection(tuple(attributes.get_np_array("Direction")))
+    want = sitk.DisplacementFieldTransform(sitk.Cast(image, sitk.sitkVectorFloat64))
+    for point in ((5.0, -1.0), (7.5, 3.0)):
+        assert oracle.TransformPoint(point) == pytest.approx(want.TransformPoint(point))
+    assert dataset.bounded_region_reads("Transform", "P000")
+    whole, _ = dataset.read_data("Transform", "P000")
+    np.testing.assert_allclose(np.asarray(whole), field, rtol=1e-6)  # read at float32, as a region read is
+    region, _ = dataset.read_data_slice("Transform", "P000", (slice(0, 2), slice(2, 5), slice(1, 8)))
+    np.testing.assert_array_equal(np.asarray(region), np.asarray(whole)[:, 2:5, 1:8])
