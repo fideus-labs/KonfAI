@@ -174,6 +174,12 @@ def test_the_preset_save_command_starts_from_another_preset(tmp_path: Path, monk
     cli.main_apps()
     saved = json.loads((root / "app.json").read_text())["presets"]["mine"]
     assert saved["set"] == ["grid_spacing=3", "iterations=90"]
+    # the full reference of another app's preset: its --set must apply here, which saving checks
+    other = _app(tmp_path / "other", {"tight": {"description": "", "set": ["grid_spacing=2"]}})
+    argv = ["konfai-apps", "preset", "save", f"{root}#theirs", "--from", f"{other}#tight", "--set", "iterations=5"]
+    monkeypatch.setattr(sys, "argv", argv)
+    cli.main_apps()
+    assert json.loads((root / "app.json").read_text())["presets"]["theirs"]["set"] == ["grid_spacing=2", "iterations=5"]
 
 
 def test_a_preset_of_one_s_own_never_hides_a_published_one(tmp_path: Path) -> None:

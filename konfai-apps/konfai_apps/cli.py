@@ -293,7 +293,8 @@ def _with_run_options(
 
 
 def _save_preset(app: str, from_preset: str | None, description: str, overrides: list[str]) -> None:
-    """``preset save APP#NAME``: the overrides of ``--from`` (if any) then ``--set``, kept as preset NAME."""
+    """``preset save APP#NAME``: the overrides of ``--from`` (any ``APP#PRESET``, or a preset of APP by its name), then
+    ``--set``, kept as preset NAME; they must apply to APP, which saving checks."""
     base, name = split_preset(app)
     if name is None:
         raise AppRepositoryError(f"'{app}' names no preset to save.", "Name it APP#NAME (ConvexAdam#mine).")
@@ -301,9 +302,9 @@ def _save_preset(app: str, from_preset: str | None, description: str, overrides:
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
     start: tuple[str, ...] = ()
-    if from_preset is not None:
-        info.use_preset(from_preset)
-        start = info.get_preset().overrides  # type: ignore[union-attr]
+    if from_preset is not None:  # any APP#PRESET, or a preset of this app by its name
+        source = get_app_repository_info(from_preset if "#" in from_preset else f"{base}#{from_preset}", False)
+        start = source.get_preset().overrides  # type: ignore[union-attr]
     written = info.save_preset(name, description, [*start, *overrides])
     print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
 
@@ -938,7 +939,13 @@ def main_apps() -> None:
         "local app folder.",
     )
     save_p.add_argument("app", help="APP#NAME: the app and the name of the new preset ('repo_id:app_name#NAME').")
-    save_p.add_argument("--from", dest="from_preset", default=None, help="Start from this preset's --set.")
+    save_p.add_argument(
+        "--from",
+        dest="from_preset",
+        default=None,
+        metavar="APP#PRESET",
+        help="Start from this preset's --set: any APP#PRESET, or a preset of this app by its name.",
+    )
     save_p.add_argument("--description", default="", help="What the preset is for.")
     _add_config_overrides(save_p)
 
