@@ -283,3 +283,9 @@ def test_a_hub_app_s_revision_is_the_snapshot_it_runs_from(tmp_path: Path) -> No
     snapshot = tmp_path / "hub" / "models--VBoussot--ImpactReg" / "snapshots" / "09d2a191" / "ConvexAdam" / "app.json"
     info._download = lambda filename: snapshot  # type: ignore[method-assign]
     assert info.get_revision() == "09d2a191"
+
+
+def test_list_shows_each_app_s_presets(capsys: pytest.CaptureFixture) -> None:
+    cli.print_apps("konfai-apps", [("ConvexAdam", {"display_name": "ConvexAdam", "presets": _PRESETS}), ("Demons", {})])
+    out = capsys.readouterr().out
+    assert "#composite, #coarse, #fine_grid" in out and "NAME#PRESET runs a preset" in out

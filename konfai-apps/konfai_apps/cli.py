@@ -386,7 +386,10 @@ def print_apps(prog: str, apps: list[tuple[str, dict]]) -> None:
         print(f"{name:<{width}}  {manifest.get('display_name', '')}".rstrip())
         for line in textwrap.wrap(manifest.get("short_description", ""), columns):
             print(f"{'':<{width}}  {line}")
-    print(f"\n'{prog} show NAME' says what an app runs, what it needs and what --set tunes.")
+        if manifest.get("presets"):
+            for line in textwrap.wrap(f"#{', #'.join(manifest['presets'])}", columns):
+                print(f"{'':<{width}}  {line}")
+    print(f"\n'{prog} show NAME' says what an app runs, what it needs and what --set tunes; NAME#PRESET runs a preset.")
 
 
 #: The ``app.json`` keys ``show`` prints in its header or leaves to a UI; the others are printed as they are.
