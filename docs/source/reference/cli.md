@@ -148,7 +148,7 @@ Per command:
 
 | Option | Meaning |
 | --- | --- |
-| `--set NAME=VALUE` | Change a config value (repeatable). A bare name changes a model parameter (`--set iterations=300`), a dotted one a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |
+| `--set NAME=VALUE` | Change a config value (repeatable). A name changes a model parameter (`--set iterations=300`), a nested one dotted from the model (`--set models.0.layers_mask=01`); a name from the config root is a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |
 | `--patch-size` | The inference patch size (one value for a cube). |
 | `--batch-size` | The batch size. Without it, the app decides (`batch_size: 0` measures it on the GPU). |
 

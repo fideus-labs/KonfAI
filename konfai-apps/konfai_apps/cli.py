@@ -220,8 +220,9 @@ def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
 def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
     """Add the generic config override (``--set NAME=VALUE``, repeatable).
 
-    A bare ``NAME`` tunes a model parameter (e.g. ``--set iterations=300``); a dotted ``NAME`` is a full
-    path from the config root (e.g. ``Predictor.Dataset.batch_size=2``). The value is parsed as YAML (int /
+    A ``NAME`` tunes a model parameter (e.g. ``--set iterations=300``), a nested one dotted from the model
+    (``--set models.0.layers_mask=01``); a dotted ``NAME`` that starts at the config root is a full path
+    (e.g. ``Predictor.Dataset.batch_size=2``). The value is parsed as YAML (int /
     float / bool / list / string). This is the generic mechanism a UI drives to tune a preset's parameters.
     """
     parser.add_argument(
@@ -230,7 +231,8 @@ def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="NAME=VALUE",
         default=None,
-        help="Tune a model parameter, e.g. --set iterations=300 (repeatable; a dotted NAME targets any config key).",
+        help="Tune a model parameter, e.g. --set iterations=300 or models.0.layers_mask=01 (repeatable; a NAME from "
+        "Predictor. or Trainer. targets any config key).",
     )
 
 
@@ -382,7 +384,6 @@ def print_app(name: str, described: dict[str, Any]) -> None:
     fill = functools.partial(textwrap.fill, width=shutil.get_terminal_size().columns, break_on_hyphens=False)
     print(f"{name}: {manifest.get('display_name', '')}\n")
     print(fill(manifest.get("description") or manifest.get("short_description", "")), end="\n\n")
-    model_class = described["classpath"].partition(":")[2]
     models = [
         f"{ref} ({_megabytes(size)})" if size else f"{ref} (not cached yet: downloaded on the first run)"
         for ref, size in described["models"].items()
@@ -421,7 +422,7 @@ def print_app(name: str, described: dict[str, Any]) -> None:
                 )
 
     after = f", after preset '{described['preset']}'" if described.get("preset") else ""
-    print(f"\nParameters{after}: --set NAME=VALUE (repeatable); a nested one takes its full path.")
+    print(f"\nParameters{after}: --set NAME=VALUE (repeatable), a nested one dotted (models.0.ref=...).")
     parameters, described_already = described["parameters"], set()
 
     def rows_of(values: dict, constraints: dict, prefix: str) -> list[tuple[str, object, dict]]:
@@ -429,7 +430,7 @@ def print_app(name: str, described: dict[str, Any]) -> None:
         for key, value in values.items():
             constraint = constraints.get(key) or constraints.get("*") or {}
             if isinstance(value, dict) and value:
-                found += rows_of(value, constraint, f"{prefix or f'Predictor.Model.{model_class}.'}{key}.")
+                found += rows_of(value, constraint, f"{prefix}{key}.")
             else:
                 found.append((f"{prefix}{key}", value, constraint))
         return found

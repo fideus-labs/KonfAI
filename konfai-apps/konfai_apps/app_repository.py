@@ -422,9 +422,9 @@ _TRAINING_KNOBS = {"batch_size": "Trainer.Dataset.batch_size"}
 # A bare ``--set`` name resolves inside the model block only; every other key needs its full path.
 # The same overrides engine writes inference and fine-tune configs, so the hint names both roots.
 _DOTTED_PATH_HINT = (
-    "A bare name is a model parameter; a config key needs its full dotted path from the config root,"
-    " e.g. 'Predictor.Dataset.batch_size=4' in an inference config or 'Trainer.Dataset.batch_size=4'"
-    " in a fine-tune one."
+    "A name is a model parameter, a nested one dotted from the model (models.0.layers_mask=01); any other config key"
+    " takes its full dotted path from the config root, e.g. 'Predictor.Dataset.batch_size=4' in an inference config or"
+    " 'Trainer.Dataset.batch_size=4' in a fine-tune one."
 )
 
 
@@ -473,16 +473,18 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         key_path = key_path.strip()
         if not key_path:
             raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
-        if "." in key_path:
-            # Full dotted path from the config root (any key, for advanced overrides).
+        first = key_path.split(".", 1)[0]
+        if "." in key_path and (model_params is None or first in (data or {})):
+            # A dotted path from the config root (Predictor.Dataset.batch_size): any key, for advanced overrides.
             keys = [key for key in key_path.split(".") if key]
         elif model_params is None:
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': the config has no model parameter block. {_DOTTED_PATH_HINT}"
             )
         else:
-            # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
-            keys = [*model_path, key_path]
+            # Any other name is a model parameter, nested ones included (models.0.layers_mask): resolved in
+            # Predictor.Model.<ClassName>.
+            keys = [*model_path, *(key for key in key_path.split(".") if key)]
         node = data
         for key in keys[:-1]:
             if not isinstance(node, dict) or key not in node:
@@ -499,7 +501,7 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
                 + did_you_mean(leaf, known),
-                *([] if "." in key_path else [_DOTTED_PATH_HINT]),
+                _DOTTED_PATH_HINT,
             )
         try:
             value = value_parser.load(raw_value)
@@ -979,9 +981,9 @@ class LocalAppRepository(AppRepositoryInfo):
         """Apply ``--set NAME=VALUE`` overrides to the resolved prediction config before it runs.
 
         A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
-        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly. A dotted
-        ``NAME`` (e.g. ``Predictor.Dataset.batch_size``) is a full path from the config root, for any other
-        key. Either way the key must exist, in the config or, inside the model block, among what the model
+        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly, and a dotted one
+        is a nested model parameter (``models.0.layers_mask``). A dotted ``NAME`` that starts at the config root
+        (``Predictor.Dataset.batch_size``) is a full path, for any other key. Either way the key must exist, in the config or, inside the model block, among what the model
         declares there (an argument of its class, a field of a ``models`` entry: a preset lists what it sets, not
         every knob its model takes), so a typo raises here instead of silently adding a dead key; a value the
         declared type refuses (a choice, a type, a range) raises here too, not once the run has started. ``VALUE``
