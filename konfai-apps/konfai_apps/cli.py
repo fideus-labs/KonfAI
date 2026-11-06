@@ -44,6 +44,7 @@ from .app_repository import (
 )
 from .errors import AppRepositoryError
 from .options import add_device, add_tmp_dir
+from .presets import split_preset
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
@@ -264,6 +265,22 @@ def list_apps(repo: str, task: str | None = None) -> list[tuple[str, dict]]:
     return [(name, manifest) for name, manifest in apps if task is None or manifest.get("task", task) == task]
 
 
+def _save_preset(app: str, from_preset: str | None, description: str, overrides: list[str]) -> None:
+    """``preset save APP#NAME``: the overrides of ``--from`` (if any) then ``--set``, kept as preset NAME."""
+    base, name = split_preset(app)
+    if name is None:
+        raise AppRepositoryError(f"'{app}' names no preset to save.", "Name it APP#NAME (ConvexAdam#mine).")
+    info = get_app_repository_info(base, False)
+    if not isinstance(info, LocalAppRepository):
+        raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
+    start: tuple[str, ...] = ()
+    if from_preset is not None:
+        info.use_preset(from_preset)
+        start = info.get_preset().overrides  # type: ignore[union-attr]
+    written = info.save_preset(name, description, [*start, *overrides])
+    print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
+
+
 def _show(app: str) -> None:
     """``show``: ``describe_app`` of ``app`` (``repo:name`` or a local app folder), printed."""
     repo, name = _split_app(app)
@@ -271,14 +288,18 @@ def _show(app: str) -> None:
 
 
 def _split_app(app: str) -> tuple[str, str]:
-    """``repo:name`` or a local app folder -> ``(repo, name)``."""
+    """``repo:name`` or a local app folder, ``#preset`` after either -> ``(repo, name[#preset])``."""
+    app, preset = split_preset(app)
     path = Path(app).expanduser()
     if path.is_dir():
-        return str(path.resolve().parent), path.name
-    repo, colon, name = app.partition(":")
-    if not colon:
-        raise AppRepositoryError(f"'{app}' names no app.", "Name it 'repo_id:app_name', or give a local app folder.")
-    return repo, name
+        repo, name = str(path.resolve().parent), path.name
+    else:
+        repo, colon, name = app.partition(":")
+        if not colon:
+            raise AppRepositoryError(
+                f"'{app}' names no app.", "Name it 'repo_id:app_name', or give a local app folder."
+            )
+    return repo, name if preset is None else f"{name}#{preset}"
 
 
 def describe_app(repo: str, name: str) -> dict[str, Any]:
@@ -290,14 +311,15 @@ def describe_app(repo: str, name: str) -> dict[str, Any]:
     from huggingface_hub import try_to_load_from_cache
     from ruamel.yaml import YAML
 
+    base = split_preset(name)[0]
     try:
         info = get_app_repository_info(app_id(repo, name), False)
     except AppRepositoryError:
         names = app_names(repo)  # only now: a warm cache resolves one app offline, not the listing
-        if name in names:
+        if base in names:
             raise
         raise AppRepositoryError(
-            f"No app '{name}' in {repo}.{did_you_mean(name, names, 3)}", f"Its apps: {', '.join(names)}."
+            f"No app '{base}' in {repo}.{did_you_mean(base, names, 3)}", f"Its apps: {', '.join(names)}."
         ) from None
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{name}' is not a local or Hugging Face app.")
@@ -312,8 +334,11 @@ def describe_app(repo: str, name: str) -> dict[str, Any]:
             Path(cached).stat().st_size if isinstance(cached, str) else None
         )
     lines = files["requirements.txt"].read_text(encoding="utf-8").splitlines() if "requirements.txt" in files else []
+    chosen = info.get_preset()
     return {
         "manifest": manifest,
+        "preset": chosen.name if chosen else None,
+        "presets": {preset.name: preset.to_json() for preset in info.get_presets().values()},
         "classpath": config["Predictor"]["Model"]["classpath"],
         "parameters": parameters,
         "models": models,
@@ -347,6 +372,7 @@ _SHOWN_KEYS = {
     "terminology",
     "icon",
     "model_files",
+    "presets",
 }
 
 
@@ -372,7 +398,30 @@ def print_app(name: str, described: dict[str, Any]) -> None:
         if value:
             print(fill(value, initial_indent=f"  {label:<{width}}", subsequent_indent=" " * (width + 2)))
 
-    print("\nParameters: --set NAME=VALUE (repeatable); a nested one takes its full path.")
+    presets = described.get("presets") or {}
+    if presets:
+        base = name.partition("#")[0]
+        print(f"\nPresets: {base}#NAME, each a list of --set applied before the run's own.")
+        for preset_name, preset in presets.items():
+            mark = "*" if preset_name == described.get("preset") else " "
+            print(
+                fill(
+                    f"{preset_name}  {preset['description']}".rstrip(),
+                    initial_indent=f" {mark}",
+                    subsequent_indent="      ",
+                )
+            )
+            if preset["set"]:
+                print(
+                    fill(
+                        " ".join(f"--set {override}" for override in preset["set"]),
+                        initial_indent="      ",
+                        subsequent_indent="      ",
+                    )
+                )
+
+    after = f", after preset '{described['preset']}'" if described.get("preset") else ""
+    print(f"\nParameters{after}: --set NAME=VALUE (repeatable); a nested one takes its full path.")
     parameters, described_already = described["parameters"], set()
 
     def rows_of(values: dict, constraints: dict, prefix: str) -> list[tuple[str, object, dict]]:
@@ -623,7 +672,11 @@ def main_apps() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_args(parser: argparse.ArgumentParser, is_fine_tune: bool = False) -> None:
-        parser.add_argument("app", type=str, help="KonfAI App name")
+        parser.add_argument(
+            "app",
+            type=str,
+            help="KonfAI App: repo_id:app_name or a local app folder, #preset after it to run one of its presets",
+        )
         parser.add_argument("--host", type=str, default=None, help="Server host")
         parser.add_argument("--port", type=int, default=8000, help="Server port")
         parser.add_argument(
@@ -826,7 +879,20 @@ def main_apps() -> None:
     list_p.add_argument("repo", help="A Hugging Face repository ('repo_id[@revision]') or a local directory of apps.")
     list_p.add_argument("--task", default=None, help="Only the apps declaring this task.")
     show_p = subparsers.add_parser("show", help="Say what an app runs, what it needs and what --set tunes.")
-    show_p.add_argument("app", help="'repo_id:app_name', or a local app folder.")
+    show_p.add_argument(
+        "app", help="'repo_id:app_name' or a local app folder, '#preset' after it for one of its presets."
+    )
+    preset_p = subparsers.add_parser("preset", help="Keep a preset of your own: a name for a list of --set.")
+    preset_sub = preset_p.add_subparsers(dest="preset_command", required=True)
+    save_p = preset_sub.add_parser(
+        "save",
+        help="Save APP#NAME: in your presets file for an app of the Hugging Face cache, in the app's app.json for a "
+        "local app folder.",
+    )
+    save_p.add_argument("app", help="APP#NAME: the app and the name of the new preset ('repo_id:app_name#NAME').")
+    save_p.add_argument("--from", dest="from_preset", default=None, help="Start from this preset's --set.")
+    save_p.add_argument("--description", default="", help="What the preset is for.")
+    _add_config_overrides(save_p)
 
     download_p = subparsers.add_parser(
         "download", help="Download KonfAI App files from Hugging Face into the local cache."
@@ -864,6 +930,10 @@ def main_apps() -> None:
 
     if kwargs.get("command") == "show":
         _show(kwargs["app"])
+        return
+
+    if kwargs.get("command") == "preset":
+        _save_preset(kwargs["app"], kwargs["from_preset"], kwargs["description"], kwargs["config_overrides"] or [])
         return
 
     host = kwargs.pop("host")

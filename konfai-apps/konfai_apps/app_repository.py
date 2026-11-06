@@ -38,6 +38,7 @@ from dataclasses import dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Union, get_args, get_origin
+from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -53,6 +54,15 @@ from packaging.version import InvalidVersion, Version
 from ruamel.yaml import YAML, YAMLError
 
 from .errors import AppMetadataError, AppRepositoryError
+from .presets import (
+    PRESET_NAME,
+    Preset,
+    load_presets_file,
+    read_presets,
+    split_preset,
+    user_presets_file,
+    write_preset,
+)
 
 
 def _plain(value: Any) -> Any:
@@ -579,6 +589,7 @@ class AppRepositoryInfo(ABC):
         self._patch_size = patch_size
         self._task = task
         self._icon_path = icon_path
+        self._preset: Preset | None = None
 
     def __str__(self) -> str:
         return (
@@ -599,6 +610,24 @@ class AppRepositoryInfo(ABC):
 
     def get_display_name(self) -> str:
         return self._display_name
+
+    def get_presets(self) -> dict[str, Preset]:
+        """The presets this app runs with, by name: none unless it declares some."""
+        return {}
+
+    def get_preset(self) -> Preset | None:
+        """The preset chosen with ``#`` (:meth:`use_preset`), None for the app's base config."""
+        return self._preset
+
+    def use_preset(self, name: str) -> None:
+        """Run with preset ``name`` from now on: its overrides are applied before any ``--set``."""
+        presets = self.get_presets()
+        if name not in presets:
+            raise AppRepositoryError(
+                f"App '{self.get_name()}' has no preset '{name}'.{did_you_mean(name, presets)}",
+                f"Its presets: {', '.join(sorted(presets))}." if presets else "It declares none.",
+            )
+        self._preset = presets[name]
 
     def get_description(self) -> str:
         return self._description
@@ -743,6 +772,7 @@ class LocalAppRepository(AppRepositoryInfo):
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
         self._portable_assets: list[str] = [str(name) for name in app_repository_metadata.get("portable_assets", [])]
+        self._published_presets = read_presets(app_repository_metadata.get("presets"), f"the app.json of '{app_name}'")
 
         # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-weight files
         # are all downloaded above, so resolving it here costs nothing.
@@ -960,6 +990,7 @@ class LocalAppRepository(AppRepositoryInfo):
         key stays that string (``layers_mask=01``). This is the generic override the UI (SlicerKonfAI) drives to
         tune a preset; :func:`apply_overrides` resolves it.
         """
+        overrides = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
         if not overrides:
             return
         yaml = YAML()
@@ -968,6 +999,71 @@ class LocalAppRepository(AppRepositoryInfo):
         apply_overrides(data, overrides, lambda: self._model_class(data))
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
+
+    def _user_presets_file(self) -> Path | None:
+        """Where the user keeps their own presets of this app; None when they go in its own ``app.json``."""
+        return None
+
+    def get_presets(self) -> dict[str, Preset]:
+        """The app's published presets (its ``app.json``) and the user's own (:func:`user_presets_file`). A name in
+        both is refused: a preset of one's own never hides a published one."""
+        own_file = self._user_presets_file()
+        own = load_presets_file(own_file) if own_file else {}
+        clash = sorted(set(own) & set(self._published_presets))
+        if clash:
+            raise AppRepositoryError(
+                f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{self.get_name()}' publishes too.",
+                "Rename yours: a preset of your own never hides a published one.",
+            )
+        return {**self._published_presets, **own}
+
+    def use_preset(self, name: str) -> None:
+        """Choose preset ``name``, refused here if its overrides do not resolve against the app's config: a preset
+        that no longer fits its app fails when it is chosen, not halfway through a run."""
+        presets = self.get_presets()
+        if name in presets:  # an unknown name is the base class's refusal, with the app's presets
+            self._check(presets[name].overrides, f"preset '{name}'")
+        super().use_preset(name)
+
+    def _check(
+        self, overrides: tuple[str, ...] | list[str], what: str, prediction_file: str = "Prediction.yml"
+    ) -> None:
+        """Apply ``overrides`` to a copy of the app's config, the refusal naming ``what``."""
+        filenames = self._all_repo_filenames()
+        config_filename = self._find_repo_filename(prediction_file, filenames)
+        if config_filename is None or not overrides:
+            return
+        with open(self._download(config_filename), encoding="utf-8") as file:
+            data = YAML().load(file)
+        try:
+            apply_overrides(data, list(overrides), lambda: self._model_class(data, filenames))
+        except AppRepositoryError as error:
+            raise AppRepositoryError(f"The {what} of app '{self.get_name()}' does not apply: {error}") from error
+
+    def save_preset(self, name: str, description: str, overrides: list[str]) -> Path:
+        """Keep ``overrides`` as preset ``name`` of this app and return the file written: the user's presets file for
+        an app of the Hugging Face cache, which is not theirs to edit, else the app's own ``app.json``.
+
+        A preset is flat: ``overrides`` are relative to the base config, so a preset made from another one carries
+        that one's overrides first (``--from``). A name set twice keeps its last value, once.
+        """
+        if not PRESET_NAME.fullmatch(name):
+            raise AppRepositoryError(f"'{name}' is not a preset name: letters, digits, '_', '.' and '-'.")
+        own_file = self._user_presets_file()
+        if own_file is not None and name in self._published_presets:
+            raise AppRepositoryError(
+                f"App '{self.get_name()}' publishes a preset '{name}' already.", "Save yours under another name."
+            )
+        last = {override.partition("=")[0].strip(): override for override in overrides}
+        preset = Preset(name, description, tuple(last.values()))
+        self._check(preset.overrides, f"preset '{name}'")
+        if own_file is not None:
+            write_preset(own_file, preset)
+            return own_file
+        app_json = self._download("app.json")
+        write_preset(app_json, preset, key="presets")
+        self._published_presets = {**self._published_presets, name: preset}
+        return app_json
 
     def get_parameters(self, prediction_file: str = "Prediction.yml") -> dict[str, Any]:
         """The model's configurable parameters + their constraints: the single reader a UI needs.
@@ -986,6 +1082,8 @@ class LocalAppRepository(AppRepositoryInfo):
             return {"values": {}, "constraints": {}}
         with open(self._download(config_filename), encoding="utf-8") as file:
             data = YAML().load(file)
+        if self._preset is not None:  # the values the run starts from: a UI compares its edits against these
+            apply_overrides(data, list(self._preset.overrides), lambda: self._model_class(data, filenames))
         _, params = self._model_param_block(data)
         structural = {"outputs_criterions", "optimizer", "schedulers", "engine", "parameter_maps", "classpath"}
         values = {name: _plain(value) for name, value in (params or {}).items() if name not in structural}
@@ -1110,11 +1208,17 @@ class LocalAppRepository(AppRepositoryInfo):
             with open(metadata_file, "w", encoding="utf-8") as file:
                 json.dump(metadata, file, indent=2, ensure_ascii=False)
 
-        if config_overrides:
+        if config_overrides or self._preset is not None:
             config = path / prediction_file
             if not config.is_file():
                 raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
             self._apply_config_overrides(str(config), config_overrides)
+            # The copy's base config is now this preset and these overrides: the presets it published were
+            # relative to the old base, so they do not travel with it.
+            metadata_file = path / "app.json"
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            if metadata.pop("presets", None) is not None:
+                metadata_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def download_bundle(
         self,
@@ -1568,7 +1672,11 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
         config = self._app_directory / self._app_name / prediction_file
         if not config.is_file():
             raise AppRepositoryError(f"Cannot save defaults: '{prediction_file}' not found in app '{self._app_name}'.")
-        self._apply_config_overrides(str(config), overrides)
+        preset, self._preset = self._preset, None  # the base config's defaults: the chosen preset is not baked in
+        try:
+            self._apply_config_overrides(str(config), overrides)
+        finally:
+            self._preset = preset
 
 
 @functools.cache
@@ -1600,6 +1708,9 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         self._repo_id = repo_id
         self._force_update = force_update
         super().__init__(app_name)
+
+    def _user_presets_file(self) -> Path | None:
+        return user_presets_file(self._repo_id.partition("@")[0], self._app_name)
 
     @staticmethod
     def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:
@@ -1777,7 +1888,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
     def __init__(self, remote_server: RemoteServer, app_name: str) -> None:
         self._remote_server = remote_server
-        url = f"{remote_server.get_url()}/repo_apps/{app_name}"
+        url = f"{remote_server.get_url()}/repo_apps/{quote(app_name, safe='/:@')}"
         response = requests.get(
             url, headers=remote_server.get_headers(), timeout=remote_server.timeout, verify=remote_server.verify
         )
@@ -1786,6 +1897,8 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
         if not data.get("available", False):
             raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
+        # The server resolves a preset itself: the app's are listed for a client to choose from.
+        self._remote_presets = read_presets(data.get("presets"), f"app '{app_name}' of {remote_server.get_url()}")
         self._has_capabilities = data["has_capabilities"]
         # Servers that omit the 'finetunable' field fall back to the inference capability
         # (fine-tune is offered for any inference-capable app).
@@ -1849,6 +1962,9 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
     def is_finetunable(self) -> bool:
         return self._finetunable
 
+    def get_presets(self) -> dict[str, Preset]:
+        return self._remote_presets
+
     def get_name(self) -> str:
         return self._app_name
 
@@ -1859,7 +1975,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         def safe_name(value: str) -> str:
             return re.sub(r"[^a-zA-Z0-9._-]+", "_", value)
 
-        url = f"{self._remote_server.get_url()}/repo_apps_config/{self._app_name}"
+        url = f"{self._remote_server.get_url()}/repo_apps_config/{quote(self._app_name, safe='/:@')}"
         response = requests.get(
             url,
             headers=self._remote_server.get_headers(),
@@ -1899,7 +2015,7 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     """
     Resolve an app repository identifier into a concrete repository adapter.
 
-    Supported formats:
+    Supported formats, each followed by ``#preset`` to run one of the app's presets:
     - ``repo_id:app_name`` -> Hugging Face repository
     - ``/path/to/app_repository`` -> local folder
     - ``host:port:app_name`` -> remote KonfAI app server
@@ -1907,6 +2023,15 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     - ``https://host:port:app_name[|token]`` -> the same server over HTTPS, its certificate checked against
       ``KONFAI_API_CA_CERT`` when set
     """
+    app_id, preset = split_preset(app_id)
+    info = _app_repository_info(app_id, force_update)
+    if preset is not None:
+        info.use_preset(preset)
+    return info
+
+
+def _app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInfo:
+    """:func:`get_app_repository_info` without the ``#preset``."""
     local_path = _resolve_local_app_path(app_id)
     if local_path is not None:
         if local_path.exists():

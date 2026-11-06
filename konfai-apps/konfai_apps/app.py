@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -679,8 +680,10 @@ class KonfAIAppClient(AbstractKonfAIApp):
                     read_timeout: int = 600
 
                     body = _multipart_body(files, data)
+                    # The app is a path segment: a preset's '#' goes as %23, or the URL would end at it.
+                    url = f"{self.remote_server.get_url()}/apps/{quote(self.app, safe='/:@')}/{func.__name__}"
                     with requests.post(
-                        f"{self.remote_server.get_url()}/apps/{self.app}/{func.__name__}",
+                        url,
                         data=body,
                         headers={**self.remote_server.get_headers(), "Content-Type": body.content_type},
                         timeout=(connect_timeout, read_timeout),
