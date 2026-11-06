@@ -54,6 +54,9 @@ from .app_repository import LocalAppRepository, get_app_repository_info
 from .errors import AppRepositoryError, KonfAIAppClientError
 from .remote_options import REMOTE_OPTION_FIELDS, collect_remote_options
 
+#: The file an inference writes in its output folder: what ran (``LocalAppRepository.record``).
+RUN_RECORD = "konfai-run.json"
+
 # Marks the ``./Dataset`` directories konfai-apps staged: the only ones it may delete from a caller's workspace.
 _STAGED_MARKER = ".konfai-apps-staged"
 
@@ -1548,6 +1551,10 @@ class KonfAIApp(AbstractKonfAIApp):
         self._collect_result(output, tmp_dir, "Predictions")
         for case, volumes in KonfAIApp._case_volumes(output, self._predicted or []).items():
             print(f"[KonfAI-Apps] {case}: {', '.join(str(volume) for volume in volumes)}")
+        # What ran, beside what it wrote: the app, its revision, its preset and every --set, in order.
+        output.mkdir(parents=True, exist_ok=True)
+        record = self.app_repository.record(config_overrides)
+        (output / RUN_RECORD).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     @run_distributed_app
     def evaluate(

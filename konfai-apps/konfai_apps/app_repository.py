@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import difflib
 import functools
+import hashlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -1038,6 +1039,25 @@ class LocalAppRepository(AppRepositoryInfo):
         """Where the user keeps their own presets of this app; None when they go in its own ``app.json``."""
         return None
 
+    def get_revision(self) -> str | None:
+        """The revision of the app's files a run reads: a Hugging Face commit, None for a local folder."""
+        return None
+
+    def record(self, overrides: list[str] | None) -> dict[str, Any]:
+        """What a run of this app ran: the app, its revision, its preset and every ``--set`` it applied, in order
+        (the preset's, then the run's own), with an ``identity`` that every run of that configuration shares: the
+        app, its revision and the value each name ends with, whatever their order or spelling of presets."""
+        applied = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
+        last = {override.partition("=")[0].strip(): override for override in applied}
+        canonical = {"app": self.get_name(), "revision": self.get_revision(), "set": sorted(last.values())}
+        return {
+            "app": self.get_name(),
+            "revision": self.get_revision(),
+            "preset": self._preset.name if self._preset else None,
+            "set": applied,
+            "identity": hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()[:16],
+        }
+
     def get_presets(self) -> dict[str, Preset]:
         """The app's published presets (its ``app.json``) and the user's own (:func:`user_presets_file`). A name in
         both is refused: a preset of one's own never hides a published one."""
@@ -1745,6 +1765,12 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
 
     def _user_presets_file(self) -> Path | None:
         return user_presets_file(self._repo_id.partition("@")[0], self._app_name)
+
+    def get_revision(self) -> str | None:
+        parts = Path(self._download("app.json")).parts  # .../snapshots/<commit>/<app>/app.json in the hub cache
+        if "snapshots" in parts:
+            return parts[parts.index("snapshots") + 1]
+        return self._split_repo_reference(self._repo_id)[1]
 
     @staticmethod
     def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:

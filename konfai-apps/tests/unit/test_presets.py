@@ -263,3 +263,23 @@ def test_a_remote_app_s_preset_travels_encoded_and_the_server_lists_its_presets(
     assert info.get_preset() == Preset("coarse", "The coarse search alone", ("stages=[coarse]",))
     assert urls == ["http://host:8000/repo_apps/VBoussot/ImpactReg:ConvexAdam"]
     assert app_repository_module.quote("ConvexAdam#coarse", safe="/:@") == "ConvexAdam%23coarse"
+
+
+def test_a_run_records_what_it_ran_and_one_identity_per_configuration(tmp_path: Path) -> None:
+    root = _app(tmp_path, _PRESETS)
+    chosen = app_repository_module.get_app_repository_info(f"{root}#fine_grid", False)
+    record = chosen.record(["iterations=200"])
+    assert record["app"] == str(root) and record["revision"] is None and record["preset"] == "fine_grid"
+    assert record["set"] == ["grid_spacing=3", "iterations=150", "iterations=200"]  # in the order applied
+    base = app_repository_module.get_app_repository_info(str(root), False)
+    # the same configuration, reached another way: the same identity
+    assert base.record(["iterations=200", "grid_spacing=3"])["identity"] == record["identity"]
+    assert base.record(["grid_spacing=3"])["identity"] != record["identity"]
+
+
+def test_a_hub_app_s_revision_is_the_snapshot_it_runs_from(tmp_path: Path) -> None:
+    info = object.__new__(app_repository_module.LocalAppRepositoryFromHF)
+    info._repo_id = "VBoussot/ImpactReg"
+    snapshot = tmp_path / "hub" / "models--VBoussot--ImpactReg" / "snapshots" / "09d2a191" / "ConvexAdam" / "app.json"
+    info._download = lambda filename: snapshot  # type: ignore[method-assign]
+    assert info.get_revision() == "09d2a191"
