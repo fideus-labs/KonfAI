@@ -1,166 +1,119 @@
 # Presets inside an app, and direct options for shared settings
 
-Status: proposal, 2026-11-06. Touches konfai-apps first, then impact-reg-konfai, SlicerKonfAI, SlicerImpactReg,
-konfai-mcp, and two users of the apps: fidopt (the benchmark) and fidlab (its tuning lab).
+Status: decided 2026-11-06; konfai-apps, konfai-mcp and impact-reg-konfai implemented on this branch. Still to do:
+the app repositories on Hugging Face, SlicerKonfAI and SlicerImpactReg, then fidopt and fidlab.
 
 ## The problem
 
-**One app per parameterization.** VBoussot/ImpactReg publishes 12 apps. They run three engines, and most differ from
-a sibling by a few lines of `Prediction.yml`:
+**One app per parameterization.** VBoussot/ImpactReg publishes 12 apps over three engines, most a few lines of
+`Prediction.yml` apart: `Generic_Rigid_BSpline` is `Generic_Rigid` plus a B-spline map and a 16 mm grid,
+`ConvexAdam_Composite` is `ConvexAdam_Coarse` plus the fine stage. `Evaluation_*.yml` and `Uncertainty.yml` are the
+same file in every app. Users hit the same wall: SlicerKonfAI's "Save as local app" kept tuned parameters as a new
+app folder, and fidopt names a line `<method>@<variant>`, so a tuned configuration of an IMPACT-Reg app had no name.
 
-| Engine (`models.<engine>:RegistrationNet`) | Apps today |
+**Long `--set` paths.** A dotted name started at the config root, so a nested model parameter took
+`--set Predictor.Model.RegistrationNet.models.0.layers_mask=01`, and OME-Zarr outputs took
+`--set Predictor.outputs_dataset.DisplacementField.OutputDataset.dataset_filename=Transform:omezarr`.
+
+## The design
+
+Three words for the user: the **app** is what runs (an engine), a **preset** is a named way to run it, a **setting**
+is what one run changes.
+
+### Presets
+
+- **A preset is a description and a list of `NAME=VALUE`,** exactly what `--set` takes, and nothing else:
+
+  ```json
+  "presets": {
+    "composite":   {"description": "Coarse search, then Adam refinement, on MIND features", "set": []},
+    "impact_cbct": {"description": "With TotalSegmentator features, for CBCT to CT",
+                    "set": ["models.1.ref=VBoussot/impact-torchscript-models:TS/M730.pt", "models.1.layers_mask=01",
+                            "regularization_weight=5.0"]}
+  }
+  ```
+
+- **Chosen with `#`:** `VBoussot/ImpactReg:ConvexAdam#composite`, `ConvexAdam#composite` where the repository is
+  implied, `host:port:app#preset|token` on a server. No `#` is the base config. A name is letters, digits, `_` and
+  `-`; no `.`, which an impact-reg-konfai scope (`PRESET:NAME=VALUE`) would read as the start of a dotted name.
+- **Applied first:** `Prediction.yml`, then the preset's `set`, then the run's own `--set`, then the direct options;
+  the last value wins. One resolver checks them all (`apply_overrides`), and a preset that no longer resolves
+  against its app is refused when it is chosen.
+- **Method parameters only:** never the output format, the device, the batch or the patch size, so one preset gives
+  one result whatever the run's own choices.
+- **Flat:** no preset inherits another. One made from another copies its `set` (`preset save --from`), which keeps a
+  tuned preset frozen when its parent changes.
+- **Everything else belongs to the app:** the weights its presets may use (one pinned list), the memory per voxel
+  (the costliest preset's), the tiling, the sample. The provenance of a tuned preset is written in its description;
+  its tier is the benchmark's to record, in fidopt.
+- **Where they live:** published in the app's `app.json`; a user's own in `~/.konfai/presets/<repo>/<app>.json`
+  (`$KONFAI_PRESETS_DIR`), or in the `app.json` of a local app folder. A user's preset of a published name is
+  refused: one's own never hides a published one. Publishing is copying an entry into the app's `app.json`.
+- **A preset changes parameters, never weights.** An app that ships other weights is another app: ImpactSynth `MR`
+  and `CBCT` have the same config and differ by their trained weights, and stay two apps, each with its own
+  `trained_on` in fidopt.
+- **No compatibility layer:** the old app names go.
+
+### Settings
+
+- `--set NAME=VALUE` is unchanged for a model parameter. A dotted name now starts at the model
+  (`--set models.0.layers_mask=01`, `--set optimizer.lr=0.1`) unless its first key is one of the config's own roots
+  (`Predictor.`, `Trainer.`), which keeps every full path working.
+- Two direct options join `--batch-size`, `--patch-size`, `--tta`, `--max-voxels`, `--gpu`, `--cpu`, `--out`:
+  `--output-format [OUTPUT=]FORMAT` (repeatable) and `--seed N`. Each is translated into the `--set` it stands for,
+  read off the app's config, so nothing downstream changes; an unknown format or output is refused with the valid
+  ones.
+
+### What ran
+
+Every inference writes `konfai-run.json` beside its outputs: the app, its revision (the Hugging Face snapshot), its
+preset, every `--set` it applied in order, and an `identity` that every run of the same configuration shares.
+
+## Implemented on this branch
+
+| Commit | What |
 |---|---|
-| ConvexAdam | ConvexAdam_Coarse, ConvexAdam_Composite, ConvexAdam_IMPACT_CBCT, ConvexAdam_IMPACT_MRCT |
-| Elastix | Generic_Rigid, Generic_Rigid_BSpline, Elastix_IMPACT_Static, Elastix_IMPACT_Jacobian |
-| FireANTs | FireANTs_SyN, FireANTs_IMPACT, FireANTs_IMPACT_MRCT, FireANTs_Anatomix |
+| `feat(apps): run an app with one of its presets (APP#PRESET)` | presets, `show APP#PRESET`, `preset save`, user presets, server and client |
+| `feat(apps): dot a nested model parameter from the model` | `--set models.0.layers_mask=01` |
+| `feat(apps): --output-format and --seed for every app` | the two direct options, on infer, pipeline, fine-tune |
+| `feat(apps): record what an inference ran beside its outputs` | `konfai-run.json` |
+| `feat(mcp): take an app's presets (ref#preset)` | every app tool takes `#preset`, `describe_app` lists them |
+| `feat(impact-reg): register with an app's preset (APP#PRESET)` | presets split between the global and tile passes, ensembles of full references, the direct options on every pass |
+| `feat(apps): list each app's presets` | `list` shows them |
 
-`Generic_Rigid_BSpline` is `Generic_Rigid` plus `Parameters_BSpline.txt` and `final_grid_spacing: 16.0`;
-`ConvexAdam_Composite` is `ConvexAdam_Coarse` plus the `fine` stage. `Evaluation_*.yml` and `Uncertainty.yml` are the
-same file in every app, and `requirements.txt` has one version per engine.
+## The app repositories
 
-The same thing happens to users. SlicerKonfAI's "Save as local app" keeps a set of tuned parameters by exporting a
-new app folder with them as defaults. fidopt names a line `<method>@<variant>`, and for IMPACT-Reg the variant slot
-is taken by the app (`impact_reg@ConvexAdam_Composite`), so a tuned configuration of that app has no name of its own.
+The ten repositories SlicerKonfAI, SlicerImpactReg and fidopt read, and what presets change in each (the neighbours'
+`Prediction.yml` compared):
 
-**Long `--set` paths for common settings.** konfai-apps reads a bare `NAME` as a model parameter
-(`--set iterations=300`) and a dotted `NAME` as a full path from the config root. Everything outside the model's own
-arguments takes the full path, the output format among them:
+| Repository | Task | Apps | What tells neighbours apart | After |
+|---|---|---|---|---|
+| VBoussot/ImpactReg | registration | 12 | parameters, over three engines | 3 |
+| VBoussot/ImpactSeg | segmentation | 1 | | 1 |
+| VBoussot/ImpactSynth | synthesis | 4 | the weights only (identical configs) | 4 |
+| VBoussot/TotalSegmentator-KonfAI | segmentation | 4 | the weights (`total` 5 checkpoints, `total-3mm` 1) | 4 |
+| VBoussot/MRSegmentator-KonfAI | segmentation | 1 | | 1 |
+| VBoussot/DentalSegmentator-KonfAI | segmentation | 1 | | 1 |
+| fideus-labs/fidopt-registration | registration | 13 | UniGradICON and MultiGradICON: one parameter (`model`) | 12 |
+| fideus-labs/fidopt-segmentation | segmentation | 26 | TotalSegmentator and its 9 tasks: one parameter (`task`); Lungmask and Lungmask_Lobes: `model` | 16 |
+| fideus-labs/fidopt-synthesis | synthesis | 12 | the 6 nnsyn: `source` and `region`; the 2 DFCAN: `structure` | 6 |
 
-```bash
---set Predictor.outputs_dataset.DisplacementField.OutputDataset.dataset_filename=Transform:omezarr
-```
+The ImpactReg engines and their presets, each a list of `set` over its engine's base (`Prediction.yml` of the app
+named as the base):
 
-A nested model parameter takes it too, since a dotted name starts at the root:
-`--set Predictor.Model.RegistrationNet.models.0.layers_mask=01` (fidopt's `tuning.json`, konfai-apps' tests and CLI
-reference).
-
-## Proposal
-
-### 1. Presets: named lists of `--set` inside an app
-
-An app is an engine: its code, its base config (`Prediction.yml`), its shared files. A preset is a name for a list of
-`NAME=VALUE` overrides of that base, declared in `app.json`:
-
-```json
-"presets": {
-  "rigid":         {"description": "Rigid, Mattes mutual information",
-                    "set": ["parameter_maps=[Parameters_Rigid.txt]"]},
-  "rigid_bspline": {"description": "Rigid, then a B-spline on a 16 mm grid",
-                    "set": ["parameter_maps=[Parameters_Rigid.txt,Parameters_BSpline.txt]", "final_grid_spacing=16.0"]},
-  "hippocampus":   {"based_on": "composite",
-                    "set": ["grid_spacing=3", "grid_shrink=1", "iterations=150"],
-                    "tuned_on": "the 10 development pairs of fidopt's L2R_HippocampusMR",
-                    "source": "https://github.com/fideus-labs/fidlab/pull/2"}
-}
-```
-
-- **Reference.** `<repo>:<app>#<preset>`: `VBoussot/ImpactReg:ConvexAdam#composite`, or `ConvexAdam#composite` where
-  the repository is implied (`impact-reg-konfai register ConvexAdam#composite`). No `#` means the base config.
-- **Resolution.** `Prediction.yml`, then the `based_on` chain, then the preset's `set`, then the user's `--set`, then
-  the direct options of section 3. A later value wins. The one resolver that checks every `--set` today
-  (`apply_overrides`: the name exists or the model declares it, the value fits the declared type) checks the presets
-  too, so a published preset that no longer resolves fails at load, not halfway through a run.
-- **A preset holds the method's parameters only.** Never the output format, the device, the batch or patch size:
-  those are the user's choices, and keeping them out means one preset gives one result whatever the user picks.
-- **Every published configuration keeps a name,** the base one included (`"composite": {"set": []}`), so a reference
-  never depends on which configuration the base happens to be.
-- **The format is a list, shown as a command line.** A value with spaces, quotes or a JSON block
-  (`models.1={"ref": "...", "voxel_size": [3, 3, 3]}`) needs no shell quoting in a list. The pass scopes that
-  impact-reg-konfai already reads (`global:`, `tile:`) work inside an entry.
-- **Per-preset resources.** The 12 apps also differ in `app.json`, not only in the config: `tiling`,
-  `ram_bytes_per_voxel`, `vram_bytes_per_voxel`, `model_files`, `sample`. A preset may override those keys
-  (`"app": {"tiling": {...}, "vram_bytes_per_voxel": 210}`). `model_files` could instead be derived from the
-  `models.*.ref` the preset sets.
-- **`#` stays out of URLs.** In a URL, `#` starts the fragment. A remote server's API takes the preset as a field
-  of its own; the `#` form is for the command line, configs and identifiers.
-
-### 2. Dotted names relative to the model
-
-A dotted `NAME` whose first segment is a parameter of the model resolves inside the model block, as a bare name
-does. A dotted name that starts at a root key (`Predictor.`, `Trainer.`) stays a full path. A name both could mean
-is refused, and the error names the two paths.
-
-```bash
---set models.0.layers_mask=01          # was Predictor.Model.RegistrationNet.models.0.layers_mask=01
---set optimizer.lr=0.1                 # was Predictor.Model.RegistrationNet.optimizer.lr=0.1
-```
-
-### 3. Direct options for what every app shares
-
-konfai-apps already has `--batch-size`, `--patch-size`, `--tta`, `--mc`, `--ensemble`, `--max-voxels`, `--gpu`,
-`--cpu` and `--out`. Two settings are missing, and both are on every config:
-
-| Option | Writes | Seen in |
+| Engine, base | Preset | `set` entries |
 |---|---|---|
-| `--output-format FORMAT`, or `OUTPUT=FORMAT` for one output | `Predictor.outputs_dataset.<OUTPUT>.OutputDataset.dataset_filename=<group>:<FORMAT>` | `<name>:mha` in the 5 apps of VBoussot/ImpactSeg and VBoussot/ImpactSynth, `Transform:itktransform` in the 12 of VBoussot/ImpactReg |
-| `--seed N` | `Predictor.manual_seed=N` (`Trainer.manual_seed` when training) | `manual_seed` in each of the 12 registration apps |
+| ConvexAdam, Composite | composite, coarse, impact_cbct, impact_mrct | 0, 1, 6, 7 |
+| Elastix, Rigid_BSpline | rigid_bspline, rigid, impact_static, impact_jacobian | 0, 2, about 5 each as structured values (65 and 45 flat) |
+| FireANTs, SyN | syn, impact, impact_mrct, anatomix | 0, 8, 18, 23 |
 
-```bash
-konfai-apps infer VBoussot/ImpactSynth:MR ... --output-format mha
-impact-reg-konfai register ConvexAdam#composite ... --output-format Transform=omezarr
-```
-
-Each option is translated into the `--set` it stands for, so nothing downstream changes. The format is checked
-against the formats KonfAI already knows (`SUPPORTED_EXTENSIONS`, `SUPPORTED_BACKEND_FORMATS`: `mha`, `nii.gz`,
-`omezarr`, `ome-zarr`, `nrrd`, `tif`, ...), and an unknown format or output is refused before anything runs, with
-the list of valid ones. The output's precision (`TensorCast`) and inference `autocast` are candidates too, left out
-until someone needs them.
-
-## The 12 apps as presets
-
-Each preset written as `set` entries over its engine's base (`Prediction.yml` of the app named as the base below).
-Every difference is a model parameter: none touches the dataset, the outputs or the device.
-
-| Engine, base | Preset | `set` entries | Notes |
-|---|---|---|---|
-| ConvexAdam, Composite | coarse | 1 | `stages=[coarse]`. The fine stage's keys, which Coarse leaves out, stay at the base's values and are inert without that stage: to confirm |
-| | impact_cbct | 6 | a feature model (`models.1.*`), `regularization_weight=5.0` |
-| | impact_mrct | 7 | the same, `stages=[coarse]` |
-| Elastix, Rigid_BSpline | rigid | 2 | the rigid parameter map alone |
-| | impact_jacobian | 45 | a feature model for each level (`levels.<i>.models.<j>.*`), its own grid and iterations |
-| | impact_static | 65 | the same, two feature models a level |
-| FireANTs, SyN | impact | 8 | `deformable_metric=impact`, one feature model |
-| | impact_mrct | 18 | two feature models, LNCC, the feature patching |
-| | anatomix | 23 | the anatomix features, its own iterations and step |
-
-Nine of the twelve need 8 entries or fewer. The two Elastix IMPACT presets repeat a feature model block per level.
-Three ways to write them:
-
-1. **Structured values:** one entry a level, `levels.0.models=[{...}, {...}]`, which brings them to about 5 entries.
-2. **An overlay file** for a preset that outgrows a list: `"file": "presets/impact_static.yml"`, the same keys as a
-   config fragment, read by the same resolver.
-3. **Keep them as apps of their own,** if the IMPACT Elastix pipelines are seen as methods apart.
-
-The first keeps one format everywhere. The second is the escape hatch if a preset ever needs more.
-
-## What changes where
-
-| Where | Change |
-|---|---|
-| konfai-apps | reads `presets`, resolves `#preset` and `based_on`, model-relative dotted names, `--output-format`, `--seed`; lists the presets in its API and its server |
-| impact-reg-konfai | `register ConvexAdam#composite`; an ensemble member is a full reference, so two presets of one engine can be ensembled (`ConvexAdam#composite` and `ConvexAdam#hippocampus`), and `PRESET:NAME=VALUE` scopes by that reference |
-| SlicerKonfAI | a Preset list under the app; the parameter widgets start from base plus preset, and "differs from the default" compares against the preset, so its values are not sent twice; "Save as local app" becomes "Save as preset" (a name and a `set` list in a presets file of the user's); an Output format list that writes `--output-format` |
-| SlicerImpactReg | the ensemble chips hold engine and preset pairs |
-| konfai-mcp | `list_app_parameters` and `run_app` take a preset; `describe_app` lists them |
-| fidopt | a line is `impact_reg@ConvexAdam#composite`; its IMPACT-Reg rows, off the boards while the presets are retuned (`"board": false`), are run again under the new names; the authors' presets are tier 1 and a preset with `tuned_on` is tier 2 (a protocol change, for the maintainers to decide); `tuning.json` becomes presets with a `source` |
-| fidlab | an experiment searches the parameters the app declares (`get_parameters`: values and constraints) from a preset, and a winning one ends as one preset entry |
-
-## Migration
-
-No compatibility layer: the 12 old app names go, with nothing mapping them to the new references.
-
-1. konfai-apps: presets, references, model-relative names, direct options. An app without `presets` is its base
-   config, as every app is today.
-2. VBoussot/ImpactReg: three engine apps (`ConvexAdam`, `Elastix`, `FireANTs`) with their presets, in place of the
-   12 apps. The shared files are kept once per app.
-3. impact-reg-konfai, then SlicerKonfAI and SlicerImpactReg.
-4. fidopt, then fidlab.
+fidopt-registration's `ConvexAdam_MIND`, `Elastix_BSpline` and `FireANTs_Greedy` run impact-reg-konfai's engines
+too, but stay fidopt's own baselines: the reference to the authors' code that the benchmark keeps apart.
 
 ## Open questions
 
-- **The base of each engine:** the most used configuration (Composite, Rigid_BSpline, SyN, as above) or the simplest.
-- **Keys a preset leaves out** (Coarse has no fine-stage keys): confirm they are inert, or let an entry reset a key to
-  the model's own default.
-- **The two Elastix IMPACT presets:** structured values, an overlay file, or apps of their own.
-- **Where tuned presets live:** in the engine app beside the authors' ones, marked by `tuned_on`, or in a repository
-  of their own; and how fidopt shows them.
+- **Tiling of `coarse` and `impact_mrct`:** the old apps had no tile pass; whether impact-reg-konfai can leave the
+  tile pass out for a preset without a fine stage, or whether the engine's tiling has to say so.
+- **Keys a preset leaves out:** Coarse has no fine-stage keys; under the engine's base they stay at the base's
+  values. To confirm they are inert without the fine stage.
+- **Where fidlab's tuned presets live:** in the engine app beside the authors', or in a repository of their own.
