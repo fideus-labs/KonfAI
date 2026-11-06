@@ -73,7 +73,7 @@ def _model(path: Path) -> dict:
         ("VBoussot/ImpactReg:ConvexAdam#composite", ("VBoussot/ImpactReg:ConvexAdam", "composite")),
         ("VBoussot/ImpactReg:ConvexAdam", ("VBoussot/ImpactReg:ConvexAdam", None)),
         ("host:8000:ConvexAdam#impact_cbct|secret", ("host:8000:ConvexAdam|secret", "impact_cbct")),
-        ("VBoussot/ImpactReg@v1.2:ConvexAdam#v1.0-a", ("VBoussot/ImpactReg@v1.2:ConvexAdam", "v1.0-a")),
+        ("VBoussot/ImpactReg@v1.2:ConvexAdam#impact-v2", ("VBoussot/ImpactReg@v1.2:ConvexAdam", "impact-v2")),
     ],
 )
 def test_a_reference_splits_into_its_app_and_its_preset(reference: str, expected: tuple) -> None:
@@ -86,7 +86,7 @@ def test_an_existing_folder_with_a_hash_in_its_name_is_a_folder(tmp_path: Path) 
     assert split_preset(str(folder)) == (str(folder), None)
 
 
-@pytest.mark.parametrize("reference", ["repo:App#", "repo:App#two words", "#composite"])
+@pytest.mark.parametrize("reference", ["repo:App#", "repo:App#two words", "repo:App#v1.0", "#composite"])
 def test_a_malformed_preset_name_is_refused(reference: str) -> None:
     with pytest.raises(AppRepositoryError, match="names no preset"):
         split_preset(reference)

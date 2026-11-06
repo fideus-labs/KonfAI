@@ -1102,7 +1102,7 @@ class LocalAppRepository(AppRepositoryInfo):
         that one's overrides first (``--from``). A name set twice keeps its last value, once.
         """
         if not PRESET_NAME.fullmatch(name):
-            raise AppRepositoryError(f"'{name}' is not a preset name: letters, digits, '_', '.' and '-'.")
+            raise AppRepositoryError(f"'{name}' is not a preset name: letters, digits, '_' and '-'.")
         own_file = self._user_presets_file()
         if own_file is not None and name in self._published_presets:
             raise AppRepositoryError(

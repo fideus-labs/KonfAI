@@ -34,7 +34,7 @@ from typing import Any
 from .errors import AppRepositoryError
 
 #: A preset's name: what follows ``#`` in an app reference.
-PRESET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+PRESET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ def split_preset(app_id: str) -> tuple[str, str | None]:
     if not base or not PRESET_NAME.fullmatch(name):
         raise AppRepositoryError(
             f"'{app_id}' names no preset: '{name}' is not a preset name.",
-            "Name one as APP#PRESET, the preset in letters, digits, '_', '.' and '-' (ConvexAdam#composite).",
+            "Name one as APP#PRESET, the preset in letters, digits, '_' and '-' (ConvexAdam#composite).",
         )
     return base + bar + token, name
 
@@ -83,7 +83,7 @@ def read_presets(entries: Any, source: str) -> dict[str, Preset]:
     for name, entry in entries.items():
         where = f"preset '{name}' of {source}"
         if not isinstance(name, str) or not PRESET_NAME.fullmatch(name):
-            raise AppRepositoryError(f"{where}: a name is letters, digits, '_', '.' and '-'.")
+            raise AppRepositoryError(f"{where}: a name is letters, digits, '_' and '-'.")
         if not isinstance(entry, dict) or set(entry) - {"description", "set"}:
             raise AppRepositoryError(f"{where}: a preset is {{'description': str, 'set': [NAME=VALUE, ...]}}.")
         overrides = entry.get("set", [])

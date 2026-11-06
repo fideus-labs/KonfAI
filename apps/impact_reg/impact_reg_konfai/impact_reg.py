@@ -61,6 +61,7 @@ from konfai.utils.utils import format_token, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
+from konfai_apps.presets import read_presets, split_preset
 
 from impact_reg_konfai import PRESETS_REPO
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
@@ -198,13 +199,16 @@ def _case_key(name: str) -> tuple[int, str]:
 
 
 def _manifest(preset: str) -> dict:
-    """The preset's ``app.json``, from the local preset directory or the Hugging Face repo; empty if unreadable.
+    """The preset's ``app.json`` (its app's, for ``APP#PRESET``), from the local preset directory or the Hugging Face
+    repo; empty if unreadable.
 
     Read cache first, as the preset run resolves its own files: an online read moved the cache to the newest
     preset, which only the runs that read a manifest then picked up.
     """
     try:
-        return json.loads(app_file(IMPACT_REG_KONFAI_REPO, preset, "app.json").read_text(encoding="utf-8"))
+        return json.loads(
+            app_file(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0], "app.json").read_text(encoding="utf-8")
+        )
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
 
@@ -213,7 +217,24 @@ def _preset_config(preset: str, filename: str) -> dict:
     """One of the preset's prediction configs, as data."""
     from ruamel.yaml import YAML
 
-    return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, preset, filename).read_text(encoding="utf-8")) or {}
+    app = split_preset(preset)[0]
+    return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, app, filename).read_text(encoding="utf-8")) or {}
+
+
+def _app_preset_sets(preset: str) -> list[str]:
+    """The ``--set`` of the app preset ``APP#PRESET`` names (none for a bare app): they go first in its share, split
+    between its passes as any ``--set`` is, so the app is then run bare and nothing applies them twice."""
+    app, name = split_preset(preset)
+    if name is None:
+        return []
+    presets = read_presets(_manifest(app).get("presets"), f"the app.json of '{app}'")
+    if name not in presets:
+        raise KonfAIError(
+            "ImpactReg",
+            f"the app '{app}' has no preset '{name}'.{did_you_mean(name, presets)}",
+            f"Its presets: {', '.join(presets)}." if presets else "It declares none.",
+        )
+    return list(presets[name].overrides)
 
 
 #: A key a prediction config leaves out, at its model's default (see ``_agree``).
@@ -224,9 +245,11 @@ _PASSES = ("global", "tile")
 
 
 def _config_value(config: dict, key: str) -> object:
-    """What ``--set key=...`` names in a prediction config, resolved as konfai-apps resolves it: a bare name in the
-    model's parameter block, a dotted one from the config root. ``_UNSET`` when the config has no such key."""
-    node = config if "." in key else LocalAppRepository._model_param_block(config)[1]
+    """What ``--set key=...`` names in a prediction config, resolved as konfai-apps resolves it: a name in the model's
+    parameter block (a nested one dotted from there), one that starts at the config root from there. ``_UNSET`` when
+    the config has no such key."""
+    from_root = "." in key and key.split(".", 1)[0] in config  # Predictor.Dataset...: from the config root
+    node = config if from_root else LocalAppRepository._model_param_block(config)[1]
     for part in filter(None, key.split(".")):
         if not isinstance(node, dict) or part not in node:
             return _UNSET
@@ -290,7 +313,9 @@ def _preset_overrides(
     the pass would refuse stops the run here, that of the tiles included. A config that cannot be read (offline,
     nothing cached) leaves its share to that resolver, in the preset's own process.
     """
-    shares: dict[str, list[tuple[str | None, str]]] = {preset: [] for preset in presets}
+    shares: dict[str, list[tuple[str | None, str]]] = {
+        preset: [(None, override) for override in _app_preset_sets(preset)] for preset in presets
+    }
     for override in overrides or []:
         preset, stage, rest = _scopes(override, presets)
         for member in [preset] if preset else presets:
@@ -354,8 +379,9 @@ def _preset_overrides(
                 raise KonfAIError(
                     "ImpactReg",
                     f"{preset} ({files[stage]}): {error.args[0]}",
-                    f"'impact-reg-konfai show {preset}' lists its parameters. A dotted NAME is a path from its"
-                    f" config root, and --set {preset}:NAME=VALUE sets it for this preset alone.",
+                    f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
+                    f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
+                    " for this preset alone.",
                 ) from None
     return passes
 
@@ -515,16 +541,17 @@ def _check_presets(presets: list[str]) -> None:
     for preset in presets:
         if presets.count(preset) > 1:
             raise KonfAIError("ImpactReg", f"the preset '{preset}' is listed twice.", "Name each preset once.")
-        if _manifest(preset):
+        app = split_preset(preset)[0]
+        if _manifest(app):
             continue
         try:
             available = app_names(IMPACT_REG_KONFAI_REPO, force_update=True)
         except Exception:
             return
-        if preset not in available:
+        if app not in available:
             raise KonfAIError(
                 "ImpactReg",
-                f"there is no preset '{preset}' in {IMPACT_REG_KONFAI_REPO}.{did_you_mean(preset, available, 3)}",
+                f"there is no preset '{app}' in {IMPACT_REG_KONFAI_REPO}.{did_you_mean(app, available, 3)}",
                 "'impact-reg-konfai list' lists them.",
             )
 
@@ -924,6 +951,8 @@ class ImpactRegKonfAIApp:
         # ``ran``. It does not describe the cases a rank finished before a restart.
         self._plans: dict[str, dict[str, int | None]] = {}
         self._ran: dict[str, list[dict]] = {}
+        # The run's own choices every preset pass takes as they are: --output-format, --seed.
+        self._run_args: list[str] = []
 
     # ------------------------------------------------------------------ register
 
@@ -968,7 +997,14 @@ class ImpactRegKonfAIApp:
         out = work / (label or preset)
         # This interpreter's konfai-apps, not the first on PATH: an unactivated environment has none there, and
         # another environment's would run another konfai and install the preset's requirements into it.
-        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, preset)]
+        # The bare app: an APP#PRESET's own --set are already in this pass's share (see _preset_overrides).
+        command = [
+            sys.executable,
+            "-m",
+            "konfai_apps",
+            "infer",
+            app_id(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0]),
+        ]
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if moving_masks and not fixed_masks:
@@ -994,6 +1030,7 @@ class ImpactRegKonfAIApp:
         for override in config_overrides or []:
             command += ["--set", override]
         self._applied[label or preset] = list(config_overrides or [])
+        command += self._run_args
         if max_voxels:
             command += ["--max-voxels", str(max_voxels)]
         if gpu:
@@ -1057,6 +1094,8 @@ class ImpactRegKonfAIApp:
         tmp_dir: Path | None = None,
         fields_only: bool = False,
         max_voxels: int | None = None,
+        output_format: list[str] | None = None,
+        seed: int | None = None,
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -1102,6 +1141,8 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
+        self._run_args = [arg for spec in output_format or [] for arg in ("--output-format", spec)]
+        self._run_args += ["--seed", str(seed)] if seed is not None else []
         # An affine is one pass's result: an ensemble and a test-time augmentation average fields.
         affine_presets = [preset for preset in presets if _declares_affine(preset, overrides[preset]["global"])]
         if affine_presets and (len(presets) > 1 or tta):
