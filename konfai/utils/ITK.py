@@ -135,6 +135,14 @@ def jacobian_statistics(dataset: Dataset, group: str, name: str) -> dict[str, fl
     of halo on each side: every derivative is the whole field's.
     """
     read, shape, _, _, _, to_index = open_field(dataset, group, name)
+    return field_jacobian_statistics(read, shape, to_index)
+
+
+def field_jacobian_statistics(
+    read: Callable[[tuple[slice, ...]], np.ndarray], shape: list[int], to_index: np.ndarray
+) -> dict[str, float]:
+    """:func:`jacobian_statistics` of a field ``read`` by ``[c, z, y, x]`` regions, of ``shape``, whose ``to_index``
+    takes a world offset to grid indices: what :func:`open_field` hands back."""
     planes = _slab_planes(shape)
     count = folded = 0
     lowest, log_sum, log_squares = float("inf"), 0.0, 0.0
@@ -330,7 +338,7 @@ def read_transform_stages(
     held in: float64 for the bit-exact walk, float32 for a caller whose walk runs in float32.
     """
     from konfai.data.geometry import Grid
-    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, data_to_transform
+    from konfai.utils.dataset import data_to_transform, is_displacement_entry
 
     read_data = getattr(dataset, "read_data", None)
     if read_data is None:
@@ -340,7 +348,7 @@ def read_transform_stages(
         # The PLAN's read: a dense field answers as the identity and its values are never touched.
         # Everything else is coefficients, small and bounded exactly, so it decodes as usual.
         shape, header = dataset.get_infos(group, name)
-        if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+        if is_displacement_entry(shape, header):
             return ()
         data, attribute = read_data(group, name)
         return decode_transform_stages(data_to_transform(data, attribute, name))
@@ -348,14 +356,14 @@ def read_transform_stages(
     # A backend that cannot serve a slice reads whole, as it would for any window it was given.
     if box is not None and getattr(dataset, "read_data_slice", None) is not None:
         shape, header = dataset.get_infos(group, name)
-        if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+        if is_displacement_entry(shape, header):
             grid = Grid.of([int(extent) for extent in shape[1:]], header, what)
             window = grid.node_window(box())
     if window is not None:
         data, attribute = dataset.read_data_slice(group, name, (slice(None), *window))
         return (_displacement_stage(grid.sub_grid(window), data, 1, what, field_dtype),)
     data, attribute = read_data(group, name)
-    if DISPLACEMENT_FIELD_ATTRIBUTE not in attribute:
+    if not is_displacement_entry(np.shape(data), attribute):
         return decode_transform_stages(data_to_transform(data, attribute, name))
     return (
         _displacement_stage(

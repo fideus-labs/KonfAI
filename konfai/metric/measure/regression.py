@@ -18,6 +18,7 @@
 """Pointwise, structural and information criteria over intensities."""
 
 import math
+import weakref
 from collections.abc import Iterator
 from functools import partial
 from typing import Any
@@ -27,7 +28,14 @@ import torch
 import torch.nn.functional as F
 
 from konfai.data.patching import ModelPatch
-from konfai.metric.measure.base import Criterion, CriterionWithInit, LabelledValues, MaskedLoss, _require_optional
+from konfai.metric.measure.base import (
+    Criterion,
+    CriterionWithAttribute,
+    CriterionWithInit,
+    LabelledValues,
+    MaskedLoss,
+    _require_optional,
+)
 from konfai.metric.measure.segmentation import Dice
 from konfai.network.blocks import LatentDistribution
 from konfai.network.network import Network
@@ -469,6 +477,80 @@ class TRE(Criterion):
         loss = torch.linalg.norm(output - targets[0], dim=2)
         per_landmark = loss.mean(0).detach()
         return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
+
+
+def _jacobian_of(field: torch.Tensor, attribute: Any, name: str) -> dict[str, float]:
+    """:func:`konfai.utils.ITK.jacobian_statistics` of one displacement field ``[C, (Z), Y, X]`` on the grid its
+    ``attribute`` describes. A 2-D field is measured as a volume one plane thick, whose determinant is the plane's."""
+    from konfai.utils.ITK import field_jacobian_statistics
+
+    rank = field.dim() - 1
+    if attribute is None or rank not in (2, 3) or field.shape[0] != rank:
+        raise MeasureError(
+            f"{name} measures a displacement field, one component per spatial axis; got {list(field.shape)}.",
+            "Score the group of a dense field read with its geometry: an affine's Jacobian is its matrix, everywhere.",
+        )
+    values = field.detach().cpu().numpy().astype(np.float64)
+    spacing = attribute.get_np_array("Spacing").astype(np.float64)
+    direction = attribute.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
+    if rank == 2:  # one plane thick: no z displacement, so the z row of J is the identity's
+        values = np.concatenate([values, np.zeros_like(values[:1])])[:, None]
+        spacing, direction = np.append(spacing, 1.0), np.pad(direction, (0, 1))
+        direction[2, 2] = 1.0
+    to_index = np.linalg.inv(direction @ np.diag(spacing))
+    return field_jacobian_statistics(lambda region: values[region], list(values.shape), to_index)
+
+
+class _JacobianStatistic(CriterionWithAttribute):
+    """One statistic of the determinant of a displacement field's Jacobian ``J = I + du/dx``, as
+    :func:`konfai.utils.ITK.jacobian_statistics` takes it, over the output: the field, read with its geometry. The
+    target is not read: name the output group itself under ``targets_criterions``."""
+
+    accepts_output_attributes = True
+    any_target_grid = True
+    statistic = ""
+    # ponytail: a one-slot memo, so the statistics of one field share one pass; a case at a time, as evaluation runs.
+    _last: tuple[Any, list[dict[str, float]]] | None = None
+
+    def forward(  # type: ignore[override]
+        self,
+        output: torch.Tensor,
+        *targets: torch.Tensor,
+        attributes: list[list[Any]],
+        output_attributes: list[Any] | None = None,
+    ) -> torch.Tensor:
+        del targets, attributes
+        last = _JacobianStatistic._last
+        if last is None or last[0]() is not output:
+            per_sample = output_attributes if output_attributes is not None else [None] * output.shape[0]
+            stats = [
+                _jacobian_of(field, attribute, self.get_name())
+                for field, attribute in zip(output, per_sample, strict=True)
+            ]
+            _JacobianStatistic._last = (weakref.ref(output), stats)
+        else:
+            stats = last[1]
+        return torch.tensor(float(np.mean([case[self.statistic] for case in stats])))
+
+
+class JacobianFolding(_JacobianStatistic):
+    """The fraction of a displacement field's voxels where the map folds: its Jacobian's determinant at or below 0."""
+
+    statistic = "folded_fraction"
+
+
+class JacobianMin(_JacobianStatistic):
+    """The lowest determinant of a displacement field's Jacobian: below 0 the map folds, near 0 it crushes a volume."""
+
+    statistic = "min"
+    maximize = True
+
+
+class JacobianLogStd(_JacobianStatistic):
+    """The standard deviation of the log of a displacement field's Jacobian determinant (clipped to ``[1e-9, 1e9]``,
+    so a fold counts as a vanishing volume): how unevenly the map stretches."""
+
+    statistic = "sd_log"
 
 
 class GradientImages(Criterion):

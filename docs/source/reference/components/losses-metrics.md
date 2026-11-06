@@ -92,6 +92,7 @@ reduction, a criterion from another library) are averaged per batch instead.
 | Name | Purpose | Key arguments (defaults) |
 | --- | --- | --- |
 | `TRE` | Target registration error between landmarks. | |
+| `JacobianFolding`, `JacobianMin`, `JacobianLogStd` | How regular a displacement field (the output, read with its geometry) is: the fraction of voxels where its Jacobian determinant is at most 0, the minimum, the standard deviation of its log. The target is not read. | |
 | `GradientImages` | Gradient smoothness (or gradient difference with a target). | |
 | `KLDivergence` | VAE KL term, against the prior N(`mu`, `std`²). | `shape` (required), `dim=100, mu=0, std=1` |
 | `Variance`, `Mean` | Variance or mean of the output (uncertainty). | |

@@ -44,6 +44,9 @@ from konfai.metric.measure.regression import Accuracy as Accuracy
 from konfai.metric.measure.regression import CrossEntropyLoss as CrossEntropyLoss
 from konfai.metric.measure.regression import FocalLoss as FocalLoss
 from konfai.metric.measure.regression import GradientImages as GradientImages
+from konfai.metric.measure.regression import JacobianFolding as JacobianFolding
+from konfai.metric.measure.regression import JacobianLogStd as JacobianLogStd
+from konfai.metric.measure.regression import JacobianMin as JacobianMin
 from konfai.metric.measure.regression import KLDivergence as KLDivergence
 from konfai.metric.measure.regression import MAESaveMap as MAESaveMap
 from konfai.metric.measure.regression import Mean as Mean
@@ -77,6 +80,9 @@ __all__ = [
     "IMPACTReg",
     "IMPACTSynth",
     "ImpactFeatureModel",
+    "JacobianFolding",
+    "JacobianLogStd",
+    "JacobianMin",
     "KLDivergence",
     "LabelSums",
     "LabelledValues",

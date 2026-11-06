@@ -59,6 +59,7 @@ from konfai.data.transform.labels import SelectLabel as SelectLabel
 from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
 from konfai.data.transform.resample import Resample as Resample
+from konfai.data.transform.resample import TransformPoints as TransformPoints
 from konfai.data.transform.shape import Canonical as Canonical
 from konfai.data.transform.shape import Crop as Crop
 from konfai.data.transform.shape import Flatten as Flatten
@@ -109,6 +110,7 @@ __all__ = [
     "Transform",
     "TransformInverse",
     "TransformLoader",
+    "TransformPoints",
     "UnNormalize",
     "Variance",
     "Write",
