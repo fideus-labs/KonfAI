@@ -46,7 +46,7 @@ from .app_repository import (
 )
 from .errors import AppRepositoryError
 from .options import add_device, add_run_options, add_tmp_dir
-from .presets import split_preset
+from .presets import PRESET_NAME, split_preset
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
@@ -293,8 +293,8 @@ def _with_run_options(
 
 
 def _save_preset(app: str, from_preset: str | None, description: str, overrides: list[str]) -> None:
-    """``preset save APP#NAME``: the overrides of ``--from`` (any ``APP#PRESET``, or a preset of APP by its name), then
-    ``--set``, kept as preset NAME; they must apply to APP, which saving checks."""
+    """``preset save APP#NAME``: the overrides of ``--from`` (a preset of APP, by its name) then ``--set``, kept as
+    preset NAME of APP."""
     base, name = split_preset(app)
     if name is None:
         raise AppRepositoryError(f"'{app}' names no preset to save.", "Name it APP#NAME (ConvexAdam#mine).")
@@ -302,9 +302,14 @@ def _save_preset(app: str, from_preset: str | None, description: str, overrides:
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
     start: tuple[str, ...] = ()
-    if from_preset is not None:  # any APP#PRESET, or a preset of this app by its name
-        source = get_app_repository_info(from_preset if "#" in from_preset else f"{base}#{from_preset}", False)
-        start = source.get_preset().overrides  # type: ignore[union-attr]
+    if from_preset is not None:  # a preset of this same app: APP#NAME names the app already
+        if not PRESET_NAME.fullmatch(from_preset):
+            raise AppRepositoryError(
+                f"--from {from_preset}: name a preset of {base} by its name alone.",
+                f"The app is the one APP#NAME names: --from composite, not --from {from_preset}.",
+            )
+        info.use_preset(from_preset)
+        start = info.get_preset().overrides  # type: ignore[union-attr]
     written = info.save_preset(name, description, [*start, *overrides])
     print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
 
@@ -943,8 +948,8 @@ def main_apps() -> None:
         "--from",
         dest="from_preset",
         default=None,
-        metavar="APP#PRESET",
-        help="Start from this preset's --set: any APP#PRESET, or a preset of this app by its name.",
+        metavar="PRESET",
+        help="Start from the --set of this preset of the same app (its name alone, e.g. composite).",
     )
     save_p.add_argument("--description", default="", help="What the preset is for.")
     _add_config_overrides(save_p)
