@@ -36,14 +36,16 @@ from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
 from konfai.utils.utils import env_flag
 
 from .app_repository import (
+    AppRepositoryInfoFromRemoteServer,
     LocalAppRepository,
     LocalAppRepositoryFromHF,
     did_you_mean,
     get_app_repository_info,
     get_available_apps_on_hf_repo,
+    run_overrides,
 )
 from .errors import AppRepositoryError
-from .options import add_device, add_tmp_dir
+from .options import add_device, add_run_options, add_tmp_dir
 from .presets import split_preset
 
 if TYPE_CHECKING:
@@ -265,6 +267,29 @@ def list_apps(repo: str, task: str | None = None) -> list[tuple[str, dict]]:
         (name, json.loads(app_file(repo, name, "app.json").read_text(encoding="utf-8"))) for name in app_names(repo)
     ]
     return [(name, manifest) for name, manifest in apps if task is None or manifest.get("task", task) == task]
+
+
+def _with_run_options(
+    app: str,
+    remote: RemoteServer | None,
+    config_name: str,
+    overrides: list[str] | None,
+    output_format: list[str] | None,
+    seed: int | None,
+) -> list[str] | None:
+    """The run's ``--set``, then those its ``--output-format`` and ``--seed`` stand for: last, so they win. They are
+    read off the app's config ``config_name`` as it ships (a server's app, from the server)."""
+    if not output_format and seed is None:
+        return overrides
+    from ruamel.yaml import YAML
+
+    base = split_preset(app)[0]
+    info = AppRepositoryInfoFromRemoteServer(remote, base) if remote else get_app_repository_info(base, False)
+    files = {path.name: path for path in info.download_config_file()}
+    if config_name not in files:
+        raise AppRepositoryError(f"App '{base}' has no {config_name}: --output-format and --seed have nothing to set.")
+    config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8"))
+    return [*(overrides or []), *run_overrides(config, output_format, seed)]
 
 
 def _save_preset(app: str, from_preset: str | None, description: str, overrides: list[str]) -> None:
@@ -500,6 +525,7 @@ def build_app_cli(
         knobs(run_p)
         _add_patch_overrides(run_p)
         _add_config_overrides(run_p)
+        add_run_options(run_p)
         if with_uncertainty:
             run_p.add_argument("-uncertainty", action="store_true", help="Also write the inference stack.")
         run_p.add_argument(
@@ -543,6 +569,7 @@ def build_app_cli(
         knobs(pipe_p)
         _add_patch_overrides(pipe_p)
         _add_config_overrides(pipe_p)
+        add_run_options(pipe_p)
         _add_gt(pipe_p, required=False)
         _add_mask(pipe_p)
         pipe_p.add_argument(
@@ -596,7 +623,14 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=args.config_overrides,
+                config_overrides=_with_run_options(
+                    resolve_app(args),
+                    None,
+                    getattr(args, "prediction_file", "Prediction.yml"),
+                    args.config_overrides,
+                    args.output_format,
+                    args.seed,
+                ),
                 **infer_kwargs(args),
             )
         elif args.command == "eval":
@@ -638,7 +672,14 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=args.config_overrides,
+                config_overrides=_with_run_options(
+                    resolve_app(args),
+                    None,
+                    getattr(args, "prediction_file", "Prediction.yml"),
+                    args.config_overrides,
+                    args.output_format,
+                    args.seed,
+                ),
                 **infer_kwargs(args),
             )
 
@@ -715,6 +756,7 @@ def main_apps() -> None:
     )
     _add_patch_overrides(infer_p)
     _add_config_overrides(infer_p)
+    add_run_options(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
     infer_p.add_argument(
         "--prediction-file",
@@ -765,6 +807,7 @@ def main_apps() -> None:
     )
     _add_patch_overrides(pipe_p)
     _add_config_overrides(pipe_p)
+    add_run_options(pipe_p)
     pipe_p.add_argument(
         "--prediction-file",
         "--prediction_file",
@@ -833,6 +876,7 @@ def main_apps() -> None:
         help="Override the training batch size (Trainer.Dataset.batch_size). Default: the app config's value.",
     )
     _add_config_overrides(ft_p)
+    add_run_options(ft_p, output_format=False)
 
     bundle_p = subparsers.add_parser(
         "bundle", help="Assemble an app bundle (HF layout), optionally with a portable ONNX model."
@@ -945,9 +989,16 @@ def main_apps() -> None:
 
     from . import app as app_module
 
+    remote = RemoteServer(host, port, token, https, ca_cert) if host is not None else None
+    output_format, seed = kwargs.pop("output_format", None), kwargs.pop("seed", None)
+    if "config_overrides" in kwargs:  # the commands that run the model: infer, pipeline, fine-tune
+        config_name = kwargs.get("prediction_file") or kwargs.get("config_file") or "Prediction.yml"
+        kwargs["config_overrides"] = _with_run_options(
+            kwargs["app"], remote, config_name, kwargs["config_overrides"], output_format, seed
+        )
     konfai_app: AbstractKonfAIApp
-    if host is not None:
-        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), RemoteServer(host, port, token, https, ca_cert))
+    if remote is not None:
+        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), remote)
     else:
         konfai_app = app_module.KonfAIApp(kwargs.pop("app"), kwargs.pop("download"), kwargs.pop("force_update"))
 

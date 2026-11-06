@@ -47,7 +47,7 @@ from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.config import Choices, Range, _coerce_config_value
 from konfai.utils.errors import ConfigError
-from konfai.utils.utils import is_windows_absolute_path
+from konfai.utils.utils import SUPPORTED_FORMATS, is_windows_absolute_path, split_format_level, split_path_spec
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -517,6 +517,38 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         if declared is not None:
             _check_value(value, declared, key_path)
         node[leaf] = value
+
+
+def run_overrides(config: Any, output_formats: list[str] | None = None, seed: int | None = None) -> list[str]:
+    """The ``--set`` overrides that ``--output-format`` and ``--seed`` stand for, read off the config ``data`` they
+    apply to: each output's ``dataset_filename`` with its format replaced, the root's ``manual_seed``. A format KonfAI
+    does not write, or an output the config has not, is refused here, before anything runs."""
+    root_key = "Predictor" if (config or {}).get("Predictor") else "Trainer"
+    root = (config or {}).get(root_key) or {}
+    overrides = [f"{root_key}.manual_seed={seed}"] if seed is not None else []
+    outputs: dict[str, tuple[str, str]] = {}  # output -> (its dataset class key, its dataset_filename)
+    for name, output in (root.get("outputs_dataset") or {}).items():
+        for key, dataset in (output or {}).items():
+            if isinstance(dataset, dict) and "dataset_filename" in dataset:
+                outputs[str(name)] = (str(key), str(dataset["dataset_filename"]))
+    for spec in output_formats or []:
+        name, assigned, file_format = spec.rpartition("=")
+        if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+            raise AppRepositoryError(
+                f"--output-format {spec}: '{file_format}' is not a format KonfAI writes.{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+            )
+        if assigned and name not in outputs:
+            raise AppRepositoryError(
+                f"--output-format {spec}: the app has no output '{name}'.{did_you_mean(name, outputs)}",
+                f"Its outputs: {', '.join(outputs) or 'none'}.",
+            )
+        for output in [name] if assigned else outputs:
+            key, filename = outputs[output]
+            path, flag, _ = split_path_spec(filename, supported_formats=SUPPORTED_FORMATS)
+            spelled = f"{path}:{flag}:{file_format}" if flag else f"{path}:{file_format}"
+            overrides.append(f"{root_key}.outputs_dataset.{output}.{key}.dataset_filename={spelled}")
+    return overrides
 
 
 def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
