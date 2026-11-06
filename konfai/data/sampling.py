@@ -871,3 +871,113 @@ def walked_box(target_grid: Grid, stages: SpatialStages) -> WorldBox:
     world = Grid((1,) * rank, np.zeros(rank), np.ones(rank), np.eye(rank))
     points = _face_points(target_grid, world, stages)
     return WorldBox(points.min(axis=0), points.max(axis=0))
+
+
+#: ITK's uniform cubic on one cell: ``d(u) = [1, u, u², u³] @ _CUBIC @ (c[k-1], c[k], c[k+1], c[k+2])``.
+_CUBIC = np.array([[1, 4, 1, 0], [-3, 0, 3, 0], [3, -6, 3, 0], [-1, 3, -3, 1]]) / 6.0
+#: Power coefficients on ``[0, 1]`` to Bernstein ones: ``b_i = sum_n C(i, n) / C(3, n) p_n``.
+_TO_BERNSTEIN = np.array([[math.comb(i, n) / math.comb(3, n) if n <= i else 0.0 for n in range(4)] for i in range(4)])
+#: ``C(m, n)``, row ``n``, column ``m``: the binomial a change of variable ``u = a + h s`` expands with.
+_BINOMIAL = np.array([[float(math.comb(m, n)) for m in range(4)] for n in range(4)])
+#: Bernstein coefficients a box may cost, ``(4 cells) ** rank`` of them per component: past it, about
+#: 25 cells per axis in 3-D, the box is far wider than a cell and the control points' range alone bounds it.
+_MAX_BERNSTEIN_POINTS = 1 << 20
+
+
+def _bernstein_axis(low: float, high: float, size: int) -> tuple[int, np.ndarray, np.ndarray]:
+    """One axis of a continuous-index box on a cubic BSpline's control grid, cell by cell.
+
+    Returns the first control point the box reads; the map from those control values to the
+    Bernstein coefficients of each cell's piece over the box, four rows per cell; and where the
+    Bernstein coefficients of the index itself sit, which a linear function has evenly spaced.
+    """
+    first = min(math.floor(low), size - 3)
+    last = min(max(first, math.ceil(high) - 1), size - 3)
+    cells = np.arange(first, last + 1)
+    start = np.maximum(low, cells) - cells
+    width = np.minimum(high, cells + 1) - cells - start
+    power = np.clip(np.arange(4)[None, :] - np.arange(4)[:, None], 0, None)
+    shift = _BINOMIAL * start[:, None, None] ** power * width[:, None, None] ** np.arange(4)[:, None]
+    local = _TO_BERNSTEIN @ shift @ _CUBIC  # (cell, Bernstein coefficient, control point)
+    operator = np.zeros((cells.size, 4, cells.size + 3))
+    rows = np.arange(cells.size)
+    for tap in range(4):
+        operator[rows, :, rows + tap] = local[:, :, tap]
+    at = (cells + start)[:, None] + width[:, None] * np.arange(4) / 3
+    return first - 1, operator.reshape(4 * cells.size, -1), at.reshape(-1)
+
+
+def _spline_reach(
+    stage: DisplacementStage, low: np.ndarray, high: np.ndarray, before: AffineMap
+) -> tuple[np.ndarray, np.ndarray]:
+    """Where a cubic BSpline stage sends the world box ``[low, high]``, once ``before`` has moved it,
+    from its control points alone.
+
+    On each control cell the box crosses, a point lands at ``x + d(x)``, a cubic in the index. Its
+    Bernstein coefficients over the part of the cell in the box bound it (a Bernstein form is a convex
+    combination of them), and they come from the cell's 4 control values per axis by a fixed linear map,
+    the index's own coefficients being evenly spaced. No point is evaluated, and the bound tightens
+    as the box shrinks. It is intersected with the box plus the signed range of those control points,
+    since a point moves by a convex combination of them. Where the box leaves the spline's valid
+    region ITK displaces nothing, and that range, zero in it, stands alone; so it does past
+    ``_MAX_BERNSTEIN_POINTS``, which keeps a box over a fine grid from costing gigabytes.
+    """
+    grid = stage.grid
+    rank = grid.rank
+    moved = WorldBox(low, high).image_under(before)
+    index_low, index_high = grid.continuous_box(moved)
+    size = [int(grid.size_zyx[rank - 1 - axis]) for axis in range(rank)]  # (x, y, z)
+    first = np.clip(np.floor(index_low).astype(int) - 1, 0, np.array(size) - 1)
+    last = np.clip(np.floor(index_high).astype(int) + 2, 0, np.array(size) - 1)
+    around = stage.values[(slice(None), *(slice(first[axis], last[axis] + 1) for axis in reversed(range(rank))))]
+    flat = around.reshape(rank, -1)
+    range_low, range_high = flat.min(axis=1), flat.max(axis=1)
+    if not (np.all(index_low >= 1) and np.all(index_high <= np.array(size) - 2)):
+        return moved.low_xyz + np.minimum(range_low, 0.0), moved.high_xyz + np.maximum(range_high, 0.0)
+    if math.prod(4 * max(1, n - 3) for n in around.shape[1:]) > _MAX_BERNSTEIN_POINTS:
+        return moved.low_xyz + range_low, moved.high_xyz + range_high
+
+    axes = [_bernstein_axis(float(index_low[axis]), float(index_high[axis]), size[axis]) for axis in range(rank)]
+    window = tuple(slice(axes[axis][0], axes[axis][0] + axes[axis][1].shape[1]) for axis in reversed(range(rank)))
+    landing = stage.values[(slice(None), *window)]
+    for array_axis in range(rank):
+        operator = axes[rank - 1 - array_axis][1]
+        landing = np.moveaxis(np.tensordot(operator, landing, axes=(1, array_axis + 1)), 0, array_axis + 1)
+    to_world = grid.index_to_world
+    landing = landing + to_world.translation.reshape(rank, *([1] * rank))
+    for axis in range(rank):
+        shape = [1] * rank
+        shape[rank - 1 - axis] = -1
+        landing = landing + to_world.matrix[:, axis].reshape(rank, *([1] * rank)) * axes[axis][2].reshape(shape)
+    landing = landing.reshape(rank, -1)
+    return (
+        np.maximum(landing.min(axis=1), moved.low_xyz + range_low),
+        np.minimum(landing.max(axis=1), moved.high_xyz + range_high),
+    )
+
+
+def region_reach(region: Grid, stages: SpatialStages) -> WorldBox:
+    """Where ``stages``, in application order, send ``region``: a box the plan can price a region
+    with before reading anything, and that holds every point the run samples there.
+
+    Affine stages are composed and handed to the next BSpline, which carries the box as
+    :func:`_spline_reach` bounds it from its control points; a dense field moves the box by the
+    signed range of the samples around it. Neither depends on the rest of the lattice, so a
+    coefficient far from the region does not widen its window.
+    """
+    rank = region.rank
+    box = region.world_box()
+    low, high = box.low_xyz, box.high_xyz
+    before = AffineMap.identity(rank)
+    for stage in stages:
+        if isinstance(stage, AffineStage):
+            before = before.then(stage.map)
+            continue
+        if stage.order == 3:
+            low, high = _spline_reach(stage, low, high, before)
+        else:
+            moved = WorldBox(low, high).image_under(before)
+            reached = stage.over(moved).bound().map_box(moved)
+            low, high = reached.low_xyz, reached.high_xyz
+        before = AffineMap.identity(rank)
+    return WorldBox(low, high).image_under(before)

@@ -315,6 +315,65 @@ def _slab_reads(stage: Resample, attribute: Attribute, rows: int) -> list[int]:
     return reads
 
 
+def test_a_bspline_prices_a_region_by_the_control_points_around_it():
+    # Large coefficients on the control points of the top of the lattice, small ones elsewhere: the bottom
+    # slab reads a window grown by the small ones, as ngff-zarr bounds a block, not by the largest
+    # coefficient anywhere (+40 mm along z reaches the whole volume from the bottom). And it still holds
+    # what the run samples there.
+    image = _image(oblique=False)
+    transform = sitk.BSplineTransformInitializer(image, [5] * 3, 3)
+    nx, ny, nz = transform.GetCoefficientImages()[0].GetSize()
+    coefficients = np.random.RandomState(3).uniform(-0.3, 0.3, (3, nz, ny, nx))
+    coefficients[:, -2:] = 40.0  # the last two planes of control points along z: 40 mm
+    transform.SetParameters(coefficients.ravel().tolist())  # x component first, x fastest
+    stage = _stage(image, transform)
+    attribute = _attribute(image)
+    source, target_grid = stage._grids_of(CASE)
+    far = (slice(0, 4), slice(0, SIZE[1]), slice(0, SIZE[2]))
+    local = stage.stream_region_source(CASE, far, list(SIZE), Attribute(attribute))
+    region = target_grid.sub_grid(far)
+    whole = transform_module.source_window(region, source, stage._pricing_bound(CASE), stage._tap_margin)
+    assert local[0].stop - local[0].start <= 8 < whole[0].stop - whole[0].start
+    whole_reads = 0
+    for start in range(0, SIZE[0], 4):
+        slab = target_grid.sub_grid((slice(start, min(start + 4, SIZE[0])), slice(0, SIZE[1]), slice(0, SIZE[2])))
+        window = transform_module.source_window(slab, source, stage._pricing_bound(CASE), stage._tap_margin)
+        whole_reads += int(np.prod([part.stop - part.start for part in window]))
+    assert sum(_slab_reads(stage, attribute, 4)) < 0.75 * whole_reads
+
+    volume = torch.from_numpy(sitk.GetArrayFromImage(image)).unsqueeze(0)
+    reference = stage(CASE, volume, Attribute(attribute))
+    streamed = torch.empty_like(reference)
+    for start in range(0, SIZE[0], 4):
+        target = (slice(start, min(start + 4, SIZE[0])), slice(0, SIZE[1]), slice(0, SIZE[2]))
+        window = tuple(stage.stream_region_source(CASE, target, list(SIZE), Attribute(attribute)))
+        context = RegionContext(window, target, tuple(SIZE))
+        streamed[(slice(None), *target)] = stage.stream_region(
+            CASE, volume[(slice(None), *window)], context, Attribute(attribute)
+        )
+    torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * float(reference.abs().max()))
+
+
+@pytest.mark.parametrize("mesh", [6, 60])
+def test_a_bspline_reach_holds_every_landing_point(mesh):
+    # 6 cells per axis takes the Bernstein form, 60 the control points' range alone: both hold every
+    # point the region's voxels land on.
+    image = _image(oblique=False)
+    transform = sitk.BSplineTransformInitializer(image, [mesh] * 3, 3)
+    transform.SetParameters(np.random.RandomState(0).uniform(-2.0, 2.0, len(transform.GetParameters())).tolist())
+    stage = _stage(image, transform)
+    _, target_grid = stage._grids_of(CASE)
+    box = stage._region_reach(CASE, target_grid.sub_grid(tuple(slice(0, n) for n in SIZE)))
+    field = sitk.TransformToDisplacementField(
+        transform, sitk.sitkVectorFloat64, image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()
+    )
+    index = np.stack(np.meshgrid(*[np.arange(n) for n in image.GetSize()], indexing="ij"), -1)  # (x, y, z, xyz)
+    points = np.asarray(image.GetOrigin()) + index * np.asarray(image.GetSpacing())
+    landing = points.transpose(2, 1, 0, 3) + sitk.GetArrayFromImage(field)  # (z, y, x, xyz), as the field
+    assert np.all(landing.reshape(-1, 3).min(axis=0) >= box.low_xyz - 1e-9)
+    assert np.all(landing.reshape(-1, 3).max(axis=0) <= box.high_xyz + 1e-9)
+
+
 def test_a_slab_pulls_a_bounded_source_window():
     # The point of the whole exercise: on a map aligned with the storage axes a slab reads a slab,
     # not the volume.
