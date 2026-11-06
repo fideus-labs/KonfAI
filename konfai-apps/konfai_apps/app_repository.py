@@ -654,8 +654,11 @@ class AppRepositoryInfo(ABC):
         """The preset chosen with ``#`` (:meth:`use_preset`), None for the app's base config."""
         return self._preset
 
-    def use_preset(self, name: str) -> None:
-        """Run with preset ``name`` from now on: its overrides are applied before any ``--set``."""
+    def use_preset(self, name: str | None) -> None:
+        """Run with preset ``name`` from now on, its overrides applied before any ``--set``; None for the base config."""
+        if name is None:
+            self._preset = None
+            return
         presets = self.get_presets()
         if name not in presets:
             raise AppRepositoryError(
@@ -1071,10 +1074,10 @@ class LocalAppRepository(AppRepositoryInfo):
             )
         return {**self._published_presets, **own}
 
-    def use_preset(self, name: str) -> None:
-        """Choose preset ``name``, refused here if its overrides do not resolve against the app's config: a preset
-        that no longer fits its app fails when it is chosen, not halfway through a run."""
-        presets = self.get_presets()
+    def use_preset(self, name: str | None) -> None:
+        """Choose preset ``name`` (None for the base config), refused here if its overrides do not resolve against the
+        app's config: a preset that no longer fits its app fails when it is chosen, not halfway through a run."""
+        presets = self.get_presets() if name is not None else {}
         if name in presets:  # an unknown name is the base class's refusal, with the app's presets
             self._check(presets[name].overrides, f"preset '{name}'")
         super().use_preset(name)

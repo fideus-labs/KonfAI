@@ -125,6 +125,8 @@ def test_choosing_a_preset_shows_the_values_the_run_starts_from(tmp_path: Path) 
     assert values["grid_spacing"] == 3 and values["iterations"] == 150
     base = app_repository_module.get_app_repository_info(str(root), False)
     assert base.get_preset() is None and base.get_parameters()["values"]["grid_spacing"] == 6
+    info.use_preset(None)  # back to the base config, as a UI's "base" entry does
+    assert info.get_preset() is None and info.get_parameters()["values"]["grid_spacing"] == 6
     assert sorted(base.get_presets()) == ["coarse", "composite", "fine_grid"]
 
 
