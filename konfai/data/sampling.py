@@ -879,6 +879,9 @@ _CUBIC = np.array([[1, 4, 1, 0], [-3, 0, 3, 0], [3, -6, 3, 0], [-1, 3, -3, 1]]) 
 _TO_BERNSTEIN = np.array([[math.comb(i, n) / math.comb(3, n) if n <= i else 0.0 for n in range(4)] for i in range(4)])
 #: ``C(m, n)``, row ``n``, column ``m``: the binomial a change of variable ``u = a + h s`` expands with.
 _BINOMIAL = np.array([[float(math.comb(m, n)) for m in range(4)] for n in range(4)])
+#: Bernstein coefficients a box may cost, ``(4 cells) ** rank`` of them per component: past it, about
+#: 25 cells per axis in 3-D, the box is far wider than a cell and the control points' range alone bounds it.
+_MAX_BERNSTEIN_POINTS = 1 << 20
 
 
 def _bernstein_axis(low: float, high: float, size: int) -> tuple[int, np.ndarray, np.ndarray]:
@@ -916,7 +919,8 @@ def _spline_reach(
     the index's own coefficients being evenly spaced. No point is evaluated, and the bound tightens
     as the box shrinks. It is intersected with the box plus the signed range of those control points,
     since a point moves by a convex combination of them. Where the box leaves the spline's valid
-    region ITK displaces nothing, and that range, zero in it, stands alone.
+    region ITK displaces nothing, and that range, zero in it, stands alone; so it does past
+    ``_MAX_BERNSTEIN_POINTS``, which keeps a box over a fine grid from costing gigabytes.
     """
     grid = stage.grid
     rank = grid.rank
@@ -930,6 +934,8 @@ def _spline_reach(
     range_low, range_high = flat.min(axis=1), flat.max(axis=1)
     if not (np.all(index_low >= 1) and np.all(index_high <= np.array(size) - 2)):
         return moved.low_xyz + np.minimum(range_low, 0.0), moved.high_xyz + np.maximum(range_high, 0.0)
+    if math.prod(4 * max(1, n - 3) for n in around.shape[1:]) > _MAX_BERNSTEIN_POINTS:
+        return moved.low_xyz + range_low, moved.high_xyz + range_high
 
     axes = [_bernstein_axis(float(index_low[axis]), float(index_high[axis]), size[axis]) for axis in range(rank)]
     window = tuple(slice(axes[axis][0], axes[axis][0] + axes[axis][1].shape[1]) for axis in reversed(range(rank)))

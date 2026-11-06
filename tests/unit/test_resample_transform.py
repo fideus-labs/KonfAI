@@ -354,6 +354,26 @@ def test_a_bspline_prices_a_region_by_the_control_points_around_it():
     torch.testing.assert_close(streamed, reference, rtol=0.0, atol=1e-5 * float(reference.abs().max()))
 
 
+@pytest.mark.parametrize("mesh", [6, 60])
+def test_a_bspline_reach_holds_every_landing_point(mesh):
+    # 6 cells per axis takes the Bernstein form, 60 the control points' range alone: both hold every
+    # point the region's voxels land on.
+    image = _image(oblique=False)
+    transform = sitk.BSplineTransformInitializer(image, [mesh] * 3, 3)
+    transform.SetParameters(np.random.RandomState(0).uniform(-2.0, 2.0, len(transform.GetParameters())).tolist())
+    stage = _stage(image, transform)
+    _, target_grid = stage._grids_of(CASE)
+    box = stage._region_reach(CASE, target_grid.sub_grid(tuple(slice(0, n) for n in SIZE)))
+    field = sitk.TransformToDisplacementField(
+        transform, sitk.sitkVectorFloat64, image.GetSize(), image.GetOrigin(), image.GetSpacing(), image.GetDirection()
+    )
+    index = np.stack(np.meshgrid(*[np.arange(n) for n in image.GetSize()], indexing="ij"), -1)  # (x, y, z, xyz)
+    points = np.asarray(image.GetOrigin()) + index * np.asarray(image.GetSpacing())
+    landing = points.transpose(2, 1, 0, 3) + sitk.GetArrayFromImage(field)  # (z, y, x, xyz), as the field
+    assert np.all(landing.reshape(-1, 3).min(axis=0) >= box.low_xyz - 1e-9)
+    assert np.all(landing.reshape(-1, 3).max(axis=0) <= box.high_xyz + 1e-9)
+
+
 def test_a_slab_pulls_a_bounded_source_window():
     # The point of the whole exercise: on a map aligned with the storage axes a slab reads a slab,
     # not the volume.
