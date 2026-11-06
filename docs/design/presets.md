@@ -22,7 +22,8 @@ is what one run changes.
 
 ### Presets
 
-- **A preset is a description and a list of `NAME=VALUE`,** exactly what `--set` takes, and nothing else:
+- **A preset is a description and a list of `NAME=VALUE`,** exactly what `--set` takes, and `"tiles": false` for one
+  that never runs in tiles (a pair too large for the device is then resampled, as the old tile-less apps did):
 
   ```json
   "presets": {
@@ -112,7 +113,8 @@ too, but stay fidopt's own baselines: the reference to the authors' code that th
 
 ## Open questions
 
-- **Tiling of `coarse` and `impact_mrct`:** the old apps had no tile pass; whether impact-reg-konfai can leave the
+- **Tiling (decided):** the five presets whose old app had no tile pass (ConvexAdam coarse, impact_mrct; Elastix rigid,
+  impact_static, impact_jacobian) say `"tiles": false`.
   tile pass out for a preset without a fine stage, or whether the engine's tiling has to say so.
 - **Keys a preset leaves out:** Coarse has no fine-stage keys; under the engine's base they stay at the base's
   values. To confirm they are inert without the fine stage.

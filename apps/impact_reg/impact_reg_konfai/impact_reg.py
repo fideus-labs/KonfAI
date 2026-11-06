@@ -205,12 +205,15 @@ def _manifest(preset: str) -> dict:
     Read cache first, as the preset run resolves its own files: an online read moved the cache to the newest
     preset, which only the runs that read a manifest then picked up.
     """
+    app, name = split_preset(preset)
     try:
-        return json.loads(
-            app_file(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0], "app.json").read_text(encoding="utf-8")
-        )
+        manifest = json.loads(app_file(IMPACT_REG_KONFAI_REPO, app, "app.json").read_text(encoding="utf-8"))
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
+    chosen = read_presets(manifest.get("presets"), f"the app.json of '{app}'").get(name) if name else None
+    if chosen is not None and not chosen.tiles:  # a preset that never runs in tiles: its app's tile pass is not its
+        manifest["tiling"] = {key: value for key, value in (manifest.get("tiling") or {}).items() if key == "global"}
+    return manifest
 
 
 def _preset_config(preset: str, filename: str) -> dict:

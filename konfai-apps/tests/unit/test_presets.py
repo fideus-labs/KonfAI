@@ -99,12 +99,22 @@ def test_a_malformed_preset_name_is_refused(reference: str) -> None:
         {"composite": {"set": ["iterations=3"], "tuned_on": "a dataset"}},  # only description and set
         {"composite": {"set": "iterations=3"}},
         {"composite": {"set": ["iterations"]}},
+        {"composite": {"set": [], "tiles": "no"}},
         {"two words": {"set": []}},
     ],
 )
 def test_a_preset_is_a_description_and_a_list_of_name_value(entries: object) -> None:
     with pytest.raises(AppRepositoryError):
         read_presets(entries, "app.json")
+
+
+def test_a_preset_may_never_run_in_tiles() -> None:
+    presets = read_presets(
+        {"rigid": {"description": "", "set": [], "tiles": False}, "bspline": {"set": []}}, "app.json"
+    )
+    assert presets["rigid"].tiles is False and presets["bspline"].tiles is True
+    assert presets["rigid"].to_json() == {"description": "", "set": [], "tiles": False}
+    assert "tiles" not in presets["bspline"].to_json()
 
 
 def test_choosing_a_preset_shows_the_values_the_run_starts_from(tmp_path: Path) -> None:

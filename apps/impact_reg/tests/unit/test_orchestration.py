@@ -874,6 +874,13 @@ def test_an_app_preset_s_set_goes_first_and_splits_between_the_passes_as_any_set
     with pytest.raises(KonfAIError, match="Did you mean 'fast'"):
         reg._preset_overrides(["A#fats"], [])
 
+    # a preset that never runs in tiles: its app's tile pass is not its, so a pair too large is resampled instead
+    manifest["presets"]["whole"] = {"description": "", "set": [], "tiles": False}
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    assert reg._manifest("A#whole")["tiling"] == {"global": "Prediction.yml"}
+    assert reg._manifest("A#fast")["tiling"] == _TILING
+    assert reg._preset_overrides(["A#whole"], ["seed=3"]) == {"A#whole": {"global": ["seed=3"], "tile": []}}
+
 
 def test_an_app_preset_runs_its_app_bare_with_the_run_s_own_choices(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_preset_output

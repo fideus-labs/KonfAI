@@ -39,14 +39,17 @@ PRESET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 @dataclass(frozen=True)
 class Preset:
-    """A named way to run an app: its description, and the ``NAME=VALUE`` overrides it applies, in order."""
+    """A named way to run an app: its description, the ``NAME=VALUE`` overrides it applies, in order, and whether a
+    pair too large for the device may be registered in tiles (``tiles``; when not, it is resampled instead)."""
 
     name: str
     description: str
     overrides: tuple[str, ...]
+    tiles: bool = True
 
     def to_json(self) -> dict[str, Any]:
-        return {"description": self.description, "set": list(self.overrides)}
+        entry: dict[str, Any] = {"description": self.description, "set": list(self.overrides)}
+        return entry if self.tiles else {**entry, "tiles": False}
 
 
 def split_preset(app_id: str) -> tuple[str, str | None]:
@@ -72,7 +75,8 @@ def split_preset(app_id: str) -> tuple[str, str | None]:
 def read_presets(entries: Any, source: str) -> dict[str, Preset]:
     """The presets of an ``app.json``'s ``"presets"`` (or of a user's presets file), checked for their shape.
 
-    Each is ``{"description": str, "set": [NAME=VALUE, ...]}``; nothing else, so that a preset stays what it says.
+    Each is ``{"description": str, "set": [NAME=VALUE, ...]}``, and ``"tiles": false`` for one that never runs in
+    tiles; nothing else, so that a preset stays what it says.
     Whether the overrides resolve against the app's config is checked when the preset is used.
     """
     if entries is None:
@@ -84,12 +88,17 @@ def read_presets(entries: Any, source: str) -> dict[str, Preset]:
         where = f"preset '{name}' of {source}"
         if not isinstance(name, str) or not PRESET_NAME.fullmatch(name):
             raise AppRepositoryError(f"{where}: a name is letters, digits, '_' and '-'.")
-        if not isinstance(entry, dict) or set(entry) - {"description", "set"}:
-            raise AppRepositoryError(f"{where}: a preset is {{'description': str, 'set': [NAME=VALUE, ...]}}.")
+        if not isinstance(entry, dict) or set(entry) - {"description", "set", "tiles"}:
+            raise AppRepositoryError(
+                f"{where}: a preset is {{'description': str, 'set': [NAME=VALUE, ...]}}, with 'tiles': false for one "
+                "that never runs in tiles."
+            )
+        if not isinstance(entry.get("tiles", True), bool):
+            raise AppRepositoryError(f"{where}: 'tiles' is true or false.")
         overrides = entry.get("set", [])
         if not isinstance(overrides, list) or not all(isinstance(o, str) and "=" in o for o in overrides):
             raise AppRepositoryError(f"{where}: 'set' is a list of NAME=VALUE strings, as --set takes them.")
-        presets[name] = Preset(name, str(entry.get("description", "")), tuple(overrides))
+        presets[name] = Preset(name, str(entry.get("description", "")), tuple(overrides), entry.get("tiles", True))
     return presets
 
 
