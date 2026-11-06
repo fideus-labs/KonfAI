@@ -151,3 +151,32 @@ def test_write_inputs_stages_series_as_dir_and_store_with_suffix(
     assert volume_zarr.is_symlink() or volume_zarr.is_dir()
     assert Path(os.readlink(volume_dicom)).name == "ser"
     assert Path(os.readlink(volume_zarr)).name == "st.ome.zarr"
+
+
+def test_an_h5_transform_is_staged_for_the_transform_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``.h5`` no ITK image reader takes is a transform: staged in its own root, read as ``itktransform`` beside
+    the images; an ITK HDF5 image stays an image; the default mask takes the grid of Reference_0."""
+    sitk = pytest.importorskip("SimpleITK")
+    source = tmp_path / "src"
+    source.mkdir()
+    sitk.WriteTransform(sitk.AffineTransform(3), str(source / "Transform.h5"))
+    image = sitk.Image(6, 5, 4, sitk.sitkUInt8)
+    sitk.WriteImage(image, str(source / "fixed.nii.gz"))
+    sitk.WriteImage(image, str(source / "image.h5"))
+    config = tmp_path / "Evaluation.yml"
+    config.write_text("Evaluator:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset:mha\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    app = KonfAIApp.__new__(KonfAIApp)
+    app._write_inputs_to_dataset([[source / "Transform.h5"]])
+    app._write_gt_to_dataset([[source / "fixed.nii.gz"], [source / "image.h5"]])
+    app._write_mask_or_default(None)
+    KonfAIApp._declare_dataset_roots(str(config))
+
+    assert (tmp_path / "Dataset_itktransform" / "P000" / "Volume_0.h5").is_symlink()
+    assert (tmp_path / "Dataset" / "P000" / "Reference_0.nii.gz").is_symlink()
+    assert (tmp_path / "Dataset" / "P000" / "Reference_1.h5").is_symlink()  # an image, read as one
+    mask = sitk.ReadImage(str(next((tmp_path / "Dataset" / "P000").glob("Mask_0.*"))))
+    assert mask.GetSize() == image.GetSize()
+    assert not list((tmp_path / "Dataset_itktransform").glob("*/Mask_0.*"))
+    assert "./Dataset_itktransform/:itktransform" in config.read_text(encoding="utf-8")

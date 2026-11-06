@@ -463,7 +463,7 @@ def build_app_cli(
         eval_p = subparsers.add_parser("eval", help="Evaluate the model against ground-truth labels.")
         select(eval_p)
         _add_app_io(eval_p)
-        _add_gt(eval_p, required=True)
+        _add_gt(eval_p, required=False)
         _add_mask(eval_p)
         eval_p.add_argument(
             "--evaluation-file",
@@ -672,7 +672,7 @@ def main_apps() -> None:
 
     eval_p = subparsers.add_parser("eval", help="Evaluate a KonfAI App using ground-truth labels.")
     add_common_args(eval_p)
-    _add_gt(eval_p, required=True)
+    _add_gt(eval_p, required=False)
     _add_mask(eval_p)
     eval_p.add_argument(
         "--evaluation-file",

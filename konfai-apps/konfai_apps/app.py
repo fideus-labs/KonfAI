@@ -35,7 +35,7 @@ import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import Attribute, Dataset, entry_links
+from konfai.utils.dataset import Attribute, Dataset, entry_links, is_an_image, is_displacement_entry
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load, save_weights
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -764,7 +764,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
     def evaluate(
         self,
         inputs: list[list[Path]],
-        gt: list[list[Path]],
+        gt: list[list[Path]] | None,
         output: Path = Path("./Output/"),
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -901,7 +901,8 @@ class KonfAIApp(AbstractKonfAIApp):
             True if the file matches one of `SUPPORTED_EXTENSIONS`.
         """
         lower = file.name.lower()
-        return any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
+        # ITK's text .tfm is a transform file konfai's own listing does not know: staged for itktransform.
+        return lower.endswith(".tfm") or any(lower.endswith("." + ext) for ext in SUPPORTED_EXTENSIONS)
 
     @staticmethod
     def _supported_suffix(file: Path) -> str:
@@ -1057,21 +1058,31 @@ class KonfAIApp(AbstractKonfAIApp):
                 if not matches:
                     continue
                 suffix = KonfAIApp._directory_volume_suffix(matches[0])
-                return "mha" if suffix is None else KonfAIApp._unit_backend(suffix)
+                return KonfAIApp._unit_backend(matches[0], storage_form(matches[0]) if suffix is None else suffix)
         return "mha"
 
     @staticmethod
-    def _unit_backend(suffix: str) -> str:
-        """The backend token a staged unit is read through, from its staging suffix: an OME-Zarr store,
-        a DICOM series (a bare directory, no suffix) or a single file."""
+    def _unit_backend(source: Path, suffix: str) -> str:
+        """The backend token a staged unit is read through: an OME-Zarr store, a DICOM series (a bare
+        directory, no suffix), an ITK transform file (a ``.h5`` no ITK image reader takes: a field, an
+        affine or a composite, which a Resample or a TransformPoints reads as a transform) or an image file."""
         if suffix in (".ome.zarr", ".zarr"):
             return "omezarr"
-        return "dicom" if suffix == "" else "mha"
+        if suffix == "":
+            return "dicom"
+        if suffix.lower() == ".tfm" or (
+            suffix.lower() == ".h5" and not sitk.ImageFileReader.GetImageIOFromFileName(str(source))
+        ):
+            return "itktransform"
+        return "mha"
 
     @staticmethod
     def _dataset_roots() -> list[Path]:
         """The staging roots on disk: ``./Dataset``, then one ``./Dataset_<backend>`` per other backend."""
-        roots = [Path("Dataset"), *(Path(f"Dataset_{backend}") for backend in ("mha", "dicom", "omezarr"))]
+        roots = [
+            Path("Dataset"),
+            *(Path(f"Dataset_{backend}") for backend in ("mha", "dicom", "omezarr", "itktransform")),
+        ]
         return [root for root in roots if root.exists() or root.is_symlink()]
 
     @staticmethod
@@ -1084,9 +1095,10 @@ class KonfAIApp(AbstractKonfAIApp):
         ``./Dataset``, the root every config reads; any other to ``./Dataset_<backend>``, which
         :meth:`_declare_dataset_roots` adds to the config.
         """
-        backend = KonfAIApp._unit_backend(suffix)
+        backend = KonfAIApp._unit_backend(source, suffix)
         root = Path("Dataset" if backend == primary else f"Dataset_{backend}")
-        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix}")
+        # The transform backend looks an entry up as <entry>.h5 or .tfm, in lower case.
+        KonfAIApp.link_entry(source, root / case / f"{entry}{suffix.lower() if backend == 'itktransform' else suffix}")
         (root / _STAGED_MARKER).touch()  # konfai-apps' own root: _clear_dataset may delete it
 
     @staticmethod
@@ -1207,9 +1219,11 @@ class KonfAIApp(AbstractKonfAIApp):
         staged = {case.name for root in KonfAIApp._dataset_roots() for case in root.iterdir() if case.is_dir()}
         cases = len(staged) or (len(listed[0]) if listed else 0)
         if prefix == "Volume":
-            primary = KonfAIApp._unit_backend(listed[0][0][1]) if listed and listed[0] else "mha"
+            primary = KonfAIApp._unit_backend(*listed[0][0]) if listed and listed[0] else "mha"
         else:
             primary = KonfAIApp._detect_group_format(Path("Dataset"), "Volume_0")
+        # A transform never takes ./Dataset, the root every config reads as images: its own root is declared beside it.
+        primary = "mha" if primary == "itktransform" else primary
         for i, units in enumerate(listed):
             if len(units) != cases:
                 raise AppRepositoryError(
@@ -1384,11 +1398,22 @@ class KonfAIApp(AbstractKonfAIApp):
             Optional mask paths.
         """
         if mask is None:
-            for root in KonfAIApp._dataset_roots():
-                dataset = Dataset(str(root), KonfAIApp._detect_group_format(root, "Volume_0"))
+            # One channel of ones, which a masked metric broadcasts over the image's, on the grid of the first of
+            # Volume_0 and Reference_0 that is an image: a transform (a registration's Volume_0) masks nothing.
+            roots = [
+                Dataset(str(root), KonfAIApp._detect_group_format(root, "Volume_0"))
+                for root in KonfAIApp._dataset_roots()
+            ]
+            for dataset in roots:
                 for name in dataset.get_names("Volume_0"):
-                    shape, attr = dataset.get_infos("Volume_0", name)  # header only, no pixel read
-                    KonfAIApp.write_constant(dataset, "Mask_0", name, shape, attr, 1)
+                    for group in ("Volume_0", "Reference_0"):
+                        holder = next((root for root in roots if root.is_dataset_exist(group, name)), None)
+                        if holder is None:
+                            continue
+                        shape, attr = holder.get_infos(group, name)  # header only, no pixel read
+                        if is_an_image(attr) and not is_displacement_entry(shape, attr):
+                            KonfAIApp.write_constant(holder, "Mask_0", name, [1, *shape[1:]], attr, 1)
+                            break
         else:
             KonfAIApp._stage_groups(mask, "Mask")
 
@@ -1550,7 +1575,7 @@ class KonfAIApp(AbstractKonfAIApp):
     def evaluate(
         self,
         inputs: list[list[Path]],
-        gt: list[list[Path]],
+        gt: list[list[Path]] | None,
         output: Path = Path("./Output/"),
         mask: list[list[Path]] | None = None,
         evaluation_file: str = "Evaluation.yml",
@@ -1576,7 +1601,8 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inputs_to_dataset(inputs)
-        self._write_gt_to_dataset(gt)
+        if gt:  # an evaluation of the prediction alone (a field's Jacobian) has no reference
+            self._write_gt_to_dataset(gt)
         self._write_mask_or_default(mask)
         self.app_repository.install_evaluation(evaluation_file)
         self._declare_dataset_roots(evaluation_file)
