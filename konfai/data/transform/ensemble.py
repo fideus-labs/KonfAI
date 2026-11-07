@@ -116,6 +116,14 @@ def stacked_groups(stage: Any, groups: Iterable[str], name: str) -> tuple[set[st
     return stacked, next(iter(counts), 0)
 
 
+def _no_field(cache_attribute: Attribute) -> None:
+    """Drop the displacement-field mark: what a stage made of a field (its spread, its magnitude) is no field."""
+    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
+
+    if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute:
+        cache_attribute.pop(DISPLACEMENT_FIELD_ATTRIBUTE)
+
+
 def _stack_attributes(cache_attribute: Attribute, members: int, dataset: Dataset, channels: int) -> Attribute:
     """The stack's own header: the output's, and its member count. The output itself is no stack. Members of several
     channels are told apart by the count alone, so their stack goes where a header keeps it."""
@@ -142,6 +150,7 @@ class _MemberSpread(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         members = stack_members(tensors, cache_attribute)
+        _no_field(cache_attribute)  # a spread of fields is no field
         if members.shape[0] > 1:
             return self._spread(members.float(), 0)
         return torch.zeros_like(members[0])
@@ -221,6 +230,7 @@ class Magnitude(Transform):
         super().__init__()
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        _no_field(cache_attribute)  # a field's magnitude is an image, in its unit: a reader must not take it for one
         return torch.linalg.norm(tensors.float(), dim=0, keepdim=True)
 
 

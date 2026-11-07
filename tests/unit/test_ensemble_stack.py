@@ -174,3 +174,16 @@ def test_the_spread_of_points_its_calibration_and_a_quantile() -> None:
     assert SpreadCalibration()(members, reference[None])[1] == pytest.approx(1.0)
     values = torch.arange(101.0)[None, None]
     assert Quantile(0.95)(values)[1] == pytest.approx(95.0) and Quantile(0.95).get_name() == "Quantile95"
+
+
+def test_the_spread_of_fields_is_no_field() -> None:
+    """A field's header marks it a displacement field; its spread and its magnitude are images in its unit, and a
+    reader would take them for transforms if they kept the mark."""
+    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
+
+    header = Attribute()
+    header[MEMBERS_ATTRIBUTE] = 2
+    header[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+    spread = StandardDeviation()("P000", torch.randn(6, 2, 2, 2), header)
+    Magnitude()("P000", spread, header)
+    assert DISPLACEMENT_FIELD_ATTRIBUTE not in header and MEMBERS_ATTRIBUTE not in header
