@@ -26,6 +26,7 @@ where that form keeps the member count, the members named in ``konfai-run.json``
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -37,7 +38,7 @@ import numpy as np
 import torch
 from konfai.data import reduction
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, holds_stack, member_count
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset
 from konfai.utils.utils import format_token, storage_form
 
 from .errors import AppRepositoryError
@@ -233,6 +234,9 @@ def infer_references(
 
     own_members = bool(infer.get("ensemble") or infer.get("ensemble_models") or infer.get("tta"))
     work = Path(tempfile.mkdtemp(prefix="konfai_ensemble_", dir=output.parent if output.parent.exists() else None))
+    # Every member is averaged: none keeps a native form (a registration's affine or B-spline), each writes its field.
+    dense = os.environ.get(DENSE_TRANSFORMS_ENV)
+    os.environ[DENSE_TRANSFORMS_ENV] = "1"
     try:
         runs = []
         for index, reference in enumerate(references):
@@ -272,4 +276,8 @@ def infer_references(
             json.dumps({"ensemble": records, "combine": operator, "members": names}, indent=2) + "\n", encoding="utf-8"
         )
     finally:
+        if dense is None:
+            os.environ.pop(DENSE_TRANSFORMS_ENV, None)
+        else:
+            os.environ[DENSE_TRANSFORMS_ENV] = dense
         shutil.rmtree(work, ignore_errors=True)
