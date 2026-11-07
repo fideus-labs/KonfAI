@@ -1347,32 +1347,20 @@ class KonfAIApp(AbstractKonfAIApp):
                     KonfAIApp.write_constant(dataset, f"Volume_{i}", name, shape, attributes, fill_value[default])
 
     def _write_inference_stack_to_dataset(self, inputs: list[list[Path]]) -> None:
-        """
-        Build the Dataset/ structure for uncertainty estimation.
-
-        This method enforces that each input file is a multi-component volume
-        (e.g., an inference stack) by reading metadata with SimpleITK.
-
-        Raises
-        ------
-        AppRepositoryError
-            If a provided input is not multi-channel (single-component).
-        """
-        dataset_path = KonfAIApp._stage_dataset()
-        for i, input_path in enumerate(inputs):
-            for idx, file in enumerate(KonfAIApp._list_supported_files(input_path)):
-                reader = sitk.ImageFileReader()
-                reader.SetFileName(str(file))
-                reader.ReadImageInformation()
-                n_channels = reader.GetNumberOfComponents()
-                if n_channels > 1:
-                    suffix = KonfAIApp._supported_suffix(file)
-                    KonfAIApp.link_entry(file, dataset_path / f"P{idx:03d}" / f"Volume_{i}{suffix}")
-                else:
-                    raise AppRepositoryError(
-                        f"'{file}' has one channel: uncertainty reads an inference stack, one channel per inference.",
-                        "Give the InferenceStack.mha an inference with -uncertainty wrote.",
-                    )
+        """Stage the stacks as inputs are staged (``P{idx}/Volume_{i}``, an OME-Zarr store whole), each read back by its
+        header and refused when it holds one channel: uncertainty reads an inference stack, its members' channels."""
+        self._write_inputs_to_dataset(inputs)
+        for dataset_dir in KonfAIApp._dataset_roots():
+            for i in range(len(inputs)):
+                group = f"Volume_{i}"
+                dataset = Dataset(str(dataset_dir), KonfAIApp._detect_group_format(dataset_dir, group))
+                for name in dataset.get_names(group):
+                    if dataset.get_infos(group, name)[0][0] < 2:
+                        raise AppRepositoryError(
+                            f"Case {name}'s {group} has one channel: uncertainty reads an inference stack, one channel"
+                            " per inference.",
+                            "Give the InferenceStack an inference with -uncertainty wrote.",
+                        )
 
     def _write_gt_to_dataset(self, gt: list[list[Path]]) -> None:
         """
