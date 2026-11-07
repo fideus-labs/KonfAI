@@ -385,6 +385,23 @@ def _installer() -> list[str]:
     )
 
 
+def read_tabs(spec: dict[str, Any] | None) -> dict[EvaluationKey, dict[str, DataEntry]]:
+    """``inputs_evaluations`` or ``inputs_uncertainties`` of an app.json: ``{tab: {config file: {entry: {display_name,
+    volume_type, required}}}}``, by (tab, config file)."""
+    return {
+        EvaluationKey(display_name=str(tab), evaluation_file=str(config)): {
+            str(key): DataEntry(
+                display_name=str(value["display_name"]),
+                volume_type=VolumeType(value["volume_type"]),
+                required=bool(value["required"]),
+            )
+            for key, value in entries.items()
+        }
+        for tab, by_file in (spec or {}).items()
+        for config, entries in by_file.items()
+    }
+
+
 class VolumeType(Enum):
     SEGMENTATION = "SEGMENTATION"
     VOLUME = "VOLUME"
@@ -604,6 +621,7 @@ class AppRepositoryInfo(ABC):
         outputs: dict[str, DataEntry],
         inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]],
         terminology: dict[int, TerminologyEntry] | None = None,
+        inputs_uncertainties: dict[EvaluationKey, dict[str, DataEntry]] | None = None,
         patch_size: list[int] | None = None,
         task: str | None = None,
         icon_path: Path | None = None,
@@ -620,6 +638,7 @@ class AppRepositoryInfo(ABC):
         self._inputs = inputs
         self._outputs = outputs
         self._inputs_evaluations = inputs_evaluations
+        self._inputs_uncertainties = inputs_uncertainties or {}
         self._terminology = terminology
         self._patch_size = patch_size
         self._task = task
@@ -639,6 +658,7 @@ class AppRepositoryInfo(ABC):
             f"  inputs={self._inputs!r},\n"
             f"  outputs={self._outputs!r},\n"
             f"  inputs_evaluations={self._inputs_evaluations!r},\n"
+            f"  inputs_uncertainties={self._inputs_uncertainties!r},\n"
             f"  terminology={self._terminology!r}\n"
             f")"
         )
@@ -713,6 +733,11 @@ class AppRepositoryInfo(ABC):
     def get_evaluations_inputs(self) -> dict[EvaluationKey, dict[str, DataEntry]]:
         return self._inputs_evaluations
 
+    def get_uncertainties_inputs(self) -> dict[EvaluationKey, dict[str, DataEntry]]:
+        """The uncertainty configs a run's stack is measured with, by tab, and the references (``--gt``) each takes
+        beside the stack (``-i``)."""
+        return self._inputs_uncertainties
+
     def get_terminology(self) -> dict[int, TerminologyEntry] | None:
         return self._terminology
 
@@ -773,19 +798,8 @@ class LocalAppRepository(AppRepositoryInfo):
                 for key, value in app_repository_metadata["outputs"].items()
             }
 
-        inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]] = {}
-        if "inputs_evaluations" in app_repository_metadata:
-            for display_name, by_file in app_repository_metadata["inputs_evaluations"].items():
-                for evaluation_file, entries in by_file.items():
-                    eval_key = EvaluationKey(display_name=display_name, evaluation_file=evaluation_file)
-                    inputs_evaluations[eval_key] = {
-                        key: DataEntry(
-                            display_name=value["display_name"],
-                            volume_type=VolumeType(value["volume_type"]),
-                            required=bool(value["required"]),
-                        )
-                        for key, value in entries.items()
-                    }
+        inputs_evaluations = read_tabs(app_repository_metadata.get("inputs_evaluations"))
+        inputs_uncertainties = read_tabs(app_repository_metadata.get("inputs_uncertainties"))
 
         try:
             maximum_tta = int(app_repository_metadata["tta"])
@@ -829,6 +843,7 @@ class LocalAppRepository(AppRepositoryInfo):
             inputs=inputs,
             outputs=outputs,
             inputs_evaluations=inputs_evaluations,
+            inputs_uncertainties=inputs_uncertainties,
             terminology=terminology,
             patch_size=patch_size,
             task=app_repository_metadata.get("task"),
@@ -1984,18 +1999,8 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
             for key, value in data["outputs"].items()
         }
 
-        inputs_evaluations: dict[EvaluationKey, dict[str, DataEntry]] = {}
-        for display_name, by_file in data["inputs_evaluations"].items():
-            for evaluation_file, entries in by_file.items():
-                eval_key = EvaluationKey(display_name=str(display_name), evaluation_file=str(evaluation_file))
-                inputs_evaluations[eval_key] = {
-                    key: DataEntry(
-                        display_name=str(value["display_name"]),
-                        volume_type=VolumeType(value["volume_type"]),
-                        required=bool(value["required"]),
-                    )
-                    for key, value in entries.items()
-                }
+        inputs_evaluations = read_tabs(data["inputs_evaluations"])
+        inputs_uncertainties = read_tabs(data.get("inputs_uncertainties"))  # a server before 1.9 sends none
 
         terminology: dict[int, TerminologyEntry] | None = None
         if "terminology" in data:
@@ -2016,6 +2021,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
             inputs=inputs,
             outputs=outputs,
             inputs_evaluations=inputs_evaluations,
+            inputs_uncertainties=inputs_uncertainties,
             terminology=terminology,
         )
 
