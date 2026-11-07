@@ -143,6 +143,9 @@ class ClaudeCodeProvider:
             effort=self.effort,  # type: ignore[arg-type]
             max_turns=self.max_turns,
             resume=self.session_id,
+            # a view of a large noisy volume is a PNG of several hundred kB; base64 in one JSON line, it passes
+            # the SDK's default 1 MB message buffer
+            max_buffer_size=64 * 1024 * 1024,
         )
 
     async def _stream(self, content: list[dict[str, Any]], options: Any) -> AsyncIterator[Any]:
