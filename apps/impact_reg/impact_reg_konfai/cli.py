@@ -231,14 +231,17 @@ convention): resampling the moving image through it gives Moved.""",
         help="Evaluate a registration on any subset of modalities (image/seg/fid); at least one is required.",
         description="""Evaluate a transform on any subset of three modalities, at least one:
 
-  image  -f/-m                              MAE between the fixed image and the warped moving one
-  seg    --gt-fixed-seg/--gt-moving-seg     Dice per label, and their mean
+  image  -f/-m                              the fixed image against the warped moving one: MAE,
+                                            NMI, NCC, LNCC, and the share sent outside the moving image
+  seg    --gt-fixed-seg/--gt-moving-seg     per label, and their mean: Dice, Jaccard, volume difference,
+                                            HD95, ASSD and surface Dice (2 mm), in mm where a distance
   fid    --gt-fixed-fid/--gt-moving-fid     TRE in mm: the fixed landmarks (Slicer .fcsv) pushed
                                             through the transform, against the moving ones, row by row
 
 The moving side is the ORIGINAL moving data: the transform is applied here, and omitted it is the
 identity (the misalignment before registration). A displacement-field transform also gets its
-Jacobian determinant statistics (folded fraction, minimum, SD of its log). The metrics go to
+measures without reference: Jacobian (folded fraction, minimum, SD of its log), bending energy,
+displacement lengths (mean, 95th percentile, max); given alone, it gets those only. The metrics go to
 <output>/<case>/Evaluation/<modality>/, and <output>/Evaluation_summary.json gathers the cohort.""",
         epilog="""example:
   impact-reg-konfai eval --transform Output/P000/Transform.h5 -f fixed.nii.gz -m moving.nii.gz \\
@@ -452,14 +455,14 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
 
     elif args.command == "eval":
         # Nothing is mandatory except at least one complete modality (image / seg / fid), or a transform
-        # alone, whose Jacobian is then the evaluation.
+        # alone, whose measures without reference are then the evaluation.
         has_image = bool(args.fixed_images and args.moving_images)
         has_seg = bool(args.gt_fixed_seg and args.gt_moving_seg)
         has_fid = bool(args.gt_fixed_fid and args.gt_moving_fid)
         if not (has_image or has_seg or has_fid or args.transform):
             ev.error(
                 "provide at least one modality: image (-f/-m), seg (--gt-fixed-seg/--gt-moving-seg), "
-                "or fid (--gt-fixed-fid/--gt-moving-fid); or --transform alone, for its Jacobian."
+                "or fid (--gt-fixed-fid/--gt-moving-fid); or --transform alone, for its measures without reference."
             )
         gpu = [] if args.cpu is not None else args.gpu
         app.evaluate(

@@ -1656,8 +1656,9 @@ class ImpactRegKonfAIApp:
         is given it warps the moving data onto the fixed grid first; otherwise the moving data is assumed
         already registered and only resampled onto the fixed grid (identity). Each option holds one entry
         per case or one used for every case (``_cases``); a displacement-field transform also gets its
-        Jacobian statistics, and is evaluated alone when no modality is given. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
-        Segmentation, Landmarks, Jacobian), and the whole call to ``<output>/Evaluation_summary.json``.
+        measures without reference (Jacobian, bending energy, displacement lengths), and is evaluated alone when no
+        modality is given. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
+        Segmentation, Landmarks, NoReference), and the whole call to ``<output>/Evaluation_summary.json``.
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
         three, and resolving one only to read them pip-installed its requirements (itk-impact for the
@@ -1697,7 +1698,8 @@ class ImpactRegKonfAIApp:
                 }
             )
         )
-        # A transform given alone is a case of its own: its Jacobian, when it is a field, is the evaluation.
+        # A transform given alone is a case of its own: its measures without reference, when it is a field, are the
+        # evaluation.
         n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid)) or len(transforms)
         scored: list[tuple[str, Path]] = []
         jacobians: dict[Path, Path] = {}  # one field given for every case is measured once: it reads the whole field
@@ -1752,25 +1754,25 @@ class ImpactRegKonfAIApp:
                         tmp_dir=work / modality,
                     )
                     scored.append((f"P{index:03d}", eval_out / modality))
-                # Deformation quality, a property of the transform alone. Only a displacement field is measured: a
-                # linear transform's Jacobian is its matrix, the same everywhere, and a B-spline file is not converted
-                # to a field.
+                # The transform alone, no reference: its Jacobian, bending energy and displacement lengths. Only a
+                # displacement field is measured: a linear transform's Jacobian is its matrix, the same everywhere,
+                # and a B-spline file is not converted to a field.
                 if transforms and _is_field(transform):
                     if transform in jacobians:
-                        shutil.copytree(jacobians[transform], eval_out / "Jacobian", dirs_exist_ok=True)
+                        shutil.copytree(jacobians[transform], eval_out / "NoReference", dirs_exist_ok=True)
                     else:
                         app.evaluate(
                             inputs=[[transform]],
                             gt=None,
-                            output=eval_out / "Jacobian",
-                            evaluation_file="Evaluation_with_jacobian.yml",
+                            output=eval_out / "NoReference",
+                            evaluation_file="Evaluation_no_reference.yml",
                             gpu=gpu,
                             cpu=cpu,
                             quiet=quiet,
-                            tmp_dir=work / "Jacobian",
+                            tmp_dir=work / "NoReference",
                         )
-                        jacobians[transform] = eval_out / "Jacobian"
-                    scored.append((f"P{index:03d}", eval_out / "Jacobian"))
+                        jacobians[transform] = eval_out / "NoReference"
+                    scored.append((f"P{index:03d}", eval_out / "NoReference"))
             except BaseException as error:
                 _leave(work, error)
                 raise
