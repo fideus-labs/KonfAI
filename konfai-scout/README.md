@@ -32,6 +32,7 @@ and the measurements that support them.
 pip install konfai-scout[anthropic]        # Claude through the Anthropic API
 pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)
 pip install konfai-scout[claude-code]      # Claude under your Claude Code login (the Claude Agent SDK), no API key
+pip install konfai-scout[codex]            # GPT under your ChatGPT login (the Codex CLI), no API key
 ```
 
 Scout is a package of the [KonfAI](https://github.com/fideus-labs/KonfAI) family (`konfai-scout/` in its repository),
@@ -53,6 +54,7 @@ konfai-scout inspect --task registration --name pair07 \
     --out reports/pair07 --provider openai --base-url http://localhost:11434/v1 --model llava:34b
 
 konfai-scout inspect --case case.json --out reports/case --provider claude-code --allow-cloud-images  # Claude Code login
+konfai-scout inspect --case case.json --out reports/case --provider codex --allow-cloud-images        # Codex (ChatGPT) login
 konfai-scout inspect --case case.json --out reports/case --mode fixed --provider mock   # no API at all
 ```
 
@@ -100,6 +102,10 @@ The `claude-code` provider runs the Claude Agent SDK under your Claude Code logi
 tool loop, Scout's tools are served to it as an in-process MCP server (images included) and no built-in tool is
 enabled. It is a cloud provider (`--allow-cloud-images`), and the CLI keeps the session, images included, under
 `~/.claude/projects`. The report records the same calls, views, measurements and budget as with the API providers.
+
+The `codex` provider does the same with the Codex CLI under your ChatGPT login: `codex exec` runs the loop, Scout's
+tools are served to it over a loopback MCP server, the case images are attached to the prompt; your own Codex
+configuration (MCP servers, plugins, shell) is not loaded. The CLI keeps the session under `~/.codex/sessions`.
 
 ## Examples and study
 
