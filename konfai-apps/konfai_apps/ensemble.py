@@ -19,8 +19,8 @@
 A member of an ensemble is one run of a model, whatever tells it from the others: a preset, a checkpoint, a TTA copy.
 A reference's own checkpoints and TTA copies stay in its predictor run, which hands over its stack when it holds
 several members and its output when one; each reference is a run of its own. The output is every member of every run
-reduced by the combine operator; with ``-uncertainty`` the stack of them all is kept beside it, the members named in
-``konfai-run.json`` in its order.
+reduced by the combine operator; with ``-uncertainty`` the stack of them all is kept beside it, in the output's form
+where that form keeps the member count, the members named in ``konfai-run.json`` in its order.
 """
 
 from __future__ import annotations
@@ -50,6 +50,12 @@ OPERATORS: dict[str, Callable[[], reduction.Reduction]] = {
 }
 # ponytail: a fixed slab height along the first spatial axis; size it from the memory budget if members get wide.
 SLAB_PLANES = 16
+
+
+def stack_file(form: str) -> str:
+    """The stack's file name beside an output of ``form`` (``.ome.zarr``, ``.nii.gz``): in that form where its header
+    keeps the member count, as MetaImage otherwise (NIfTI's header does not, nor is a transform file a stack)."""
+    return f"{STACK}{form if form in ('.mha', '.nrrd', '.ome.zarr') else '.mha'}"
 
 
 def _token(path: Path) -> str:
@@ -104,8 +110,32 @@ def combine(
 ) -> tuple[list[int], list[int]]:
     """Reduce every member ``sources`` hold (an output, or a stack of several) into ``output``, written through
     ``output_token``, slab by slab along the first spatial axis; and the stack of them all into ``stack`` when given,
-    as MetaImage, whose header keeps the member count. The members must share a grid and a channel count; the output
-    and the stack take the first member's header. Returns the output's shape and each source's member count."""
+    in the form its name asks (:func:`stack_file`), whose header keeps the member count. The members must share a grid and a channel count; the output
+    and the stack take the first member's header. Returns the output's shape and each source's member count.
+
+    Both are written in a folder of their own, then moved into place: written where they go, a folder that holds a
+    store (an earlier run's OME-Zarr) would read as a folder of stores and turn the output into one."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".konfai_combine_", dir=output.parent) as staging:
+        staged_output = Path(staging) / output.parent.name / output.name
+        staged_stack = Path(staging) / output.parent.name / stack.name if stack is not None else None
+        result = _combine_into(sources, operator, staged_output, output_token, staged_stack)
+        for staged, final in ((staged_output, output), (staged_stack, stack)):
+            if staged is None or final is None:
+                continue
+            final.parent.mkdir(parents=True, exist_ok=True)
+            if final.is_dir():
+                shutil.rmtree(final)
+            elif final.exists():
+                final.unlink()
+            shutil.move(str(staged), str(final))
+    return result
+
+
+def _combine_into(
+    sources: list[Path], operator: str, output: Path, output_token: str, stack: Path | None
+) -> tuple[list[int], list[int]]:
+    """:func:`combine`, written where it is told."""
     if operator not in OPERATORS:
         raise AppRepositoryError(f"An ensemble has no operator '{operator}'.", f"Choose one of {', '.join(OPERATORS)}.")
     entries = [_entry(path) for path in sources]
@@ -128,7 +158,7 @@ def combine(
     sinks: dict[str, Any] = {}
     buffers: dict[str, list[np.ndarray]] = {"output": [], "stack": []}
     out_entry = _entry(output, output_token)
-    stack_entry = _entry(stack, "mha") if stack is not None else None
+    stack_entry = _entry(stack, format_token(storage_form(stack))) if stack is not None else None
 
     def write(
         kind: str, entry: tuple[Dataset, str, str], data: np.ndarray, first: int, shape: list[int], attrs: Attribute
@@ -220,7 +250,7 @@ def infer_references(
             folder, case, name = key
             first_output = runs[0][2][key][0]
             target = output / folder / case / f"{name}{storage_form(first_output)}"
-            stack = output / folder / case / f"{STACK}.mha" if uncertainty else None
+            stack = output / folder / case / stack_file(storage_form(first_output)) if uncertainty else None
             _, counts = combine([found[key][1] for _, _, found in runs], operator, target, _token(first_output), stack)
             if not names:
                 names = [
