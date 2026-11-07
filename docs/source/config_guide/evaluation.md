@@ -83,7 +83,8 @@ custom metric without `reducible`) makes the whole run read cases whole.
 
 - `Metric_TRAIN.json`, and `Metric_VALIDATION.json` when `validation` is set.
 - `case`: the value of each metric for each case.
-- `aggregates`: mean, standard deviation, percentiles, minimum, maximum and count.
+- `aggregates`: mean, standard deviation, percentiles, minimum, maximum and count, and `worst30` for a metric with a
+  direction: the mean of its worst 30 % of cases (the lowest Dice, the highest TRE), Learn2Reg's robustness.
 - `directions`: for each metric, whether higher (`max`) or lower (`min`) is better.
 - `set_aside`: the cases that could not be read, with the error, when there are some.
 

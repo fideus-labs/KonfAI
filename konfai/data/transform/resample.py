@@ -1867,3 +1867,44 @@ class TransformPoints(Transform):
             rank = transform.GetDimension()
             points[:, :rank] = [transform.TransformPoint(point[:rank].tolist()) for point in points]
         return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)
+
+
+class WorldCoordinates(Transform):
+    """Replace a case by the world coordinates of its voxel centres: one channel per axis (x, y, z), in the unit of
+    its spacing, from its ``Origin``, ``Spacing`` and ``Direction``. A ``Resample`` through a map then reads, at each
+    voxel, where the map sends it: through a registration and the one registered back, the distance to the case's
+    own coordinates (``PointDistance``) is the round trip's error, its inverse consistency.
+    """
+
+    locality = LocalityKind.WHOLE_VOLUME
+
+    def output_channels(self, channels: int) -> int:
+        del channels
+        return 3  # a 2-D case holds two: three bounds every case
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        del name
+        spatial = list(tensor.shape[1:])
+        rank = len(spatial)
+        if not all(key in cache_attribute for key in _GEOMETRY_KEYS):
+            raise TransformError(
+                "'WorldCoordinates' needs the case's Origin, Spacing and Direction.",
+                "Read the case from a store that keeps its geometry (an image file, an OME-Zarr store).",
+            )
+        origin = cache_attribute.get_np_array("Origin").astype(np.float64)
+        spacing = cache_attribute.get_np_array("Spacing").astype(np.float64)
+        direction = cache_attribute.get_np_array("Direction").astype(np.float64).reshape(rank, rank)
+        # world_c = origin_c + sum_a direction[c, a] spacing_a index_a: one broadcast per axis, so nothing larger
+        # than one channel is held beside the result. Index axis a (x, y, z) is array axis rank - 1 - a.
+        step = direction * spacing
+        world = torch.empty((rank, *spatial), dtype=torch.float32)
+        for c in range(rank):
+            channel = torch.full((1,) * rank, float(origin[c]), dtype=torch.float64)
+            for a in range(rank):
+                along = [1] * rank
+                along[rank - 1 - a] = spatial[rank - 1 - a]
+                channel = channel + float(step[c, a]) * torch.arange(spatial[rank - 1 - a], dtype=torch.float64).view(
+                    along
+                )
+            world[c] = channel
+        return world
