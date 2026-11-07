@@ -21,6 +21,7 @@ from pathlib import Path
 
 import konfai_apps.app as app_module
 import pytest
+from konfai_apps.errors import AppRepositoryError
 
 KonfAIApp = app_module.KonfAIApp
 
@@ -151,3 +152,47 @@ def test_write_inputs_stages_series_as_dir_and_store_with_suffix(
     assert volume_zarr.is_symlink() or volume_zarr.is_dir()
     assert Path(os.readlink(volume_dicom)).name == "ser"
     assert Path(os.readlink(volume_zarr)).name == "st.ome.zarr"
+
+
+def test_list_input_units_reads_a_store_uri_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A URI is no path to walk: a store there is one unit the core reads in place, probed once for its
+    existence; a file there would be a whole download, which is the caller's to make."""
+    probed: list[str] = []
+
+    def is_dir(path: str) -> bool:
+        probed.append(path)
+        return path.endswith("fused.ome.zarr")
+
+    monkeypatch.setattr(app_module.uri, "is_dir", is_dir)
+
+    assert KonfAIApp._list_input_units(["s3://bucket/x/fused.ome.zarr"]) == [
+        ("s3://bucket/x/fused.ome.zarr", ".ome.zarr")
+    ]
+    assert probed == ["s3://bucket/x/fused.ome.zarr"]
+    with pytest.raises(AppRepositoryError, match="OME-Zarr store"):
+        KonfAIApp._list_input_units(["s3://bucket/x/volume.mha"])
+    with pytest.raises(AppRepositoryError, match="does not exist"):
+        KonfAIApp._list_input_units(["s3://bucket/x/missing.ome.zarr"])
+
+
+def test_write_inputs_names_a_store_uri_in_the_remote_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store read in place is named in ``./Dataset/.konfai-apps-remote.yml``, KonfAI's manifest form, under its
+    case and group: nothing of it is linked. It lives in ``./Dataset``, so it comes and goes with the staging."""
+    from ruamel.yaml import YAML
+
+    local = _zarr_store(tmp_path / "src", "moving.ome.zarr")
+    monkeypatch.setattr(app_module.uri, "is_dir", lambda path: True)
+    monkeypatch.chdir(tmp_path)
+
+    app = KonfAIApp.__new__(KonfAIApp)
+    app._write_inputs_to_dataset([["s3://bucket/x/fused.ome.zarr"], [local]])
+
+    manifest = tmp_path / "Dataset" / ".konfai-apps-remote.yml"
+    assert YAML(typ="safe").load(manifest) == {"P000": {"Volume_0": "s3://bucket/x/fused.ome.zarr"}}
+    assert not (tmp_path / "Dataset" / "P000").exists()
+    assert (tmp_path / "Dataset_omezarr" / "P000" / "Volume_1.ome.zarr").is_symlink()
+    assert KonfAIApp._remote_cases() == ["P000"]
+
+    KonfAIApp._clear_dataset()
+
+    assert not manifest.exists()

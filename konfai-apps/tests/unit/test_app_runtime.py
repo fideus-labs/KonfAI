@@ -477,6 +477,165 @@ def test_optional_defaults_follow_each_case_into_the_root_of_its_backend(
     assert Dataset("Dataset_omezarr", "omezarr").get_names("Volume_1") == ["P001"]
 
 
+def test_optional_defaults_of_a_case_read_in_place_land_in_the_dataset_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A case named in the remote manifest has no root of its own: its defaults are sized from the store's
+    header, read through the URI, and written into ./Dataset, where the roots meet on the case name."""
+    fsspec = pytest.importorskip("fsspec")
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.dataset import Attribute, Dataset
+    from konfai.utils.dataset.ome_zarr_file import _forget_resolved_paths
+    from konfai.utils.ome_zarr import write_ome_zarr
+
+    fs = fsspec.filesystem("memory")
+    fs.store.clear()
+    fs.pseudo_dirs.clear()
+    fs.pseudo_dirs.append("")
+    _forget_resolved_paths()
+    geometry = Attribute({"Origin": np.zeros(3), "Spacing": np.ones(3), "Direction": np.eye(3).flatten()})
+    write_ome_zarr(
+        "memory://cohort/x/fused.ome.zarr",
+        np.full((1, 3, 4, 5), 5, np.int16),
+        spacing=[1.0, 1.0, 1.0],
+        origin=[0.0, 0.0, 0.0],
+        attributes=dict(geometry),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    app = _app_with_inputs(
+        {
+            "Image": DataEntry("Image", VolumeType.VOLUME, True),
+            "Mask": DataEntry("Mask", VolumeType.SEGMENTATION, False, default="ones"),
+        }
+    )
+    app._write_inputs_to_dataset([["memory://cohort/x/fused.ome.zarr"]])
+    app._fill_optional_inputs(1)
+
+    assert Dataset("Dataset/.konfai-apps-remote.yml", "omezarr").get_names("Volume_0") == ["P000"]
+    masks = Dataset("Dataset", "mha")
+    assert masks.get_names("Volume_1") == ["P000"]
+    assert masks.get_infos("Volume_1", "P000")[0] == [1, 3, 4, 5]
+
+
+def test_declare_dataset_roots_carries_the_level_and_names_the_remote_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The extra store roots read at the level ./Dataset's entry declares (a default sized at @1 is unreadable
+    at @0; a file format has no level), and the remote manifest is one more root, declared like them."""
+    from ruamel.yaml import YAML
+
+    config = tmp_path / "Prediction.yml"
+    config.write_text(
+        "Predictor:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset/:i:omezarr@1\n", encoding="utf-8"
+    )
+    (tmp_path / "Dataset").mkdir()
+    (tmp_path / "Dataset" / ".konfai-apps-remote.yml").write_text(
+        "P000:\n  Volume_0: s3://bucket/x.ome.zarr\n", encoding="utf-8"
+    )
+    (tmp_path / "Dataset_mha").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    app_module.KonfAIApp._declare_dataset_roots(str(config))
+
+    assert YAML().load(config)["Predictor"]["Dataset"]["dataset_filenames"] == [
+        "./Dataset/:i:omezarr@1",
+        "./Dataset_mha/:i:mha",
+        "./Dataset/.konfai-apps-remote.yml:i:omezarr@1",
+    ]
+
+
+def test_run_distributed_app_keeps_a_uri_input_as_it_is(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A URI names a store the core reads in place; resolved as a path it would read '<cwd>/s3:/bucket/...'."""
+    user_dir = tmp_path / "user"
+    run_dir = tmp_path / "workspace"
+    user_dir.mkdir()
+    run_dir.mkdir()
+    monkeypatch.chdir(user_dir)
+    monkeypatch.setattr(app_module, "MinimalLog", nullcontext)
+    seen: dict[str, object] = {}
+
+    @app_module.run_distributed_app
+    def wrapped(inputs: list[list[Path | str]], tmp_dir: Path) -> None:
+        seen["inputs"] = inputs
+
+    wrapped(inputs=[["s3://bucket/x/fused.ome.zarr", "scan.mha"]], tmp_dir=run_dir)
+
+    assert seen["inputs"] == [["s3://bucket/x/fused.ome.zarr", user_dir / "scan.mha"]]
+
+
+def test_dataset_entry_reads_the_entry_of_any_workflow_section(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An evaluation config declares its entry under ``Evaluator``, a prediction's under ``Predictor``: the token and
+    the level of ./Dataset's entry are read wherever the file keeps it."""
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / "Evaluation.yml"
+    config.write_text("Evaluator:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset/:omezarr@2\n", encoding="utf-8")
+
+    assert app_module.KonfAIApp._dataset_entry(str(config), Path("Dataset")) == ("omezarr", 2)
+    assert app_module.KonfAIApp._dataset_entry(str(config), Path("Elsewhere")) == ("mha", 0)
+
+
+def test_a_default_mask_is_sized_at_the_level_the_evaluation_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``eval`` without --mask writes a mask of ones per case; on a pyramid read at @1 it is the level-1 shape,
+    which is why the config is installed before the mask is sized."""
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.dataset import Dataset
+    from konfai.utils.ome_zarr import write_ome_zarr
+
+    store = tmp_path / "image.ome.zarr"
+    write_ome_zarr(
+        str(store),
+        np.zeros((1, 8, 8, 8), np.float32),
+        spacing=[1.0, 1.0, 1.0],
+        origin=[0.0, 0.0, 0.0],
+        scale_factors=[2],
+    )
+    monkeypatch.chdir(tmp_path)
+    Path("Evaluation.yml").write_text(
+        "Evaluator:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset/:omezarr@1\n", encoding="utf-8"
+    )
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app._write_inputs_to_dataset([[store]])
+
+    app._write_mask_or_default(None, "Evaluation.yml")
+
+    assert Dataset("Dataset", "omezarr@1").get_infos("Mask_0", "P000")[0] == [1, 4, 4, 4]
+
+
+def test_a_default_of_a_case_read_in_place_is_written_as_the_store_the_config_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every input read in place, the config reading ./Dataset as ':omezarr@1': the default mask is the only thing
+    in ./Dataset, so it is written as a store at that level, the one form that token reads."""
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.dataset import Dataset
+    from konfai.utils.ome_zarr import write_ome_zarr
+
+    store = tmp_path / "image.ome.zarr"
+    write_ome_zarr(
+        str(store),
+        np.zeros((1, 8, 8, 8), np.float32),
+        spacing=[1.0, 1.0, 1.0],
+        origin=[0.0, 0.0, 0.0],
+        scale_factors=[2],
+    )
+    monkeypatch.chdir(tmp_path)
+    Path("Evaluation.yml").write_text(
+        "Evaluator:\n  Dataset:\n    dataset_filenames:\n    - ./Dataset/:omezarr@1\n", encoding="utf-8"
+    )
+    app = app_module.KonfAIApp.__new__(app_module.KonfAIApp)
+    app._write_inputs_to_dataset([[f"file://{store.as_posix()}"]])
+
+    app._write_mask_or_default(None, "Evaluation.yml")
+
+    assert not (tmp_path / "Dataset" / "P000" / "Volume_0.ome.zarr").exists()
+    assert Dataset("Dataset", "omezarr@1").get_infos("Mask_0", "P000")[0] == [1, 4, 4, 4]
+
+
 def test_write_mask_or_default_reads_header_only(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
