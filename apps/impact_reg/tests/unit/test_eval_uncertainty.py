@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 from impact_reg_konfai import cli
-from konfai.utils.dataset import write_landmarks
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, write_landmarks
 
 _SHAPE = (24, 24, 24)
 
@@ -156,6 +156,39 @@ def test_uncertainty_is_the_spread_of_the_vectors(
     expected = np.sqrt(((vectors - vectors.mean(axis=0)) ** 2).sum(axis=1).sum() / (len(members) - 1))
     np.testing.assert_allclose(sitk.GetArrayFromImage(spread), expected, rtol=1e-6)
     assert spread.GetSpacing() == (2.0, 2.0, 2.0)
+
+
+def test_a_segmentation_s_disagreement_counts_the_background(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A binary segmentation pulled through two members shifted apart: where one member has the structure and the
+    other has not, half the members disagree with the majority. Left out, the background would agree everywhere."""
+    from konfai_apps.ensemble import combine
+
+    fields = []
+    for index, shift in enumerate((2.0, -2.0)):
+        (tmp_path / f"m{index}" / "P000").mkdir(parents=True)
+        field = sitk.GetImageFromArray(np.broadcast_to(np.float32([shift, 0.0, 0.0]), (*_SHAPE, 3)).copy(), True)
+        field.SetSpacing((2.0, 2.0, 2.0))
+        field.SetMetaData(DISPLACEMENT_FIELD_ATTRIBUTE, "true")  # as an engine's field is marked
+        sitk.WriteImage(field, str(tmp_path / f"m{index}" / "P000" / "DVF.mha"))
+        fields.append(tmp_path / f"m{index}" / "P000" / "DVF.mha")
+    stack = tmp_path / "Ensemble" / "P000" / "InferenceStack.mha"
+    combine(fields, "Mean", tmp_path / "Ensemble" / "P000" / "DVF.mha", "mha", stack)
+    labels = np.zeros(_SHAPE, dtype=np.uint8)
+    labels[6:18, 6:18, 6:18] = 1
+    seg = _write(labels, tmp_path / "moving_seg.mha")
+    out = tmp_path / "Uncertainty"
+    code = _main(monkeypatch, ["uncertainty", "-i", str(stack), "--gt-moving-seg", str(seg), "-o", str(out), "-q"])
+
+    assert code == 0
+    pulled = []
+    for field in fields:
+        transform = sitk.DisplacementFieldTransform(sitk.Cast(sitk.ReadImage(str(field)), sitk.sitkVectorFloat64))
+        image = sitk.ReadImage(str(seg))
+        pulled.append(sitk.GetArrayFromImage(sitk.Resample(image, image, transform, sitk.sitkNearestNeighbor, 0)))
+    expected = (pulled[0] != pulled[1]).mean() * 0.5
+    summary = json.loads((out / "Uncertainty_summary.json").read_text())
+    got = summary["case"]["Disagreement:None:SegmentationDisagreement"]["P000"]
+    assert expected > 0 and got == pytest.approx(expected, rel=1e-6)
 
 
 def test_landmarks_saved_in_ras_score_a_perfect_transform_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

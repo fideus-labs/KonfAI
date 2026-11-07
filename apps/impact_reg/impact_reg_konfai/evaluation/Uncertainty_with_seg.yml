@@ -1,7 +1,8 @@
 # konfai-apps uncertainty APP --uncertainty-file Uncertainty_with_seg.yml -i STACK --gt MOVING_SEG
 # The ensemble's uncertainty where structures are: the moving segmentation pulled onto the fixed grid through every
-# member of the stack, and per voxel the share of members that disagree with the majority label (background left out),
-# written as a map, with its mean.
+# member of the stack, and per voxel the share of members that disagree with the majority label, the background a label
+# like any other (left out, a voxel where a member has the structure and another has not would agree), written as a
+# map, with its mean over the fixed grid.
 Evaluator:
   metrics:
     Disagreement:
@@ -23,7 +24,7 @@ Evaluator:
                   Volume_0: false
                 interpolation: nearest
               SegmentationDisagreement:
-                ignore_background: true
+                ignore_background: false
               Save:
                 dataset: ./Uncertainties/ImpactReg/Output:mha
                 group: None
