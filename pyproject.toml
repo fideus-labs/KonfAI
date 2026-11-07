@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "konfai-scout"
+dynamic = ["version"]
+description = "An autonomous agent that inspects segmentation, registration and synthesis results visually and reports localized defects with evidence and KonfAI Eval measurements"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Fideus Labs" }]
+dependencies = [
+  "numpy",
+  "SimpleITK>=2.0",
+  "Pillow>=10.1",
+  "scipy",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.66"]
+openai = ["openai>=1.40"]
+# The KonfAI Eval bridge: region metrics through konfai.evaluate (the branch that holds the registration
+# criteria is pinned by the integration, not here).
+konfai = ["konfai[itk]"]
+dev = ["pytest", "ruff==0.15.2", "anthropic>=0.66", "openai>=1.40"]
+
+[project.scripts]
+konfai-scout = "konfai_scout.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/fideus-labs/konfai-scout"
+Repository = "https://github.com/fideus-labs/konfai-scout"
+
+[tool.setuptools_scm]
+tag_regex = "^v(?P<version>.*)$"
+local_scheme = "no-local-version"
+fallback_version = "0.1.0.dev0"
+
+[tool.setuptools.packages.find]
+include = ["konfai_scout*"]
+
+[tool.setuptools.package-data]
+konfai_scout = ["py.typed"]
+
+[tool.ruff]
+line-length = 120
+src = ["konfai_scout"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
