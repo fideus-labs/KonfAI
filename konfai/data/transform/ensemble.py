@@ -27,6 +27,39 @@ from konfai.utils.dataset import Attribute, Dataset, DataStream
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
 
+#: The header key of a stack: how many members it holds. A stack is one volume whose channels are its members'
+#: channels, member-major (``[M x C, *spatial]``), so one member of ``C`` channels is ``C`` consecutive channels.
+#: The underscore keeps the key out of ``Attribute``'s stack renaming.
+MEMBERS_ATTRIBUTE = "konfai_members"
+
+
+def stack_members(tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+    """A stack ``[M x C, *spatial]`` as ``[M, C, *spatial]``, its member count read off its header, and the count
+    dropped from ``cache_attribute``: what a stage makes of the members is no stack any more. Without the key, every
+    channel is a member, as a stack of one-channel members always was."""
+    members = (
+        int(float(cache_attribute.pop(MEMBERS_ATTRIBUTE))) if MEMBERS_ATTRIBUTE in cache_attribute else tensors.shape[0]
+    )
+    if members < 1 or tensors.shape[0] % members:
+        raise TransformError(
+            f"A stack of {tensors.shape[0]} channels does not hold {members} members of one channel count.",
+            "Read the stack InferenceStack wrote, its header unchanged.",
+        )
+    return tensors.reshape(members, tensors.shape[0] // members, *tensors.shape[1:])
+
+
+def _stack_attributes(cache_attribute: Attribute, members: int, dataset: Dataset, channels: int) -> Attribute:
+    """The stack's own header: the output's, and its member count. The output itself is no stack. Members of several
+    channels are told apart by the count alone, so their stack goes where a header keeps it."""
+    if channels > 1 and dataset.file_format.split("@")[0] in ("nii", "nii.gz"):
+        raise TransformError(
+            f"A stack of members of {channels} channels needs its member count in its header, which NIfTI does not keep.",
+            "Write the stack where a header holds it: InferenceStack(dataset='<path>:mha'), or nrrd, or omezarr.",
+        )
+    attributes = Attribute(cache_attribute)
+    attributes[MEMBERS_ATTRIBUTE] = members
+    return attributes
+
 
 class _MemberSpread(Transform):
     """A per-voxel spread across the leading member axis (no spatial neighbour); one member spreads 0."""
@@ -40,9 +73,10 @@ class _MemberSpread(Transform):
         super().__init__()
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        if tensors.shape[0] > 1:
-            return self._spread(tensors.float(), 0).unsqueeze(0)
-        return torch.zeros_like(tensors[0]).unsqueeze(0)
+        members = stack_members(tensors, cache_attribute)
+        if members.shape[0] > 1:
+            return self._spread(members.float(), 0)
+        return torch.zeros_like(members[0])
 
 
 class Variance(_MemberSpread):
@@ -65,6 +99,7 @@ class SegmentationDisagreement(Transform):
 
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         # tensors shape: [N, ...] with N segmentations and integer labels per voxel
+        tensors = stack_members(tensors, cache_attribute)[:, 0]
         if tensors.shape[0] <= 1:
             return torch.zeros_like(tensors[0], dtype=torch.float32).unsqueeze(0)
 
@@ -175,10 +210,12 @@ class InferenceStack(Transform):
     locality = LocalityKind.SLAB
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
+        """The members ``[M, C, *spatial]`` as a stack: member-major channels ``[M x C, *spatial]``; a label map per
+        member in ``Seg`` mode."""
         if self.mode == "Seg":
             _tensors = torch.argmax(tensors, dim=1).to(torch.uint8)  # a softmax keeps the order it is taken of
         else:
-            _tensors = tensors.squeeze(1)
+            _tensors = tensors.reshape(tensors.shape[0] * tensors.shape[1], *tensors.shape[2:])
         return _tensors.float().cpu().numpy()
 
     def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
@@ -194,7 +231,12 @@ class InferenceStack(Transform):
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
         dataset = self.dataset if self.dataset else self.datasets[-1]
-        dataset.write("InferenceStack", name, self._stack(tensors), cache_attribute)
+        dataset.write(
+            "InferenceStack",
+            name,
+            self._stack(tensors),
+            _stack_attributes(cache_attribute, tensors.shape[0], dataset, tensors.shape[1]),
+        )
         return self._reduce(tensors)
 
     @property
@@ -211,15 +253,16 @@ class InferenceStack(Transform):
         dataset = self.dataset if self.dataset else self.datasets[-1]
         total, dtype, sink = torch.empty(0), torch.float32, None
         rows: list[np.ndarray] = []
-        written = 0
+        written = total_members = channels = 0  # the stack's rows (member channels), its members, a member's channels
         try:
             for members in copies:
                 stack = self._stack(members)
                 if written == 0:
-                    total, dtype = members.sum(0, dtype=torch.float32), members.dtype
-                    if count * len(stack) > 1:
+                    total, dtype, channels = members.sum(0, dtype=torch.float32), members.dtype, members.shape[1]
+                    if count * members.shape[0] > 1:
                         shape = [count * len(stack), *stack.shape[1:]]
-                        sink = dataset.open_data_stream("InferenceStack", name, shape, stack.dtype, cache_attribute)
+                        header = _stack_attributes(cache_attribute, count * members.shape[0], dataset, channels)
+                        sink = dataset.open_data_stream("InferenceStack", name, shape, stack.dtype, header)
                 else:
                     total.add_(members.sum(0, dtype=torch.float32))
                 if sink is None:
@@ -228,15 +271,21 @@ class InferenceStack(Transform):
                     region = (slice(written, written + len(stack)), *(slice(0, extent) for extent in stack.shape[1:]))
                     sink.write_slice(region, stack)
                 written += len(stack)
+                total_members += members.shape[0]
         except BaseException:
             if sink is not None:
                 sink.abort()  # abort, not close: finalizing would publish a partial stack
             raise
         if sink is not None:
             sink.close()
-        elif written > 1:
-            dataset.write("InferenceStack", name, np.concatenate(rows), cache_attribute)
-        return total.div_(written).to(dtype)
+        elif total_members > 1:
+            dataset.write(
+                "InferenceStack",
+                name,
+                np.concatenate(rows),
+                _stack_attributes(cache_attribute, total_members, dataset, channels),
+            )
+        return total.div_(total_members).to(dtype)
 
     def stream_slab(
         self,
@@ -253,9 +302,10 @@ class InferenceStack(Transform):
             return tensor.squeeze(0)
         stack = self._stack(tensor)
         dataset = self.dataset if self.dataset else self.datasets[-1]
+        header = _stack_attributes(cache_attribute, tensor.shape[0], dataset, tensor.shape[1])
         if name not in self._stack_sinks and name not in self._stack_buffers:
             sink = dataset.open_data_stream(
-                "InferenceStack", name, [stack.shape[0], *spatial_shape], stack.dtype, cache_attribute
+                "InferenceStack", name, [stack.shape[0], *spatial_shape], stack.dtype, header
             )
             if sink is None:
                 self._stack_buffers[name] = []
@@ -265,7 +315,7 @@ class InferenceStack(Transform):
             self._stack_buffers[name].append(stack)
             if region.stop == spatial_shape[0]:
                 whole = np.concatenate(self._stack_buffers.pop(name), axis=1)
-                dataset.write("InferenceStack", name, whole, cache_attribute)
+                dataset.write("InferenceStack", name, whole, header)
         else:
             target = (slice(0, stack.shape[0]), region, *(slice(0, extent) for extent in spatial_shape[1:]))
             self._stack_sinks[name].write_slice(target, stack)
