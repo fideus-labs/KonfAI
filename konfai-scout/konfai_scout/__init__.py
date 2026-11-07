@@ -7,21 +7,18 @@ from __future__ import annotations
 from .agent import Inspector, inspect, scout_version
 from .case import InspectionCase, Volume
 from .config import Budget, ScoutConfig
-from .geometry import Grid, WorldBox
 from .report import Report, compare, render_markdown
 
 __version__ = scout_version()
 __all__ = [
     "Budget",
-    "Grid",
     "InspectionCase",
     "Inspector",
     "Report",
     "ScoutConfig",
     "Volume",
-    "WorldBox",
+    "__version__",
     "compare",
     "inspect",
     "render_markdown",
-    "__version__",
 ]

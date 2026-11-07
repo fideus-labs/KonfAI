@@ -15,8 +15,8 @@ import numpy as np
 from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import EvaluationError, RegionEvaluator
-from .geometry import PLANES, WorldBox
 from .measure import displacement_stats, intensity_stats, label_overlap, label_stats
+from .planes import PLANES, box_from_dict, box_to_dict, window_of, world_box_of
 from .providers.base import ImageContent, ToolCall, ToolResult, ToolSpec
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS, Conclusion, Measurement, Observation
 from .report import ToolCall as ToolCallRecord
@@ -66,7 +66,7 @@ class Toolbox:
         window = _nullable(
             {
                 "anyOf": [
-                    {"type": "string", "enum": sorted(WINDOW_PRESETS) + ["auto"]},
+                    {"type": "string", "enum": [*sorted(WINDOW_PRESETS), "auto"]},
                     {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2},
                 ],
                 "description": "Intensity window: a preset name or [low, high]; auto by default.",
@@ -256,7 +256,7 @@ class Toolbox:
         window: object = None,
         label: int | None = None,
     ) -> tuple[dict[str, Any], list[ImageContent]]:
-        box = WorldBox.from_dict(zoom) if zoom else None
+        box = box_from_dict(zoom) if zoom else None
         png, view = self.renderer.render(
             plane, mode, index=index, position_mm=position_mm, window=window, zoom=box, label=label
         )
@@ -282,7 +282,7 @@ class Toolbox:
     def _tool_measure(
         self, record: ToolCallRecord, box_mm: object, metrics: list[str] | None = None
     ) -> tuple[dict[str, Any], list[ImageContent]]:
-        box = WorldBox.from_dict(box_mm)
+        box = box_from_dict(box_mm)
         measurement = self.evaluator.measure(box, metrics, measurement_id=f"m{len(self.measurements) + 1:03d}")
         self.measurements.append(measurement)
         record.measurements.append(measurement.id)
@@ -300,25 +300,25 @@ class Toolbox:
         }, []
 
     def _tool_region_stats(self, record: ToolCallRecord, box_mm: object) -> tuple[dict[str, Any], list[ImageContent]]:
-        box = WorldBox.from_dict(box_mm)
+        box = box_from_dict(box_mm)
         grid = self.case.grid
-        inside = box.intersection(grid.bounds)
-        index_box = inside.index_box(grid) if inside is not None else None
-        if index_box is None:
+        window = window_of(grid, box)
+        if window is None:
             raise ValueError("the box holds no voxel of the case")
-        lo, hi = index_box
-        measured = WorldBox.of_index_box(grid, lo, hi)
-        out: dict[str, Any] = {"box_measured": measured.to_dict(), "voxels": int(np.prod(np.subtract(hi, lo)))}
+        lo = tuple(int(part.start) for part in window)
+        hi = tuple(int(part.stop) for part in window)
+        measured = world_box_of(grid, window)
+        out: dict[str, Any] = {"box_measured": box_to_dict(measured), "voxels": int(np.prod(np.subtract(hi, lo)))}
         task = self.case.task
         if task == "segmentation":
-            prediction = self.case.volume("prediction").region(lo, hi)
+            prediction = self.case.volume("prediction").region(lo, hi)[0]
             out["prediction_labels"] = label_stats(prediction, grid, self.case.labels, lo)
-            image = self.case.volume("image").region(lo, hi)
+            image = self.case.volume("image").region(lo, hi)[0]
             out["image"] = intensity_stats(image)
             if prediction.any():
                 out["image_inside_prediction"] = intensity_stats(image, prediction != 0)
             if "truth" in self.case.inputs:
-                truth = self.case.volume("truth").region(lo, hi)
+                truth = self.case.volume("truth").region(lo, hi)[0]
                 out["truth_labels"] = label_stats(truth, grid, self.case.labels, lo)
                 out["overlap_voxels_prediction_vs_truth"] = label_overlap(prediction, truth)
         elif task == "registration":
@@ -327,18 +327,18 @@ class Toolbox:
             out["displacement"] = displacement_stats(self.renderer.volume("field").region(lo, hi))
             if "fixed_labels" in self.case.inputs:
                 out["fixed_labels"] = label_stats(
-                    self.case.volume("fixed_labels").region(lo, hi), grid, self.case.labels, lo
+                    self.case.volume("fixed_labels").region(lo, hi)[0], grid, self.case.labels, lo
                 )
             try:
                 out["warped_labels"] = label_stats(
-                    self.renderer.volume("warped_labels").region(lo, hi), grid, self.case.labels, lo
+                    self.renderer.volume("warped_labels").region(lo, hi)[0], grid, self.case.labels, lo
                 )
             except ViewError:
                 pass
             points = self.case.landmarks("fixed_landmarks")
             if points is not None:
                 out["fixed_landmarks_inside"] = int(
-                    np.sum(np.all((points >= measured.min_xyz) & (points <= measured.max_xyz), axis=1))
+                    np.sum(np.all((points >= measured.low_xyz) & (points <= measured.high_xyz), axis=1))
                 )
         else:
             synthetic = self.case.volume("synthetic").region(lo, hi)
@@ -374,8 +374,8 @@ class Toolbox:
             raise ValueError(f"severity is one of {SEVERITIES}")
         known_views = {v.id for v in self.renderer.views}
         known_measurements = {m.id for m in self.measurements}
-        views = [v for v in (views or [])]
-        measurements = [m for m in (measurements or [])]
+        views = list(views or [])
+        measurements = list(measurements or [])
         unknown = [v for v in views if v not in known_views] + [m for m in measurements if m not in known_measurements]
         if unknown:
             raise ValueError(f"unknown evidence id(s) {unknown}; cite ids returned by view, montage or measure")
@@ -398,7 +398,7 @@ class Toolbox:
             severity=severity,
             confidence=float(min(max(confidence, 0.0), 1.0)),
             description=description,
-            box_mm=WorldBox.from_dict(box_mm).to_dict() if box_mm else None,
+            box_mm=box_to_dict(box_from_dict(box_mm)) if box_mm else None,
             plane=plane,
             views=views,
             measurements=measurements,

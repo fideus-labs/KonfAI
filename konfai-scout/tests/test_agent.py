@@ -13,7 +13,7 @@ from konfai_scout.providers.mock import HeuristicProvider, ScriptedProvider, cal
 @pytest.mark.parametrize("mode", ["active", "fixed"])
 @pytest.mark.parametrize("key", ["segmentation", "registration", "synthesis"])
 def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, key, mode):
-    case, defects = fixtures[key]
+    case, _defects = fixtures[key]
     report = inspect(case, ScoutConfig(provider="mock", mode=mode, max_px=200), tmp_path / mode)
     assert report.error is None and report.conclusion is not None and report.conclusion.by == "model"
     assert (tmp_path / mode / "report.json").exists() and (tmp_path / mode / "report.md").exists()
@@ -34,7 +34,7 @@ def test_the_heuristic_inspection_leaves_a_complete_report(fixtures, tmp_path, k
     data = json.loads((tmp_path / mode / "report.json").read_text())
     assert (
         data["schema_version"] == "1.0"
-        and data["case"]["inputs"]["image" if key == "segmentation" else list(data["case"]["inputs"])[0]]["sha256"]
+        and data["case"]["inputs"]["image" if key == "segmentation" else next(iter(data["case"]["inputs"]))]["sha256"]
     )
 
 
@@ -161,4 +161,7 @@ def test_a_case_json_round_trip_and_a_registration_from_a_transform_file(fixture
     report = inspect(
         affine, ScoutConfig(provider="mock", max_px=200), tmp_path / "affine", provider=HeuristicProvider()
     )
-    assert report.error is None and (tmp_path / "affine" / "work" / "derived" / "field.mha").exists()
+    assert (
+        report.error is None
+        and (tmp_path / "affine" / "work" / "derived" / "Dataset" / "affine" / "FIELD.mha").exists()
+    )

@@ -15,7 +15,8 @@ and the measurements that support them.
   maps, displacement fields, Jacobians, deformed grids, landmarks. Every view carries its position in millimetres.
 - **It measures with KonfAI Eval, not with a scorer of its own.** A region is cropped and scored by `konfai.evaluate`
   with KonfAI's criteria: Dice per label, MAE, PSNR, SSIM, TRE where a reference exists; a field's folding, Jacobian
-  and displacement statistics without one.
+  and displacement statistics without one. Reading, warping and geometry are KonfAI's too: Scout adds the viewer,
+  the agent and the report, nothing that KonfAI already does.
 - **It keeps its statements apart.** A *measured property*, a *suspected error* (seen, not proven) and a *confirmed
   error* (a cited measurement) are distinct, and without a truth nothing is confirmed from appearance. "Insufficient
   evidence" is a legitimate conclusion.
@@ -30,10 +31,12 @@ and the measurements that support them.
 ```bash
 pip install konfai-scout[anthropic]        # Claude through the Anthropic API
 pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)
-pip install "konfai[itk] @ git+https://github.com/fideus-labs/KonfAI@feat/scout"   # the measurements (KonfAI Eval)
 ```
 
-Without KonfAI, Scout still renders, explores and reports; the `measure` tool tells the model it is unavailable.
+Scout is a package of the [KonfAI](https://github.com/fideus-labs/KonfAI) family (`konfai-scout/` in its repository),
+pinned to the `konfai` release it ships with: every volume is read through KonfAI's dataset backends (image files,
+OME-Zarr stores, DICOM series, ITK transform files), a registration is warped by KonfAI's own `Resample`, and every
+measurement is KonfAI Eval's. From a checkout: `pip install -e ./konfai-scout[dev]` beside `pip install -e .`.
 
 ## Inspect a case
 
@@ -104,9 +107,12 @@ konfai-mcp, KonfAI Studio, FidOpt and FidLab use Scout.
 
 ## Development
 
+From the KonfAI checkout, in its `dev` environment:
+
 ```bash
-uv venv && uv pip install -e ".[dev]" && pytest -q          # no API key: fake clients and a mock model
-ruff check konfai_scout tests examples
+pixi run --environment dev python -m pip install -e "./konfai-scout[dev]"
+pixi run --environment dev python -m pytest konfai-scout/tests      # no API key: fake clients and a mock model
+pixi run --environment dev ruff check konfai-scout
 ```
 
 Apache-2.0. Copyright (c) 2026 Fideus Labs LLC.

@@ -72,6 +72,17 @@ jobs:
         run: |
           python -m pytest konfai-mcp/tests
 
+      - name: Install standalone Scout package
+        run: |
+          pip install -e "./konfai-scout[dev]"
+
+      - name: Run konfai-scout tests
+        # No API key: the providers run against fake clients, the loop with the mock model.
+        env:
+          OMP_NUM_THREADS: "1"
+        run: |
+          python -m pytest -q konfai-scout/tests
+
       - name: Install standalone Studio package
         run: |
           pip install -e ./konfai-studio
@@ -111,6 +122,8 @@ jobs:
           - name: konfai-mcp
             pkg: "konfai-mcp"
             build_args: "--wheel"
+          - name: konfai-scout
+            pkg: "konfai-scout"
           - name: impact-synth-konfai
             pkg: "apps/impact_synth"
           - name: impact-seg-konfai

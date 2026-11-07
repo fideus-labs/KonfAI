@@ -12,18 +12,30 @@ from __future__ import annotations
 
 import hashlib
 import io
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from konfai.data.geometry import Grid, WorldBox
 from PIL import Image, ImageDraw, ImageFont
 
 from .case import InspectionCase, Volume
 from .config import ScoutConfig
-from .geometry import LPS_ENDS, Grid, WorldBox
+from .derived import Derived
 from .measure import jacobian_determinant
+from .planes import (
+    PlaneFrame,
+    axis_world_vector,
+    box_center,
+    box_to_dict,
+    dominant_world_axis,
+    grid_bounds,
+    index_along,
+    index_to_world,
+    plane_frame,
+    window_of,
+    world_box_of,
+)
 from .report import View
-from .warp import Derived
 
 PALETTE = [
     (230, 25, 75),
@@ -160,35 +172,6 @@ def checkerboard(a: np.ndarray, b: np.ndarray, tiles: int = 8) -> np.ndarray:
     return np.where(board, a, b)
 
 
-@dataclass(frozen=True)
-class PlaneFrame:
-    """How a plane is laid out on screen: which array axes run along rows and columns, flipped or not."""
-
-    plane: str
-    array_axis: int
-    rows_axis: int
-    cols_axis: int
-    flip_rows: bool
-    flip_cols: bool
-    #: Direction letters at the left, right, top and bottom edges.
-    edges: tuple[str, str, str, str]
-
-
-def plane_frame(grid: Grid, plane: str) -> PlaneFrame:
-    axis = grid.plane_axis(plane)
-    rows_axis, cols_axis = [a for a in range(3) if a != axis]
-    wanted = {0: 1, 1: 1, 2: -1}  # cols/rows along x: towards L; along y: towards P; along z: S at the top
-    world_c, sign_c = grid.dominant_world_axis(cols_axis)
-    world_r, sign_r = grid.dominant_world_axis(rows_axis)
-    flip_cols = sign_c != wanted[world_c]
-    flip_rows = sign_r != wanted[world_r]
-    sign_c = wanted[world_c]
-    sign_r = wanted[world_r]
-    right, left = LPS_ENDS[world_c][1 if sign_c > 0 else 0], LPS_ENDS[world_c][0 if sign_c > 0 else 1]
-    bottom, top = LPS_ENDS[world_r][1 if sign_r > 0 else 0], LPS_ENDS[world_r][0 if sign_r > 0 else 1]
-    return PlaneFrame(plane, axis, rows_axis, cols_axis, flip_rows, flip_cols, (left, right, top, bottom))
-
-
 class Renderer:
     """Renders the case's views and keeps the record of each one."""
 
@@ -197,7 +180,7 @@ class Renderer:
         self.config = config
         self.evidence = Path(evidence)
         self.evidence.mkdir(parents=True, exist_ok=True)
-        self.derived = Derived(case, Path(work) / "derived") if case.task == "registration" else None
+        self.derived = Derived(case, Path(work)) if case.task == "registration" else None
         self._windows: dict[str, tuple[float, float]] = {}
         self._count = 0
         self.views: list[View] = []
@@ -242,16 +225,18 @@ class Renderer:
                     raise ViewError("this case has no moving labels")
                 return warped
         volume = self.case.volume(role)
-        if volume.grid.size_xyz != self.grid.size_xyz:
+        if tuple(volume.grid.size_zyx) != tuple(self.grid.size_zyx):
             raise ViewError(
-                f"{role} is on another grid than {self.case.image_role} ({volume.grid.size_xyz} vs "
-                f"{self.grid.size_xyz}); Scout views the roles of one case on one grid"
+                f"{role} is on another grid than {self.case.image_role} ({list(volume.grid.size_zyx)} vs "
+                f"{list(self.grid.size_zyx)}, array order); Scout views the roles of one case on one grid"
             )
         return volume
 
     def window(self, role: str) -> tuple[float, float]:
-        if role not in self._windows:
-            self._windows[role] = self.volume(role).sample_percentiles()
+        if role not in self._windows:  # KonfAI's bounded passes: the volume is never held for its window
+            volume = self.volume(role)
+            low, high = volume.quantile(0.01), volume.quantile(0.99)
+            self._windows[role] = (low, high if high > low else low + 1.0)
         return self._windows[role]
 
     def resolve_window(self, window: object, role: str) -> tuple[float, float]:
@@ -289,14 +274,14 @@ class Renderer:
         axis = frame.array_axis
         if index is None:
             if position_mm is not None:
-                index = self.grid.index_along(axis, position_mm)
+                index = index_along(self.grid, axis, position_mm)
             elif zoom is not None:
-                index = self.grid.index_along(axis, zoom.center)
+                index = index_along(self.grid, axis, box_center(zoom))
             else:
-                index = self.grid.shape_zyx[axis] // 2
+                index = self.grid.size_zyx[axis] // 2
         index = int(index)
-        if not 0 <= index < self.grid.shape_zyx[axis]:
-            raise ViewError(f"slice {index} is outside the {plane} range 0..{self.grid.shape_zyx[axis] - 1}")
+        if not 0 <= index < self.grid.size_zyx[axis]:
+            raise ViewError(f"slice {index} is outside the {plane} range 0..{self.grid.size_zyx[axis] - 1}")
         crop = self._crop(zoom, frame) if zoom is not None else None
         rgb, extra, resolved_window = self._compose(frame, index, mode, window, label, crop)
         header = self._header_text(frame, index, mode, resolved_window, extra)
@@ -318,7 +303,7 @@ class Renderer:
         if mode not in self.modes():
             raise ViewError(f"mode {mode!r} is not available for this case; modes: {', '.join(self.modes())}")
         frame = plane_frame(self.grid, plane)
-        depth = self.grid.shape_zyx[frame.array_axis]
+        depth = self.grid.size_zyx[frame.array_axis]
         count = max(1, min(int(count or self.config.coverage_slices), depth, 16))
         indices = (
             [int(i) for i in np.linspace(0, depth - 1, count + 2)[1:-1]]
@@ -367,7 +352,7 @@ class Renderer:
         self._count += 1
         view_id = f"v{self._count:03d}"
         draw.text((4, 3), title.format(id=view_id), fill=(255, 255, 255), font=self.font)
-        box = WorldBox.of_points(np.array([self.grid.bounds.min_xyz, self.grid.bounds.max_xyz]))
+        box = grid_bounds(self.grid)
         view = View(
             id=view_id,
             kind="montage",
@@ -375,7 +360,7 @@ class Renderer:
             array_axis=frame.array_axis,
             index=None,
             position_mm=None,
-            box_mm=box.to_dict(),
+            box_mm=box_to_dict(box),
             mode=mode,
             window=resolved_window,
             size_px=[sheet.width, sheet.height],
@@ -391,17 +376,12 @@ class Renderer:
     # ------------------------------------------------------------------ composition
 
     def _crop(self, zoom: WorldBox, frame: PlaneFrame) -> tuple[slice, slice]:
-        box = zoom.intersection(self.grid.bounds)
-        if box is None:
+        window = window_of(self.grid, zoom)
+        if window is None:
             raise ViewError("the zoom box lies outside the volume")
-        index_box = box.index_box(self.grid)
-        if index_box is None:
-            raise ViewError("the zoom box holds no voxel")
-        lo, hi = index_box
-        rows = slice(lo[frame.rows_axis], hi[frame.rows_axis])
-        cols = slice(lo[frame.cols_axis], hi[frame.cols_axis])
-        return self._widen(rows, self.grid.shape_zyx[frame.rows_axis]), self._widen(
-            cols, self.grid.shape_zyx[frame.cols_axis]
+        rows, cols = window[frame.rows_axis], window[frame.cols_axis]
+        return self._widen(rows, self.grid.size_zyx[frame.rows_axis]), self._widen(
+            cols, self.grid.size_zyx[frame.cols_axis]
         )
 
     @staticmethod
@@ -564,9 +544,9 @@ class Renderer:
     ) -> np.ndarray:
         field = self.volume("field")
         lo = [0, 0, 0]
-        hi = list(self.grid.shape_zyx)
+        hi = list(self.grid.size_zyx)
         lo[frame.array_axis] = max(0, index - 1)
-        hi[frame.array_axis] = min(self.grid.shape_zyx[frame.array_axis], index + 2)
+        hi[frame.array_axis] = min(self.grid.size_zyx[frame.array_axis], index + 2)
         if crop is not None:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
@@ -589,15 +569,15 @@ class Renderer:
     # ------------------------------------------------------------------ display
 
     def _world_axis(self, frame: PlaneFrame) -> int:
-        return self.grid.dominant_world_axis(frame.array_axis)[0]
+        return dominant_world_axis(self.grid, frame.array_axis)[0]
 
     def _axis_letter(self, frame: PlaneFrame) -> str:
         return "xyz"[self._world_axis(frame)]
 
     def _position(self, frame: PlaneFrame, index: int) -> np.ndarray:
-        center = [(n - 1) / 2 for n in self.grid.size_xyz]
+        center = [(n - 1) / 2 for n in reversed(self.grid.size_zyx)]
         center[2 - frame.array_axis] = float(index)
-        return self.grid.index_to_world(center)
+        return index_to_world(self.grid, center)
 
     def _window_text(self, window: list[float] | None) -> str:
         return "n/a" if window is None else f"[{window[0]:.4g}, {window[1]:.4g}]"
@@ -606,7 +586,7 @@ class Renderer:
         self, frame: PlaneFrame, index: int, mode: str, window: list[float] | None, extra: dict[str, object]
     ) -> str:
         position = self._position(frame, index)
-        depth = self.grid.shape_zyx[frame.array_axis]
+        depth = self.grid.size_zyx[frame.array_axis]
         text = (
             f"{{id}} {frame.plane} {self._axis_letter(frame)}={position[self._world_axis(frame)]:.1f}mm "
             f"(slice {index}/{depth - 1}) | {mode} | window {self._window_text(window)}"
@@ -631,13 +611,13 @@ class Renderer:
         rows0 = crop[0].start if crop is not None else 0
         cols0 = crop[1].start if crop is not None else 0
         height0, width0 = array.shape[:2]
-        u_step = self.grid.axis_world_vector(frame.cols_axis)
-        v_step = self.grid.axis_world_vector(frame.rows_axis)
+        u_step = axis_world_vector(self.grid, frame.cols_axis)
+        v_step = axis_world_vector(self.grid, frame.rows_axis)
         first = np.zeros(3)
         first[frame.array_axis] = index
         first[frame.rows_axis] = rows0
         first[frame.cols_axis] = cols0
-        origin = self.grid.index_to_world(first[::-1])  # array order -> xyz
+        origin = index_to_world(self.grid, first[::-1])  # array order -> xyz
         if frame.flip_cols:
             array = array[:, ::-1]
             origin = origin + (width0 - 1) * u_step
@@ -649,15 +629,15 @@ class Renderer:
         drawn_width = array.shape[1]  # side_by_side widens the array beyond the plane
         mm_u, mm_v = float(np.linalg.norm(u_step)), float(np.linalg.norm(v_step))
         finest = min(mm_u, mm_v)
-        width1 = max(1, int(round(drawn_width * mm_u / finest)))
-        height1 = max(1, int(round(height0 * mm_v / finest)))
+        width1 = max(1, round(drawn_width * mm_u / finest))
+        height1 = max(1, round(height0 * mm_v / finest))
         # the longest edge takes the target size: a small volume or a zoom is enlarged (nearest: every voxel a
         # crisp block), a large plane reduced
         target = max_px or self.config.max_px
         longest = max(width1, height1)
         if longest != target:
             factor = target / longest
-            width1, height1 = max(1, int(round(width1 * factor))), max(1, int(round(height1 * factor)))
+            width1, height1 = max(1, round(width1 * factor)), max(1, round(height1 * factor))
         image = Image.fromarray((np.clip(array, 0, 1) * 255).astype(np.uint8))
         upscaling = width1 >= drawn_width and height1 >= height0
         image = image.resize((width1, height1), Image.Resampling.NEAREST if upscaling else Image.Resampling.BILINEAR)
@@ -728,12 +708,12 @@ class Renderer:
         header = self._header_text(frame, index, mode, window, extra).format(id=view_id)
         draw.text((4, 3), header, fill=(255, 255, 255), font=self.font)
         lo = [0, 0, 0]
-        hi = list(self.grid.shape_zyx)
+        hi = list(self.grid.size_zyx)
         lo[frame.array_axis], hi[frame.array_axis] = index, index + 1
         if crop is not None:
             lo[frame.rows_axis], hi[frame.rows_axis] = crop[0].start, crop[0].stop
             lo[frame.cols_axis], hi[frame.cols_axis] = crop[1].start, crop[1].stop
-        box = WorldBox.of_index_box(self.grid, tuple(lo), tuple(hi))  # type: ignore[arg-type]
+        box = world_box_of(self.grid, tuple(slice(a, b) for a, b in zip(lo, hi, strict=True)))
         position = self._position(frame, index)
         view = View(
             id=view_id,
@@ -742,7 +722,7 @@ class Renderer:
             array_axis=frame.array_axis,
             index=index,
             position_mm=[round(float(v), 3) for v in position],
-            box_mm=box.to_dict(),
+            box_mm=box_to_dict(box),
             mode=mode,
             window=window,
             size_px=[image.width, image.height],
@@ -830,7 +810,7 @@ class Renderer:
         moved = self.derived.moved_landmarks()
         if fixed is None or view.position_mm is None:
             return
-        normal = self.grid.axis_world_vector(view.array_axis)
+        normal = axis_world_vector(self.grid, view.array_axis)
         thickness = float(np.linalg.norm(normal))
         unit_normal = normal / max(thickness, 1e-9)
         position = np.asarray(view.position_mm)

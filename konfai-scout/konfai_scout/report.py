@@ -202,7 +202,7 @@ class Report:
         return Report.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     def counts(self) -> dict[str, int]:
-        out = {kind: 0 for kind in KINDS} | {severity: 0 for severity in SEVERITIES}
+        out = dict.fromkeys(KINDS, 0) | dict.fromkeys(SEVERITIES, 0)
         for observation in self.observations:
             out[observation.kind] = out.get(observation.kind, 0) + 1
             out[observation.severity] = out.get(observation.severity, 0) + 1
@@ -260,7 +260,7 @@ def _box_text(box: dict[str, list[float]] | None) -> str:
     size = [b - a for a, b in zip(lo, hi, strict=True)]
     return (
         f"centre ({center[0]:.1f}, {center[1]:.1f}, {center[2]:.1f}) mm, "
-        f"size {size[0]:.1f} × {size[1]:.1f} × {size[2]:.1f} mm"
+        f"size {size[0]:.1f} x {size[1]:.1f} x {size[2]:.1f} mm"
     )
 
 

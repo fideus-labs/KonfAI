@@ -6,13 +6,14 @@ import io
 import numpy as np
 import pytest
 from konfai_scout.config import ScoutConfig
-from konfai_scout.geometry import WorldBox
-from konfai_scout.views import DEFAULT_MODE, MODES, Renderer, ViewError, plane_frame
+from konfai_scout.planes import box_from_dict, box_volume, grid_bounds, plane_frame
+from konfai_scout.views import DEFAULT_MODE, MODES, Renderer, ViewError
 from PIL import Image
 
 
 def renderer(fixtures, key, tmp_path, max_px=256) -> Renderer:
     case, _ = fixtures[key]
+    case.stage(tmp_path / "work" / "stage")
     return Renderer(case, tmp_path / "work", ScoutConfig(max_px=max_px), tmp_path / "evidence")
 
 
@@ -59,7 +60,7 @@ def test_the_affine_points_at_the_drawn_voxels(fixtures, tmp_path, key):
     case, _ = fixtures[key]
     r = renderer(fixtures, key, tmp_path, max_px=512)
     prediction = case.volume("prediction")
-    index = prediction.shape_zyx[0] // 2
+    index = prediction.grid.size_zyx[0] // 2
     png, view = r.render("axial", "prediction", index=index)
     image = np.asarray(Image.open(io.BytesIO(png)).convert("RGB")).astype(int)
     labels = prediction.plane(0, index)
@@ -69,9 +70,9 @@ def test_the_affine_points_at_the_drawn_voxels(fixtures, tmp_path, key):
     basis = np.stack([u, v], axis=1)
     hits = 0
     for row, col in where:
-        world = case.grid.index_to_world([col, row, index])
+        world = case.grid.index_to_world.apply(np.array([col, row, index], dtype=float))
         px, py = np.linalg.lstsq(basis, world - origin, rcond=None)[0]
-        px, py = int(round(px)), int(round(py))
+        px, py = round(px), round(py)
         assert 0 <= px < image.shape[1] and 0 <= py < image.shape[0]
         red, green, blue = image[py, px]
         hits += red > green + 25 and red > blue + 25  # label 1 is drawn red over a grey image
@@ -81,14 +82,14 @@ def test_the_affine_points_at_the_drawn_voxels(fixtures, tmp_path, key):
 def test_zoom_crops_to_the_box_and_keeps_the_size(fixtures, tmp_path):
     case, defects = fixtures["segmentation"]
     r = renderer(fixtures, "segmentation", tmp_path)
-    box = WorldBox.from_dict(defects["spurious_blob"]["box_mm"])
-    png, view = r.render("coronal", "prediction", zoom=box)
+    box = box_from_dict(defects["spurious_blob"]["box_mm"])
+    _png, view = r.render("coronal", "prediction", zoom=box)
     assert view.kind == "slice" and max(view.size_px) in (256, 256 + 18)
-    shown = WorldBox.from_dict(view.box_mm)
-    assert shown.intersection(box) is not None
-    assert shown.volume_mm3 < case.grid.bounds.volume_mm3 / 10
+    shown = box_from_dict(view.box_mm)
+    assert np.all(shown.low_xyz <= box.high_xyz) and np.all(shown.high_xyz >= box.low_xyz)
+    assert box_volume(shown) < box_volume(grid_bounds(case.grid)) / 10
     with pytest.raises(ViewError):
-        r.render("axial", "prediction", zoom=WorldBox((900, 900, 900), (910, 910, 910)))
+        r.render("axial", "prediction", zoom=box_from_dict({"min": [900, 900, 900], "max": [910, 910, 910]}))
 
 
 def test_montage_tiles_cover_the_plane(fixtures, tmp_path):
@@ -96,16 +97,16 @@ def test_montage_tiles_cover_the_plane(fixtures, tmp_path):
     png, view = r.montage("axial", "synthetic", count=9)
     assert view.kind == "montage" and len(view.extra["tiles"]) == 9
     indices = view.extra["indices"]
-    assert indices == sorted(indices) and indices[0] > 0 and indices[-1] < r.grid.shape_zyx[0] - 1
+    assert indices == sorted(indices) and indices[0] > 0 and indices[-1] < r.grid.size_zyx[0] - 1
     image = Image.open(io.BytesIO(png))
     assert image.size[0] <= 620 and image.size[1] > 100
 
 
 def test_windows_and_unknown_modes_are_checked(fixtures, tmp_path):
     r = renderer(fixtures, "segmentation", tmp_path)
-    png, view = r.render("axial", "image", window="ct_soft")
+    _png, view = r.render("axial", "image", window="ct_soft")
     assert view.window == [-160.0, 240.0]
-    png, view = r.render("axial", "image", window=[-50, 50])
+    _png, view = r.render("axial", "image", window=[-50, 50])
     assert view.window == [-50.0, 50.0]
     with pytest.raises(ViewError):
         r.render("axial", "image", window="ct_whatever")
@@ -130,9 +131,10 @@ def test_a_2d_case_renders_one_plane(tmp_path):
     case = InspectionCase(
         "segmentation", "flat", {"image": tmp_path / "image.mha", "prediction": tmp_path / "prediction.mha"}
     )
-    assert case.grid.size_xyz == (60, 40, 1)
+    case.stage(tmp_path / "work" / "stage")
+    assert case.grid.size_zyx == (1, 40, 60) and case.volume("image").rank == 2
     r = Renderer(case, tmp_path / "work", ScoutConfig(max_px=240), tmp_path / "evidence")
-    png, view = r.render("axial", "prediction")
+    _png, view = r.render("axial", "prediction")
     assert view.index == 0 and view.size_px[0] == 240
     assert case.volume("prediction").plane(0, 0).shape == (40, 60)
-    assert np.array_equal(case.volume("image").region((0, 5, 10), (1, 7, 12))[0], image[5:7, 10:12])
+    assert np.array_equal(case.volume("image").region((0, 5, 10), (1, 7, 12))[0, 0], image[5:7, 10:12])

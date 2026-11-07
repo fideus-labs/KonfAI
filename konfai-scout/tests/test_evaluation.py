@@ -6,9 +6,9 @@ import json
 import numpy as np
 import pytest
 from konfai_scout.config import ScoutConfig
-from konfai_scout.evaluation import EvaluationError, RegionEvaluator, konfai_available, load_prior
-from konfai_scout.geometry import WorldBox
-from konfai_scout.warp import Derived
+from konfai_scout.derived import Derived
+from konfai_scout.evaluation import EvaluationError, RegionEvaluator, load_prior
+from konfai_scout.planes import box_from_dict, grid_bounds, window_of
 
 
 def test_load_prior_reads_the_case_values(tmp_path):
@@ -23,25 +23,19 @@ def test_load_prior_reads_the_case_values(tmp_path):
     assert "_unreadable:missing.json" in load_prior([tmp_path / "missing.json"], "c1")
 
 
-def test_without_konfai_the_measurement_says_so(fixtures, tmp_path):
-    case, _ = fixtures["segmentation"]
-    evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path, None)
-    if konfai_available():
-        pytest.skip("konfai is installed")
-    with pytest.raises(EvaluationError, match="not installed"):
-        evaluator.measure(case.grid.bounds)
-
-
-@pytest.mark.skipif(not konfai_available(), reason="konfai is not installed")
 def test_a_region_dice_is_konfais_dice_of_the_crop(fixtures, tmp_path):
     case, defects = fixtures["segmentation"]
+    case.stage(tmp_path / "stage")
     evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path, None)
-    box = WorldBox.from_dict(defects["missing_cube"]["box_mm"])
+    box = box_from_dict(defects["missing_cube"]["box_mm"])
     measurement = evaluator.measure(box)
     assert measurement.reference and measurement.kind == "konfai_eval"
-    lo, hi = box.index_box(case.grid)
+    window = window_of(case.grid, box)
+    lo, hi = tuple(w.start for w in window), tuple(w.stop for w in window)
     pred = case.volume("prediction").region(lo, hi)
     truth = case.volume("truth").region(lo, hi)
+    with pytest.raises(EvaluationError, match="no voxel"):
+        evaluator.measure(box_from_dict({"min": [900, 900, 900], "max": [901, 901, 901]}))
     for label in (1, 2):
         key = f"PRED:TRUTH:Dice:{label}"
         if key not in measurement.values:
@@ -54,25 +48,25 @@ def test_a_region_dice_is_konfais_dice_of_the_crop(fixtures, tmp_path):
     assert (tmp_path / measurement.workspace / "Evaluations" / "region" / "Metric_TRAIN.json").exists()
 
 
-@pytest.mark.skipif(not konfai_available(), reason="konfai is not installed")
 def test_a_field_region_is_scored_without_a_reference(fixtures, tmp_path):
     case, defects = fixtures["registration_no_ref"]
-    derived = Derived(case, tmp_path / "derived")
+    case.stage(tmp_path / "stage")
+    derived = Derived(case, tmp_path / "work")
     evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path, derived)
-    measurement = evaluator.measure(WorldBox.from_dict(defects["zeroed_field"]["box_mm"]))
+    measurement = evaluator.measure(box_from_dict(defects["zeroed_field"]["box_mm"]))
     assert not measurement.reference
     keys = set(measurement.values)
     assert any("JacobianFolding" in k for k in keys) and any("Displacement" in k for k in keys)
-    selected = evaluator.measure(case.grid.bounds, metrics=["MAE"])
+    selected = evaluator.measure(grid_bounds(case.grid), metrics=["MAE"])
     assert all(k.endswith("MAE") for k in selected.values) and selected.values
 
 
-@pytest.mark.skipif(not konfai_available(), reason="konfai is not installed")
 def test_registration_references_are_scored_through_the_field(fixtures, tmp_path):
     case, _ = fixtures["registration"]
-    derived = Derived(case, tmp_path / "derived")
+    case.stage(tmp_path / "stage")
+    derived = Derived(case, tmp_path / "work")
     evaluator = RegionEvaluator(case, ScoutConfig(), tmp_path, derived)
-    measurement = evaluator.measure(case.grid.bounds, metrics=["Dice", "TRE"])
+    measurement = evaluator.measure(grid_bounds(case.grid), metrics=["Dice", "TRE"])
     assert measurement.reference
     dice = [v for k, v in measurement.values.items() if k == "WARPED_LABELS:FIXED_LABELS:Dice"]
     assert dice and dice[0] > 0.8  # the field is exact outside the planted errors

@@ -27,8 +27,11 @@ konfai-studio ── drives konfai-mcp ── Scout panel: launch, follow the jo
   Dice, MAE and TRE on the crop; the field's own statistics (Jacobian folding, minimum and log-std, bending energy,
   displacement lengths) need no reference.
 
-The Python API accepts the `None` target KonfAI's configs use for a measure of the output alone (the fix in
-`konfai.api.evaluate` ships with the Scout integration branch of KonfAI).
+What Scout reuses of KonfAI beyond the criteria: `konfai.data.geometry` (grids, world boxes, the affine of a
+voxel), `konfai.utils.dataset` (the staged layout konfai-apps uses, region reads through every backend, landmarks),
+`konfai.transform` with `Resample` and `TransformPoints` for the warped moving data and the carried landmarks, and
+`konfai.utils.ITK.field_jacobian_determinant` for the Jacobian view. The Python API accepts the `None` target
+KonfAI's configs use for a measure of the output alone.
 
 ## konfai-mcp
 

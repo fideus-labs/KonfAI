@@ -8,6 +8,7 @@ import json
 
 from .case import InspectionCase
 from .config import ScoutConfig
+from .planes import box_to_dict, grid_bounds, plane_axes
 from .report import DEFECTS, KINDS, SEVERITIES, VERDICTS
 
 PROMPT_VERSION = "1.1"
@@ -112,16 +113,17 @@ def case_card(
 ) -> str:
     """The first user message: everything known about the case before any view."""
     grid = case.grid
+    size_xyz = [int(n) for n in reversed(grid.size_zyx)]
+    spacing = [round(float(v), 3) for v in grid.spacing_xyz]
     lines = [
         f"Task: {case.task}",
         f"Case: {case.name}",
         f"Notes: {case.notes or 'none'}",
         f"Truth available: {'yes' if case.truth_available else 'no'} (roles given: {', '.join(case.inputs)})",
-        f"Reference grid ({case.image_role}): size_xyz {list(grid.size_xyz)}, "
-        f"spacing_mm {[round(s, 3) for s in grid.spacing_xyz]}, "
-        f"extent_mm {[round(n * s, 1) for n, s in zip(grid.size_xyz, grid.spacing_xyz, strict=True)]}",
-        f"bounds_mm: {json.dumps(grid.bounds.to_dict())}",
-        "Planes: " + ", ".join(f"{p} = {grid.shape_zyx[a]} slices" for p, a in grid.plane_axes.items()),
+        f"Reference grid ({case.image_role}): size_xyz {size_xyz}, spacing_mm {spacing}, "
+        f"extent_mm {[round(n * s, 1) for n, s in zip(size_xyz, spacing, strict=True)]}",
+        f"bounds_mm: {json.dumps(box_to_dict(grid_bounds(grid)))}",
+        "Planes: " + ", ".join(f"{p} = {grid.size_zyx[a]} slices" for p, a in plane_axes(grid).items()),
     ]
     if case.labels:
         lines.append("Label names: " + ", ".join(f"{k}: {v}" for k, v in sorted(case.labels.items())))

@@ -8,9 +8,10 @@ import json
 from pathlib import Path
 
 import numpy as np
+from konfai.data.geometry import Grid
 
 from .case import InspectionCase
-from .geometry import Grid, WorldBox
+from .planes import box_to_dict, index_to_world, world_box_of
 
 
 def _sitk():
@@ -39,9 +40,9 @@ def _image(array: np.ndarray, grid: Grid, vector: bool = False):
         )
     else:
         image = sitk.GetImageFromArray(np.ascontiguousarray(array))
-    image.SetSpacing(grid.spacing_xyz)
-    image.SetOrigin(grid.origin_xyz)
-    image.SetDirection(grid.direction)
+    image.SetSpacing([float(v) for v in grid.spacing_xyz])
+    image.SetOrigin([float(v) for v in grid.origin_xyz])
+    image.SetDirection([float(v) for v in np.asarray(grid.direction_xyz).ravel()])
     return image
 
 
@@ -57,14 +58,18 @@ def _sphere(shape: tuple[int, int, int], center: tuple[float, float, float], rad
 
 
 def _grid(shape: tuple[int, int, int], spacing: tuple[float, float, float], oblique: bool) -> Grid:
-    return Grid((shape[2], shape[1], shape[0]), spacing, (-20.0, 10.0, 5.0), _direction(oblique))
+    return Grid(
+        tuple(shape),
+        np.array([-20.0, 10.0, 5.0]),
+        np.asarray(spacing, dtype=np.float64),
+        np.asarray(_direction(oblique)).reshape(3, 3),
+    )
 
 
-def _box_of(mask: np.ndarray, grid: Grid) -> WorldBox:
+def _box_of(mask: np.ndarray, grid: Grid) -> dict[str, list[float]]:
     where = np.argwhere(mask)
-    lo = tuple(int(v) for v in where.min(axis=0))
-    hi = tuple(int(v) + 1 for v in where.max(axis=0))
-    return WorldBox.of_index_box(grid, lo, hi)  # type: ignore[arg-type]
+    window = tuple(slice(int(a), int(b) + 1) for a, b in zip(where.min(axis=0), where.max(axis=0), strict=True))
+    return box_to_dict(world_box_of(grid, window))
 
 
 def segmentation_case(
@@ -106,9 +111,9 @@ def segmentation_case(
         notes="synthetic phantom: a sphere and a cube",
     )
     defects = {
-        "missing_cube": {"defect": "missing_structure", "label": 2, "box_mm": _box_of(cube, grid).to_dict()},
-        "spurious_blob": {"defect": "spurious_structure", "label": 1, "box_mm": _box_of(blob, grid).to_dict()},
-        "hole": {"defect": "holes", "label": 1, "box_mm": _box_of(hole, grid).to_dict()},
+        "missing_cube": {"defect": "missing_structure", "label": 2, "box_mm": _box_of(cube, grid)},
+        "spurious_blob": {"defect": "spurious_structure", "label": 1, "box_mm": _box_of(blob, grid)},
+        "hole": {"defect": "holes", "label": 1, "box_mm": _box_of(hole, grid)},
         "shifted_sphere": {"defect": "boundary_error", "label": 1, "shift_voxels_yxz": [2, 0, 0]},
     }
     (folder / "defects.json").write_text(json.dumps(defects, indent=2))
@@ -146,8 +151,7 @@ def registration_case(
     # the exact field, in mm along world axes: a smooth sinusoid, up to ~3 mm
     index = np.stack([xx, yy, zz], axis=0)
     world = (
-        np.einsum("ij,j...->i...", grid.matrix @ np.diag(grid.spacing_xyz), index)
-        + np.asarray(grid.origin_xyz)[:, None, None, None]
+        np.einsum("ij,j...->i...", grid.index_to_world.matrix, index) + np.asarray(grid.origin_xyz)[:, None, None, None]
     )
     exact = np.stack(
         [
@@ -171,14 +175,14 @@ def registration_case(
     defects: dict[str, object] = {
         "zeroed_field": {
             "defect": "residual_misalignment",
-            "box_mm": _box_of(zeroed, grid).to_dict(),
+            "box_mm": _box_of(zeroed, grid),
             "displacement_lost_mm": float(np.linalg.norm(exact[:, zeroed], axis=0).mean()),
         }
     }
     if fold:
         bump = _sphere(shape, (shape[0] / 2, 10, shape[2] / 2 + 12), 3)
         inspected[0, bump] += 12.0  # a 12 mm jump over a few voxels: det J < 0 at its edges
-        defects["fold"] = {"defect": "folding", "box_mm": _box_of(bump, grid).to_dict()}
+        defects["fold"] = {"defect": "folding", "box_mm": _box_of(bump, grid)}
     inputs = {
         "fixed": _write(fixed_image, folder / "fixed.mha"),
         "moving": _write(moving_image, folder / "moving.mha"),
@@ -190,9 +194,9 @@ def registration_case(
         inputs["moving_labels"] = _write(_image(moving_labels, grid), folder / "moving_labels.mha")
         fixed_points = np.array(
             [
-                grid.index_to_world([24.0, 24.0, 12.0]),
-                grid.index_to_world([35.0, 10.0, 6.0]),
-                grid.index_to_world([12.0, 30.0, 14.0]),
+                index_to_world(grid, [24.0, 24.0, 12.0]),
+                index_to_world(grid, [35.0, 10.0, 6.0]),
+                index_to_world(grid, [12.0, 30.0, 14.0]),
             ]
         )
         moving_points = np.array([transform.TransformPoint([float(v) for v in p]) for p in fixed_points])
@@ -248,8 +252,8 @@ def synthesis_case(
         "synthesis", folder.name or "synthetic", inputs, notes="synthetic MR-like source to CT-like target"
     )
     defects = {
-        "bias": {"defect": "intensity_bias", "box_mm": _box_of(biased, grid).to_dict(), "bias_hu": 150.0},
-        "invented": {"defect": "hallucinated_structure", "box_mm": _box_of(invented, grid).to_dict()},
+        "bias": {"defect": "intensity_bias", "box_mm": _box_of(biased, grid), "bias_hu": 150.0},
+        "invented": {"defect": "hallucinated_structure", "box_mm": _box_of(invented, grid)},
         "blur": {"defect": "blur", "sigma_voxels": 1.2},
     }
     (folder / "defects.json").write_text(json.dumps(defects, indent=2))

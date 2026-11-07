@@ -6,11 +6,15 @@ import copy
 import json
 
 import pytest
-from konfai_scout.config import ScoutConfig
-from konfai_scout.providers import check_privacy, is_remote, make_provider
-from konfai_scout.providers.anthropic import AnthropicProvider
-from konfai_scout.providers.base import ImageContent, ProviderError, ToolResult, ToolSpec, is_loopback
-from konfai_scout.providers.openai import OpenAIProvider
+
+anthropic = pytest.importorskip("anthropic")
+openai = pytest.importorskip("openai")
+
+from konfai_scout.config import ScoutConfig  # noqa: E402
+from konfai_scout.providers import check_privacy, is_remote, make_provider  # noqa: E402
+from konfai_scout.providers.anthropic import AnthropicProvider  # noqa: E402
+from konfai_scout.providers.base import ImageContent, ProviderError, ToolResult, ToolSpec, is_loopback  # noqa: E402
+from konfai_scout.providers.openai import OpenAIProvider  # noqa: E402
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="

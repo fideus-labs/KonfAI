@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--task", choices=list(MAKERS) + ["all"], default="all")
+    parser.add_argument("--task", choices=[*list(MAKERS), "all"], default="all")
     parser.add_argument("--provider", default="mock")
     parser.add_argument("--model")
     parser.add_argument("--base-url")

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
-from konfai_scout.geometry import Grid
+from konfai.data.geometry import Grid
 from konfai_scout.measure import displacement_stats, intensity_stats, jacobian_determinant, label_overlap, label_stats
 
 
 def test_label_stats_count_volume_pieces_and_box():
-    grid = Grid((10, 10, 6), (1.0, 2.0, 3.0), (0, 0, 0), tuple(np.eye(3).ravel()))
+    grid = Grid((6, 10, 10), np.zeros(3), np.array([1.0, 2.0, 3.0]), np.eye(3))
     labels = np.zeros((6, 10, 10), dtype=np.int16)
     labels[1:3, 1:3, 1:3] = 1
     labels[4:6, 7:9, 7:9] = 1
@@ -17,14 +17,14 @@ def test_label_stats_count_volume_pieces_and_box():
 
 
 def test_jacobian_of_identity_and_of_a_scaling():
-    grid = Grid((8, 8, 8), (1.0, 1.0, 1.0), (0, 0, 0), tuple(np.eye(3).ravel()))
+    grid = Grid((8, 8, 8), np.zeros(3), np.ones(3), np.eye(3))
     field = np.zeros((3, 8, 8, 8))
     assert np.allclose(jacobian_determinant(field, grid), 1.0)
     xx = np.indices((8, 8, 8))[2].astype(float)
     field[0] = 0.5 * xx  # x' = 1.5 x
     assert np.allclose(jacobian_determinant(field, grid)[:, :, 1:-1], 1.5)
     oblique = Grid(
-        (8, 8, 8), (0.5, 1.0, 2.0), (0, 0, 0), tuple(np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], float).ravel())
+        (8, 8, 8), np.zeros(3), np.array([0.5, 1.0, 2.0]), np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], float)
     )
     assert np.allclose(jacobian_determinant(np.zeros((3, 8, 8, 8)), oblique), 1.0)
 

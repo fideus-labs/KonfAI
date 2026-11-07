@@ -3,15 +3,16 @@
 
 What needs a reference (Dice, MAE, TRE...) and what KonfAI already measures (a field's Jacobian, bending energy,
 displacement lengths) go through KonfAI Eval (:mod:`konfai_scout.evaluation`). Here: how much of each label a region
-holds and in how many pieces, the intensities, the length of the displacements; plus the Jacobian determinant of one
-plane, for display only.
+holds and in how many pieces, the intensities, the length of the displacements; plus the Jacobian determinant of a
+block for display, by KonfAI's own derivative (:func:`konfai.utils.ITK.field_jacobian_determinant`).
 """
 
 from __future__ import annotations
 
 import numpy as np
+from konfai.data.geometry import Grid
 
-from .geometry import Grid
+from .planes import box_to_dict, world_box_of
 
 
 def intensity_stats(values: np.ndarray, mask: np.ndarray | None = None) -> dict[str, float]:
@@ -41,23 +42,20 @@ def label_stats(
     from scipy import ndimage
 
     array = np.asarray(labels)
-    voxel_mm3 = float(np.prod(grid.spacing_xyz))
+    voxel_mm3 = float(np.prod(np.asarray(grid.spacing_xyz, dtype=np.float64)))
     out: dict[str, dict[str, object]] = {}
     for label in (int(v) for v in np.unique(array) if v != 0):
         mask = array == label
-        components, count = ndimage.label(mask, structure=np.ones((3, 3, 3)))
-        del components
+        _, count = ndimage.label(mask, structure=np.ones((3, 3, 3)))
         where = np.argwhere(mask)
         lo = where.min(axis=0) + np.asarray(offset_zyx)
         hi = where.max(axis=0) + np.asarray(offset_zyx) + 1
-        from .geometry import WorldBox
-
-        box = WorldBox.of_index_box(grid, tuple(int(v) for v in lo), tuple(int(v) for v in hi))  # type: ignore[arg-type]
+        window = tuple(slice(int(a), int(b)) for a, b in zip(lo, hi, strict=True))
         entry: dict[str, object] = {
             "voxels": int(mask.sum()),
             "volume_mm3": round(float(mask.sum() * voxel_mm3), 2),
             "components": int(count),
-            "bbox_mm": box.to_dict(),
+            "bbox_mm": box_to_dict(world_box_of(grid, window)),
         }
         if names and label in names:
             entry["name"] = names[label]
@@ -95,16 +93,9 @@ def displacement_stats(field: np.ndarray) -> dict[str, float]:
 
 
 def jacobian_determinant(field: np.ndarray, grid: Grid) -> np.ndarray:
-    """``det(I + du/dx)`` of a field ``[3, Z, Y, X]`` (components x, y, z in world mm) over its voxels, derivatives in
-    world axes through the grid's direction and spacing, as KonfAI's ``jacobian_statistics`` takes them. A block one
-    voxel thick along an axis has no derivative there (the identity's row)."""
-    values = np.asarray(field, dtype=np.float64)
-    to_index = np.linalg.inv(grid.matrix @ np.diag(grid.spacing_xyz))  # world offset -> index offset
-    # du_c / d(index_a) for a along x, y, z: block axes 3, 2, 1
-    by_index = np.stack(
-        [np.gradient(values, axis=axis) if values.shape[axis] > 1 else np.zeros_like(values) for axis in (3, 2, 1)],
-        axis=-1,
-    )  # [c, z, y, x, a]
-    gradient = by_index @ to_index  # du_c / dx_w: [c, z, y, x, w]
-    jacobian = np.moveaxis(gradient, 0, -2) + np.eye(3)  # [z, y, x, c, w]
-    return np.linalg.det(jacobian)
+    """``det(I + du/dx)`` of a field block ``[3, Z, Y, X]`` (components x, y, z in world mm) on ``grid``, by
+    KonfAI's own derivative: the one its Jacobian statistics are computed with."""
+    from konfai.utils.ITK import field_jacobian_determinant
+
+    to_index = np.linalg.inv(np.asarray(grid.direction_xyz, dtype=np.float64) @ np.diag(np.asarray(grid.spacing_xyz)))
+    return field_jacobian_determinant(np.asarray(field, dtype=np.float64), to_index)

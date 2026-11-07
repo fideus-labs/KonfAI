@@ -20,6 +20,7 @@ from .case import InspectionCase
 from .config import ScoutConfig
 from .evaluation import RegionEvaluator, konfai_version, load_prior
 from .measure import label_stats
+from .planes import describe_grid
 from .prompts import PROMPT_VERSION, case_card, system_prompt
 from .providers import ImageContent, Provider, ProviderError, ToolResult, Turn, check_privacy, make_provider
 from .providers.pricing import cost_usd, price_of
@@ -89,6 +90,9 @@ class Inspector:
         if provider is None:
             check_privacy(config)
         self.provider = provider or make_provider(config)
+        case.stage(
+            self.out / "work" / "stage"
+        )  # the case as KonfAI reads it: every read, warp and measure goes through it
         self.renderer = Renderer(case, self.out / "work", config, self.out / "evidence")
         self.evaluator = RegionEvaluator(case, config, self.out / "work", self.renderer.derived)
         self.toolbox = Toolbox(case, config, self.renderer, self.evaluator)
@@ -208,9 +212,7 @@ class Inspector:
         the central slice of each plane in the secondary modes."""
         images: list[ImageContent] = []
         lines = ["Views attached (ids as printed on each image):"]
-        planes = (
-            ["axial", "coronal", "sagittal"] if self.case.volume(self.case.image_role).dimension == 3 else ["axial"]
-        )
+        planes = ["axial", "coronal", "sagittal"] if self.case.volume(self.case.image_role).rank == 3 else ["axial"]
         for plane in planes:
             png, view = self.renderer.montage(plane, DEFAULT_MODE[self.case.task])
             images.append(ImageContent(png, f"[{view.id}]"))
@@ -230,10 +232,12 @@ class Inspector:
         if role is None or role not in self.case.inputs:
             return {}
         volume = self.case.volume(role)
-        if max(volume.shape_zyx) > 512:  # the whole map in memory only when it is small; the model can ask per region
+        if (
+            max(volume.grid.size_zyx) > 512
+        ):  # the whole map in memory only when it is small; the model can ask per region
             return {"note": "labels not summarised whole: ask region_stats on a box"}
-        array = volume.region((0, 0, 0), volume.shape_zyx)
-        return {role: label_stats(array, volume.grid, self.case.labels)}
+        array = volume.region((0, 0, 0), tuple(volume.grid.size_zyx))  # type: ignore[arg-type]
+        return {role: label_stats(array[0], volume.grid, self.case.labels)}
 
     # ------------------------------------------------------------------ the report
 
@@ -274,7 +278,7 @@ class Inspector:
                 **self.case.to_dict(),
                 "inputs": self.case.fingerprint(),
                 "truth_available": self.case.truth_available,
-                "grid": self.case.grid.describe(),
+                "grid": describe_grid(self.case.grid),
             },
             config=self.config.to_dict(),
             provider={

@@ -99,6 +99,7 @@ class HeuristicProvider(ScriptedProvider):
         self.measurement_id: str | None = None
         self.view_id: str | None = None
         self.coverage_views: list[str] = []
+        self.stats_asked = False
         self.results: list[dict[str, Any]] = []
         self.n = 0
 
@@ -153,7 +154,11 @@ class HeuristicProvider(ScriptedProvider):
         self.step += 1
         if self.step == 1 and "montage" in names:
             return turn(self._call("montage", plane="axial"), text="Coverage first.")
-        if self.suspect is None and "region_stats" in names and not any("region" in r for r in self.results):
+        asked = any("region" in r for r in self.results) or any(
+            r.get("error") and "region_stats" in str(r.get("text", "")) for r in self.results
+        )
+        if self.suspect is None and "region_stats" in names and not asked and not self.stats_asked:
+            self.stats_asked = True
             return turn(self._call("region_stats", box_mm=self._extent_box()), text="Statistics of the whole case.")
         if self.suspect is None:
             self.suspect = self._find_suspect()

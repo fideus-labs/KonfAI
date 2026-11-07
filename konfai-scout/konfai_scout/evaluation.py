@@ -2,25 +2,28 @@
 """The bridge to KonfAI Eval: the deterministic evaluation stays there, Scout reads its reports and asks it for more.
 
 A prior evaluation (``Metric_*.json`` of a KonfAI EVALUATION run) gives the whole-case values Scout starts from. A
-region measurement stages the case's groups cropped to a box, in millimetres, and runs ``konfai.evaluate`` on the
-crop with KonfAI's own criteria, named as in its configs, so the same code scores the whole case and the region.
+region measurement reads the case's groups cropped to a box (KonfAI region reads), writes them as a one-case dataset
+with their geometry and runs ``konfai.evaluate`` on it with KonfAI's own criteria, named as in its configs, so the
+same code scores the whole case and the region.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from konfai.data.geometry import Grid, WorldBox
+from konfai.utils.dataset import Attribute, Dataset, write_landmarks
+from konfai.utils.errors import KonfAIError
 
-from .case import InspectionCase
+from .case import InspectionCase, Volume
 from .config import ScoutConfig
-from .geometry import WorldBox
+from .derived import Derived
+from .planes import box_to_dict, window_of, world_box_of
 from .report import Measurement
-from .warp import Derived
 
 DEFAULT_CRITERIA: dict[str, dict[str, dict[str, Any]]] = {
     "segmentation": {"Dice": {"labels": "auto"}},
@@ -42,10 +45,6 @@ DEFAULT_CRITERIA: dict[str, dict[str, dict[str, Any]]] = {
 
 class EvaluationError(RuntimeError):
     """A measurement KonfAI Eval could not make; the message is for the model."""
-
-
-def konfai_available() -> bool:
-    return importlib.util.find_spec("konfai") is not None
 
 
 def konfai_version() -> str | None:
@@ -82,6 +81,14 @@ def load_prior(evaluation: list[Path] | dict[str, Any] | None, case_name: str) -
     return values
 
 
+def _attribute_of(grid: Grid) -> Attribute:
+    attribute = Attribute()
+    attribute["Origin"] = np.asarray(grid.origin_xyz, dtype=np.float64)
+    attribute["Spacing"] = np.asarray(grid.spacing_xyz, dtype=np.float64)
+    attribute["Direction"] = np.asarray(grid.direction_xyz, dtype=np.float64).ravel()
+    return attribute
+
+
 class RegionEvaluator:
     """Measures a box of the case with KonfAI Eval, one evaluation workspace per measurement, kept beside the report."""
 
@@ -95,51 +102,41 @@ class RegionEvaluator:
     def criteria(self, kind: str) -> dict[str, dict[str, Any]]:
         return dict(self.config.criteria.get(kind) or DEFAULT_CRITERIA[kind])
 
-    def available(self) -> str | None:
-        """Why a measurement is impossible, or None."""
-        if not konfai_available():
-            return "KonfAI is not installed in this environment: pip install 'konfai-scout[konfai]'"
-        return None
-
     def measure(
         self, box: WorldBox, metrics: list[str] | None = None, measurement_id: str | None = None
     ) -> Measurement:
         started = time.time()
         self.count += 1
         identifier = measurement_id or f"m{self.count:03d}"
-        reason = self.available()
-        if reason:
-            raise EvaluationError(reason)
         grid = self.case.grid
-        index_box = box.intersection(grid.bounds)
-        index_box = index_box.index_box(grid) if index_box is not None else None
-        if index_box is None:
+        window = window_of(grid, box)
+        if window is None:
             raise EvaluationError("the box holds no voxel of the case")
-        lo, hi = index_box
-        measured = WorldBox.of_index_box(grid, lo, hi)
+        measured = world_box_of(grid, window)
         root = self.work / identifier
-        dataset = root / "Dataset" / _slug(self.case.name)
-        dataset.mkdir(parents=True, exist_ok=True)
-        tree, reference, labels_used = self._stage(dataset, lo, hi, metrics)
+        dataset = Dataset(root / "Dataset", "mha")
+        tree, reference, labels_used = self._stage(dataset, window, metrics)
         if not tree:
             raise EvaluationError("nothing to measure in this box with the roles this case has")
         from konfai import evaluate
 
-        result = evaluate(
-            "region",
-            [f"{root / 'Dataset'}:mha"],
-            tree,
-            cpu=1,
-            quiet=True,
-            overwrite=True,
-            evaluations_dir=root / "Evaluations",
-        )
+        try:
+            result = evaluate(
+                "region",
+                [f"{root / 'Dataset'}:mha"],
+                tree,
+                cpu=1,
+                quiet=True,
+                overwrite=True,
+                evaluations_dir=root / "Evaluations",
+            )
+        except KonfAIError as error:
+            raise EvaluationError(f"KonfAI Eval refused the measurement: {error}") from error
         report = result.metrics.get("TRAIN") or {}
         values: dict[str, Any] = {}
-        name = _slug(self.case.name)
         for key, per_case in (report.get("case") or {}).items():
-            if isinstance(per_case, dict) and name in per_case:
-                values[key] = per_case[name]
+            if isinstance(per_case, dict) and self.case.slug in per_case:
+                values[key] = per_case[self.case.slug]
         if not self.config.keep_evaluations:
             import shutil
 
@@ -148,8 +145,8 @@ class RegionEvaluator:
             id=identifier,
             kind="konfai_eval",
             reference=reference,
-            box_requested=box.to_dict(),
-            box_measured=measured.to_dict(),
+            box_requested=box_to_dict(box),
+            box_measured=box_to_dict(measured),
             values=values,
             request={"metrics": tree, "labels": labels_used, "dataset": str(root / "Dataset")},
             workspace=str(root.relative_to(self.work.parent)) if self.config.keep_evaluations else None,
@@ -158,24 +155,18 @@ class RegionEvaluator:
 
     # ------------------------------------------------------------------ staging
 
-    def _write(self, dataset: Path, group: str, role_volume, lo, hi, dtype: str) -> np.ndarray:
-        import SimpleITK as sitk
-
-        array = role_volume.region(lo, hi)
-        grid = self.case.grid
-        if array.ndim == 4:  # a vector field: components last for SimpleITK
-            image = sitk.GetImageFromArray(
-                np.ascontiguousarray(np.moveaxis(array.astype(np.float32), 0, -1)), isVector=True
-            )
-        else:
-            image = sitk.GetImageFromArray(np.ascontiguousarray(array.astype(dtype)))
-        image.SetSpacing(grid.spacing_xyz)
-        image.SetDirection(grid.direction)
-        image.SetOrigin([float(v) for v in grid.index_to_world([lo[2], lo[1], lo[0]])])
-        sitk.WriteImage(image, str(dataset / f"{group}.mha"), False)
+    def _write(
+        self, dataset: Dataset, group: str, volume: Volume, window: tuple[slice, slice, slice], dtype: str
+    ) -> np.ndarray:
+        """The crop of a volume as an entry of the measurement's dataset, with the crop's own geometry."""
+        lo = tuple(int(part.start) for part in window)
+        hi = tuple(int(part.stop) for part in window)
+        array = volume.region(lo, hi)  # type: ignore[arg-type]
+        data = array.astype(np.float32) if array.ndim == 4 else array.astype(dtype)
+        dataset.write(group, self.case.slug, np.ascontiguousarray(data), _attribute_of(volume.grid.sub_grid(window)))
         return array
 
-    def _volume(self, role: str):
+    def _volume(self, role: str) -> Volume | None:
         if self.case.task == "registration" and self.derived is not None:
             if role == "warped":
                 return self.derived.warped()
@@ -206,7 +197,9 @@ class RegionEvaluator:
             if name.lower() in wanted or name.split("#")[0].lower() in wanted
         }
 
-    def _stage(self, dataset: Path, lo, hi, metrics: list[str] | None) -> tuple[dict[str, Any], bool, list[int]]:
+    def _stage(
+        self, dataset: Dataset, window: tuple[slice, slice, slice], metrics: list[str] | None
+    ) -> tuple[dict[str, Any], bool, list[int]]:
         task = self.case.task
         tree: dict[str, Any] = {}
         reference = False
@@ -214,12 +207,12 @@ class RegionEvaluator:
         mask_role = {"segmentation": "mask", "registration": "fixed_mask", "synthesis": "mask"}[task]
         mask_group = ""
         if mask_role in self.case.inputs:
-            self._write(dataset, "MASK", self.case.volume(mask_role), lo, hi, "uint8")
+            self._write(dataset, "MASK", self.case.volume(mask_role), window, "uint8")
             mask_group = ";MASK"
         if task == "segmentation":
-            pred = self._write(dataset, "PRED", self.case.volume("prediction"), lo, hi, "int32")
+            pred = self._write(dataset, "PRED", self.case.volume("prediction"), window, "int32")
             if "truth" in self.case.inputs:
-                truth = self._write(dataset, "TRUTH", self.case.volume("truth"), lo, hi, "int32")
+                truth = self._write(dataset, "TRUTH", self.case.volume("truth"), window, "int32")
                 labels_used = sorted({int(v) for v in np.union1d(np.unique(pred), np.unique(truth)) if v != 0})
                 criteria = self._selected(self._with_labels(self.criteria("segmentation"), labels_used), metrics)
                 if criteria:
@@ -229,21 +222,22 @@ class RegionEvaluator:
             field = self._volume("field")
             field_criteria = self._selected(self.criteria("registration_field"), metrics)
             if field is not None and field_criteria:
-                self._write(dataset, "FIELD", field, lo, hi, "float32")
+                self._write(dataset, "FIELD", field, window, "float32")
                 tree["FIELD"] = {"None": field_criteria}
             warped_labels = self._volume("warped_labels")
             if warped_labels is not None and "fixed_labels" in self.case.inputs:
-                warped = self._write(dataset, "WARPED_LABELS", warped_labels, lo, hi, "int32")
-                fixed = self._write(dataset, "FIXED_LABELS", self.case.volume("fixed_labels"), lo, hi, "int32")
+                warped = self._write(dataset, "WARPED_LABELS", warped_labels, window, "int32")
+                fixed = self._write(dataset, "FIXED_LABELS", self.case.volume("fixed_labels"), window, "int32")
                 labels_used = sorted({int(v) for v in np.union1d(np.unique(warped), np.unique(fixed)) if v != 0})
                 criteria = self._selected(self._with_labels(self.criteria("registration_labels"), labels_used), metrics)
                 if criteria:
                     tree["WARPED_LABELS"] = {f"FIXED_LABELS{mask_group}": criteria}
                     reference = True
             image_criteria = self._selected(self.criteria("registration_images"), metrics)
-            if image_criteria:
-                self._write(dataset, "WARPED", self._volume("warped"), lo, hi, "float32")
-                self._write(dataset, "FIXED", self.case.volume("fixed"), lo, hi, "float32")
+            warped_image = self._volume("warped")
+            if image_criteria and warped_image is not None:
+                self._write(dataset, "WARPED", warped_image, window, "float32")
+                self._write(dataset, "FIXED", self.case.volume("fixed"), window, "float32")
                 tree["WARPED"] = {f"FIXED{mask_group}": image_criteria}
             if (
                 "fixed_landmarks" in self.case.inputs
@@ -254,32 +248,28 @@ class RegionEvaluator:
                 fixed_points = self.case.landmarks("fixed_landmarks")
                 moving_points = self.case.landmarks("moving_landmarks")
                 moved = self.derived.moved_landmarks()
-                box = WorldBox.of_index_box(self.case.grid, lo, hi)
+                measured = world_box_of(self.case.grid, window)
                 inside = [
                     i
-                    for i, p in enumerate(fixed_points)
-                    if np.all(p >= box.min_xyz) and np.all(p <= box.max_xyz) and i < len(moving_points)
+                    for i, p in enumerate(fixed_points if fixed_points is not None else [])
+                    if np.all(p >= measured.low_xyz)
+                    and np.all(p <= measured.high_xyz)
+                    and moving_points is not None
+                    and i < len(moving_points)
                 ]
-                if landmark_criteria and inside and moved is not None:
-                    _write_points(dataset / "MOVED_LANDMARKS.fcsv", moved[inside])
-                    _write_points(dataset / "MOVING_LANDMARKS.fcsv", moving_points[inside])
+                if landmark_criteria and inside and moved is not None and moving_points is not None:
+                    case_dir = Path(str(dataset.filename)) / self.case.slug
+                    case_dir.mkdir(parents=True, exist_ok=True)
+                    write_landmarks(moved[inside], case_dir / "MOVED_LANDMARKS.fcsv")
+                    write_landmarks(moving_points[inside], case_dir / "MOVING_LANDMARKS.fcsv")
                     tree["MOVED_LANDMARKS"] = {"MOVING_LANDMARKS": landmark_criteria}
                     reference = True
         else:
             if "target" in self.case.inputs:
                 criteria = self._selected(self.criteria("synthesis"), metrics)
                 if criteria:
-                    self._write(dataset, "SYN", self.case.volume("synthetic"), lo, hi, "float32")
-                    self._write(dataset, "TARGET", self.case.volume("target"), lo, hi, "float32")
+                    self._write(dataset, "SYN", self.case.volume("synthetic"), window, "float32")
+                    self._write(dataset, "TARGET", self.case.volume("target"), window, "float32")
                     tree["SYN"] = {f"TARGET{mask_group}": criteria}
                     reference = True
         return tree, reference, labels_used
-
-
-def _slug(name: str) -> str:
-    return name.replace("/", "__")
-
-
-def _write_points(path: Path, points: np.ndarray) -> None:
-    rows = "\n".join(f"F-{i + 1},{x:.6f},{y:.6f},{z:.6f}" for i, (x, y, z) in enumerate(points))
-    path.write_text(f"# Markups fiducial file version = 4.6\n# CoordinateSystem = LPS\n# columns = id,x,y,z\n{rows}\n")

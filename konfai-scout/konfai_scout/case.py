@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What Scout inspects: one case of a task, its files by role, read lazily with their geometry.
+"""What Scout inspects: one case of a task, its files by role, read through KonfAI's dataset backends.
+
+The files are staged as KonfAI reads a case (``<root>/<case>/<ROLE><suffix>``, one root per storage backend, linked
+not copied, as konfai-apps stages its inputs), so an image file, an OME-Zarr store, a DICOM series or an ITK
+transform file are all read the same way: by region, with their geometry, through ``konfai.utils.dataset.Dataset``.
 
 Roles by task (``*`` required):
   segmentation  image*, prediction*, truth, mask
@@ -11,16 +15,20 @@ Roles by task (``*`` required):
 
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
+import tempfile
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 
 import numpy as np
+from konfai.data.geometry import Grid
+from konfai.utils.dataset import Dataset, entry_backend, link_entry, read_landmarks
+from konfai.utils.errors import KonfAIError
+from konfai.utils.utils import directory_volume_form, storage_form
 
-from .geometry import Grid
+from .planes import promoted
 
 TASKS = ("segmentation", "registration", "synthesis")
 ROLES: dict[str, dict[str, bool]] = {
@@ -45,25 +53,24 @@ TRUTH_ROLES = {
     "registration": ("fixed_labels", "fixed_landmarks"),
     "synthesis": ("target",),
 }
-LANDMARK_SUFFIXES = (".fcsv", ".csv", ".txt")
-TRANSFORM_SUFFIXES = (".h5", ".hdf5", ".tfm", ".txt", ".mat")
+#: Roles read as point sets, not volumes.
+POINT_ROLES = ("fixed_landmarks", "moving_landmarks")
+#: The group a role is staged under: the role's name in upper case.
+BACKENDS = ("mha", "omezarr", "dicom", "itktransform")
 
 
 class CaseError(ValueError):
     """A case Scout cannot inspect as given."""
 
 
-def _sitk():
-    try:
-        import SimpleITK as sitk
-    except ImportError as error:  # pragma: no cover - the dependency is declared
-        raise CaseError("Scout reads images with SimpleITK: pip install SimpleITK") from error
-    return sitk
-
-
 def sha256_of(path: Path, limit: int = 64 << 20) -> str:
-    """The SHA-256 of a file (its first 64 MiB and its size for a larger one: a fingerprint, not a checksum)."""
+    """The SHA-256 of a file (its first 64 MiB and its size for a larger one: a fingerprint, not a checksum); for
+    a store or a series directory, of its file names and sizes."""
     digest = hashlib.sha256()
+    if path.is_dir():
+        for part in sorted(p for p in path.rglob("*") if p.is_file()):
+            digest.update(f"{part.relative_to(path)}:{part.stat().st_size}\n".encode())
+        return digest.hexdigest()
     size = path.stat().st_size
     with path.open("rb") as handle:
         digest.update(handle.read(limit))
@@ -73,145 +80,76 @@ def sha256_of(path: Path, limit: int = 64 << 20) -> str:
 
 
 class Volume:
-    """One image file read lazily: its header at once, its planes and regions on demand."""
+    """One staged entry read through KonfAI: its header at once, its planes and regions on demand, always as a
+    rank-3 ``[(C,) Z, Y, X]`` array on a rank-3 grid (a 2-D image is one plane thick)."""
 
-    def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
-        if not self.path.exists():
-            raise CaseError(f"{self.path} does not exist")
-        sitk = _sitk()
-        reader = sitk.ImageFileReader()
-        reader.SetFileName(str(self.path))
+    def __init__(self, dataset: Dataset, group: str, name: str, role: str) -> None:
+        self.dataset, self.group, self.name, self.role = dataset, group, name, role
         try:
-            reader.ReadImageInformation()
-        except RuntimeError as error:
-            raise CaseError(f"{self.path} is not an image SimpleITK can read: {error}") from error
-        self.dimension = int(reader.GetDimension())
-        if self.dimension not in (2, 3):
-            raise CaseError(f"{self.path} has {self.dimension} dimensions; Scout inspects 2-D and 3-D images")
-        self.components = int(reader.GetNumberOfComponents())
-        self.pixel_type = sitk.GetPixelIDValueAsString(reader.GetPixelID())
-        self.grid = Grid.of(reader.GetSize(), reader.GetSpacing(), reader.GetOrigin(), reader.GetDirection())
-        self._whole: np.ndarray | None = None
-
-    @property
-    def is_integer(self) -> bool:
-        return "int" in self.pixel_type.lower() and "float" not in self.pixel_type.lower()
+            shape, self.attribute = dataset.get_infos(group, name)
+        except KonfAIError as error:
+            raise CaseError(f"{role}: {error}") from error
+        self.components = int(shape[0])
+        self.rank = len(shape) - 1
+        if self.rank not in (2, 3):
+            raise CaseError(f"{role} has {self.rank} spatial dimensions; Scout inspects 2-D and 3-D images")
+        try:
+            self.grid = promoted(Grid.of([int(v) for v in shape[1:]], self.attribute, role))
+        except KonfAIError as error:
+            raise CaseError(f"{role}: {error}") from error
+        self._dtype: np.dtype | None = None
 
     @property
     def is_vector(self) -> bool:
-        return self.components == self.dimension and self.components > 1
+        return self.components == self.rank and self.components > 1
 
     @property
-    def shape_zyx(self) -> tuple[int, int, int]:
-        return self.grid.shape_zyx
+    def dtype(self) -> np.dtype:
+        if self._dtype is None:
+            self._dtype = self.region((0, 0, 0), (1, 1, 1)).dtype
+        return self._dtype
 
-    def _as_array(self, image) -> np.ndarray:
-        sitk = _sitk()
-        array = sitk.GetArrayFromImage(image)
-        if self.dimension == 2:
-            array = array[None] if self.components == 1 else array[None]
-        if self.components > 1:
-            array = np.moveaxis(array, -1, 0)
-        return array
+    @property
+    def is_integer(self) -> bool:
+        return np.issubdtype(self.dtype, np.integer) or self.dtype == np.bool_
 
     def region(self, lo_zyx: tuple[int, int, int], hi_zyx: tuple[int, int, int]) -> np.ndarray:
-        """The voxels ``lo:hi`` (array order, ``hi`` exclusive) as ``[(C,) Z, Y, X]``, read as a region: the whole
-        volume is never loaded for a slice. A 2-D image is read whole once (one plane) and cached."""
-        sitk = _sitk()
+        """The voxels ``lo:hi`` (array order, ``hi`` exclusive) as ``[(C,) Z, Y, X]``, read as a region of the
+        store: KonfAI reads what the region needs, never the whole volume for a slice."""
         lo = [int(v) for v in lo_zyx]
-        hi = [int(min(h, n)) for h, n in zip(hi_zyx, self.shape_zyx, strict=True)]
+        hi = [int(min(h, n)) for h, n in zip(hi_zyx, self.grid.size_zyx, strict=True)]
         if any(h <= lo_ for h, lo_ in zip(hi, lo, strict=True)) or min(lo) < 0:
-            raise CaseError(f"empty region {lo}:{hi} in {self.path.name} of shape {self.shape_zyx}")
-        if self.dimension == 2:
-            if self._whole is None:
-                self._whole = self._as_array(sitk.ReadImage(str(self.path)))
-            return self._whole[..., lo[0] : hi[0], lo[1] : hi[1], lo[2] : hi[2]]
-        reader = sitk.ImageFileReader()
-        reader.SetFileName(str(self.path))
-        reader.ReadImageInformation()
-        reader.SetExtractIndex([lo[2], lo[1], lo[0]])
-        reader.SetExtractSize([hi[2] - lo[2], hi[1] - lo[1], hi[0] - lo[0]])
-        return self._as_array(reader.Execute())
+            raise CaseError(f"empty region {lo}:{hi} in {self.role} of shape {self.grid.size_zyx}")
+        spatial = tuple(slice(a, b) for a, b in zip(lo, hi, strict=True))
+        if self.rank == 2:
+            spatial = spatial[1:]  # the z plane is the whole 2-D image
+        try:
+            array, _ = self.dataset.read_data_slice(self.group, self.name, (slice(None), *spatial))
+        except KonfAIError as error:
+            raise CaseError(f"{self.role}: {error}") from error
+        array = np.asarray(array)
+        if self.rank == 2:
+            array = array[:, None]
+        return array
 
     def plane(self, array_axis: int, index: int) -> np.ndarray:
-        """One slice along an array axis, as ``[(C,) H, W]`` with the in-plane axes in array order."""
+        """One slice along an array axis, as ``[(C,) H, W]`` with the in-plane axes in array order; the channel
+        axis is dropped for a scalar image."""
         lo = [0, 0, 0]
-        hi = list(self.shape_zyx)
-        lo[array_axis] = int(index)
-        hi[array_axis] = int(index) + 1
+        hi = list(self.grid.size_zyx)
+        lo[array_axis], hi[array_axis] = int(index), int(index) + 1
         block = self.region(tuple(lo), tuple(hi))  # type: ignore[arg-type]
-        return np.squeeze(block, axis=block.ndim - 3 + array_axis)
+        plane = np.take(block, 0, axis=1 + array_axis)
+        return plane[0] if self.components == 1 else plane
 
-    def image(self):
-        """The whole image, for a resample (a warp needs every voxel)."""
-        # ponytail: a warp reads the moving image whole; stream it by region when cases outgrow RAM
-        return _sitk().ReadImage(str(self.path))
-
-    def sample_percentiles(self, lower: float = 1.0, upper: float = 99.0, planes: int = 5) -> tuple[float, float]:
-        """An intensity window from a few planes of the longest axis, never the whole volume."""
-        axis = int(np.argmax(self.shape_zyx))
-        count = self.shape_zyx[axis]
-        samples = [
-            self.plane(axis, i).astype(np.float32).ravel()
-            for i in np.linspace(0, count - 1, min(planes, count)).astype(int)
-        ]
-        values = np.concatenate(samples)
-        if self.components > 1:
-            values = np.abs(values)
-        low, high = np.percentile(values, (lower, upper))
-        return float(low), float(high) if high > low else float(low) + 1.0
+    def quantile(self, q: float) -> float:
+        """A quantile of the whole entry, by KonfAI's bounded passes: the volume is never held."""
+        return float(self.dataset.read_data_quantile(self.group, self.name, q))
 
     def describe(self) -> dict[str, object]:
-        return {
-            "path": str(self.path),
-            "pixel_type": self.pixel_type,
-            "components": self.components,
-            "dimension": self.dimension,
-            **self.grid.describe(),
-        }
+        from .planes import describe_grid
 
-
-def read_landmarks(path: Path) -> np.ndarray:
-    """Points ``[N, 3]`` in LPS from a Slicer fiducial file or a plain ``x,y,z`` CSV (``x,y`` in 2-D, z = 0); a
-    ``# CoordinateSystem = RAS`` header is converted."""
-    system = "LPS"
-    rows: list[list[float]] = []
-    with Path(path).open(newline="") as handle:
-        for line in handle:
-            if line.startswith("#"):
-                key, _, value = line[1:].partition("=")
-                if key.strip() == "CoordinateSystem":
-                    system = value.strip().upper()
-                continue
-            cells = next(csv.reader([line.strip()]))
-            if not cells or not line.strip():
-                continue
-            numbers = []
-            for cell in cells:
-                try:
-                    numbers.append(float(cell))
-                except ValueError:
-                    continue
-            if len(cells) >= 4 and not _is_number(cells[0]):  # id,x,y,z[,...]: the id first
-                numbers = numbers[:3]
-            elif len(numbers) >= 2:
-                numbers = numbers[:3]
-            else:
-                continue
-            rows.append(numbers + [0.0] * (3 - len(numbers)))
-    points = np.asarray(rows, dtype=float).reshape(-1, 3)
-    if system in ("RAS", "0"):
-        points[:, :2] *= -1
-    return points
-
-
-def _is_number(text: str) -> bool:
-    try:
-        float(text)
-        return True
-    except ValueError:
-        return False
+        return {"components": self.components, "dimension": self.rank, **describe_grid(self.grid)}
 
 
 @dataclass
@@ -248,6 +186,51 @@ class InspectionCase:
                 raise CaseError(f"{role}: {path} does not exist")
         self.labels = {int(k): str(v) for k, v in self.labels.items()}
         self._volumes: dict[str, Volume] = {}
+        self._stage: Path | None = None
+        self._datasets: dict[str, Dataset] = {}
+
+    # ------------------------------------------------------------------ staging through KonfAI
+
+    @property
+    def slug(self) -> str:
+        """The case's name as KonfAI names a case on disk."""
+        return self.name.replace("/", "__") or "case"
+
+    def stage(self, work: Path | str) -> Path:
+        """Link every volume role under ``work``, one root per storage backend (``Dataset_<backend>/<case>/<ROLE>``),
+        as konfai-apps stages its inputs; the roots feed every KonfAI read, transform and evaluation of the case."""
+        work = Path(work)
+        work.mkdir(parents=True, exist_ok=True)
+        self._datasets = {}
+        for role, path in self.inputs.items():
+            if role in POINT_ROLES:
+                continue
+            suffix = (directory_volume_form(path) if path.is_dir() else None) or storage_form(path)
+            backend = entry_backend(path, suffix)
+            root = work / f"Dataset_{backend}"
+            name = f"{role.upper()}{suffix.lower() if backend == 'itktransform' else suffix}"
+            link_entry(path, root / self.slug / name)
+            if backend not in self._datasets:
+                self._datasets[backend] = Dataset(root, backend)
+        self._stage = work
+        self._volumes = {}
+        return work
+
+    def staged(self) -> Path:
+        if self._stage is None:
+            self.stage(Path(tempfile.mkdtemp(prefix="konfai_scout_")))
+        assert self._stage is not None
+        return self._stage
+
+    def dataset_roots(self) -> list[str]:
+        """The staged roots as a KonfAI config names them (``path:format``), for a TRANSFORM or an EVALUATION run."""
+        self.staged()
+        return [f"{self._stage}/Dataset_{backend}:{backend}" for backend in self._datasets]
+
+    def dataset_of(self, role: str) -> Dataset:
+        self.staged()
+        backend = entry_backend(self.inputs[role])
+        return self._datasets[backend]
 
     @property
     def truth_available(self) -> bool:
@@ -261,8 +244,10 @@ class InspectionCase:
     def volume(self, role: str) -> Volume:
         if role not in self.inputs:
             raise CaseError(f"this case has no {role}")
+        if role in POINT_ROLES or role == "transform":
+            raise CaseError(f"{role} is not a volume")
         if role not in self._volumes:
-            self._volumes[role] = Volume(self.inputs[role])
+            self._volumes[role] = Volume(self.dataset_of(role), role.upper(), self.slug, role)
         return self._volumes[role]
 
     @cached_property
@@ -271,13 +256,22 @@ class InspectionCase:
         return self.volume(self.image_role).grid
 
     def landmarks(self, role: str) -> np.ndarray | None:
-        return read_landmarks(self.inputs[role]) if role in self.inputs else None
+        """Points ``[N, 3]`` in LPS, read as KonfAI reads a fiducial file."""
+        if role not in self.inputs:
+            return None
+        try:
+            points = read_landmarks(self.inputs[role])
+        except (KonfAIError, ValueError, OSError) as error:
+            raise CaseError(f"{role}: {error}") from error
+        return None if points is None else np.asarray(points, dtype=np.float64).reshape(-1, 3)
 
     def fingerprint(self) -> dict[str, dict[str, object]]:
         out: dict[str, dict[str, object]] = {}
         for role, path in self.inputs.items():
-            entry: dict[str, object] = {"path": str(path), "sha256": sha256_of(path), "bytes": path.stat().st_size}
-            if path.suffix.lower() not in LANDMARK_SUFFIXES + TRANSFORM_SUFFIXES or role in ("field",):
+            entry: dict[str, object] = {"path": str(path), "sha256": sha256_of(path)}
+            if path.is_file():
+                entry["bytes"] = path.stat().st_size
+            if role not in POINT_ROLES and role != "transform":
                 try:
                     entry.update(self.volume(role).describe())
                 except CaseError:
