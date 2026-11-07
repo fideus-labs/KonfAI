@@ -144,13 +144,21 @@ Per command:
 
 ### Tuning an app without editing it
 
-`infer` and `pipeline` take the three options below; `fine-tune` takes `--set` and `--batch-size`:
+`infer` and `pipeline` take the options below; `fine-tune` takes `--set`, `--batch-size` and `--seed`. An app
+reference may end in `#PRESET` to run one of the app's presets (`konfai-apps show APP` lists them): a named list of
+`--set`, applied before the run's own.
+
+`konfai-apps preset save APP#PRESET NAME --set ...` keeps the `--set` of PRESET, then the ones given, as a new preset
+NAME of the app: in your presets file for an app of the Hugging Face cache, in `app.json` for a local app folder.
+Without `#PRESET` it starts from the app's base config.
 
 | Option | Meaning |
 | --- | --- |
-| `--set NAME=VALUE` | Change a config value (repeatable). A bare name changes a model parameter (`--set iterations=300`), a dotted one a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |
+| `--set NAME=VALUE` | Change a config value (repeatable). A name changes a model parameter (`--set iterations=300`), a nested one dotted from the model (`--set models.0.layers_mask=01`); a name from the config root is a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |
 | `--patch-size` | The inference patch size (one value for a cube). |
 | `--batch-size` | The batch size. Without it, the app decides (`batch_size: 0` measures it on the GPU). |
+| `--output-format [OUTPUT=]FORMAT` | Write every output in FORMAT (`mha`, `nii.gz`, `omezarr`, ...), or one output with `OUTPUT=FORMAT` (repeatable). It writes the outputs' `dataset_filename` for you. |
+| `--seed N` | The run's random seed (`manual_seed`). |
 
 They also work on a remote server; a server that does not support one refuses the job.
 

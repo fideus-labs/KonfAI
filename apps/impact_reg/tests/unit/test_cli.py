@@ -158,7 +158,7 @@ def test_show_says_what_a_preset_will_do(
     assert "nibabel, on first use" in out
     # The shape, not FireANTs' own wording: the preset's value, its range or choices, a description under it.
     assert re.search(r"\n  cc_kernel = 5  \([^)]+\)\n      \w", out)
-    assert f"  Predictor.Model.RegistrationNet.models.0.ref = {model}" in out
+    assert f"  models.0.ref = {model}" in out  # a nested parameter by the name --set takes: dotted from the model
 
     # Not a case slip: a local folder is a path, which macOS and Windows resolve whatever the case.
     assert _run(monkeypatch, ["show", "FireANTs_SyM"]) == 1
