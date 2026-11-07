@@ -2,7 +2,7 @@
 
 A dataset is named by a path and a format: `./Dataset:mha` in `dataset_filenames`. The format picks the
 backend that reads and writes it (`konfai/utils/dataset/`). {doc}`../../config_guide/index` describes the
-case and group layout.
+case and group layout; a [manifest](#a-manifest-of-explicit-entries) names entries that do not follow it.
 
 | Backend | Formats | Layout | Region reads | Region writes | Extra |
 | --- | --- | --- | --- | --- | --- |
@@ -54,11 +54,45 @@ FSSPEC_S3_ANON=true konfai TRANSFORM --config Transform.yml
 That bucket is public, hence `FSSPEC_S3_ANON=true`. Credentials use fsspec's and AWS's usual settings:
 `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `FSSPEC_S3_ENDPOINT_URL` for MinIO.
 
-- Only `:omezarr` reads a remote root.
+- Only `:omezarr` reads a remote root, or a remote entry of a manifest.
 - A remote root is read-only: `Write` to a local path.
 - Give the run a generous `memory_budget`: the chunk cache is a third of it, and every cache miss is a
   download.
 - A root that cannot be reached (a wrong bucket, an expired credential) is an error, not an empty dataset.
+
+## A manifest of explicit entries
+
+A `dataset_filenames` entry may name a YAML (or JSON) file instead of a directory. The file lists each case's
+groups and where their store is, a local path or a URI, so a store that cannot be laid out as
+`<root>/<case>/<group>` (one in object storage, files from several folders) still reads under the group the
+config names:
+
+```yaml
+Dataset:
+  dataset_filenames:
+    - ./cases.yml:omezarr@1
+```
+
+```yaml
+# cases.yml
+P000:
+  CT: s3://bucket/study/fused.ome.zarr
+  SEG: ./labels/P000.ome.zarr
+P001:
+  CT: s3://bucket/study/other.zarr
+```
+
+- A relative entry is read from the manifest's own directory.
+- The flag and the level are the entry's (`:i:omezarr@1`): every store the manifest names is read at that
+  level.
+- Only `:omezarr` reads a manifest, and the manifest itself is a local file; its entries may be remote.
+- A manifest is read-only: it names where entries are read from, never where they are written.
+- A case is listed for the groups it names; one that lacks a group drops out of that group, as a folder
+  without the file would.
+- Case and group names are text: quote one that reads as a number (`"001":`), or YAML hands over the integer
+  and the manifest is refused.
+
+`konfai-apps` writes one for an input named by a URI ({doc}`../../usage/apps`).
 
 ## HDF5
 
