@@ -43,7 +43,7 @@ is what one run changes.
   against its app is refused when it is chosen.
 - **Method parameters only:** never the output format, the device, the batch or the patch size, so one preset gives
   one result whatever the run's own choices.
-- **Flat:** no preset inherits another. One made from another copies its `set` (`preset save --from`), which keeps a
+- **Flat:** no preset inherits another. One made from another copies its `set` (`preset save APP#PRESET NAME`), which keeps a
   tuned preset frozen when its parent changes.
 - **Everything else belongs to the app:** the weights its presets may use (one pinned list), the memory per voxel
   (the costliest preset's), the tiling, the sample. The provenance of a tuned preset is written in its description;
@@ -85,7 +85,7 @@ preset, every `--set` it applied in order, and an `identity` that every run of t
 | `feat(apps): a preset that never runs in tiles ("tiles": false)` | the one field beside `description` and `set` |
 | `feat(apps): return an app to its base config (use_preset(None))` | what SlicerKonfAI's preset menu calls |
 | `test(apps): hold the preset calls SlicerKonfAI makes` | the Slicer API contract |
-| `feat(apps): preset save --from ...` (two commits) | `--from` names a preset of the same app, bare: `--from composite` |
+| `feat(apps): preset save ...` (three commits) | `preset save APP#PRESET NAME`: the preset it starts from is the reference's |
 
 ## The app repositories
 

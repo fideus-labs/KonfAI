@@ -148,6 +148,10 @@ Per command:
 reference may end in `#PRESET` to run one of the app's presets (`konfai-apps show APP` lists them): a named list of
 `--set`, applied before the run's own.
 
+`konfai-apps preset save APP#PRESET NAME --set ...` keeps the `--set` of PRESET, then the ones given, as a new preset
+NAME of the app: in your presets file for an app of the Hugging Face cache, in `app.json` for a local app folder.
+Without `#PRESET` it starts from the app's base config.
+
 | Option | Meaning |
 | --- | --- |
 | `--set NAME=VALUE` | Change a config value (repeatable). A name changes a model parameter (`--set iterations=300`), a nested one dotted from the model (`--set models.0.layers_mask=01`); a name from the config root is a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |

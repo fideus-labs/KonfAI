@@ -292,23 +292,20 @@ def _with_run_options(
     return [*(overrides or []), *run_overrides(config, output_format, seed)]
 
 
-def _save_preset(app: str, from_preset: str | None, description: str, overrides: list[str]) -> None:
-    """``preset save APP#NAME``: the overrides of ``--from`` (a preset of APP, by its name) then ``--set``, kept as
-    preset NAME of APP."""
-    base, name = split_preset(app)
-    if name is None:
-        raise AppRepositoryError(f"'{app}' names no preset to save.", "Name it APP#NAME (ConvexAdam#mine).")
+def _save_preset(app: str, name: str, description: str, overrides: list[str]) -> None:
+    """``preset save APP[#PRESET] NAME``: the preset APP runs with (its base config without one), then ``--set``, kept
+    as preset NAME of APP. The source is the preset the run is written with, so it needs no flag of its own."""
+    base, source = split_preset(app)
+    if not PRESET_NAME.fullmatch(name):
+        raise AppRepositoryError(
+            f"'{name}' is not a preset name.", "Name it with letters, digits, '_' and '-': hippo, fine_grid."
+        )
     info = get_app_repository_info(base, False)
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
     start: tuple[str, ...] = ()
-    if from_preset is not None:  # a preset of this same app: APP#NAME names the app already
-        if not PRESET_NAME.fullmatch(from_preset):
-            raise AppRepositoryError(
-                f"--from {from_preset}: name a preset of {base} by its name alone.",
-                f"The app is the one APP#NAME names: --from composite, not --from {from_preset}.",
-            )
-        info.use_preset(from_preset)
+    if source is not None:
+        info.use_preset(source)
         start = info.get_preset().overrides  # type: ignore[union-attr]
     written = info.save_preset(name, description, [*start, *overrides])
     print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
@@ -940,17 +937,14 @@ def main_apps() -> None:
     preset_sub = preset_p.add_subparsers(dest="preset_command", required=True)
     save_p = preset_sub.add_parser(
         "save",
-        help="Save APP#NAME: in your presets file for an app of the Hugging Face cache, in the app's app.json for a "
-        "local app folder.",
+        help="Save the --set of APP[#PRESET] as a new preset NAME: in your presets file for an app of the Hugging Face "
+        "cache, in the app's app.json for a local app folder.",
     )
-    save_p.add_argument("app", help="APP#NAME: the app and the name of the new preset ('repo_id:app_name#NAME').")
     save_p.add_argument(
-        "--from",
-        dest="from_preset",
-        default=None,
-        metavar="PRESET",
-        help="Start from the --set of this preset of the same app (its name alone, e.g. composite).",
+        "app",
+        help="The app and the preset it starts from: 'repo_id:app_name#composite', or no '#' for its base config.",
     )
+    save_p.add_argument("name", help="The new preset's name: letters, digits, '_' and '-'.")
     save_p.add_argument("--description", default="", help="What the preset is for.")
     _add_config_overrides(save_p)
 
@@ -993,7 +987,7 @@ def main_apps() -> None:
         return
 
     if kwargs.get("command") == "preset":
-        _save_preset(kwargs["app"], kwargs["from_preset"], kwargs["description"], kwargs["config_overrides"] or [])
+        _save_preset(kwargs["app"], kwargs["name"], kwargs["description"], kwargs["config_overrides"] or [])
         return
 
     host = kwargs.pop("host")

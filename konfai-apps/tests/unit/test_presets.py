@@ -168,17 +168,22 @@ def test_saving_a_preset_of_a_local_app_writes_its_app_json(tmp_path: Path) -> N
 
 def test_the_preset_save_command_starts_from_another_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _app(tmp_path, _PRESETS)
+    # APP#PRESET is what the run starts from, as everywhere: the new preset is the next argument
     monkeypatch.setattr(
-        sys, "argv", ["konfai-apps", "preset", "save", f"{root}#mine", "--from", "fine_grid", "--set", "iterations=90"]
+        sys, "argv", ["konfai-apps", "preset", "save", f"{root}#fine_grid", "mine", "--set", "iterations=90"]
     )
     cli.main_apps()
-    saved = json.loads((root / "app.json").read_text())["presets"]["mine"]
-    assert saved["set"] == ["grid_spacing=3", "iterations=90"]
-    # APP#NAME names the app already: --from is a preset of it, by its name alone
-    monkeypatch.setattr(sys, "argv", ["konfai-apps", "preset", "save", f"{root}#x", "--from", f"{root}#fine_grid"])
+    saved = json.loads((root / "app.json").read_text())["presets"]
+    assert saved["mine"]["set"] == ["grid_spacing=3", "iterations=90"]
+    # no '#': from the base config
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "preset", "save", str(root), "plain", "--set", "iterations=70"])
+    cli.main_apps()
+    assert json.loads((root / "app.json").read_text())["presets"]["plain"]["set"] == ["iterations=70"]
+    # a name that is not one
+    monkeypatch.setattr(sys, "argv", ["konfai-apps", "preset", "save", f"{root}#fine_grid", "x.y"])
     with pytest.raises(SystemExit):
         cli.main_apps()
-    assert "x" not in json.loads((root / "app.json").read_text())["presets"]
+    assert "x.y" not in json.loads((root / "app.json").read_text())["presets"]
 
 
 def test_a_preset_of_one_s_own_never_hides_a_published_one(tmp_path: Path) -> None:
