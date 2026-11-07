@@ -99,22 +99,21 @@ def test_infer_preset_forwards_the_workspace(tmp_path: Path, monkeypatch, write_
 def test_uncertainty_stages_inside_the_callers_tmp_dir(tmp_path: Path, write_preset_output) -> None:
     """The staging and the run workspaces live in a private directory INSIDE the caller's tmp_dir --
     never under the system TMPDIR, and the caller's directory is left standing, emptied, when the
-    run is done. The spread map is the one deliverable, under <output>/uncertainty/."""
+    run is done. The spread map is the deliverable, under <output>/<case>/Uncertainty/Map/."""
+    from konfai_apps.ensemble import combine
+
     _, first = write_preset_output(tmp_path / "a")
     _, second = write_preset_output(tmp_path / "b")
+    stack = tmp_path / "ensemble" / "P000" / "InferenceStack.mha"
+    combine([first, second], "Mean", tmp_path / "ensemble" / "P000" / first.name, "mha", stack)
     staging = tmp_path / "staging"
 
-    ImpactRegKonfAIApp().uncertainty(
-        dvfs=[first, second],
-        output=tmp_path / "out",
-        quiet=True,
-        tmp_dir=staging,
-    )
+    ImpactRegKonfAIApp().uncertainty(stacks=[stack], output=tmp_path / "out", quiet=True, tmp_dir=staging)
 
     assert staging.is_dir()
     assert list(staging.iterdir()) == []
-    spread = sorted((tmp_path / "out" / "uncertainty").iterdir())
-    assert [path.name for path in spread] == ["Uncertainty.mha"]
+    maps = list((tmp_path / "out" / "P000" / "Uncertainty" / "Map").rglob("*.mha"))
+    assert [path.name for path in maps] == ["Uncertainty.mha"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod cannot make a Windows directory read-only")

@@ -285,12 +285,12 @@ def test_uncertainty_needs_no_preset(monkeypatch: pytest.MonkeyPatch, capsys: py
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "app_names", no_listing)
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "uncertainty", "--dvf", "a.h5", "b.h5"])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", "uncertainty", "-i", "a.mha", "--gt-fixed-fid", "f.fcsv"])
     cli.main()
-    assert [path.name for path in calls["uncertainty"]["dvfs"]] == ["a.h5", "b.h5"]
+    assert [path.name for path in calls["uncertainty"]["stacks"]] == ["a.mha"]
+    assert [path.name for path in calls["uncertainty"]["gt_fixed_fid"]] == ["f.fcsv"]
 
-    assert _run(monkeypatch, ["uncertainty", "--dvf", "a.h5"]) == 2
-    assert "two or more displacement fields" in capsys.readouterr().err
+    assert _run(monkeypatch, ["uncertainty", "--gt-fixed-fid", "f.fcsv"]) == 2  # the stack is required
     assert _run(monkeypatch, ["uncertainty", "--help"]) == 0
     assert "--download" not in capsys.readouterr().out
 
@@ -312,24 +312,14 @@ def test_a_remote_uri_is_refused_by_the_parser(monkeypatch: pytest.MonkeyPatch, 
     assert "is a URI" in capsys.readouterr().err
 
 
-def test_keep_fields_names_what_the_ensemble_holds(tmp_path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    # Members accumulate across runs into one --output; the stale one must be named, since `uncertainty --dvf
-    # Ensemble/*` takes it too.
-    ensemble = tmp_path / "P000" / "Ensemble"
-    ensemble.mkdir(parents=True)
-    for member in ("FireANTs_SyN.h5", "Generic_Rigid.h5", "ConvexAdam_Coarse.h5"):
-        (ensemble / member).touch()
+def test_uncertainty_keeps_the_ensemble_s_stack(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, dict] = {}
     monkeypatch.setattr(impact_reg, "ImpactRegKonfAIApp", _stub_app(calls))
     argv = ["register", "FireANTs_SyN", "Generic_Rigid", "-f", "a.mha", "-m", "b.mha", "-o", str(tmp_path)]
-    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--keep-fields", "--cpu", "1"])
+    monkeypatch.setattr(sys, "argv", ["impact-reg-konfai", *argv, "--uncertainty", "--cpu", "1"])
     cli.main()
 
-    assert calls["register"]["keep_dvf"] is True
-    assert capsys.readouterr().out.strip() == (
-        f"[ImpactReg] {ensemble}: ConvexAdam_Coarse, FireANTs_SyN, Generic_Rigid "
-        "(ConvexAdam_Coarse from an earlier run)."
-    )
+    assert calls["register"]["uncertainty"] is True
 
 
 @pytest.mark.parametrize(("device", "noted"), [([], True), (["--cpu", "1"], False), (["--gpu", "0"], False)])

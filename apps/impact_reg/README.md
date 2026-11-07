@@ -113,10 +113,10 @@ The CLI is organised into sub-commands, matching the registration workflow:
 | Sub-command | Purpose |
 |---|---|
 | `list`, `show` | List the presets; say what one runs, needs, costs and tunes (`show NAME`). |
-| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform, the moved image derived from it, a record of the run (`register.json`) and, with `--keep-fields`, each preset's own field under `Ensemble/`. |
+| `register` | Register a moving image onto a fixed image with one or more presets. Several presets are ensembled (their displacement fields are averaged). Writes the transform, the moved image derived from it, a record of the run (`register.json`) and, with `--uncertainty`, the ensemble's stack (every preset's field, `InferenceStack.mha`). |
 | `eval` | Evaluate a registration on any subset of modalities: image (MAE), segmentation (Dice), landmarks (TRE), and for a displacement field its Jacobian (the fraction of folded voxels). |
 | `apply` | Warp more moving-side images through a transform: another sequence, or a label map (`--labels`, nearest neighbour). |
-| `uncertainty` | Voxel-wise spread map from an ensemble of displacement fields. |
+| `uncertainty` | How an ensemble's registrations disagree, from its stack: the spread of the displacement vectors (a map, its mean and 95th percentile); with landmarks, their spread through every member and its calibration against the TRE; with a moving segmentation, how its propagations disagree. |
 
 Register a moving image onto a fixed image (ensemble several presets by listing them):
 
@@ -163,11 +163,11 @@ Warp a label map of the moving image onto the fixed one:
 impact-reg-konfai apply --transform ./Output/P000/Transform.h5 -f fixed.nii.gz -i moving_labels.nii.gz --labels -o ./Output/P000
 ```
 
-Estimate uncertainty from the per-preset displacement fields written by `register`:
+Measure how an ensemble's registrations disagree, from the stack `register --uncertainty` keeps:
 
 ```bash
-impact-reg-konfai register <PRESET_1> <PRESET_2> -f fixed.nii.gz -m moving.nii.gz -o ./Output --gpu 0 --keep-fields
-impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
+impact-reg-konfai register <PRESET_1> <PRESET_2> -f fixed.nii.gz -m moving.nii.gz -o ./Output --gpu 0 --uncertainty
+impact-reg-konfai uncertainty -i ./Output/P000/InferenceStack.mha --gt-fixed-fid fixed.fcsv -o ./Uncertainty
 ```
 
 ### `register` arguments
@@ -180,7 +180,7 @@ impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
 | `--fixed-mask`, `--moving-mask` | Optional masks restricting the metric region | *unset* |
 | `-o`, `--output` | Output directory | `./Output/` |
 | `--tta` | Test-time-augmentation draws per preset | `0` |
-| `--keep-fields` | Keep each preset's field under `Ensemble/` for a later `uncertainty` run | `False` |
+| `--uncertainty` | Keep the ensemble's stack, every preset's field, as `<case>/InferenceStack.mha` (`.ome.zarr` beside a store) for `uncertainty` | `False` |
 | `--fields-only` | Write the transforms and stop; skip deriving the moved images | `False` |
 | `--max-voxels` | Register whole a pair of at most this many voxels; a larger one runs in two passes (see *Large images*) | what the device holds at the preset's declared cost |
 | `--set [PRESET:]NAME=VALUE` | Tune a preset parameter (repeatable); `PRESET:` limits it to one preset of an ensemble; checked before anything runs | *unset* |
@@ -203,8 +203,11 @@ impact-reg-konfai uncertainty --dvf ./Output/P000/Ensemble/*.h5 -o ./Output/P000
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--dvf` | Two or more ensemble displacement fields (e.g. the per-preset fields from `register`) | *required* |
-| `-o`, `--output` | Output directory | `./Output/` |
+| `-i`, `--stack` | The ensemble's stack of each case, from `register --uncertainty` | *required* |
+| `--gt-fixed-fid` | Fixed landmarks: their spread through every member (mm per landmark) | *unset* |
+| `--gt-moving-fid` | Moving landmarks, with `--gt-fixed-fid`: whether the spread predicts the TRE (Spearman) | *unset* |
+| `--gt-moving-seg` | Moving segmentation: how its propagations disagree, voxel by voxel | *unset* |
+| `-o`, `--output` | Output directory: `Uncertainty_summary.json` holds every measure, per case and over the cohort | `./Output/` |
 
 See the full help of any sub-command with:
 
