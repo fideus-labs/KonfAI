@@ -1,6 +1,6 @@
 # Ensembles: one notion of member for checkpoints, TTA and presets
 
-Status: proposed 2026-11-07, for review. Builds on `docs/design/presets.md` (presets, `APP#PRESET`) and on the
+Status: decided 2026-11-07 (see Decided), not implemented. Builds on `docs/design/presets.md` (presets, `APP#PRESET`) and on the
 registration measures (`TransformPoints`, `Resample` through stored transforms).
 
 ## The problem
@@ -17,7 +17,8 @@ combine them:
   weights. Only impact-reg-konfai ensembles them: one `konfai-apps infer` per preset, a `Reduce(Mean)` of the fields,
   each member kept as `Ensemble/<preset>.h5` (`--keep-fields`), and an `uncertainty` command of its own
   (`Reduce(Std)` then `Magnitude`).
-- **MC dropout** is refused by konfai-apps and never reaches the member axis.
+- **MC dropout** is refused by konfai-apps and never reaches the member axis; it comes back as a fourth kind of
+  member (decided).
 
 So a member is three different things, the stack has no defined layout for a member of several channels (a
 displacement field's three components slide into a spatial axis in `.mha`, unchecked), and every uncertainty measure
@@ -29,7 +30,8 @@ nothing to read: `Resample` and `TransformPoints` apply one stored transform per
 ### A member, an ensemble, a stack
 
 - **A member is one run of a model:** an app reference with its preset (`APP#PRESET`), one checkpoint, one TTA
-  copy. Two members may differ by any of the three, or by the app itself when their outputs match.
+  copy, one MC-dropout draw. Two members may differ by any of the four, or by the app itself when their outputs
+  match.
 - **An ensemble is a list of members,** written as the product of what the run asks for:
   `konfai-apps infer APP#a APP#b --ensemble-models c1 c2 --tta 2` is 2 presets x 2 checkpoints x the TTA copies
   the run makes.
@@ -37,13 +39,18 @@ nothing to read: `Resample` and `TransformPoints` apply one stored transform per
   channels are the members' channels, member-major (`[M x C, *spatial]`), its header carrying `konfai_members: M`.
   Any store that holds channels holds it (MetaImage, NIfTI, OME-Zarr), and a reader reshapes it to `[M, C, ...]`
   from the header alone. One member per channel (`C = 1`) is today's layout unchanged.
+- **Which member is which is written once, in the run record** (decided): `konfai-run.json` lists the members in the
+  stack's order (`APP#PRESET`, checkpoint, TTA copy, MC-dropout draw); the stack holds their count alone. Slicer names
+  the members from the record.
 - **The output is the stack reduced** by the app's own `combine` operator (`Mean`, `Median`, `Vote`), the one it
   already declares for its checkpoints. Members of several apps must declare the same one.
 
 ### Where each kind of member is run
 
-- **Checkpoints and TTA copies of one preset** stay in one predictor run, as today: their stack rows are written as
-  the run makes them (`InferenceStack.fold_copies` already streams them).
+- **Checkpoints, TTA copies and MC-dropout draws of one preset** stay in one predictor run, reduced there by a
+  running sum as today, which writes nothing more for an ensemble of checkpoints without uncertainty (decided: the
+  two paths stay, one format and one operator between them). With `-uncertainty`, or as a member of a preset
+  ensemble, the run writes its rows as it makes them (`InferenceStack.fold_copies` already streams them).
 - **Each preset (each app reference) is a run of its own,** whose rows are appended to the same stack. The output is
   reduced once from the whole stack, so a mean weighs every member alike and a vote counts every member, where a
   reduction of per-preset results would not.
@@ -87,8 +94,9 @@ registrations; its result goes into the stack as any member's does.
 
 ## Slicer
 
-- SlicerKonfAI's checkpoint chips take presets too, for every app: a member is `APP#PRESET` (one checkpoint) or
-  `APP#PRESET:checkpoint`; SlicerImpactReg's own preset chips go.
+- SlicerKonfAI composes an ensemble as the CLI does, a product (decided): a row of preset chips (`APP#PRESET`) beside
+  the checkpoint chips it has, and the TTA count; every combination is a member. For an app without checkpoints (the
+  registration engines) the preset chips are the whole choice. SlicerImpactReg's own preset chips go.
 - The Uncertainty panel hands konfai-apps the stack it wrote, instead of re-stacking the sequence nodes into
   `Volume.mha`, and offers the app's `Uncertainty*.yml` tabs with their `--gt` entries, as the evaluation tabs do.
 
@@ -101,11 +109,9 @@ registrations; its result goes into the stack as any member's does.
    uncertainty.
 5. SlicerKonfAI and SlicerImpactReg.
 
-## Open questions
+## Decided
 
-- **Two places combine members:** inside a predictor run (checkpoints, TTA) and across runs (presets). One stack
-  format and one operator make them agree; whether the in-run reduction should also go through the stack (simpler,
-  one more write) is to measure.
-- **Member names:** the header holds the count; whether it also lists each member (`APP#PRESET`, checkpoint, TTA
-  copy), so the uncertainty panel can name them.
-- **MC dropout:** whether to allow it again as a fourth member axis, now that the stack is defined.
+- The in-run reduction (checkpoints, TTA, MC dropout) and the stack's (presets) both stay: one format, one operator.
+- MC dropout comes back as a fourth kind of member.
+- The members are named in `konfai-run.json`, in the stack's order; the stack holds their count.
+- Slicer composes an ensemble as a product, as the CLI does.
