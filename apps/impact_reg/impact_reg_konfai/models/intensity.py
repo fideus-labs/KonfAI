@@ -19,6 +19,8 @@ read, the translation between two subjects' centres of mass, and whether a mask 
 
 import contextlib
 import gc
+import os
+import tempfile
 
 import numpy as np
 import SimpleITK as sitk
@@ -27,15 +29,19 @@ from konfai.metric.measure.impact import no_texpr_fuser
 from konfai.utils.dataset import (
     AFFINE_ATTRIBUTE,
     DISPLACEMENT_FIELD_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
     Attribute,
     affine_to_attribute,
+    as_affine,
     data_to_image,
     image_to_data,
 )
 from konfai.utils.vram import out_of_memory_as_torch
 
-#: The forms a preset declares its transform written in: its displacement on the fixed grid, or the affine it is.
-TRANSFORM_TYPES = ("field", "affine")
+#: The forms a preset declares its transform written in: the one the engine found ('native': an affine for linear maps,
+#: elastix's rigid then B-spline as such, a field for what is dense), its displacement on the fixed grid, or the affine
+#: it is. A mean (TTA, an ensemble) or a tiled run writes the field whatever the form.
+TRANSFORM_TYPES = ("native", "field", "affine")
 
 
 def check_transform_type(transform_type: str) -> None:
@@ -49,6 +55,54 @@ def displacement_on(grid: sitk.Image, transform: sitk.Transform) -> np.ndarray:
         transform, sitk.sitkVectorFloat64, grid.GetSize(), grid.GetOrigin(), grid.GetSpacing(), grid.GetDirection()
     )
     return image_to_data(field)[0]
+
+
+def _leaves(transform: sitk.Transform) -> list[sitk.Transform]:
+    """``transform``'s leaves in their order, a composite nested in another (elastix's, with its start added back)
+    flattened."""
+    if not isinstance(transform, sitk.CompositeTransform):
+        transform = transform.Downcast()
+    if not isinstance(transform, sitk.CompositeTransform):
+        return [transform]
+    return [
+        leaf for index in range(transform.GetNumberOfTransforms()) for leaf in _leaves(transform.GetNthTransform(index))
+    ]
+
+
+def world_transform(transform: sitk.Transform, voxel: float) -> sitk.Transform:
+    """``transform``, found in voxel units, in millimetres: ``voxel * T(p / voxel)``. A linear leaf keeps its matrix
+    and scales its translation; a B-spline scales its control grid and its coefficients. Any other leaf raises."""
+    world: list[sitk.Transform] = []
+    for leaf in _leaves(transform):
+        if leaf.IsLinear():
+            affine = as_affine(leaf)
+            affine.SetTranslation([value * voxel for value in affine.GetTranslation()])
+            world.append(affine)
+        elif isinstance(leaf, sitk.BSplineTransform):
+            coefficients = []
+            for image in leaf.GetCoefficientImages():
+                scaled = image * voxel
+                scaled.SetOrigin([value * voxel for value in image.GetOrigin()])
+                scaled.SetSpacing([value * voxel for value in image.GetSpacing()])
+                scaled.SetDirection(image.GetDirection())
+                coefficients.append(scaled)
+            world.append(sitk.BSplineTransform(coefficients, leaf.GetOrder()))
+        else:
+            raise ValueError(f"A {leaf.GetName()} has no native form here: it is written as its field.")
+    return world[0] if len(world) == 1 else sitk.CompositeTransform(world)
+
+
+def _native_file(transform: sitk.Transform, voxel: float) -> str | None:
+    """``transform`` in millimetres in a transform file the output writes in place of its field, or None when it has
+    no native form (its field is written)."""
+    try:
+        world = world_transform(transform, voxel)
+    except ValueError:
+        return None
+    handle, path = tempfile.mkstemp(prefix="konfai_native_", suffix=".h5")
+    os.close(handle)
+    sitk.WriteTransform(world, path)
+    return path
 
 
 def _world_affine(linear: sitk.Transform, voxel: float, z_shift: float | None) -> np.ndarray:
@@ -114,8 +168,8 @@ class EngineRegistration(torch.nn.Module):
                 try:
                     with out_of_memory_as_torch(device_index >= 0):
                         result = self._engine.register(images[0], images[1], device_index, images[2], images[3])
-                    linear = result if isinstance(result, sitk.Transform) else None
-                    field = (displacement_on(images[0], linear) if linear is not None else result) * voxel
+                    transform = result if isinstance(result, sitk.Transform) else None
+                    field = (displacement_on(images[0], transform) if transform is not None else result) * voxel
                     if flat:  # the plane's (dx, dy), and along z from one plane to the other
                         field = np.concatenate([field, np.full_like(field[:1], z_shift)])
                 finally:
@@ -124,8 +178,10 @@ class EngineRegistration(torch.nn.Module):
                 fields.append(torch.from_numpy(field))
                 # The output's header is the fixed image's: an ':omezarr' output dataset then writes an RFC-5 field.
                 attributes[0][b][DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
-                if linear is not None:
-                    attributes[0][b][AFFINE_ATTRIBUTE] = _world_affine(linear, voxel, z_shift if flat else None)
+                if transform is not None and transform.IsLinear():
+                    attributes[0][b][AFFINE_ATTRIBUTE] = _world_affine(transform, voxel, z_shift if flat else None)
+                elif transform is not None and not flat and (native := _native_file(transform, voxel)) is not None:
+                    attributes[0][b][TRANSFORM_FILE_ATTRIBUTE] = native  # a plane's B-spline is written as its field
         return torch.stack(fields, dim=0).to(fixed.device)
 
 

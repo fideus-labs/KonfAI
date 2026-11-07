@@ -696,7 +696,7 @@ class FireANTsEngine:
         mixed_precision: bool = False,
         voxel_sampling: float = 1.0,
         translation_lr: float = 0.015,
-        transform_type: str = "field",
+        transform_type: str = "native",
     ) -> None:
         """Hold one preset's registration settings; nothing is imported or allocated until ``register``.
 
@@ -783,6 +783,13 @@ class FireANTsEngine:
                 voxel_sampling=self._voxel_sampling,
             )
         return self._feature_loss
+
+    @property
+    def _writes_affine(self) -> bool:
+        """The linear stages' affine is the result where no deformable stage follows, for 'native' as for 'affine'."""
+        return self._transform_type == "affine" or (
+            self._transform_type == "native" and self._deformable_method == "none"
+        )
 
     @staticmethod
     def _affine_to_sitk(affine_matrix: "torch.Tensor") -> sitk.AffineTransform:
@@ -933,7 +940,7 @@ class FireANTsEngine:
             # but a wrong mask, and said so.
             if self._linear_method != "none":
                 print("[FireANTs] the fixed mask is empty: nothing registered, the field is zero.", flush=True)
-            if self._transform_type == "affine":
+            if self._writes_affine:
                 return sitk.AffineTransform(fixed.GetDimension())
             return np.zeros((fixed.GetDimension(), *fixed.GetSize()[::-1]), dtype=np.float32)
         # Only a mask that restricts (some voxels in, some out) is one, decided on the mask as given: konfai-apps
@@ -1089,7 +1096,7 @@ class FireANTsEngine:
         # from the affine so their TOTAL transform already bakes in the linear pre-align.
         if self._deformable_method == "none":
             linear = self._affine_to_sitk(affine_matrix)
-            if self._transform_type == "affine":
+            if self._writes_affine:
                 return linear
             field = self._field_on(linear, grid)
         else:
@@ -1281,12 +1288,13 @@ class RegistrationNet(network.Network):
             "registration. Both set to 'none' is refused: it would optimise nothing.",
         ] = "syn",
         transform_type: Annotated[
-            Literal["field", "affine"],
-            "The form the transform is written in: 'field', its displacement on the fixed grid; 'affine', the one "
-            "matrix the linear stages found, for deformable_method 'none' alone. An affine is written as an ITK "
+            Literal["native", "field", "affine"],
+            "The form the transform is written in: 'native', the one the stages found (the linear stages' affine for "
+            "deformable_method 'none', a field otherwise); 'field', its displacement on the fixed grid; 'affine', the "
+            "one matrix the linear stages found, for deformable_method 'none' alone. An affine is written as an ITK "
             "AffineTransform file or as an RFC-5 'affine' store, where a field of the same registration weighs "
-            "megabytes.",
-        ] = "field",
+            "megabytes. A mean (TTA, an ensemble) or a tiled run writes the field whatever the form.",
+        ] = "native",
         deformable_metric: Annotated[
             Literal["cc", "mi", "mse", "impact"],
             "Similarity metric for the deformable stage; 'impact' uses the IMPACT feature models under 'models'.",

@@ -327,7 +327,7 @@ def test_an_empty_fixed_mask_says_so_outside_the_tile_pass(capsys: pytest.Captur
     image = _volume(32)
     empty = sitk.Image(image.GetSize(), sitk.sitkUInt8)
     empty.CopyInformation(image)
-    assert not _engine().register(image, image, -1, empty).any()
+    assert not _engine(transform_type="field").register(image, image, -1, empty).any()  # linear: native is an affine
     assert "fixed mask is empty" in capsys.readouterr().out
     _engine(linear_method="none", deformable_method="syn").register(image, image, -1, empty)
     assert "fixed mask is empty" not in capsys.readouterr().out

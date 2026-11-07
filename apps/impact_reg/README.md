@@ -127,8 +127,10 @@ impact-reg-konfai register Elastix_IMPACT_Static -f ct.nii.gz -m mr.nii.gz --fix
 ```
 
 Each case gets its transform, `Output/P000/Transform.h5` (an ITK transform mapping a fixed point to its moving partner,
-in mm: a displacement field on the fixed grid, or the affine a linear preset declares with `transform_type: affine`,
-as `Generic_Rigid` does), and the moving image resampled through it, `Output/P000/Moved.<ext>`. OME-Zarr stores go in
+in mm) in the form the preset found: an affine for linear maps (`Elastix#rigid`), elastix's rigid then B-spline as
+such (kilobytes), a displacement field on the fixed grid for what is dense (ConvexAdam, FireANTs SyN). An ensemble, a
+TTA or a tiled run writes the field whatever the form, and `--set transform_type=field` forces it. The moving image
+resampled through it is `Output/P000/Moved.<ext>`. OME-Zarr stores go in
 and come out the same way:
 
 ```bash

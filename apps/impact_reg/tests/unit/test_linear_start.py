@@ -85,7 +85,7 @@ def test_elastix_starts_where_the_preset_declares(
     monkeypatch.setattr(elastix_engine.subprocess, "Popen", Process)
     monkeypatch.setattr(elastix_engine, "loader_env", lambda root: {})
     monkeypatch.setattr(ElastixEngine, "_ensure_binary", lambda self: Path("elastix"))
-    engine = ElastixEngine(["Rigid.txt"], moments_init=moments_init)
+    engine = ElastixEngine(["Rigid.txt"], moments_init=moments_init, transform_type="field")  # one map, sampled
     engine._elastix_root = Path("/opt/elastix-impact")
     field = engine.register(fixed, moving, -1)
 

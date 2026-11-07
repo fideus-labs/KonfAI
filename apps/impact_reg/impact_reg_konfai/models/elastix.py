@@ -342,12 +342,13 @@ class RegistrationNet(network.Network):
             "different lengths of a body have their centres of mass apart where the anatomy is not: 'cof' there.",
         ] = "cof",
         transform_type: Annotated[
-            Literal["field", "affine"],
-            "The form the transform is written in: 'field', its displacement on the fixed grid, whatever the maps; "
-            "'affine', the one matrix the maps found, which takes linear maps alone (translation, Euler, similarity, "
-            "affine) and refuses a B-spline. An affine is written as an ITK AffineTransform file or as an RFC-5 "
-            "'affine' store, where a field of the same registration weighs megabytes.",
-        ] = "field",
+            Literal["native", "field", "affine"],
+            "The form the transform is written in: 'native', the one the maps found (an affine for linear maps, the "
+            "rigid then B-spline composite as such: kilobytes where its field weighs megabytes); 'field', its "
+            "displacement on the fixed grid, whatever the maps; 'affine', the one matrix the maps found, which takes "
+            "linear maps alone (translation, Euler, similarity, affine) and refuses a B-spline. A mean (TTA, an "
+            "ensemble) or a tiled run writes the field whatever the form.",
+        ] = "native",
     ) -> None:
         # The IMPACT metric is described by ``models`` / ``levels`` (config = source of truth); the download list
         # is derived from them. Global knobs override the generated map (final_grid_spacing ->

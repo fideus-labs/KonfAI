@@ -181,7 +181,7 @@ class ElastixEngine:
         voxel_sampling: float = 1.0,
         seed: int = 42,
         moments_init: str = "cof",
-        transform_type: str = "field",
+        transform_type: str = "native",
     ) -> None:
         if moments_init not in ("cof", "com"):
             raise ValueError(f"Unknown moments_init '{moments_init}': 'cof' or 'com'.")
@@ -440,7 +440,7 @@ class ElastixEngine:
         if fixed_mask is not None and not sitk.GetArrayViewFromImage(fixed_mask).any():
             # Nothing to register: in a tiled run, a patch the tissue does not reach.
             identity = sitk.AffineTransform(fixed.GetDimension())
-            return identity if self._transform_type == "affine" else displacement_on(fixed, identity)
+            return identity if self._transform_type != "field" else displacement_on(fixed, identity)
         grid = fixed  # the field is sampled on the fixed image as it came
         if self._feature_models and fixed.GetDimension() == 2:
             # ponytail: elastix's IMPACT metric reads its models from the map, 3-D here; ConvexAdam swaps them
@@ -559,7 +559,10 @@ class ElastixEngine:
             if not transforms:
                 raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
             transform = sitk.ReadTransform(str(transforms[-1]))
-            if self._transform_type == "affine":
+            if self._transform_type == "native" and not transform.IsLinear():
+                # The maps' own transform (rigid then B-spline), kilobytes where its field weighs megabytes.
+                return with_shift(transform, shift)
+            if self._transform_type != "field":
                 # The one affine the maps compose to, the start added back: a moving point is T(x) + shift.
                 affine = as_affine(transform)
                 if shift is not None:
@@ -571,6 +574,14 @@ class ElastixEngine:
             return field
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+
+def with_shift(transform: sitk.Transform, shift: list[float] | None) -> sitk.Transform:
+    """``transform`` with the start the moving image was moved by added back: a moving point is ``T(x) + shift``
+    (a composite applies its last transform first)."""
+    if shift is None:
+        return transform
+    return sitk.CompositeTransform([sitk.TranslationTransform(len(shift), list(shift)), transform])
 
 
 class ElastixRegistration(EngineRegistration):
@@ -593,7 +604,7 @@ class ElastixRegistration(EngineRegistration):
         voxel_sampling: float = 1.0,
         seed: int = 42,
         moments_init: str = "cof",
-        transform_type: str = "field",
+        transform_type: str = "native",
     ) -> None:
         if engine != "elastix":
             raise NotImplementedError(f"ElastixRegistration engine '{engine}' is not implemented yet.")
