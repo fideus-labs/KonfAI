@@ -1,6 +1,6 @@
 # Ensembles: one notion of member for checkpoints, TTA and presets
 
-Status: decided 2026-11-07 (see Decided), not implemented. Builds on `docs/design/presets.md` (presets, `APP#PRESET`) and on the
+Status: decided 2026-11-07 (see Decided); phases 1 to 4 implemented, phase 5 (Slicer) not yet. Builds on `docs/design/presets.md` (presets, `APP#PRESET`) and on the
 registration measures (`TransformPoints`, `Resample` through stored transforms).
 
 ## The problem
@@ -37,8 +37,12 @@ nothing to read: `Resample` and `TransformPoints` apply one stored transform per
   the run makes.
 - **The stack is the one record of an ensemble's members,** and its only format: one volume per output whose
   channels are the members' channels, member-major (`[M x C, *spatial]`), its header carrying `konfai_members: M`.
-  Any store that holds channels holds it (MetaImage, NIfTI, OME-Zarr), and a reader reshapes it to `[M, C, ...]`
-  from the header alone. One member per channel (`C = 1`) is today's layout unchanged.
+  A reader reshapes it to `[M, C, ...]` from the header alone. One member per channel (`C = 1`) is today's layout
+  unchanged.
+- **The stack takes the output's form where its header keeps the count** (MetaImage, NRRD, OME-Zarr, KonfAI's
+  HDF5), and is MetaImage beside the output otherwise: NIfTI keeps no free header key (for `C = 1` the count is the
+  channel count, and NIfTI serves), and an ITK transform file holds one transform. A stack of fields in OME-Zarr is
+  plain channels, the field mark in its header: no RFC-5 axis types several fields as one.
 - **Which member is which is written once, in the run record** (decided): `konfai-run.json` lists the members in the
   stack's order (`APP#PRESET`, checkpoint, TTA copy, MC-dropout draw); the stack holds their count alone. Slicer names
   the members from the record.
