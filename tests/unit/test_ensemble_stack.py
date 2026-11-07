@@ -27,29 +27,32 @@ pytest.importorskip("SimpleITK")
 
 from konfai.data.transform import InferenceStack, Magnitude, SegmentationDisagreement, StandardDeviation
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, stack_members
-from konfai.utils.dataset import Attribute, Dataset
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset
 
 
-def _attributes() -> Attribute:
+def _attributes(field: bool = False) -> Attribute:
     attributes = Attribute()
+    if field:
+        attributes[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
     attributes["Origin"] = np.array([1.0, 2.0, 3.0])
     attributes["Spacing"] = np.array([1.5, 1.0, 2.0])
     attributes["Direction"] = np.eye(3).ravel()
     return attributes
 
 
-@pytest.mark.parametrize("fmt", ["mha", "nrrd"])
+@pytest.mark.parametrize("fmt", ["mha", "nrrd", "omezarr"])
 def test_a_stack_of_fields_keeps_each_member_s_components(tmp_path: Path, fmt: str) -> None:
     """Three members of a three-component field: nine channels, member-major, and the count in the header, so the
-    reader splits members from components; the output (their mean) carries no count."""
+    reader splits members from components; the output (their mean) carries no count. OME-Zarr holds the stack as
+    plain channels: no RFC-5 axis types nine components as one field."""
     members = torch.randn(3, 3, 4, 5, 6)
-    attributes = _attributes()
+    attributes = _attributes(field=True)
     mean = InferenceStack(dataset=f"{tmp_path}:{fmt}")("P000", members, attributes)
 
     torch.testing.assert_close(mean, members.mean(0))
     assert MEMBERS_ATTRIBUTE not in attributes
     data, header = Dataset(str(tmp_path), fmt).read_data("InferenceStack", "P000")
-    assert list(data.shape) == [9, 4, 5, 6]
+    assert list(data.shape) == [9, 4, 5, 6] and DISPLACEMENT_FIELD_ATTRIBUTE in header
     torch.testing.assert_close(stack_members(torch.from_numpy(data), header), members, rtol=0, atol=1e-6)
 
 
@@ -100,7 +103,7 @@ def test_a_stack_of_fields_is_refused_where_its_count_is_lost(tmp_path: Path) ->
 # ---------------------------------------------------------------- a stored transform, one member at a time
 
 
-def _member_fields(tmp_path: Path) -> tuple[list, Dataset]:
+def _member_fields(tmp_path: Path, fmt: str = "mha") -> tuple[list, Dataset]:
     """Two displacement fields stacked as InferenceStack writes them: [6, z, y, x], two members of three."""
     import SimpleITK as sitk
 
@@ -109,15 +112,15 @@ def _member_fields(tmp_path: Path) -> tuple[list, Dataset]:
         np.stack([a * np.sin(y / 3), b * np.cos(x / 4), 0.5 * np.sin(z / 2)], -1) for a, b in ((1.0, 0.5), (0.3, 1.2))
     ]
     members = torch.from_numpy(np.stack([np.moveaxis(field, -1, 0) for field in fields])).float()
-    attributes = _attributes()
-    InferenceStack(dataset=f"{tmp_path / 'stack'}:mha")("P000", members, attributes)
+    attributes = _attributes(field=True)
+    InferenceStack(dataset=f"{tmp_path / 'stack'}:{fmt}")("P000", members, attributes)
     transforms = []
     for field in fields:
         image = sitk.GetImageFromArray(field, isVector=True)
         image.SetOrigin((1.0, 2.0, 3.0))
         image.SetSpacing((1.5, 1.0, 2.0))
         transforms.append(sitk.DisplacementFieldTransform(image))
-    return transforms, Dataset(str(tmp_path / "stack"), "mha")
+    return transforms, Dataset(str(tmp_path / "stack"), fmt)
 
 
 def test_a_member_view_reads_one_member_by_region(tmp_path: Path) -> None:
@@ -133,14 +136,15 @@ def test_a_member_view_reads_one_member_by_region(tmp_path: Path) -> None:
     np.testing.assert_array_equal(view.read_data_slice("InferenceStack", "P000", region)[0], stack[4:6, 2:5])
 
 
-def test_points_and_images_go_through_every_member_of_a_stack(tmp_path: Path) -> None:
+@pytest.mark.parametrize("fmt", ["mha", "omezarr"])
+def test_points_and_images_go_through_every_member_of_a_stack(tmp_path: Path, fmt: str) -> None:
     """TransformPoints through a stack: one set of points per member, [M, N, 3]; Resample: one image per member,
     stacked with their count. Each is SimpleITK's own through that member's field."""
     import SimpleITK as sitk
     from konfai.data.transform import Resample, TransformPoints
     from konfai.utils.dataset import image_to_data
 
-    transforms, dataset = _member_fields(tmp_path)
+    transforms, dataset = _member_fields(tmp_path, fmt)
     points = np.array([[4.0, 5.0, 6.0], [8.0, 6.0, 10.0], [12.0, 9.0, 14.0]])
     stage = TransformPoints({"InferenceStack": False})
     stage.set_datasets([dataset])
