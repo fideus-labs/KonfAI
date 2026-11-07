@@ -29,7 +29,7 @@ import textwrap
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from konfai import RemoteServer
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
@@ -47,10 +47,6 @@ from .app_repository import (
 from .errors import AppRepositoryError
 from .options import add_device, add_run_options, add_tmp_dir
 from .presets import PRESET_NAME, split_preset
-
-if TYPE_CHECKING:
-    from .app import AbstractKonfAIApp
-
 
 #: Where a designed refusal also writes its message, when set: the app server reads it back to answer
 #: the job's result with the refusal (422) rather than a bare exit code.
@@ -290,6 +286,34 @@ def _with_run_options(
         raise AppRepositoryError(f"App '{base}' has no {config_name}: --output-format and --seed have nothing to set.")
     config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8"))
     return [*(overrides or []), *run_overrides(config, output_format, seed)]
+
+
+def _combine_of(references: list[str], remote: RemoteServer | None, config_name: str) -> str:
+    """The operator an ensemble of ``references`` reduces its members with: the one their configs declare for their
+    checkpoints (``Predictor.combine``), ``Mean`` where it is unset or a ``Concat`` (a stack's), the same for all."""
+    from ruamel.yaml import YAML
+
+    from .ensemble import OPERATORS
+
+    operators = {}
+    for reference in references:
+        base = split_preset(reference)[0]
+        info = AppRepositoryInfoFromRemoteServer(remote, base) if remote else get_app_repository_info(base, False)
+        files = {path.name: path for path in info.download_config_file()}
+        config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8")) if config_name in files else {}
+        declared = str(((config or {}).get("Predictor") or {}).get("combine") or "Mean")
+        operators[reference] = "Mean" if declared == "Concat" else declared
+    if len(set(operators.values())) > 1:
+        raise AppRepositoryError(
+            f"The ensemble's apps combine their members differently: {operators}.",
+            "Ensemble apps that reduce their members alike (Mean, Median or Vote).",
+        )
+    operator = next(iter(operators.values()))
+    if operator not in OPERATORS:
+        raise AppRepositoryError(
+            f"An ensemble of apps reduces with {', '.join(OPERATORS)}; these declare '{operator}'."
+        )
+    return operator
 
 
 def _save_preset(app: str, name: str, description: str, overrides: list[str]) -> None:
@@ -719,11 +743,13 @@ def main_apps() -> None:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    def add_common_args(parser: argparse.ArgumentParser, is_fine_tune: bool = False) -> None:
+    def add_common_args(parser: argparse.ArgumentParser, is_fine_tune: bool = False, several: bool = False) -> None:
         parser.add_argument(
             "app",
             type=str,
-            help="KonfAI App: repo_id:app_name or a local app folder, #preset after it to run one of its presets",
+            nargs="+" if several else None,
+            help="KonfAI App: repo_id:app_name or a local app folder, #preset after it to run one of its presets"
+            + ("; several, an ensemble of their members (docs/design/ensembles.md)" if several else ""),
         )
         parser.add_argument("--host", type=str, default=None, help="Server host")
         parser.add_argument("--port", type=int, default=8000, help="Server port")
@@ -746,7 +772,7 @@ def main_apps() -> None:
         _add_app_io(parser, fine_tune=is_fine_tune)
 
     infer_p = subparsers.add_parser("infer", help="Run inference using a KonfAI App.")
-    add_common_args(infer_p)
+    add_common_args(infer_p, several=True)
     group = infer_p.add_mutually_exclusive_group()
     group.add_argument("--ensemble", type=int, default=0, help="Number of models in the ensemble (auto-select).")
     group.add_argument(
@@ -1000,16 +1026,37 @@ def main_apps() -> None:
 
     remote = RemoteServer(host, port, token, https, ca_cert) if host is not None else None
     output_format, seed = kwargs.pop("output_format", None), kwargs.pop("seed", None)
+    references = kwargs["app"] if isinstance(kwargs["app"], list) else [kwargs["app"]]
+    download, force_update = kwargs.pop("download", False), kwargs.pop("force_update", False)
+
+    def make_app(reference: str) -> Any:  # KonfAIApp or KonfAIAppClient: the same methods
+        if remote is not None:
+            return app_module.KonfAIAppClient(reference, remote)
+        return app_module.KonfAIApp(reference, download, force_update)
+
+    if kwargs["command"] == "infer" and len(references) > 1:
+        from .ensemble import infer_references
+
+        config_name, overrides = kwargs.get("prediction_file") or "Prediction.yml", kwargs.pop("config_overrides")
+        for key in ("app", "command"):
+            kwargs.pop(key)
+        infer_references(
+            references,
+            make_app,
+            Path(kwargs.pop("output")),
+            _combine_of(references, remote, config_name),
+            kwargs.pop("uncertainty"),
+            lambda reference: _with_run_options(reference, remote, config_name, overrides, output_format, seed),
+            **kwargs,
+        )
+        return
+    kwargs["app"] = references[0]
     if "config_overrides" in kwargs:  # the commands that run the model: infer, pipeline, fine-tune
         config_name = kwargs.get("prediction_file") or kwargs.get("config_file") or "Prediction.yml"
         kwargs["config_overrides"] = _with_run_options(
             kwargs["app"], remote, config_name, kwargs["config_overrides"], output_format, seed
         )
-    konfai_app: AbstractKonfAIApp
-    if remote is not None:
-        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), remote)
-    else:
-        konfai_app = app_module.KonfAIApp(kwargs.pop("app"), kwargs.pop("download"), kwargs.pop("force_update"))
+    konfai_app = make_app(kwargs.pop("app"))
 
     command = kwargs.pop("command")
     if command == "infer":

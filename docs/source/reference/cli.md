@@ -152,6 +152,12 @@ reference may end in `#PRESET` to run one of the app's presets (`konfai-apps sho
 NAME of the app: in your presets file for an app of the Hugging Face cache, in `app.json` for a local app folder.
 Without `#PRESET` it starts from the app's base config.
 
+`konfai-apps infer APP#a APP#b ... -i ...` runs an ensemble of app references: one run each (its own `--ensemble`,
+`--ensemble-models` and `--tta` members inside it), then every member reduced into `<output>/<output>/<case>/` by the
+operator the apps declare for their checkpoints (`Mean` by default, `Median`, `Vote`). With `-uncertainty` the stack
+of every member is kept beside it as `InferenceStack.mha`, and `konfai-run.json` names the members in its order. The
+references may be presets of one app or apps of matching outputs (docs/design/ensembles.md).
+
 | Option | Meaning |
 | --- | --- |
 | `--set NAME=VALUE` | Change a config value (repeatable). A name changes a model parameter (`--set iterations=300`), a nested one dotted from the model (`--set models.0.layers_mask=01`); a name from the config root is a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |
