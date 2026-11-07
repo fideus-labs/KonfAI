@@ -1,7 +1,8 @@
 # Presets inside an app, and direct options for shared settings
 
-Status: decided 2026-11-06; konfai-apps, konfai-mcp and impact-reg-konfai implemented on this branch. Still to do:
-the app repositories on Hugging Face, SlicerKonfAI and SlicerImpactReg, then fidopt and fidlab.
+Status: decided 2026-11-06; konfai-apps, konfai-mcp and impact-reg-konfai implemented on this branch. The three
+VBoussot/ImpactReg engine apps, and the SlicerKonfAI and SlicerImpactReg changes, are prepared on their own branches
+and ship apart. Still to do: fidopt and fidlab.
 
 ## The problem
 
@@ -81,6 +82,10 @@ preset, every `--set` it applied in order, and an `identity` that every run of t
 | `feat(mcp): take an app's presets (ref#preset)` | every app tool takes `#preset`, `describe_app` lists them |
 | `feat(impact-reg): register with an app's preset (APP#PRESET)` | presets split between the global and tile passes, ensembles of full references, the direct options on every pass |
 | `feat(apps): list each app's presets` | `list` shows them |
+| `feat(apps): a preset that never runs in tiles ("tiles": false)` | the one field beside `description` and `set` |
+| `feat(apps): return an app to its base config (use_preset(None))` | what SlicerKonfAI's preset menu calls |
+| `test(apps): hold the preset calls SlicerKonfAI makes` | the Slicer API contract |
+| `feat(apps): preset save --from ...` (two commits) | `--from` names a preset of the same app, bare: `--from composite` |
 
 ## The app repositories
 
@@ -115,7 +120,6 @@ too, but stay fidopt's own baselines: the reference to the authors' code that th
 
 - **Tiling (decided):** the five presets whose old app had no tile pass (ConvexAdam coarse, impact_mrct; Elastix rigid,
   impact_static, impact_jacobian) say `"tiles": false`.
-  tile pass out for a preset without a fine stage, or whether the engine's tiling has to say so.
 - **Keys a preset leaves out:** Coarse has no fine-stage keys; under the engine's base they stay at the base's
   values. To confirm they are inert without the fine stage.
 - **Where fidlab's tuned presets live:** in the engine app beside the authors', or in a repository of their own.
