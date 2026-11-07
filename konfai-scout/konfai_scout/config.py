@@ -8,8 +8,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 MODES = ("active", "fixed")
-PROVIDERS = ("anthropic", "openai", "mock")
-DEFAULT_MODELS = {"anthropic": "claude-opus-5-5", "openai": "gpt-5", "mock": "heuristic"}
+PROVIDERS = ("anthropic", "openai", "claude-code", "mock")
+DEFAULT_MODELS = {
+    "anthropic": "claude-opus-5-5",
+    "openai": "gpt-5",
+    "claude-code": "claude-opus-5-5",  # Claude under the user's Claude Code login, through the Claude Agent SDK
+    "mock": "heuristic",
+}
 
 
 @dataclass

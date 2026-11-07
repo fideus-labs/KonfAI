@@ -22,7 +22,7 @@ from .evaluation import RegionEvaluator, konfai_version, load_prior
 from .measure import label_stats
 from .planes import describe_grid
 from .prompts import PROMPT_VERSION, case_card, system_prompt
-from .providers import ImageContent, Provider, ProviderError, ToolResult, Turn, check_privacy, make_provider
+from .providers import ImageContent, Provider, ProviderError, ToolCall, ToolResult, Turn, check_privacy, make_provider
 from .providers.pricing import cost_usd, price_of
 from .report import Conclusion, Report, Usage
 from .tools import Toolbox
@@ -33,6 +33,13 @@ COVERAGE_EXTRA_MODES = {
     "registration": ["field_magnitude", "jacobian", "overlay"],
     "synthesis": ["difference", "side_by_side"],
 }
+NOTICE_BUDGET = (
+    "Budget exhausted ({exhausted}). Call `note` for anything established and not yet recorded, then `conclude` now."
+)
+NOTICE_SILENT = (
+    "Nothing was recorded by this message. Use the tools: `note` for each finding, then `conclude` to end; keep "
+    "exploring with `view`/`measure` if you are not done."
+)
 
 
 def scout_version() -> str:
@@ -113,66 +120,89 @@ class Inspector:
         self.provider.start(system, tools)
         images, views_text = self._coverage()
         card = case_card(self.case, prior, self._labels_summary(), self.renderer.modes(), views_text)
-        turn: Turn | None = None
         try:
-            turn = self._request(lambda: self.provider.user(card, images))
-            self.budget.images += len(images)
-            self.toolbox.images_sent += len(images)
-            reminders = 0
-            final = False
-            while self.toolbox.conclusion is None:
-                exhausted = self.budget.exhausted()
-                if turn.stop == "refusal":
-                    self.error = f"the model refused: {turn.text}"
-                    break
-                if turn.tool_calls:
-                    if exhausted and final:
-                        break
-                    if exhausted:
-                        # the budget is spent: only a note or a conclusion still runs, once
-                        final = True
-                        results = [
-                            self._refused(call, exhausted)
-                            if call.name not in ("note", "conclude")
-                            else self.toolbox.call(call)
-                            for call in turn.tool_calls
-                        ]
-                        if self.toolbox.conclusion is not None:
-                            break
-                        final_specs = self.toolbox.specs(exploration, final=True)
-                        turn = self._request(lambda r=results, t=final_specs: self.provider.tool_results(r, t))
-                        continue
-                    results = [self.toolbox.call(call) for call in turn.tool_calls]
-                    self.budget.calls += len(results)
-                    self.budget.images += sum(len(r.images) for r in results)
-                    if self.toolbox.conclusion is not None:
-                        break
-                    turn = self._request(lambda r=results: self.provider.tool_results(r))
-                    continue
-                if final or reminders >= 2:
-                    break
-                reminders += 1
-                if exhausted:
-                    final = True
-                    notice = (
-                        f"Budget exhausted ({exhausted}). Call `note` for anything established and not yet "
-                        "recorded, then `conclude` now."
-                    )
-                    turn = self._request(lambda n=notice: self.provider.user(n, None))
-                    continue
-                turn = self._request(
-                    lambda: self.provider.user(
-                        "Nothing was recorded by this message. Use the tools: `note` for each finding, then "
-                        "`conclude` to "
-                        "end; keep exploring with `view`/`measure` if you are not done.",
-                        None,
-                    )
-                )
+            if getattr(self.provider, "drives_tools", False):
+                self._run_driven(card, images)
+            else:
+                self._run_loop(card, images, exploration)
         except ProviderError as error:
             self.error = f"provider error: {error}"
         except Exception as error:  # the report must still be written
             self.error = f"{type(error).__name__}: {error}"
         return self._finish()
+
+    def _run_loop(self, card: str, images: list[ImageContent], exploration: bool) -> None:
+        """Scout drives the loop: each tool call the model makes is run here and its result sent back."""
+        turn = self._request(lambda: self.provider.user(card, images))
+        self.budget.images += len(images)
+        self.toolbox.images_sent += len(images)
+        reminders = 0
+        final = False
+        while self.toolbox.conclusion is None:
+            exhausted = self.budget.exhausted()
+            if turn.stop == "refusal":
+                self.error = f"the model refused: {turn.text}"
+                break
+            if turn.tool_calls:
+                if exhausted and final:
+                    break
+                if exhausted:
+                    # the budget is spent: only a note or a conclusion still runs, once
+                    final = True
+                    results = [
+                        self._refused(call, exhausted)
+                        if call.name not in ("note", "conclude")
+                        else self.toolbox.call(call)
+                        for call in turn.tool_calls
+                    ]
+                    if self.toolbox.conclusion is not None:
+                        break
+                    final_specs = self.toolbox.specs(exploration, final=True)
+                    turn = self._request(lambda r=results, t=final_specs: self.provider.tool_results(r, t))
+                    continue
+                results = [self.toolbox.call(call) for call in turn.tool_calls]
+                self.budget.calls += len(results)
+                self.budget.images += sum(len(r.images) for r in results)
+                if self.toolbox.conclusion is not None:
+                    break
+                turn = self._request(lambda r=results: self.provider.tool_results(r))
+                continue
+            if final or reminders >= 2:
+                break
+            reminders += 1
+            if exhausted:
+                final = True
+                turn = self._request(lambda e=exhausted: self.provider.user(NOTICE_BUDGET.format(exhausted=e), None))
+                continue
+            turn = self._request(lambda: self.provider.user(NOTICE_SILENT, None))
+
+    def _run_driven(self, card: str, images: list[ImageContent]) -> None:
+        """The provider runs the tool loop itself (the Claude Agent SDK): every call it makes lands in ``_execute``,
+        so the record and the budget are the same; Scout only speaks between its turns."""
+        self.provider.execute = self._execute  # type: ignore[attr-defined]
+        turn = self._request(lambda: self.provider.user(card, images))
+        self.budget.images += len(images)
+        self.toolbox.images_sent += len(images)
+        reminders = 0
+        while self.toolbox.conclusion is None and turn.stop != "refusal" and reminders < 2:
+            reminders += 1
+            exhausted = self.budget.exhausted()
+            notice = NOTICE_BUDGET.format(exhausted=exhausted) if exhausted else NOTICE_SILENT
+            turn = self._request(lambda n=notice: self.provider.user(n, None))
+        if turn.stop == "refusal":
+            self.error = f"the model refused: {turn.text}"
+
+    def _execute(self, call: ToolCall) -> ToolResult:
+        """One tool call under the budget: refused once the budget is spent, except a note or the conclusion."""
+        exhausted = self.budget.exhausted()
+        if exhausted:  # the budget is spent: a note or the conclusion still runs, uncounted as in the API loop
+            if call.name not in ("note", "conclude"):
+                return self._refused(call, exhausted)
+            return self.toolbox.call(call)
+        result = self.toolbox.call(call)
+        self.budget.calls += 1
+        self.budget.images += len(result.images)
+        return result
 
     def _request(self, call) -> Turn:
         attempts = 0
@@ -185,6 +215,8 @@ class Inspector:
                 if not error.retryable or attempts > self.config.provider_retries:
                     raise
                 time.sleep(self.config.retry_wait_seconds * attempts)
+        if self.price is None and turn.model:  # a provider that names its model only once it answered
+            self.price = price_of(turn.model, self.config.prices)
         self.usage.requests += 1
         self.usage.input_tokens += turn.usage.input_tokens
         self.usage.output_tokens += turn.usage.output_tokens

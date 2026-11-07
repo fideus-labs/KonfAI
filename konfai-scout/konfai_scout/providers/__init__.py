@@ -46,6 +46,11 @@ def make_provider(config: ScoutConfig, client: object = None) -> Provider:
             max_tokens=config.max_output_tokens,
             client=client,
         )
+    if config.provider == "claude-code":
+        from .claude_code import ClaudeCodeProvider
+
+        # the SDK counts turns, not calls: a few text-only turns on top of the call budget
+        return ClaudeCodeProvider(model, effort=config.effort, max_turns=config.budget.max_tool_calls + 8)
     from .mock import HeuristicProvider
 
     return HeuristicProvider(model or "heuristic")

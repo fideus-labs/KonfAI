@@ -135,8 +135,8 @@ confidence, the views and measurements cited). It depends on `konfai` only and r
 `link_entry`, the same as konfai-apps) and region reads through every backend, `konfai.transform` with `Resample`
 and `TransformPoints` for a registration's warped data, `konfai.evaluate` for every metric,
 `konfai.utils.ITK.field_jacobian_determinant` for the Jacobian view. Scout adds the viewer (`views.py`,
-`planes.py`), the tools and prompts the model drives, the loop, the report and the providers (Claude, GPT, any
-OpenAI-compatible local server, a mock for tests). Images leave the machine only under `allow_cloud_images`.
+`planes.py`), the tools and prompts the model drives, the loop, the report and the providers (Claude through the API
+or through Claude Code's Agent SDK, GPT, any OpenAI-compatible local server, a mock for tests). Images leave the machine only under `allow_cloud_images`.
 konfai-mcp exposes it (`run_scout_inspection`, §5b) and Studio shows its reports. `konfai-scout/README.md` and
 `konfai-scout/docs/` hold the user side, the report schema and the fixed-views-versus-exploration study.
 

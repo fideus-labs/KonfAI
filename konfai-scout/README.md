@@ -31,6 +31,7 @@ and the measurements that support them.
 ```bash
 pip install konfai-scout[anthropic]        # Claude through the Anthropic API
 pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)
+pip install konfai-scout[claude-code]      # Claude under your Claude Code login (the Claude Agent SDK), no API key
 ```
 
 Scout is a package of the [KonfAI](https://github.com/fideus-labs/KonfAI) family (`konfai-scout/` in its repository),
@@ -51,6 +52,7 @@ konfai-scout inspect --task registration --name pair07 \
     --input fixed_labels=fixed_seg.nii.gz --input moving_labels=moving_seg.nii.gz \
     --out reports/pair07 --provider openai --base-url http://localhost:11434/v1 --model llava:34b
 
+konfai-scout inspect --case case.json --out reports/case --provider claude-code --allow-cloud-images  # Claude Code login
 konfai-scout inspect --case case.json --out reports/case --mode fixed --provider mock   # no API at all
 ```
 
@@ -93,6 +95,11 @@ model gets one last turn to note and conclude, else Scout concludes "insufficien
 Images of the case leave the machine only under `--allow-cloud-images`; a loopback `--base-url` is local. The cost
 is computed from the published prices of the Claude models and reported as unknown otherwise (`ScoutConfig.prices`
 adds a model).
+
+The `claude-code` provider runs the Claude Agent SDK under your Claude Code login, no API key: the SDK drives the
+tool loop, Scout's tools are served to it as an in-process MCP server (images included) and no built-in tool is
+enabled. It is a cloud provider (`--allow-cloud-images`), and the CLI keeps the session, images included, under
+`~/.claude/projects`. The report records the same calls, views, measurements and budget as with the API providers.
 
 ## Examples and study
 
