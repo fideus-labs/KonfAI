@@ -451,14 +451,15 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
             _report_ensemble(args.output, args.presets)
 
     elif args.command == "eval":
-        # Nothing is mandatory except at least one complete modality (image / seg / fid).
+        # Nothing is mandatory except at least one complete modality (image / seg / fid), or a transform
+        # alone, whose Jacobian is then the evaluation.
         has_image = bool(args.fixed_images and args.moving_images)
         has_seg = bool(args.gt_fixed_seg and args.gt_moving_seg)
         has_fid = bool(args.gt_fixed_fid and args.gt_moving_fid)
-        if not (has_image or has_seg or has_fid):
+        if not (has_image or has_seg or has_fid or args.transform):
             ev.error(
                 "provide at least one modality: image (-f/-m), seg (--gt-fixed-seg/--gt-moving-seg), "
-                "or fid (--gt-fixed-fid/--gt-moving-fid)."
+                "or fid (--gt-fixed-fid/--gt-moving-fid); or --transform alone, for its Jacobian."
             )
         gpu = [] if args.cpu is not None else args.gpu
         app.evaluate(

@@ -1656,7 +1656,7 @@ class ImpactRegKonfAIApp:
         is given it warps the moving data onto the fixed grid first; otherwise the moving data is assumed
         already registered and only resampled onto the fixed grid (identity). Each option holds one entry
         per case or one used for every case (``_cases``); a displacement-field transform also gets its
-        Jacobian statistics. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
+        Jacobian statistics, and is evaluated alone when no modality is given. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
         Segmentation, Landmarks, Jacobian), and the whole call to ``<output>/Evaluation_summary.json``.
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
@@ -1697,7 +1697,8 @@ class ImpactRegKonfAIApp:
                 }
             )
         )
-        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid))
+        # A transform given alone is a case of its own: its Jacobian, when it is a field, is the evaluation.
+        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid)) or len(transforms)
         scored: list[tuple[str, Path]] = []
         jacobians: dict[Path, Path] = {}  # one field given for every case is measured once: it reads the whole field
         for index in range(n_cases):

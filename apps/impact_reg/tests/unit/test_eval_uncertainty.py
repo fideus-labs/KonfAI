@@ -468,3 +468,15 @@ def test_eval_of_a_2d_pair_is_simpleitks(tmp_path: Path, monkeypatch: pytest.Mon
     tre = np.linalg.norm(pushed - (points + offset), axis=1).mean()
     assert metrics["FixedFid:MovingFid:TRE"] == pytest.approx(tre, abs=1e-6)
     assert metrics["Transform:Transform:JacobianFolding"] == 0.0
+
+
+def test_a_field_given_alone_is_measured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--transform and no modality: the field's Jacobian is the evaluation (SlicerImpactReg's Jacobian tab). It
+    scored nothing: the cases were counted from the modalities alone."""
+    field = sitk.Image([24, 24, 24], sitk.sitkVectorFloat64, 3)
+    field.SetSpacing((2.0, 2.0, 2.0))
+    sitk.WriteTransform(sitk.DisplacementFieldTransform(field), str(tmp_path / "Transform.h5"))
+    out = tmp_path / "Evaluation"
+
+    assert _main(monkeypatch, ["eval", "--transform", str(tmp_path / "Transform.h5"), "-o", str(out), "-q"]) == 0
+    assert _metrics(out)["Transform:Transform:JacobianFolding"] == 0.0

@@ -14,7 +14,7 @@ measures the misalignment before registration).
 
 When the transform is a displacement field, `eval` also reports its **Jacobian determinant**: the fraction of folded
 voxels (determinant ≤ 0), the minimum, and the standard deviation of its logarithm. A good deformable registration has
-no folding.
+no folding. `--transform` given alone measures the Jacobian and nothing else.
 
 ```bash
 impact-reg-konfai eval --transform Output/P000/Transform.h5 \
