@@ -35,6 +35,7 @@ logic that does not fit the generic ``konfai-apps`` pipeline, split into three c
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -462,6 +463,13 @@ def _is_entry(path: Path, stem: str) -> bool:
     staging entry. The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
     """
     return (path.name == stem or path.name.startswith(f"{stem}.")) and not is_staging_entry(path.name)
+
+
+def _workspace(name: str) -> str:
+    """A folder name for a preset's workspace: ``ConvexAdam#composite`` as ``ConvexAdam_composite``. A ``#`` in a path
+    is a URL fragment to zarr, which then wrote an OME-Zarr output into the folder before it; ``/`` and ``:`` of an
+    app reference would nest folders and split a dataset spec."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
 
 def _drop_other_forms(dest_dir: Path, stem: str, suffixes: str) -> None:
@@ -993,7 +1001,7 @@ class ImpactRegKonfAIApp:
         mapping is positional, a lone moving mask still needs the fixed-mask slot present: filled with an all-ones
         mask on each case's fixed grid (``_neutral_fixed_masks``).
         """
-        out = work / (label or preset)
+        out = work / _workspace(label or preset)
         # This interpreter's konfai-apps, not the first on PATH: an unactivated environment has none there, and
         # another environment's would run another konfai and install the preset's requirements into it.
         # The bare app: an APP#PRESET's own --set are already in this pass's share (see _preset_overrides).
@@ -1007,7 +1015,7 @@ class ImpactRegKonfAIApp:
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if moving_masks and not fixed_masks:
-            fixed_masks = _neutral_fixed_masks(work / f"{label or preset}_fixed_mask", fixed_images)
+            fixed_masks = _neutral_fixed_masks(work / _workspace(f"{label or preset}_fixed_mask"), fixed_images)
         if fixed_masks:
             command += ["-i", *(str(path) for path in fixed_masks)]
         if moving_masks:
@@ -1532,7 +1540,7 @@ class ImpactRegKonfAIApp:
                         dict(zip(cases, inputs[side], strict=True)),
                         fixed,
                         global_fields,
-                        work / f"{preset}_prewarp",
+                        work / _workspace(f"{preset}_prewarp"),
                         gpu,
                         cpu,
                         quiet,
@@ -1546,7 +1554,7 @@ class ImpactRegKonfAIApp:
                 dict(zip(cases, inputs["FixedMask"], strict=True)),
                 fixed,
                 None,
-                work / f"{preset}_prewarp",
+                work / _workspace(f"{preset}_prewarp"),
                 gpu,
                 cpu,
                 quiet,
@@ -1569,13 +1577,13 @@ class ImpactRegKonfAIApp:
             return group, tile_fields
         # Volume-sized intermediates go as soon as nothing reads them: the pre-warped images before the composition,
         # the tiles' field after it.
-        shutil.rmtree(work / f"{preset}_prewarp", ignore_errors=True)
-        reach = max(field_reach(*_field(field, work / f"{preset}_reach")) for field in tile_fields.values())
+        shutil.rmtree(work / _workspace(f"{preset}_prewarp"), ignore_errors=True)
+        reach = max(field_reach(*_field(field, work / _workspace(f"{preset}_reach"))) for field in tile_fields.values())
         padding = _compose_padding(headers, budget, reach)
         composed = self._compose(
-            tile_fields, global_fields, fixed, group, padding, work / f"{preset}_compose", gpu, cpu, quiet
+            tile_fields, global_fields, fixed, group, padding, work / _workspace(f"{preset}_compose"), gpu, cpu, quiet
         )
-        shutil.rmtree(work / f"{preset}_tiles", ignore_errors=True)
+        shutil.rmtree(work / _workspace(f"{preset}_tiles"), ignore_errors=True)
         return group, composed
 
     def _derive_moved(
