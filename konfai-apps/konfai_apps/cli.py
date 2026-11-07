@@ -583,6 +583,7 @@ def build_app_cli(
             unc_p = subparsers.add_parser("uncertainty", help="Compute model uncertainty.")
             select(unc_p)
             _add_app_io(unc_p)
+            _add_gt(unc_p, required=False)
             unc_p.add_argument(
                 "--uncertainty-file",
                 "--uncertainty_file",
@@ -812,6 +813,7 @@ def main_apps() -> None:
 
     unc_p = subparsers.add_parser("uncertainty", help="Compute model uncertainty for a KonfAI App.")
     add_common_args(unc_p)
+    _add_gt(unc_p, required=False)
     unc_p.add_argument(
         "--uncertainty-file",
         "--uncertainty_file",

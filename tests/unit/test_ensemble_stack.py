@@ -95,3 +95,82 @@ def test_a_stack_of_fields_is_refused_where_its_count_is_lost(tmp_path: Path) ->
 
     with pytest.raises(TransformError, match="NIfTI"):
         InferenceStack(dataset=f"{tmp_path}:nii.gz")("P000", torch.randn(2, 3, 4, 5, 6), _attributes())
+
+
+# ---------------------------------------------------------------- a stored transform, one member at a time
+
+
+def _member_fields(tmp_path: Path) -> tuple[list, Dataset]:
+    """Two displacement fields stacked as InferenceStack writes them: [6, z, y, x], two members of three."""
+    import SimpleITK as sitk
+
+    z, y, x = np.mgrid[0:8, 0:9, 0:10].astype(np.float64)
+    fields = [
+        np.stack([a * np.sin(y / 3), b * np.cos(x / 4), 0.5 * np.sin(z / 2)], -1) for a, b in ((1.0, 0.5), (0.3, 1.2))
+    ]
+    members = torch.from_numpy(np.stack([np.moveaxis(field, -1, 0) for field in fields])).float()
+    attributes = _attributes()
+    InferenceStack(dataset=f"{tmp_path / 'stack'}:mha")("P000", members, attributes)
+    transforms = []
+    for field in fields:
+        image = sitk.GetImageFromArray(field, isVector=True)
+        image.SetOrigin((1.0, 2.0, 3.0))
+        image.SetSpacing((1.5, 1.0, 2.0))
+        transforms.append(sitk.DisplacementFieldTransform(image))
+    return transforms, Dataset(str(tmp_path / "stack"), "mha")
+
+
+def test_a_member_view_reads_one_member_by_region(tmp_path: Path) -> None:
+    from konfai.data.transform.ensemble import MemberView
+
+    _, dataset = _member_fields(tmp_path)
+    stack = dataset.read_data("InferenceStack", "P000")[0]
+    view = MemberView(dataset, {"InferenceStack"}, 1)
+    shape, header = view.get_infos("InferenceStack", "P000")
+    assert shape == [3, 8, 9, 10] and MEMBERS_ATTRIBUTE not in header
+    np.testing.assert_array_equal(view.read_data("InferenceStack", "P000")[0], stack[3:6])
+    region = (slice(1, 3), slice(2, 5), slice(None), slice(None))
+    np.testing.assert_array_equal(view.read_data_slice("InferenceStack", "P000", region)[0], stack[4:6, 2:5])
+
+
+def test_points_and_images_go_through_every_member_of_a_stack(tmp_path: Path) -> None:
+    """TransformPoints through a stack: one set of points per member, [M, N, 3]; Resample: one image per member,
+    stacked with their count. Each is SimpleITK's own through that member's field."""
+    import SimpleITK as sitk
+    from konfai.data.transform import Resample, TransformPoints
+    from konfai.utils.dataset import image_to_data
+
+    transforms, dataset = _member_fields(tmp_path)
+    points = np.array([[4.0, 5.0, 6.0], [8.0, 6.0, 10.0], [12.0, 9.0, 14.0]])
+    stage = TransformPoints({"InferenceStack": False})
+    stage.set_datasets([dataset])
+    moved = stage("P000", torch.from_numpy(points), Attribute()).numpy()
+    assert moved.shape == (2, 3, 3)
+    for member, transform in enumerate(transforms):
+        np.testing.assert_allclose(moved[member], [transform.TransformPoint(p) for p in points.tolist()], atol=1e-5)
+
+    image = sitk.GetImageFromArray(np.random.default_rng(0).normal(size=(8, 9, 10)).astype(np.float32))
+    image.SetOrigin((1.0, 2.0, 3.0))
+    image.SetSpacing((1.5, 1.0, 2.0))
+    data, attributes = image_to_data(image)
+    resample = Resample(transforms={"InferenceStack": False}, interpolation="linear")
+    resample.set_datasets([dataset])
+    stacked = resample("P000", torch.from_numpy(data), attributes)
+    assert list(stacked.shape) == [2, 8, 9, 10] and int(float(attributes[MEMBERS_ATTRIBUTE])) == 2
+    for member, transform in enumerate(transforms):
+        want = sitk.GetArrayFromImage(sitk.Resample(image, image, transform, sitk.sitkLinear, 0.0))
+        np.testing.assert_allclose(stacked[member].numpy(), want, atol=1e-4)
+
+
+def test_the_spread_of_points_its_calibration_and_a_quantile() -> None:
+    from konfai.metric.measure import PointSpread, Quantile, SpreadCalibration
+
+    rng = np.random.default_rng(3)
+    members = torch.from_numpy(rng.normal(size=(1, 4, 6, 3)))
+    per_landmark = np.linalg.norm(members[0].numpy().std(0, ddof=1), axis=-1)
+    assert float(PointSpread()(members)[0]) == pytest.approx(per_landmark.mean())
+    # the error grows with the spread: a calibration of 1
+    reference = members[0].mean(0) + torch.from_numpy(per_landmark)[:, None] * torch.tensor([1.0, 0.0, 0.0])
+    assert SpreadCalibration()(members, reference[None])[1] == pytest.approx(1.0)
+    values = torch.arange(101.0)[None, None]
+    assert Quantile(0.95)(values)[1] == pytest.approx(95.0) and Quantile(0.95).get_name() == "Quantile95"

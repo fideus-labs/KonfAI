@@ -42,6 +42,9 @@ loaded whole.
 | --- | --- | --- | --- | --- | --- |
 | `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0`, `inverse=True` | yes | yes (the grid change) | yes |
 | `TransformPoints` | Push landmarks (`[N, 3]`, LPS) through stored transforms: the map a `Resample` with the same `transforms` pulls an image back through, so fixed landmarks land in the moving image (a registration's TRE). | `transforms` | no | no | no |
+
+A transform group holding a stack (an ensemble's members, `InferenceStack`) is applied one member at a time: `Resample` returns one result per member, stacked with their count, over the whole volume; `TransformPoints` returns `[M, N, 3]`. `StandardDeviation`, `Variance` and `SegmentationDisagreement` read a stack's member count from its header, so a stack of fields spreads per component.
+
 | `WorldCoordinates` | Replace the case by its voxels' world coordinates (one channel per axis): resampled through a map and its inverse, `PointDistance` reads the round trip's error. | | channels | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
 | `Crop` | Crop to the foreground bounding box. Must come before any stage that changes the grid. | `inverse=True` | yes | yes | yes |

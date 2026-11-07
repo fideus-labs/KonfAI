@@ -1268,7 +1268,9 @@ async def evaluate(
 async def uncertainty(
     app_name: str,
     inputs: Annotated[list[UploadFile], File(...)],
+    gt: Annotated[list[UploadFile], File(...)] = [],
     inputs_groups: Annotated[str | None, Form()] = None,
+    gt_groups: Annotated[str | None, Form()] = None,
     uncertainty_file: Annotated[str, Form()] = "Uncertainty.yml",
     options: Annotated[str, Form()] = "{}",  # JSON, validated against REMOTE_OPTION_FIELDS
     gpu: Annotated[str | None, Form()] = "",

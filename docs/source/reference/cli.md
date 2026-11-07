@@ -158,6 +158,9 @@ operator the apps declare for their checkpoints (`Mean` by default, `Median`, `V
 of every member is kept beside it as `InferenceStack.mha`, and `konfai-run.json` names the members in its order. The
 references may be presets of one app or apps of matching outputs (docs/design/ensembles.md).
 
+`konfai-apps uncertainty APP -i STACK [--gt ...]` evaluates such a stack against the app's `Uncertainty*.yml`, the
+references (an ensemble's landmarks, a segmentation it propagates) staged as `eval` stages them.
+
 | Option | Meaning |
 | --- | --- |
 | `--set NAME=VALUE` | Change a config value (repeatable). A name changes a model parameter (`--set iterations=300`), a nested one dotted from the model (`--set models.0.layers_mask=01`); a name from the config root is a full path (`--set Predictor.Dataset.batch_size=2`). The value is read as YAML. |

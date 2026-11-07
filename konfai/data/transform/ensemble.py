@@ -18,6 +18,7 @@
 """Folds over a stacked member axis: spread, disagreement, magnitudes, inference stacks."""
 
 from collections.abc import Callable, Iterable
+from typing import Any
 
 import numpy as np
 import torch
@@ -46,6 +47,73 @@ def stack_members(tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Te
             "Read the stack InferenceStack wrote, its header unchanged.",
         )
     return tensors.reshape(members, tensors.shape[0] // members, *tensors.shape[1:])
+
+
+class MemberView:
+    """A dataset whose stacks under ``groups`` read as member ``member`` alone: its channels, by region as the stack
+    is, its header without the member count. Every other group, and every other call, is the dataset's own: a stage
+    that applies a stored transform reads one member of a stack as the entry it was."""
+
+    def __init__(self, dataset: Any, groups: set[str], member: int) -> None:
+        self._dataset, self._groups, self._member = dataset, groups, member
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._dataset, name)
+
+    def _narrow(self, group: str, shape: list[int], header: Attribute) -> tuple[int, Attribute] | None:
+        """The member's first channel and its header, for a stack of ``groups``; ``None`` for anything else."""
+        if group not in self._groups or MEMBERS_ATTRIBUTE not in header:
+            return None
+        channels = int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE]))
+        header = Attribute(header)
+        header.pop(MEMBERS_ATTRIBUTE)
+        return self._member * channels, header
+
+    def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
+        shape, header = self._dataset.get_infos(group, name)
+        narrowed = self._narrow(group, shape, header)
+        if narrowed is None:
+            return shape, header
+        return [int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE])), *shape[1:]], narrowed[1]
+
+    def read_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
+        shape, header = self._dataset.get_infos(group, name)
+        narrowed = self._narrow(group, shape, header)
+        if narrowed is None:
+            return self._dataset.read_data(group, name)
+        channels = int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE]))
+        return self.read_data_slice(group, name, (slice(0, channels), *(slice(0, extent) for extent in shape[1:])))
+
+    def read_data_slice(self, group: str, name: str, region: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
+        shape, header = self._dataset.get_infos(group, name)
+        narrowed = self._narrow(group, shape, header)
+        if narrowed is None:
+            return self._dataset.read_data_slice(group, name, region)
+        first, member_header = narrowed
+        channels = int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE]))
+        start, stop, _ = region[0].indices(channels)
+        data, _ = self._dataset.read_data_slice(group, name, (slice(first + start, first + stop), *region[1:]))
+        return data, member_header
+
+
+def stacked_groups(stage: Any, groups: Iterable[str], name: str) -> tuple[set[str], int]:
+    """Which of ``groups`` hold a stack for case ``name`` (``stage.dataset_holding`` finds them), and its member
+    count: 0 when none does. Stacks of one stage share a count: their members pair by position."""
+    stacked, counts = set(), set()
+    for group in groups:
+        dataset = stage.dataset_holding(group, name)
+        if dataset is None or getattr(dataset, "get_infos", None) is None:
+            continue  # absent, or a store that serves transforms alone: no stack there
+        header = dataset.get_infos(group, name)[1]
+        if MEMBERS_ATTRIBUTE in header:
+            stacked.add(group)
+            counts.add(int(float(header[MEMBERS_ATTRIBUTE])))
+    if len(counts) > 1:
+        raise TransformError(
+            f"The stacks of case '{name}' hold {sorted(counts)} members: one member of each is applied together.",
+            "Stack the same ensemble's members in every group a stage reads.",
+        )
+    return stacked, next(iter(counts), 0)
 
 
 def _stack_attributes(cache_attribute: Attribute, members: int, dataset: Dataset, channels: int) -> Attribute:

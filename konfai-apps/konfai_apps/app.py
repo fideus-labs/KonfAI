@@ -791,6 +791,7 @@ class KonfAIAppClient(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
+        gt: list[list[Path]] | None = None,
     ) -> None:
         pass
 
@@ -1641,9 +1642,12 @@ class KonfAIApp(AbstractKonfAIApp):
         cpu: int | None = None,
         quiet: bool = False,
         tmp_dir: Path | None = None,
+        gt: list[list[Path]] | None = None,
     ) -> None:
         """
-        Run uncertainty estimation locally.
+        Run uncertainty estimation locally: an evaluation of the stack (``Volume_0``), against the references ``gt``
+        (``Reference_i``) an uncertainty config reads beside it (an ensemble's landmarks, a segmentation it
+        propagates).
 
         Steps:
         1. Validate that inputs are multi-component inference stacks
@@ -1658,7 +1662,10 @@ class KonfAIApp(AbstractKonfAIApp):
         """
         gpu = cuda_visible_devices() if gpu is None else gpu
         self._write_inference_stack_to_dataset(inputs)
+        if gt:
+            self._write_gt_to_dataset(gt)
         self.app_repository.install_uncertainty(uncertainty_file)
+        self._declare_dataset_roots(uncertainty_file)
         from konfai.evaluator import evaluate
 
         result_dir = self._stage_result_dir(output, tmp_dir, "Uncertainties")
