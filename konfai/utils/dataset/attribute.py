@@ -293,6 +293,15 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
 DISPLACEMENT_FIELD_ATTRIBUTE = "konfai_displacement_field"
 
 
+def is_displacement_entry(shape: list[int] | tuple[int, ...], attributes: Attribute) -> bool:
+    """Whether an entry read AS A TRANSFORM is a displacement field: one its store marks so, or an image with one
+    component per spatial axis (``shape`` is ``[C, *spatial]``), as a field written as a vector image is (ANTs'
+    ``Warp.nii.gz``). Read as a transform, such an image can be nothing else; read as an image, it stays one."""
+    return DISPLACEMENT_FIELD_ATTRIBUTE in attributes or (
+        is_an_image(attributes) and len(shape) in (3, 4) and int(shape[0]) == len(shape) - 1
+    )
+
+
 def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np.ndarray, Attribute]:
     """A displacement-field transform as a channel-first array plus its geometry.
 
@@ -500,7 +509,7 @@ def data_to_transform(data: np.ndarray, attributes: Attribute, name: str) -> sit
     """The transform a stored entry holds: a displacement field is its image in float64, which
     ``DisplacementFieldTransform`` requires; any other entry is the parameter rows and type keys of
     ``_encode_transform_leaves``."""
-    if DISPLACEMENT_FIELD_ATTRIBUTE in attributes:
+    if is_displacement_entry(np.shape(data), attributes):
         return sitk.DisplacementFieldTransform(data_to_image(np.asarray(data, dtype=np.float64), attributes))
     transforms = []
     for i, transform_type in enumerate(v for k, v in attributes.items() if k.endswith(":Transform_0")):

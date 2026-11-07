@@ -53,10 +53,9 @@ from konfai.utils.dataset import (
     read_landmarks,
     staged_entry,
     transfer_entry,
-    write_landmarks,
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
-from konfai.utils.ITK import displace_points, field_reach, jacobian_statistics
+from konfai.utils.ITK import field_reach
 from konfai.utils.utils import format_token, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
@@ -175,20 +174,13 @@ def _compose_padding(headers: "list[dict[str, _Header]]", budget: int, reach: fl
     return [extent for extent in widest for _ in range(2)]
 
 
-def _jacobian_statistics(path: Path, work: Path) -> dict[str, float]:
-    """KonfAI's Jacobian statistics of a stored field, under the names the evaluation summary reports."""
-    return {f"Transform:Jacobian:{key}": value for key, value in jacobian_statistics(*_field(path, work)).items()}
-
-
-def _displace(points: np.ndarray, path: Path, work: Path) -> np.ndarray:
-    """``points`` (``[N, 3]``, LPS) moved by the stored registration, fixed -> moving, whatever its form: a field
-    read around the points alone (KonfAI's ``displace_points``), any other transform read and applied whole."""
-    if not _is_field(path):
-        from konfai.utils.ome_zarr import read_ome_zarr_affine
-
-        transform = read_ome_zarr_affine(path) if _backend(path) == "omezarr" else sitk.ReadTransform(str(path))
-        return np.array([transform.TransformPoint(point) for point in points.astype(np.float64).tolist()])
-    return displace_points(points, *_field(path, work))
+def _identity(work: Path, fixed: list[Path]) -> Path:
+    """The identity map as a transform file, for an evaluation given no transform: 2-D for a 2-D fixed image."""
+    flat = bool(fixed) and is_flat(_read_header(work / "identity", "Fixed", fixed[0])[0])
+    path = work / "Identity.itk.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteTransform(sitk.AffineTransform(2 if flat else 3), str(path))
+    return path
 
 
 def _case_key(name: str) -> tuple[int, str]:
@@ -1664,7 +1656,7 @@ class ImpactRegKonfAIApp:
         is given it warps the moving data onto the fixed grid first; otherwise the moving data is assumed
         already registered and only resampled onto the fixed grid (identity). Each option holds one entry
         per case or one used for every case (``_cases``); a displacement-field transform also gets its
-        Jacobian statistics. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
+        Jacobian statistics, and is evaluated alone when no modality is given. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
         Segmentation, Landmarks, Jacobian), and the whole call to ``<output>/Evaluation_summary.json``.
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
@@ -1705,97 +1697,79 @@ class ImpactRegKonfAIApp:
                 }
             )
         )
-        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid))
+        # A transform given alone is a case of its own: its Jacobian, when it is a field, is the evaluation.
+        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid)) or len(transforms)
         scored: list[tuple[str, Path]] = []
-        jacobians: dict[Path, dict[str, float]] = {}  # one transform given for every case is measured once
+        jacobians: dict[Path, Path] = {}  # one field given for every case is measured once: it reads the whole field
         for index in range(n_cases):
-            transform_path = transforms[index] if transforms else None
-            # One output folder AND one workspace per modality (Image, Segmentation, Landmarks): the three
-            # configs share one train_name and konfai-apps evaluates with overwrite.
+            # One output folder AND one workspace per modality: the configs share one train_name and konfai-apps
+            # evaluates with overwrite.
             eval_out = output / f"P{index:03d}" / "Evaluation"
             work = _work_dir(tmp_dir, output, "impact_reg_eval_")
             try:
-                # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
+                # Each modality is konfai-apps' evaluation of the transform (-i) against the fixed and the moving data
+                # (--gt): its config pulls the moving side through the transform onto the fixed grid, or pushes the
+                # fixed landmarks into the moving image. With no transform the moving data is taken as registered
+                # already, and an identity only resamples it onto the fixed grid.
+                transform = (
+                    transforms[index]
+                    if transforms
+                    else _identity(work, (fixed_images or gt_fixed_seg)[index : index + 1])
+                )
+                runs: list[tuple[str, str, Path, Path, list[list[Path]] | None]] = []
                 if fixed_images:
-                    moved = self._warp_onto_fixed(
-                        work, "img", fixed_images[index], moving_images[index], transform_path, gpu, cpu, quiet
+                    case_mask = [[mask[index]]] if mask else None
+                    runs.append(
+                        ("Image", "Evaluation_with_images.yml", fixed_images[index], moving_images[index], case_mask)
                     )
-                    app.evaluate(
-                        inputs=[[fixed_images[index]]],
-                        gt=[[moved]],
-                        output=eval_out / "Image",
-                        mask=[[mask[index]]] if mask else None,
-                        evaluation_file="Evaluation_with_images.yml",
-                        gpu=gpu,
-                        cpu=cpu,
-                        quiet=quiet,
-                        tmp_dir=work / "Image",
-                    )
-                    scored.append((f"P{index:03d}", eval_out / "Image"))
-
-                # Segmentation: moving seg warped onto fixed vs fixed seg (Dice), nearest-neighbour.
                 if gt_fixed_seg:
-                    moved_seg = self._warp_onto_fixed(
-                        work, "seg", gt_fixed_seg[index], gt_moving_seg[index], transform_path, gpu, cpu, quiet
+                    runs.append(
+                        ("Segmentation", "Evaluation_with_seg.yml", gt_fixed_seg[index], gt_moving_seg[index], None)
                     )
-                    app.evaluate(
-                        inputs=[[gt_fixed_seg[index]]],
-                        gt=[[moved_seg]],
-                        output=eval_out / "Segmentation",
-                        evaluation_file="Evaluation_with_seg.yml",
-                        gpu=gpu,
-                        cpu=cpu,
-                        quiet=quiet,
-                        tmp_dir=work / "Segmentation",
-                    )
-                    scored.append((f"P{index:03d}", eval_out / "Segmentation"))
-
-                # Landmarks (TRE): the transform is defined on the fixed grid and maps fixed->moving, so the
-                # fixed fiducials are displaced by it into moving space and compared against the moving fiducials
-                # there (the standard warped-keypoints convention; no field inversion needed). With no transform
-                # the raw fiducials are compared, measuring the initial misalignment. Landmarks are a few
-                # points: a field is read around them alone (``_displace``). Points pair by row,
-                # so both files must hold as many; the warped fixed points are the config's FixedFid group.
                 if gt_fixed_fid:
-                    fixed_points = read_landmarks(gt_fixed_fid[index])
-                    moving_count = len(read_landmarks(gt_moving_fid[index]))
-                    if len(fixed_points) != moving_count:
+                    fixed_count, moving_count = (
+                        len(read_landmarks(path)) for path in (gt_fixed_fid[index], gt_moving_fid[index])
+                    )
+                    if fixed_count != moving_count:
                         raise EvaluatorError(
-                            f"{len(fixed_points)} fixed vs {moving_count} moving landmarks"
+                            f"{fixed_count} fixed vs {moving_count} moving landmarks"
                             f" ('{gt_fixed_fid[index]}', '{gt_moving_fid[index]}').",
                             "Landmarks pair by row order: give both files the same points, in the same order.",
                         )
-                    if transform_path is not None:
-                        fixed_points = _displace(fixed_points, transform_path, work)
-                    moved_fid = work / "moved_fid.fcsv"
-                    write_landmarks(fixed_points, moved_fid)
+                    runs.append(
+                        ("Landmarks", "Evaluation_with_fid.yml", gt_fixed_fid[index], gt_moving_fid[index], None)
+                    )
+                for modality, evaluation_file, fixed, moving, case_mask in runs:
                     app.evaluate(
-                        inputs=[[moved_fid]],
-                        gt=[[gt_moving_fid[index]]],
-                        output=eval_out / "Landmarks",
-                        evaluation_file="Evaluation_with_fid.yml",
+                        inputs=[[transform]],
+                        gt=[[fixed], [moving]],
+                        output=eval_out / modality,
+                        mask=case_mask,
+                        evaluation_file=evaluation_file,
                         gpu=gpu,
                         cpu=cpu,
                         quiet=quiet,
-                        tmp_dir=work / "Landmarks",
+                        tmp_dir=work / modality,
                     )
-                    scored.append((f"P{index:03d}", eval_out / "Landmarks"))
-
-                # Deformation quality, a property of the transform alone. Only a displacement field is
-                # measured: a linear transform's Jacobian is its matrix, the same everywhere, and a B-spline file is
-                # not converted to a field.
-                if transform_path is not None and _is_field(transform_path):
-                    from konfai.evaluator import Statistics
-
-                    if transform_path not in jacobians:
-                        jacobians[transform_path] = _jacobian_statistics(transform_path, work)
-                    jacobian = Statistics(eval_out / "Jacobian" / "ImpactReg" / "Metric_TRAIN.json")
-                    jacobian.filename.parent.mkdir(parents=True, exist_ok=True)
-                    jacobian.add(jacobians[transform_path], "P000")
-                    jacobian.directions = {
-                        key: "max" if key.endswith(":min") else "min" for key in jacobian.measures["P000"]
-                    }
-                    jacobian.write([jacobian.measures])
+                    scored.append((f"P{index:03d}", eval_out / modality))
+                # Deformation quality, a property of the transform alone. Only a displacement field is measured: a
+                # linear transform's Jacobian is its matrix, the same everywhere, and a B-spline file is not converted
+                # to a field.
+                if transforms and _is_field(transform):
+                    if transform in jacobians:
+                        shutil.copytree(jacobians[transform], eval_out / "Jacobian", dirs_exist_ok=True)
+                    else:
+                        app.evaluate(
+                            inputs=[[transform]],
+                            gt=None,
+                            output=eval_out / "Jacobian",
+                            evaluation_file="Evaluation_with_jacobian.yml",
+                            gpu=gpu,
+                            cpu=cpu,
+                            quiet=quiet,
+                            tmp_dir=work / "Jacobian",
+                        )
+                        jacobians[transform] = eval_out / "Jacobian"
                     scored.append((f"P{index:03d}", eval_out / "Jacobian"))
             except BaseException as error:
                 _leave(work, error)
