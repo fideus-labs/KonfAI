@@ -287,6 +287,18 @@ class InferenceStack(Transform):
     # volume, which is what SLAB declares.
     locality = LocalityKind.SLAB
 
+    def _destination(self, channels: int) -> Dataset:
+        """Where the stack goes: the dataset the config names; else the output's, or MetaImage beside the output where
+        its form cannot hold the stack (a transform file; NIfTI, for members of several channels), as konfai-apps'
+        ensembles do."""
+        if self.dataset:
+            return self.dataset
+        output = self.datasets[-1]
+        form = output.file_format.split("@")[0]
+        if form == "itktransform" or (channels > 1 and form in ("nii", "nii.gz")):
+            return Dataset(output.filename, "mha")
+        return output
+
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         """The members ``[M, C, *spatial]`` as a stack: member-major channels ``[M x C, *spatial]``; a label map per
         member in ``Seg`` mode."""
@@ -308,7 +320,7 @@ class InferenceStack(Transform):
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
-        dataset = self.dataset if self.dataset else self.datasets[-1]
+        dataset = self._destination(tensors.shape[1])
         dataset.write(
             "InferenceStack",
             name,
@@ -328,7 +340,7 @@ class InferenceStack(Transform):
         """The call over the concatenation of ``count`` copies (``[members, C, ...]`` each), one copy at a time:
         each copy's stack rows are written as they come, where the destination serves region writes, and its
         members are added to a running total."""
-        dataset = self.dataset if self.dataset else self.datasets[-1]
+        dataset: Dataset | None = None
         total, dtype, sink = torch.empty(0), torch.float32, None
         rows: list[np.ndarray] = []
         written = total_members = channels = 0  # the stack's rows (member channels), its members, a member's channels
@@ -337,6 +349,7 @@ class InferenceStack(Transform):
                 stack = self._stack(members)
                 if written == 0:
                     total, dtype, channels = members.sum(0, dtype=torch.float32), members.dtype, members.shape[1]
+                    dataset = self._destination(channels)
                     if count * members.shape[0] > 1:
                         shape = [count * len(stack), *stack.shape[1:]]
                         header = _stack_attributes(cache_attribute, count * members.shape[0], dataset, channels)
@@ -356,7 +369,7 @@ class InferenceStack(Transform):
             raise
         if sink is not None:
             sink.close()
-        elif total_members > 1:
+        elif total_members > 1 and dataset is not None:
             dataset.write(
                 "InferenceStack",
                 name,
@@ -379,7 +392,7 @@ class InferenceStack(Transform):
         if tensor.shape[0] == 1:
             return tensor.squeeze(0)
         stack = self._stack(tensor)
-        dataset = self.dataset if self.dataset else self.datasets[-1]
+        dataset = self._destination(tensor.shape[1])
         header = _stack_attributes(cache_attribute, tensor.shape[0], dataset, tensor.shape[1])
         if name not in self._stack_sinks and name not in self._stack_buffers:
             sink = dataset.open_data_stream(

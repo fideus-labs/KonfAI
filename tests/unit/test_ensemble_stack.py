@@ -100,6 +100,23 @@ def test_a_stack_of_fields_is_refused_where_its_count_is_lost(tmp_path: Path) ->
         InferenceStack(dataset=f"{tmp_path}:nii.gz")("P000", torch.randn(2, 3, 4, 5, 6), _attributes())
 
 
+@pytest.mark.parametrize("fmt", ["nii.gz", "itktransform"])
+def test_a_stack_goes_beside_an_output_that_cannot_hold_it(tmp_path: Path, fmt: str) -> None:
+    """Named by no dataset, the stack goes with the output; beside a NIfTI output or a transform file, which cannot
+    hold it, as MetaImage, as konfai-apps' ensembles write it."""
+    members = torch.randn(2, 3, 4, 5, 6)
+    stage = InferenceStack()
+    stage.set_datasets([Dataset(str(tmp_path), fmt)])
+    stage("P000", members, _attributes(field=True))
+
+    assert [path.name for path in (tmp_path / "P000").iterdir()] == ["InferenceStack.mha"]
+    data, header = Dataset(str(tmp_path), "mha").read_data("InferenceStack", "P000")
+    torch.testing.assert_close(stack_members(torch.from_numpy(data), header), members, rtol=0, atol=1e-6)
+
+
+# ---------------------------------------------------------------- a stored transform, one member at a time
+
+
 # ---------------------------------------------------------------- a stored transform, one member at a time
 
 
