@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import difflib
 import functools
+import hashlib
 import importlib.metadata
 import importlib.util
 import inspect
@@ -38,6 +39,7 @@ from dataclasses import dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Union, get_args, get_origin
+from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -46,13 +48,22 @@ from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.config import Choices, Range, _coerce_config_value
 from konfai.utils.errors import ConfigError
-from konfai.utils.utils import is_windows_absolute_path
+from konfai.utils.utils import SUPPORTED_FORMATS, is_windows_absolute_path, split_format_level, split_path_spec
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from ruamel.yaml import YAML, YAMLError
 
 from .errors import AppMetadataError, AppRepositoryError
+from .presets import (
+    PRESET_NAME,
+    Preset,
+    load_presets_file,
+    read_presets,
+    split_preset,
+    user_presets_file,
+    write_preset,
+)
 
 
 def _plain(value: Any) -> Any:
@@ -412,9 +423,9 @@ _TRAINING_KNOBS = {"batch_size": "Trainer.Dataset.batch_size"}
 # A bare ``--set`` name resolves inside the model block only; every other key needs its full path.
 # The same overrides engine writes inference and fine-tune configs, so the hint names both roots.
 _DOTTED_PATH_HINT = (
-    "A bare name is a model parameter; a config key needs its full dotted path from the config root,"
-    " e.g. 'Predictor.Dataset.batch_size=4' in an inference config or 'Trainer.Dataset.batch_size=4'"
-    " in a fine-tune one."
+    "A name is a model parameter, a nested one dotted from the model (models.0.layers_mask=01); any other config key"
+    " takes its full dotted path from the config root, e.g. 'Predictor.Dataset.batch_size=4' in an inference config or"
+    " 'Trainer.Dataset.batch_size=4' in a fine-tune one."
 )
 
 
@@ -463,16 +474,18 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         key_path = key_path.strip()
         if not key_path:
             raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
-        if "." in key_path:
-            # Full dotted path from the config root (any key, for advanced overrides).
+        first = key_path.split(".", 1)[0]
+        if "." in key_path and (model_params is None or first in (data or {})):
+            # A dotted path from the config root (Predictor.Dataset.batch_size): any key, for advanced overrides.
             keys = [key for key in key_path.split(".") if key]
         elif model_params is None:
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': the config has no model parameter block. {_DOTTED_PATH_HINT}"
             )
         else:
-            # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
-            keys = [*model_path, key_path]
+            # Any other name is a model parameter, nested ones included (models.0.layers_mask): resolved in
+            # Predictor.Model.<ClassName>.
+            keys = [*model_path, *(key for key in key_path.split(".") if key)]
         node = data
         for key in keys[:-1]:
             if not isinstance(node, dict) or key not in node:
@@ -489,7 +502,7 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
                 + did_you_mean(leaf, known),
-                *([] if "." in key_path else [_DOTTED_PATH_HINT]),
+                _DOTTED_PATH_HINT,
             )
         try:
             value = value_parser.load(raw_value)
@@ -505,6 +518,38 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         if declared is not None:
             _check_value(value, declared, key_path)
         node[leaf] = value
+
+
+def run_overrides(config: Any, output_formats: list[str] | None = None, seed: int | None = None) -> list[str]:
+    """The ``--set`` overrides that ``--output-format`` and ``--seed`` stand for, read off the config ``data`` they
+    apply to: each output's ``dataset_filename`` with its format replaced, the root's ``manual_seed``. A format KonfAI
+    does not write, or an output the config has not, is refused here, before anything runs."""
+    root_key = "Predictor" if (config or {}).get("Predictor") else "Trainer"
+    root = (config or {}).get(root_key) or {}
+    overrides = [f"{root_key}.manual_seed={seed}"] if seed is not None else []
+    outputs: dict[str, tuple[str, str]] = {}  # output -> (its dataset class key, its dataset_filename)
+    for name, output in (root.get("outputs_dataset") or {}).items():
+        for key, dataset in (output or {}).items():
+            if isinstance(dataset, dict) and "dataset_filename" in dataset:
+                outputs[str(name)] = (str(key), str(dataset["dataset_filename"]))
+    for spec in output_formats or []:
+        name, assigned, file_format = spec.rpartition("=")
+        if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+            raise AppRepositoryError(
+                f"--output-format {spec}: '{file_format}' is not a format KonfAI writes.{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+            )
+        if assigned and name not in outputs:
+            raise AppRepositoryError(
+                f"--output-format {spec}: the app has no output '{name}'.{did_you_mean(name, outputs)}",
+                f"Its outputs: {', '.join(outputs) or 'none'}.",
+            )
+        for output in [name] if assigned else outputs:
+            key, filename = outputs[output]
+            path, flag, _ = split_path_spec(filename, supported_formats=SUPPORTED_FORMATS)
+            spelled = f"{path}:{flag}:{file_format}" if flag else f"{path}:{file_format}"
+            overrides.append(f"{root_key}.outputs_dataset.{output}.{key}.dataset_filename={spelled}")
+    return overrides
 
 
 def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
@@ -579,6 +624,7 @@ class AppRepositoryInfo(ABC):
         self._patch_size = patch_size
         self._task = task
         self._icon_path = icon_path
+        self._preset: Preset | None = None
 
     def __str__(self) -> str:
         return (
@@ -599,6 +645,27 @@ class AppRepositoryInfo(ABC):
 
     def get_display_name(self) -> str:
         return self._display_name
+
+    def get_presets(self) -> dict[str, Preset]:
+        """The presets this app runs with, by name: none unless it declares some."""
+        return {}
+
+    def get_preset(self) -> Preset | None:
+        """The preset chosen with ``#`` (:meth:`use_preset`), None for the app's base config."""
+        return self._preset
+
+    def use_preset(self, name: str | None) -> None:
+        """Run with preset ``name`` from now on, its overrides applied before any ``--set``; None for the base config."""
+        if name is None:
+            self._preset = None
+            return
+        presets = self.get_presets()
+        if name not in presets:
+            raise AppRepositoryError(
+                f"App '{self.get_name()}' has no preset '{name}'.{did_you_mean(name, presets)}",
+                f"Its presets: {', '.join(sorted(presets))}." if presets else "It declares none.",
+            )
+        self._preset = presets[name]
 
     def get_description(self) -> str:
         return self._description
@@ -743,6 +810,7 @@ class LocalAppRepository(AppRepositoryInfo):
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
         self._portable_assets: list[str] = [str(name) for name in app_repository_metadata.get("portable_assets", [])]
+        self._published_presets = read_presets(app_repository_metadata.get("presets"), f"the app.json of '{app_name}'")
 
         # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-weight files
         # are all downloaded above, so resolving it here costs nothing.
@@ -949,9 +1017,9 @@ class LocalAppRepository(AppRepositoryInfo):
         """Apply ``--set NAME=VALUE`` overrides to the resolved prediction config before it runs.
 
         A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
-        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly. A dotted
-        ``NAME`` (e.g. ``Predictor.Dataset.batch_size``) is a full path from the config root, for any other
-        key. Either way the key must exist, in the config or, inside the model block, among what the model
+        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly, and a dotted one
+        is a nested model parameter (``models.0.layers_mask``). A dotted ``NAME`` that starts at the config root
+        (``Predictor.Dataset.batch_size``) is a full path, for any other key. Either way the key must exist, in the config or, inside the model block, among what the model
         declares there (an argument of its class, a field of a ``models`` entry: a preset lists what it sets, not
         every knob its model takes), so a typo raises here instead of silently adding a dead key; a value the
         declared type refuses (a choice, a type, a range) raises here too, not once the run has started. ``VALUE``
@@ -960,6 +1028,7 @@ class LocalAppRepository(AppRepositoryInfo):
         key stays that string (``layers_mask=01``). This is the generic override the UI (SlicerKonfAI) drives to
         tune a preset; :func:`apply_overrides` resolves it.
         """
+        overrides = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
         if not overrides:
             return
         yaml = YAML()
@@ -968,6 +1037,90 @@ class LocalAppRepository(AppRepositoryInfo):
         apply_overrides(data, overrides, lambda: self._model_class(data))
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
+
+    def _user_presets_file(self) -> Path | None:
+        """Where the user keeps their own presets of this app; None when they go in its own ``app.json``."""
+        return None
+
+    def get_revision(self) -> str | None:
+        """The revision of the app's files a run reads: a Hugging Face commit, None for a local folder."""
+        return None
+
+    def record(self, overrides: list[str] | None) -> dict[str, Any]:
+        """What a run of this app ran: the app, its revision, its preset and every ``--set`` it applied, in order
+        (the preset's, then the run's own), with an ``identity`` that every run of that configuration shares: the
+        app, its revision and the value each name ends with, whatever their order or spelling of presets."""
+        applied = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
+        last = {override.partition("=")[0].strip(): override for override in applied}
+        canonical = {"app": self.get_name(), "revision": self.get_revision(), "set": sorted(last.values())}
+        return {
+            "app": self.get_name(),
+            "revision": self.get_revision(),
+            "preset": self._preset.name if self._preset else None,
+            "set": applied,
+            "identity": hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()[:16],
+        }
+
+    def get_presets(self) -> dict[str, Preset]:
+        """The app's published presets (its ``app.json``) and the user's own (:func:`user_presets_file`). A name in
+        both is refused: a preset of one's own never hides a published one."""
+        own_file = self._user_presets_file()
+        own = load_presets_file(own_file) if own_file else {}
+        clash = sorted(set(own) & set(self._published_presets))
+        if clash:
+            raise AppRepositoryError(
+                f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{self.get_name()}' publishes too.",
+                "Rename yours: a preset of your own never hides a published one.",
+            )
+        return {**self._published_presets, **own}
+
+    def use_preset(self, name: str | None) -> None:
+        """Choose preset ``name`` (None for the base config), refused here if its overrides do not resolve against the
+        app's config: a preset that no longer fits its app fails when it is chosen, not halfway through a run."""
+        presets = self.get_presets() if name is not None else {}
+        if name in presets:  # an unknown name is the base class's refusal, with the app's presets
+            self._check(presets[name].overrides, f"preset '{name}'")
+        super().use_preset(name)
+
+    def _check(
+        self, overrides: tuple[str, ...] | list[str], what: str, prediction_file: str = "Prediction.yml"
+    ) -> None:
+        """Apply ``overrides`` to a copy of the app's config, the refusal naming ``what``."""
+        filenames = self._all_repo_filenames()
+        config_filename = self._find_repo_filename(prediction_file, filenames)
+        if config_filename is None or not overrides:
+            return
+        with open(self._download(config_filename), encoding="utf-8") as file:
+            data = YAML().load(file)
+        try:
+            apply_overrides(data, list(overrides), lambda: self._model_class(data, filenames))
+        except AppRepositoryError as error:
+            raise AppRepositoryError(f"The {what} of app '{self.get_name()}' does not apply: {error}") from error
+
+    def save_preset(self, name: str, description: str, overrides: list[str]) -> Path:
+        """Keep ``overrides`` as preset ``name`` of this app and return the file written: the user's presets file for
+        an app of the Hugging Face cache, which is not theirs to edit, else the app's own ``app.json``.
+
+        A preset is flat: ``overrides`` are relative to the base config, so a preset made from another one carries
+        that one's overrides first (``--from``). A name set twice keeps its last value, once.
+        """
+        if not PRESET_NAME.fullmatch(name):
+            raise AppRepositoryError(f"'{name}' is not a preset name: letters, digits, '_' and '-'.")
+        own_file = self._user_presets_file()
+        if own_file is not None and name in self._published_presets:
+            raise AppRepositoryError(
+                f"App '{self.get_name()}' publishes a preset '{name}' already.", "Save yours under another name."
+            )
+        last = {override.partition("=")[0].strip(): override for override in overrides}
+        preset = Preset(name, description, tuple(last.values()))
+        self._check(preset.overrides, f"preset '{name}'")
+        if own_file is not None:
+            write_preset(own_file, preset)
+            return own_file
+        app_json = self._download("app.json")
+        write_preset(app_json, preset, key="presets")
+        self._published_presets = {**self._published_presets, name: preset}
+        return app_json
 
     def get_parameters(self, prediction_file: str = "Prediction.yml") -> dict[str, Any]:
         """The model's configurable parameters + their constraints: the single reader a UI needs.
@@ -986,6 +1139,8 @@ class LocalAppRepository(AppRepositoryInfo):
             return {"values": {}, "constraints": {}}
         with open(self._download(config_filename), encoding="utf-8") as file:
             data = YAML().load(file)
+        if self._preset is not None:  # the values the run starts from: a UI compares its edits against these
+            apply_overrides(data, list(self._preset.overrides), lambda: self._model_class(data, filenames))
         _, params = self._model_param_block(data)
         structural = {"outputs_criterions", "optimizer", "schedulers", "engine", "parameter_maps", "classpath"}
         values = {name: _plain(value) for name, value in (params or {}).items() if name not in structural}
@@ -1110,11 +1265,17 @@ class LocalAppRepository(AppRepositoryInfo):
             with open(metadata_file, "w", encoding="utf-8") as file:
                 json.dump(metadata, file, indent=2, ensure_ascii=False)
 
-        if config_overrides:
+        if config_overrides or self._preset is not None:
             config = path / prediction_file
             if not config.is_file():
                 raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
             self._apply_config_overrides(str(config), config_overrides)
+            # The copy's base config is now this preset and these overrides: the presets it published were
+            # relative to the old base, so they do not travel with it.
+            metadata_file = path / "app.json"
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            if metadata.pop("presets", None) is not None:
+                metadata_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def download_bundle(
         self,
@@ -1568,7 +1729,11 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
         config = self._app_directory / self._app_name / prediction_file
         if not config.is_file():
             raise AppRepositoryError(f"Cannot save defaults: '{prediction_file}' not found in app '{self._app_name}'.")
-        self._apply_config_overrides(str(config), overrides)
+        preset, self._preset = self._preset, None  # the base config's defaults: the chosen preset is not baked in
+        try:
+            self._apply_config_overrides(str(config), overrides)
+        finally:
+            self._preset = preset
 
 
 @functools.cache
@@ -1600,6 +1765,15 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         self._repo_id = repo_id
         self._force_update = force_update
         super().__init__(app_name)
+
+    def _user_presets_file(self) -> Path | None:
+        return user_presets_file(self._repo_id.partition("@")[0], self._app_name)
+
+    def get_revision(self) -> str | None:
+        parts = Path(self._download("app.json")).parts  # .../snapshots/<commit>/<app>/app.json in the hub cache
+        if "snapshots" in parts:
+            return parts[parts.index("snapshots") + 1]
+        return self._split_repo_reference(self._repo_id)[1]
 
     @staticmethod
     def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:
@@ -1777,7 +1951,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
     def __init__(self, remote_server: RemoteServer, app_name: str) -> None:
         self._remote_server = remote_server
-        url = f"{remote_server.get_url()}/repo_apps/{app_name}"
+        url = f"{remote_server.get_url()}/repo_apps/{quote(app_name, safe='/:@')}"
         response = requests.get(
             url, headers=remote_server.get_headers(), timeout=remote_server.timeout, verify=remote_server.verify
         )
@@ -1786,6 +1960,8 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
         if not data.get("available", False):
             raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
+        # The server resolves a preset itself: the app's are listed for a client to choose from.
+        self._remote_presets = read_presets(data.get("presets"), f"app '{app_name}' of {remote_server.get_url()}")
         self._has_capabilities = data["has_capabilities"]
         # Servers that omit the 'finetunable' field fall back to the inference capability
         # (fine-tune is offered for any inference-capable app).
@@ -1849,6 +2025,9 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
     def is_finetunable(self) -> bool:
         return self._finetunable
 
+    def get_presets(self) -> dict[str, Preset]:
+        return self._remote_presets
+
     def get_name(self) -> str:
         return self._app_name
 
@@ -1859,7 +2038,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         def safe_name(value: str) -> str:
             return re.sub(r"[^a-zA-Z0-9._-]+", "_", value)
 
-        url = f"{self._remote_server.get_url()}/repo_apps_config/{self._app_name}"
+        url = f"{self._remote_server.get_url()}/repo_apps_config/{quote(self._app_name, safe='/:@')}"
         response = requests.get(
             url,
             headers=self._remote_server.get_headers(),
@@ -1899,7 +2078,7 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     """
     Resolve an app repository identifier into a concrete repository adapter.
 
-    Supported formats:
+    Supported formats, each followed by ``#preset`` to run one of the app's presets:
     - ``repo_id:app_name`` -> Hugging Face repository
     - ``/path/to/app_repository`` -> local folder
     - ``host:port:app_name`` -> remote KonfAI app server
@@ -1907,6 +2086,15 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     - ``https://host:port:app_name[|token]`` -> the same server over HTTPS, its certificate checked against
       ``KONFAI_API_CA_CERT`` when set
     """
+    app_id, preset = split_preset(app_id)
+    info = _app_repository_info(app_id, force_update)
+    if preset is not None:
+        info.use_preset(preset)
+    return info
+
+
+def _app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInfo:
+    """:func:`get_app_repository_info` without the ``#preset``."""
     local_path = _resolve_local_app_path(app_id)
     if local_path is not None:
         if local_path.exists():

@@ -852,6 +852,54 @@ def test_set_takes_a_model_argument_the_preset_leaves_at_its_default() -> None:
         reg._preset_overrides(["A"], ["moment_init=com"])
 
 
+def test_an_app_preset_s_set_goes_first_and_splits_between_the_passes_as_any_set_does() -> None:
+    """APP#PRESET: the preset's --set lead its share, kept from the tiles where the tile config differs, so the
+    app runs bare and nothing applies them twice; two presets of one engine ensemble, each scoped by its reference."""
+    config = _CONFIG.format(own="deformable_iterations: [200, 100, 50]")
+    _tiled_preset("A", config, _deformable_alone(config))
+    manifest_file = Path(reg.IMPACT_REG_KONFAI_REPO) / "A" / "app.json"
+    manifest = json.loads(manifest_file.read_text())
+    manifest["presets"] = {
+        "fast": {"description": "", "set": ["deformable_iterations=[10, 10, 10]"]},
+        "affine": {"description": "", "set": ["linear_method=rigid_affine"]},
+    }
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+
+    shares = reg._preset_overrides(["A#fast", "A#affine"], ["A#fast:seed=3"])
+    assert shares["A#fast"] == {
+        "global": ["deformable_iterations=[10, 10, 10]", "seed=3"],
+        "tile": ["deformable_iterations=[10, 10, 10]", "seed=3"],
+    }
+    assert shares["A#affine"] == {"global": ["linear_method=rigid_affine"], "tile": []}  # the tiles stay deformable
+    with pytest.raises(KonfAIError, match="Did you mean 'fast'"):
+        reg._preset_overrides(["A#fats"], [])
+
+    # a preset that never runs in tiles: its app's tile pass is not its, so a pair too large is resampled instead
+    manifest["presets"]["whole"] = {"description": "", "set": [], "tiles": False}
+    manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+    assert reg._manifest("A#whole")["tiling"] == {"global": "Prediction.yml"}
+    assert reg._manifest("A#fast")["tiling"] == _TILING
+    assert reg._preset_overrides(["A#whole"], ["seed=3"]) == {"A#whole": {"global": ["seed=3"], "tile": []}}
+
+
+def test_an_app_preset_runs_its_app_bare_with_the_run_s_own_choices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_preset_output
+) -> None:
+    captured: dict = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(command=list(command))
+        write_preset_output(Path(command[command.index("-o") + 1]) / "reg" / "DVF" / "P000")
+
+    monkeypatch.setattr(reg.subprocess, "run", fake_run)
+    app, arguments = reg.ImpactRegKonfAIApp(), ([tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [])
+    app._run_args = ["--output-format", "omezarr", "--seed", "7"]
+    app._infer_preset("A#fast", *arguments, tmp_path, [], None, True, config_overrides=["seed=1"])
+    command = captured["command"]
+    assert command[4] == reg.app_id(reg.IMPACT_REG_KONFAI_REPO, "A")
+    assert command[command.index("--output-format") + 1] == "omezarr" and command[command.index("--seed") + 1] == "7"
+
+
 def test_the_tiles_keep_the_stages_their_config_sets_unless_a_scope_names_them() -> None:
     """``linear_method`` is what makes the tile config the deformable stage alone: forwarded to the tiles, an override
     of it brought a linear stage back into every tile, and the blended field tore. A scope gives an override to one

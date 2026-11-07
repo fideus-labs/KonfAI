@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 # argparse only: --help and --version stay free of torch and KonfAI.
-from konfai_apps.options import add_device, add_tmp_dir, at_least, local_path
+from konfai_apps.options import add_device, add_run_options, add_tmp_dir, at_least, local_path
 
 from impact_reg_konfai import PRESETS_REPO
 
@@ -211,6 +211,7 @@ convention): resampling the moving image through it gives Moved.""",
         help="Write the transforms only: skip the moved image, which is derived from them. For a "
         "caller that composes the transform itself and would delete it.",
     )
+    add_run_options(reg)
     add_device(reg)
     add_tmp_dir(reg, tmp_dir_help)
     reg.add_argument(
@@ -449,6 +450,8 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
             tmp_dir=args.tmp_dir,
             fields_only=args.fields_only,
             max_voxels=args.max_voxels,
+            output_format=args.output_format,
+            seed=args.seed,
         )
         if args.keep_fields and not args.quiet:
             _report_ensemble(args.output, args.presets)
