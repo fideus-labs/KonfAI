@@ -138,6 +138,19 @@ def jacobian_statistics(dataset: Dataset, group: str, name: str) -> dict[str, fl
     return field_jacobian_statistics(read, shape, to_index)
 
 
+def field_jacobian_determinant(block: np.ndarray, to_index: np.ndarray) -> np.ndarray:
+    """``det(I + du/dx)`` at every voxel of a field block ``[c, z, y, x]`` (components x, y, z in world units):
+    central differences along the grid's axes (one-sided at the block's faces, as ``np.gradient`` takes them),
+    taken to world axes through ``to_index``, the matrix from a world offset to grid indices. A block one voxel
+    thick along an axis has no derivative there."""
+    by_index = np.stack(
+        [np.gradient(block, axis=axis) if block.shape[axis] > 1 else np.zeros_like(block) for axis in (3, 2, 1)],
+        axis=-1,
+    )
+    jacobian = np.moveaxis(by_index, 0, -2) @ to_index + np.eye(3)
+    return np.linalg.det(jacobian)
+
+
 def field_jacobian_statistics(
     read: Callable[[tuple[slice, ...]], np.ndarray], shape: list[int], to_index: np.ndarray
 ) -> dict[str, float]:
@@ -150,13 +163,8 @@ def field_jacobian_statistics(
         last = min(first + planes, shape[1])
         low, high = max(first - 1, 0), min(last + 1, shape[1])
         block = read((slice(None), slice(low, high), slice(None), slice(None)))
-        # du_c / d(index) along x, y, z (the block is [c, z, y, x]), then to world axes.
-        by_index = np.stack(
-            [np.gradient(block, axis=axis) if block.shape[axis] > 1 else np.zeros_like(block) for axis in (3, 2, 1)],
-            axis=-1,
-        )[:, first - low : last - low]
-        jacobian = np.moveaxis(by_index, 0, -2) @ to_index + np.eye(3)
-        determinant = np.linalg.det(jacobian).ravel()
+        # one plane of halo on each side, so every derivative is the whole field's
+        determinant = field_jacobian_determinant(block, to_index)[first - low : last - low].ravel()
         logs = np.log(np.clip(determinant, 1e-9, 1e9))
         count, folded = count + determinant.size, folded + int((determinant <= 0).sum())
         lowest = min(lowest, float(determinant.min()))

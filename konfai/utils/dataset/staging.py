@@ -112,6 +112,79 @@ def _pixel_reference(path: Path) -> Path | None:
     return None
 
 
+def entry_backend(source: Path, suffix: str | None = None) -> str:
+    """The backend token a staged entry is read through: an OME-Zarr store (``omezarr``), a DICOM series (a bare
+    directory, ``dicom``), an ITK transform file (``itktransform``: a ``.tfm``, or a ``.h5`` no ITK image reader
+    takes: a field, an affine or a composite, which a Resample or a TransformPoints reads as a transform), or an
+    image file (``mha``, the SimpleITK backend, whatever the file's own format). ``suffix`` is the entry's storage
+    form (:func:`~konfai.utils.utils.storage_form`), derived from ``source`` when left out."""
+    from konfai.utils.dataset.attribute import sitk
+    from konfai.utils.utils import directory_volume_form, storage_form
+
+    source = Path(source)
+    if suffix is None:
+        suffix = directory_volume_form(source) if source.is_dir() else None
+        if suffix is None:
+            suffix = storage_form(source)
+    if suffix in (".ome.zarr", ".zarr"):
+        return "omezarr"
+    if suffix == "":
+        return "dicom"
+    if suffix.lower() == ".tfm" or (
+        suffix.lower() == ".h5" and (sitk is None or not sitk.ImageFileReader.GetImageIOFromFileName(str(source)))
+    ):
+        return "itktransform"
+    return "mha"
+
+
+def _link_or_copy(src: str | Path, dst: str | Path) -> None:
+    """A hard link to ``src`` where the filesystem makes one (same volume, no privilege needed on Windows), else a
+    copy. A link given as ``src`` is followed, as the copy does: a hard link to the link itself would resolve a
+    relative target from ``dst``."""
+    try:
+        os.link(os.path.realpath(src), dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def symlink(src: Path, dst: Path) -> None:
+    """A symlink ``dst`` pointing to ``src``, replacing what is there (a directory is removed unless it is a link,
+    a file unlinked). Where the platform or the filesystem makes no symlink (Windows without Developer Mode raises
+    WinError 1314), each file is hard-linked where the filesystem allows it and copied otherwise; a directory is
+    rebuilt around its files."""
+    src, dst = Path(src), Path(dst)
+    # ``is_symlink()`` also catches a BROKEN link (its target is gone), which ``exists()`` reports as absent: left
+    # in place it makes both os.symlink and the copy fallback fail on FileExists.
+    if dst.is_symlink() or dst.exists():
+        if dst.is_dir() and not dst.is_symlink():
+            shutil.rmtree(dst)
+        else:
+            dst.unlink()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(src, dst, target_is_directory=src.is_dir())
+    except OSError:
+        if src.is_dir():
+            shutil.copytree(src, dst, copy_function=_link_or_copy)
+        else:
+            _link_or_copy(src, dst)
+
+
+def link_entry(src: Path, dst: Path) -> None:
+    """Link the image entry ``src`` as ``dst``, with the pixel file a detached header (.mhd, .hdr) reads where it
+    reads it from ``dst`` (:func:`entry_links`): the header alone reads as nothing."""
+    (header, _), *companions = entry_links(Path(src), Path(dst))
+    symlink(header, Path(dst))
+    for part, companion in companions:
+        if companion.exists() and companion.resolve() != part.resolve():
+            raise DatasetManagerError(
+                f"'{src}' and another input of its case both keep their pixels at '{companion.name}'.",
+                "Convert one of them to .mha or .nii.gz, which hold their pixels in the same file.",
+            )
+        companion.parent.mkdir(parents=True, exist_ok=True)
+        symlink(part, companion)
+
+
 def entry_links(src: Path, dest: Path) -> list[tuple[Path, Path]]:
     """Each file of the image entry ``src`` and where it must lie for its header, left as it is, to read it as
     ``dest``: the header at ``dest``, Analyze's pixels beside it under its name, a MetaImage's where its

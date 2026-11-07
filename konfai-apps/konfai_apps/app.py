@@ -35,7 +35,15 @@ import numpy as np
 import requests
 import SimpleITK as sitk
 from konfai import RemoteServer, check_server, cuda_visible_devices
-from konfai.utils.dataset import Attribute, Dataset, entry_links, is_an_image, is_displacement_entry
+from konfai.utils.dataset import (
+    Attribute,
+    Dataset,
+    entry_backend,
+    is_an_image,
+    is_displacement_entry,
+    link_entry,
+    symlink,
+)
 from konfai.utils.runtime import MinimalLog, State, safe_torch_load, save_weights
 from konfai.utils.utils import (
     SUPPORTED_EXTENSIONS,
@@ -307,16 +315,6 @@ def _multipart_body(files: list[tuple[str, Any]], data: dict[str, Any]) -> Any:
             (key, value if isinstance(value, tuple) else (os.path.basename(getattr(value, "name", key)), value))
         )
     return MultipartEncoder(fields=fields)
-
-
-def _link_or_copy(src: str | Path, dst: str | Path) -> None:
-    """A hard link to ``src`` where the filesystem makes one (same volume, no privilege needed on
-    Windows), else a copy. A link given as ``src`` is followed, as the copy does: a hard link to the
-    link itself would resolve a relative target from ``dst``."""
-    try:
-        os.link(os.path.realpath(src), dst)
-    except OSError:
-        shutil.copy2(src, dst)
 
 
 class AbstractKonfAIApp:
@@ -1063,18 +1061,8 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def _unit_backend(source: Path, suffix: str) -> str:
-        """The backend token a staged unit is read through: an OME-Zarr store, a DICOM series (a bare
-        directory, no suffix), an ITK transform file (a ``.h5`` no ITK image reader takes: a field, an
-        affine or a composite, which a Resample or a TransformPoints reads as a transform) or an image file."""
-        if suffix in (".ome.zarr", ".zarr"):
-            return "omezarr"
-        if suffix == "":
-            return "dicom"
-        if suffix.lower() == ".tfm" or (
-            suffix.lower() == ".h5" and not sitk.ImageFileReader.GetImageIOFromFileName(str(source))
-        ):
-            return "itktransform"
-        return "mha"
+        """The backend token a staged unit is read through (:func:`konfai.utils.dataset.entry_backend`)."""
+        return entry_backend(source, suffix)
 
     @staticmethod
     def _dataset_roots() -> list[Path]:
@@ -1134,59 +1122,14 @@ class KonfAIApp(AbstractKonfAIApp):
 
     @staticmethod
     def link_entry(src: Path, dst: Path) -> None:
-        """Link the image entry ``src`` as ``dst``, with the pixel file a detached header (.mhd, .hdr) reads where it
-        reads it from ``dst`` (``entry_links``): the header alone reads as nothing."""
-        (header, _), *companions = entry_links(src, dst)
-        KonfAIApp.symlink(header, dst)
-        for part, companion in companions:
-            if companion.exists() and companion.resolve() != part.resolve():
-                from konfai.utils.errors import DatasetManagerError
-
-                raise DatasetManagerError(
-                    f"'{src}' and another input of its case both keep their pixels at '{companion.name}'.",
-                    "Convert one of them to .mha or .nii.gz, which hold their pixels in the same file.",
-                )
-            companion.parent.mkdir(parents=True, exist_ok=True)
-            KonfAIApp.symlink(part, companion)
+        """Link the image entry ``src`` as ``dst`` (:func:`konfai.utils.dataset.link_entry`)."""
+        link_entry(src, dst)
 
     @staticmethod
     def symlink(src: Path, dst: Path) -> None:
-        """
-        Create a symlink from `dst` pointing to `src`, with safe replacement.
-
-        If `dst` already exists:
-        - directories are removed (unless they are symlinks)
-        - files are unlinked
-
-        On platforms or filesystems that do not support symlinks (Windows without
-        Developer Mode raises OSError WinError 1314), each file is hard-linked where
-        the filesystem allows it (same volume) and copied otherwise; a directory is
-        rebuilt around its files.
-
-        Parameters
-        ----------
-        src : Path
-            Source file or directory.
-        dst : Path
-            Destination symlink path.
-        """
-        # ``is_symlink()`` also catches a BROKEN link (its target is gone), which ``exists()`` reports
-        # as absent: left in place it makes both os.symlink and the copy fallback fail on FileExists.
-        if dst.is_symlink() or dst.exists():
-            if dst.is_dir() and not dst.is_symlink():
-                shutil.rmtree(dst)
-            else:
-                dst.unlink()
-        dst.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            os.symlink(src, dst, target_is_directory=src.is_dir())
-        except OSError:
-            # Windows without Developer Mode (WinError 1314), or a filesystem without symlink support.
-            if src.is_dir():
-                shutil.copytree(src, dst, copy_function=_link_or_copy)
-            else:
-                _link_or_copy(src, dst)
+        """A symlink ``dst`` to ``src``, replaced safely, a hard link or a copy where the platform makes no symlink
+        (:func:`konfai.utils.dataset.symlink`)."""
+        symlink(src, dst)
 
     def _write_inputs_to_dataset(self, inputs: list[list[Path]]) -> None:
         """
