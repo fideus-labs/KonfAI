@@ -253,7 +253,17 @@ def test_wheel_ships_model_zoo_and_catalog(built_wheel: Path) -> None:
     # PEP 561: without the marker every downstream type checker treats konfai as untyped.
     assert "konfai/py.typed" in names, "py.typed missing from the wheel"
 
-    forbidden_top_level = {"apps", "konfai-apps", "konfai_apps", "konfai-mcp", "konfai_mcp"}
+    forbidden_top_level = {
+        "apps",
+        "konfai-apps",
+        "konfai_apps",
+        "konfai-mcp",
+        "konfai_mcp",
+        "konfai-studio",
+        "konfai_studio",
+        "konfai-scout",
+        "konfai_scout",
+    }
     leaked = sorted(n for n in names if n.split("/", 1)[0] in forbidden_top_level)
     assert not leaked, f"sibling package leaked into the wheel: {leaked[:5]}"
 
@@ -351,6 +361,7 @@ _SIBLING_SETUPS = (
     "konfai-apps/setup.py",
     "konfai-mcp/setup.py",
     "konfai-studio/setup.py",
+    "konfai-scout/setup.py",
     "apps/impact_reg/setup.py",
     "apps/impact_seg/setup.py",
     "apps/impact_synth/setup.py",
