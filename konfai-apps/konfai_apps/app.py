@@ -1723,8 +1723,10 @@ class KonfAIApp(AbstractKonfAIApp):
         # every later prediction on the next case's reference, or score what an earlier run left in its place.
         staged = [f"P{idx:03d}" for idx in range(len(KonfAIApp._list_input_units(inputs[0])))]
         volumes = [volume for files in KonfAIApp._case_volumes(predictions_dir, staged).values() for volume in files]
-        outputs = [volume for volume in volumes if volume.name != "InferenceStack.mha"]
-        inference_stacks = [volume for volume in volumes if volume.name == "InferenceStack.mha"]
+        from .ensemble import is_stack
+
+        outputs = [volume for volume in volumes if not is_stack(volume)]
+        inference_stacks = [volume for volume in volumes if is_stack(volume)]
         missing = [case for case in staged if self._predicted is not None and case not in self._predicted]
         if (gt is not None or uncertainty) and missing:
             raise AppRepositoryError(

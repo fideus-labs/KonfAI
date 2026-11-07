@@ -68,10 +68,20 @@ def _token(path: Path) -> str:
     return backend if backend != "mha" else format_token(form)
 
 
+def _group(path: Path) -> str:
+    """The group a file or store holds: its name without its form (``InferenceStack`` of ``InferenceStack.ome.zarr``)."""
+    form = storage_form(path)
+    return path.name.removesuffix(form) if form else path.stem
+
+
+def is_stack(path: Path) -> bool:
+    """Whether ``path`` is an ensemble's stack, in whatever form."""
+    return _group(path) == STACK
+
+
 def _entry(path: Path, token: str | None = None) -> tuple[Dataset, str, str]:
     """``path`` (``<root>/<case>/<group>.<ext>``) as the dataset that holds it, its group and its case."""
-    name = path.name.removesuffix(storage_form(path)) if storage_form(path) else path.stem
-    return Dataset(str(path.parent.parent), token or _token(path)), name, path.parent.name
+    return Dataset(str(path.parent.parent), token or _token(path)), _group(path), path.parent.name
 
 
 def _member_count(path: Path) -> int:
@@ -97,11 +107,11 @@ def members_of(run: Path) -> dict[tuple[str, str, str], tuple[Path, Path]]:
             for path in sorted(case_dir.iterdir())
             if KonfAIApp._match_supported(path) or KonfAIApp._directory_volume_suffix(path) is not None
         ]
-        stack = next((path for path in files if _entry(path)[1] == STACK), None)
+        stack = next((path for path in files if is_stack(path)), None)
         for path in files:
             if path is stack:
                 continue
-            found[(case_dir.parent.name, case_dir.name, _entry(path)[1])] = (path, stack or path)
+            found[(case_dir.parent.name, case_dir.name, _group(path))] = (path, stack or path)
     return found
 
 
