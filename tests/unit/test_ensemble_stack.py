@@ -191,3 +191,20 @@ def test_the_spread_of_fields_is_no_field() -> None:
     spread = StandardDeviation()("P000", torch.randn(6, 2, 2, 2), header)
     Magnitude()("P000", spread, header)
     assert DISPLACEMENT_FIELD_ATTRIBUTE not in header and MEMBERS_ATTRIBUTE not in header
+
+
+def test_a_streamed_save_drops_what_the_chain_removed() -> None:
+    """A sweep publishes the plan-time header with what the chain's stages added, and without what they removed: a
+    spread written slab by slab is no stack and no field, as the whole-volume pass leaves it."""
+    from konfai.data.patching.sweep import _sweep_header
+
+    evolved = _attributes(field=True)
+    evolved[MEMBERS_ATTRIBUTE] = 2
+    scope = Attribute(evolved)
+    before = set(scope.keys())
+    StandardDeviation()("P000", torch.randn(6, 2, 2, 2), scope)
+    scope["Added"] = 1.0
+
+    header = _sweep_header(evolved, scope, before)
+    assert MEMBERS_ATTRIBUTE not in header and DISPLACEMENT_FIELD_ATTRIBUTE not in header
+    assert "Added" in header and "Spacing" in header
