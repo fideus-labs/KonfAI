@@ -118,6 +118,11 @@ A third package exposing a **FastMCP** server. It depends on KonfAI's public API
   with the middle process (regression test: `test_cancel_reaps_the_whole_process_group_including_grandchildren`).
 - **Regenerate derived docs:** after changing a tool's description run
   `python konfai-mcp/scripts/generate_tool_reference.py` (the committed skill reference is generated).
+- **KonfAI Scout and FidOpt (`konfai_mcp/server_scout.py`):** `run_scout_inspection` runs a visual inspection
+  (the separate `konfai-scout` package) as a tracked job and `read_scout_report`/`list_scout_reports` read it
+  back without images; images reach a cloud model only with `allow_cloud_images`. The `fidopt_*` tools reach
+  FidOpt through its own CLI and Python (`KONFAI_MCP_FIDOPT`), launch only `KONFAI_MCP_FIDOPT_ALLOWED`
+  operations, and reimplement nothing of it. Studio's *Scout* tab reads the same reports (`/api/scout/*`).
 
 ## 6. Running things
 

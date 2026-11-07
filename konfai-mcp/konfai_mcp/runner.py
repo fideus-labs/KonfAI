@@ -546,6 +546,31 @@ def run_registration_evaluate_api(
         )
 
 
+def run_scout_inspection_api(*, case: str, config: str, output: str, cwd: str | None = None) -> None:
+    """Child entrypoint that runs a KonfAI Scout inspection: the case JSON and the ScoutConfig JSON the tool wrote,
+    the report under ``output``. Images reach a cloud model only when the config says so (checked by Scout itself)."""
+    import json
+
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        try:
+            from konfai_scout import InspectionCase, ScoutConfig, inspect
+        except ImportError as exc:
+            raise RuntimeError("KonfAI Scout is not installed in this environment: pip install konfai-scout") from exc
+        report = inspect(InspectionCase.load(case), ScoutConfig.load(config), Path(output).resolve())
+        print(json.dumps(report.summary(), indent=1))
+
+
+def run_fidopt_api(*, executable: str, args: list[str], cwd: str | None = None) -> None:
+    """Child entrypoint that runs one FidOpt command (``fidopt <operation> ...``) as the tool allowed it: FidOpt's own
+    CLI does the work, its output is the job log; FidOpt writes its rows where its own configuration says."""
+    import subprocess  # nosec B404 - FidOpt's executable with the arguments the tool checked, no shell
+
+    with _runtime_context(cwd=Path(cwd).resolve() if cwd is not None else None):
+        completed = subprocess.run([executable, *args], check=False)  # nosec B603
+        if completed.returncode != 0:
+            raise RuntimeError(f"fidopt exited with {completed.returncode}")
+
+
 def run_finetune_api(
     *,
     ref: str,
