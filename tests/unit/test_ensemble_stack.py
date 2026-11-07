@@ -117,10 +117,7 @@ def test_a_stack_goes_beside_an_output_that_cannot_hold_it(tmp_path: Path, fmt: 
 # ---------------------------------------------------------------- a stored transform, one member at a time
 
 
-# ---------------------------------------------------------------- a stored transform, one member at a time
-
-
-def _member_fields(tmp_path: Path, fmt: str = "mha") -> tuple[list, Dataset]:
+def _member_fields(tmp_path: Path, fmt: str = "mha", marked: bool = True) -> tuple[list, Dataset]:
     """Two displacement fields stacked as InferenceStack writes them: [6, z, y, x], two members of three."""
     import SimpleITK as sitk
 
@@ -129,7 +126,9 @@ def _member_fields(tmp_path: Path, fmt: str = "mha") -> tuple[list, Dataset]:
         np.stack([a * np.sin(y / 3), b * np.cos(x / 4), 0.5 * np.sin(z / 2)], -1) for a, b in ((1.0, 0.5), (0.3, 1.2))
     ]
     members = torch.from_numpy(np.stack([np.moveaxis(field, -1, 0) for field in fields])).float()
-    attributes = _attributes(field=True)
+    attributes = _attributes(
+        field=marked
+    )  # unmarked: fields as NIfTI holds them, told a field when used as a transform
     InferenceStack(dataset=f"{tmp_path / 'stack'}:{fmt}")("P000", members, attributes)
     transforms = []
     for field in fields:
@@ -153,15 +152,15 @@ def test_a_member_view_reads_one_member_by_region(tmp_path: Path) -> None:
     np.testing.assert_array_equal(view.read_data_slice("InferenceStack", "P000", region)[0], stack[4:6, 2:5])
 
 
-@pytest.mark.parametrize("fmt", ["mha", "omezarr"])
-def test_points_and_images_go_through_every_member_of_a_stack(tmp_path: Path, fmt: str) -> None:
+@pytest.mark.parametrize(("fmt", "marked"), [("mha", True), ("nrrd", True), ("omezarr", True), ("mha", False)])
+def test_points_and_images_go_through_every_member_of_a_stack(tmp_path: Path, fmt: str, marked: bool) -> None:
     """TransformPoints through a stack: one set of points per member, [M, N, 3]; Resample: one image per member,
     stacked with their count. Each is SimpleITK's own through that member's field."""
     import SimpleITK as sitk
     from konfai.data.transform import Resample, TransformPoints
     from konfai.utils.dataset import image_to_data
 
-    transforms, dataset = _member_fields(tmp_path, fmt)
+    transforms, dataset = _member_fields(tmp_path, fmt, marked)
     points = np.array([[4.0, 5.0, 6.0], [8.0, 6.0, 10.0], [12.0, 9.0, 14.0]])
     stage = TransformPoints({"InferenceStack": False})
     stage.set_datasets([dataset])
@@ -176,6 +175,7 @@ def test_points_and_images_go_through_every_member_of_a_stack(tmp_path: Path, fm
     data, attributes = image_to_data(image)
     resample = Resample(transforms={"InferenceStack": False}, interpolation="linear")
     resample.set_datasets([dataset])
+    resample.transform_shape("Volume_0", "P000", list(data.shape[1:]), attributes)  # the plan's probe, member by member
     stacked = resample("P000", torch.from_numpy(data), attributes)
     assert list(stacked.shape) == [2, 8, 9, 10] and int(float(attributes[MEMBERS_ATTRIBUTE])) == 2
     for member, transform in enumerate(transforms):

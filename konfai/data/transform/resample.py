@@ -21,6 +21,8 @@ import functools
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1206,8 +1208,15 @@ class Resample(TransformInverse):
             self.displacement.probe(name)
         if self.transforms is None:
             return
+        from konfai.data.transform.ensemble import stacked_groups
+
         try:
-            self._stored_map(name)
+            stacked, members = stacked_groups(self, self.transforms, name)
+            if members:  # every member is a map of its own, read as the call reads it; the first stands for them
+                with self._as_member(name, stacked, 0):
+                    self._stored_map(name)
+            else:
+                self._stored_map(name)
         except TransformError:
             raise
         except Exception as error:  # a corrupt store fails both routes; name the case and the cure
@@ -1390,23 +1399,33 @@ class Resample(TransformInverse):
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         """The case resampled; through a stacked transform (an ensemble's members), once per member, the results
         stacked in the members' order with their count in the header."""
-        from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, MemberView, stacked_groups
+        from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, stacked_groups
 
         stacked, members = stacked_groups(self, self.transforms or {}, name)
         if not members:
             return self._resample_whole(name, tensor, cache_attribute)
-        datasets, results = self.datasets, []
-        try:
-            for member in range(members):
-                self.datasets = [cast(Dataset, MemberView(dataset, stacked, member)) for dataset in datasets]
-                self._forget_maps(name)
+        results = []
+        for member in range(members):
+            with self._as_member(name, stacked, member):
                 header = cache_attribute if member == 0 else Attribute(cache_attribute)
                 results.append(self._resample_whole(name, tensor, header))
+        cache_attribute[MEMBERS_ATTRIBUTE] = members
+        return torch.cat(results)
+
+    @contextmanager
+    def _as_member(self, name: str, stacked: set[str], member: int) -> Iterator[None]:
+        """The stage reading member ``member`` of the stacks under ``stacked`` alone, its maps read afresh and
+        forgotten after: the next member's is another map."""
+        from konfai.data.transform.ensemble import MemberView
+
+        datasets = self.datasets
+        self.datasets = [cast(Dataset, MemberView(dataset, stacked, member)) for dataset in datasets]
+        self._forget_maps(name)
+        try:
+            yield
         finally:
             self.datasets = datasets
             self._forget_maps(name)
-        cache_attribute[MEMBERS_ATTRIBUTE] = members
-        return torch.cat(results)
 
     def _forget_maps(self, name: str) -> None:
         """Drop what this case's stored map was read and decoded into: the next member's is another map."""
