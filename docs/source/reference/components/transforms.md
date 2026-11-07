@@ -45,6 +45,7 @@ loaded whole.
 
 A transform group holding a stack (an ensemble's members, `InferenceStack`) is applied one member at a time: `Resample` returns one result per member, stacked with their count, over the whole volume; `TransformPoints` returns `[M, N, 3]`. `StandardDeviation`, `Variance` and `SegmentationDisagreement` read a stack's member count from its header, so a stack of fields spreads per component.
 
+| `TransformToField` | A case's transform as a displacement field: a stored field as it is; a transform with no grid of its own (an affine, a B-spline, their composite) sampled on the grid of `reference_group` (the fixed image), so the measures of a field read it. | `group="Volume_0", reference_group="Reference_0"` | grid, channels | no | no |
 | `WorldCoordinates` | Replace the case by its voxels' world coordinates (one channel per axis): resampled through a map and its inverse, `PointDistance` reads the round trip's error. | | channels | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
 | `Crop` | Crop to the foreground bounding box. Must come before any stage that changes the grid. | `inverse=True` | yes | yes | yes |

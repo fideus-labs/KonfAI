@@ -22,7 +22,9 @@ the package is re-exported here; the backends are public as ``Dataset.<Backend>`
 
 from konfai.utils.dataset.abstract import AbstractFile as AbstractFile
 from konfai.utils.dataset.attribute import AFFINE_ATTRIBUTE as AFFINE_ATTRIBUTE
+from konfai.utils.dataset.attribute import DENSE_TRANSFORMS_ENV as DENSE_TRANSFORMS_ENV
 from konfai.utils.dataset.attribute import DISPLACEMENT_FIELD_ATTRIBUTE as DISPLACEMENT_FIELD_ATTRIBUTE
+from konfai.utils.dataset.attribute import TRANSFORM_FILE_ATTRIBUTE as TRANSFORM_FILE_ATTRIBUTE
 from konfai.utils.dataset.attribute import Attribute as Attribute
 from konfai.utils.dataset.attribute import affine_from_attributes as affine_from_attributes
 from konfai.utils.dataset.attribute import affine_to_attribute as affine_to_attribute
@@ -31,6 +33,7 @@ from konfai.utils.dataset.attribute import as_channel_first as as_channel_first
 from konfai.utils.dataset.attribute import data_to_image as data_to_image
 from konfai.utils.dataset.attribute import data_to_transform as data_to_transform
 from konfai.utils.dataset.attribute import displacement_field_to_data as displacement_field_to_data
+from konfai.utils.dataset.attribute import drop_native_form as drop_native_form
 from konfai.utils.dataset.attribute import get_infos as get_infos
 from konfai.utils.dataset.attribute import image_to_data as image_to_data
 from konfai.utils.dataset.attribute import is_an_image as is_an_image
@@ -63,7 +66,9 @@ from konfai.utils.dataset.stream import DataStream as DataStream
 __all__ = [
     "AFFINE_ATTRIBUTE",
     "BACKENDS",
+    "DENSE_TRANSFORMS_ENV",
     "DISPLACEMENT_FIELD_ATTRIBUTE",
+    "TRANSFORM_FILE_ATTRIBUTE",
     "Attribute",
     "DataStream",
     "Dataset",
@@ -76,6 +81,7 @@ __all__ = [
     "data_to_image",
     "data_to_transform",
     "displacement_field_to_data",
+    "drop_native_form",
     "entry_files",
     "entry_links",
     "get_infos",

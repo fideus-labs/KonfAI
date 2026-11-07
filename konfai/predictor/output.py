@@ -60,7 +60,7 @@ from konfai.data.transform import (
 from konfai.utils.budget import format_bytes, node_local_ranks, resolve_memory_budget
 from konfai.utils.clock import SweepClock
 from konfai.utils.config import _escape_key_component, apply_config, config
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import DENSE_TRANSFORMS_ENV, Attribute, Dataset, DataStream, drop_native_form
 from konfai.utils.errors import KonfAIWarning, PredictorError
 from konfai.utils.runtime import (
     NeedDevice,
@@ -437,8 +437,13 @@ class OutputDataset(Dataset, NeedDevice):
         self._submit_write(operation)
 
     def write_prediction(self, index: int, name: str, layer: torch.Tensor) -> None:
-        attribute = self.attributes[index][0][0]
-        self.attributes.pop(index)
+        copies = self.attributes.pop(index)
+        attribute = copies[0][0]
+        if len(copies) > 1 or os.environ.get(DENSE_TRANSFORMS_ENV):
+            # A mean of TTA copies is no copy's transform but the field; a run whose output its caller averages or
+            # composes (an ensemble's member, a tile) writes the field too.
+            for copy_attributes in copies.values():
+                drop_native_form(copy_attributes[0])
         self._submit_final_write(name, layer, attribute)
 
     def __str__(self) -> str:

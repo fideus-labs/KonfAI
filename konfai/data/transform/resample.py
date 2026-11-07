@@ -1929,6 +1929,79 @@ class TransformPoints(Transform):
         return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)
 
 
+class TransformToField(Transform):
+    """A case's transform as a displacement field: a stored field as it is; any other transform (an affine, a
+    B-spline, their composite), which has no grid of its own, sampled on the grid of ``reference_group`` (the fixed
+    image), ``T(x) - x`` at each voxel centre, in world units, marked a field. The measures of a field (its Jacobian,
+    its bending energy, its displacement lengths) then read a native transform as they read a field.
+
+    Applied to the transform's own group, named ``group`` (``Volume_0``): what it reads there is the transform's
+    entry, which only a field holds as an image.
+    """
+
+    locality = LocalityKind.WHOLE_VOLUME  # ponytail: the field is sampled whole; by slab if a case outgrows memory
+
+    def __init__(self, group: str = "Volume_0", reference_group: str = "Reference_0") -> None:
+        super().__init__()
+        self.group = group
+        self.reference_group = reference_group
+
+    def _entry(self, name: str) -> tuple[Any, list[int], Attribute]:
+        from konfai.utils.dataset import is_displacement_entry
+
+        dataset = self.dataset_holding(self.group, name)
+        if dataset is None:
+            raise TransformError(
+                f"'TransformToField' found no transform for case '{name}' in group '{self.group}'.",
+                "Name the group the transform is read as: TransformToField: {group: Volume_0}.",
+            )
+        shape, header = dataset.get_infos(self.group, name)
+        return (None if is_displacement_entry(shape, header) else dataset), shape, header
+
+    def _grid(self, name: str) -> tuple[list[int], Attribute]:
+        reference = self.dataset_holding(self.reference_group, name)
+        if reference is None:
+            raise TransformError(
+                f"The transform of case '{name}' has no grid of its own (an affine, a B-spline): it is measured where"
+                f" it applies, and '{self.reference_group}' holds no image for it.",
+                "Give the fixed image beside the transform (--gt FIXED).",
+            )
+        return reference.get_infos(self.reference_group, name)
+
+    def transform_shape(self, group_src: str, name: str, shape: list[int], cache_attribute: Attribute) -> list[int]:
+        del group_src, cache_attribute
+        if not name or self._entry(name)[0] is None:
+            return shape
+        return [int(extent) for extent in self._grid(name)[0][1:]]
+
+    def output_channels(self, channels: int) -> int:
+        del channels
+        return 3
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, image_to_data
+
+        dataset, _, _ = self._entry(name)
+        if dataset is None:
+            return tensor  # a field already
+        transform = dataset.read_transform(self.group, name)
+        shape, header = self._grid(name)
+        rank = len(shape) - 1
+        field = sitk.TransformToDisplacementField(
+            transform,
+            sitk.sitkVectorFloat32,
+            [int(extent) for extent in shape[1:]][::-1],
+            header.get_np_array("Origin").astype(float).tolist(),
+            header.get_np_array("Spacing").astype(float).tolist(),
+            header.get_np_array("Direction").astype(float).reshape(rank * rank).tolist(),
+        )
+        data, geometry = image_to_data(field)
+        for key in ("Origin", "Spacing", "Direction"):
+            cache_attribute[key] = geometry.get_np_array(key)
+        cache_attribute[DISPLACEMENT_FIELD_ATTRIBUTE] = "true"
+        return torch.from_numpy(np.ascontiguousarray(data))
+
+
 class WorldCoordinates(Transform):
     """Replace a case by the world coordinates of its voxel centres: one channel per axis (x, y, z), in the unit of
     its spacing, from its ``Origin``, ``Spacing`` and ``Direction``. A ``Resample`` through a map then reads, at each

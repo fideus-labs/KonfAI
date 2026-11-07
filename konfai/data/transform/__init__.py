@@ -61,6 +61,7 @@ from konfai.data.transform.labels import Softmax as Softmax
 from konfai.data.transform.labels import Sum as Sum
 from konfai.data.transform.resample import Resample as Resample
 from konfai.data.transform.resample import TransformPoints as TransformPoints
+from konfai.data.transform.resample import TransformToField as TransformToField
 from konfai.data.transform.resample import WorldCoordinates as WorldCoordinates
 from konfai.data.transform.shape import Canonical as Canonical
 from konfai.data.transform.shape import Crop as Crop
@@ -114,6 +115,7 @@ __all__ = [
     "TransformInverse",
     "TransformLoader",
     "TransformPoints",
+    "TransformToField",
     "UnNormalize",
     "Variance",
     "WorldCoordinates",

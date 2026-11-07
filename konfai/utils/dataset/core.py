@@ -39,10 +39,12 @@ from konfai.utils.dataset import statistics
 from konfai.utils.dataset.abstract import AbstractFile as _AbstractFile
 from konfai.utils.dataset.attribute import (
     AFFINE_ATTRIBUTE,
+    TRANSFORM_FILE_ATTRIBUTE,
     Attribute,
     as_channel_first,
     data_to_image,
     data_to_transform,
+    drop_native_form,
 )
 from konfai.utils.dataset.backend import File as _File
 from konfai.utils.dataset.backend import backend_for
@@ -353,6 +355,10 @@ class Dataset:
         attributes: Attribute | None = None,
     ) -> None:
         attributes = attributes if attributes is not None else Attribute()
+        if TRANSFORM_FILE_ATTRIBUTE in attributes and self.file_format.split("@")[0] != "itktransform":
+            # Only a transform file holds it: another format takes the field it was sampled as.
+            attributes = Attribute(attributes)
+            drop_native_form(attributes)
         if AFFINE_ATTRIBUTE in attributes and self.file_format not in _AFFINE_FORMATS:
             raise DatasetManagerError(
                 f"An affine transform has no image form: it cannot be written as '{self.file_format}'.",
@@ -369,7 +375,7 @@ class Dataset:
         """Whether ``open_data_stream`` can serve this dataset's write format: H5 and OME-Zarr always;
         ``mha``, ``nii`` and ``itktransform`` (a displacement field) with image geometry; every other
         format only writes whole volumes. An affine is metadata alone: written whole, by ``write``."""
-        if AFFINE_ATTRIBUTE in attributes:
+        if AFFINE_ATTRIBUTE in attributes or TRANSFORM_FILE_ATTRIBUTE in attributes:
             return False
         return self._backend.can_stream(self.file_format, attributes)
 
