@@ -23,7 +23,7 @@ features. Grey values do not agree across modalities (bone is bright in CT and d
 MIND, made to describe local structure whatever the modality, agrees most at this scale, which is why the presets keep
 it for detail. TotalSegmentator's first layer reads edges and texture, which differ between MRI and CT: it suits CT
 and CBCT, not this pair. Its decoder output is smooth, organ by organ: it agrees region by region rather than voxel
-by voxel, which is what brings two images centimetres apart into register, and why Elastix_IMPACT_Static compares it
+by voxel, which is what brings two images centimetres apart into register, and why Elastix#impact_static compares it
 with a soft Dice rather than a correlation.
 
     python 02_feature_maps.py [data_dir]        # needs data/ from prepare_data.py; CPU, about three minutes

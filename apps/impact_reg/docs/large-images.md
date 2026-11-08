@@ -5,7 +5,7 @@ the presets that declare it, a refinement on native tiles. The outputs are on th
 works for a brain MRI and for a light-sheet volume of a billion voxels:
 
 ```bash
-impact-reg-konfai register FireANTs_SyN -f fixed.ome.zarr -m moving.ome.zarr -o Output --gpu 0
+impact-reg-konfai register FireANTs#syn -f fixed.ome.zarr -m moving.ome.zarr -o Output --gpu 0
 ```
 
 ## How a run is sized
@@ -31,15 +31,15 @@ Every published preset declares its cost, so every run is sized. A preset that d
      it on native tiles with a 20 % overlap, blended where they meet. A tile the fixed mask does not reach gets a zero
      field without running. The two fields are composed on the native grid.
 
-Only presets with a deformable stage worth refining locally run the tile pass: `Generic_Rigid_BSpline`,
-`ConvexAdam_Composite`, `ConvexAdam_IMPACT_CBCT` and the FireANTs presets. The others stop after the global pass:
-`Generic_Rigid`, `ConvexAdam_Coarse`, the elastix IMPACT presets, whose features are computed at a few millimetres
-anyway, and `ConvexAdam_IMPACT_MRCT`, whose organ-level features need the whole image around them.
+Only presets with a deformable stage worth refining locally run the tile pass: `Elastix#rigid_bspline`,
+`ConvexAdam#composite`, `ConvexAdam#impact_cbct` and the FireANTs presets. The others stop after the global pass:
+`Elastix#rigid`, `ConvexAdam#coarse`, the elastix IMPACT presets, whose features are computed at a few millimetres
+anyway, and `ConvexAdam#impact_mrct`, whose organ-level features need the whole image around them.
 
 The plan is printed before the run:
 
 ```text
-[ImpactReg] FireANTs_SyN: 257 x 665 x 887 voxels, more than the 19,636,779 it registers whole on this GPU: the preset
+[ImpactReg] FireANTs#syn: 257 x 665 x 887 voxels, more than the 19,636,779 it registers whole on this GPU: the preset
 on the whole pair resampled to fit, then its deformable stage on native tiles of at most 17,705,407 voxels.
 ```
 

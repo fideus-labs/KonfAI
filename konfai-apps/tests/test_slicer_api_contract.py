@@ -119,6 +119,9 @@ METHODS = [
         )
     ],
     (_LOCAL, "get_parameters", 0, ()),
+    (_ANY, "get_presets", 0, ()),
+    (_ANY, "use_preset", 1, ()),
+    (_LOCAL, "save_preset", 3, ()),
     (_LOCAL, "install_fine_tune", 6, ()),
     (_LOCAL, "export_app", 1, ("display_name", "config_overrides")),
     (("LocalAppRepositoryFromDirectory",), "get_filenames", 2, ()),

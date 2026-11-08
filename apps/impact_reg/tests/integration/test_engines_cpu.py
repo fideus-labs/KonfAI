@@ -179,7 +179,7 @@ def test_register_end_to_end_on_a_2d_pair(flat_pair: tuple, tmp_path: Path) -> N
     fixed, moving, _ = flat_pair
     sitk.WriteImage(fixed, str(tmp_path / "fixed.mha"))
     sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
-    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Generic_Rigid"]
+    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Elastix#rigid"]
     command += ["-f", str(tmp_path / "fixed.mha"), "-m", str(tmp_path / "moving.mha"), "-o", str(tmp_path / "out")]
     subprocess.run([*command, "--cpu", "1", "--tmp-dir", str(tmp_path / "tmp")], check=True)
     transform = sitk.ReadTransform(str(tmp_path / "out" / "P000" / "Transform.h5"))
@@ -195,7 +195,7 @@ def test_register_end_to_end_on_the_cpu(pair: tuple, tmp_path: Path) -> None:
     fixed, moving, inside = pair
     sitk.WriteImage(fixed, str(tmp_path / "fixed.mha"))
     sitk.WriteImage(moving, str(tmp_path / "moving.mha"))
-    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Generic_Rigid_BSpline"]
+    command = [sys.executable, "-m", "impact_reg_konfai.cli", "register", "Elastix#rigid_bspline"]
     command += ["-f", str(tmp_path / "fixed.mha"), "-m", str(tmp_path / "moving.mha"), "-o", str(tmp_path / "out")]
     subprocess.run([*command, "--cpu", "1", "--tmp-dir", str(tmp_path / "tmp")], check=True)
 
