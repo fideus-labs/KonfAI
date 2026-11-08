@@ -147,7 +147,7 @@ def _stages(tmp_path: Path, monkeypatch, masks: tuple = (None, None), **net) -> 
     engine = _net(tmp_path, **net)["Registration"]._engine
     monkeypatch.setattr(engine, "_model_configurations", lambda stage, dimension: [])
     image = SimpleNamespace(GetImageDimension=lambda: 3)
-    engine._fine(image, image, *masks, engine._coarse(image, image, *masks, "cpu"), "cpu")
+    engine._run_stages(image, image, *masks, "cpu")
     return coarse, fine
 
 

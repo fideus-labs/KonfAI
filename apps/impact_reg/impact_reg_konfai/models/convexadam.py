@@ -418,11 +418,9 @@ class ConvexAdamEngine:
         registration.Update()
         return affine
 
-    def _restrict(self, stage, fixed_mask: "itk.Image | None", moving_mask: "itk.Image | None") -> None:
-        """Hand ``stage`` the masks there are, each on its image's grid: without one, or with deformable_masked off,
-        the filter runs unmasked."""
-        if not self._deformable_masked:
-            return
+    @staticmethod
+    def _restrict(stage, fixed_mask: "itk.Image | None", moving_mask: "itk.Image | None") -> None:
+        """Hand ``stage`` the masks there are, each on its image's grid: without one, the filter runs unmasked."""
         if fixed_mask is not None:
             stage.SetFixedMask(fixed_mask)
         if moving_mask is not None:
@@ -556,8 +554,11 @@ class ConvexAdamEngine:
 
         ``coarse`` produces a field from scratch; ``fine`` refines the running field. So ``['coarse']`` is a
         coarse-only app, ``['fine']`` a fine-only app (zero warm-start), and ``['coarse', 'fine']`` chains both
-        (the composite). Returns None when no deformable stage runs (e.g. a linear-only chain).
+        (the composite). Returns None when no deformable stage runs (e.g. a linear-only chain). With
+        ``deformable_masked`` off, the stages read the whole image: the masks stay the linear stage's.
         """
+        if not self._deformable_masked:
+            fixed_mask = moving_mask = None
         field: itk.Image | None = None
         for stage in self._stages:
             field = (
@@ -645,7 +646,7 @@ class ConvexAdamEngine:
             _foreground_centre(moving, moving_mask),
         )
         moving_linear = _resampled(moving_itk, fixed_itk, affine, itk.LinearInterpolateImageFunction)
-        if moving_mask_itk is not None and self._deformable_masked:  # the deformable stages' alone
+        if moving_mask_itk is not None:
             moving_mask_itk = _resampled(
                 moving_mask_itk, fixed_itk, affine, itk.NearestNeighborInterpolateImageFunction
             )
