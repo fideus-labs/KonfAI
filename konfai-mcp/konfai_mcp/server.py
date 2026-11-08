@@ -276,6 +276,7 @@ def _write_workflow_config(
     return {
         "written": filename,
         **result,
+        "schema_errors": result.get("schema_errors", []),
         # Written either way; a config with schema_errors is fixed and rewritten before anything runs it.
         "next_actions": (
             ["write_workflow_config", "describe_config_schema"]
@@ -406,14 +407,16 @@ def _app_job_devices(gpu: list[int] | None, cpu: int | None) -> list[str]:
     return _job_devices(gpu, cpu)
 
 
-def _cpu_fallback_warnings(gpu: list[int] | None, cluster: dict[str, Any] | None = None) -> list[str]:
+def _cpu_fallback_warnings(
+    gpu: list[int] | None, cluster: dict[str, Any] | None = None, *, cpu: int | None = None
+) -> list[str]:
     """Factual notice when a LOCAL run omits gpu while CUDA devices are visible.
 
     KonfAI defaults to CPU when no gpu is given, so on a GPU host it silently trains on CPU. A SLURM job
     runs off-host, so the server's own CUDA visibility is irrelevant and no notice is emitted. The torch
     import is guarded so a torch-less / CPU-only host never raises.
     """
-    if gpu or cluster is not None:
+    if gpu or cpu or cluster is not None:  # cpu given: CPU was asked for, not fallen back to
         return []
     try:
         import torch
@@ -2109,7 +2112,8 @@ def initialize_session(
     template = template_dir(EXAMPLES_ROOT, from_example) if from_example is not None else None
     selected_workflows = SESSION.seeded_workflows(template, workflows) if template is not None else []
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace()
-    if workspace.exists() and any(workspace.iterdir()):
+    # directories alone (a session just created, or initialised without a template) are not worth protecting
+    if workspace.exists() and any(path.is_file() for path in workspace.rglob("*")):
         if not overwrite:
             raise ValueError(
                 f"Session workspace already exists for '{WORKSPACE_LAYOUT.current_session}'. "
@@ -2900,7 +2904,10 @@ def run_train(
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
     cpu: Annotated[
-        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+        int | None,
+        Field(
+            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+        ),
     ] = None,
     overwrite: Annotated[
         bool,
@@ -2951,7 +2958,7 @@ def run_train(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu, cluster),
     )
-    cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster)
+    cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster, cpu=cpu)
     if cpu_fallback:
         payload["warnings"] = cpu_fallback
     return payload
@@ -2994,7 +3001,10 @@ def run_resume(
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
     cpu: Annotated[
-        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+        int | None,
+        Field(
+            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+        ),
     ] = None,
     overwrite: Annotated[
         bool,
@@ -3084,7 +3094,10 @@ def run_batch(
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
     cpu: Annotated[
-        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+        int | None,
+        Field(
+            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+        ),
     ] = None,
     overwrite: Annotated[
         bool,
@@ -3304,7 +3317,10 @@ def run_prediction(
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
     cpu: Annotated[
-        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+        int | None,
+        Field(
+            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+        ),
     ] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing prediction outputs without prompting (KonfAI --overwrite).")
@@ -3365,7 +3381,10 @@ def run_evaluation(
         Field(description="GPU index or indices; omit for CPU (excludes cpu)."),
     ] = None,
     cpu: Annotated[
-        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+        int | None,
+        Field(
+            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+        ),
     ] = None,
     overwrite: Annotated[
         bool, Field(description="Overwrite existing evaluation outputs without prompting (KonfAI --overwrite).")
@@ -3624,7 +3643,9 @@ def read_live_metrics(
     job_id: Annotated[
         str | None, Field(description="Exact job to read (default: the latest job of the given kind).")
     ] = None,
-    max_entries: Annotated[int, Field(description="Maximum recent metric entries returned (default 20).")] = 20,
+    max_entries: Annotated[
+        int, Field(description="Recent metric entries returned (default 6; by_stage holds the latest per stage).")
+    ] = 6,
 ) -> dict[str, Any]:
     """Read parsed live metrics from the current runtime log of a job."""
     job = JOB_REGISTRY.get(job_id) if job_id is not None else SESSION.discover_latest_job(kind)
@@ -3808,7 +3829,10 @@ def run_transform(
     ] = False,
     gpu: Annotated[int | list[int] | None, Field(description="GPU index or indices; omitted: CPU.")] = None,
     cpu: Annotated[
-        int | None, Field(description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu.")
+        int | None,
+        Field(
+            description="Worker processes on CPU (KonfAI --cpu; 1 is one plain process); excludes gpu. Both omitted: one CPU process."
+        ),
     ] = None,
     overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
     quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,

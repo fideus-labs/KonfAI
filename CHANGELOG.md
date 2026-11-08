@@ -33,7 +33,11 @@ pinned the session; `summarize_session` names the missing configs and carries th
 (training, prediction, evaluation) added: `preview_volume` returns the plane's min, max, mean and unique values
 beside the image; a clean `check_config` review suggests the matching `run_*`; launch payloads no longer repeat
 `get_job_status`; `check_config` reports `setup.world_size` (was `size`); readiness says `prediction_config_present`
-(was `prediction_requires_models`).
+(was `prediction_requires_models`). A third run added: `initialize_session` seeds a workspace that holds only
+directories without `overwrite`; a finished train, prediction or evaluation job lists its `outputs`;
+`design_config_strategy` selects the best compatible template and names its seed; the redundant readiness flag is
+gone (`blocked.prediction.missing_models` says it); `write_workflow_config` always returns `schema_errors`; the
+CUDA notice stays quiet when `cpu` was asked for.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

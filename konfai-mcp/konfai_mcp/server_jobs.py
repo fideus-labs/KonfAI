@@ -609,6 +609,18 @@ class JobRegistry:
             },
             "manifest_path": str(job.manifest_path) if job.manifest_path is not None else None,
         }
+        if job.status == "done" and not app_kind and job.run_name and self.workspace_layout is not None:
+            # what the run produced, so the next step needs no guess at a path
+            run_dirs = {
+                "train": self.workspace_layout.checkpoints_dir,
+                "prediction": self.workspace_layout.predictions_dir,
+                "evaluation": self.workspace_layout.evaluations_dir,
+            }
+            out_dir = run_dirs[job.kind]() / job.run_name if job.kind in run_dirs else None
+            if out_dir is not None and out_dir.is_dir():
+                # ponytail: a full walk per status call; cache it if a big run makes this slow
+                files = sorted(str(path.relative_to(out_dir)) for path in out_dir.rglob("*") if path.is_file())
+                payload["outputs"] = {"dir": str(out_dir), "file_count": len(files), "files": files[:20]}
         # Only a finished job's manifest is its own: the run directory is reused across runs of one
         # name, so while the job is queued or running the file there is a previous run's.
         outputs = self._recorded_outputs(job) if job.status == "done" else None

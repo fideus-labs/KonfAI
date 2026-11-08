@@ -865,6 +865,6 @@ def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
             assert [issue["message"] for issue in review["blocking_issues"]] == ["Trainer: [] is not a mapping"]
 
             fixed = await client.call_tool("write_workflow_config", {"workflow": "train", "content": example})
-            assert "schema_errors" not in fixed.structured_content
+            assert fixed.structured_content["schema_errors"] == []
 
     asyncio.run(scenario())

@@ -112,8 +112,6 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         return {
             "train": statuses.get("train", {}).get("ready", False),
             "prediction": statuses.get("prediction", {}).get("ready", False),
-            "prediction_config_present": statuses.get("prediction", {}).get("config_present", False)
-            and bool(statuses.get("prediction", {}).get("missing_models")),
             "evaluation": statuses.get("evaluation", {}).get("ready", False),
             "transform": statuses.get("transform", {}).get("ready", False),
             "configs_present": {
@@ -332,6 +330,12 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "patching_considerations": self.strategy_patching_considerations(modeling_intent),
         }
 
+        options = self.example_options(dataset_groups, requested_workflows)
+        # no template requested: the best compatible one is selected, so the plan names its seed
+        chosen = example or next(
+            (option["name"] for option in sorted(options, key=lambda o: -o["match_ratio"]) if option["compatible"]),
+            None,
+        )
         return {
             "ok": True,
             "task": task_name,
@@ -341,9 +345,16 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "workflows": requested_workflows,
             "group_roles": normalized_roles,
             "modeling_intent": modeling_intent,
-            "compatible_examples": self.example_options(dataset_groups, requested_workflows),
+            "compatible_examples": options,
             "selected_example": (
-                {"name": example, "summary_resource": f"template://{example}/summary"} if example is not None else None
+                {
+                    "name": chosen,
+                    "requested": example is not None,
+                    "summary_resource": f"template://{chosen}/summary",
+                    "seed": f"initialize_session(from_example='{chosen}')",
+                }
+                if chosen is not None
+                else None
             ),
             "config_plan": config_plan,
             "customization_options": {
