@@ -62,7 +62,7 @@ from konfai.utils.utils import format_token, path_format_token, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
-from konfai_apps.presets import load_presets_file, read_presets, split_preset, user_presets_file
+from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
 from impact_reg_konfai import PRESETS_REPO
 from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
@@ -211,17 +211,12 @@ def _manifest(preset: str) -> dict:
         manifest = json.loads(app_file(IMPACT_REG_KONFAI_REPO, app, "app.json").read_text(encoding="utf-8"))
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
+    presets = read_presets(manifest.get("presets"), f"the app.json of '{app}'")
     if not Path(IMPACT_REG_KONFAI_REPO).expanduser().is_dir():  # a Hugging Face app: the user's own presets too
         own_file = user_presets_file(IMPACT_REG_KONFAI_REPO.partition("@")[0], app)
-        own = load_presets_file(own_file)
-        published = manifest.get("presets") or {}
-        if clash := sorted(set(own) & set(published)):  # refused as konfai-apps refuses it: the app runs bare here
-            raise AppRepositoryError(
-                f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{app}' publishes too.",
-                "Rename yours: a preset of your own never hides a published one.",
-            )
-        manifest["presets"] = {**published, **{key: entry.to_json() for key, entry in own.items()}}
-    chosen = read_presets(manifest.get("presets"), f"the app.json of '{app}'").get(name) if name else None
+        presets = merge_presets(presets, own_file, app)  # a clash is refused as konfai-apps refuses it
+        manifest["presets"] = {key: entry.to_json() for key, entry in presets.items()}
+    chosen = presets.get(name) if name else None
     if chosen is not None and not chosen.tiles:  # a preset that never runs in tiles: its app's tile pass is not its
         manifest["tiling"] = {key: value for key, value in (manifest.get("tiling") or {}).items() if key == "global"}
     return manifest
@@ -1019,13 +1014,8 @@ class ImpactRegKonfAIApp:
         # This interpreter's konfai-apps, not the first on PATH: an unactivated environment has none there, and
         # another environment's would run another konfai and install the preset's requirements into it.
         # The bare app: an APP#PRESET's own --set are already in this pass's share (see _preset_overrides).
-        command = [
-            sys.executable,
-            "-m",
-            "konfai_apps",
-            "infer",
-            app_id(IMPACT_REG_KONFAI_REPO, split_preset(preset)[0]),
-        ]
+        app = split_preset(preset)[0]
+        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, app)]
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if moving_masks and not fixed_masks:

@@ -127,6 +127,18 @@ def load_presets_file(path: Path) -> dict[str, Preset]:
     return read_presets(_read_json_object(path), str(path))
 
 
+def merge_presets(published: dict[str, Preset], own_file: Path | None, app_name: str) -> dict[str, Preset]:
+    """The ``published`` presets of app ``app_name`` with the user's own from ``own_file`` (none when None). A name in
+    both is refused: a preset of one's own never hides a published one."""
+    own = load_presets_file(own_file) if own_file else {}
+    if clash := sorted(set(own) & set(published)):
+        raise AppRepositoryError(
+            f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{app_name}' publishes too.",
+            "Rename yours: a preset of your own never hides a published one.",
+        )
+    return {**published, **own}
+
+
 def write_preset(path: Path, preset: Preset, key: str | None = None) -> None:
     """Add ``preset`` to the JSON file at ``path``, or replace the one of that name: under ``key`` of the file's
     object (an ``app.json``'s ``"presets"``), or at its top level (a user's presets file)."""

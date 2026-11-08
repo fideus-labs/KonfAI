@@ -71,22 +71,6 @@ is what one run changes.
 Every inference writes `konfai-run.json` beside its outputs: the app, its revision (the Hugging Face snapshot), its
 preset, and every `--set` it applied, in order.
 
-## Implemented on this branch
-
-| Commit | What |
-|---|---|
-| `feat(apps): run an app with one of its presets (APP#PRESET)` | presets, `show APP#PRESET`, `preset save`, user presets, server and client |
-| `feat(apps): dot a nested model parameter from the model` | `--set models.0.layers_mask=01` |
-| `feat(apps): --output-format and --seed for every app` | the two direct options, on infer, pipeline, fine-tune |
-| `feat(apps): record what an inference ran beside its outputs` | `konfai-run.json` |
-| `feat(mcp): take an app's presets (ref#preset)` | every app tool takes `#preset`, `describe_app` lists them |
-| `feat(impact-reg): register with an app's preset (APP#PRESET)` | presets split between the global and tile passes, ensembles of full references, the direct options on every pass |
-| `feat(apps): list each app's presets` | `list` shows them |
-| `feat(apps): a preset that never runs in tiles ("tiles": false)` | the one field beside `description` and `set` |
-| `feat(apps): return an app to its base config (use_preset(None))` | what SlicerKonfAI's preset menu calls |
-| `test(apps): hold the preset calls SlicerKonfAI makes` | the Slicer API contract |
-| `feat(apps): preset save ...` (three commits) | `preset save APP#PRESET NAME`: the preset it starts from is the reference's |
-
 ## The app repositories
 
 The ten repositories SlicerKonfAI, SlicerImpactReg and fidopt read, and what presets change in each (the neighbours'

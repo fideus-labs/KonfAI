@@ -295,16 +295,11 @@ def _with_run_options(
 def _save_preset(app: str, name: str, description: str, overrides: list[str]) -> None:
     """``preset save APP[#PRESET] NAME``: the preset APP runs with (its base config without one), then ``--set``, kept
     as preset NAME of APP. The source is the preset the run is written with, so it needs no flag of its own."""
-    base, source = split_preset(app)
-    info = get_app_repository_info(base, False)
+    info = get_app_repository_info(app, False)  # the preset of APP#PRESET chosen
     if not isinstance(info, LocalAppRepository):
-        raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
-    start: tuple[str, ...] = ()
-    tiles = True
-    if source is not None:
-        info.use_preset(source)
-        chosen = info.get_preset()
-        start, tiles = chosen.overrides, chosen.tiles  # type: ignore[union-attr]
+        raise AppRepositoryError(f"'{app}' is not a local or Hugging Face app: save its presets on its server.")
+    chosen = info.get_preset()
+    start, tiles = (chosen.overrides, chosen.tiles) if chosen else ((), True)
     written = info.save_preset(name, description, [*start, *overrides], tiles)
     print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
 
@@ -432,23 +427,12 @@ def print_app(name: str, described: dict[str, Any]) -> None:
     if presets:
         base = name.partition("#")[0]
         print(f"\nPresets: {base}#NAME, each a list of --set applied before the run's own.")
+        row = functools.partial(fill, subsequent_indent="      ")
         for preset_name, preset in presets.items():
             mark = "*" if preset_name == described.get("preset") else " "
-            print(
-                fill(
-                    f"{preset_name}  {preset['description']}".rstrip(),
-                    initial_indent=f" {mark}",
-                    subsequent_indent="      ",
-                )
-            )
+            print(row(f"{preset_name}  {preset['description']}".rstrip(), initial_indent=f" {mark}"))
             if preset["set"]:
-                print(
-                    fill(
-                        " ".join(f"--set {override}" for override in preset["set"]),
-                        initial_indent="      ",
-                        subsequent_indent="      ",
-                    )
-                )
+                print(row(" ".join(f"--set {override}" for override in preset["set"]), initial_indent="      "))
 
     after = f", after preset '{described['preset']}'" if described.get("preset") else ""
     print(f"\nParameters{after}: --set NAME=VALUE (repeatable), a nested one dotted (models.0.ref=...).")
@@ -613,6 +597,10 @@ def build_app_cli(
         from . import app as app_module
 
         konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
+        if args.command in (infer_command, "pipeline"):  # the commands that run the model
+            config_overrides = _with_run_options(
+                resolve_app(args), None, args.prediction_file, args.config_overrides, args.output_format, args.seed
+            )
 
         if args.command == infer_command:
             konfai_app.infer(
@@ -627,14 +615,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=_with_run_options(
-                    resolve_app(args),
-                    None,
-                    getattr(args, "prediction_file", "Prediction.yml"),
-                    args.config_overrides,
-                    args.output_format,
-                    args.seed,
-                ),
+                config_overrides=config_overrides,
                 **infer_kwargs(args),
             )
         elif args.command == "eval":
@@ -676,14 +657,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=_with_run_options(
-                    resolve_app(args),
-                    None,
-                    getattr(args, "prediction_file", "Prediction.yml"),
-                    args.config_overrides,
-                    args.output_format,
-                    args.seed,
-                ),
+                config_overrides=config_overrides,
                 **infer_kwargs(args),
             )
 

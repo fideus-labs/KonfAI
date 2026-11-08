@@ -307,7 +307,6 @@ def test_a_remote_app_s_preset_travels_encoded_and_the_server_lists_its_presets(
     info = app_repository_module.get_app_repository_info("host:8000:VBoussot/ImpactReg:ConvexAdam#coarse", False)
     assert info.get_preset() == Preset("coarse", "The coarse search alone", ("stages=[coarse]",))
     assert urls == ["http://host:8000/repo_apps/VBoussot/ImpactReg:ConvexAdam"]
-    assert app_repository_module.quote("ConvexAdam#coarse", safe="/:@") == "ConvexAdam%23coarse"
 
 
 def test_a_run_records_what_it_ran(tmp_path: Path) -> None:

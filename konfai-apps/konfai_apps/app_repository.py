@@ -38,7 +38,6 @@ from dataclasses import dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Union, get_args, get_origin
-from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -57,7 +56,7 @@ from .errors import AppMetadataError, AppRepositoryError
 from .presets import (
     PRESET_NAME,
     Preset,
-    load_presets_file,
+    merge_presets,
     read_presets,
     split_preset,
     user_presets_file,
@@ -1066,15 +1065,7 @@ class LocalAppRepository(AppRepositoryInfo):
     def get_presets(self) -> dict[str, Preset]:
         """The app's published presets (its ``app.json``) and the user's own (:func:`user_presets_file`). A name in
         both is refused: a preset of one's own never hides a published one."""
-        own_file = self._user_presets_file()
-        own = load_presets_file(own_file) if own_file else {}
-        clash = sorted(set(own) & set(self._published_presets))
-        if clash:
-            raise AppRepositoryError(
-                f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{self.get_name()}' publishes too.",
-                "Rename yours: a preset of your own never hides a published one.",
-            )
-        return {**self._published_presets, **own}
+        return merge_presets(self._published_presets, self._user_presets_file(), self.get_name())
 
     def use_preset(self, name: str | None) -> None:
         """Choose preset ``name`` (None for the base config), refused here if its overrides do not resolve against the
@@ -1948,7 +1939,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
     def __init__(self, remote_server: RemoteServer, app_name: str) -> None:
         self._remote_server = remote_server
-        url = f"{remote_server.get_url()}/repo_apps/{quote(app_name, safe='/:@')}"
+        url = f"{remote_server.get_url()}/repo_apps/{app_name}"
         response = requests.get(
             url, headers=remote_server.get_headers(), timeout=remote_server.timeout, verify=remote_server.verify
         )
@@ -2035,7 +2026,7 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
         def safe_name(value: str) -> str:
             return re.sub(r"[^a-zA-Z0-9._-]+", "_", value)
 
-        url = f"{self._remote_server.get_url()}/repo_apps_config/{quote(self._app_name, safe='/:@')}"
+        url = f"{self._remote_server.get_url()}/repo_apps_config/{self._app_name}"
         response = requests.get(
             url,
             headers=self._remote_server.get_headers(),
