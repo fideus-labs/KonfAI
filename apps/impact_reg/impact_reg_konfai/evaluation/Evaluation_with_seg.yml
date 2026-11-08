@@ -1,8 +1,10 @@
 # konfai-apps eval APP --evaluation-file Evaluation_with_seg.yml -i TRANSFORM --gt FIXED_SEG --gt MOVING_SEG
 # The moving segmentation, pulled onto the fixed grid through the registration (Volume_0, a transform file, a field
 # store or a field image), is scored against the fixed one, the reference: every label of the fixed segmentation gets
-# a Dice, near 0 when the moved one lost it (scored the other way round, a lost label was dropped from the mean).
-# int32, not uint8: 1002, 2002 and 1026 wrapped to 234, 210 and 2.
+# its scores, a lost label the worst (scored the other way round, it was dropped from the mean). Overlap: Dice,
+# Jaccard, and the relative volume difference. Surfaces, in mm: the 95th percentile Hausdorff distance, the average
+# symmetric surface distance, and the surface Dice at 2 mm (the share of both surfaces within 2 mm of the other; set
+# the tolerance to the annotation's own uncertainty). int32, not uint8: 1002, 2002 and 1026 wrapped to 234, 210 and 2.
 Evaluator:
   metrics:
     MovingSeg:
@@ -13,6 +15,12 @@ Evaluator:
               labels: None
               dataset: ./Evaluations/ImpactReg/Output:mha
               group: Dice_map
+            Jaccard: {}
+            VolumeDifference: {}
+            HD95: {}
+            ASSD: {}
+            SurfaceDice:
+              tolerance: 2.0
   Dataset:
     groups_src:
       Reference_0:

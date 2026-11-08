@@ -17,6 +17,7 @@
 """Evaluation workflow classes and helpers for KonfAI."""
 
 import json
+import math
 import os
 import shutil
 import warnings
@@ -171,13 +172,17 @@ class Statistics:
         return rows
 
     @staticmethod
-    def get_statistic(values: list[float]) -> dict[str, float]:
-        """Max, min, std, quartiles, mean and count of the non-NaN ``values``: all NaN when there is none."""
+    def get_statistic(values: list[float], direction: str | None = None) -> dict[str, float]:
+        """Max, min, std, quartiles, mean and count of the non-NaN ``values``: all NaN when there is none. With the
+        metric's ``direction`` (``max``: higher is better), ``worst30`` too: the mean of its worst 30 % of values
+        (at least one), the robustness Learn2Reg reports as DSC30 and TRE30: a method that fails some cases shows
+        there and not in the mean."""
         array = np.asarray(values, dtype=float)
         count = int(np.count_nonzero(~np.isnan(array)))
+        keys = ("max", "min", "std", "25pc", "50pc", "75pc", "mean", *(("worst30",) if direction else ()))
         if count == 0:
-            return dict.fromkeys(("max", "min", "std", "25pc", "50pc", "75pc", "mean"), np.nan) | {"count": 0.0}
-        return {
+            return dict.fromkeys(keys, np.nan) | {"count": 0.0}
+        statistics = {
             "max": float(np.nanmax(array)),
             "min": float(np.nanmin(array)),
             "std": float(np.nanstd(array)),
@@ -187,6 +192,11 @@ class Statistics:
             "mean": float(np.nanmean(array)),
             "count": float(count),
         }
+        if direction:
+            ordered = np.sort(array[~np.isnan(array)])
+            worst = ordered[: math.ceil(0.3 * count)] if direction == "max" else ordered[-math.ceil(0.3 * count) :]
+            statistics["worst30"] = float(worst.mean())
+        return statistics
 
     @staticmethod
     def _to_serializable(obj: Any) -> Any:
@@ -233,7 +243,7 @@ class Statistics:
                     tmp[metric_name] = []
                 tmp[metric_name].append(v[metric_name])
         for metric_name, values in tmp.items():
-            result["aggregates"][metric_name] = Statistics.get_statistic(values)
+            result["aggregates"][metric_name] = Statistics.get_statistic(values, self.directions.get(metric_name))
 
         directions = {name: self.directions[name] for name in result["aggregates"] if name in self.directions}
         if directions:

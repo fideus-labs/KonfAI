@@ -105,6 +105,13 @@ class Criterion(torch.nn.Module, ABC):
     def get_name(self):
         return self.__class__.__name__
 
+    def _require_target(self, targets: tuple[torch.Tensor, ...]) -> None:
+        if not targets:
+            raise MeasureError(
+                f"{self.get_name()} compares the output with a target and was handed none.",
+                "Name the target group under its targets_criterions.",
+            )
+
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> Any:
         """Sufficient statistics of one disjoint patch (only meaningful when ``reducible``)."""
         raise NotImplementedError(f"{self.get_name()} is not reducible: it has no partial state.")
@@ -160,13 +167,6 @@ class MaskedLoss(Criterion):
         super().__init__()
         self.loss = loss
         self.mode_image_masked = mode_image_masked
-
-    def _require_target(self, targets: tuple[torch.Tensor, ...]) -> None:
-        if not targets:
-            raise MeasureError(
-                f"{self.get_name()} compares the output with a target and was handed none.",
-                "Name the target group under its targets_criterions.",
-            )
 
     @staticmethod
     def get_mask(targets: list[torch.Tensor]) -> torch.Tensor | None:

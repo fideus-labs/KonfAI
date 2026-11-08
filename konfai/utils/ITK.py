@@ -175,6 +175,50 @@ def jacobian_statistics(sums: Iterable[JacobianSums]) -> dict[str, float]:
     }
 
 
+def field_regularity_statistics(
+    read: Callable[[tuple[slice, ...]], np.ndarray], shape: list[int], to_index: np.ndarray
+) -> dict[str, float]:
+    """How smooth and how large the map a displacement field stores is, over the field's grid: its bending energy,
+    the mean over its voxels of every squared second derivative ``d2u_c / dx_i dx_j`` (world axes, so in 1/mm^2
+    for a field in mm), and the length of its displacements (mean, 95th percentile, maximum).
+
+    ``read``, ``shape`` and ``to_index`` as :func:`open_field` hands them back. The second derivatives are central
+    differences of central differences along the grid's axes (one-sided at its faces, as ``np.gradient`` takes
+    them), taken to world axes through ``to_index`` on both sides; the field is read in slabs of planes with two
+    planes of halo on each side, so every derivative is the whole field's.
+    """
+
+    def along(values: np.ndarray, axis: int) -> np.ndarray:
+        return np.gradient(values, axis=axis) if values.shape[axis] > 1 else np.zeros_like(values)
+
+    planes = max(1, _slab_planes(shape) // 3)  # a voxel holds nine second derivatives per component
+    bending, lengths = 0.0, []
+    for first in range(0, shape[1], planes):
+        last = min(first + planes, shape[1])
+        low, high = max(first - 2, 0), min(last + 2, shape[1])
+        block = read((slice(None), slice(low, high), slice(None), slice(None)))
+        core = slice(first - low, last - low)
+        # [c, z, y, x, a, b]: d2u_c / d(index_a) d(index_b), a and b along x, y, z, then to world axes.
+        first_derivatives = [along(block, axis) for axis in (3, 2, 1)]
+        hessian = np.stack(
+            [
+                np.stack([along(derivative, axis)[:, core] for axis in (3, 2, 1)], axis=-1)
+                for derivative in first_derivatives
+            ],
+            axis=-2,
+        )
+        world = to_index.T @ hessian @ to_index
+        bending += float((world**2).sum())
+        lengths.append(np.sqrt((block[:, core] ** 2).sum(0)).ravel().astype(np.float32))
+    length = np.concatenate(lengths)
+    return {
+        "bending_energy": bending / length.size,
+        "displacement_mean": float(length.mean()),
+        "displacement_p95": float(np.percentile(length, 95)),
+        "displacement_max": float(length.max()),
+    }
+
+
 def displace_points(points: np.ndarray, dataset: Dataset, group: str, name: str) -> np.ndarray:
     """``points`` (``[N, 3]``, LPS) moved by a stored displacement field, read at the voxels around each point
     alone: a 2x2x2 block that SimpleITK interpolates where it sits in the field, with the same voxels, weights and
