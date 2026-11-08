@@ -180,11 +180,16 @@ class OmeZarrFile(AbstractFile):
 
     def _path(self, name: str, *, writing: bool = False) -> str:
         """Where entry ``name``'s store sits, as text (a remote one is a URI). Resolved once per
-        ``(root, entry)``."""
+        ``(root, entry)``, unless the dataset named it already."""
         base = uri.join(self.filename, name)
         if writing:
             uri.refuse_write(self.filename)
             return f"{base}.ome.zarr"
+        # A dataset that names its entries (a manifest) hands the answer over, under the key the
+        # SimpleITK backend reads it by: nothing is probed.
+        named = self.resolved_paths.get(f"{self.filename}{name}") if self.resolved_paths else None
+        if named is not None:
+            return named
         memo_key = (self.filename, name)
         resolved = _resolved_store_paths.get(memo_key)
         if resolved is not None:

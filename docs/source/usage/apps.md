@@ -21,6 +21,17 @@ and installs any missing app requirements, so it takes longer than later runs.
 An app imports Python code and installs its requirements by default. Use a source
 you trust. Set `KONFAI_APPS_INSTALL_REQUIREMENTS=0` to manage requirements yourself.
 
+An OME-Zarr store in object storage is read where it is, chunk by chunk, with
+`pip install "konfai[s3]"` and the usual credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
+`FSSPEC_S3_ENDPOINT_URL` for another S3 endpoint, `FSSPEC_S3_ANON=true` for a public bucket):
+
+```bash
+konfai-apps infer VBoussot/ImpactSeg:body -i s3://bucket/study/scan.ome.zarr -o ./Output --gpu 0
+```
+
+Only a store is read in place: a `.mha` or `.nii.gz` there is a whole file, copy it first. The output
+is always written locally.
+
 ## Check the result
 
 For this app, open `Output/ImpactSeg-Body/Output/P000/Output.mha`. The command
