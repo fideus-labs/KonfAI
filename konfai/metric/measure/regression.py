@@ -584,7 +584,7 @@ class NCC(Criterion):
     reducible = True
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[float, ...]:
-        a, b = _selected(output, targets)
+        a, b = (values.double() for values in _selected(output, targets))  # sums of squares far from 0: float64
         return tuple(
             float(value) for value in (a.numel(), a.sum(), b.sum(), (a * b).sum(), (a * a).sum(), (b * b).sum())
         )
@@ -677,10 +677,13 @@ class LNCC(Criterion):
         def mean(values: torch.Tensor) -> torch.Tensor:
             return pool(values[None], self.kernel, stride=1, padding=self.halo, count_include_pad=False)[0]
 
+        # In float64: the moments' differences cancel in float32 on intensities far from 0 (an MR at 1000 with a
+        # local spread of a few units scored 1672 against itself plus noise).
+        a, b = a.double(), b.double()
         mean_a, mean_b = mean(a), mean(b)
         covariance = mean(a * b) - mean_a * mean_b
-        variance = (mean(a * a) - mean_a**2) * (mean(b * b) - mean_b**2)
-        return covariance**2 / (variance + 1e-5)
+        variance = (mean(a * a) - mean_a**2).clamp_min(0) * (mean(b * b) - mean_b**2).clamp_min(0)
+        return (covariance**2 / (variance + 1e-5)).clamp_max(1.0).float()
 
     def partial_metric(
         self, output: torch.Tensor, *targets: torch.Tensor, core: tuple[slice, ...] | None = None
