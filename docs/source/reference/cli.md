@@ -121,7 +121,7 @@ Options shared by `infer`, `eval`, `uncertainty`, `pipeline` and `fine-tune`:
 | `--host`, `--port`, `--token` | Run on a `konfai-apps-server` instead of locally. |
 | `--https` | Reach that server over HTTPS. |
 | `--ca-cert` | The certificate the server's is checked against, for a self-signed one; implies `--https`. With `--https` alone, `KONFAI_API_CA_CERT` is that certificate. |
-| `-i`, `--inputs` | Input files; repeat the flag for each input group. |
+| `-i`, `--inputs` | Input files; repeat the flag for each input group. An OME-Zarr store named by a URI (`s3://bucket/scan.ome.zarr`) is read in place, chunk by chunk, with `konfai[s3]` and the credentials of {doc}`components/storage-backends`. |
 | `-o`, `--output` | Output directory. |
 | `--gpu` / `--cpu` | The device (one or the other). |
 | `--tmp-dir` | Where intermediate files go. |

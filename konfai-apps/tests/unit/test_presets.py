@@ -24,7 +24,7 @@ import pytest
 from konfai_apps import app_repository as app_repository_module
 from konfai_apps import cli
 from konfai_apps.errors import AppRepositoryError
-from konfai_apps.presets import Preset, read_presets, split_preset, user_presets_file
+from konfai_apps.presets import Preset, read_presets, split_preset, user_presets_file, write_preset
 from ruamel.yaml import YAML
 
 _CONFIG = (
@@ -186,6 +186,29 @@ def test_the_preset_save_command_starts_from_another_preset(tmp_path: Path, monk
     assert "x.y" not in json.loads((root / "app.json").read_text())["presets"]
 
 
+def test_a_preset_saved_from_one_that_never_runs_in_tiles_does_not_either(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _app(tmp_path, {**_PRESETS, "whole": {"description": "", "set": ["stages=[coarse]"], "tiles": False}})
+    monkeypatch.setattr(
+        sys, "argv", ["konfai-apps", "preset", "save", f"{root}#whole", "mine", "--set", "iterations=90"]
+    )
+    cli.main_apps()
+    assert json.loads((root / "app.json").read_text())["presets"]["mine"] == {
+        "description": "",
+        "set": ["stages=[coarse]", "iterations=90"],
+        "tiles": False,
+    }
+
+
+def test_a_presets_file_that_is_not_a_json_object_is_refused_on_write_as_on_read(tmp_path: Path) -> None:
+    for text in ("{not json", "[]"):
+        (tmp_path / "ConvexAdam.json").write_text(text, encoding="utf-8")
+        with pytest.raises(AppRepositoryError, match="JSON"):
+            write_preset(tmp_path / "ConvexAdam.json", Preset("mine", "", ("iterations=90",)))
+        assert (tmp_path / "ConvexAdam.json").read_text(encoding="utf-8") == text  # nothing overwritten
+
+
 def test_a_preset_of_one_s_own_never_hides_a_published_one(tmp_path: Path) -> None:
     root = _app(tmp_path, _PRESETS)
     own = tmp_path / "own.json"
@@ -284,7 +307,6 @@ def test_a_remote_app_s_preset_travels_encoded_and_the_server_lists_its_presets(
     info = app_repository_module.get_app_repository_info("host:8000:VBoussot/ImpactReg:ConvexAdam#coarse", False)
     assert info.get_preset() == Preset("coarse", "The coarse search alone", ("stages=[coarse]",))
     assert urls == ["http://host:8000/repo_apps/VBoussot/ImpactReg:ConvexAdam"]
-    assert app_repository_module.quote("ConvexAdam#coarse", safe="/:@") == "ConvexAdam%23coarse"
 
 
 def test_a_run_records_what_it_ran(tmp_path: Path) -> None:

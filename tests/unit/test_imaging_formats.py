@@ -685,7 +685,27 @@ class TestDatasetImagingBackends:
 
         assert directory_volume_form(root) is None
 
-    @pytest.mark.parametrize("file_format", ["dicom", "omezarr", "ome-zarr", "ome_zarr", "zarr", "itktransform"])
+    @pytest.mark.parametrize("extension", ["mha", "mhd", "nrrd", "tif", "tiff"])
+    def test_a_gz_token_writes_the_format_compressed_under_its_own_suffix(self, tmp_path: Path, extension: str) -> None:
+        pytest.importorskip("SimpleITK")
+        volume = np.zeros((1, 8, 32, 32), dtype=np.int16)
+        volume[0, 2, 3, 4] = 7
+        attributes = _image_attributes()
+        dataset = Dataset(tmp_path / "out", f"{extension}.gz")
+
+        assert not dataset.can_stream_data(attributes)  # one compressed stream: no region write
+        dataset.write("CT", "CASE_001", volume, attributes)
+
+        case = tmp_path / "out" / "CASE_001"
+        assert (case / f"CT.{extension}").exists()
+        assert sum(entry.stat().st_size for entry in case.iterdir()) < volume.nbytes
+        for token in (f"{extension}.gz", extension):  # read back under either token
+            data, _ = Dataset(tmp_path / "out", token).read_data("CT", "CASE_001")
+            np.testing.assert_array_equal(data, volume)
+
+    @pytest.mark.parametrize(
+        "file_format", ["dicom", "omezarr", "ome-zarr", "ome_zarr", "zarr", "itktransform", "mha.gz", "tiff.gz"]
+    )
     def test_data_manager_path_parser_accepts_imaging_backend(self, file_format: str) -> None:
         assert file_format in SUPPORTED_FORMATS
         assert split_path_spec(

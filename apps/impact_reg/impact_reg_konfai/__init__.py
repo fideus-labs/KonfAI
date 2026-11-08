@@ -21,7 +21,7 @@ import os
 #: The revision of ``VBoussot/ImpactReg`` this package resolves its presets at. A release pins it here, to the
 #: Hugging Face tag of the presets it was tested against, so that a later edit of the presets never reaches an
 #: install that does not know their keys; "main" follows the repository as it moves.
-PRESETS_REVISION = "b59cec02ff4efaea7a0ff9a409fa93db78d14ee6"
+PRESETS_REVISION = "54e3b3ff5e309ca91e1124946eb251b1a9a0504c"
 
 #: Where the presets are resolved from: ``KONFAI_IMPACTREG_REPO`` when set (a local directory of preset folders,
 #: for development and offline use, or a Hugging Face ``<repo>[@<revision>]``), else ``PRESETS_REVISION`` of

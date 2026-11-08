@@ -32,6 +32,13 @@ pytestmark = pytest.mark.slow
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
+#: The apps CLI as a subprocess, importing this checkout's own code ahead of any installed copy.
+_APPS = [
+    sys.executable,
+    "-c",
+    f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
+    "from konfai_apps.cli import main_apps; main_apps()",
+]
 WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"
 SimpleITK = pytest.importorskip("SimpleITK")
 
@@ -268,13 +275,7 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
     _write_image(mask_path, mask_array, SimpleITK.sitkUInt8)
 
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "pipeline",
         str(app_dir),
         "-i",
@@ -326,6 +327,50 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
     assert _single_case_metric(uncertainty_path, expected_metric_suffix="Uncertainty") == pytest.approx(0.0, abs=1e-6)
 
 
+def test_konfai_apps_infer_reads_an_ome_zarr_store_by_uri_in_place(tmp_path: Path) -> None:
+    """An input named by a URI is read where it is, chunk by chunk through fsspec: no copy, no link. The local
+    filesystem is the one scheme a test can count on; the code path is the one ``s3://`` takes."""
+    pytest.importorskip("fsspec")
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.ome_zarr import write_ome_zarr
+
+    app_dir = tmp_path / "TinySynthesisApp"
+    _write_local_synthesis_app(app_dir)
+
+    input_array = np.linspace(-0.8, 0.8, 16 * 16, dtype=np.float32).reshape(1, 1, 16, 16)
+    expected_output = np.tanh(input_array[0]).astype(np.float32)
+    store = tmp_path / "input.ome.zarr"
+    write_ome_zarr(str(store), input_array, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0])
+    output = tmp_path / "out"
+
+    cmd = [
+        *_APPS,
+        "infer",
+        str(app_dir),
+        "-i",
+        f"file://{store}",
+        "-o",
+        str(output),
+        "--ensemble",
+        "2",
+        "--cpu",
+        "1",
+    ]
+
+    result = run(cmd)
+    assert result.returncode == 0, (
+        "The local 'konfai-apps infer' command failed on a store named by URI.\n\n"
+        f"CMD: {' '.join(cmd)}\n\n"
+        f"STDOUT:\n{result.stdout}\n\n"
+        f"STDERR:\n{result.stderr}"
+    )
+
+    predicted_path = output / "TinyApp" / "Dataset" / "P000" / "sCT.mha"  # infer collects ./Predictions into -o
+    assert predicted_path.exists()
+    predicted = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(predicted_path)))
+    np.testing.assert_allclose(predicted, expected_output, atol=3e-4)
+
+
 def _run_pipeline(app_dir: Path, output: Path, cohort: str, spoiled: int | None) -> subprocess.CompletedProcess[str]:
     """The pipeline over three inputs of ``cohort`` against their references, input ``spoiled`` unreadable."""
     sign = -1.0 if cohort == "B" else 1.0
@@ -340,9 +385,7 @@ def _run_pipeline(app_dir: Path, output: Path, cohort: str, spoiled: int | None)
         inputs[spoiled].write_bytes(b"not an image\n")
     return run(
         [
-            sys.executable,
-            "-c",
-            "from konfai_apps.cli import main_apps; main_apps()",
+            *_APPS,
             "pipeline",
             str(app_dir),
             "-i",
@@ -450,13 +493,7 @@ def _run_finetune(
     epochs: int = 2,
 ) -> subprocess.CompletedProcess[str]:
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "fine-tune",
         str(app_dir),
         "FT",

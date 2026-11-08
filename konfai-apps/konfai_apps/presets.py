@@ -109,21 +109,40 @@ def user_presets_file(repo: str, app_name: str) -> Path:
     return root.joinpath(*repo.split("/"), f"{app_name}.json")
 
 
-def load_presets_file(path: Path) -> dict[str, Preset]:
-    """A user's presets file, ``{}`` when there is none."""
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """The JSON object at ``path``, ``{}`` when there is no file; a hand-edited file that is not one is refused."""
     if not path.is_file():
         return {}
     try:
-        entries = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise AppRepositoryError(f"{path} is not valid JSON: {error}.") from error
-    return read_presets(entries, str(path))
+    if not isinstance(data, dict):
+        raise AppRepositoryError(f"{path} must hold a JSON object.")
+    return data
+
+
+def load_presets_file(path: Path) -> dict[str, Preset]:
+    """A user's presets file, ``{}`` when there is none."""
+    return read_presets(_read_json_object(path), str(path))
+
+
+def merge_presets(published: dict[str, Preset], own_file: Path | None, app_name: str) -> dict[str, Preset]:
+    """The ``published`` presets of app ``app_name`` with the user's own from ``own_file`` (none when None). A name in
+    both is refused: a preset of one's own never hides a published one."""
+    own = load_presets_file(own_file) if own_file else {}
+    if clash := sorted(set(own) & set(published)):
+        raise AppRepositoryError(
+            f"{own_file} has preset(s) {', '.join(map(repr, clash))}, which app '{app_name}' publishes too.",
+            "Rename yours: a preset of your own never hides a published one.",
+        )
+    return {**published, **own}
 
 
 def write_preset(path: Path, preset: Preset, key: str | None = None) -> None:
     """Add ``preset`` to the JSON file at ``path``, or replace the one of that name: under ``key`` of the file's
     object (an ``app.json``'s ``"presets"``), or at its top level (a user's presets file)."""
-    data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    data = _read_json_object(path)
     target = data.setdefault(key, {}) if key else data
     target[preset.name] = preset.to_json()
     path.parent.mkdir(parents=True, exist_ok=True)

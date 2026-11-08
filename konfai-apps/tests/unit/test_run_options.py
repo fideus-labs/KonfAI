@@ -68,6 +68,20 @@ def test_the_seed() -> None:
     assert run_overrides(_config()) == []
 
 
+@pytest.mark.parametrize("root", ["Predictor", "Trainer"])
+def test_the_seed_applies_to_a_config_that_leaves_manual_seed_to_its_default(root: str) -> None:
+    config = {root: {"Model": {"classpath": "Model:Net", "Net": {}}}}
+    apply_overrides(config, run_overrides(config, seed=7), lambda: None)
+    assert config[root]["manual_seed"] == 7
+    with pytest.raises(AppRepositoryError, match="does not exist"):  # the one root key a config may omit
+        apply_overrides(config, [f"{root}.other_seed=7"], lambda: None)
+
+
+def test_a_format_for_every_output_of_an_app_that_writes_none_is_refused() -> None:
+    with pytest.raises(AppRepositoryError, match="no output file"):
+        run_overrides({"Predictor": {"Model": {"classpath": "Model:Net", "Net": {}}}}, ["omezarr"])
+
+
 @pytest.mark.parametrize(
     ("spec", "message"),
     [("omezar", "Did you mean 'omezarr'"), ("Sge=mha", "Did you mean 'Seg'"), ("Moved=mha", "DisplacementField, Seg")],

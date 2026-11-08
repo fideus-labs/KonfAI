@@ -567,11 +567,8 @@ class AppService:
     def _app_label(self, ref: str) -> str:
         """Short, filesystem-safe name of the app behind a reference, used to label its runs."""
         base, preset = _import_app_repository().split_preset(ref)
-        name = (
-            base.split(":")[-1]
-            if ":" in base and not Path(base).expanduser().exists()
-            else Path(base).expanduser().name
-        )
+        path = Path(base).expanduser()
+        name = path.name if path.exists() or ":" not in base else base.split(":")[-1]
         return f"{name}-{preset}" if preset else name
 
     @staticmethod

@@ -29,9 +29,10 @@ import textwrap
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from konfai import RemoteServer
+from konfai.utils import uri
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
 from konfai.utils.utils import env_flag
 
@@ -45,8 +46,12 @@ from .app_repository import (
     run_overrides,
 )
 from .errors import AppRepositoryError
-from .options import add_device, add_run_options, add_tmp_dir
+from .options import add_device, add_run_options, add_tmp_dir, local_path
 from .presets import split_preset
+
+if TYPE_CHECKING:
+    from .app import AbstractKonfAIApp
+
 
 #: Where a designed refusal also writes its message, when set: the app server reads it back to answer
 #: the job's result with the refusal (422) rather than a bare exit code.
@@ -87,7 +92,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     parser.add_argument(
         "-i",
         "--inputs",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         required=True,
@@ -96,7 +101,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
     parser.add_argument(
         "--gt",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
@@ -104,7 +109,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
     parser.add_argument(
         "--mask",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
@@ -113,7 +118,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     parser.add_argument(
         "-o",
         "--output",
-        type=lambda x: Path(x).resolve(),
+        type=local_path,
         default=Path("./Output").resolve(),
         help="Output directory / file",
     )
@@ -130,8 +135,10 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     return kwargs
 
 
-def _resolved_path(value: str) -> Path:
-    return Path(value).resolve()
+def _input_path(value: str) -> Path | str:
+    """An argparse type: an input, a local path made absolute, or a URI kept as it is (an OME-Zarr store the run
+    reads in place, chunk by chunk)."""
+    return value if uri.is_uri(value) else Path(value).resolve()
 
 
 def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> None:
@@ -139,22 +146,23 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
     instead of inputs and works in its output directory, so it takes no temporary directory."""
     if fine_tune:
         parser.add_argument(
-            "-d", "--dataset", type=_resolved_path, required=True, help="Dataset directory to fine-tune on."
+            "-d", "--dataset", type=local_path, required=True, help="Dataset directory to fine-tune on."
         )
     else:
         parser.add_argument(
             "-i",
             "--inputs",
-            type=_resolved_path,
+            type=_input_path,
             nargs="+",
             action="append",
             required=True,
-            help="Input path(s): one or multiple volume files, or a dataset directory.",
+            help="Input path(s): one or multiple volume files, a dataset directory, or an OME-Zarr store by URI "
+            "(s3://...), read in place.",
         )
     parser.add_argument(
         "-o",
         "--output",
-        type=_resolved_path,
+        type=local_path,
         default=Path("./Output").resolve(),
         help="Output directory: each case's files are listed when the run ends.",
     )
@@ -166,7 +174,7 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
 def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
     parser.add_argument(
         "--gt",
-        type=_resolved_path,
+        type=_input_path,
         nargs="+",
         action="append",
         required=required,
@@ -176,7 +184,7 @@ def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
 
 def _add_mask(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--mask", type=_resolved_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
+        "--mask", type=_input_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
     )
 
 
@@ -332,15 +340,12 @@ def _combine_of(
 def _save_preset(app: str, name: str, description: str, overrides: list[str]) -> None:
     """``preset save APP[#PRESET] NAME``: the preset APP runs with (its base config without one), then ``--set``, kept
     as preset NAME of APP. The source is the preset the run is written with, so it needs no flag of its own."""
-    base, source = split_preset(app)
-    info = get_app_repository_info(base, False)
+    info = get_app_repository_info(app, False)  # the preset of APP#PRESET chosen
     if not isinstance(info, LocalAppRepository):
-        raise AppRepositoryError(f"'{base}' is not a local or Hugging Face app: save its presets on its server.")
-    start: tuple[str, ...] = ()
-    if source is not None:
-        info.use_preset(source)
-        start = info.get_preset().overrides  # type: ignore[union-attr]
-    written = info.save_preset(name, description, [*start, *overrides])
+        raise AppRepositoryError(f"'{app}' is not a local or Hugging Face app: save its presets on its server.")
+    chosen = info.get_preset()
+    start, tiles = (chosen.overrides, chosen.tiles) if chosen else ((), True)
+    written = info.save_preset(name, description, [*start, *overrides], tiles)
     print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
 
 
@@ -467,23 +472,12 @@ def print_app(name: str, described: dict[str, Any]) -> None:
     if presets:
         base = name.partition("#")[0]
         print(f"\nPresets: {base}#NAME, each a list of --set applied before the run's own.")
+        row = functools.partial(fill, subsequent_indent="      ")
         for preset_name, preset in presets.items():
             mark = "*" if preset_name == described.get("preset") else " "
-            print(
-                fill(
-                    f"{preset_name}  {preset['description']}".rstrip(),
-                    initial_indent=f" {mark}",
-                    subsequent_indent="      ",
-                )
-            )
+            print(row(f"{preset_name}  {preset['description']}".rstrip(), initial_indent=f" {mark}"))
             if preset["set"]:
-                print(
-                    fill(
-                        " ".join(f"--set {override}" for override in preset["set"]),
-                        initial_indent="      ",
-                        subsequent_indent="      ",
-                    )
-                )
+                print(row(" ".join(f"--set {override}" for override in preset["set"]), initial_indent="      "))
 
     after = f", after preset '{described['preset']}'" if described.get("preset") else ""
     print(f"\nParameters{after}: --set NAME=VALUE (repeatable), a nested one dotted (models.0.ref=...).")
@@ -649,19 +643,11 @@ def build_app_cli(
         from . import app as app_module
 
         konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
-
-        overrides = (
-            _with_run_options(
-                resolve_app(args),
-                None,
-                getattr(args, "prediction_file", "Prediction.yml"),
-                args.config_overrides,
-                args.output_format,
-                args.seed,
+        if args.command in (infer_command, "pipeline"):  # the commands that run the model
+            config_overrides = _with_run_options(
+                resolve_app(args), None, args.prediction_file, args.config_overrides, args.output_format, args.seed
             )
-            if args.command in (infer_command, "pipeline")
-            else None
-        )
+
         if args.command == infer_command:
             konfai_app.infer(
                 inputs=args.inputs,
@@ -675,7 +661,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=overrides,
+                config_overrides=config_overrides,
                 **infer_kwargs(args),
             )
         elif args.command == "eval":
@@ -718,7 +704,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=overrides,
+                config_overrides=config_overrides,
                 **infer_kwargs(args),
             )
 
@@ -1039,7 +1025,7 @@ def main_apps() -> None:
     references = kwargs["app"] if isinstance(kwargs["app"], list) else [kwargs["app"]]
     download, force_update = kwargs.pop("download", False), kwargs.pop("force_update", False)
 
-    def make_app(reference: str) -> Any:  # KonfAIApp or KonfAIAppClient: the same methods
+    def make_app(reference: str) -> AbstractKonfAIApp:  # KonfAIApp or KonfAIAppClient: the same methods
         if remote is not None:
             return app_module.KonfAIAppClient(reference, remote)
         return app_module.KonfAIApp(reference, download, force_update)

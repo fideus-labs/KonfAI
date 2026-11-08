@@ -227,6 +227,25 @@ def test_register_single_preset_reuses_the_field_and_derives_the_moved(tmp_path:
     np.testing.assert_allclose(field[0, 0, 0], (2.0, 0.0, 0.0), atol=1e-6)
 
 
+def test_output_format_sets_the_moved_image_s_form_and_leaves_the_engine_its_own(tmp_path: Path) -> None:
+    """The moved image is derived here, so --output-format [Moved=]FORMAT is this orchestrator's to honour: the engine
+    never sees Moved= (it has no such output) and keeps the specs naming its own outputs."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"FireANTs": (2.0, 0.0, 0.0)})
+    out = tmp_path / "Output"
+    app.register(["FireANTs"], [fixed], [moving], output=out, output_format=["DVF=nii.gz", "Moved=nii.gz"])
+
+    assert (out / "P000" / "Moved.nii.gz").is_file() and not (out / "P000" / "Moved.mha").exists()
+    assert app._run_args == ["--output-format", "DVF=nii.gz"]
+    with pytest.raises(KonfAIError, match="not a format KonfAI writes"):
+        app.register(["FireANTs"], [fixed], [moving], output=tmp_path / "Other", output_format=["Moved=bogus"])
+
+
 def test_register_multi_preset_averages_and_warps_once(tmp_path: Path) -> None:
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.arange(8**3, dtype=np.float32).reshape(8, 8, 8)), str(moving))

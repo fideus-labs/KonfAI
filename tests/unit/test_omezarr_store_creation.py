@@ -106,21 +106,16 @@ def test_store_is_readable_before_any_region_is_written(tmp_path: Path) -> None:
     # is the point: a transposed geometry is the failure this test exists to catch.
     np.testing.assert_allclose(info["scale"][1:], SPACING[::-1])
     np.testing.assert_allclose(info["translation"][1:], ORIGIN[::-1])
+    np.testing.assert_allclose(info["standard_geometry"]["Origin"], ORIGIN)
 
 
-def test_konfai_attributes_survive_the_metadata_write(tmp_path: Path) -> None:
-    """The sidecar must outlive ngff-zarr's own root write.
-
-    ``to_ngff_zarr(overwrite=True)`` reopens the root group in ``mode="w"`` and drops every attribute
-    already there, so ordering is the whole test: written first, Direction disappears, and its loss is
-    silent: the reader substitutes identity and returns a plausibly oriented volume.
-    """
+def test_geometry_survives_in_standard_transforms(tmp_path: Path) -> None:
     path = tmp_path / "attrs.ome.zarr"
     _create(path)
     clear_ome_zarr_cache()
-
-    stored = get_ome_zarr_info(path)["attributes"]
-    assert [float(value) for value in stored["Direction"].split()] == list(DIRECTION)
+    info = get_ome_zarr_info(path)
+    assert not info["attributes"]
+    np.testing.assert_allclose(info["standard_geometry"]["Direction"], DIRECTION)
 
 
 def test_level_zero_key_is_taken_from_the_metadata_not_a_literal(tmp_path: Path) -> None:
@@ -214,20 +209,19 @@ def test_stores_keep_the_byte_shuffled_blosc_compressor(tmp_path: Path) -> None:
         assert configuration["shuffle"] in (1, "shuffle"), (key, configuration)
 
 
-def test_levels_appended_to_a_pre_05_store_keep_its_v2_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_levels_appended_to_a_pre_05_store_keep_its_v2_layout(tmp_path: Path) -> None:
     """A store on disk keeps the layout it was written with.
 
     Stores written before the 0.5 default are zarr v2, and a reader takes a pyramid as one store: a
     level appended as v3 beside them would be a store no single format reads through.
     """
-    from konfai.utils import ome_zarr
-    from konfai.utils.ome_zarr import append_ome_zarr_levels, write_ome_zarr
+    import ngff_zarr
+    from konfai.utils.ome_zarr import append_ome_zarr_levels
 
     volume = np.arange(1 * 16 * 16 * 16, dtype=np.uint16).reshape(1, 16, 16, 16)
     store = tmp_path / "legacy.ome.zarr"
-    monkeypatch.setattr(ome_zarr, "_DEFAULT_VERSION", ome_zarr._V2_VERSION)
-    write_ome_zarr(store, volume, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0])
-    monkeypatch.undo()
+    image = ngff_zarr.to_ngff_image(volume, dims=["c", "z", "y", "x"])
+    ngff_zarr.to_ngff_zarr(str(store), ngff_zarr.to_multiscales(image, scale_factors=[]), version="0.4")
 
     append_ome_zarr_levels(store, [4])
 
