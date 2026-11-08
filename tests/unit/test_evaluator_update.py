@@ -590,3 +590,19 @@ def test_a_case_set_aside_mid_stream_is_scored_neither_in_part_nor_after(tmp_pat
     assert report["case"]["sCT:CT:MAE"] == {"CASE_0": 1.0, "CASE_2": 2.0}
     assert report["aggregates"]["sCT:CT:MAE"]["count"] == 2
     assert report["set_aside"] == {"CASE_1": "why"}
+
+
+def test_a_resumed_run_with_every_case_restored_still_reports_the_directions(tmp_path: Path) -> None:
+    """No case is scored again on this rank, and the configured metrics give the direction, so ``worst30`` stays."""
+    evaluator = _evaluator({"PRED": {"SEG": {Dice(labels=[1]): None}}})
+    evaluator.metric_path = tmp_path
+    statistics = Statistics(tmp_path / "Metric_TRAIN.json")
+    row = {"name": "CASE_0", "values": {"PRED:SEG:Dice:1": 0.25, "PRED:SEG:Dice": 0.25}}
+    (tmp_path / "Metric_TRAIN.cases.rank0.jsonl").write_text(json.dumps(row) + "\n")
+    ones = torch.ones(1, 1, 4, 4, dtype=torch.uint8)
+
+    evaluator._evaluate_split(_Loader([_batch("CASE_0", PRED=ones, SEG=ones)]), statistics, "TRAIN", 1, 0, 0)
+
+    report = json.loads(statistics.filename.read_text())
+    assert report["directions"] == {"PRED:SEG:Dice:1": "max", "PRED:SEG:Dice": "max"}
+    assert report["aggregates"]["PRED:SEG:Dice"]["worst30"] == 0.25
