@@ -69,3 +69,24 @@ def test_a_launch_waits_only_when_asked(
     assert mcp_server._launched({"job_id": "j1"}, False, None) == {"job_id": "j1"}
     assert mcp_server._launched({"ok": False, "blocked": True}, True, None) == {"ok": False, "blocked": True}
     assert mcp_server._launched({"job_id": "j1"}, True, 30) == {"waited": "j1", "timeout_s": 30}
+
+
+def test_case_names_follow_the_staging_order(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+    names = mcp_server._case_names({"inputs": [["a.mha", "b.mha"], ["m1.mha"]]})
+    assert names == {"P000": ["a.mha", "m1.mha"], "P001": ["b.mha", None]}
+    assert mcp_server._case_names({"extra": {"inputs": [["x.nii.gz"]]}}) == {"P000": ["x.nii.gz"]}
+    assert mcp_server._case_names({"ref": "r"}) is None
+
+
+@pytest.mark.usefixtures("workspace_root")
+def test_the_scout_service_follows_the_session(load_mcp_server: Callable[[], ModuleType]) -> None:
+    mcp_server = load_mcp_server()
+
+    async def scenario() -> None:
+        async with fastmcp.Client(mcp_server.mcp) as client:
+            await client.call_tool("session", {"action": "create", "name": "scouted"})
+
+    asyncio.run(scenario())
+    assert mcp_server.SCOUT_SERVICE.workspace_layout.current_session == "scouted"
+    assert "scouted" in str(mcp_server.SCOUT_SERVICE.root())

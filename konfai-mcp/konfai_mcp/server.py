@@ -228,7 +228,7 @@ def _activate_session(name: str) -> None:
 
 
 def _activate_session_locked(name: str) -> None:
-    global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, JOB_REGISTRY, _JOBS_LOCK, _JOBS
+    global WORKSPACE_LAYOUT, SESSION, APP_SERVICE, SCOUT_SERVICE, JOB_REGISTRY, _JOBS_LOCK, _JOBS
     # Build the full replacement state locally, then swap every global in one consecutive block:
     # a concurrent tool (SSE/HTTP transports) must never observe a half-built mix (new layout
     # with the old session) during construction, which includes disk IO for persisted jobs. Readers
@@ -245,12 +245,14 @@ def _activate_session_locked(name: str) -> None:
         workflows=WORKFLOWS,
     )
     app_service = AppService(workspace_layout=workspace_layout)
+    scout_service = ScoutService(workspace_layout)
     WORKSPACE_LAYOUT = workspace_layout
     JOB_REGISTRY = job_registry
     _JOBS_LOCK = job_registry.lock
     _JOBS = job_registry.jobs
     SESSION = session
     APP_SERVICE = app_service
+    SCOUT_SERVICE = scout_service
 
 
 def _read_text_tail(path: Path, max_lines: int = MAX_LOG_TAIL_LINES) -> str:
@@ -579,6 +581,18 @@ def _config_overrides(set_parameters: dict[str, Any] | None) -> list[str] | None
     return [f"{name}={json.dumps(value)}" for name, value in set_parameters.items()]
 
 
+def _case_names(kwargs: dict[str, Any]) -> dict[str, list[str | None]] | None:
+    """``P000`` -> the idx-th file of every input group: konfai_apps stages cases positionally, the names of
+    the source files would otherwise survive only in the log."""
+    groups = kwargs.get("inputs") or (kwargs.get("extra") or {}).get("inputs")
+    if groups is None and "fixed" in kwargs and "moving" in kwargs:  # a registration app: one pair per case
+        groups = [kwargs["fixed"], kwargs["moving"]]
+    if not isinstance(groups, list) or not groups or not all(isinstance(group, list) for group in groups):
+        return None
+    count = max(len(group) for group in groups)
+    return {f"P{idx:03d}": [str(group[idx]) if idx < len(group) else None for group in groups] for idx in range(count)}
+
+
 def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
     """Launch an app job (inference, evaluation, uncertainty, pipeline, fine-tune) from an AppService
     spec via the shared job registry.
@@ -609,6 +623,7 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
         extra_manifest={
             "app_ref": kwargs.get("ref"),
             "output": spec["output"],
+            "cases": _case_names(kwargs),
             "set_parameters": set_parameters,
             "environment": _environment_snapshot(),
         },
@@ -1105,6 +1120,12 @@ def _tool_inspect_dataset(
         payload["groups"].setdefault(group, {}).update(group_statistics)
     payload["statistics_missing_groups"] = missing_groups
     if missing_reasons:
+        # one paragraph per distinct reason: a flat folder of forty files is forty groups with the same reason
+        first_group_by_reason: dict[str, str] = {}
+        for group, reason in missing_reasons.items():
+            first = first_group_by_reason.setdefault(reason, group)
+            if first != group:
+                missing_reasons[group] = f"same reason as group '{first}'"
         payload["statistics_missing_reasons"] = missing_reasons
     payload["statistics_extension"] = selected_extension
     payload["statistics_extension_note"] = (
@@ -1360,7 +1381,9 @@ _APP_BATCH_SIZE_DESC = (
     "Force the inference batch size (overrides the app's config, whose `batch_size: 0` measures it on the GPU)."
 )
 _APP_SET_PARAMETERS_DESC = (
-    "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see describe_app(parameters=True)."
+    "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see describe_app(parameters=True). A dotted "
+    "config path works too (e.g. {'Predictor.Dataset.groups_src.Volume_0.groups_dest.Volume.transforms.Standardize.mean': "
+    "1024} to insert or set a transform parameter)."
 )
 _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 
@@ -1578,8 +1601,11 @@ def run_scout_inspection(
         str, Field(description="What the model should know: modality, dataset, the method inspected.")
     ] = "",
     provider: Annotated[
-        Literal["anthropic", "openai", "mock"],
-        Field(description="anthropic (Claude), openai (GPT or an OpenAI-compatible local server), mock (no API)."),
+        Literal["anthropic", "openai", "claude-code", "codex", "mock"],
+        Field(
+            description="anthropic (Claude, API key), openai (GPT or an OpenAI-compatible local server), claude-code "
+            "(Claude under this machine's Claude Code login), codex (GPT under its Codex login), mock (no model)."
+        ),
     ] = "anthropic",
     model: Annotated[str | None, Field(description="The model id; the provider's default when omitted.")] = None,
     base_url: Annotated[
@@ -3066,6 +3092,13 @@ def preview_volume(
     # the plane's figures beside the picture: a black image is a constant plane or a squashed window
     unique = np.unique(plane)
     figures = {
+        # the whole volume's geometry, from the header alone
+        "volume": {
+            "size_xyz": size_xyz,
+            "spacing_xyz": [round(v, 6) for v in reader.GetSpacing()],
+            "origin_xyz": [round(v, 4) for v in reader.GetOrigin()],
+            "direction": [round(v, 6) for v in reader.GetDirection()],
+        },
         "shape": list(plane.shape),
         "min": float(plane.min()),
         "max": float(plane.max()),
@@ -3496,7 +3529,12 @@ async def read_file(
 ) -> dict[str, Any]:
     if "://" in path:
         # the resources, for a client that cannot read them itself
-        parts = (await mcp.read_resource(path)).contents
+        try:
+            parts = (await mcp.read_resource(path)).contents
+        except Exception as exc:
+            uris = sorted(str(r.uri) for r in await mcp.list_resources())
+            templates = sorted(str(t.uri_template) for t in await mcp.list_resource_templates())
+            raise ValueError(f"{exc}. Resources: {', '.join(uris)}. Templates: {', '.join(templates)}.") from None
         text = "\n".join(
             part.content if isinstance(part.content, str) else f"<{len(part.content)} bytes, {part.mime_type}>"
             for part in parts

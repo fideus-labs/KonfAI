@@ -46,6 +46,13 @@ every `gpu` and `cpu` parameter. A fifth run (no tool error left) asked for `wai
 `run_resume`, `run_prediction`, `run_evaluation` and `run_transform`: the launch then returns the job's final status,
 one call instead of two; `split` descriptions say that an evaluation run writes `Metric_TRAIN.json` whatever cases it
 scored.
+A run on real data (a lung segmentation app on Learn2Reg CT scans, stored in HU + 1024, which the agent
+diagnosed and corrected through `set_parameters`) added: the Scout service follows a session switch (reports
+landed in `default`); an app job's manifest maps `P000`... to the source files of each input group; `read_file` on
+an unknown resource URI lists the resources; `preview_volume` reports the volume's size, spacing, origin and
+direction from the header; `inspect_dataset` says when a folder is flat (one file per case) and repeats a
+statistics-failure reason once; `set_parameters` says a dotted config path works; `run_scout_inspection` accepts
+the `claude-code` and `codex` providers (no API key).
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

@@ -299,6 +299,13 @@ class DatasetInspectionMixin:
             "layout": layout,
             **({"warnings": structure_warnings} if structure_warnings else {}),
             "total_cases": len(case_dirs),
+            # a flat folder (one file per case) is read as ONE case whose files are groups: say so first
+            "layout_hint": (
+                None
+                if per_case or single_store_extension is not None
+                else "flat layout: the root is read as one case and each file as a group. KonfAI reads "
+                "<root>/<case>/<group>.<ext>: give each case its own folder (symlinks are fine)."
+            ),
             "groups": groups,
             # Ten consecutive cases carry the same file names ten times over. What a reader needs is how
             # many distinct layouts exist and one case per layout to look at.
