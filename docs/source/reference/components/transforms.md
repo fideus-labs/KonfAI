@@ -40,7 +40,7 @@ loaded whole.
 
 | Name | Purpose | Key arguments (defaults) | Shape | Inv | Stream |
 | --- | --- | --- | --- | --- | --- |
-| `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0`, `inverse=True` | yes | yes (the grid change) | yes |
+| `Resample` | Change the grid, and optionally apply a map ({doc}`../../config_guide/transform`). | `spacing`, `shape`, `reference`, `reference_group`, `reference_dataset`, `transforms`, `field`, `field_group`, `align="extent"`, `interpolation=None`, `fill=0.0` (or `edge`), `inverse=True` | yes | yes (the grid change) | yes |
 | `TransformPoints` | Push landmarks (`[N, 3]`, LPS) through stored transforms: the map a `Resample` with the same `transforms` pulls an image back through, so fixed landmarks land in the moving image (a registration's TRE). | `transforms` | no | no | no |
 | `Padding` | Pad; `mode` accepts `"constant:<value>"`, `reflect`, `replicate`, `circular`. | `padding=[0,0,0,0,0,0], mode="constant", inverse=True` | yes | yes | yes |
 | `Crop` | Crop to the foreground bounding box. Must come before any stage that changes the grid. | `inverse=True` | yes | yes | yes |
