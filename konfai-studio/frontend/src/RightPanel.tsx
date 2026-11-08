@@ -5,6 +5,7 @@ import { lazyWithRetry } from "./lazy";
 
 // The viewer (NiiVue) loads when first shown, not with the shell.
 const Viewer = lazyWithRetry(() => import("./Viewer"));
+const Scout = lazyWithRetry(() => import("./Scout"));
 import type { JobStream, LiveStatus, Point, RunFeed, Series } from "./useJobStream";
 import type { PaneId } from "./Viewer";
 import { getJson, postJson } from "./api";
@@ -530,10 +531,12 @@ function ExperimentView({
   focusOpen,
   comparePath,
   onComparePathChange,
+  focus,
 }: {
   session: string;
   volumePath: string | null;
   onVolumePathChange: (p: string) => void;
+  focus?: { mm: [number, number, number]; nonce: number } | null; // a Scout observation to put the crosshair on
   refresh?: number;
   dataset?: string; // re-read the experiment when one is picked: it mounts the input tree and a chip
   live?: boolean;
@@ -790,6 +793,7 @@ function ExperimentView({
               <Suspense fallback={<div className="v-failed">Loading the viewer…</div>}>
                 <Viewer
                   path={volumePath}
+                  focus={focus}
                   onPathChange={onVolumePathChange}
                   comparePath={comparePath}
                   onComparePathChange={onComparePathChange}
@@ -1398,6 +1402,8 @@ export default function RightPanel({
   const [expand, setExpand] = useState<{ runKey: string; seriesKey: string } | null>(null); // curve-zoom modal
   const [validating, setValidating] = useState(false);
   const [note, setNote] = useState(""); // a refused action says why, instead of looking like a no-op
+  // Where a Scout observation sits, in mm (LPS): the viewer puts its crosshair there once the volume is loaded.
+  const [scoutFocus, setScoutFocus] = useState<{ mm: [number, number, number]; nonce: number } | null>(null);
 
   useEffect(() => {
     setHasEval(false);
@@ -1613,6 +1619,9 @@ export default function RightPanel({
             Leaderboard
           </button>
         )}
+        <button className={tab === "scout" ? "rtab on" : "rtab"} onClick={() => show("scout")} title="KonfAI Scout's inspection reports">
+          Scout
+        </button>
         {/* A job with no run of its own: an app fetching its bundle, or one that died during warm-up.
             It gets a tab of its own so it is reachable at all; it goes as soon as its real run comes
             alive under another name (the handover above follows it) or the job ends well. A job that
@@ -1688,11 +1697,24 @@ export default function RightPanel({
 
       {/* Both panes stay mounted (hidden when inactive) so NiiVue keeps its volume and the workspace tree
           keeps its expansion/selection across tab switches. */}
-      <div className={tab === "leaderboard" ? "rscroll feed" : "rscroll feed hidden"}>
+      <div className={tab === "leaderboard" || tab === "scout" ? "rscroll feed" : "rscroll feed hidden"}>
         {tab === "leaderboard" && <Leaderboard session={session} />}
+        {tab === "scout" && (
+          <Suspense fallback={<div className="feed-sub">Loading Scout…</div>}>
+            <Scout
+              session={session}
+              onGoTo={(image, mm) => {
+                // the observation's case image in the viewer, the crosshair on the observation
+                onVolumePathChange(image);
+                setScoutFocus({ mm, nonce: Date.now() });
+                show("config");
+              }}
+            />
+          </Suspense>
+        )}
       </div>
 
-      <div className={tab !== "config" && tab !== "leaderboard" ? "rscroll feed" : "rscroll feed hidden"}>
+      <div className={tab !== "config" && tab !== "leaderboard" && tab !== "scout" ? "rscroll feed" : "rscroll feed hidden"}>
         {sel ? (
           <>
             <div className="feed-job-head">
@@ -1845,6 +1867,7 @@ export default function RightPanel({
           session={session}
           volumePath={volumePath}
           onVolumePathChange={onVolumePathChange}
+          focus={scoutFocus}
           comparePath={comparePath}
           onComparePathChange={onComparePathChange}
           refresh={stream.doneNonce}

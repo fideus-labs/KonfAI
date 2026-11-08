@@ -4,6 +4,7 @@
 prune konfai-apps
 prune konfai-mcp
 prune konfai-studio
+prune konfai-scout
 prune apps
 prune docs
 prune examples

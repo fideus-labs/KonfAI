@@ -84,6 +84,17 @@ The published wheel already ships the built front. The default brain uses your
 The same choice is in the interface: pick the backend beside the composer and **Connect…** takes its
 server URL and key, stored `0600` under the workspaces root. The environment wins on start-up.
 
+## Scout: visual inspection of a result
+
+The *Scout* tab of the right panel lists the experiment's [KonfAI Scout](https://github.com/fideus-labs/konfai-scout)
+inspections: a vision model looked at a segmentation, a registration or a synthesis slice by slice, zoomed on what
+looked off, measured regions with KonfAI Eval and wrote down localised defects with their evidence. Each observation
+shows its kind (measured, suspected, confirmed), severity, confidence, the measurements it cites and its evidence
+images; *Go to* loads the case's image in the viewer and puts the crosshair on the observation. An inspection is
+launched by the assistant through konfai-mcp's `run_scout_inspection` and followed like any other job; `pip install
+konfai-scout` beside konfai-mcp, and pass `allow_cloud_images` to let images reach a cloud model (a local
+OpenAI-compatible server needs no flag).
+
 ## Develop from a checkout
 
 The front is git-ignored, so a checkout has to build it. `konfai-mcp` comes first:

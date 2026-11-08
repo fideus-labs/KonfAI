@@ -21,6 +21,7 @@ Three pillars run through the codebase:
 | `konfai-apps/` | **Independent** package `konfai_apps` (app management, HF repos, FastAPI server) with its own `pyproject.toml`, deps, and CI |
 | `konfai-mcp/` | **Independent** package `konfai_mcp` (FastMCP server exposing KonfAI to LLM agents) with its own `pyproject.toml`, tests, CI. On `main` since v1.6.0; published to PyPI by the release workflow. |
 | `konfai-studio/` | **Independent** package `konfai_studio` (FastAPI BFF + built React front: a chatbot web UI over `konfai-mcp`). Own `pyproject.toml`; the front (`konfai_studio/web/*`) is a CI `npm` build, not in git; wheel-only. |
+| `konfai-scout/` | **Independent** package `konfai_scout` (KonfAI Scout: a vision-language agent that inspects a segmentation, registration or synthesis result visually and reports localised defects with evidence and KonfAI Eval measurements). Own `pyproject.toml`, tests, published by the release workflow; depends on `konfai` alone. |
 | `apps/` | Ready-to-use model app bundles (excluded from the `konfai` wheel) |
 | `examples/` | Runnable `Segmentation` / `Synthesis` / `Registration` / `Transform` workflows, then the published apps (index: `examples/README.md`; assume CWD = the example dir) |
 | `docs/` · `tests/` | Sphinx site · core test suite (`tests/unit`, `tests/integration`) |
@@ -118,6 +119,31 @@ A third package exposing a **FastMCP** server. It depends on KonfAI's public API
   with the middle process (regression test: `test_cancel_reaps_the_whole_process_group_including_grandchildren`).
 - **Regenerate derived docs:** after changing a tool's description run
   `python konfai-mcp/scripts/generate_tool_reference.py` (the committed skill reference is generated).
+- **KonfAI Scout and FidOpt (`konfai_mcp/server_scout.py`):** `run_scout_inspection` runs a visual inspection
+  (the separate `konfai-scout` package) as a tracked job and `read_scout_report`/`list_scout_reports` read it
+  back without images; images reach a cloud model only with `allow_cloud_images`. The `fidopt_*` tools reach
+  FidOpt through its own CLI and Python (`KONFAI_MCP_FIDOPT`), launch only `KONFAI_MCP_FIDOPT_ALLOWED`
+  operations, and reimplement nothing of it. Studio's *Scout* tab reads the same reports (`/api/scout/*`).
+
+## 5c. KonfAI Scout (`konfai-scout`)
+
+A fifth package, `konfai_scout`: an agent that looks at ONE result the way a person would at a viewer (coverage
+montages, then the slices, zooms and overlays it asks for), measures regions through KonfAI Eval, and writes a
+versioned report of localised defects (measured property / suspected error / confirmed error, severity,
+confidence, the views and measurements cited). It depends on `konfai` only and reuses it everywhere it can:
+`konfai.data.geometry` for grids and boxes, `konfai.utils.dataset` for the staged layout (`entry_backend`,
+`link_entry`, the same as konfai-apps) and region reads through every backend, `konfai.transform` with `Resample`
+and `TransformPoints` for a registration's warped data, `konfai.evaluate` for every metric,
+`konfai.utils.ITK.field_jacobian_determinant` for the Jacobian view. Scout adds the viewer (`views.py`,
+`planes.py`), the tools and prompts the model drives, the loop, the report and the providers (Claude through the API
+or through Claude Code's Agent SDK, GPT through the API or through the Codex CLI, any OpenAI-compatible local
+server, a mock for tests). Images leave the machine only under `allow_cloud_images`. `note` enforces the epistemic
+rules mechanically (an error cites a view that shows its box, a figure comes from a cited measurement, a
+measurement covers the box; an empty measurement confirms nothing), an optional blind second reading re-reads
+every error from crops alone, and `synthetic.py` builds clean cases (negative controls) beside the planted ones so
+invented defects are counted (`examples/study_controls.py`).
+konfai-mcp exposes it (`run_scout_inspection`, §5b) and Studio shows its reports. `konfai-scout/README.md` and
+`konfai-scout/docs/` hold the user side, the report schema and the studies.
 
 ## 6. Running things
 
@@ -129,15 +155,16 @@ pixi run --environment dev typecheck                              # mypy konfai
 pixi run --environment dev python -m pip install -e "./konfai-apps[server]" && pixi run --environment dev python -m pytest konfai-apps/tests   # apps suite (separate; [server] for the job-server tests)
 pixi run --environment dev python -m pip install -e ./konfai-mcp && pixi run --environment dev python -m pytest konfai-mcp/tests    # mcp suite (separate; the pin is a range from a working tree, exact at a tag)
 pixi run --environment dev python -m pip install -e ./konfai-studio && pixi run --environment dev python -m pytest konfai-studio/tests  # studio suite (separate; build the front first or its two front tests skip)
+pixi run --environment dev python -m pip install -e "./konfai-scout[dev]" && pixi run --environment dev python -m pytest konfai-scout/tests  # scout suite (separate; no API key: fake clients and a mock model)
 ```
 
-The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it the two tests of the served front skip and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `cluster`, `export`, `check`, …).
+The Pixi `dev` env and a bare `pip install .[dev]` carry the same dependency list, imaging extras included (the `dev` extra IS the dev environment). `pixi run test` does **not** run the sibling suites (`konfai-apps/`, `konfai-mcp/`, `konfai-studio/`, `konfai-scout/`); install those packages first (they pull their own runtime deps), exactly as their CI does. Studio's suite also needs its React front on disk (`cd konfai-studio/frontend && npm ci && npm run build`, emitting `konfai_studio/web/`): without it the two tests of the served front skip and the run still reports green. Install runtime extras with `pip install konfai[<extra>]` (`itk`, `hdf5`, `dicom`, `omezarr`, `imaging`, `tensorboard`, `lpips`, `cluster`, `export`, `check`, …).
 
 ## 6b. Releasing
 
 Versions are **tag-derived** (`setuptools_scm`, `^v(?P<version>.*)$`) for every package, so never hand-edit
 a version. Pushing a `v*` tag runs `.github/workflows/publish.yml`: test (core + apps + mcp + studio) → build
-the 9-package matrix (konfai, konfai-apps, konfai-mcp, konfai-studio, and the 5 `apps/*` bundles) → publish to
+the 10-package matrix (konfai, konfai-apps, konfai-mcp, konfai-studio, konfai-scout, and the 5 `apps/*` bundles) → publish to
 PyPI via OIDC → build the Docker image once `konfai` is visible on PyPI. `apps/*` bundles pin `konfai==` and
 `konfai-apps==`, and `konfai-studio` pins `konfai-mcp==` (via its `setup.py`), all the same version, so the
 whole matrix releases in lockstep. `konfai-studio` is the one exception to the pure-Python build: the build

@@ -406,6 +406,32 @@ def test_evaluate_scores_the_stored_values_when_no_chain_is_declared(
     )
 
 
+def test_evaluate_takes_the_none_target_of_a_measure_of_the_output_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A criterion that reads the output alone (a field's Jacobian) is declared under the target ``None``, as a
+    config file declares it: the API loads no dataset group of that name."""
+    monkeypatch.chdir(tmp_path)
+    field = np.zeros((6, 7, 8, 3), dtype=np.float32)
+    field[..., 0] = np.linspace(0.0, 2.0, 8, dtype=np.float32)  # a stretch along x: det J > 0 everywhere
+    image = sitk.GetImageFromArray(field, isVector=True)
+    (tmp_path / "Raw" / "P000").mkdir(parents=True)
+    sitk.WriteImage(image, str(tmp_path / "Raw" / "P000" / "DVF.mha"))
+
+    result = api.evaluate(
+        "FIELD_ALONE",
+        "./Raw:mha",
+        {"DVF": {"None": {"JacobianFolding": {}, "JacobianMin": {}}}},
+        evaluations_dir=tmp_path / "Evaluations",
+        quiet=True,
+        overwrite=True,
+    )
+
+    case = result.metrics["TRAIN"]["case"]
+    assert case["DVF:None:JacobianFolding"]["P000"] == 0.0
+    assert case["DVF:None:JacobianMin"]["P000"] == pytest.approx(1.0 + 2.0 / 7, rel=1e-3)
+
+
 def test_a_local_module_classpath_resolves_from_the_working_directory_as_under_the_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
