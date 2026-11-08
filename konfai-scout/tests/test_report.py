@@ -123,3 +123,12 @@ def test_planted_defects_are_found_by_overlap_and_the_rest_are_invented():
     rows = compare([report], [planted])["rows"]
     assert (rows[0]["planted"], rows[0]["found"], rows[0]["false_positives"]) == (3, 2, 1)
     assert "| false_positives |" in compare_markdown({"rows": rows}).splitlines()[0]
+
+
+def test_a_non_finite_value_is_saved_as_null(tmp_path):
+    report = sample()
+    report.prior_evaluation["PRED:TRUTH:Dice"] = float("nan")
+    report.measurements[0].values["F:JacobianMin"] = float("-inf")
+    loaded = Report.load(report.save(tmp_path))
+    assert loaded.prior_evaluation["PRED:TRUTH:Dice"] is None
+    assert loaded.measurements[0].values["F:JacobianMin"] is None
