@@ -24,6 +24,7 @@ import logging
 import os
 import posixpath
 import re
+import shutil
 import stat
 import sys
 import time
@@ -285,6 +286,29 @@ def _write_tree(target: Path, tree: dict) -> None:
                 if after.st_gid != before.st_gid:
                     os.chown(target, -1, before.st_gid)
                 os.chmod(target, stat.S_IMODE(before.st_mode))
+
+
+def _inline(tree: object) -> bool:
+    """Write every included block of ``tree`` in place of its reference; whether any was."""
+    changed = False
+    if isinstance(tree, MutableMapping | list):
+        pairs = list(tree.items()) if isinstance(tree, MutableMapping) else list(enumerate(tree))
+        for key, value in pairs:
+            if isinstance(value, Included):
+                tree[key] = value = _CommentedMap(value)
+                changed = True
+            changed = _inline(value) or changed
+    return changed
+
+
+def snapshot(source: Path, target: Path) -> None:
+    """Copy the config ``source`` to ``target`` as the record of a run: an included block is written in place, so
+    the record stands alone where it lies and a later change of the included file does not change it."""
+    tree = _load_tree(source)
+    if _inline(tree):
+        _write_tree(target, tree)
+    else:
+        shutil.copyfile(source, target)
 
 
 def _merge_into(target: MutableMapping, source: Mapping) -> None:

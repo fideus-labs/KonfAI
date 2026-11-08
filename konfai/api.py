@@ -521,7 +521,7 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
         tree = _yaml_safe(dict(config), "config")
         _anchor_model_paths(tree, Path.cwd())
         return tree  # type: ignore[return-value]
-    from konfai.utils.config import _yaml
+    from konfai.utils.config import _inline, _yaml
     from konfai.utils.runtime.environment import register_scratch_config
 
     source = Path(config)
@@ -531,7 +531,10 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
     yaml = _yaml()
     with source.open("r", encoding="utf-8") as file:
         tree = yaml.load(file)
-    if _anchor_model_paths(tree, source.resolve().parent):
+    # An included block is written in place: the copy stands alone, and a relative model YAML inside the block
+    # is anchored like one written in the file (the reference would be read again, relative, from the scratch copy).
+    inlined = _inline(tree)
+    if _anchor_model_paths(tree, source.resolve().parent) or inlined:
         with copy.open("w", encoding="utf-8") as file:
             yaml.dump(tree, file)
     else:
@@ -540,18 +543,9 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
 
 
 def _anchor_model_paths(tree: object, base: Path) -> bool:
-    """Make every relative model-YAML ``classpath`` and every relative ``!include`` under ``tree``
-    absolute against ``base``; whether any changed. The catalog spelling (``default|Name.yml``) and a
-    file on the Hub are not paths."""
-    from konfai.utils.config import Included, _hub_file
-
+    """Make every relative model-YAML ``classpath`` under ``tree`` absolute against ``base``;
+    whether any changed. The catalog spelling (``default|Name.yml``) is not a path."""
     changed = False
-    if isinstance(tree, Included):
-        reference, hash_, keys = tree.spec.partition("#")
-        if not Path(reference).is_absolute() and _hub_file(reference, base) is None:
-            tree.spec = str((base / reference).resolve()) + hash_ + keys
-            changed = True
-        return changed  # its own content is read from its file, not from this tree
     if isinstance(tree, dict):
         classpath = tree.get("classpath")
         if (

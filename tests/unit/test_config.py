@@ -1807,14 +1807,20 @@ def test_the_includes_being_read_belong_to_one_load(tmp_path: Path) -> None:
         _including.reset(token)
 
 
-def test_the_api_anchors_a_relative_include_to_the_config_files_directory(tmp_path: Path) -> None:
+def test_the_api_writes_an_included_block_in_place_and_anchors_its_model_yaml(tmp_path: Path) -> None:
+    """The API's copy of a config stands alone in its scratch directory: an included block is written in place, a
+    relative model YAML inside it anchored to the config file's directory as one written in the file would be (kept
+    as a reference, the block would be read again from the copy, its model looked for in the scratch directory)."""
     from konfai.api import _config_copy
 
     folder = tmp_path / "experiment"
     folder.mkdir()
-    (folder / "shared.yml").write_text("Dataset:\n  batch_size: 2\n", encoding="utf-8")
-    (folder / "Evaluation.yml").write_text("Evaluator:\n  Dataset: !include shared.yml#Dataset\n", encoding="utf-8")
-    copy = Path(_config_copy(folder / "Evaluation.yml"))
-    assert copy.parent != folder
-    assert f"Dataset: !include {(folder / 'shared.yml').resolve()}#Dataset" in copy.read_text(encoding="utf-8")
-    assert _load_tree(copy)["Evaluator"]["Dataset"]["batch_size"] == 2
+    (folder / "UNet.yml").write_text("name: UNet\n", encoding="utf-8")
+    (folder / "shared.yml").write_text("Model:\n  classpath: UNet.yml\nDataset:\n  batch_size: 2\n", encoding="utf-8")
+    (folder / "Prediction.yml").write_text(
+        "Predictor:\n  Model: !include shared.yml#Model\n  Dataset: !include shared.yml#Dataset\n", encoding="utf-8"
+    )
+    copy = Path(_config_copy(folder / "Prediction.yml"))
+    assert copy.parent != folder and "!include" not in copy.read_text(encoding="utf-8")
+    tree = _load_tree(copy)["Predictor"]
+    assert (tree["Model"]["classpath"], tree["Dataset"]["batch_size"]) == (str(folder.resolve() / "UNet.yml"), 2)

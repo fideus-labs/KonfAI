@@ -23,7 +23,6 @@ import json
 import math
 import multiprocessing
 import os
-import shutil
 import warnings
 import zipfile
 from collections.abc import Sequence
@@ -47,7 +46,7 @@ from konfai.predictor.output import OutputDatasetLoader
 from konfai.utils import vram
 from konfai.utils.budget import node_local_ranks, set_per_rank_budget
 from konfai.utils.clock import startup_clock
-from konfai.utils.config import _load_tree, apply_config, config, strict_config
+from konfai.utils.config import _load_tree, apply_config, config, snapshot, strict_config
 from konfai.utils.dataset import refuse_shared_single_file
 from konfai.utils.errors import ConfigError, KonfAIWarning, PredictorError
 from konfai.utils.ome_zarr import bound_chunk_cache
@@ -257,7 +256,7 @@ class Predictor(vram.VramAutoPatchMixin, DistributedObject):
                 "Prediction.yml, model or checkpoints, which this run would no longer describe.",
                 "Run with --overwrite to recompute them with this one, or give this run another train_name.",
             )
-        shutil.copyfile(config_file(), archived)
+        snapshot(config_file(), archived)
         weights.write_text(json.dumps(identity))
 
         self.model_composite = ModelComposite(self.model, self.combine, checkpoint_cache_gib=self.checkpoint_cache_gib)
