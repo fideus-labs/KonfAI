@@ -66,3 +66,6 @@ html { -webkit-text-size-adjust: 100%; }
   .docs-nav a[aria-current="page"] { border-color: var(--k-hue); }
   .docs-nav .docs-ref { margin-top: 0; flex-basis: 100%; }
 }
+
+/* A long path in running text breaks inside its line instead of pushing the page wider on a phone. */
+article p code, article li code { overflow-wrap: anywhere; }

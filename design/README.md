@@ -1,7 +1,7 @@
 # KonfAI identity kit
 
 One visual identity for the family: KonfAI (the engine), KonfAI Apps, KonfAI Edge, KonfAI Studio, KonfAI MCP and
-KonfAI Scout, and the sister sites that want to match it. It sits between a console and a landing page: a dark
+KonfAI Scout, and FidOpt. It sits between a console and a landing page: a dark
 ground that is never a neutral grey, Archivo for the titles, IBM Plex for the text and the data, one hue per
 piece, one clock for every motion. `design/` is the source; `sync.sh` copies it to the places that serve it.
 

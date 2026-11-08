@@ -65,11 +65,11 @@ whole metrics only (a 117-label Dice is one row, `per_label_metrics` counts the 
 (`konfai_apps:X`) is imported when a package answers to the name instead of being mistaken for a session file; the
 server instructions name `docs://index`; `describe_app` checks a local bundle's configs against the installed KonfAI's
 schema (`config_checks`), so an obsolete key is known before the first job instead of after three failed ones.
-Three more runs (the benchmark catalogue, adopting an on-disk experiment and packaging it, a transform pipeline on
+Three more runs (FidOpt's catalogue, adopting an on-disk experiment and packaging it, a transform pipeline on
 Learn2Reg CT) added: tools are hinted read-only or destructive (Codex runs the read-only ones without approval);
-the benchmark adapter refuses a dataset its corpus lacks before launching, names one folder per launch, reserves no
-GPU unless asked, takes `wait`, lists one line per dataset with `task=`/`anatomy=` filters and the corpus state, and
-follows a session switch; `read_file` honours
+`fidopt_run` refuses a dataset the corpus lacks before launching, names one folder per launch, reserves no GPU
+unless `--gpu` says so, and takes `wait`; `fidopt_catalog` is one line per dataset with `task=`/`anatomy=` filters,
+the methods of the task, and the corpus state; the FidOpt adapter follows a session switch; `read_file` honours
 `offset` on dataset text files; `package_app_from_session` resolves relative config names in the session and loads
 checkpoints with KonfAI's own loader (konfai-apps); `compare_runs` pairs a metric under two names and cases by order
 when the runs named them differently; `read_training_curves` keeps one point per step, in order; `run_transform`
@@ -102,12 +102,12 @@ selectors fold into a settings popover, chips and the Scout filmstrip scrolling 
 sheet, full-screen modals; one control height per pointer (32 px, 40 px touch), inline SVG icons, no horizontal
 page scroll at 360, 390 and 430 px (a Playwright spec at 390x844 keeps it so). The site gains a curated
 documentation section (`site/docs/`: get started, configuration, workflows, datasets, apps, agents and MCP, Scout,
-Studio) written from the repository's own docs, and a GitHub Pages workflow triggered by hand only.
-The site's landing is a designed page: a pill bar with a search over the pages, the docs,
+Studio, Edge) written from the repository's own docs, and a GitHub Pages workflow triggered by hand only.
+The site's landing is a designed page in the fidopt.io family: a pill bar with a search over the pages, the docs,
 the fifty tools and the apps; a hero over a canvas-drawn volume with drifting slice planes (30 fps cap, still under
-prefers-reduced-motion, stopped when hidden); one card per piece (engine, apps, Studio, MCP, Scout);
+prefers-reduced-motion, stopped when hidden); one card per piece (engine, apps, Edge, Studio, MCP, Scout, FidOpt);
 how it works in three steps; interactive at-a-glance bars; a terminal-style footer. No dependency, no build.
-The site's colours: a tinted ink ground, one hue per piece (engine sage, apps teal, Studio amber, MCP
+The site's colours: a tinted ink ground, one hue per piece (engine sage, apps teal, Edge violet, Studio amber, MCP
 steel blue, Scout coral) carried by kickers, card rails, bars and each inner page's accent, a sage-to-violet glow
 behind the hero; the inner pages share the landing's pill bar, search, footer and dark ground. Contrast measured
 at AA or better on every text role.

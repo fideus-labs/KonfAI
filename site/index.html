@@ -41,21 +41,22 @@
 
 <section class="sec wrap">
   <div class="head"><h2>One engine, one contract<small>The same resolved config trains, predicts, evaluates, and ships as an app an agent or a browser can run.</small></h2></div>
-  <div class="k-card k-reveals">
+  <div class="cards">
     <a class="k-card k-reveal hue-engine" href="docs/get-started.html"><span class="k-kicker">Engine</span><h3>KonfAI</h3><p>Patch-native training, complete medical-image inference and a reusable application from one configuration, without giving up the PyTorch and MONAI components you already trust.</p><span class="go">Get started →</span></a>
     <a class="k-card k-reveal hue-apps" href="apps.html"><span class="k-kicker">Apps</span><h3>KonfAI Apps</h3><p>Five published bundles: TotalSegmentator-KonfAI, MRSegmentator-KonfAI, ImpactSynth, ImpactSeg and IMPACT-Reg. One contract, from a local folder, a Hugging Face repository or an HTTP server; from a one-line CLI, konfai-apps or 3D Slicer.</p><span class="go">See the apps →</span></a>
     <a class="k-card k-reveal hue-scout" href="scout.html"><span class="k-kicker">Inspection</span><h3>KonfAI Scout</h3><p>Looks at a segmentation, a registration or a synthesis the way a person would at a viewer, and reports where it is wrong, with the views that show it and KonfAI Eval's measurements.</p><span class="go">How it reads a result →</span></a>
     <a class="k-card k-reveal wide hue-studio" href="studio.html"><span class="k-kicker">Studio</span><h3>KonfAI Studio</h3><p>A chat web UI over the MCP server. Point it at a dataset and, from the conversation, inspect, train, predict, evaluate, compare and look at the volumes. Your own model endpoint, no API key required.</p><img class="shot" src="assets/studio-screenshot.png" alt="KonfAI Studio: the conversation beside the workspace and the viewer" loading="lazy" width="1600" height="900"><span class="go">Open Studio →</span></a>
     <a class="k-card k-reveal hue-mcp" href="mcp.html"><span class="k-kicker">Agents</span><h3>KonfAI MCP</h3><p>Fifty tools, one per object. An agent inspects a dataset, writes and validates a config, launches and follows runs, compares them and packages the result, from Claude Code, Codex or any MCP client.</p><span class="go">The fifty tools →</span></a>
-    <a class="k-card k-reveal hue-edge" href="docs/edge.html"><span class="tag">coming</span><span class="k-kicker">Edge</span><h3>KonfAI Edge</h3><p>KonfAI apps in a browser tab, no server. Coming.</p><span class="go">What it is →</span></a>
-    <a class="k-card k-reveal hue-engine" href="docs/index.html"><span class="k-kicker">Docs</span><h3>Documentation</h3><p>Ten short pages, one per subject: install, configuration, workflows, datasets, apps, agents, Scout, Studio, Edge. The exhaustive reference stays on Read the Docs.</p><span class="go">Read the docs →</span></a>
+    <a class="k-card k-reveal wide hue-edge" href="docs/edge.html"><span class="tag">coming to this site</span><span class="k-kicker">Edge</span><h3>KonfAI Edge</h3><p>The Rust runtime that runs KonfAI apps in a browser tab, with no server: inference, evaluation and uncertainty beside one viewer, as Web Components another page embeds with one import.</p><span class="go">What it is →</span></a>
+    <a class="k-card k-reveal" href="https://fidopt.io/"><span class="k-kicker">Benchmark</span><h3>FidOpt</h3><p>One open benchmark for biomedical image registration, segmentation and synthesis, every method scored on the same test cases under the same rules. KonfAI MCP reads its catalogue and boards and launches its runs.</p><span class="go">fidopt.io ↗</span></a>
+    <a class="k-card k-reveal wide hue-engine" href="docs/index.html"><span class="k-kicker">Docs</span><h3>Documentation</h3><p>Ten short pages, one per subject: install, configuration, workflows, datasets, apps, agents, Scout, Studio, Edge. The exhaustive reference stays on Read the Docs.</p><span class="go">Read the docs →</span></a>
     <a class="k-card k-reveal" href="https://www.arxiv.org/abs/2508.09823"><span class="k-kicker">Research</span><h3>The paper</h3><p>KonfAI's design and the six MICCAI 2025 challenge results obtained with it, SynthRAD2025, CURVAS, TrackRAD2025 and Panther among them.</p><span class="go">Read on arXiv ↗</span></a>
   </div>
 </section>
 
 <section class="sec wrap steps">
   <div class="head"><h2>How it works<small>One config, one command per workflow, one app at the end.</small></h2></div>
-  <div class="k-card k-reveals">
+  <div class="cards">
     <div class="k-card k-reveal"><span class="k-kicker">1 · One config</span><h3>A YAML per workflow</h3><p>Config.yml for the Trainer, Prediction.yml for the Predictor, Evaluation.yml for the Evaluator, Transform.yml for the Transformer. The resolved file is the record of the run.</p><pre><code>pip install "konfai[imaging]"</code></pre></div>
     <div class="k-card k-reveal"><span class="k-kicker">2 · One command</span><h3>Train, predict, evaluate</h3><p>Dataset patches are read regionally from ITK, HDF5, DICOM and OME-Zarr stores; prediction owns batching, test-time augmentation, ensembles, overlap reconstruction, geometry and output writing.</p><pre><code>konfai TRAIN -c Config.yml --gpu 0
 konfai PREDICTION -c Prediction.yml --gpu 0
@@ -67,7 +68,7 @@ konfai EVALUATION -c Evaluation.yml</code></pre></div>
 
 <section class="sec wrap glance">
   <div class="head"><h2>At a glance<small>Every bar opens the page it counts.</small></h2><a href="mcp.html">Open the tool table</a></div>
-  <div class="k-card k-reveals">
+  <div class="cards">
     <div class="k-card k-reveal wide hue-mcp"><span class="k-kicker">The fifty MCP tools, by stage</span>
       <div class="rows">
         <a href="mcp.html#discovery"><span>Discovery</span><span class="track"><span class="fill" style="width:50%"></span></span><span class="n">6</span></a>
@@ -77,7 +78,7 @@ konfai EVALUATION -c Evaluation.yml</code></pre></div>
         <a href="mcp.html#execution-and-monitoring"><span>Execution and monitoring</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="n">12</span></a>
         <a href="mcp.html#apps"><span>Apps</span><span class="track"><span class="fill" style="width:67%"></span></span><span class="n">8</span></a>
         <a href="mcp.html#visual-inspection"><span>Visual inspection</span><span class="track"><span class="fill" style="width:17%"></span></span><span class="n">2</span></a>
-        <a href="mcp.html#benchmarks"><span>Benchmarks</span><span class="track"><span class="fill" style="width:25%"></span></span><span class="n">3</span></a>
+        <a href="mcp.html#fidopt"><span>FidOpt</span><span class="track"><span class="fill" style="width:25%"></span></span><span class="n">3</span></a>
         <a href="mcp.html#session-lifecycle"><span>Session lifecycle</span><span class="track"><span class="fill" style="width:25%"></span></span><span class="n">3</span></a>
       </div>
     </div>
@@ -117,7 +118,7 @@ konfai EVALUATION -c Evaluation.yml</code></pre></div>
     <div><h4>Engine</h4><a href="docs/get-started.html">Get started</a><a href="docs/configuration.html">Configuration</a><a href="docs/workflows.html">Workflows</a><a href="docs/datasets.html">Datasets</a></div>
     <div><h4>Apps</h4><a href="apps.html">Published apps</a><a href="docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
     <div><h4>Agents</h4><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a></div>
-    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
   </div>
 </footer>
 <script src="landing.js" defer></script>

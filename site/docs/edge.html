@@ -36,7 +36,20 @@
 <p class="lead">KonfAI apps in a browser tab, no server.</p>
 
 <section>
-<p>KonfAI Edge: KonfAI apps in a browser tab, no server. Coming. Until then, the apps run through <a href="apps.html">konfai-apps</a> on your machine, or through <a href="studio.html">Studio</a>.</p>
+<h2>What it is</h2>
+<p>KonfAI Edge is the Rust runtime that runs KonfAI apps in a browser tab, with no server: the apps of the Hugging Face catalogue, their inference, evaluation and uncertainty, beside one viewer, on the machine that opens the page.</p>
+</section>
+<section>
+<h2>What the demo holds</h2>
+<ul>
+<li>Web Components: <code>&lt;konfai-app&gt;</code> (an app's inference, evaluation and uncertainty beside one viewer) and its parts <code>&lt;konfai-inference&gt;</code>, <code>&lt;konfai-evaluation&gt;</code>, <code>&lt;konfai-uncertainty&gt;</code>, <code>&lt;konfai-viewer&gt;</code>, plus <code>&lt;konfai-workflow&gt;</code> for a TRANSFORM or EVALUATION program over a dataset folder. Another page embeds them with one import.</li>
+<li>The site that consumes them: a catalogue, one page per app, the workflows.</li>
+<li>Streamed processing of large images and remote data sources; a job tray with progress, previews, cancellation and downloadable results.</li>
+</ul>
+</section>
+<section>
+<h2>Where it will live</h2>
+<p>This site is the home of that demo: once it is released, the demo moves under <code>edge/</code> here and this page links to it, app by app. Until then, the apps run through <a href="apps.html">konfai-apps</a> on your machine, or through <a href="studio.html">Studio</a>.</p>
 </section>
 
 </article>
@@ -48,7 +61,7 @@
     <div><h4>Engine</h4><a href="../docs/get-started.html">Get started</a><a href="../docs/configuration.html">Configuration</a><a href="../docs/workflows.html">Workflows</a><a href="../docs/datasets.html">Datasets</a></div>
     <div><h4>Apps</h4><a href="../apps.html">Published apps</a><a href="../docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
     <div><h4>Agents</h4><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a></div>
-    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
   </div>
 </footer>
 <script src="../landing.js" data-root="../" defer></script>

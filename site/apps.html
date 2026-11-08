@@ -50,7 +50,7 @@ konfai-apps infer VBoussot/ImpactSynth:MR -i input_mr.nii.gz -o output/</code></
       <tr><td><a href="https://github.com/fideus-labs/KonfAI/tree/main/apps/mrsegmentator">MRSegmentator-KonfAI</a></td><td>whole-body MRI segmentation with MRSegmentator models; 40 labels, 5-fold ensemble</td><td>21 s, 5.3 GB RAM, 16.3 GB VRAM; 1.1 to 1.7 times faster and 1.4 to 5.4 times less host RAM than the original</td></tr>
       <tr><td><a href="https://github.com/fideus-labs/KonfAI/tree/main/apps/impact_synth">ImpactSynth</a></td><td>synthetic CT generation with IMPACT-Synth models; three MR and CBCT to sCT variants, 2.5D UNet++, 5 models each</td><td><code>MR</code>: 24.6 s, 2.7 GB RAM, 12.8 GB VRAM</td></tr>
       <tr><td><a href="https://github.com/fideus-labs/KonfAI/tree/main/apps/impact_seg">ImpactSeg</a></td><td>multimodal anatomical segmentation with IMPACT-Seg models; one model segments 11 structures from CT, MRI or CBCT</td><td>3.3 s, 1.7 GB RAM, 3.9 GB VRAM</td></tr>
-      <tr><td><a href="https://github.com/fideus-labs/KonfAI/tree/main/apps/impact_reg">IMPACT-Reg</a></td><td>multimodal medical image registration with IMPACT-Reg presets; 13 presets</td><td><code>_SyN</code>: 108 s, 6.3 GB RAM, 16.0 GB VRAM</td></tr>
+      <tr><td><a href="https://github.com/fideus-labs/KonfAI/tree/main/apps/impact_reg">IMPACT-Reg</a></td><td>multimodal medical image registration with IMPACT-Reg presets; 13 presets across elastix with IMPACT, ConvexAdam and FireANTs</td><td><code>FireANTs_SyN</code>: 108 s, 6.3 GB RAM, 16.0 GB VRAM</td></tr>
     </tbody>
   </table>
 </section>
@@ -72,7 +72,7 @@ python -m pip install "konfai-apps[server]"     # host apps behind an HTTP API</
     <div><h4>Engine</h4><a href="docs/get-started.html">Get started</a><a href="docs/configuration.html">Configuration</a><a href="docs/workflows.html">Workflows</a><a href="docs/datasets.html">Datasets</a></div>
     <div><h4>Apps</h4><a href="apps.html">Published apps</a><a href="docs/edge.html">KonfAI Edge</a><a href="https://huggingface.co/VBoussot">Hugging Face</a></div>
     <div><h4>Agents</h4><a href="mcp.html">MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a></div>
-    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a></div>
+    <div><h4>About</h4><a href="https://github.com/fideus-labs/KonfAI">GitHub</a><a href="https://konfai.readthedocs.io/en/latest/">Full reference</a><a href="https://www.arxiv.org/abs/2508.09823">Paper</a><a href="https://fidopt.io/">FidOpt</a></div>
   </div>
 </footer>
 <script src="landing.js" data-root="" defer></script>

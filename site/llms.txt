@@ -21,7 +21,7 @@
 - [Agents and MCP](docs/agents-mcp.html): what the MCP server lets an agent do, the tools by stage, the entry tools
 - [Scout](docs/scout.html): the visual inspector, its three kinds of statement, how to install it
 - [Studio](docs/studio.html): the chat web UI, how to install it, the model brains
-- [Edge](docs/edge.html): KonfAI Edge: KonfAI apps in a browser tab, no server. Coming.
+- [Edge](docs/edge.html): KonfAI Edge, the Rust runtime that runs the apps in a browser tab, and where its demo will live
 
 ## Source documents
 
@@ -32,3 +32,4 @@
 - [konfai-studio README](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/README.md) and its [specification](https://github.com/fideus-labs/KonfAI/blob/main/konfai-studio/docs/STUDIO_SPEC.md)
 - [AGENTS.md](https://github.com/fideus-labs/KonfAI/blob/main/AGENTS.md): the contributor's guide
 - [Documentation](https://konfai.readthedocs.io/en/latest/)
+- [FidOpt](https://fidopt.io/): the benchmark KonfAI MCP reads through FidOpt's own code
