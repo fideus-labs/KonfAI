@@ -21,6 +21,9 @@ function dimsLabel(nv: Niivue | null): string {
 
 const volumeUrl = (path: string) => `/files/volume?path=${encodeURIComponent(path)}`;
 
+// A point (mm, LPS) to put the crosshair on, in the volume at `path`.
+export type Focus = { mm: [number, number, number]; nonce: number; path: string };
+
 // One NiiVue canvas that follows a path prop. Reused for the primary view and the compare pane; `onReady`
 // hands the instance up so the two panes can be crosshair/zoom-coupled.
 function Canvas({
@@ -120,7 +123,7 @@ export default function Viewer({
   focus,
 }: {
   path: string | null;
-  focus?: { mm: [number, number, number]; nonce: number } | null; // a point (mm, LPS) to put the crosshair on
+  focus?: Focus | null;
   onPathChange: (p: string) => void;
   comparePath?: string | null;
   onComparePathChange?: (p: string) => void;
@@ -147,12 +150,18 @@ export default function Viewer({
   const nvB = useRef<Niivue | null>(null);
   // A focus is applied when it arrives and again when a volume finishes loading: the volume it points into is
   // usually still being fetched when the request comes in (a "Go to" that also loads the image). The point is
-  // converted through the volume on screen, so nothing is applied before the requested path has loaded.
-  const pendingFocus = useRef<{ mm: [number, number, number]; nonce: number } | null>(null);
+  // converted through the volume on screen, so nothing is applied before the requested path has loaded, and a
+  // focus is dropped once another volume is picked: its point is not in that one.
+  const pendingFocus = useRef<Focus | null>(null);
   const appliedFocus = useRef(0);
   const applyFocus = (nv: Niivue | null) => {
     const wanted = pendingFocus.current;
-    if (!nv || !wanted || !path || nv.volumes[0]?.url !== volumeUrl(path) || appliedFocus.current === wanted.nonce) return;
+    if (!nv || !wanted || appliedFocus.current === wanted.nonce) return;
+    if (wanted.path !== path) {
+      pendingFocus.current = null;
+      return;
+    }
+    if (nv.volumes[0]?.url !== volumeUrl(path)) return;
     // Scout speaks ITK's LPS; NiiVue's world is RAS: flip x and y.
     const ras = [-wanted.mm[0], -wanted.mm[1], wanted.mm[2]];
     try {

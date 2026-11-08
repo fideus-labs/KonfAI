@@ -21,7 +21,7 @@ type Observation = {
   measurements: string[];
   notes: string[];
 };
-type Measurement = { id: string; kind: string; reference: boolean; values: Record<string, number | null> };
+type Measurement = { id: string; kind: string; reference: boolean; values: Record<string, number | string | null> };
 type ReportSummary = {
   name: string;
   task: string | null;
