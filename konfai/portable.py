@@ -436,7 +436,7 @@ def moves_the_volume(step: dict[str, Any]) -> bool:
     return not (step["op"] == "cast" and str(step.get("dtype", "")).startswith("float"))
 
 
-def refuse_a_late_crop(name: str, moved: str | None, error: type[KonfAIError]) -> None:
+def refuse_a_late_crop(name: str, moved: str | None, error: type[KonfAIError], run: str = _PREDICT) -> None:
     """konfai's ``Crop`` keeps the box of the group as stored and the runtime the box of the volume it is
     handed: one box only while no stage before it moved the grid or the values."""
     if base_name(name) != "Crop" or moved is None:
@@ -444,7 +444,7 @@ def refuse_a_late_crop(name: str, moved: str | None, error: type[KonfAIError]) -
     raise error(
         f"'{name}' follows '{moved}', and konfai crops to the box it finds in the group as stored, whatever"
         f" '{moved}' did to the volume, where the portable runtime finds the box in the volume it is handed.",
-        _or_konfai("Put the Crop first in the chain, or run what precedes it as a chain of its own", _PREDICT),
+        _or_konfai("Put the Crop first in the chain, or run what precedes it as a chain of its own", run),
     )
 
 
@@ -2197,10 +2197,10 @@ def compile_output(
 
 def _portable_root(path: str | Path) -> str:
     """A path the runtime resolves against its ``--root``: relative to the working directory when it
-    sits below it, absolute otherwise."""
+    sits below it, with slashes whatever the system compiling, absolute otherwise."""
     text = str(path).rstrip("/") or "/"
     absolute, cwd = Path(text).absolute(), Path.cwd()
-    return str(absolute.relative_to(cwd)) if absolute.is_relative_to(cwd) else text
+    return absolute.relative_to(cwd).as_posix() if absolute.is_relative_to(cwd) else text
 
 
 def compile_prediction(
