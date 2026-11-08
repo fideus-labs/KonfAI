@@ -37,7 +37,7 @@ SERVER_INSTRUCTIONS = (
     "summarize_session); package or import apps (package_app_from_session, fetch_app, app_sources); score a "
     "registration (run_registration_evaluate); inspect a result visually with KonfAI Scout (run_scout_inspection, "
     "read_scout_report); run FidOpt benchmarks (fidopt_catalog, fidopt_table, fidopt_run). Start with "
-    "describe_konfai_capabilities when unsure. Every run is a job: launch it, then get_job_status(wait=True) or "
+    "describe_konfai_capabilities when unsure. Every run is a job: launch it (wait=True returns its final status), then get_job_status(wait=True) or "
     "read_live_metrics, and read_job_log when it fails. A tool that imports an app's code or installs its "
     "requirements needs allow_untrusted_code=True; initialize_session(overwrite=True), delete_run and "
     "session(action='delete') destroy data. Resources: docs://* hold the detailed guides, session://current/* the "

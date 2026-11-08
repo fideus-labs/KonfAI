@@ -2211,7 +2211,10 @@ def compare_runs(
     ],
     run_b: Annotated[str, Field(description="train_name or app-trial label of the run compared against run_a.")],
     split: Annotated[
-        str, Field(description="Metric split, uppercased to Metric_<SPLIT>.json (default 'TRAIN').")
+        str,
+        Field(
+            description="The Metric_<SPLIT>.json to read; an evaluation run writes TRAIN whatever cases it scored (default 'TRAIN')."
+        ),
     ] = "TRAIN",
     metric: Annotated[
         str | None,
@@ -2544,7 +2547,10 @@ def summarize_session(
         str | None, Field(description="Metric filter for the embedded leaderboard (default: every available metric).")
     ] = None,
     leaderboard_split: Annotated[
-        str, Field(description="Metric split for the embedded leaderboard (default 'TRAIN').")
+        str,
+        Field(
+            description="The Metric_<SPLIT>.json the leaderboard reads; an evaluation run writes TRAIN whatever cases it scored (default 'TRAIN')."
+        ),
     ] = "TRAIN",
     include_log_tail: Annotated[
         bool, Field(description="Include the latest session log tail (default False).")
@@ -2661,6 +2667,19 @@ def leaderboard(
     )
 
 
+_WAIT_DESC = (
+    "Block until the job ends (or timeout_s expires) and return its final status instead of the launch payload."
+)
+_WAIT_TIMEOUT_DESC = "wait: seconds before returning the current status with timed_out=true."
+
+
+def _launched(payload: dict[str, Any], wait: bool, timeout_s: float | None) -> dict[str, Any]:
+    """A launch payload, or the job's final status when the caller asked to wait: one call instead of two."""
+    if wait and payload.get("job_id"):
+        return _tool_wait_for_job(str(payload["job_id"]), timeout_s)
+    return payload
+
+
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_train"]))
 def run_train(
     gpu: Annotated[
@@ -2694,6 +2713,8 @@ def run_train(
             description="SLURM submission via submitit: exactly the keys {name, memory, num_nodes, time_limit}; omit to run locally."
         ),
     ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch a training job from the session train config (Config.yml or an alternate config_file)."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
@@ -2725,7 +2746,7 @@ def run_train(
     cpu_fallback = _cpu_fallback_warnings(normalized_gpu, cluster, cpu=cpu)
     if cpu_fallback:
         payload["warnings"] = cpu_fallback
-    return payload
+    return _launched(payload, wait, timeout_s)
 
 
 def _strip_to_weights_only(checkpoint: Path) -> Path:
@@ -2785,6 +2806,8 @@ def run_resume(
             description="Alternate train config filename in the session workspace (e.g. 'Config_GAN.yml'; default Config.yml)."
         ),
     ] = None,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Resume training from a checkpoint (optimizer/scheduler/epoch restored) via KonfAI's RESUME command."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
@@ -2830,7 +2853,7 @@ def run_resume(
         resume_model=resolved_model,
         lr=lr,
     )
-    return _launch_job(
+    launched = _launch_job(
         "train",
         job_spec["command"],
         config_path,
@@ -2843,6 +2866,7 @@ def run_resume(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
     )
+    return _launched(launched, wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_batch"]))
@@ -3091,6 +3115,8 @@ def run_prediction(
     ] = False,
     quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch a prediction job from the current session `Prediction.yml`."""
     normalized_models = _normalize_string_list(models, field_name="models")
@@ -3124,7 +3150,7 @@ def run_prediction(
         quiet=quiet,
         single_process=single_process,
     )
-    return _launch_job(
+    launched = _launch_job(
         "prediction",
         job_spec["command"],
         config_path,
@@ -3136,6 +3162,7 @@ def run_prediction(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
     )
+    return _launched(launched, wait, timeout_s)
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["run_evaluation"]))
@@ -3155,6 +3182,8 @@ def run_evaluation(
     ] = False,
     quiet: Annotated[bool, Field(description="Quiet console output (KonfAI --quiet).")] = False,
     single_process: Annotated[bool, Field(description="Inline, one process (no DDP spawn, no GPU setup).")] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     """Launch an evaluation job from the current session `Evaluation.yml`."""
     normalized_gpu = _normalize_int_list(gpu, field_name="gpu")
@@ -3173,7 +3202,7 @@ def run_evaluation(
         quiet=quiet,
         single_process=single_process,
     )
-    return _launch_job(
+    launched = _launch_job(
         "evaluation",
         job_spec["command"],
         config_path,
@@ -3182,6 +3211,7 @@ def run_evaluation(
         kwargs=job_spec["kwargs"],
         devices=_job_devices(normalized_gpu, cpu),
     )
+    return _launched(launched, wait, timeout_s)
 
 
 def _tool_run_transform(
@@ -3564,10 +3594,16 @@ def run_transform(
     overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
     quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,
     single_process: Annotated[bool, Field(description="Run inline in one process (no DDP spawn).")] = False,
+    wait: Annotated[bool, Field(description=_WAIT_DESC)] = False,
+    timeout_s: Annotated[float | None, Field(description=_WAIT_TIMEOUT_DESC)] = None,
 ) -> dict[str, Any]:
     if dry_run:
         return _tool_plan_transform(cpu=cpu, overwrite=overwrite)
-    return _tool_run_transform(gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process)
+    return _launched(
+        _tool_run_transform(gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process),
+        wait,
+        timeout_s,
+    )
 
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["session"]))

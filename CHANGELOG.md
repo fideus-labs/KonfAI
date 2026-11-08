@@ -42,7 +42,10 @@ builtin name (`Dice`) through the catalog; a checkpoint path given to `check_con
 `session(action='create', from_example=...)` creates and seeds in one call; the step-0 tqdm line of a stage (which
 repeats the previous stage's values) is no longer parsed as a metric; an isolated subprocess error starts with the
 exception's own line; `leaderboard` without a metric no longer carries an empty `leaderboard` list; one wording for
-every `gpu` and `cpu` parameter.
+every `gpu` and `cpu` parameter. A fifth run (no tool error left) asked for `wait=True` on `run_train`,
+`run_resume`, `run_prediction`, `run_evaluation` and `run_transform`: the launch then returns the job's final status,
+one call instead of two; `split` descriptions say that an evaluation run writes `Metric_TRAIN.json` whatever cases it
+scored.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

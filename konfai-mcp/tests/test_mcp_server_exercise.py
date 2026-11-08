@@ -57,3 +57,15 @@ def test_a_bare_builtin_name_is_inspected(load_mcp_server: Callable[[], ModuleTy
     payload = asyncio.run(scenario())
     assert payload["ok"] is True, payload.get("limitations")
     assert payload["resolved_classpath"].endswith(":Dice")
+
+
+def test_a_launch_waits_only_when_asked(
+    load_mcp_server: Callable[[], ModuleType], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_server = load_mcp_server()
+    monkeypatch.setattr(
+        mcp_server, "_tool_wait_for_job", lambda job_id, timeout_s: {"waited": job_id, "timeout_s": timeout_s}
+    )
+    assert mcp_server._launched({"job_id": "j1"}, False, None) == {"job_id": "j1"}
+    assert mcp_server._launched({"ok": False, "blocked": True}, True, None) == {"ok": False, "blocked": True}
+    assert mcp_server._launched({"job_id": "j1"}, True, 30) == {"waited": "j1", "timeout_s": 30}
