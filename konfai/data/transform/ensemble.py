@@ -17,8 +17,9 @@
 
 """Folds over a stacked member axis: spread, disagreement, magnitudes, inference stacks."""
 
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -34,13 +35,24 @@ from konfai.utils.utils import split_path_spec
 MEMBERS_ATTRIBUTE = "konfai_members"
 
 
+def holds_stack(file_format: str) -> bool:
+    """Whether a dataset of ``file_format`` keeps a stack's member count in its header: MetaImage, NRRD, OME-Zarr,
+    KonfAI's HDF5. NIfTI's header keeps no free key, and a transform file holds one transform."""
+    return file_format.split("@")[0] in ("mha", "nrrd", "omezarr", "h5")
+
+
+def member_count(shape: Iterable[int], header: Attribute) -> int:
+    """How many members a stack of ``shape`` holds: its header's count; one a channel without it, as a stack of
+    one-channel members always was."""
+    return int(float(header[MEMBERS_ATTRIBUTE])) if MEMBERS_ATTRIBUTE in header else int(next(iter(shape)))
+
+
 def stack_members(tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-    """A stack ``[M x C, *spatial]`` as ``[M, C, *spatial]``, its member count read off its header, and the count
-    dropped from ``cache_attribute``: what a stage makes of the members is no stack any more. Without the key, every
-    channel is a member, as a stack of one-channel members always was."""
-    members = (
-        int(float(cache_attribute.pop(MEMBERS_ATTRIBUTE))) if MEMBERS_ATTRIBUTE in cache_attribute else tensors.shape[0]
-    )
+    """A stack ``[M x C, *spatial]`` as ``[M, C, *spatial]``, its member count read off its header (:func:`member_count`),
+    and the count dropped from ``cache_attribute``: what a stage makes of the members is no stack any more."""
+    members = member_count(tensors.shape, cache_attribute)
+    if MEMBERS_ATTRIBUTE in cache_attribute:
+        cache_attribute.pop(MEMBERS_ATTRIBUTE)
     if members < 1 or tensors.shape[0] % members:
         raise TransformError(
             f"A stack of {tensors.shape[0]} channels does not hold {members} members of one channel count.",
@@ -60,40 +72,51 @@ class MemberView:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._dataset, name)
 
-    def _narrow(self, group: str, shape: list[int], header: Attribute) -> tuple[int, Attribute] | None:
-        """The member's first channel and its header, for a stack of ``groups``; ``None`` for anything else."""
+    def _narrow(self, group: str, name: str) -> tuple[list[int], int, int, Attribute] | None:
+        """For a stack of ``groups``: its shape, the member's first channel, its channel count and its header (the
+        stack's, without the count); ``None`` for anything else."""
+        shape, header = self._dataset.get_infos(group, name)
         if group not in self._groups or MEMBERS_ATTRIBUTE not in header:
             return None
-        channels = int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE]))
+        channels = int(shape[0]) // member_count(shape, header)
         header = Attribute(header)
         header.pop(MEMBERS_ATTRIBUTE)
-        return self._member * channels, header
+        return shape, self._member * channels, channels, header
 
     def get_infos(self, group: str, name: str) -> tuple[list[int], Attribute]:
-        shape, header = self._dataset.get_infos(group, name)
-        narrowed = self._narrow(group, shape, header)
+        narrowed = self._narrow(group, name)
         if narrowed is None:
-            return shape, header
-        return [int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE])), *shape[1:]], narrowed[1]
+            return self._dataset.get_infos(group, name)
+        shape, _, channels, header = narrowed
+        return [channels, *shape[1:]], header
 
     def read_data(self, group: str, name: str) -> tuple[np.ndarray, Attribute]:
-        shape, header = self._dataset.get_infos(group, name)
-        narrowed = self._narrow(group, shape, header)
+        narrowed = self._narrow(group, name)
         if narrowed is None:
             return self._dataset.read_data(group, name)
-        channels = int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE]))
+        shape, _, channels, _ = narrowed
         return self.read_data_slice(group, name, (slice(0, channels), *(slice(0, extent) for extent in shape[1:])))
 
     def read_data_slice(self, group: str, name: str, region: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
-        shape, header = self._dataset.get_infos(group, name)
-        narrowed = self._narrow(group, shape, header)
+        narrowed = self._narrow(group, name)
         if narrowed is None:
             return self._dataset.read_data_slice(group, name, region)
-        first, member_header = narrowed
-        channels = int(shape[0]) // int(float(header[MEMBERS_ATTRIBUTE]))
+        _, first, channels, member_header = narrowed
         start, stop, _ = region[0].indices(channels)
         data, _ = self._dataset.read_data_slice(group, name, (slice(first + start, first + stop), *region[1:]))
         return data, member_header
+
+
+@contextmanager
+def as_member(stage: Any, stacked: set[str], member: int) -> Iterator[None]:
+    """``stage`` reading member ``member`` of the stacks under ``stacked`` alone (:class:`MemberView`), its datasets
+    given back after: a stage that applies a stored transform applies one member at a time."""
+    datasets = stage.datasets
+    stage.datasets = [cast(Dataset, MemberView(dataset, stacked, member)) for dataset in datasets]
+    try:
+        yield
+    finally:
+        stage.datasets = datasets
 
 
 def stacked_groups(stage: Any, groups: Iterable[str], name: str) -> tuple[set[str], int]:
@@ -107,7 +130,7 @@ def stacked_groups(stage: Any, groups: Iterable[str], name: str) -> tuple[set[st
         header = dataset.get_infos(group, name)[1]
         if MEMBERS_ATTRIBUTE in header:
             stacked.add(group)
-            counts.add(int(float(header[MEMBERS_ATTRIBUTE])))
+            counts.add(member_count([], header))
     if len(counts) > 1:
         raise TransformError(
             f"The stacks of case '{name}' hold {sorted(counts)} members: one member of each is applied together.",
@@ -287,17 +310,13 @@ class InferenceStack(Transform):
     # volume, which is what SLAB declares.
     locality = LocalityKind.SLAB
 
-    def _destination(self, channels: int) -> Dataset:
+    def _destination(self) -> Dataset:
         """Where the stack goes: the dataset the config names; else the output's, or MetaImage beside the output where
-        its form cannot hold the stack (a transform file; NIfTI, for members of several channels), as konfai-apps'
-        ensembles do."""
+        its form cannot hold the stack (:func:`holds_stack`), as konfai-apps' ensembles do."""
         if self.dataset:
             return self.dataset
         output = self.datasets[-1]
-        form = output.file_format.split("@")[0]
-        if form == "itktransform" or (channels > 1 and form in ("nii", "nii.gz")):
-            return Dataset(output.filename, "mha")
-        return output
+        return output if holds_stack(output.file_format) else Dataset(output.filename, "mha")
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         """The members ``[M, C, *spatial]`` as a stack: member-major channels ``[M x C, *spatial]``; a label map per
@@ -320,7 +339,7 @@ class InferenceStack(Transform):
     def __call__(self, name: str, tensors: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
         if tensors.shape[0] == 1:
             return tensors.squeeze(0)
-        dataset = self._destination(tensors.shape[1])
+        dataset = self._destination()
         dataset.write(
             "InferenceStack",
             name,
@@ -349,7 +368,7 @@ class InferenceStack(Transform):
                 stack = self._stack(members)
                 if written == 0:
                     total, dtype, channels = members.sum(0, dtype=torch.float32), members.dtype, members.shape[1]
-                    dataset = self._destination(channels)
+                    dataset = self._destination()
                     if count * members.shape[0] > 1:
                         shape = [count * len(stack), *stack.shape[1:]]
                         header = _stack_attributes(cache_attribute, count * members.shape[0], dataset, channels)
@@ -392,7 +411,7 @@ class InferenceStack(Transform):
         if tensor.shape[0] == 1:
             return tensor.squeeze(0)
         stack = self._stack(tensor)
-        dataset = self._destination(tensor.shape[1])
+        dataset = self._destination()
         header = _stack_attributes(cache_attribute, tensor.shape[0], dataset, tensor.shape[1])
         if name not in self._stack_sinks and name not in self._stack_buffers:
             sink = dataset.open_data_stream(

@@ -507,9 +507,10 @@ class PointSpread(Criterion):
 
 
 def _ranks(values: torch.Tensor) -> torch.Tensor:
-    ranks = torch.empty_like(values)
-    ranks[values.argsort()] = torch.arange(values.numel(), dtype=values.dtype)
-    return ranks
+    """The ranks Spearman's correlation takes: tied values share the mean of the ranks they span."""
+    _, inverse, counts = torch.unique(values, return_inverse=True, return_counts=True)
+    first = torch.cumsum(counts, 0) - counts  # each distinct value's first rank, from 0
+    return (first + (counts - 1) / 2).to(values.dtype)[inverse]
 
 
 class SpreadCalibration(Criterion):

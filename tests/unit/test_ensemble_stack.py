@@ -193,6 +193,11 @@ def test_the_spread_of_points_its_calibration_and_a_quantile() -> None:
     # the error grows with the spread: a calibration of 1
     reference = members[0].mean(0) + torch.from_numpy(per_landmark)[:, None] * torch.tensor([1.0, 0.0, 0.0])
     assert SpreadCalibration()(members, reference[None])[1] == pytest.approx(1.0)
+    # ties share their mean rank: spreads 1, 1, 2, 2 against errors 1, 2, 1, 2 say nothing, a calibration of 0
+    two = torch.zeros(1, 2, 4, 3)
+    two[0, 1, :, 0] = torch.tensor([1.0, 1.0, 2.0, 2.0]) * np.sqrt(2.0)  # the spread of two members: |d| / sqrt(2)
+    tied = two[0].mean(0) + torch.tensor([1.0, 2.0, 1.0, 2.0])[:, None] * torch.tensor([0.0, 1.0, 0.0])
+    assert SpreadCalibration()(two, tied[None])[1] == pytest.approx(0.0, abs=1e-6)
     values = torch.arange(101.0)[None, None]
     assert Quantile(0.95)(values)[1] == pytest.approx(95.0) and Quantile(0.95).get_name() == "Quantile95"
 
@@ -225,3 +230,33 @@ def test_a_streamed_save_drops_what_the_chain_removed() -> None:
     header = _sweep_header(evolved, scope, before)
     assert MEMBERS_ATTRIBUTE not in header and DISPLACEMENT_FIELD_ATTRIBUTE not in header
     assert "Added" in header and "Spacing" in header
+
+
+def test_every_member_pulls_the_case_from_its_own_grid(tmp_path: Path) -> None:
+    """A moving image on a grid of its own, pulled onto the fixed one through each member of a stack: the second
+    member reads the case where it lies, as the first does, not on the grid the first one left in the header."""
+    import SimpleITK as sitk
+    from konfai.data.transform import Resample
+    from konfai.utils.dataset import image_to_data
+
+    fixed = sitk.Image([10, 9, 8], sitk.sitkFloat32)
+    fixed.SetSpacing((1.5, 1.0, 2.0))
+    fixed.SetOrigin((1.0, 2.0, 3.0))
+    shifts = (0.5, -1.0)
+    members = torch.stack([torch.full((3, 8, 9, 10), shift) for shift in shifts])
+    InferenceStack(dataset=f"{tmp_path / 'stack'}:mha")("P000", members, _attributes(field=True))
+    sitk.WriteImage(fixed, str(tmp_path / "stack" / "P000" / "Fixed.mha"))
+    moving = sitk.GetImageFromArray(np.random.default_rng(0).normal(size=(12, 14, 16)).astype(np.float32))
+    moving.SetSpacing((1.0, 0.8, 1.5))
+    moving.SetOrigin((-2.0, 0.0, 1.0))
+    data, header = image_to_data(moving)
+
+    resample = Resample(reference="{case}", reference_group="Fixed", transforms={"InferenceStack": False})
+    resample.set_datasets([Dataset(str(tmp_path / "stack"), "mha")])
+    resample.transform_shape("Volume_0", "P000", list(data.shape[1:]), header)
+    pulled = resample("P000", torch.from_numpy(data), header).numpy()
+
+    for member, shift in enumerate(shifts):
+        want = sitk.Resample(moving, fixed, sitk.TranslationTransform(3, [shift] * 3), sitk.sitkLinear, 0.0)
+        np.testing.assert_allclose(pulled[member], sitk.GetArrayFromImage(want), atol=1e-4)
+    np.testing.assert_allclose(header.get_np_array("Spacing"), fixed.GetSpacing())
