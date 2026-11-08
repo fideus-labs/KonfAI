@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 from konfai.data.transform.base import _RANK_CHANGE, LocalityKind, PatchLocality, Transform
-from konfai.utils.dataset import Attribute, Dataset, DataStream
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset, DataStream
 from konfai.utils.errors import TransformError
 from konfai.utils.utils import split_path_spec
 
@@ -141,8 +141,6 @@ def stacked_groups(stage: Any, groups: Iterable[str], name: str) -> tuple[set[st
 
 def _no_field(cache_attribute: Attribute) -> None:
     """Drop the displacement-field mark: what a stage made of a field (its spread, its magnitude) is no field."""
-    from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
-
     if DISPLACEMENT_FIELD_ATTRIBUTE in cache_attribute:
         cache_attribute.pop(DISPLACEMENT_FIELD_ATTRIBUTE)
 
@@ -320,12 +318,10 @@ class InferenceStack(Transform):
 
     def _stack(self, tensors: torch.Tensor) -> np.ndarray:
         """The members ``[M, C, *spatial]`` as a stack: member-major channels ``[M x C, *spatial]``; a label map per
-        member in ``Seg`` mode."""
-        if self.mode == "Seg":
-            _tensors = torch.argmax(tensors, dim=1).to(torch.uint8)  # a softmax keeps the order it is taken of
-        else:
-            _tensors = tensors.reshape(tensors.shape[0] * tensors.shape[1], *tensors.shape[2:])
-        return _tensors.float().cpu().numpy()
+        member in ``Seg`` mode, kept integer: a reader tells a stack of labels from one of probabilities by its type."""
+        if self.mode == "Seg":  # a softmax keeps the order it is taken of
+            return torch.argmax(tensors, dim=1).to(torch.uint8).cpu().numpy()
+        return tensors.reshape(tensors.shape[0] * tensors.shape[1], *tensors.shape[2:]).float().cpu().numpy()
 
     def _reduce(self, tensors: torch.Tensor) -> torch.Tensor:
         if self.mode != "median":
@@ -359,7 +355,7 @@ class InferenceStack(Transform):
         """The call over the concatenation of ``count`` copies (``[members, C, ...]`` each), one copy at a time:
         each copy's stack rows are written as they come, where the destination serves region writes, and its
         members are added to a running total."""
-        dataset: Dataset | None = None
+        dataset = self._destination()
         total, dtype, sink = torch.empty(0), torch.float32, None
         rows: list[np.ndarray] = []
         written = total_members = channels = 0  # the stack's rows (member channels), its members, a member's channels
@@ -368,7 +364,6 @@ class InferenceStack(Transform):
                 stack = self._stack(members)
                 if written == 0:
                     total, dtype, channels = members.sum(0, dtype=torch.float32), members.dtype, members.shape[1]
-                    dataset = self._destination()
                     if count * members.shape[0] > 1:
                         shape = [count * len(stack), *stack.shape[1:]]
                         header = _stack_attributes(cache_attribute, count * members.shape[0], dataset, channels)
@@ -388,7 +383,7 @@ class InferenceStack(Transform):
             raise
         if sink is not None:
             sink.close()
-        elif total_members > 1 and dataset is not None:
+        elif total_members > 1:
             dataset.write(
                 "InferenceStack",
                 name,

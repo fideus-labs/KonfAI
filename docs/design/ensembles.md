@@ -47,7 +47,9 @@ nothing to read: `Resample` and `TransformPoints` apply one stored transform per
   stack's order (`APP#PRESET`, checkpoint, TTA copy, MC-dropout draw); the stack holds their count alone. Slicer names
   the members from the record.
 - **The output is the stack reduced** by the app's own `combine` operator (`Mean`, `Median`, `Vote`), the one it
-  already declares for its checkpoints. Members of several apps must declare the same one.
+  already declares for its checkpoints, as its preset and the run's `--set` leave it. Members of several apps must
+  end up with the same one. Label maps (integer voxels) are voted whatever it says: a mean of labels is no label, so
+  a segmentation ensemble votes under the `Mean` its app declares for its probabilities.
 
 ### Where each kind of member is run
 

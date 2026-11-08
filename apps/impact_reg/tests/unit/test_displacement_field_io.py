@@ -35,11 +35,12 @@ from impact_reg_konfai.impact_reg import (  # noqa: E402
     _copy_output,
     _find_outputs,
 )
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE  # noqa: E402
+from konfai.data.transform.ensemble import member_count  # noqa: E402
+from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Dataset  # noqa: E402
 from konfai.utils.errors import TransformError  # noqa: E402
 from konfai.utils.ITK import read_displacement_field  # noqa: E402
 from konfai.utils.ome_zarr import is_displacement_field, write_ome_zarr  # noqa: E402
-from konfai_apps.ensemble import _member_count, combine, stack_file  # noqa: E402
+from konfai_apps.ensemble import combine, stack_file  # noqa: E402
 
 
 def _write_displacement_field(field: "sitk.Image", dest: Path) -> None:
@@ -253,7 +254,7 @@ def test_ensemble_field_written_by_the_orchestrator_is_a_declared_field(tmp_path
     combine(members, "Mean", output / "P000" / "DVF.ome.zarr", "omezarr", stack)
 
     assert stack.name == "InferenceStack.ome.zarr" and not is_displacement_field(stack)
-    assert _member_count(stack) == 2
+    assert member_count(*Dataset(str(output), "omezarr").get_infos("InferenceStack", "P000")) == 2
     out = output / "P000" / "DVF.ome.zarr"
     assert is_displacement_field(out)
     averaged = sitk.GetArrayFromImage(read_displacement_field(out))

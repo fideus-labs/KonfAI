@@ -19,8 +19,9 @@
 A member of an ensemble is one run of a model, whatever tells it from the others: a preset, a checkpoint, a TTA copy.
 A reference's own checkpoints and TTA copies stay in its predictor run, which hands over its stack when it holds
 several members and its output when one; each reference is a run of its own. The output is every member of every run
-reduced by the combine operator; with ``-uncertainty`` the stack of them all is kept beside it, in the output's form
-where that form keeps the member count, the members named in ``konfai-run.json`` in its order.
+reduced by the combine operator (label maps, integer voxels, are voted whatever it is: a mean of labels is no label);
+with ``-uncertainty`` the stack of them all is kept beside it, in the output's form where that form keeps the member
+count, the members named in ``konfai-run.json`` in its order.
 """
 
 from __future__ import annotations
@@ -96,13 +97,6 @@ def _geometry(header: Attribute) -> np.ndarray | None:
     )
 
 
-def _member_count(path: Path) -> int:
-    """How many members a file holds: a stack's count, read off its header (every channel without one); an output's
-    one."""
-    dataset, group, case = _entry(path)
-    return member_count(*dataset.get_infos(group, case)) if group == STACK else 1
-
-
 def members_of(run: Path) -> dict[tuple[str, str, str], tuple[Path, Path]]:
     """The members one run hands over, by (output folder, case, output name): the output's file, and where its
     members are read, its stack where the run wrote one, the output itself otherwise. ``run`` is an ``infer`` output,
@@ -126,11 +120,12 @@ def members_of(run: Path) -> dict[tuple[str, str, str], tuple[Path, Path]]:
 
 def combine(
     sources: list[Path], operator: str, output: Path, output_token: str, stack: Path | None = None
-) -> tuple[list[int], list[int]]:
+) -> list[int]:
     """Reduce every member ``sources`` hold (an output, or a stack of several) into ``output``, written through
     ``output_token``, slab by slab along the first spatial axis; and the stack of them all into ``stack`` when given,
-    in the form its name asks (:func:`stack_file`), whose header keeps the member count. The members must share a grid and a channel count; the output
-    and the stack take the first member's header. Returns the output's shape and each source's member count.
+    in the form its name asks (:func:`stack_file`), whose header keeps the member count. Label maps (integer voxels)
+    are voted whatever ``operator`` says: a mean of labels is no label. The members must share a grid and a channel
+    count; the output and the stack take the first member's header. Returns each source's member count.
 
     Both are written in a folder of their own, then moved into place: written where they go, a folder that holds a
     store (an earlier run's OME-Zarr) would read as a folder of stores and turn the output into one."""
@@ -151,13 +146,12 @@ def combine(
     return result
 
 
-def _combine_into(
-    sources: list[Path], operator: str, output: Path, output_token: str, stack: Path | None
-) -> tuple[list[int], list[int]]:
+def _combine_into(sources: list[Path], operator: str, output: Path, output_token: str, stack: Path | None) -> list[int]:
     """:func:`combine`, written where it is told."""
     entries = [_entry(path) for path in sources]
-    counts = [_member_count(path) for path in sources]
     infos = [dataset.get_infos(group, case) for dataset, group, case in entries]
+    # A stack's count is in its header (every channel a member without one); an output is one member.
+    counts = [member_count(*info) if group == STACK else 1 for (_, group, _), info in zip(entries, infos, strict=True)]
     channels = infos[0][0][0] // counts[0]
     spatial = list(infos[0][0][1:])
     geometry = [_geometry(header) for _, header in infos]
@@ -178,7 +172,7 @@ def _combine_into(
     if MEMBERS_ATTRIBUTE in header:
         header.pop(MEMBERS_ATTRIBUTE)
     members = sum(counts)
-    reduce = OPERATORS[operator]()
+    reduce: reduction.Reduction | None = None
     stack_header = Attribute(header)
     stack_header[MEMBERS_ATTRIBUTE] = members
     targets = [(_entry(output, output_token), [channels, *spatial], header)]
@@ -199,6 +193,8 @@ def _combine_into(
                     for dataset, group, case in entries
                 ]
             )
+            if reduce is None:  # label maps (integer voxels) vote, whatever the operator: a mean of labels is no label
+                reduce = OPERATORS[operator if rows.is_floating_point() else "Vote"]()
             reduced = reduce(list(rows.reshape(members, channels, *rows.shape[1:]))).cpu().numpy()
             for index, ((dataset, group, case), shape, attrs) in enumerate(targets):
                 data = reduced if index == 0 else rows.cpu().numpy()
@@ -214,7 +210,7 @@ def _combine_into(
     for ((dataset, group, case), _, attrs), sink, buffer in zip(targets, sinks, buffers, strict=True):
         if sink is None:
             dataset.write(group, case, np.concatenate(buffer, axis=1), attrs)
-    return [channels, *spatial], counts
+    return counts
 
 
 def infer_references(
@@ -254,7 +250,7 @@ def infer_references(
             first_output = runs[0][2][key][0]
             target = output / folder / case / f"{name}{storage_form(first_output)}"
             stack = output / folder / case / stack_file(storage_form(first_output)) if uncertainty else None
-            _, counts = combine([found[key][1] for _, _, found in runs], operator, target, _token(first_output), stack)
+            counts = combine([found[key][1] for _, _, found in runs], operator, target, _token(first_output), stack)
             if not names:
                 names = [
                     reference if count == 1 else f"{reference} [{member + 1}/{count}]"
