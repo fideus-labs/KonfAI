@@ -1269,6 +1269,7 @@ class ImpactRegKonfAIApp:
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
+                _drop_other_forms(case_out, STACK, "")  # an earlier run's stack: it describes another transform
                 members = [fields_by_preset[preset][case] for preset in presets]
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
@@ -1282,8 +1283,6 @@ class ImpactRegKonfAIApp:
                     stack = case_out / stack_file(form) if uncertainty and not flat else None
                     combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
-                    if stack is not None:
-                        _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK))
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
@@ -1313,7 +1312,15 @@ class ImpactRegKonfAIApp:
                         target = _the_output(output / case, group)
                         stack = output / case / stack_file(_form(members[0]))
                         combine(members, "Mean", target, member_token(members[0]), stack)
-                        _drop_other_forms(output / case, STACK, stack.name.removeprefix(STACK))
+            if uncertainty and not quiet:
+                unstacked = [case for case in cases if not any(_is_entry(p, STACK) for p in (output / case).iterdir())]
+                if unstacked:
+                    print(
+                        f"[ImpactReg] WARNING: --uncertainty kept no stack for {', '.join(unstacked)}: it needs two or"
+                        " more presets, or --tta on a 3-D pair registered whole.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1809,6 +1816,12 @@ class ImpactRegKonfAIApp:
                             )
                             jacobians[(transform, grid)] = eval_out / "NoReference"
                         scored.append((f"P{index:03d}", eval_out / "NoReference"))
+                    elif not runs:
+                        raise EvaluatorError(
+                            f"P{index:03d}: nothing to measure on '{transform}'.",
+                            "An affine has no measures without reference and a B-spline needs the fixed grid: give a"
+                            " modality to score it on (image, segmentation or landmarks).",
+                        )
             except BaseException as error:
                 _leave(work, error)
                 raise

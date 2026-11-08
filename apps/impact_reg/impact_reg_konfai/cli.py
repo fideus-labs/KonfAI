@@ -176,7 +176,8 @@ convention): resampling the moving image through it gives Moved.""",
         "--uncertainty",
         action="store_true",
         help="Keep every preset's displacement field as the ensemble's stack, <output>/<case>/InferenceStack.mha "
-        "(.ome.zarr beside a store), for 'uncertainty' to measure how they disagree.",
+        "(.ome.zarr beside a store), for 'uncertainty' to measure how they disagree: two or more presets, or --tta "
+        "on a 3-D pair registered whole; anything else keeps no stack, and says so.",
     )
     reg.add_argument(
         "--set",

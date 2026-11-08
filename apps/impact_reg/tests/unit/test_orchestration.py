@@ -1585,3 +1585,35 @@ def test_an_averaged_affine_preset_writes_its_field(tmp_path: Path) -> None:
     assert app._dense and (out / "P000" / "Moved.mha").is_file()
     app.register(["A"], [fixed], [moving], output=out, quiet=True)
     assert not app._dense
+
+
+def test_uncertainty_says_when_it_kept_no_stack(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """One preset and no TTA has no members to stack: the run says so rather than leave ``uncertainty`` a missing file."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0)})
+
+    app.register(["A"], [fixed], [moving], output=tmp_path / "Output", uncertainty=True, fields_only=True)
+
+    assert not any((tmp_path / "Output" / "P000").glob("InferenceStack*"))
+    assert "kept no stack for P000" in capsys.readouterr().err
+
+
+def test_a_rerun_leaves_no_stack_of_an_earlier_transform(tmp_path: Path) -> None:
+    """A stack of the earlier run's members beside this run's transform would be measured as its uncertainty."""
+    moving = tmp_path / "moving.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
+    fixed = tmp_path / "fixed.mha"
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(fixed))
+    app = reg.ImpactRegKonfAIApp()
+    _stub_infer(app, moving, {"A": (1.0, 0.0, 0.0)})
+    case = tmp_path / "Output" / "P000"
+    case.mkdir(parents=True)
+    (case / "InferenceStack.mha").write_text("an earlier run", encoding="utf-8")
+
+    app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True)
+
+    assert not (case / "InferenceStack.mha").exists()
