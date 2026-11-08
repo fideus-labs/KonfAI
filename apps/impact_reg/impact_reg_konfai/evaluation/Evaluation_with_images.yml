@@ -55,8 +55,6 @@ Evaluator:
                   Volume_0: false
                 interpolation: nearest
                 fill: 1
-              TensorCast:
-                dtype: float32
       Mask_0:
         groups_dest:
           Mask:

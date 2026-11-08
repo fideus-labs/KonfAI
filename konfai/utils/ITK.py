@@ -180,17 +180,17 @@ def field_regularity_statistics(
     them), taken to world axes through ``to_index`` on both sides; the field is read in slabs of planes with two
     planes of halo on each side, so every derivative is the whole field's.
     """
+
+    def along(values: np.ndarray, axis: int) -> np.ndarray:
+        return np.gradient(values, axis=axis) if values.shape[axis] > 1 else np.zeros_like(values)
+
     planes = max(1, _slab_planes(shape) // 3)  # a voxel holds nine second derivatives per component
-    count, bending, lengths = 0, 0.0, []
+    bending, lengths = 0.0, []
     for first in range(0, shape[1], planes):
         last = min(first + planes, shape[1])
         low, high = max(first - 2, 0), min(last + 2, shape[1])
         block = read((slice(None), slice(low, high), slice(None), slice(None)))
         core = slice(first - low, last - low)
-
-        def along(values: np.ndarray, axis: int) -> np.ndarray:
-            return np.gradient(values, axis=axis) if values.shape[axis] > 1 else np.zeros_like(values)
-
         # [c, z, y, x, a, b]: d2u_c / d(index_a) d(index_b), a and b along x, y, z, then to world axes.
         first_derivatives = [along(block, axis) for axis in (3, 2, 1)]
         hessian = np.stack(
@@ -203,10 +203,9 @@ def field_regularity_statistics(
         world = to_index.T @ hessian @ to_index
         bending += float((world**2).sum())
         lengths.append(np.sqrt((block[:, core] ** 2).sum(0)).ravel().astype(np.float32))
-        count += lengths[-1].size
     length = np.concatenate(lengths)
     return {
-        "bending_energy": bending / count,
+        "bending_energy": bending / length.size,
         "displacement_mean": float(length.mean()),
         "displacement_p95": float(np.percentile(length, 95)),
         "displacement_max": float(length.max()),

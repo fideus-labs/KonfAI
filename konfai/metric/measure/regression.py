@@ -479,11 +479,12 @@ class TRE(Criterion):
         return loss.mean(), LabelledValues(per_landmark, [f"Landmarks_{i}" for i in range(per_landmark.shape[0])])
 
 
-def _selected(output: torch.Tensor, targets: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+def _selected(
+    criterion: Criterion, output: torch.Tensor, targets: tuple[torch.Tensor, ...]
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The output's and the first target's voxels as two flat float64 vectors, inside the mask the other targets
     make (every voxel without one)."""
-    if not targets:
-        raise MeasureError("An image similarity compares the output with a target and was handed none.")
+    criterion._require_target(targets)
     target = targets[0].to(output.device)
     mask = MaskedLoss.get_mask(list(targets[1:]))
     if mask is None:
@@ -499,17 +500,20 @@ class NCC(Criterion):
 
     maximize = True
     reducible = True
+    loss_capable = False  # a value from summed moments, no gradient
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[float, ...]:
-        a, b = (values.double() for values in _selected(output, targets))  # sums of squares far from 0: float64
+        a, b = _selected(self, output, targets)  # float64: sums of squares far from 0
         return tuple(
             float(value) for value in (a.numel(), a.sum(), b.sum(), (a * b).sum(), (a * a).sum(), (b * b).sum())
         )
 
     def combine_metric(self, states: list[Any]) -> tuple[torch.Tensor, float]:
-        n, sa, sb, sab, saa, sbb = (sum(state[i] for state in states) for i in range(6))
+        n, sa, sb, sab, saa, sbb = map(sum, zip(*states, strict=True))
+        if not n:  # an empty mask
+            return torch.tensor(float("nan")), float("nan")
         covariance, var_a, var_b = sab - sa * sb / n, saa - sa * sa / n, sbb - sb * sb / n
-        ncc = covariance / math.sqrt(var_a * var_b) if n and var_a > 0 and var_b > 0 else float("nan")
+        ncc = covariance / math.sqrt(var_a * var_b) if var_a > 0 and var_b > 0 else float("nan")
         return torch.tensor(1 - ncc), ncc
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
@@ -524,6 +528,7 @@ class NMI(Criterion):
     the joint histograms of disjoint patches then add up, and it streams."""
 
     maximize = True
+    loss_capable = False  # a value from a histogram, no gradient
 
     def __init__(
         self, bins: int = 64, output_range: list[float] | None = None, target_range: list[float] | None = None
@@ -546,7 +551,7 @@ class NMI(Criterion):
         return torch.bincount(joint, minlength=self.bins * self.bins).double().cpu()
 
     def partial_metric(self, output: torch.Tensor, *targets: torch.Tensor) -> torch.Tensor:
-        a, b = _selected(output, targets)
+        a, b = _selected(self, output, targets)
         return self._histogram(a, b, tuple(self.output_range), tuple(self.target_range))  # type: ignore[arg-type]
 
     def combine_metric(self, states: list[Any]) -> tuple[torch.Tensor, float]:
@@ -562,7 +567,7 @@ class NMI(Criterion):
         return torch.tensor(2 - nmi), nmi
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
-        a, b = _selected(output, targets)
+        a, b = _selected(self, output, targets)
         if not a.numel():
             return torch.tensor(float("nan")), float("nan")
         a_range = tuple(self.output_range) if self.output_range else (float(a.min()), float(a.max()))
@@ -578,6 +583,7 @@ class LNCC(Criterion):
 
     maximize = True
     reducible = True
+    loss_capable = False  # a value from pooled moments, no gradient
 
     def __init__(self, kernel: int = 9) -> None:
         super().__init__()
@@ -587,41 +593,37 @@ class LNCC(Criterion):
         self.halo = self.kernel // 2
 
     def _map(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        pool = {3: F.avg_pool2d, 4: F.avg_pool3d}.get(a.dim())
+        """The squared local correlation at each voxel of ``a`` and ``b``, ``[N, C, (Z), Y, X]``."""
+        pool = {4: F.avg_pool2d, 5: F.avg_pool3d}.get(a.dim())
         if pool is None:
-            raise MeasureError(f"LNCC reads 2-D or 3-D images, got {list(a.shape)} (channels first).")
+            raise MeasureError(f"LNCC reads 2-D or 3-D images, got {list(a.shape[1:])} (channels first).")
 
-        def mean(values: torch.Tensor) -> torch.Tensor:
-            return pool(values[None], self.kernel, stride=1, padding=self.halo, count_include_pad=False)[0]
+        def total(values: torch.Tensor) -> torch.Tensor:
+            # The sum over each window, cut at the faces: padded by hand, since the pool refuses an image smaller
+            # than its kernel (a thin volume, a boundary patch).
+            return pool(F.pad(values, (self.halo,) * (2 * (a.dim() - 2))), self.kernel, stride=1, divisor_override=1)
 
         # In float64: the moments' differences cancel in float32 on intensities far from 0 (an MR at 1000 with a
         # local spread of a few units scored 1672 against itself plus noise).
         a, b = a.double(), b.double()
-        mean_a, mean_b = mean(a), mean(b)
-        covariance = mean(a * b) - mean_a * mean_b
-        variance = (mean(a * a) - mean_a**2).clamp_min(0) * (mean(b * b) - mean_b**2).clamp_min(0)
-        return (covariance**2 / (variance + 1e-5)).clamp_max(1.0).float()
+        count = total(torch.ones_like(a))
+        mean_a, mean_b = total(a) / count, total(b) / count
+        covariance = total(a * b) / count - mean_a * mean_b
+        variance = (total(a * a) / count - mean_a**2).clamp_min(0) * (total(b * b) / count - mean_b**2).clamp_min(0)
+        return (covariance**2 / (variance + 1e-5)).clamp_max(1.0)
 
     def partial_metric(
         self, output: torch.Tensor, *targets: torch.Tensor, core: tuple[slice, ...] | None = None
     ) -> tuple[float, int]:
-        if not targets:
-            raise MeasureError("LNCC compares the output with a target and was handed none.")
-        target = targets[0].to(output.device)
+        self._require_target(targets)
+        values = self._map(output, targets[0].to(output.device))
         mask = MaskedLoss.get_mask(list(targets[1:]))
-        total, count = 0.0, 0
-        for item in range(output.shape[0]):
-            values = self._map(output[item].float(), target[item].float())
-            selected = (
-                torch.ones_like(values, dtype=torch.bool)
-                if mask is None
-                else mask[item].to(values.device).expand_as(values)
-            )
-            if core is not None:
-                values, selected = values[(slice(None), *core)], selected[(slice(None), *core)]
-            total += float(values[selected].double().sum())
-            count += int(selected.sum())
-        return total, count
+        selected = (
+            torch.ones_like(values, dtype=torch.bool) if mask is None else mask.to(values.device).expand_as(values)
+        )
+        if core is not None:
+            values, selected = values[(slice(None), slice(None), *core)], selected[(slice(None), slice(None), *core)]
+        return float(values[selected].sum()), int(selected.sum())
 
     def combine_metric(self, states: list[Any]) -> tuple[torch.Tensor, float]:
         total, count = sum(state[0] for state in states), sum(state[1] for state in states)
@@ -632,6 +634,14 @@ class LNCC(Criterion):
         return self.combine_metric([self.partial_metric(output, *targets)])
 
 
+def _statistic_name(criterion: str, statistic: str, name: str | None) -> str:
+    """The name a ``criterion`` reports one ``statistic`` under (``mean``, ``p95`` or ``max``): ``name`` when given,
+    else on ``PointDistanceP95``'s pattern."""
+    if statistic not in ("mean", "p95", "max"):
+        raise MeasureError(f"{criterion} has no statistic '{statistic}'.", "Choose mean, p95 or max.")
+    return name or f"{criterion}{statistic.capitalize()}"
+
+
 class PointDistance(Criterion):
     """The distance between the output's and the target's vectors (one per voxel, its components on the channel
     axis): their ``mean``, 95th percentile (``p95``) or maximum (``max``) over the voxels where both are finite. On
@@ -639,19 +649,18 @@ class PointDistance(Criterion):
     the round trip's error, in mm; a voxel the round trip leaves the grid from (``Resample``'s ``fill: .nan``) is
     left out."""
 
+    loss_capable = False  # a percentile of a readout, no gradient
+
     def __init__(self, statistic: str = "mean", name: str | None = None) -> None:
         super().__init__()
-        if statistic not in ("mean", "p95", "max"):
-            raise MeasureError(f"PointDistance has no statistic '{statistic}'.", "Choose mean, p95 or max.")
         self.statistic = statistic
-        self.name = name or f"PointDistance{statistic.capitalize()}"
+        self.name = _statistic_name("PointDistance", statistic, name)
 
     def get_name(self) -> str:
         return self.name
 
     def forward(self, output: torch.Tensor, *targets: torch.Tensor) -> tuple[torch.Tensor, float]:
-        if not targets:
-            raise MeasureError("PointDistance compares the output with a target and was handed none.")
+        self._require_target(targets)
         distance = torch.linalg.norm(output.double() - targets[0].to(output.device).double(), dim=1)
         values = distance[torch.isfinite(distance)]
         if not values.numel():
@@ -688,10 +697,13 @@ def _field_statistics(field: torch.Tensor, attribute: Any, name: str, kind: str)
 
 class _FieldStatistic(CriterionWithAttribute):
     """One statistic of a displacement field, the output, read with its geometry: ``kind`` names the pass that
-    computes it (:func:`_field_statistics`). The target is not read: name it ``None`` under ``targets_criterions``."""
+    computes it (:func:`_field_statistics`; ``jacobian``, the default, reads the determinant of ``J = I + du/dx``
+    as :func:`konfai.utils.ITK.jacobian_statistics` takes it). The target is not read: name it ``None`` under
+    ``targets_criterions``."""
 
     accepts_output_attributes = True
     any_target_grid = True
+    loss_capable = False  # a statistic of a numpy pass, no gradient
     kind = "jacobian"
     statistic = ""
     # ponytail: a one-slot memo per kind, so the statistics of one field share one pass; a case at a time, as
@@ -719,13 +731,6 @@ class _FieldStatistic(CriterionWithAttribute):
         return torch.tensor(float(np.mean([case[self.statistic] for case in stats])))
 
 
-class _JacobianStatistic(_FieldStatistic):
-    """One statistic of the determinant of a displacement field's Jacobian ``J = I + du/dx``, as
-    :func:`konfai.utils.ITK.jacobian_statistics` takes it."""
-
-    kind = "jacobian"
-
-
 class BendingEnergy(_FieldStatistic):
     """The bending energy of a displacement field: the mean over its voxels of every squared second derivative, in
     1/mm^2 for a field in mm. 0 for an affine map; how far from smooth the deformation is."""
@@ -742,29 +747,27 @@ class Displacement(_FieldStatistic):
 
     def __init__(self, statistic: str = "mean", name: str | None = None) -> None:
         super().__init__()
-        if statistic not in ("mean", "p95", "max"):
-            raise MeasureError(f"Displacement has no statistic '{statistic}'.", "Choose mean, p95 or max.")
+        self.name = _statistic_name("Displacement", statistic, name)
         self.statistic = f"displacement_{statistic}"
-        self.name = name or f"Displacement{statistic.capitalize()}"
 
     def get_name(self) -> str:
         return self.name
 
 
-class JacobianFolding(_JacobianStatistic):
+class JacobianFolding(_FieldStatistic):
     """The fraction of a displacement field's voxels where the map folds: its Jacobian's determinant at or below 0."""
 
     statistic = "folded_fraction"
 
 
-class JacobianMin(_JacobianStatistic):
+class JacobianMin(_FieldStatistic):
     """The lowest determinant of a displacement field's Jacobian: below 0 the map folds, near 0 it crushes a volume."""
 
     statistic = "min"
     maximize = True
 
 
-class JacobianLogStd(_JacobianStatistic):
+class JacobianLogStd(_FieldStatistic):
     """The standard deviation of the log of a displacement field's Jacobian determinant (clipped to ``[1e-9, 1e9]``,
     so a fold counts as a vanishing volume): how unevenly the map stretches."""
 

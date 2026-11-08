@@ -379,6 +379,8 @@ class _LabelRatio(Dice):
     and reference voxels), every label the reference holds but the background, NaN for one it lacks; the reported
     value is their mean. The sums of disjoint patches add up, so it streams as Dice does."""
 
+    loss_capable = False  # a ratio of counts, no gradient
+
     @staticmethod
     def _ratio(intersection: float, predicted: float, reference: float) -> float:
         raise NotImplementedError
@@ -430,7 +432,9 @@ def _surface_distances(
 
     A surface is the label's contour voxels (face-connected), and a distance the one from a voxel centre to the
     nearest contour voxel's (SimpleITK's Maurer map, in physical spacing). Each label is cropped to the bounding
-    box of the two maps' label, one voxel wider: every contour lies inside it, so the distances are exact.
+    box of the two maps' label and padded with one voxel of background: the grid's border is a surface too (as
+    MedPy and DeepMind's surface-distance count it), and every contour lies inside the crop, so the distances are
+    exact.
     """
     global _LAST_SURFACES
     key = (tuple(labels) if labels is not None else None, tuple(spacing))
@@ -465,11 +469,8 @@ def _surface_distances(
             distances[label] = None
             continue
         union = np.argwhere(a | b)
-        box = tuple(
-            slice(max(int(low) - 1, 0), min(int(high) + 2, extent))
-            for low, high, extent in zip(union.min(0), union.max(0), a.shape, strict=True)
-        )
-        (edge_a, voxels_a), (edge_b, voxels_b) = contour(a[box]), contour(b[box])
+        box = tuple(slice(int(low), int(high) + 1) for low, high in zip(union.min(0), union.max(0), strict=True))
+        (edge_a, voxels_a), (edge_b, voxels_b) = contour(np.pad(a[box], 1)), contour(np.pad(b[box], 1))
         distances[label] = (distance_to(edge_b)[voxels_a], distance_to(edge_a)[voxels_b])
     diagonal = float(np.linalg.norm(np.array(predicted.shape[::-1]) * np.array(xyz_spacing)))
     _LAST_SURFACES = (weakref.ref(output), weakref.ref(target), key, (distances, diagonal))
@@ -480,6 +481,8 @@ class _SurfaceDistance(CriterionWithAttribute):
     """A per-label score of a label map against the reference's from their surfaces, in the reference's physical
     spacing (both maps on one grid): every label the reference holds but the background, NaN for one it lacks;
     the reported value is their mean. Read whole: a surface distance has no partial state."""
+
+    loss_capable = False  # distances read off SimpleITK's maps, no gradient
 
     def __init__(self, labels: list[int] | None = None) -> None:
         super().__init__()
