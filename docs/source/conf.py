@@ -90,6 +90,9 @@ suppress_warnings = [
     # Whether a third-party guarded import resolves depends on the environment (torch's
     # tensorboard writer guards dateutil), so it must not fail a -W build.
     "sphinx_autodoc_typehints.guarded_import",
+    # A class inheriting a third-party constructor (Included on ruamel's CommentedMap) shows annotations
+    # that module never resolves (`Any` as a string): not a defect of these docs.
+    "sphinx_autodoc_typehints.forward_reference",
     "intersphinx.external",
 ]
 
@@ -270,7 +273,24 @@ def _anchor_viewcode_backlinks(app, doctree):
             signature["ids"].append(f"{source}.{fullname}")
 
 
+def _write_config_schemas(app, exception):
+    """Publish each workflow config's JSON Schema at ``schema/<File>.schema.json``, for editors."""
+    if exception is not None or app.builder.name != "html":
+        return
+    import json
+    from pathlib import Path as _Path
+
+    from konfai.config_schema import WORKFLOWS, config_schema
+
+    directory = _Path(app.outdir) / "schema"
+    directory.mkdir(exist_ok=True)
+    for filename in WORKFLOWS:
+        schema = json.dumps(config_schema(filename), separators=(",", ":"))
+        (directory / f"{_Path(filename).stem}.schema.json").write_text(schema, encoding="utf-8")
+
+
 def setup(app):
+    app.connect("build-finished", _write_config_schemas)
     app.connect("build-finished", _write_llms_txt)
     app.connect("build-finished", _write_redirects)
     # Before viewcode's own doctree-read (priority 500), which reads the module this rewrites.

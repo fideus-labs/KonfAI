@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 # argparse only: --help and --version stay free of torch and KonfAI.
-from konfai_apps.options import add_device, add_tmp_dir, at_least, local_path
+from konfai_apps.options import add_device, add_run_options, add_tmp_dir, at_least, local_path
 
 from impact_reg_konfai import PRESETS_REPO
 
@@ -85,8 +85,8 @@ def main() -> None:
 on Hugging Face), ensemble several, evaluate a transform, and measure the spread of an ensemble.""",
         epilog=f"""examples:
   impact-reg-konfai list
-  impact-reg-konfai show FireANTs_SyN
-  impact-reg-konfai register FireANTs_SyN -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
+  impact-reg-konfai show FireANTs#syn
+  impact-reg-konfai register FireANTs#syn -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
 
 The presets come from {PRESETS_REPO}. KONFAI_IMPACTREG_REPO points elsewhere: a directory
 of preset folders, or <repo>@<revision>. IMPACT_REG_DEBUG=1 prints the traceback of a failure.""",
@@ -104,7 +104,7 @@ of preset folders, or <repo>@<revision>. IMPACT_REG_DEBUG=1 prints the traceback
     show = subparsers.add_parser(
         "show",
         help="Say what a preset runs, what it needs and what --set tunes.",
-        epilog="example:\n  impact-reg-konfai show FireANTs_SyN",
+        epilog="example:\n  impact-reg-konfai show FireANTs#syn",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     show.add_argument("name", help="The preset.")
@@ -116,15 +116,16 @@ of preset folders, or <repo>@<revision>. IMPACT_REG_DEBUG=1 prints the traceback
         description="""Register each moving image onto its fixed image with one or more presets; several presets
 are ensembled, their displacement fields averaged. Each case, P000, P001, ... in input order, gets:
 
-  <output>/<case>/Transform.h5            the transform, a displacement field on the fixed grid
+  <output>/<case>/Transform.h5            the transform: a displacement field on the fixed grid, or the affine
+                                          a linear preset declares (transform_type: affine)
   <output>/<case>/Moved.<moving's ext>    the moving image resampled through it (not with --fields-only)
   <output>/<case>/Ensemble/<preset>.h5    each preset's own field, with --keep-fields
 
 The transform maps a point of the fixed image to the matching point of the moving image (ITK's
 convention): resampling the moving image through it gives Moved.""",
         epilog="""examples:
-  impact-reg-konfai register FireANTs_SyN -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
-  impact-reg-konfai register -f fixed.ome.zarr -m moving.ome.zarr -p ConvexAdam_Composite FireANTs_SyN \\
+  impact-reg-konfai register FireANTs#syn -f fixed.nii.gz -m moving.nii.gz -o Output --gpu 0
+  impact-reg-konfai register -f fixed.ome.zarr -m moving.ome.zarr -p ConvexAdam#composite FireANTs#syn \\
       --keep-fields -o Output --gpu 0""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -186,11 +187,11 @@ convention): resampling the moving image through it gives Moved.""",
         default=None,
         help="Tune a preset parameter (repeatable), checked against each preset before anything runs. NAME=VALUE "
         "applies to every preset, PRESET:NAME=VALUE to that one alone, since engines name their knobs differently: "
-        "e.g. --set FireANTs_SyN:deformable_iterations=[400,200,100] --set Generic_Rigid:max_iterations=500. "
+        "e.g. --set FireANTs#syn:deformable_iterations=[400,200,100] --set Elastix#rigid:max_iterations=500. "
         "'impact-reg-konfai show NAME' lists the parameters a preset takes. A pair registered in tiles gets it "
         "in the preset's global pass and in its tiles where their configs agree, in the global pass alone where "
         "the tile config differs (its deformable stage alone); global: or tile: gives it to that pass alone, "
-        "e.g. --set FireANTs_SyN:tile:deformable_iterations=[100,50,25].",
+        "e.g. --set FireANTs#syn:tile:deformable_iterations=[100,50,25].",
     )
     reg.add_argument(
         "--max-voxels",
@@ -210,6 +211,7 @@ convention): resampling the moving image through it gives Moved.""",
         help="Write the transforms only: skip the moved image, which is derived from them. For a "
         "caller that composes the transform itself and would delete it.",
     )
+    add_run_options(reg)
     add_device(reg)
     add_tmp_dir(reg, tmp_dir_help)
     reg.add_argument(
@@ -445,19 +447,22 @@ def _dispatch(args: argparse.Namespace, ev: argparse.ArgumentParser) -> None:
             tmp_dir=args.tmp_dir,
             fields_only=args.fields_only,
             max_voxels=args.max_voxels,
+            output_format=args.output_format,
+            seed=args.seed,
         )
         if args.keep_fields and not args.quiet:
             _report_ensemble(args.output, args.presets)
 
     elif args.command == "eval":
-        # Nothing is mandatory except at least one complete modality (image / seg / fid).
+        # Nothing is mandatory except at least one complete modality (image / seg / fid), or a transform
+        # alone, whose Jacobian is then the evaluation.
         has_image = bool(args.fixed_images and args.moving_images)
         has_seg = bool(args.gt_fixed_seg and args.gt_moving_seg)
         has_fid = bool(args.gt_fixed_fid and args.gt_moving_fid)
-        if not (has_image or has_seg or has_fid):
+        if not (has_image or has_seg or has_fid or args.transform):
             ev.error(
                 "provide at least one modality: image (-f/-m), seg (--gt-fixed-seg/--gt-moving-seg), "
-                "or fid (--gt-fixed-fid/--gt-moving-fid)."
+                "or fid (--gt-fixed-fid/--gt-moving-fid); or --transform alone, for its Jacobian."
             )
         gpu = [] if args.cpu is not None else args.gpu
         app.evaluate(

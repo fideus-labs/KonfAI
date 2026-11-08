@@ -276,7 +276,9 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
     if data.shape[0] == 1:
         image = sitk.GetImageFromArray(data[0])
     else:
-        data = data.transpose(tuple([i + 1 for i in range(len(data.shape) - 1)] + [0]))
+        # Contiguous before the import: SimpleITK copies a strided view through `tobytes`, at half
+        # the speed of numpy's own copy (a 134 MB volume writes in 0.16 s instead of 0.24 s).
+        data = np.ascontiguousarray(data.transpose(tuple([i + 1 for i in range(len(data.shape) - 1)] + [0])))
         image = sitk.GetImageFromArray(data, isVector=True)
     for k, v in attributes.items():
         if v and len(v):
@@ -293,6 +295,18 @@ def data_to_image(data: np.ndarray | torch.Tensor, attributes: Attribute) -> sit
 DISPLACEMENT_FIELD_ATTRIBUTE = "konfai_displacement_field"
 
 
+def _is_field_shape(shape: tuple[int, ...] | list[int]) -> bool:
+    """Whether ``shape`` is a displacement field's: channel-first, one component per spatial axis, in 2-D or 3-D."""
+    return len(shape) in (3, 4) and int(shape[0]) == len(shape) - 1
+
+
+def is_displacement_entry(shape: list[int] | tuple[int, ...], attributes: Attribute) -> bool:
+    """Whether an entry read AS A TRANSFORM is a displacement field: one its store marks so, or an image with one
+    component per spatial axis (``shape`` is ``[C, *spatial]``), as a field written as a vector image is (ANTs'
+    ``Warp.nii.gz``). Read as a transform, such an image can be nothing else; read as an image, it stays one."""
+    return DISPLACEMENT_FIELD_ATTRIBUTE in attributes or (is_an_image(attributes) and _is_field_shape(shape))
+
+
 def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np.ndarray, Attribute]:
     """A displacement-field transform as a channel-first array plus its geometry.
 
@@ -304,6 +318,49 @@ def displacement_field_to_data(transform: sitk.Transform, name: str) -> tuple[np
             f"Expected a DisplacementFieldTransform for entry '{name}', got '{type(transform).__name__}'."
         )
     return image_to_data(transform.GetDisplacementField())
+
+
+# Set by a registration whose preset declares its transform an affine: the header of the field it hands
+# over carries the map (``D x (D+1)`` flat, row-major, world units, fixed -> moving points), and the
+# backends write that map in place of the field. The underscore keeps the key out of the stack renaming.
+AFFINE_ATTRIBUTE = "konfai_affine"
+
+
+def as_affine(transform: sitk.Transform) -> sitk.AffineTransform:
+    """A linear transform (a leaf of any parameterisation, or a composite of them) as the one
+    ``AffineTransform`` it is: the same world map, matrix and translation."""
+    from konfai.utils.ITK import _linear_map
+
+    linear = _linear_map(transform)
+    affine = sitk.AffineTransform(int(transform.GetDimension()))
+    affine.SetMatrix(linear.matrix.ravel().tolist())
+    affine.SetTranslation(linear.translation.tolist())
+    return affine
+
+
+def affine_to_attribute(transform: sitk.Transform) -> np.ndarray:
+    """The value ``AFFINE_ATTRIBUTE`` records for a linear transform: its matrix with the translation as the
+    last column, flat."""
+    from konfai.utils.ITK import _linear_map
+
+    linear = _linear_map(transform)
+    return np.hstack([linear.matrix, linear.translation.reshape(-1, 1)]).ravel()
+
+
+def affine_from_attributes(attributes: Attribute) -> sitk.AffineTransform:
+    """The transform ``AFFINE_ATTRIBUTE`` records: ``affine_to_attribute``'s inverse."""
+    values = attributes.get_np_array(AFFINE_ATTRIBUTE)
+    if len(values) not in (6, 12):
+        raise DatasetManagerError(
+            f"'{AFFINE_ATTRIBUTE}' holds {len(values)} values; a 2-D affine has 6 and a 3-D one 12.",
+            "Record it with affine_to_attribute.",
+        )
+    rank = 3 if len(values) == 12 else 2
+    matrix = values.reshape(rank, rank + 1)
+    affine = sitk.AffineTransform(rank)
+    affine.SetMatrix(matrix[:, :rank].ravel().tolist())
+    affine.SetTranslation(matrix[:, rank].tolist())
+    return affine
 
 
 def push_geometry(attributes: Attribute, key: str, value: Any) -> None:
@@ -345,51 +402,29 @@ def _same_values(recorded: np.ndarray, level: np.ndarray) -> bool:
 def ome_zarr_attributes(metadata: dict[str, Any]) -> Attribute:
     """A KonfAI ``Attribute`` (Origin / Spacing / Direction) from an OME-Zarr entry's metadata.
 
-    The store's konfai sidecar carries the Direction matrix, which NGFF cannot express, and every
-    other key it recorded; Direction defaults to identity without it. The sidecar describes one
-    level, the finest, as KonfAI wrote it: its Spacing and Origin are trusted only where they are
-    this level's scale and translation. Any other level, or a store another tool has moved, takes
-    both from its own transforms.
+    Geometry comes from RFC-5 coordinate transformations (including the selected pyramid level),
+    with RFC-4 axis orientation defining the physical frame. The private record holds the rungs of
+    the geometry stack beneath that grid, as the writer left them; the grid is pushed on top, so the
+    stack reads back as it was written.
 
     Spacing and Origin come out in MILLIMETRES, whatever the store declares: they are handed to
     SimpleITK, written into NIfTI headers and composed with other volumes' frames, none of which
     carries a unit. The store's own unit is kept under ``OMEUnits`` so that writing the geometry
     back out restores it. A store that declares no unit is taken at its numbers, as before.
     """
-    from konfai.utils.ome_zarr import NO_UNIT, millimetres_per_unit  # imported here: ome_zarr imports this
+    from konfai.utils.ome_zarr import NO_UNIT  # imported here: ome_zarr imports this
 
     attributes = Attribute(metadata.get("attributes", {}))
+    geometry = metadata["standard_geometry"]
+    for key in ("Origin", "Spacing", "Direction"):
+        attributes[key] = geometry[key]
     axes = metadata["axes"]
-    scale = dict(zip(axes, metadata.get("scale", []), strict=False))
-    translation = dict(zip(axes, metadata.get("translation", []), strict=False))
-    spatial_axes = [axis for axis in ("x", "y", "z") if axis in axes]
-    units = {axis: unit for axis, unit in (metadata.get("units") or {}).items() if axis in spatial_axes}
-    factors = np.asarray([millimetres_per_unit(units.get(axis)) or 1.0 for axis in spatial_axes])
-    level_spacing = np.asarray([scale.get(axis, 1.0) for axis in spatial_axes]) * factors
-    level_origin = np.asarray([translation.get(axis, 0.0) for axis in spatial_axes]) * factors
-    if "Spacing" in attributes:
-        recorded_spacing = attributes.get_np_array("Spacing")
-        recorded_origin = attributes.get_np_array("Origin") if "Origin" in attributes else level_origin
-        if not (_same_values(recorded_spacing, level_spacing) and _same_values(recorded_origin, level_origin)):
-            # Not the grid the sidecar recorded. Popped then set, so the key keeps its place in the stack.
-            attributes.pop("Spacing")
-            attributes["Spacing"] = level_spacing
-            if "Origin" in attributes:
-                attributes.pop("Origin")
-            attributes["Origin"] = level_origin
-    if "Spacing" not in attributes:
-        attributes["Spacing"] = level_spacing
-    if "Origin" not in attributes:
-        attributes["Origin"] = level_origin
-    if "Direction" not in attributes:
-        attributes["Direction"] = np.eye(len(spatial_axes), dtype=np.float64).flatten()
     attributes["OMEAxes"] = np.asarray(axes)
+    units = geometry["units"]
+    spatial_axes = [axis for axis in ("x", "y", "z") if axis in axes]
     if units:
-        # What the store called it, per spatial axis, so a store read and written back declares the
-        # same unit it arrived with instead of KonfAI's millimetres.
-        # Space-joined, the form a sidecar stores: a list would come back as its own repr. An axis the
-        # store left silent is recorded as "-", so writing the geometry back leaves it silent too.
         attributes["OMEUnits"] = " ".join(units.get(axis, NO_UNIT) for axis in spatial_axes)
+
     return attributes
 
 
@@ -403,31 +438,37 @@ def _flatten_transforms(transform: sitk.Transform) -> list[sitk.Transform]:
     return [transform]
 
 
-def _transform_codec() -> list[tuple[type, str, Any]]:
-    """(sitk class, serialized type tag, decode factory) for every supported transform kind."""
-    return [
-        (sitk.Euler3DTransform, "Euler3DTransform_double_3_3", sitk.Euler3DTransform),
-        (sitk.AffineTransform, "AffineTransform_double_3_3", lambda: sitk.AffineTransform(3)),
-        (sitk.BSplineTransform, "BSplineTransform_double_3_3", lambda: sitk.BSplineTransform(3)),
-    ]
+def _transform_codec() -> dict[str, Any]:
+    """Serialized type tag -> decode factory for every supported transform kind, in 2-D and 3-D: the tag names the
+    class and the dimension, as ITK's own type names do."""
+    return {
+        "Euler3DTransform_double_3_3": sitk.Euler3DTransform,
+        "Euler2DTransform_double_2_2": sitk.Euler2DTransform,
+        **{
+            f"{kind.__name__}_double_{rank}_{rank}": functools.partial(kind, rank)
+            for kind in (sitk.AffineTransform, sitk.BSplineTransform)
+            for rank in (2, 3)
+        },
+    }
 
 
 def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: Attribute) -> np.ndarray:
     """Serialize a (possibly composite) transform: record each leaf's type tag and fixed parameters
     into ``attributes`` (``{i}:Transform`` / ``{i}:FixedParameters``) and return the leaves'
-    parameters, one row per leaf in application order, the shorter rows padded with NaN. A 3-D linear leaf the
-    codec has no tag for (a translation, a versor, a similarity) is stored as the affine map it is, exactly."""
+    parameters, one row per leaf in application order, the shorter rows padded with NaN. A linear leaf the codec has
+    no tag for (a translation, a versor, a similarity) is stored as the affine map it is, exactly."""
     from konfai.utils.ITK import _linear_map
 
     datas: list[np.ndarray] = []
     for i, leaf in enumerate(_flatten_transforms(transform)):
-        type_tag = next((tag for sitk_class, tag, _ in _transform_codec() if isinstance(leaf, sitk_class)), None)
-        if type_tag is None and leaf.IsLinear() and leaf.GetDimension() == 3:
+        rank = leaf.GetDimension()
+        type_tag = f"{type(leaf).__name__}_double_{rank}_{rank}"
+        if type_tag not in _transform_codec():
+            if not leaf.IsLinear():
+                raise DatasetManagerError(f"Unsupported transform type '{type(leaf).__name__}' for entry '{name}'.")
             linear = _linear_map(leaf)
             leaf = sitk.AffineTransform(linear.matrix.ravel().tolist(), linear.translation.tolist())
-            type_tag = "AffineTransform_double_3_3"
-        if type_tag is None:
-            raise DatasetManagerError(f"Unsupported transform type '{type(leaf).__name__}' for entry '{name}'.")
+            type_tag = f"AffineTransform_double_{rank}_{rank}"
         attributes[f"{i}:Transform"] = type_tag
         attributes[f"{i}:FixedParameters"] = leaf.GetFixedParameters()
 
@@ -438,17 +479,17 @@ def _encode_transform_leaves(transform: sitk.Transform, name: str, attributes: A
 
 def _decode_transform(transform_type: str, name: str) -> sitk.Transform:
     """A fresh transform instance for a serialized type tag."""
-    for _, type_tag, factory in _transform_codec():
-        if transform_type == type_tag:
-            return factory()
-    raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")
+    factory = _transform_codec().get(transform_type)
+    if factory is None:
+        raise DatasetManagerError(f"Unsupported transform type '{transform_type}' for entry '{name}'.")
+    return factory()
 
 
 def data_to_transform(data: np.ndarray, attributes: Attribute, name: str) -> sitk.Transform:
     """The transform a stored entry holds: a displacement field is its image in float64, which
     ``DisplacementFieldTransform`` requires; any other entry is the parameter rows and type keys of
     ``_encode_transform_leaves``."""
-    if DISPLACEMENT_FIELD_ATTRIBUTE in attributes:
+    if is_displacement_entry(np.shape(data), attributes):
         return sitk.DisplacementFieldTransform(data_to_image(np.asarray(data, dtype=np.float64), attributes))
     transforms = []
     for i, transform_type in enumerate(v for k, v in attributes.items() if k.endswith(":Transform_0")):

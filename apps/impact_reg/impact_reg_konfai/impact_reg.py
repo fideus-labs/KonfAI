@@ -35,6 +35,7 @@ logic that does not fit the generic ``konfai-apps`` pipeline, split into three c
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,16 +54,17 @@ from konfai.utils.dataset import (
     read_landmarks,
     staged_entry,
     transfer_entry,
-    write_landmarks,
 )
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, EvaluatorError, KonfAIError
-from konfai.utils.ITK import displace_points, field_reach, jacobian_statistics
-from konfai.utils.utils import format_token, path_format_token, storage_form
+from konfai.utils.ITK import field_reach
+from konfai.utils.utils import SUPPORTED_FORMATS, format_token, path_format_token, split_format_level, storage_form
 from konfai_apps import KonfAIApp
 from konfai_apps.app_repository import AppRepositoryError, LocalAppRepository, check_overrides, did_you_mean, pass_cost
 from konfai_apps.cli import app_file, app_id, app_names
+from konfai_apps.presets import merge_presets, read_presets, split_preset, user_presets_file
 
 from impact_reg_konfai import PRESETS_REPO
+from impact_reg_konfai.plane import is_flat, lift_field, lift_plane, project_field, project_image
 
 # Preset apps live on this Hugging Face repo, at the revision this release pins; KONFAI_IMPACTREG_REPO points
 # it at a local directory of preset folders (each with an app.json) for development / offline use.
@@ -86,8 +88,13 @@ _TRANSFORM_FORMS = {".h5", ".tfm"}
 
 
 def _form(path: Path) -> str:
-    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name."""
-    return storage_form(path)
+    """The storage form of ``path``: konfai's, which knows a dot in a stem is part of the name. An OME-Zarr store whose
+    name carries no suffix (an HCS well's image, ``plate.zarr/C/02/1``) is ``.ome.zarr``, the form it is written back
+    in: a bare form would name the moved image another output than the one its writer produces."""
+    form = storage_form(path)
+    if not form and path.is_dir() and path_format_token(path) == "omezarr":
+        return ".ome.zarr"
+    return form
 
 
 def _format_token(form: str) -> str:
@@ -125,13 +132,31 @@ def _transform_kinds(path: Path) -> list[str]:
         return [line.split(":", 1)[1].strip() for line in file if line.startswith("Transform:")]
 
 
+def _is_flat_field(path: Path) -> bool:
+    """Whether a stored registration, a transform file or an OME-Zarr store, is 2-D, read off its header alone."""
+    if _backend(path) == "omezarr":
+        from konfai.utils.ome_zarr import get_ome_zarr_info, is_affine_store, read_ome_zarr_affine
+
+        if is_affine_store(path):
+            return read_ome_zarr_affine(path).GetDimension() == 2
+        return "z" not in get_ome_zarr_info(path)["axes"]
+    return _is_transform_file(path) and _transform_kinds(path)[0].endswith("_2_2")
+
+
 def _is_field(path: Path) -> bool:
-    """Whether a stored registration is a displacement field: an image or store, or a field transform file."""
-    return not _is_transform_file(path) or _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
+    """Whether a stored registration is a displacement field: an image, a field store or a field transform file. A
+    linear transform file or an RFC-5 affine store (a preset's ``transform_type: affine``) is not one."""
+    if _is_transform_file(path):
+        return _transform_kinds(path)[0].startswith("DisplacementFieldTransform")
+    from konfai.utils.ome_zarr import is_affine_store
+
+    return not (_backend(path) == "omezarr" and is_affine_store(path))
 
 
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
     """A stored displacement field staged as a dataset entry, for KonfAI's field readers."""
+    if _is_flat_field(path):  # See plane.py.
+        path = lift_field(path, work / "plane_field")
     root, _, backend = _stage_group(work / "field", "Reg", {"P000": path}).rpartition(":")
     return Dataset(root, backend), "Reg", "P000"
 
@@ -151,18 +176,13 @@ def _compose_padding(headers: "list[dict[str, _Header]]", budget: int, reach: fl
     return [extent for extent in widest for _ in range(2)]
 
 
-def _jacobian_statistics(path: Path, work: Path) -> dict[str, float]:
-    """KonfAI's Jacobian statistics of a stored field, under the names the evaluation summary reports."""
-    return {f"Transform:Jacobian:{key}": value for key, value in jacobian_statistics(*_field(path, work)).items()}
-
-
-def _displace(points: np.ndarray, path: Path, work: Path) -> np.ndarray:
-    """``points`` (``[N, 3]``, LPS) moved by the stored registration, fixed -> moving, whatever its form: a field
-    read around the points alone (KonfAI's ``displace_points``), any other transform read and applied whole."""
-    if not _is_field(path):
-        transform = sitk.ReadTransform(str(path))
-        return np.array([transform.TransformPoint(point) for point in points.astype(np.float64).tolist()])
-    return displace_points(points, *_field(path, work))
+def _identity(work: Path, fixed: list[Path]) -> Path:
+    """The identity map as a transform file, for an evaluation given no transform: 2-D for a 2-D fixed image."""
+    flat = bool(fixed) and is_flat(_read_header(work / "identity", "Fixed", fixed[0])[0])
+    path = work / "Identity.itk.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteTransform(sitk.AffineTransform(2 if flat else 3), str(path))
+    return path
 
 
 def _case_key(name: str) -> tuple[int, str]:
@@ -172,22 +192,50 @@ def _case_key(name: str) -> tuple[int, str]:
 
 
 def _manifest(preset: str) -> dict:
-    """The preset's ``app.json``, from the local preset directory or the Hugging Face repo; empty if unreadable.
+    """The preset's ``app.json`` (its app's, for ``APP#PRESET``), from the local preset directory or the Hugging Face
+    repo, with the user's own presets of a Hugging Face app (konfai-apps runs them alike); empty if unreadable.
 
     Read cache first, as the preset run resolves its own files: an online read moved the cache to the newest
     preset, which only the runs that read a manifest then picked up.
     """
+    app, name = split_preset(preset)
     try:
-        return json.loads(app_file(IMPACT_REG_KONFAI_REPO, preset, "app.json").read_text(encoding="utf-8"))
+        manifest = json.loads(app_file(IMPACT_REG_KONFAI_REPO, app, "app.json").read_text(encoding="utf-8"))
     except Exception:  # an unreadable manifest declares nothing; resolving the preset reports a bad name itself
         return {}
+    presets = read_presets(manifest.get("presets"), f"the app.json of '{app}'")
+    if not Path(IMPACT_REG_KONFAI_REPO).expanduser().is_dir():  # a Hugging Face app: the user's own presets too
+        own_file = user_presets_file(IMPACT_REG_KONFAI_REPO.partition("@")[0], app)
+        presets = merge_presets(presets, own_file, app)  # a clash is refused as konfai-apps refuses it
+        manifest["presets"] = {key: entry.to_json() for key, entry in presets.items()}
+    chosen = presets.get(name) if name else None
+    if chosen is not None and not chosen.tiles:  # a preset that never runs in tiles: its app's tile pass is not its
+        manifest["tiling"] = {key: value for key, value in (manifest.get("tiling") or {}).items() if key == "global"}
+    return manifest
 
 
 def _preset_config(preset: str, filename: str) -> dict:
     """One of the preset's prediction configs, as data."""
     from ruamel.yaml import YAML
 
-    return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, preset, filename).read_text(encoding="utf-8")) or {}
+    app = split_preset(preset)[0]
+    return YAML(typ="safe").load(app_file(IMPACT_REG_KONFAI_REPO, app, filename).read_text(encoding="utf-8")) or {}
+
+
+def _app_preset_sets(preset: str) -> list[str]:
+    """The ``--set`` of the app preset ``APP#PRESET`` names (none for a bare app): they go first in its share, split
+    between its passes as any ``--set`` is, so the app is then run bare and nothing applies them twice."""
+    app, name = split_preset(preset)
+    if name is None:
+        return []
+    presets = read_presets(_manifest(app).get("presets"), f"the app.json of '{app}'")
+    if name not in presets:
+        raise KonfAIError(
+            "ImpactReg",
+            f"the app '{app}' has no preset '{name}'.{did_you_mean(name, presets)}",
+            f"Its presets: {', '.join(presets)}." if presets else "It declares none.",
+        )
+    return list(presets[name].overrides)
 
 
 #: A key a prediction config leaves out, at its model's default (see ``_agree``).
@@ -198,9 +246,11 @@ _PASSES = ("global", "tile")
 
 
 def _config_value(config: dict, key: str) -> object:
-    """What ``--set key=...`` names in a prediction config, resolved as konfai-apps resolves it: a bare name in the
-    model's parameter block, a dotted one from the config root. ``_UNSET`` when the config has no such key."""
-    node = config if "." in key else LocalAppRepository._model_param_block(config)[1]
+    """What ``--set key=...`` names in a prediction config, resolved as konfai-apps resolves it: a name in the model's
+    parameter block (a nested one dotted from there), one that starts at the config root from there. ``_UNSET`` when
+    the config has no such key."""
+    from_root = "." in key and key.split(".", 1)[0] in config  # Predictor.Dataset...: from the config root
+    node = config if from_root else LocalAppRepository._model_param_block(config)[1]
     for part in filter(None, key.split(".")):
         if not isinstance(node, dict) or part not in node:
             return _UNSET
@@ -264,7 +314,9 @@ def _preset_overrides(
     the pass would refuse stops the run here, that of the tiles included. A config that cannot be read (offline,
     nothing cached) leaves its share to that resolver, in the preset's own process.
     """
-    shares: dict[str, list[tuple[str | None, str]]] = {preset: [] for preset in presets}
+    shares: dict[str, list[tuple[str | None, str]]] = {
+        preset: [(None, override) for override in _app_preset_sets(preset)] for preset in presets
+    }
     for override in overrides or []:
         preset, stage, rest = _scopes(override, presets)
         for member in [preset] if preset else presets:
@@ -328,10 +380,28 @@ def _preset_overrides(
                 raise KonfAIError(
                     "ImpactReg",
                     f"{preset} ({files[stage]}): {error.args[0]}",
-                    f"'impact-reg-konfai show {preset}' lists its parameters. A dotted NAME is a path from its"
-                    f" config root, and --set {preset}:NAME=VALUE sets it for this preset alone.",
+                    f"'impact-reg-konfai show {preset}' lists its parameters. A nested one is dotted from the model,"
+                    f" a NAME from Predictor. is a path from the config root, and --set {preset}:NAME=VALUE sets it"
+                    " for this preset alone.",
                 ) from None
     return passes
+
+
+def _declares_affine(preset: str, overrides: list[str]) -> bool:
+    """Whether the preset's global pass writes its transform as an affine: ``transform_type`` in its config, or the
+    ``--set`` of it. A config that cannot be read (offline, nothing cached) declares nothing here: the preset's own
+    process reads it."""
+    # Bare or dotted from the config root (Predictor.Model.RegistrationNet.transform_type), as konfai-apps resolves it.
+    declared = {
+        name.strip().rpartition(".")[2]: value.strip() for name, _, value in (o.partition("=") for o in overrides)
+    }.get("transform_type")
+    if declared is None:
+        try:
+            tiling = _manifest(preset).get("tiling") or {}
+            declared = _config_value(_preset_config(preset, tiling.get("global") or "Prediction.yml"), "transform_type")
+        except Exception:
+            return False
+    return declared == "affine"
 
 
 def _plan(
@@ -397,6 +467,13 @@ def _is_entry(path: Path, stem: str) -> bool:
     staging entry. The bare name is a form of its own: a DICOM series is a directory carrying no extension at all.
     """
     return (path.name == stem or path.name.startswith(f"{stem}.")) and not is_staging_entry(path.name)
+
+
+def _workspace(name: str) -> str:
+    """A folder name for a preset's workspace: ``ConvexAdam#composite`` as ``ConvexAdam_composite``. A ``#`` in a path
+    is a URL fragment to zarr, which then wrote an OME-Zarr output into the folder before it; ``/`` and ``:`` of an
+    app reference would nest folders and split a dataset spec."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
 
 
 def _drop_other_forms(dest_dir: Path, stem: str, suffixes: str) -> None:
@@ -472,16 +549,17 @@ def _check_presets(presets: list[str]) -> None:
     for preset in presets:
         if presets.count(preset) > 1:
             raise KonfAIError("ImpactReg", f"the preset '{preset}' is listed twice.", "Name each preset once.")
-        if _manifest(preset):
+        app = split_preset(preset)[0]
+        if _manifest(app):
             continue
         try:
             available = app_names(IMPACT_REG_KONFAI_REPO, force_update=True)
         except Exception:
             return
-        if preset not in available:
+        if app not in available:
             raise KonfAIError(
                 "ImpactReg",
-                f"there is no preset '{preset}' in {IMPACT_REG_KONFAI_REPO}.{did_you_mean(preset, available, 3)}",
+                f"there is no preset '{app}' in {IMPACT_REG_KONFAI_REPO}.{did_you_mean(app, available, 3)}",
                 "'impact-reg-konfai list' lists them.",
             )
 
@@ -522,15 +600,42 @@ def _check_inputs(inputs: dict[str, list[Path]], output: Path) -> None:
 
 
 def _check_volumes(inputs: dict[str, list[Path]], headers: list[dict[str, _Header]]) -> None:
-    """Refuse, before any preset runs, a volume the presets cannot register: the engines are 3-D and single-channel,
-    and a 2-D image, a colour one or a time series failed deep inside one of them."""
+    """Refuse, before any preset runs, an image the presets cannot register: the engines are single-channel, and a
+    colour image or a time series failed deep inside one of them."""
     for index, case in enumerate(headers):
         for group, (shape, *_) in case.items():
-            if len(shape) != 4 or shape[0] != 1:
+            if len(shape) not in (3, 4) or shape[0] != 1:
                 raise KonfAIError(
                     "ImpactReg",
-                    f"the {group} volume {inputs[group][index]} has the shape {shape}, channels first.",
-                    "The presets register 3-D single-channel volumes: extract the channel or the time point first.",
+                    f"the {group} image {inputs[group][index]} has the shape {shape}, channels first.",
+                    "The presets register single-channel 2-D or 3-D images: extract the channel or the time point first.",
+                )
+    if len({is_flat(shape) for case in headers for shape, *_ in case.values()}) > 1:
+        raise KonfAIError(
+            "ImpactReg",
+            "the inputs mix 2-D images and 3-D volumes.",
+            "Register them in separate runs: a run's images are all 2-D or all 3-D.",
+        )
+
+
+def _check_time_points(inputs: dict[str, list[Path]]) -> None:
+    """Refuse a store of several time points: KonfAI reads the first, so a time series given twice registered its
+    first time point onto itself, silently."""
+    from konfai.utils.ome_zarr import clear_ome_zarr_cache, get_ome_zarr_info
+
+    for group, units in inputs.items():
+        for unit in units:
+            if _backend(unit) != "omezarr":
+                continue
+            clear_ome_zarr_cache(unit)  # a store replaced at this path since an earlier call in this process
+            info = get_ome_zarr_info(unit)
+            count = info["shape"][info["axes"].index("t")] if "t" in info["axes"] else 1
+            if count > 1:
+                raise KonfAIError(
+                    "ImpactReg",
+                    f"the {group} store {unit} has {count} time points, and a preset registers one image.",
+                    "Write the time point to a store of its own, e.g. with ngff_zarr: image.data[t] with the dims "
+                    "that remain, and register each pair in turn.",
                 )
 
 
@@ -539,6 +644,35 @@ def _read_header(base: Path, group: str, source: Path) -> tuple[list[int], Attri
     root, _, backend = _stage_group(base, group, {"P000": source}).rpartition(":")
     shape, attributes = Dataset(root, backend).get_infos(group, "P000")
     return list(shape), attributes
+
+
+#: The physical sizes of a pair this far apart, on every axis, are more likely a matter of units than of anatomy.
+_SIZE_RATIO = 20.0
+
+
+def _warn_of_other_units(headers: list[dict[str, _Header]], quiet: bool) -> None:
+    """Warn of a pair whose physical sizes differ a lot on every axis: a store in micrometres against a file whose
+    numbers mean millimetres registers to nothing, silently (NCC 0.14 against 0.93 on the same pair)."""
+    if quiet:
+        return
+    for index, case in enumerate(headers):
+        extents = []
+        for group in ("Fixed", "Moving"):
+            shape, spacing, _, direction = case[group]
+            if len(shape) - 1 != len(spacing):
+                break  # not an image: _check_volumes says so
+            axes = np.reshape(direction, (len(spacing), len(spacing)))
+            extents.append(np.abs(axes) @ (np.array(shape[:0:-1]) * spacing))  # along the physical axes
+        if len(extents) < 2 or extents[0].size != extents[1].size:
+            continue
+        fixed, moving = extents
+        ratios = np.maximum(fixed / moving, moving / fixed)
+        if ratios.min() * (1 + 1e-9) >= _SIZE_RATIO:
+            print(
+                f"[ImpactReg] P{index:03d}: the fixed and moving images differ x{ratios.min():.3g} or more in physical "
+                f"size on every axis ({fixed.tolist()} and {moving.tolist()} mm): check each image's unit and spacing.",
+                flush=True,
+            )
 
 
 def _same_grid(first: _Header, second: _Header) -> bool:
@@ -628,6 +762,14 @@ def _publish_output(src: Path, dest: Path, move: bool = False) -> Path:
     ``move`` moves it instead, for a source in a workspace that is deleted next: a transform on a full-resolution
     grid is tens of gigabytes, and a copy wrote it twice."""
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.name.lower().endswith(".hdr") and dest.exists():
+        # An Analyze pair cannot be replaced whole (staged_entry): the new one is made complete first, the old one goes.
+        with tempfile.TemporaryDirectory(dir=dest.parent, prefix=f".{dest.name}.") as scratch:
+            ready = Path(scratch) / dest.name
+            transfer_entry(src, ready, move)
+            for part in entry_files(dest):
+                part.unlink()
+            return _publish_output(ready, dest, move=True)
     with staged_entry(dest) as staged:
         transfer_entry(src, staged, move)
     if dest.is_dir():
@@ -817,6 +959,10 @@ class ImpactRegKonfAIApp:
         # ``ran``. It does not describe the cases a rank finished before a restart.
         self._plans: dict[str, dict[str, int | None]] = {}
         self._ran: dict[str, list[dict]] = {}
+        # The run's own choices every preset pass takes as they are: --output-format, --seed. The moved image is
+        # derived here, so its format (--output-format [Moved=]FORMAT) is this orchestrator's; None: the moving's.
+        self._run_args: list[str] = []
+        self._moved_format: str | None = None
 
     # ------------------------------------------------------------------ register
 
@@ -858,14 +1004,16 @@ class ImpactRegKonfAIApp:
         mapping is positional, a lone moving mask still needs the fixed-mask slot present: filled with an all-ones
         mask on each case's fixed grid (``_neutral_fixed_masks``).
         """
-        out = work / (label or preset)
+        out = work / _workspace(label or preset)
         # This interpreter's konfai-apps, not the first on PATH: an unactivated environment has none there, and
         # another environment's would run another konfai and install the preset's requirements into it.
-        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, preset)]
+        # The bare app: an APP#PRESET's own --set are already in this pass's share (see _preset_overrides).
+        app = split_preset(preset)[0]
+        command = [sys.executable, "-m", "konfai_apps", "infer", app_id(IMPACT_REG_KONFAI_REPO, app)]
         command += ["-i", *(str(path) for path in fixed_images)]
         command += ["-i", *(str(path) for path in moving_images)]
         if moving_masks and not fixed_masks:
-            fixed_masks = _neutral_fixed_masks(work / f"{label or preset}_fixed_mask", fixed_images)
+            fixed_masks = _neutral_fixed_masks(work / _workspace(f"{label or preset}_fixed_mask"), fixed_images)
         if fixed_masks:
             command += ["-i", *(str(path) for path in fixed_masks)]
         if moving_masks:
@@ -887,6 +1035,7 @@ class ImpactRegKonfAIApp:
         for override in config_overrides or []:
             command += ["--set", override]
         self._applied[label or preset] = list(config_overrides or [])
+        command += self._run_args
         if max_voxels:
             command += ["--max-voxels", str(max_voxels)]
         if gpu:
@@ -950,6 +1099,8 @@ class ImpactRegKonfAIApp:
         tmp_dir: Path | None = None,
         fields_only: bool = False,
         max_voxels: int | None = None,
+        output_format: list[str] | None = None,
+        seed: int | None = None,
     ) -> None:
         """Register every case with the selected presets and ensemble their DVFs.
 
@@ -995,14 +1146,50 @@ class ImpactRegKonfAIApp:
         _check_inputs(inputs, output)
         _check_presets(presets)
         overrides = _preset_overrides(presets, config_overrides, quiet)
+        self._run_args = ["--seed", str(seed)] if seed is not None else []
+        self._moved_format = None
+        for spec in output_format or []:
+            name, assigned, file_format = spec.rpartition("=")
+            if not assigned or name == "Moved":  # the moved image is derived here: its format is set here
+                if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"--output-format {spec}: '{file_format}' is not a format KonfAI writes."
+                        f"{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                        f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+                    )
+                self._moved_format = format_token(f".{file_format}")  # one token per form: zarr is omezarr
+            if name != "Moved":  # a bare FORMAT is every output's, the engine's transform included
+                self._run_args += ["--output-format", spec]
+        # An affine is one pass's result: an ensemble and a test-time augmentation average fields.
+        affine_presets = [preset for preset in presets if _declares_affine(preset, overrides[preset]["global"])]
+        if affine_presets and (len(presets) > 1 or tta):
+            raise KonfAIError(
+                "ImpactReg",
+                f"the preset '{affine_presets[0]}' writes its transform as an affine, which "
+                f"{'an ensemble' if len(presets) > 1 else '--tta'} cannot average.",
+                "Run it alone and without --tta, or --set transform_type=field.",
+            )
         self._applied, self._plans, self._ran = {}, {}, {}
 
         work = _work_dir(tmp_dir, output, "impact_reg_")
         try:
             if not quiet:
                 print(f"[ImpactReg] intermediates in {work}", flush=True)
+            _check_time_points(inputs)
             headers = self._headers(inputs, work)
+            _warn_of_other_units(headers, quiet)
             _check_volumes(inputs, headers)
+            lifted, flat = inputs, is_flat(headers[0]["Fixed"][0])
+            if flat:  # The presets run on volumes one plane thick, on one z grid: see plane.py.
+                lifted = {
+                    group: [
+                        lift_plane(unit, work / "planes" / group / f"{index:03d}", min(headers[index]["Fixed"][1]))
+                        for index, unit in enumerate(units)
+                    ]
+                    for group, units in inputs.items()
+                }
+                headers = self._headers(lifted, work / "planes")
             _check_space(work, headers, len(presets))
             on_grid = None
             fields_by_preset = {}
@@ -1015,13 +1202,19 @@ class ImpactRegKonfAIApp:
                 self._plans[preset] = {"whole_voxels": budget, "tile_voxels": tile_budget}
                 largest_voxels = max(math.prod(case[group][0][-3:]) for case in headers for group in case)
                 tiled = bool(tiling.get("tile") and budget and largest_voxels > budget)
+                if tiled and preset in affine_presets:
+                    raise KonfAIError(
+                        "ImpactReg",
+                        f"the pair outgrows the device, and the tile pass of '{preset}' refines a field, not an affine.",
+                        "--set transform_type=field, or --max-voxels to register the pair whole.",
+                    )
                 # KonfAI patches each image on its own grid, and a test-time flip turns each about its own centre:
                 # the pair goes onto the fixed grid where it would be tiled as it came (tiles with no global pass
                 # before them) and wherever it is flipped.
                 onto_fixed = bool(tta or (tiled and not tiling.get("global")))
                 if onto_fixed:
-                    on_grid = on_grid or self._onto_fixed_grid(inputs, headers, work, gpu, cpu, quiet)
-                pair = on_grid if onto_fixed else (inputs, headers)
+                    on_grid = on_grid or self._onto_fixed_grid(lifted, headers, work, gpu, cpu, quiet)
+                pair = on_grid if onto_fixed else (lifted, headers)
                 if tiled:
                     fields_by_preset[preset] = self._register_tiled(
                         preset,
@@ -1109,7 +1302,8 @@ class ImpactRegKonfAIApp:
                 # the grid of that case's own field (a field is defined ON the fixed grid) and reads
                 # the field as the map.
                 self._derive_moved(
-                    dict(zip(cases, moving_units, strict=True)),
+                    dict(zip(cases, lifted["Moving"], strict=True)),
+                    dict(zip(cases, lifted["Fixed"], strict=True)),
                     group,
                     output,
                     work,
@@ -1117,6 +1311,13 @@ class ImpactRegKonfAIApp:
                     cpu,
                     quiet,
                 )
+            if flat:
+                for case, moving in zip(cases, moving_units, strict=True):
+                    for field in (_the_output(output / case, group), *(output / case / _ENSEMBLE_DIR).glob("*")):
+                        project_field(field)
+                    if not fields_only:  # in the moving's own spelling (.zarr stays .zarr) unless a form was chosen
+                        moved = _the_output(output / case, "Moved")
+                        project_image(moved, moved if self._moved_format else output / case / f"Moved{_form(moving)}")
         except BaseException as error:
             _leave(work, error)
             raise
@@ -1351,7 +1552,7 @@ class ImpactRegKonfAIApp:
                         dict(zip(cases, inputs[side], strict=True)),
                         fixed,
                         global_fields,
-                        work / f"{preset}_prewarp",
+                        work / _workspace(f"{preset}_prewarp"),
                         gpu,
                         cpu,
                         quiet,
@@ -1365,7 +1566,7 @@ class ImpactRegKonfAIApp:
                 dict(zip(cases, inputs["FixedMask"], strict=True)),
                 fixed,
                 None,
-                work / f"{preset}_prewarp",
+                work / _workspace(f"{preset}_prewarp"),
                 gpu,
                 cpu,
                 quiet,
@@ -1388,13 +1589,13 @@ class ImpactRegKonfAIApp:
             return group, tile_fields
         # Volume-sized intermediates go as soon as nothing reads them: the pre-warped images before the composition,
         # the tiles' field after it.
-        shutil.rmtree(work / f"{preset}_prewarp", ignore_errors=True)
-        reach = max(field_reach(*_field(field, work / f"{preset}_reach")) for field in tile_fields.values())
+        shutil.rmtree(work / _workspace(f"{preset}_prewarp"), ignore_errors=True)
+        reach = max(field_reach(*_field(field, work / _workspace(f"{preset}_reach"))) for field in tile_fields.values())
         padding = _compose_padding(headers, budget, reach)
         composed = self._compose(
-            tile_fields, global_fields, fixed, group, padding, work / f"{preset}_compose", gpu, cpu, quiet
+            tile_fields, global_fields, fixed, group, padding, work / _workspace(f"{preset}_compose"), gpu, cpu, quiet
         )
-        shutil.rmtree(work / f"{preset}_tiles", ignore_errors=True)
+        shutil.rmtree(work / _workspace(f"{preset}_tiles"), ignore_errors=True)
         return group, composed
 
     def _ensemble_mean(
@@ -1413,7 +1614,8 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Reduce, Write
 
         members = _stage_group(work / f"ensemble_{case}", "DVF", dict(zip(presets, dvf_paths, strict=True)))
-        suffixes, backend = _form(dvf_paths[0]), _backend(dvf_paths[0])
+        # Written apart, as the moved image is: see _derive_moved.
+        root = work / f"ensemble_{case}_mean"
         _run_transform(
             f"impact_reg_ensemble_{case}",
             [members],
@@ -1421,7 +1623,7 @@ class ImpactRegKonfAIApp:
                 "DVF": {
                     group: [
                         Reduce(operator="Mean", output=case, grid="strict"),
-                        Write(dataset=f"{output}:{backend}"),
+                        Write(dataset=f"{root}:{_backend(dvf_paths[0])}"),
                     ]
                 }
             },
@@ -1430,11 +1632,12 @@ class ImpactRegKonfAIApp:
             cpu,
             quiet,
         )
-        _drop_other_forms(output / case, group, suffixes)
+        _copy_output(_the_output(root / case, group), output / case, group, move=True)
 
     def _derive_moved(
         self,
         cases: dict[str, Path],
+        fixed: dict[str, Path],
         group: str,
         output: Path,
         work: Path,
@@ -1444,10 +1647,11 @@ class ImpactRegKonfAIApp:
     ) -> None:
         """The moved images, derived from the transforms, one streamed run over the whole cohort.
 
-        A preset that emits only a field is complete: everything else IS that field. The moved
+        A preset that emits only a transform is complete: everything else IS that transform. The moved
         image: ``reference: '{case}'`` adopts each case's own DVF grid (a field is defined ON the
         fixed grid) and the field is the map (``field_group``): one interpolation, streamed, each
-        slab's source window sized from the field values it reads.
+        slab's source window sized from the field values it reads. An affine (``transform_type: affine``) has no
+        grid of its own: the fixed image lends it, and the affine is the map KonfAI decodes (``transforms``).
 
         NOTHING ELSE IS DERIVED. A preset writes its transform in the form its consumer reads (an ITK
         transform file where Slicer picks it up, an RFC-5 store where this pipeline streams it) so
@@ -1459,22 +1663,30 @@ class ImpactRegKonfAIApp:
         from konfai.data.transform import Resample, Write
 
         fields = {case: _the_output(output / case, group) for case in cases}
-        # The moved image is written in the MOVING's own form: the fields' form may be an ITK
-        # transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
-        # below, so the first case's form speaks for the cohort.
-        moving = next(iter(cases.values()))
-        suffixes, backend = _form(moving), _backend(moving)
-        moving_root = _stage_group(work / "moved_stage", "Moving", cases)
-        field_root = _stage_group(work / "moved_stage", "DVF", fields)
+        # The moved image is written in the form --output-format chose, else the MOVING's own: the fields' form may
+        # be an ITK transform file, which cannot hold an image. _stage_group refuses a mixed Moving group
+        # below, so the first case's form speaks for the cohort, and one preset writes one form of transform.
+        backend = self._moved_format or _backend(next(iter(cases.values())))
+        roots = [_stage_group(work / "moved_stage", "Moving", cases), _stage_group(work / "moved_stage", "DVF", fields)]
+        if _is_field(next(iter(fields.values()))):
+            resample = Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear")
+        else:
+            roots.append(_stage_group(work / "moved_stage", "Fixed", fixed))
+            resample = Resample(
+                reference="{case}", reference_group="Fixed", transforms={"DVF": False}, interpolation="linear"
+            )
+        # Written apart, then published: a root has one backend, read off what it holds (_stage_group), so beside a
+        # store, here or left by an earlier run, a moved file would come out as a store.
+        root = work / "moved"
         _run_transform(
             "impact_reg_moved",
-            [moving_root, field_root],
+            roots,
             {
                 "Moving": {
                     "Moved": [
-                        Resample(reference="{case}", reference_group="DVF", field_group="DVF", interpolation="linear"),
+                        resample,
                         Write(
-                            dataset=f"{output}:{backend}",
+                            dataset=f"{root}:{backend}",
                             scale_factors="auto" if backend == "omezarr" else None,
                         ),
                     ]
@@ -1486,7 +1698,7 @@ class ImpactRegKonfAIApp:
             quiet,
         )
         for case in fields:
-            _drop_other_forms(output / case, "Moved", suffixes)
+            _copy_output(_the_output(root / case, "Moved"), output / case, "Moved", move=True)
 
     # ------------------------------------------------------------------ evaluate
 
@@ -1512,7 +1724,7 @@ class ImpactRegKonfAIApp:
         is given it warps the moving data onto the fixed grid first; otherwise the moving data is assumed
         already registered and only resampled onto the fixed grid (identity). Each option holds one entry
         per case or one used for every case (``_cases``); a displacement-field transform also gets its
-        Jacobian statistics. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
+        Jacobian statistics, and is evaluated alone when no modality is given. Case ``P###`` is written to ``<output>/P###/Evaluation/<modality>/`` (Image,
         Segmentation, Landmarks, Jacobian), and the whole call to ``<output>/Evaluation_summary.json``.
 
         The evaluation configs ship with this package (``_EVALUATION_APP``): every preset carried the same
@@ -1553,97 +1765,79 @@ class ImpactRegKonfAIApp:
                 }
             )
         )
-        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid))
+        # A transform given alone is a case of its own: its Jacobian, when it is a field, is the evaluation.
+        n_cases = max(len(fixed_images), len(gt_fixed_seg), len(gt_fixed_fid)) or len(transforms)
         scored: list[tuple[str, Path]] = []
-        jacobians: dict[Path, dict[str, float]] = {}  # one transform given for every case is measured once
+        jacobians: dict[Path, Path] = {}  # one field given for every case is measured once: it reads the whole field
         for index in range(n_cases):
-            transform_path = transforms[index] if transforms else None
-            # One output folder AND one workspace per modality (Image, Segmentation, Landmarks): the three
-            # configs share one train_name and konfai-apps evaluates with overwrite.
+            # One output folder AND one workspace per modality: the configs share one train_name and konfai-apps
+            # evaluates with overwrite.
             eval_out = output / f"P{index:03d}" / "Evaluation"
             work = _work_dir(tmp_dir, output, "impact_reg_eval_")
             try:
-                # Image: moving resampled onto the fixed grid vs fixed (MAE). Mask is optional.
+                # Each modality is konfai-apps' evaluation of the transform (-i) against the fixed and the moving data
+                # (--gt): its config pulls the moving side through the transform onto the fixed grid, or pushes the
+                # fixed landmarks into the moving image. With no transform the moving data is taken as registered
+                # already, and an identity only resamples it onto the fixed grid.
+                transform = (
+                    transforms[index]
+                    if transforms
+                    else _identity(work, (fixed_images or gt_fixed_seg)[index : index + 1])
+                )
+                runs: list[tuple[str, str, Path, Path, list[list[Path]] | None]] = []
                 if fixed_images:
-                    moved = self._warp_onto_fixed(
-                        work, "img", fixed_images[index], moving_images[index], transform_path, gpu, cpu, quiet
+                    case_mask = [[mask[index]]] if mask else None
+                    runs.append(
+                        ("Image", "Evaluation_with_images.yml", fixed_images[index], moving_images[index], case_mask)
                     )
-                    app.evaluate(
-                        inputs=[[fixed_images[index]]],
-                        gt=[[moved]],
-                        output=eval_out / "Image",
-                        mask=[[mask[index]]] if mask else None,
-                        evaluation_file="Evaluation_with_images.yml",
-                        gpu=gpu,
-                        cpu=cpu,
-                        quiet=quiet,
-                        tmp_dir=work / "Image",
-                    )
-                    scored.append((f"P{index:03d}", eval_out / "Image"))
-
-                # Segmentation: moving seg warped onto fixed vs fixed seg (Dice), nearest-neighbour.
                 if gt_fixed_seg:
-                    moved_seg = self._warp_onto_fixed(
-                        work, "seg", gt_fixed_seg[index], gt_moving_seg[index], transform_path, gpu, cpu, quiet
+                    runs.append(
+                        ("Segmentation", "Evaluation_with_seg.yml", gt_fixed_seg[index], gt_moving_seg[index], None)
                     )
-                    app.evaluate(
-                        inputs=[[gt_fixed_seg[index]]],
-                        gt=[[moved_seg]],
-                        output=eval_out / "Segmentation",
-                        evaluation_file="Evaluation_with_seg.yml",
-                        gpu=gpu,
-                        cpu=cpu,
-                        quiet=quiet,
-                        tmp_dir=work / "Segmentation",
-                    )
-                    scored.append((f"P{index:03d}", eval_out / "Segmentation"))
-
-                # Landmarks (TRE): the transform is defined on the fixed grid and maps fixed->moving, so the
-                # fixed fiducials are displaced by it into moving space and compared against the moving fiducials
-                # there (the standard warped-keypoints convention; no field inversion needed). With no transform
-                # the raw fiducials are compared, measuring the initial misalignment. Landmarks are a few
-                # points: a field is read around them alone (``_displace``). Points pair by row,
-                # so both files must hold as many; the warped fixed points are the config's FixedFid group.
                 if gt_fixed_fid:
-                    fixed_points = read_landmarks(gt_fixed_fid[index])
-                    moving_count = len(read_landmarks(gt_moving_fid[index]))
-                    if len(fixed_points) != moving_count:
+                    fixed_count, moving_count = (
+                        len(read_landmarks(path)) for path in (gt_fixed_fid[index], gt_moving_fid[index])
+                    )
+                    if fixed_count != moving_count:
                         raise EvaluatorError(
-                            f"{len(fixed_points)} fixed vs {moving_count} moving landmarks"
+                            f"{fixed_count} fixed vs {moving_count} moving landmarks"
                             f" ('{gt_fixed_fid[index]}', '{gt_moving_fid[index]}').",
                             "Landmarks pair by row order: give both files the same points, in the same order.",
                         )
-                    if transform_path is not None:
-                        fixed_points = _displace(fixed_points, transform_path, work)
-                    moved_fid = work / "moved_fid.fcsv"
-                    write_landmarks(fixed_points, moved_fid)
+                    runs.append(
+                        ("Landmarks", "Evaluation_with_fid.yml", gt_fixed_fid[index], gt_moving_fid[index], None)
+                    )
+                for modality, evaluation_file, fixed, moving, case_mask in runs:
                     app.evaluate(
-                        inputs=[[moved_fid]],
-                        gt=[[gt_moving_fid[index]]],
-                        output=eval_out / "Landmarks",
-                        evaluation_file="Evaluation_with_fid.yml",
+                        inputs=[[transform]],
+                        gt=[[fixed], [moving]],
+                        output=eval_out / modality,
+                        mask=case_mask,
+                        evaluation_file=evaluation_file,
                         gpu=gpu,
                         cpu=cpu,
                         quiet=quiet,
-                        tmp_dir=work / "Landmarks",
+                        tmp_dir=work / modality,
                     )
-                    scored.append((f"P{index:03d}", eval_out / "Landmarks"))
-
-                # Deformation quality, a property of the transform alone. Only a displacement field is
-                # measured: a linear transform's Jacobian is its matrix, the same everywhere, and a B-spline file is
-                # not converted to a field.
-                if transform_path is not None and _is_field(transform_path):
-                    from konfai.evaluator import Statistics
-
-                    if transform_path not in jacobians:
-                        jacobians[transform_path] = _jacobian_statistics(transform_path, work)
-                    jacobian = Statistics(eval_out / "Jacobian" / "ImpactReg" / "Metric_TRAIN.json")
-                    jacobian.filename.parent.mkdir(parents=True, exist_ok=True)
-                    jacobian.add(jacobians[transform_path], "P000")
-                    jacobian.directions = {
-                        key: "max" if key.endswith(":min") else "min" for key in jacobian.measures["P000"]
-                    }
-                    jacobian.write([jacobian.measures])
+                    scored.append((f"P{index:03d}", eval_out / modality))
+                # Deformation quality, a property of the transform alone. Only a displacement field is measured: a
+                # linear transform's Jacobian is its matrix, the same everywhere, and a B-spline file is not converted
+                # to a field.
+                if transforms and _is_field(transform):
+                    if transform in jacobians:
+                        shutil.copytree(jacobians[transform], eval_out / "Jacobian", dirs_exist_ok=True)
+                    else:
+                        app.evaluate(
+                            inputs=[[transform]],
+                            gt=None,
+                            output=eval_out / "Jacobian",
+                            evaluation_file="Evaluation_with_jacobian.yml",
+                            gpu=gpu,
+                            cpu=cpu,
+                            quiet=quiet,
+                            tmp_dir=work / "Jacobian",
+                        )
+                        jacobians[transform] = eval_out / "Jacobian"
                     scored.append((f"P{index:03d}", eval_out / "Jacobian"))
             except BaseException as error:
                 _leave(work, error)
@@ -1671,6 +1865,40 @@ class ImpactRegKonfAIApp:
         With no transform the map is the identity and this is a change of grid alone.
         Written as MHA, or with ``keep_form`` in the moving's own form (file, OME-Zarr store, DICOM series).
         """
+        shape, attributes = _read_header(work / f"plane_{kind}", "Fixed", fixed)
+        if not is_flat(shape):
+            return self._warp_volume(work, kind, fixed, moving, transform_path, gpu, cpu, quiet, keep_form)
+        # Through the 3-D stream one plane thick, as register runs a 2-D pair: see plane.py.
+        planes = work / f"planes_{kind}"
+        z_mm = float(min(attributes.get_np_array("Spacing")))
+        moved = self._warp_volume(
+            work,
+            kind,
+            lift_plane(fixed, planes / "Fixed", z_mm),
+            lift_plane(moving, planes / "Moving", z_mm),
+            lift_field(transform_path, planes) if transform_path and _is_flat_field(transform_path) else transform_path,
+            gpu,
+            cpu,
+            quiet,
+            keep_form,
+        )
+        target = moved.with_name(f"Moved{_form(moving) if keep_form else '.mha'}")
+        project_image(moved, target)
+        return target
+
+    def _warp_volume(
+        self,
+        work: Path,
+        kind: str,
+        fixed: Path,
+        moving: Path,
+        transform_path: Path | None,
+        gpu: list[int],
+        cpu: int | None,
+        quiet: bool,
+        keep_form: bool,
+    ) -> Path:
+        """``_warp_onto_fixed`` on volumes."""
         from konfai.data.transform import Resample, Write
 
         base = work / f"warp_{kind}"
@@ -1684,7 +1912,7 @@ class ImpactRegKonfAIApp:
             "interpolation": "nearest" if kind == "seg" else "linear",
         }
         if transform_path is not None:
-            if _is_transform_file(transform_path):
+            if not _is_field(transform_path):
                 resample["transforms"] = {"Reg": False}
             else:
                 resample["field_group"] = "Reg"
@@ -1731,8 +1959,11 @@ class ImpactRegKonfAIApp:
             from konfai.data.transform import Magnitude, Reduce, Write
 
             members = _units(list(dvfs))
-            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
             suffixes = ".mha" if _is_transform_file(members[0]) else _form(members[0])
+            flat = _is_flat_field(members[0])
+            if flat:  # See plane.py.
+                members = [lift_field(dvf, work / "planes" / f"M{index:03d}") for index, dvf in enumerate(members)]
+            spec = _stage_group(work / "members", "DVF", {f"M{index:03d}": dvf for index, dvf in enumerate(members)})
             _run_transform(
                 "impact_reg_uncertainty",
                 [spec],
@@ -1751,6 +1982,9 @@ class ImpactRegKonfAIApp:
                 quiet,
             )
             _drop_other_forms(output / "uncertainty", "Uncertainty", suffixes)
+            if flat:
+                written = _the_output(output / "uncertainty", "Uncertainty")
+                project_image(written, written)
         except BaseException as error:
             _leave(work, error)
             raise

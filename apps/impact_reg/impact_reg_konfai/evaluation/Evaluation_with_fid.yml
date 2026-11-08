@@ -1,3 +1,7 @@
+# konfai-apps eval APP --evaluation-file Evaluation_with_fid.yml -i TRANSFORM --gt FIXED_FID --gt MOVING_FID
+# The target registration error: the fixed landmarks pushed through the registration (Volume_0), which maps the fixed
+# grid into the moving image, against the moving landmarks, in mm. Landmarks pair by row: both files hold the same
+# points, in the same order. No field is inverted.
 Evaluator:
   metrics:
     FixedFid:
@@ -7,11 +11,14 @@ Evaluator:
             TRE: {}
   Dataset:
     groups_src:
-      Volume_0:
+      Reference_0:
         groups_dest:
           FixedFid:
-            transforms: None
-      Reference_0:
+            transforms:
+              TransformPoints:
+                transforms:
+                  Volume_0: false
+      Reference_1:
         groups_dest:
           MovingFid:
             transforms: None

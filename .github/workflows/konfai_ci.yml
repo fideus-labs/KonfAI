@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/konfai_ci.yml"
+      - ".github/ci-constraints.txt"
       - "konfai/**"
       - "konfai-apps/**"
       - "tests/**"
@@ -21,6 +22,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/konfai_ci.yml"
+      - ".github/ci-constraints.txt"
       - "konfai/**"
       - "konfai-apps/**"
       - "tests/**"
@@ -42,6 +44,10 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
+
+# Holds the tools CI tests with (the file says why).
+env:
+  PIP_CONSTRAINT: ${{ github.workspace }}/.github/ci-constraints.txt
 
 jobs:
   konfai_ci:

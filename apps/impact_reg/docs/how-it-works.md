@@ -16,7 +16,8 @@ konfai-apps infer            one subprocess per preset: reads the pair, runs the
         └── ConvexAdam       itk-impact: coarse discrete search, then Adam refinement
         │
         ▼
-displacement field on the fixed grid   (several presets: averaged voxel by voxel)
+the transform: a displacement field on the fixed grid (several presets: averaged voxel by voxel),
+               or the affine a linear preset declares (transform_type: affine)
         │
         ▼
 Moved image · eval (MAE, Dice, TRE, Jacobian) · uncertainty (spread of an ensemble) · apply (more images)
@@ -25,10 +26,21 @@ Moved image · eval (MAE, Dice, TRE, Jacobian) · uncertainty (spread of an ense
 A pair larger than a preset registers whole is split: the preset runs once on a coarse copy of the whole pair, then
 its deformable stage refines the result on native-resolution tiles (see [Large images](large-images.md)).
 
+### 2-D images
+
+A 2-D image registers as a volume does: `register`, `apply`, `eval` and `uncertainty` take a single-channel image of any
+form, and `register` gives back a 2-D moved image in that form and a 2-D transform in the form of the preset's output
+dataset, `Transform.h5` or `Transform.ome.zarr`. The presets' configurations and KonfAI's patches are 3-D, so the pair
+goes through them one plane thick, and the engine registers the plane itself: elastix and FireANTs in 2-D, ConvexAdam on
+the 2-D version of its MIND model. The IMPACT presets on elastix and FireANTs, and the presets on a model with no 2-D
+version (TotalSegmentator), are refused.
+
 ## The transform and its conventions
 
 `Output/<case>/Transform.h5` is an ITK `DisplacementFieldTransform` stored as HDF5, readable by SimpleITK, ITK, 3D Slicer
-and ANTs:
+and ANTs. A linear preset that declares `transform_type: affine` (`Elastix#rigid`) writes the one `AffineTransform` its
+stages found instead, and as an OME-Zarr output (`Transform:omezarr`) an RFC-5 `affine` transformation on its own,
+twelve numbers where the same registration as a field weighs megabytes. Both forms map fixed points to moving points:
 
 | Property | Value |
 |---|---|
@@ -36,9 +48,15 @@ and ANTs:
 | Direction | maps a point of the **fixed** image to the matching point of the **moving** image (ITK's pull-back convention) |
 | Moved image | `moved(x) = moving(x + D(x))` for every fixed voxel `x`: resampling the moving image through the transform |
 | Vector components | physical x, y, z (LPS, as ITK), not voxel axes; the direction matrix is already applied |
-| Units | the images' physical unit: millimetres for NIfTI, MHA, NRRD, DICOM; what the store declares for OME-Zarr |
+| Units | millimetres: NIfTI, MHA, NRRD and DICOM are read as such, and an OME-Zarr store in another unit (micrometres) is converted on read |
 | Outside the grid | zero displacement |
 | Size on disk | 24 bytes per fixed voxel (float64), whatever the preset: 175 MB for 240 × 180 × 176 |
+
+`Transform:omezarr` in the preset's output dataset writes the same field as `Output/<case>/Transform.ome.zarr`, an NGFF
+RFC-5 `displacements` store: float32, its components in the axes' order (dz, dy, dx) and in the images' unit. A reader
+such as ngff-zarr applies it, and `NgffScene` puts it with the two images in one OME-Zarr 0.6 store, as it is. On an
+oblique grid the store has no `displacements` entry: RFC-5 places a field by a scale and a translation, and the rotation
+stays in a sidecar only KonfAI reads.
 
 Consequences worth knowing:
 
@@ -48,6 +66,19 @@ Consequences worth knowing:
   nearest-neighbour interpolation. There is no inverse transform: to bring fixed-side data onto the moving image,
   register the other way round.
 - **Ensembles** average the members' fields voxel by voxel on the common fixed grid (not a diffeomorphic mean).
+
+### Lengths are in voxels
+
+A preset's lengths (a step, a B-spline grid, a smoothing, a feature model's `voxel_size`) are numbers of voxels of the
+fixed image, its finest axis: a step of 1.2 is 1.2 mm on 1 mm voxels and 1.2 µm on 1 µm voxels. The engine measures the
+pair in that voxel and brings the field back to millimetres, so one preset registers a CT and a micrometre organoid
+alike. The unit conversion (an OME-Zarr in micrometres read as millimetres) is exact and separate. A `--set` of a length
+is in voxels too: `--set final_grid_spacing=8` is a grid of 8 voxels.
+
+The presets were tuned in millimetres on ~2 mm anatomy, so their lengths are half the millimetres they were tuned in:
+the B-spline grid of `Elastix#rigid_bspline` is 8 voxels, 16 mm on that anatomy. On the tutorial MR/CT pair (2 mm) the
+presets give what they gave in millimetres. FireANTs moves its translation with its own step, `translation_lr`
+(voxels), apart from `affine_lr`, the step of the rotation and the matrix, which have no unit.
 
 ## IMPACT: registering on what a network sees
 
@@ -109,7 +140,7 @@ They are downloaded once to the Hugging Face cache (`~/.cache/huggingface`) when
 | Similarity | mutual information or IMPACT | local correlation, mutual information or IMPACT | IMPACT |
 | IMPACT modes | Static or Jacobian | Static or Jacobian | Static or Jacobian (fine stage) |
 | Runs on | CPU, IMPACT metric on a CUDA GPU | GPU (CPU works, slowly) | GPU or CPU |
-| Presets | `Generic_Rigid`, `Generic_Rigid_BSpline`, `Elastix_IMPACT_Static`, `Elastix_IMPACT_Jacobian` | `FireANTs_SyN`, `FireANTs_IMPACT`, `FireANTs_Anatomix`, `FireANTs_IMPACT_MRCT` | `ConvexAdam_Coarse`, `ConvexAdam_Composite`, `ConvexAdam_IMPACT_CBCT`, `ConvexAdam_IMPACT_MRCT` |
+| Presets | `Elastix#rigid`, `Elastix#rigid_bspline`, `Elastix#impact_static`, `Elastix#impact_jacobian` | `FireANTs#syn`, `FireANTs#impact`, `FireANTs#anatomix`, `FireANTs#impact_mrct` | `ConvexAdam#coarse`, `ConvexAdam#composite`, `ConvexAdam#impact_cbct`, `ConvexAdam#impact_mrct` |
 
 The three engines compute one IMPACT loss: the same models, layers, PCA, feature normalisation and distances, each
 layer divided by its value when a level starts (`normalize`). elastix and itk-impact share itk-impact's C++

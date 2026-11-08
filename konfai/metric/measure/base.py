@@ -135,7 +135,8 @@ class CriterionWithAttribute(Criterion):
     """A criterion handed the per-sample attributes of its targets: ``attributes[i]`` belongs to
     ``targets[i]``, in the order of the target group, in training and in evaluation alike. A subclass
     that also reads the output's own declares ``accepts_output_attributes`` and takes an
-    ``output_attributes`` keyword, ``None`` in training (a model output has none)."""
+    ``output_attributes`` keyword, ``None`` in training (a model output has none); a reducible one
+    takes it on ``partial_metric`` too, the case's header with every patch."""
 
     accepts_attributes = True
     accepts_output_attributes = False

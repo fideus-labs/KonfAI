@@ -45,6 +45,7 @@ from konfai.data.sampling import (
     default_interpolation,
     gather,
     gather_separable,
+    region_reach,
     sampling_dtype,
     scanline_index,
     scanline_map,
@@ -531,7 +532,8 @@ class _StoredMap:
 
     The decoded stages are not kept: a cohort of fields would stay resident and be serialised to
     every rank. They are decoded again where a region of their case is sampled
-    (:meth:`Resample._stored_stages`).
+    (:meth:`Resample._stored_stages`), and a BSpline's for the plan to price a region by where it
+    sends that region (:meth:`Resample._region_reach`).
     """
 
     bound: TransformBound
@@ -539,6 +541,9 @@ class _StoredMap:
     #: Whether a dense field member was priced as the identity rather than bounded. The plan cannot
     #: bound one from headers, so the run measures its window from the values it samples anyway.
     field: bool = False
+    #: Whether the map holds a BSpline and no dense field: the plan then prices each region by where
+    #: the spline actually sends it (:func:`~konfai.data.sampling.region_reach`), not by its whole range.
+    spline: bool = False
 
 
 def _stages_bytes(stages: SpatialStages) -> int:
@@ -843,6 +848,9 @@ class Resample(TransformInverse):
         #: ``stored_stage_bytes``. Not pickled. Keyed on (case, box): a field read for one region
         #: answers for that region alone.
         self._stored: OrderedDict[tuple, SpatialStages] = OrderedDict()
+        #: The headers' stages of the last cases priced with a BSpline, most recent last, within
+        #: ``priced_stage_slots``. Not pickled: what crosses to a rank does not grow with the cohort.
+        self._priced: OrderedDict[str, SpatialStages] = OrderedDict()
         #: The last field window read, kept for the sampler: sizing a region's source window reads
         #: the very field slab the sampler needs next, so one slot makes the two one read.
         self._field_window: tuple[str, object, DisplacementStage] | None = None
@@ -870,6 +878,7 @@ class Resample(TransformInverse):
     def __getstate__(self) -> dict:
         state = dict(self.__dict__)
         state["_stored"] = OrderedDict()
+        state["_priced"] = OrderedDict()
         state["_field_window"] = None
         state["_sitk_input"] = _SitkInput()
         return state
@@ -880,6 +889,9 @@ class Resample(TransformInverse):
     stored_stage_bytes = 512 << 20
     #: Region-keyed entries kept at once: an all-affine map prices zero bytes and would never evict.
     stored_stage_slots = 64
+    #: Cases whose headers' stages the plan keeps for pricing regions: a plan prices one case's
+    #: windows after another, so a few are enough, and the rest decode again on demand.
+    priced_stage_slots = 8
 
     @staticmethod
     def _target_from(
@@ -1054,12 +1066,36 @@ class Resample(TransformInverse):
             # identity, which is the price the declared route puts on its field.
             priced = self._decode_stored(name, headers_only=True)
             has_field = self._stored_has_field(name)
+            # A BSpline decodes to an order-3 stage on its coefficients; a dense field read as a
+            # transform to an order-1 one, whose windows are measured from its values at run time.
+            displacements = [stage for stage in priced if isinstance(stage, DisplacementStage)]
+            spline = bool(displacements) and not has_field and all(stage.order == 3 for stage in displacements)
             stored = self._maps[name] = _StoredMap(
                 bound_of(priced, rank),
                 not has_field and all(isinstance(stage, AffineStage) for stage in priced),
                 field=has_field,
+                spline=spline,
             )
+            if spline:
+                self._keep_priced(name, priced)
         return stored
+
+    def _keep_priced(self, name: str, stages: SpatialStages) -> SpatialStages:
+        self._priced.pop(name, None)
+        self._priced[name] = stages
+        while len(self._priced) > self.priced_stage_slots:
+            self._priced.popitem(last=False)
+        return stages
+
+    def _region_reach(self, name: str, region: Grid) -> WorldBox:
+        """Where the PLAN prices one target region's reads: through a map holding a BSpline, the
+        region's box carried stage by stage as ngff-zarr bounds a block (:func:`region_reach`), so
+        a coefficient far from the region does not widen its window; through any other map, the
+        case's bound (:meth:`_pricing_bound`). Both hold every point the run samples there."""
+        if self.transforms is None or not self._stored_map(name).spline:
+            return self._pricing_bound(name).map_box(region.world_box())
+        stages = self._keep_priced(name, self._priced.get(name) or self._decode_stored(name, headers_only=True))
+        return region_reach(region, stages)
 
     def _stored_has_field(self, name: str) -> bool:
         """Whether any member of this case's stored map is a dense field, from headers alone.
@@ -1071,7 +1107,7 @@ class Resample(TransformInverse):
 
     def _stored_field_headers(self, name: str) -> list[tuple[list[int], Attribute]]:
         """The shape and header of every dense-field member of this case's stored map."""
-        from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE
+        from konfai.utils.dataset import is_displacement_entry
 
         fields = []
         for group in cast("dict[str, bool]", self.transforms or {}):
@@ -1081,7 +1117,7 @@ class Resample(TransformInverse):
                 if getattr(dataset, "read_data", None) is None:
                     break  # a transform-only store serves no field
                 shape, header = dataset.get_infos(group, name)
-                if DISPLACEMENT_FIELD_ATTRIBUTE in header:
+                if is_displacement_entry(shape, header):
                     fields.append((shape, header))
                 break
         return fields
@@ -1289,7 +1325,7 @@ class Resample(TransformInverse):
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
         return list(
-            source_window(target.sub_grid(tuple(target_slices)), source, self._pricing_bound(name), self._tap_margin)
+            source.index_window(self._region_reach(name, target.sub_grid(tuple(target_slices))), self._tap_margin)
         )
 
     @property
@@ -1817,3 +1853,59 @@ class Resample(TransformInverse):
     @property
     def _target_is_own(self) -> bool:
         return isinstance(self._target, _OwnGrid)
+
+
+class TransformPoints(Transform):
+    """Push a case's points (``[N, 3]`` in LPS, as a ``.fcsv`` reads) through transforms stored beside the cases.
+
+    The map is the one a ``Resample`` with the same ``transforms`` pulls an image back through: a registration that
+    moves the moving image onto the fixed grid maps each fixed point to where it lands in the moving image, so the
+    TRE of a registration compares the fixed landmarks pushed through it with the moving ones, and no field is
+    inverted. ``transforms`` maps each GROUP to whether to invert it (a rigid or affine map only), the LAST declared
+    applied first, as in ``Resample``.
+
+    A 3-D displacement field is read around each point alone (:func:`~konfai.utils.ITK.displace_points`), so a few
+    points never hold the field in memory. Any other transform is read whole and applied to the axes it has: a 2-D
+    one moves x and y and leaves z, where a 2-D image's landmarks sit.
+    """
+
+    locality = LocalityKind.WHOLE_VOLUME  # a set of points, read whole: there is no region of it to stream
+
+    def __init__(self, transforms: dict[str, bool]) -> None:
+        super().__init__()
+        if not transforms:
+            raise TransformError(
+                "'TransformPoints' was given no transform.",
+                "Name a group and whether to invert it: transforms: {Volume_0: false}.",
+            )
+        self.transforms = transforms
+
+    def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
+        from konfai.utils.dataset import is_displacement_entry
+        from konfai.utils.ITK import displace_points
+
+        points = tensor.detach().cpu().numpy().astype(np.float64).reshape(-1, 3)
+        for group, invert in reversed(list(self.transforms.items())):
+            dataset = self.dataset_holding(group, name)
+            if dataset is None:
+                raise TransformError(
+                    f"'TransformPoints' found no transform for case '{name}' in group '{group}'.",
+                    "Every case needs an entry in every group named under 'transforms:'.",
+                )
+            shape, header = dataset.get_infos(group, name)
+            if not invert and len(shape) == 4 and is_displacement_entry(shape, header):
+                points = displace_points(points, dataset, group, name)
+                continue
+            transform = dataset.read_transform(group, name)
+            if invert:
+                try:
+                    transform = transform.GetInverse()
+                except RuntimeError as error:
+                    raise TransformError(
+                        f"'TransformPoints' cannot invert group '{group}' for case '{name}': it is not a rigid or"
+                        " affine map.",
+                        f"Store the inverse instead, or set '{group}: false'.",
+                    ) from error
+            rank = transform.GetDimension()
+            points[:, :rank] = [transform.TransformPoint(point[:rank].tolist()) for point in points]
+        return torch.as_tensor(points, dtype=tensor.dtype).reshape(tensor.shape)

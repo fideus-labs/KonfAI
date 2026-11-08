@@ -25,11 +25,20 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from konfai.utils.runtime import save_weights
+from safetensors import safe_open
 
 pytestmark = pytest.mark.slow
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 KONFAI_APPS_ROOT = REPO_ROOT / "konfai-apps"
+#: The apps CLI as a subprocess, importing this checkout's own code ahead of any installed copy.
+_APPS = [
+    sys.executable,
+    "-c",
+    f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
+    "from konfai_apps.cli import main_apps; main_apps()",
+]
 WORKFLOW_ASSETS_DIR = REPO_ROOT / "tests" / "assets" / "Workflows"
 SimpleITK = pytest.importorskip("SimpleITK")
 
@@ -82,7 +91,7 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
                 "short_description": "Tiny synth",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny_0.pt", "tiny_1.pt"],
+                "models": ["tiny_0.safetensors", "tiny_1.safetensors"],
                 "inputs": {
                     "Volume_0": {
                         "display_name": "MR",
@@ -246,8 +255,8 @@ def _write_local_synthesis_app(app_dir: Path) -> None:
         model.Projection.bias.zero_()
 
     checkpoint = {"Model": model.network_states()}
-    torch.save(checkpoint, app_dir / "tiny_0.pt")
-    torch.save(checkpoint, app_dir / "tiny_1.pt")
+    save_weights(checkpoint, app_dir / "tiny_0.safetensors")
+    save_weights(checkpoint, app_dir / "tiny_1.safetensors")
 
 
 def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None:
@@ -266,13 +275,7 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
     _write_image(mask_path, mask_array, SimpleITK.sitkUInt8)
 
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "pipeline",
         str(app_dir),
         "-i",
@@ -324,6 +327,50 @@ def test_konfai_apps_pipeline_is_local_and_deterministic(tmp_path: Path) -> None
     assert _single_case_metric(uncertainty_path, expected_metric_suffix="Uncertainty") == pytest.approx(0.0, abs=1e-6)
 
 
+def test_konfai_apps_infer_reads_an_ome_zarr_store_by_uri_in_place(tmp_path: Path) -> None:
+    """An input named by a URI is read where it is, chunk by chunk through fsspec: no copy, no link. The local
+    filesystem is the one scheme a test can count on; the code path is the one ``s3://`` takes."""
+    pytest.importorskip("fsspec")
+    pytest.importorskip("ngff_zarr")
+    from konfai.utils.ome_zarr import write_ome_zarr
+
+    app_dir = tmp_path / "TinySynthesisApp"
+    _write_local_synthesis_app(app_dir)
+
+    input_array = np.linspace(-0.8, 0.8, 16 * 16, dtype=np.float32).reshape(1, 1, 16, 16)
+    expected_output = np.tanh(input_array[0]).astype(np.float32)
+    store = tmp_path / "input.ome.zarr"
+    write_ome_zarr(str(store), input_array, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0])
+    output = tmp_path / "out"
+
+    cmd = [
+        *_APPS,
+        "infer",
+        str(app_dir),
+        "-i",
+        f"file://{store}",
+        "-o",
+        str(output),
+        "--ensemble",
+        "2",
+        "--cpu",
+        "1",
+    ]
+
+    result = run(cmd)
+    assert result.returncode == 0, (
+        "The local 'konfai-apps infer' command failed on a store named by URI.\n\n"
+        f"CMD: {' '.join(cmd)}\n\n"
+        f"STDOUT:\n{result.stdout}\n\n"
+        f"STDERR:\n{result.stderr}"
+    )
+
+    predicted_path = output / "TinyApp" / "Dataset" / "P000" / "sCT.mha"  # infer collects ./Predictions into -o
+    assert predicted_path.exists()
+    predicted = SimpleITK.GetArrayFromImage(SimpleITK.ReadImage(str(predicted_path)))
+    np.testing.assert_allclose(predicted, expected_output, atol=3e-4)
+
+
 def _run_pipeline(app_dir: Path, output: Path, cohort: str, spoiled: int | None) -> subprocess.CompletedProcess[str]:
     """The pipeline over three inputs of ``cohort`` against their references, input ``spoiled`` unreadable."""
     sign = -1.0 if cohort == "B" else 1.0
@@ -338,9 +385,7 @@ def _run_pipeline(app_dir: Path, output: Path, cohort: str, spoiled: int | None)
         inputs[spoiled].write_bytes(b"not an image\n")
     return run(
         [
-            sys.executable,
-            "-c",
-            "from konfai_apps.cli import main_apps; main_apps()",
+            *_APPS,
             "pipeline",
             str(app_dir),
             "-i",
@@ -386,7 +431,7 @@ def _write_local_finetune_app(app_dir: Path) -> None:
                 "short_description": "Tiny synth",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny_0.pt", "tiny_1.pt"],
+                "models": ["tiny_0.safetensors", "tiny_1.safetensors"],
                 "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
                 "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
             }
@@ -416,8 +461,8 @@ def _write_local_finetune_app(app_dir: Path) -> None:
         "loss": 0.0,
         "Model": model.network_states(),
     }
-    torch.save(checkpoint, app_dir / "tiny_0.pt")
-    torch.save(checkpoint, app_dir / "tiny_1.pt")
+    save_weights(checkpoint, app_dir / "tiny_0.safetensors")
+    save_weights(checkpoint, app_dir / "tiny_1.safetensors")
 
 
 def _build_finetune_dataset(dataset_dir: Path) -> None:
@@ -448,13 +493,7 @@ def _run_finetune(
     epochs: int = 2,
 ) -> subprocess.CompletedProcess[str]:
     cmd = [
-        sys.executable,
-        "-c",
-        (
-            f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-            f"sys.path.insert(0, {str(KONFAI_APPS_ROOT)!r}); "
-            "from konfai_apps.cli import main_apps; main_apps()"
-        ),
+        *_APPS,
         "fine-tune",
         str(app_dir),
         "FT",
@@ -475,9 +514,10 @@ def _run_finetune(
 def _assert_finetuned_from_checkpoint(checkpoint_path: Path) -> None:
     """A fine-tuned checkpoint must start fresh (counters reset) yet have actually trained."""
     assert checkpoint_path.exists(), checkpoint_path
-    state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    assert state["epoch"] < _PRETRAINED_EPOCH, f"epoch not reset: {state['epoch']}"
-    assert 0 < state["it"] < _PRETRAINED_IT, f"training did not run from a fresh counter: it={state['it']}"
+    with safe_open(str(checkpoint_path), "pt") as file:
+        epoch, it = int(file.metadata()["epoch"]), int(file.metadata()["it"])
+    assert epoch < _PRETRAINED_EPOCH, f"epoch not reset: {epoch}"
+    assert 0 < it < _PRETRAINED_IT, f"training did not run from a fresh counter: it={it}"
 
 
 def test_finetune_single_model_resumes_from_checkpoint_and_trains(tmp_path: Path) -> None:
@@ -492,11 +532,11 @@ def test_finetune_single_model_resumes_from_checkpoint_and_trains(tmp_path: Path
 
     meta = _read_json(output_dir / "app.json")
     assert meta["display_name"] == "FT"
-    assert meta["models"] == ["tiny_0.pt"]
+    assert meta["models"] == ["tiny_0.safetensors"]
 
-    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.pt")
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.safetensors")
     # Only the selected checkpoint is packaged, and the bundle is clean (no training artifacts).
-    assert not (output_dir / "tiny_1.pt").exists()
+    assert not (output_dir / "tiny_1.safetensors").exists()
     for artifact in ("Checkpoints", "Statistics", "Dataset"):
         assert not (output_dir / artifact).exists(), artifact
 
@@ -512,9 +552,9 @@ def test_finetune_defaults_to_first_checkpoint(tmp_path: Path) -> None:
     assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
 
     meta = _read_json(output_dir / "app.json")
-    assert meta["models"] == ["tiny_0.pt"]
-    assert (output_dir / "tiny_0.pt").exists()
-    assert not (output_dir / "tiny_1.pt").exists()
+    assert meta["models"] == ["tiny_0.safetensors"]
+    assert (output_dir / "tiny_0.safetensors").exists()
+    assert not (output_dir / "tiny_1.safetensors").exists()
 
 
 def test_finetune_multiple_models_produces_one_checkpoint_each(tmp_path: Path) -> None:
@@ -528,6 +568,6 @@ def test_finetune_multiple_models_produces_one_checkpoint_each(tmp_path: Path) -
     assert result.returncode == 0, f"CMD failed.\nSTDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
 
     meta = _read_json(output_dir / "app.json")
-    assert meta["models"] == ["tiny_0.pt", "tiny_1.pt"]
-    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.pt")
-    _assert_finetuned_from_checkpoint(output_dir / "tiny_1.pt")
+    assert meta["models"] == ["tiny_0.safetensors", "tiny_1.safetensors"]
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_0.safetensors")
+    _assert_finetuned_from_checkpoint(output_dir / "tiny_1.safetensors")
