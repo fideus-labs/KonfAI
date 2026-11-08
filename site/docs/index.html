@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation · KonfAI docs</title>
+<meta name="description" content="What these pages cover.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html" aria-current="page">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Documentation</h1>
+<p class="lead">What these pages cover.</p>
+
+<p>Short pages for someone who wants to run KonfAI: what to install, what a config says, what each command writes, how data is laid out, and how the apps, the MCP server, Scout, Studio and Edge fit around the engine. Every page ends where the <a href="https://konfai.readthedocs.io/en/latest/">full reference</a> begins; nothing here replaces it.</p>
+<div class="grid docs-grid">
+<article><h2><a href="get-started.html">Get started</a></h2><p>Install KonfAI and run the Segmentation example.</p></article><article><h2><a href="configuration.html">Configuration</a></h2><p>One YAML per workflow: roots, dataset, groups, transforms, patches, models.</p></article><article><h2><a href="workflows.html">Workflows</a></h2><p>TRAIN, RESUME, PREDICTION, EVALUATION, TRANSFORM and the options that matter.</p></article><article><h2><a href="datasets.html">Datasets</a></h2><p>The layout KonfAI reads and the formats it reads regionally.</p></article><article><h2><a href="apps.html">Apps</a></h2><p>Published bundles, Hugging Face, the one-line CLI, 3D Slicer.</p></article><article><h2><a href="agents-mcp.html">Agents and MCP</a></h2><p>What the MCP server lets an agent do.</p></article><article><h2><a href="scout.html">Scout</a></h2><p>A visual inspector of results.</p></article><article><h2><a href="studio.html">Studio</a></h2><p>A chat web UI over the MCP server.</p></article><article><h2><a href="edge.html">Edge</a></h2><p>KonfAI apps in a browser tab, no server.</p></article>
+</div>
+<section>
+<h2>Which page first</h2>
+<ul>
+<li>You have images and want a model: <a href="get-started.html">Get started</a>, then <a href="configuration.html">Configuration</a>.</li>
+<li>You want a result without training: <a href="apps.html">Apps</a>.</li>
+<li>You want to prepare data only: <a href="workflows.html#transform">TRANSFORM</a> and <a href="datasets.html">Datasets</a>.</li>
+<li>You drive KonfAI from an agent or from a chat: <a href="agents-mcp.html">Agents and MCP</a>, <a href="studio.html">Studio</a>.</li>
+<li>You want to look at a result the way a radiologist would: <a href="scout.html">Scout</a>.</li>
+<li>You want it in a browser tab, no server: <a href="edge.html">Edge</a>.</li>
+</ul>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

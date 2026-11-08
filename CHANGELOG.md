@@ -96,6 +96,13 @@ measurements it cites, a filmstrip of the views it cites with a lightbox), the u
 demand; `/api/scout/report` carries the views' metadata, the date and the duration. Studio's design rests on one
 token set (type, spacing, radii, colour roles), with a light theme following the system preference, tool-call cards
 collapsed to one line (open when the call failed), and a readable measure for the assistant's prose.
+Studio is responsive: three panes from 1200 px, the experiments rail as a drawer between 768 and 1199 px, one
+column under 768 px with an app bar, a Conversation · Workspace · Scout · Runs bar, a sticky composer whose
+selectors fold into a settings popover, chips and the Scout filmstrip scrolling sideways, the terminal as a bottom
+sheet, full-screen modals; one control height per pointer (32 px, 40 px touch), inline SVG icons, no horizontal
+page scroll at 360, 390 and 430 px (a Playwright spec at 390x844 keeps it so). The site gains a curated
+documentation section (`site/docs/`: get started, configuration, workflows, datasets, apps, agents and MCP, Scout,
+Studio, Edge) written from the repository's own docs, and a GitHub Pages workflow triggered by hand only.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

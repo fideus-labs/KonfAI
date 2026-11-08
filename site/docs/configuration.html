@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration · KonfAI docs</title>
+<meta name="description" content="One YAML per workflow: roots, dataset, groups, transforms, patches, models.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html" aria-current="page">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Configuration</h1>
+<p class="lead">One YAML per workflow: roots, dataset, groups, transforms, patches, models.</p>
+
+<section>
+<h2>Four files, four roots</h2>
+<p>A KonfAI config is YAML that says which Python objects to build and how they connect. Each workflow has one file with one root key; the model workflows share a workspace named by <code>train_name</code>, so use the same <code>train_name</code> in the files of one experiment.</p>
+<table>
+<thead><tr><th>Command</th><th>File</th><th>Root</th><th>Writes</th></tr></thead>
+<tbody>
+<tr><td><code>konfai TRAIN</code> / <code>RESUME</code></td><td><code>Config.yml</code></td><td><code>Trainer:</code></td><td><code>Checkpoints/&lt;train_name&gt;/</code>, <code>Statistics/&lt;train_name&gt;/</code></td></tr>
+<tr><td><code>konfai PREDICTION</code></td><td><code>Prediction.yml</code></td><td><code>Predictor:</code></td><td><code>Predictions/&lt;train_name&gt;/</code></td></tr>
+<tr><td><code>konfai EVALUATION</code></td><td><code>Evaluation.yml</code></td><td><code>Evaluator:</code></td><td><code>Evaluations/&lt;train_name&gt;/Metric_*.json</code></td></tr>
+<tr><td><code>konfai TRANSFORM</code></td><td><code>Transform.yml</code></td><td><code>Transformer:</code></td><td>wherever each <code>Write:</code> points; logs in <code>Transforms/&lt;name&gt;/</code></td></tr>
+</tbody>
+</table>
+</section>
+<section>
+<h2>How YAML becomes objects</h2>
+<p>Each key is a constructor argument: KonfAI reads the class's signature, takes each argument from the key of the same name (<code>snake_case</code>) and builds nested objects the same way. A missing key takes its default (<code>konfai &lt;COMMAND&gt; --init</code> writes every default into the file); <code>null</code> means <code>None</code> and turns a feature off; a required key must be written and the error names it; a value of the wrong shape is refused with its path; a key nothing reads is reported with the closest valid name. Running a config rewrites it with its resolved defaults.</p>
+</section>
+<section>
+<h2>The dataset</h2>
+<p>Every workflow reads its data through a <code>Dataset:</code> block. <code>dataset_filenames</code> is a list of <code>path</code>, <code>path:format</code> or <code>path:flag:format</code> entries, as the templates write them:</p>
+<ul>
+<li><code>./Dataset:mha</code>, <code>./DicomDataset:dicom</code>, <code>./OmeDataset:omezarr</code>;</li>
+<li>the flag <code>a</code> adds a dataset's cases to the others (union), <code>i</code> keeps only the cases present in all (intersection): <code>./Predictions/TRAIN_01/Dataset:i:mha</code>;</li>
+<li>a manifest of explicit entries, <code>./cases.yml:omezarr</code>, when the cases do not sit in the standard layout.</li>
+</ul>
+<p><code>groups_src</code> names the groups read from disk; each gives one or more tensors in <code>groups_dest</code>, each with its own <code>transforms</code>; <code>is_input: true</code> marks the model's inputs, the others are targets. <code>transforms</code> is case preprocessing, replayed on regions when streaming; <code>patch_transforms</code> runs on each patch. No <code>transforms</code> means the group reaches the model as stored.</p>
+<pre><code>Trainer:
+  Dataset:
+    dataset_filenames: [./Dataset:mha]
+    groups_src:
+      CT:
+        groups_dest:
+          CT:
+            transforms:
+              Standardize: {mean: None, std: None}
+            is_input: true
+      SEG:
+        groups_dest:
+          SEG: {}
+    Patch:
+      patch_size: [128, 128, 128]</code></pre>
+<p><code>subset</code> and <code>validation</code> take the same selectors: a share of the cases, a list of names, a case-list file, or a <code>start:end</code> slice.</p>
+</section>
+<section>
+<h2>Patches</h2>
+<p><code>Patch.patch_size</code> is the patch the model sees (default <code>[128, 128, 128]</code>); a <code>0</code> lets KonfAI size that axis, starting from the whole axis and, on a GPU out-of-memory at the first step, restarting with the fewest equal patches that fit. <code>overlap</code> defaults to 20 %. <code>extend_slice</code> adds neighbouring slices as channels for 2.5-D models (with <code>patch_size[0] == 1</code>). <code>memory_budget</code> decides whether the dataset stays in RAM or streams.</p>
+</section>
+<section>
+<h2>Models by classpath</h2>
+<p>A KonfAI model is a graph of named modules, either a Python class or the same graph written as a <code>.yml</code>. Pick it with <code>classpath</code>: <code>segmentation.UNet.UNet</code> for a Python class of the catalogue, <code>default|UNet.yml</code> for the YAML catalogue, <code>UNet.yml</code> for a file next to the config; its arguments go in a section named after the class. A module's path joins the names of its parents with <code>:</code>, and the config attaches losses and metrics to those paths under <code>outputs_criterions</code> (the segmentation example puts cross entropy on <code>UNetBlock_0:Head:Conv</code>, the logits, and Dice on <code>UNetBlock_0:Head:Softmax</code>, the probabilities). A model with no loss is refused. KonfAI also instantiates regular PyTorch and MONAI components named by classpath (<code>monai.networks.nets:UNet</code>, with the <code>monai</code> extra).</p>
+<p>The exhaustive field tables: <a href="https://konfai.readthedocs.io/en/latest/config_guide/training.html">training</a>, <a href="https://konfai.readthedocs.io/en/latest/config_guide/prediction.html">prediction</a>, <a href="https://konfai.readthedocs.io/en/latest/config_guide/evaluation.html">evaluation</a>, <a href="https://konfai.readthedocs.io/en/latest/config_guide/transform.html">transform</a>.</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

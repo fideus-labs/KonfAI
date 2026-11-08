@@ -11,6 +11,7 @@ import { useJobStream } from "./useJobStream";
 import { getJson, postJson } from "./api";
 import { useJson } from "./useJson";
 import { jobState } from "./status";
+import { ChevronIcon, MenuIcon, TerminalIcon } from "./icons";
 
 // The deployment pane (ONNX Runtime) and the terminal (xterm) load when first shown: their bundles
 // are not part of what a chat session pays to start.
@@ -147,6 +148,21 @@ function Meter({
 // Auth gate: decide once whether this deployment needs a token, and only mount the workspace when the
 // browser holds a valid session. Trusted-local (no token) falls straight through. A mid-session 401
 // (session expired) flips back to the lock screen via the `ks-unauth` event from main.tsx.
+// The layout follows the viewport in three steps: ≥1200 the three panes side by side; 768–1199 the
+// experiments rail folds into a drawer; <768 one column, a pane bar to move between the conversation
+// and the right panel, the terminal as a sheet. A media query, not a user agent sniff.
+function useMedia(query: string): boolean {
+  const [matches, setMatches] = useState(() => (typeof window !== "undefined" ? window.matchMedia(query).matches : false));
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const onChange = () => setMatches(mq.matches);
+    onChange();
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 export default function App() {
   const [auth, setAuth] = useState<"checking" | "in" | "out">("checking");
   const [remote, setRemote] = useState(false);
@@ -188,6 +204,18 @@ export default function App() {
 }
 
 function Studio({ remote }: { remote: boolean }) {
+  const compact = useMedia("(max-width: 1199px)"); // the rail is a drawer
+  const phone = useMedia("(max-width: 767px)"); // one column, a pane bar
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [pane, setPane] = useState<"chat" | "right">("chat");
+  const [tabReq, setTabReq] = useState<{ tab: string; nonce: number } | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  // On a phone the right panel is reached through the pane bar: naming the tab there opens the panel on it.
+  function showRight(tab: string) {
+    setPane("right");
+    setSheetOpen(false);
+    setTabReq((r) => ({ tab, nonce: (r?.nonce ?? 0) + 1 }));
+  }
   const [status, setStatus] = useState("connecting…");
   const [stopped, setStopped] = useState(false); // the user shut the local server down from the titlebar
   const [sessions, setSessions] = useState<string[]>([]); // starts empty: no phantom "default" experiment
@@ -671,10 +699,21 @@ function Studio({ remote }: { remote: boolean }) {
   return (
     <div className="app">
       <div className="titlebar">
+        {compact && (
+          <button
+            className="menu-btn"
+            aria-label={drawerOpen ? "Hide experiments" : "Show experiments"}
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen((o) => !o)}
+          >
+            <MenuIcon />
+          </button>
+        )}
         <img className="wordmark" src="/konfai-logo.png" alt="KonfAI" />
         <span className="studio">Studio</span>
-        <button className="apps-btn" onClick={openZoo} title="Browse KonfAI Apps">
-          <AppsIcon /> KonfAI Apps
+        {phone && <span className="title-now">{active === NEW ? "New experiment" : (ui[active]?.title ?? active)}</span>}
+        <button className="apps-btn" onClick={openZoo} title="Browse KonfAI Apps" aria-label="KonfAI Apps">
+          <AppsIcon /> <span className="apps-label">KonfAI Apps</span>
         </button>
         <span className="spacer" />
         {gpus.map((g) => (
@@ -717,15 +756,23 @@ function Studio({ remote }: { remote: boolean }) {
       </div>
 
       <div
-        className={railHidden ? "body rail-off" : "body"}
-        style={railHidden ? undefined : { gridTemplateColumns: `${railWidth}px 5px minmax(0, 1fr)` }}
+        className={[
+          "body",
+          compact ? "compact" : railHidden ? "rail-off" : "",
+          phone ? "phone" : "",
+          drawerOpen ? "drawer-open" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        style={compact || railHidden ? undefined : { gridTemplateColumns: `${railWidth}px 5px minmax(0, 1fr)` }}
       >
-        {railHidden && (
+        {!compact && railHidden && (
           <button className="rail-reopen" title="Show experiments" onClick={() => setRailHidden(false)}>
             <PanelIcon />
           </button>
         )}
-        <aside className="rail">
+        {compact && drawerOpen && <div className="drawer-back" onClick={() => setDrawerOpen(false)} />}
+        <aside className="rail" aria-hidden={compact && !drawerOpen}>
           <div className="rail-head">
             <span>Experiments</span>
             <span className="rail-tools">
@@ -739,7 +786,11 @@ function Studio({ remote }: { remote: boolean }) {
               >
                 <SearchIcon />
               </button>
-              <button className="rail-icon" title="Hide experiments" onClick={() => setRailHidden(true)}>
+              <button
+                className="rail-icon"
+                title="Hide experiments"
+                onClick={() => (compact ? setDrawerOpen(false) : setRailHidden(true))}
+              >
                 <PanelIcon />
               </button>
             </span>
@@ -754,7 +805,14 @@ function Studio({ remote }: { remote: boolean }) {
               onKeyDown={(e) => e.key === "Escape" && (setSearchOpen(false), setRailSearch(""))}
             />
           )}
-          <button className={active === NEW ? "rail-new-btn on" : "rail-new-btn"} onClick={newDraft}>
+          <button
+            className={active === NEW ? "rail-new-btn on" : "rail-new-btn"}
+            onClick={() => {
+              newDraft();
+              setDrawerOpen(false);
+              setPane("chat");
+            }}
+          >
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
@@ -771,7 +829,11 @@ function Studio({ remote }: { remote: boolean }) {
                 <button
                   key={s}
                   className={s === active ? "task on" : "task"}
-                  onClick={() => setActive(s)}
+                  onClick={() => {
+                    setActive(s);
+                    setDrawerOpen(false);
+                    setPane("chat");
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ session: s, x: e.clientX, y: e.clientY });
@@ -790,10 +852,14 @@ function Studio({ remote }: { remote: boolean }) {
           </div>
         </aside>
 
-        {!railHidden && <div className="rail-divider" onMouseDown={startRailDrag} title="Drag to resize" />}
+        {!compact && !railHidden && <div className="rail-divider" onMouseDown={startRailDrag} title="Drag to resize" />}
 
         <div className="main">
-          <div className="work" ref={workRef} style={{ gridTemplateColumns: `${split}fr 6px ${1 - split}fr` }}>
+          <div
+            className={phone ? `work phone pane-${pane}` : "work"}
+            ref={workRef}
+            style={phone ? undefined : { gridTemplateColumns: `${split}fr 6px ${1 - split}fr` }}
+          >
             <div className="chat-col">
               <div className="chat-stack">
                 {sessions.map((s) => (
@@ -852,9 +918,10 @@ function Studio({ remote }: { remote: boolean }) {
                 )}
               </div>
             </div>
-            <div className="col-divider" onMouseDown={startColDrag} title="Drag to resize" />
+            {!phone && <div className="col-divider" onMouseDown={startColDrag} title="Drag to resize" />}
             <RightPanel
               session={active}
+              tabRequest={tabReq}
               volumePath={ui[active]?.volume ?? null}
               volumeNonce={ui[active]?.volumeNonce ?? 0}
               onVolumePathChange={(p) => setUi((u) => patchSession(u, active, { volume: p }))}
@@ -865,7 +932,51 @@ function Studio({ remote }: { remote: boolean }) {
               onReload={() => bumpRun(active)}
             />
           </div>
-          {terminalRequested ? (
+          {phone ? (
+            <>
+              <nav className="panebar" aria-label="Panels">
+                <button
+                  className={pane === "chat" ? "pane-btn on" : "pane-btn"}
+                  onClick={() => {
+                    setPane("chat");
+                    setSheetOpen(false);
+                  }}
+                >
+                  Conversation
+                </button>
+                <button className={pane === "right" && tabReq?.tab === "config" ? "pane-btn on" : "pane-btn"} onClick={() => showRight("config")}>
+                  Workspace
+                </button>
+                <button className={pane === "right" && tabReq?.tab === "scout" ? "pane-btn on" : "pane-btn"} onClick={() => showRight("scout")}>
+                  Scout
+                </button>
+                <button className={pane === "right" && tabReq?.tab === "runs" ? "pane-btn on" : "pane-btn"} onClick={() => showRight("runs")}>
+                  Runs
+                </button>
+                <button
+                  className={sheetOpen ? "pane-btn icon on" : "pane-btn icon"}
+                  aria-label={sheetOpen ? "Close the terminal" : "Open the terminal"}
+                  aria-expanded={sheetOpen}
+                  onClick={() => {
+                    setTerminalRequested(true);
+                    setSheetOpen((o) => !o);
+                  }}
+                >
+                  <TerminalIcon />
+                </button>
+              </nav>
+              {sheetOpen && terminalRequested && (
+                <>
+                  <div className="term-sheet-back" onClick={() => setSheetOpen(false)} />
+                  <div className="term-sheet" role="dialog" aria-label="Terminal">
+                    <Suspense fallback={<div className="console-head" role="status">Opening terminal…</div>}>
+                      <Console initialOpen />
+                    </Suspense>
+                  </div>
+                </>
+              )}
+            </>
+          ) : terminalRequested ? (
             <Suspense fallback={
               <section className="console">
                 <div className="console-head" role="status">Opening terminal…</div>
@@ -881,7 +992,7 @@ function Studio({ remote }: { remote: boolean }) {
                 </button>
                 <span className="cbar-spacer" />
                 <button className="toggle" aria-label="Open terminal" aria-expanded={false} onClick={() => setTerminalRequested(true)}>
-                  ▸
+                  <ChevronIcon open={false} />
                 </button>
               </div>
             </section>

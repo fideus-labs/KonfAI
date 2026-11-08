@@ -10,6 +10,19 @@
 - [KonfAI Scout](scout.html): what the inspector does, how it measures, how it keeps its statements apart, how to install it
 - [KonfAI Studio](studio.html): the chat UI over the MCP server, its three ways in, the sessions it keeps
 
+## Documentation (short pages for a newcomer; the exhaustive reference is https://konfai.readthedocs.io/en/latest/)
+
+- [Documentation](docs/index.html): what the docs cover and which page to read first
+- [Get started](docs/get-started.html): install, the Segmentation quickstart (TRAIN, PREDICTION, EVALUATION), what appears on disk
+- [Configuration](docs/configuration.html): the four roots, dataset_filenames and the path:flag:format token, groups_src and groups_dest, transforms, patches, models by classpath
+- [Workflows](docs/workflows.html): TRAIN and RESUME, PREDICTION with test-time augmentation and ensembles, EVALUATION, TRANSFORM, the options --gpu, --cpu, --overwrite, --quiet
+- [Datasets](docs/datasets.html): the one-folder-per-case layout, the formats (ITK, HDF5, DICOM, OME-Zarr, ITK transforms), regional reads
+- [Apps](docs/apps.html): what an app is, how to run one, the published catalogue, 3D Slicer
+- [Agents and MCP](docs/agents-mcp.html): what the MCP server lets an agent do, the tools by stage, the entry tools
+- [Scout](docs/scout.html): the visual inspector, its three kinds of statement, how to install it
+- [Studio](docs/studio.html): the chat web UI, how to install it, the model brains
+- [Edge](docs/edge.html): KonfAI Edge, the Rust runtime that runs the apps in a browser tab, and where its demo will live
+
 ## Source documents
 
 - [KonfAI README](https://github.com/fideus-labs/KonfAI/blob/main/README.md)

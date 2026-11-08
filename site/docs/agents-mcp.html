@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agents and MCP · KonfAI docs</title>
+<meta name="description" content="What the MCP server lets an agent do.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html" aria-current="page">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Agents and MCP</h1>
+<p class="lead">What the MCP server lets an agent do.</p>
+
+<section>
+<h2>What the server lets an agent do</h2>
+<p>KonfAI MCP exposes KonfAI to an MCP client (Claude Code, Codex, Studio) as fifty tools, one per object: inspect a dataset, design and write a config, check it without launching anything (up to one real forward and backward pass), launch and follow jobs, compare runs, use a published app, fine-tune it, package a session as an app, inspect a result with Scout, read FidOpt's catalogue. Every run is a job; most answers name the valid next calls.</p>
+<pre><code>pip install "konfai[imaging]" konfai-apps konfai-mcp
+konfai-mcp            # stdio transport by default</code></pre>
+<pre><code>[mcp_servers.konfai]
+command = "/path/to/venv/bin/konfai-mcp"
+tool_timeout_sec = 3600
+
+[mcp_servers.konfai.env]
+KONFAI_MCP_WORKSPACES_ROOT = "/path/to/workspaces"</code></pre>
+</section>
+<section>
+<h2>The tools by stage</h2>
+<table>
+<thead><tr><th>Stage</th><th>Tools</th></tr></thead>
+<tbody>
+<tr><td>Orient</td><td><code>describe_konfai_capabilities</code>, <code>describe_config_schema</code>, <code>describe_extension_points</code></td></tr>
+<tr><td>Dataset</td><td><code>inspect_dataset</code> (and <code>browse=True</code>), <code>read_file</code>, <code>preview_volume</code>, <code>prepare_dataset_aliases</code></td></tr>
+<tr><td>Author</td><td><code>design_config_strategy</code>, <code>initialize_session</code>, <code>write_workflow_config</code>, <code>write_session_file</code></td></tr>
+<tr><td>Validate</td><td><code>check_config</code> (<code>review</code>, <code>instantiate</code>, <code>setup</code>, <code>train_step</code>)</td></tr>
+<tr><td>Run and monitor</td><td><code>run_train</code>, <code>run_prediction</code>, <code>run_evaluation</code>, <code>run_transform</code> (<code>dry_run=True</code> first), <code>get_job_status</code>, <code>read_live_metrics</code>, <code>leaderboard</code></td></tr>
+<tr><td>Use an app</td><td><code>list_apps</code>, <code>describe_app</code>, <code>run_app</code> (<code>infer</code>, <code>evaluate</code>, <code>uncertainty</code>, <code>pipeline</code>), <code>fetch_app</code></td></tr>
+<tr><td>Adapt and package</td><td><code>fine_tune_app</code>, <code>run_resume</code>, <code>package_app_from_session</code>, <code>app_sources</code></td></tr>
+</tbody>
+</table>
+<p>The six entry tools a client loads first: <code>describe_konfai_capabilities</code>, <code>list_apps</code>, <code>run_app</code>, <code>initialize_session</code>, <code>write_workflow_config</code>, <code>summarize_session</code>. The complete table, one sentence per tool: <a href="../mcp.html">MCP</a> on this site; the server guide: <a href="https://konfai.readthedocs.io/en/latest/usage/mcp.html">MCP workflows</a>.</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

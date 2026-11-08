@@ -51,6 +51,7 @@
   --r-1: 6px;
   --r-2: 10px;
   --r-3: 14px;
+  --ctl: 32px; /* the height of every bar control; 40px where a finger does the pointing */
   /* One clock for the whole interface: state changes settle in 150ms with a hard ease-out. */
   --dur: 0.15s;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
@@ -240,6 +241,7 @@ body {
   height: 100%;
   display: grid;
   grid-template-rows: 40px minmax(0, 1fr) 24px; /* title bar · body · status bar */
+  grid-template-columns: minmax(0, 1fr); /* the one column never grows past the viewport for a wide child */
 }
 .body {
   display: grid;
@@ -655,12 +657,6 @@ dialog.modal-back::backdrop {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-}
-@media (max-width: 900px) {
-  .work {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr 1fr;
-  }
 }
 .pane {
   min-width: 0;
@@ -3478,7 +3474,6 @@ dialog.modal-back::backdrop {
   height: 100%;
   background: var(--accent);
   border-radius: 4px;
-  transition: width 0.3s ease;
 }
 .feed-prog-meta {
   display: flex;
@@ -4231,7 +4226,6 @@ dialog.modal-back::backdrop {
   padding: var(--s-4);
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-left: 4px solid var(--verdict);
   border-radius: var(--r-2);
 }
 .verdict-band.defective {
@@ -4317,13 +4311,13 @@ dialog.modal-back::backdrop {
   font-size: var(--fs-2);
   color: var(--muted);
   padding: var(--s-2) var(--s-3);
-  border-left: 3px solid var(--line-2);
+  background: var(--inset);
+  border-radius: var(--r-1);
 }
 .sheet-note.err {
   color: var(--err);
-  border-left-color: var(--err);
 }
-/* the observations: the kind is a colour on the left edge, the id is the handle the conclusion cites */
+/* the observations: the kind is the colour of its badge, the id is the handle the conclusion cites */
 .obs-list {
   list-style: none;
   margin: 0;
@@ -4336,7 +4330,6 @@ dialog.modal-back::backdrop {
   --kind: var(--faint);
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-left: 4px solid var(--kind);
   border-radius: var(--r-2);
   padding: var(--s-3) var(--s-4);
   display: flex;
@@ -4621,31 +4614,433 @@ dialog.modal-back::backdrop {
     height: 118px;
   }
 }
-/* A phone is not where an experiment is run, but the page must still be readable there: the experiments rail
-   folds away, the bars wrap, the meters go. */
-@media (max-width: 700px) {
-  .body {
-    grid-template-columns: minmax(0, 1fr);
+
+/* ================================================================================================
+   Shell at three widths, and the finish: one control height, a visible focus ring, drawn icons.
+   ================================================================================================ */
+:focus-visible {
+  outline: 2px solid var(--current);
+  outline-offset: 2px;
+}
+::selection {
+  background: color-mix(in srgb, var(--current) 35%, transparent);
+}
+.cbar-sel,
+.composer-bar .cbtn,
+.csend,
+.rail-new-btn,
+.v-btn,
+.vbar button,
+.zoo-addbtn,
+.menu-btn,
+.apps-btn {
+  min-height: var(--ctl);
+}
+.chip-prompt {
+  min-height: 28px;
+}
+.titlebar .menu-btn {
+  display: grid;
+  place-items: center;
+  width: var(--ctl);
+  height: var(--ctl);
+  margin-left: -6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-1);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.titlebar .menu-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--line-2);
+}
+/* tablet: the titlebar keeps one line, the meters and the Apps button never wrap */
+@media (max-width: 1199px) {
+  .titlebar {
+    gap: 8px;
   }
-  .rail {
+  .titlebar .chip,
+  .titlebar .apps-btn {
+    white-space: nowrap;
+  }
+  /* a run's phase chips and its actions share one wrapping row in a narrow panel */
+  .feed-job-head {
+    flex-wrap: wrap;
+  }
+  .feed-job-actions {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+  }
+  /* a table wider than the conversation scrolls inside its own box */
+  .chat-col table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+@media (max-width: 1023px) {
+  .titlebar .studio {
+    display: none;
+  }
+}
+.title-now {
+  display: none;
+}
+.cbar-settings {
+  display: contents; /* a desktop keeps the selectors inline; a phone folds them (below) */
+}
+.composer-bar .cbar-gear,
+.cbar-settings-back {
+  display: none;
+}
+/* the selectors give way before the buttons do: a narrow desktop pane shows "Default", not "Defaul" */
+.composer-bar .cbar-llm {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.composer-bar .cbar-sel {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.console .toggle svg {
+  display: block;
+}
+.v-btn svg {
+  vertical-align: -2px;
+  margin-right: 2px;
+}
+
+/* A long path in a message must never widen the shell: every column breaks the chain of intrinsic widths. */
+.body,
+.pane.chat,
+.log {
+  min-width: 0;
+}
+/* ---- 768–1199: the experiments rail is a drawer behind the menu; the two panes keep their split ---- */
+.body.compact {
+  grid-template-columns: minmax(0, 1fr);
+  position: relative;
+}
+.body.compact .rail {
+  position: fixed;
+  top: 40px;
+  bottom: 24px;
+  left: 0;
+  z-index: 40;
+  width: min(320px, 85vw);
+  border-right: 1px solid var(--line-2);
+  box-shadow: 12px 0 40px rgba(0, 0, 0, 0.35);
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition:
+    transform var(--dur) var(--ease),
+    visibility 0s linear var(--dur);
+}
+.body.compact.drawer-open .rail {
+  transform: none;
+  visibility: visible;
+  transition: transform var(--dur) var(--ease);
+}
+.drawer-back {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+/* ---- < 768: one column ---- */
+.panebar,
+.term-sheet,
+.term-sheet-back {
+  display: none;
+}
+@media (max-width: 767px) {
+  :root {
+    --fs-1: 12.5px;
+    --fs-2: 14px; /* body text a phone can read */
+    --ctl: 40px;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  .app {
+    grid-template-rows: 48px minmax(0, 1fr); /* app bar · body; the status bar folds into the pane bar */
+  }
+  .statusbar {
     display: none;
   }
   .titlebar {
-    flex-wrap: wrap;
-    padding: 6px 10px;
     gap: 8px;
+    padding: 0 8px;
   }
-  .titlebar .chip.meter {
+  .titlebar .studio,
+  .titlebar .chip.meter,
+  .titlebar .power-btn,
+  .apps-btn .apps-label {
     display: none;
   }
-  .composer-bar {
-    flex-wrap: wrap;
-    row-gap: 6px;
+  .titlebar .wordmark {
+    height: 18px;
   }
-  .statusbar {
+  .title-now {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--fs-2);
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .apps-btn {
+    width: var(--ctl);
+    padding: 0;
+    justify-content: center;
+  }
+  .titlebar .spacer {
+    display: none;
+  }
+  .body.phone .rail {
+    top: 48px;
+    bottom: 0;
+  }
+  .main {
+    grid-template-rows: minmax(0, 1fr) auto; /* work · pane bar */
+  }
+  .work.phone {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .work.phone.pane-chat .rpanel,
+  .work.phone.pane-right .chat-col {
+    display: none;
+  }
+  .chat-col {
+    border-right: none;
+  }
+  /* the pane bar: where the right panel's tabs and the terminal live on a phone */
+  .panebar {
+    display: flex;
+    align-items: stretch;
+    position: relative;
+    z-index: 46; /* above the terminal sheet and its backdrop: the bar still switches panes and closes the sheet */
+    height: calc(52px + env(safe-area-inset-bottom));
+    padding: 0 4px env(safe-area-inset-bottom);
+    background: var(--chrome);
+    border-top: 1px solid var(--line);
+  }
+  .pane-btn {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    place-items: center;
+    background: none;
+    border: none;
+    border-top: 2px solid transparent;
+    color: var(--muted);
+    font-family: var(--fsans);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .pane-btn.icon {
+    flex: 0 0 var(--ctl);
+  }
+  .pane-btn.on {
+    color: var(--ink);
+    border-top-color: var(--current);
+  }
+  /* the terminal as a sheet over the work, under the pane bar */
+  .term-sheet-back {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 44;
+    background: rgba(0, 0, 0, 0.4);
+  }
+  .term-sheet {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(52px + env(safe-area-inset-bottom));
+    height: 55vh;
+    z-index: 45;
+    background: var(--inset);
+    border-top: 1px solid var(--line-2);
+    border-radius: var(--r-3) var(--r-3) 0 0;
+    overflow: hidden;
+  }
+  .term-sheet .console {
+    flex: 1;
+    min-height: 0;
+    border-top: none;
+  }
+  .term-sheet .term-host {
+    flex: 1;
+    min-height: 0;
+  }
+  /* the conversation */
+  .suggest {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .suggest::-webkit-scrollbar {
+    display: none;
+  }
+  .chip-prompt {
+    flex: none;
+    white-space: nowrap;
+  }
+  .chat-col pre,
+  .chat-col details pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .log {
+    overflow-wrap: anywhere; /* a path or a run name longer than the screen wraps instead of scrolling it */
+  }
+  .composer {
+    margin: 6px 8px 8px;
+    padding: 8px 10px 8px;
+  }
+  .composer textarea {
+    font-size: 16px; /* under 16px iOS zooms the page on focus */
+  }
+  .cbar-settings {
+    display: none;
+  }
+  .cbar-settings.open {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: calc(100% + 6px);
+    z-index: 12;
+    padding: 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-2);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+  .cbar-settings.open .cbar-llm,
+  .cbar-settings.open .cbar-dev {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .cbar-settings.open .cbar-sel {
+    max-width: none;
+    width: 100%;
+  }
+  .composer-bar .cbar-gear {
+    display: grid;
+  }
+  .cbar-gear.on {
+    color: var(--current);
+    border-color: var(--current);
+  }
+  .cbar-settings-back {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 11;
+  }
+  .composer-bar .cbtn,
+  .csend {
+    width: var(--ctl);
+    height: var(--ctl);
+  }
+  /* the right panel */
+  .rtabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+    height: 40px;
+  }
+  .rtab {
+    height: 40px;
+    padding: 0 10px;
+    font-size: 11.5px;
+  }
+  .cfg {
+    flex-direction: column;
+  }
+  .cfg .tree {
+    width: auto;
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .vbar,
+  .pane-head {
     flex-wrap: wrap;
     height: auto;
-    padding: 4px 10px;
-    gap: 6px 12px;
+    min-height: 36px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+  }
+  .pane-head .v-tools {
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+  .v-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 1fr 1fr;
+  }
+  .filmstrip {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  .scout {
+    padding: var(--s-2);
+  }
+  /* modals take the whole screen; the gallery header keeps one line and its close button */
+  .zoo-head {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+  .zoo-title,
+  .zoo-addbtn {
+    white-space: nowrap;
+  }
+  .zoo-search {
+    min-width: 0;
+    flex: 1 1 80px;
+  }
+  .zoo-close {
+    display: grid;
+    place-items: center;
+    width: var(--ctl);
+    height: var(--ctl);
+    padding: 0;
+  }
+  .modal-back > .zoo,
+  .modal-back > .modal {
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    border: none;
+  }
+}
+@media (pointer: coarse) {
+  :root {
+    --ctl: 40px;
   }
 }

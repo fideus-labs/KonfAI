@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Edge · KonfAI docs</title>
+<meta name="description" content="KonfAI apps in a browser tab, no server.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html" aria-current="page">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Edge</h1>
+<p class="lead">KonfAI apps in a browser tab, no server.</p>
+
+<section>
+<h2>What it is</h2>
+<p>KonfAI Edge is the Rust runtime that runs KonfAI apps in a browser tab, with no server: the apps of the Hugging Face catalogue, their inference, evaluation and uncertainty, beside one viewer, on the machine that opens the page. Its demo site is being added to the <a href="https://github.com/fideus-labs/fideye">fideye</a> repository (<a href="https://github.com/fideus-labs/fideye/pull/847">pull request 847</a>, <code>konfai-edge/web/</code>).</p>
+</section>
+<section>
+<h2>What the demo holds</h2>
+<ul>
+<li>Web Components: <code>&lt;konfai-app&gt;</code> (an app's inference, evaluation and uncertainty beside one viewer) and its parts <code>&lt;konfai-inference&gt;</code>, <code>&lt;konfai-evaluation&gt;</code>, <code>&lt;konfai-uncertainty&gt;</code>, <code>&lt;konfai-viewer&gt;</code>, plus <code>&lt;konfai-workflow&gt;</code> for a TRANSFORM or EVALUATION program over a dataset folder. Another page embeds them with one import.</li>
+<li>The site that consumes them: a catalogue, one page per app, the workflows; a static server with an optional mirror of the bundles' <code>web/</code> folders.</li>
+<li>The engines the site serves itself, built to WebAssembly: the registration glue (FireANTs and ConvexAdam with the IMPACT loss), ITK-wasm's elastix with the IMPACT metric, and the 3D view.</li>
+<li>Streamed processing of large images and remote data sources; a job tray with progress, previews, cancellation and downloadable results.</li>
+</ul>
+</section>
+<section>
+<h2>Where it will live</h2>
+<p>This site is the home of that demo: once the pull request lands, the demo moves under <code>edge/</code> here and this page links to it, app by app. Until then, the apps run through <a href="apps.html">konfai-apps</a> on your machine, or through <a href="studio.html">Studio</a>.</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

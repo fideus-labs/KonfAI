@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Workflows · KonfAI docs</title>
+<meta name="description" content="TRAIN, RESUME, PREDICTION, EVALUATION, TRANSFORM and the options that matter.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html" aria-current="page">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Workflows</h1>
+<p class="lead">TRAIN, RESUME, PREDICTION, EVALUATION, TRANSFORM and the options that matter.</p>
+
+<section>
+<h2>Options that matter for every command</h2>
+<table>
+<thead><tr><th>Option</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>-y</code>, <code>--overwrite</code></td><td>Overwrite existing outputs without asking. Under <code>TRANSFORM</code> and <code>PREDICTION</code>, recompute cases already written; without it, <code>PREDICTION</code> skips them and refuses a <code>Prediction.yml</code> or checkpoints other than the ones they were written with.</td></tr>
+<tr><td><code>--gpu</code></td><td>GPU ids (<code>--gpu 0 1</code>). Without it, the run is on the CPU.</td></tr>
+<tr><td><code>--cpu</code></td><td>Number of CPU processes when no <code>--gpu</code> is given. Under <code>TRANSFORM</code>, the number of processes sharing the cases.</td></tr>
+<tr><td><code>-q</code>, <code>--quiet</code></td><td>Less console output.</td></tr>
+<tr><td><code>--config</code></td><td>The config file (default: the workflow's own name).</td></tr>
+</tbody>
+</table>
+</section>
+<section>
+<h2 id="train">TRAIN and RESUME</h2>
+<pre><code>konfai TRAIN -y --gpu 0 --config Config.yml
+konfai RESUME -y --config Config.yml --model Checkpoints/SEG_BASELINE/resume_latest.pt</code></pre>
+<p>TRAIN fits the model of <code>Config.yml</code> and writes <code>Checkpoints/</code> and <code>Statistics/</code> under <code>train_name</code>. <code>save_checkpoint_mode: BEST</code> keeps one dated model; <code>resume_latest.pt</code> is the continuation RESUME reads (optimizer, scheduler and counters restored), <code>crash_*.pt</code> an exceptional save: neither is a model to predict with. RESUME reads the split seed back from <code>Statistics/&lt;train_name&gt;/Seed.txt</code>.</p>
+</section>
+<section>
+<h2 id="prediction">PREDICTION</h2>
+<pre><code>konfai PREDICTION -y --gpu 0 --config Prediction.yml --models Checkpoints/SEG_BASELINE/SELECTED_MODEL.pt
+konfai PREDICTION -y --gpu 0 --config Prediction.yml --models ckpt_a.pt ckpt_b.pt ckpt_c.pt   # an ensemble</code></pre>
+<p><code>--models</code> is required; several checkpoints make an ensemble, merged by <code>combine</code> (<code>Mean</code> by default), the members run one after the other in one model with their weights kept in a host cache. Test-time augmentation is the <code>augmentations</code> block of <code>Predictor.Dataset</code> (a <code>Flip</code> gives, in turn, the distinct mirrors its <code>f_prob</code> allows) and the copies are merged by <code>reduction</code> (<code>Mean</code>, <code>Vote</code> for labels). Prediction owns patching, overlap reconstruction, geometry and output writing: <code>outputs_dataset</code> says which head is written, under which group name and format. Preprocessing must match training.</p>
+</section>
+<section>
+<h2 id="evaluation">EVALUATION</h2>
+<pre><code>konfai EVALUATION -y --cpu 1 --config Evaluation.yml</code></pre>
+<p>Evaluation compares predictions with references: <code>metrics</code> names, for each output group, the reference group and the criteria (<code>Dice</code> with its <code>labels</code>, …). It writes <code>Evaluations/&lt;train_name&gt;/Metric_TRAIN.json</code> and the per-case values beside it, so an interrupted evaluation resumes.</p>
+</section>
+<section>
+<h2 id="transform">TRANSFORM</h2>
+<pre><code>konfai TRANSFORM --config Transform.yml --plan   # what it would do
+konfai TRANSFORM --config Transform.yml          # do it</code></pre>
+<p>TRANSFORM prepares a dataset: it reads cases, runs a chain of stages on each one (<code>Resample</code>, …, then <code>Write:</code> to a dataset and format) and writes the result, slab by slab when the chain streams, so a cohort larger than RAM is a normal cohort. Plan before you run. A case whose output already exists is skipped, so an interrupted run resumes. If you never train anything, this is the only workflow you need.</p>
+<p>The complete option tables, exit codes and environment variables: <a href="https://konfai.readthedocs.io/en/latest/reference/cli.html">CLI reference</a>.</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

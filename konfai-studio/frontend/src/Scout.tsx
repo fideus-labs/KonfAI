@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useJson } from "./useJson";
+import { RefreshIcon } from "./icons";
 
 // KonfAI Scout's reports for this experiment, read like a radiologist's sheet: the verdict first, then every
 // observation with its kind, where it sits (millimetres), what was measured there and the views that show it.
@@ -222,8 +223,8 @@ export default function Scout({
             ))}
           </div>
         )}
-        <button className="scout-reload" onClick={() => setRetry((n) => n + 1)} title="Reload the list">
-          ↻
+        <button className="scout-reload" onClick={() => setRetry((n) => n + 1)} title="Reload the list" aria-label="Reload the list">
+          <RefreshIcon />
         </button>
       </div>
 

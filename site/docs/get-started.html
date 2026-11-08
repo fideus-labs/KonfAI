@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get started · KonfAI docs</title>
+<meta name="description" content="Install KonfAI and run the Segmentation example.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html" aria-current="page">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Get started</h1>
+<p class="lead">Install KonfAI and run the Segmentation example.</p>
+
+<section>
+<h2>Install</h2>
+<p>KonfAI needs Python 3.11 or newer. The line most people want brings the engine and every image reader (SimpleITK, h5py, pydicom, zarr, ngff-zarr):</p>
+<pre><code>python -m pip install "konfai[imaging]"
+python -c "import konfai; print(konfai.__version__)"
+konfai --help</code></pre>
+<p><code>konfai</code> alone has no image reader and cannot open a <code>.mha</code>. KonfAI declares <code>torch</code> but cannot pick the wheel for your drivers: if you need a specific CUDA or a CPU-only build, install PyTorch first. GPUs are CUDA devices; on macOS every workflow runs on the CPU (<code>--cpu N</code>). The examples do not travel in the wheel: clone the repository to run them.</p>
+<pre><code>git clone https://github.com/fideus-labs/KonfAI.git
+cd KonfAI
+python -m pip install ".[imaging]"</code></pre>
+<p>Other extras (<code>itk</code>, <code>hdf5</code>, <code>dicom</code>, <code>omezarr</code>, <code>s3</code>, <code>tensorboard</code>, <code>monai</code>, <code>export</code>, <code>all</code>, <code>dev</code>) are listed in the <a href="https://konfai.readthedocs.io/en/latest/getting-started/installation.html">installation page</a> of the reference.</p>
+</section>
+<section>
+<h2>The first run: four tiny CT volumes</h2>
+<p>The quickstart trains, predicts and evaluates a two-class segmentation on four synthetic volumes (32 × 32 × 4 voxels, labels 0 = background and 1 = foreground), on one CPU, without downloading anything. From a clone:</p>
+<pre><code>cp -r KonfAI/examples/Segmentation/TwoClasses konfai-first-run
+cd konfai-first-run
+python quickstart.py prepare                 # Dataset/CASE_000 .. CASE_003, each with CT.mha and SEG.mha
+export OMP_NUM_THREADS=1
+konfai TRAIN -y --cpu 1 --config Config.yml
+konfai PREDICTION -y --cpu 1 --config Prediction.yml --models "$(python quickstart.py checkpoint)"
+konfai EVALUATION -y --cpu 1 --config Evaluation.yml
+python quickstart.py verify</code></pre>
+<p>The three YAML files are short: <code>Config.yml</code> (a 2D UNet from the catalogue, two output channels, cross entropy and foreground Dice, twenty epochs), <code>Prediction.yml</code> (the same model, the <code>Argmax</code> head written as <code>PRED.mha</code>), <code>Evaluation.yml</code> (<code>PRED</code> against <code>SEG</code>, label <code>[1]</code>). <code>CASE_003</code> is held out during training. Twenty epochs reach a Dice of about 0.98; the final check verifies the files, their geometry and the reported values, not accuracy on medical images.</p>
+</section>
+<section>
+<h2>What appears on disk</h2>
+<p>Each command writes under a directory named after <code>train_name</code> (<code>CT_TWO_CLASSES</code> in the quickstart):</p>
+<table>
+<thead><tr><th>Folder</th><th>Holds</th></tr></thead>
+<tbody>
+<tr><td><code>Checkpoints/&lt;train_name&gt;/</code></td><td>the dated <code>BEST</code> model and <code>resume_latest.pt</code> (a training continuation, not a model to predict with)</td></tr>
+<tr><td><code>Statistics/&lt;train_name&gt;/</code></td><td>the resolved <code>Config.yml</code> the run read, <code>Seed.txt</code>, <code>Train_0.txt</code> and <code>Validation_0.txt</code> (the split), <code>log_0.txt</code>, <code>tb/</code> when TensorBoard is installed</td></tr>
+<tr><td><code>Predictions/&lt;train_name&gt;/</code></td><td><code>Dataset/&lt;case&gt;/PRED.mha</code>, a copy of <code>Prediction.yml</code>, <code>log_0.txt</code>, <code>checkpoints.json</code> (which checkpoint wrote each case)</td></tr>
+<tr><td><code>Evaluations/&lt;train_name&gt;/</code></td><td><code>Metric_TRAIN.json</code>, the per-case <code>Metric_TRAIN.cases.rank0.jsonl</code>, a copy of <code>Evaluation.yml</code>, <code>log_0.txt</code></td></tr>
+</tbody>
+</table>
+<p>A run writes its resolved defaults back into the YAML files, so after a run the file is the complete record of the experiment. For another fresh run, copy the example to a new directory.</p>
+<p>Next: <a href="configuration.html">Configuration</a> for what those files say, <a href="workflows.html">Workflows</a> for the commands and their options.</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

@@ -1376,6 +1376,7 @@ export default function RightPanel({
   stream,
   dataset,
   onReload,
+  tabRequest,
 }: {
   session: string;
   volumePath: string | null;
@@ -1387,6 +1388,7 @@ export default function RightPanel({
   dataset?: string; // the experiment's dataset: picking one has to reach the overview and the tree
 
   onReload?: () => void; // reconnect the live stream (e.g. after deleting a run) so state rebuilds from disk
+  tabRequest?: { tab: string; nonce: number } | null; // a phone's pane bar names the tab to show ("runs": the newest)
 }) {
   const [tab, setTab] = useState<string>("config"); // "config" (Workspace) or a run name
   // Run tabs closed by their ✕: a view choice, nothing on disk: they come back via the "+n closed"
@@ -1422,6 +1424,14 @@ export default function RightPanel({
   const active = stream.runs.find((r) => r.key === stream.activeRun);
   const runNames: string[] = [];
   for (const r of stream.runs) if (!runNames.includes(r.run)) runNames.push(r.run);
+  useEffect(() => {
+    if (!tabRequest) return;
+    const wanted =
+      tabRequest.tab === "runs" ? stream.run || runNames[runNames.length - 1] || (runNames.length >= 2 ? "leaderboard" : "config") : tabRequest.tab;
+    setAuto(false);
+    setTab(wanted);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabRequest?.nonce]);
   // Sub-tabs follow the workflow order (train, then prediction, then evaluation) the order you actually
   // ran them, not newest-first (and robust while a training is still writing its log).
   const kindsForName = stream.runs

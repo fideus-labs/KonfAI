@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apps · KonfAI docs</title>
+<meta name="description" content="Published bundles, Hugging Face, the one-line CLI, 3D Slicer.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html" aria-current="page">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Apps</h1>
+<p class="lead">Published bundles, Hugging Face, the one-line CLI, 3D Slicer.</p>
+
+<section>
+<h2>What an app is</h2>
+<p>A KonfAI app packages a trained model, its weights and its configuration: a folder with <code>app.json</code>, the <code>Prediction.yml</code> (and the train and evaluation configs when the app ships them), the checkpoints, and the Python code the model needs. It is the same contract everywhere: a local folder, a Hugging Face repository (<code>repo_id:app_name</code>) or an HTTP server.</p>
+</section>
+<section>
+<h2>Run one</h2>
+<pre><code>python -m pip install "konfai[imaging]" konfai-apps
+konfai-apps infer VBoussot/ImpactSeg:body -i ./scan.mha -o ./Output --gpu 0</code></pre>
+<p>Replace <code>./scan.mha</code> with your image; <code>--cpu 1</code> runs on the CPU. The first run downloads the app's weights and installs any missing app requirements. An app imports Python code and installs its requirements by default: use a source you trust (<code>KONFAI_APPS_INSTALL_REQUIREMENTS=0</code> to manage requirements yourself). The output lands under <code>Output/&lt;app&gt;/Output/P000/</code>; open the label image beside your input in a viewer such as 3D Slicer and check that they align.</p>
+<p>The <code>konfai-apps</code> command also evaluates an app against a ground truth, stacks test-time copies into uncertainty maps, fine-tunes an app that ships a train config, and bundles a trained session into a new app. From Slicer, the SlicerKonfAI and SlicerImpactReg extensions run the same apps.</p>
+</section>
+<section>
+<h2>The published apps</h2>
+<p>The catalogue on this site: <a href="../apps.html">Apps</a> (segmentation, synthesis and registration bundles with their measured figures). The task guide: <a href="https://konfai.readthedocs.io/en/latest/usage/apps.html">Run a published app</a>; packaging your own: <a href="https://konfai.readthedocs.io/en/latest/usage/packaging-apps.html">Package an app</a>.</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

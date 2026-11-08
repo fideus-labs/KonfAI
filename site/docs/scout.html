@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout · KonfAI docs</title>
+<meta name="description" content="A visual inspector of results.">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../assets/konfai-logo.png">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="../index.html"><picture><source srcset="../assets/konfai-logo.png" media="(prefers-color-scheme: dark)"><img src="../assets/konfai-logo-light.png" alt="KonfAI" width="170" height="51"></picture></a>
+  <nav><a href="../index.html">KonfAI</a><a href="../apps.html">Apps</a><a href="../mcp.html">MCP</a><a href="../scout.html">Scout</a><a href="../studio.html">Studio</a><a href="index.html" aria-current="page">Docs</a><a href="https://github.com/fideus-labs/KonfAI">GitHub</a></nav>
+</header>
+<main class="docs">
+<nav class="docs-nav" aria-label="Documentation"><p class="docs-nav-title">Docs</p><a href="index.html">Documentation</a><a href="get-started.html">Get started</a><a href="configuration.html">Configuration</a><a href="workflows.html">Workflows</a><a href="datasets.html">Datasets</a><a href="apps.html">Apps</a><a href="agents-mcp.html">Agents and MCP</a><a href="scout.html" aria-current="page">Scout</a><a href="studio.html">Studio</a><a href="edge.html">Edge</a><a class="docs-ref" href="https://konfai.readthedocs.io/en/latest/">Full reference ↗</a></nav>
+<article>
+<h1>Scout</h1>
+<p class="lead">A visual inspector of results.</p>
+
+<section>
+<h2>What it does</h2>
+<p>Scout inspects one result of a segmentation, a registration or a synthesis the way a person would at a viewer: it looks at slices, zooms, switches overlays, asks KonfAI Eval for measurements on a region, and writes a report of localised defects with the views that show them. It is not a scorer: KonfAI Eval scores, Scout reads those scores and asks for more on a region. Every location is in millimetres. The report keeps three kinds of statement apart, a measured property, a suspected error and a confirmed error, and a confirmation must cite a measurement with a reference: something seen but not measured stays a suspicion.</p>
+</section>
+<section>
+<h2>Install and run</h2>
+<pre><code>pip install konfai-scout[claude-code]      # Claude under your Claude Code login, no API key
+pip install konfai-scout[codex]            # GPT under your ChatGPT login (the Codex CLI), no API key
+pip install konfai-scout[anthropic]        # Claude through the Anthropic API
+pip install konfai-scout[openai]           # GPT, or any OpenAI-compatible server (vLLM, Ollama, LM Studio)</code></pre>
+<p>Images leave the machine only when you allow it (<code>allow_cloud_images</code>); a local server is local. The MCP server runs Scout through <code>run_scout_inspection</code> and Studio shows the report in its SCOUT tab: verdict, observations, measurements and the cited views. Details: <a href="../scout.html">Scout</a> on this site and the <a href="https://github.com/fideus-labs/KonfAI/tree/main/konfai-scout">konfai-scout</a> folder (its <code>docs/</code> hold the report schema and the study protocol).</p>
+</section>
+
+</article>
+</main>
+<footer>KonfAI is developed by Fideus Labs and released under the Apache-2.0 licence. <a href="https://github.com/fideus-labs/KonfAI">Source on GitHub</a> · <a href="https://konfai.readthedocs.io/en/latest/">Full reference</a> · <a href="../llms.txt">llms.txt</a></footer>
+</body>
+</html>

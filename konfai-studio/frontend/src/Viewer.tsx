@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Niivue } from "@niivue/niivue";
 import { postJson } from "./api";
+import { ExpandIcon } from "./icons";
 
 // The 3D Slicer mark, inlined so the button needs no asset and no network. 3D Slicer is a trademark
 // of its project; shown here to name the application this hands the volume over to.
@@ -232,7 +233,7 @@ export default function Viewer({
             Compare
           </button>
           <button className="v-btn" onClick={() => setFull((f) => !f)} title={full ? "Exit fullscreen (Esc)" : "Enlarge"}>
-            {full ? "Exit ⤢" : "Enlarge ⤢"}
+            <ExpandIcon /> {full ? "Exit" : "Enlarge"}
           </button>
         </span>
       </div>
