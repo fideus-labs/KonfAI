@@ -523,7 +523,8 @@ def _launch_app_job(spec: dict[str, Any]) -> dict[str, Any]:
         log_path=WORKSPACE_LAYOUT.jobs_dir() / f"{kind}_{uuid.uuid4().hex[:12]}.log",
         config_path=workspace / f"app_{kind}.ref",
         run_name=spec["run_name"],
-        devices=_app_job_devices(
+        devices=spec.get("devices")
+        or _app_job_devices(
             kwargs.get("gpu") if kwargs.get("gpu") is not None else (kwargs.get("extra") or {}).get("gpu"),
             kwargs.get("cpu") if kwargs.get("cpu") is not None else (kwargs.get("extra") or {}).get("cpu"),
         ),

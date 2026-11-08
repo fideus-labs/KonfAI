@@ -558,6 +558,8 @@ def run_scout_inspection_api(*, case: str, config: str, output: str, cwd: str | 
             raise RuntimeError("KonfAI Scout is not installed in this environment: pip install konfai-scout") from exc
         report = inspect(InspectionCase.load(case), ScoutConfig.load(config), Path(output).resolve())
         print(json.dumps(report.summary(), indent=1))
+        if report.error:  # the report is written; the job fails all the same, as `konfai-scout inspect` exits 1
+            raise RuntimeError(f"the inspection failed: {report.error}")
 
 
 def run_fidopt_api(*, executable: str, args: list[str], cwd: str | None = None) -> None:
