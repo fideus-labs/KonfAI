@@ -2111,7 +2111,7 @@ def export_checkpoints(
             extend_slice=extend_slice,
             pad_value=pad_value,
             placement=derive_placement(config, root),
-            extra_manifest=dict(extra) | {"accumulation_dtype": precision},
+            extra_manifest=extra | {"accumulation_dtype": precision},
             fold_pre=folds,
             model_filename=f"{model_id}.onnx",
             write_manifest=write_manifest,
