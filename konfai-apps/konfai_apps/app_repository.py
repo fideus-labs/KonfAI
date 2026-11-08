@@ -46,13 +46,22 @@ from huggingface_hub.hf_api import RepoFolder
 from konfai import RemoteServer
 from konfai.utils.config import Choices, Range, _coerce_config_value
 from konfai.utils.errors import ConfigError
-from konfai.utils.utils import is_windows_absolute_path
+from konfai.utils.utils import SUPPORTED_FORMATS, is_windows_absolute_path, split_format_level, split_path_spec
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 from ruamel.yaml import YAML, YAMLError
 
 from .errors import AppMetadataError, AppRepositoryError
+from .presets import (
+    PRESET_NAME,
+    Preset,
+    merge_presets,
+    read_presets,
+    split_preset,
+    user_presets_file,
+    write_preset,
+)
 
 
 def _plain(value: Any) -> Any:
@@ -280,7 +289,7 @@ def get_available_apps_on_hf_repo(repo_id: str, force_update: bool = False) -> l
             apps = sorted(_apps_in(files))
             if force_update or _cached_apps(base_repo_id, revision) != apps:
                 prefixes = tuple(f"{app}/" for app in apps)
-                small = [path for path in files if path.startswith(prefixes) and not path.endswith(".pt")]
+                small = [path for path in files if path.startswith(prefixes) and not path.endswith(WEIGHTS)]
                 snapshot_download(repo_id=base_repo_id, repo_type="model", revision=revision, allow_patterns=small)  # nosec B615
             return apps
         except Exception as exc:
@@ -339,6 +348,41 @@ def current_free_vram(devices: list[int], remote_server: RemoteServer | None = N
     return min(frees) if frees else None
 
 
+def _installer() -> list[str]:
+    """The command that installs into THIS interpreter and its environment: its pip, or uv's when the environment has
+    no pip (``uv venv`` makes one without it)."""
+    if importlib.util.find_spec("pip") is not None:
+        return [sys.executable, "-m", "pip", "install"]
+    uv = shutil.which("uv")
+    if uv is not None:
+        # uv does not read pip's package sources, and searches indexes in another order: an install set up for pip alone
+        # would reach another index than the one set (pip.conf is pip's own too, uv has uv.toml).
+        unread = [
+            pip_name
+            for pip_name, uv_name in (
+                ("PIP_INDEX_URL", "UV_INDEX_URL"),
+                ("PIP_EXTRA_INDEX_URL", "UV_EXTRA_INDEX_URL"),
+                ("PIP_FIND_LINKS", "UV_FIND_LINKS"),
+                ("PIP_NO_INDEX", "UV_NO_INDEX"),
+            )
+            if os.environ.get(pip_name, "").strip() and uv_name not in os.environ
+        ]
+        if unread:
+            raise AppRepositoryError(
+                f"The environment of {sys.executable} has no pip, so uv installs an app's requirements, and uv does not"
+                f" read {', '.join(unread)}.",
+                f"Set uv's own (UV_INDEX_URL, UV_EXTRA_INDEX_URL, UV_FIND_LINKS, UV_NO_INDEX), or install pip into it"
+                f" ('{sys.executable} -m ensurepip').",
+            )
+        return [uv, "pip", "install", "--python", sys.executable]
+    raise AppRepositoryError(
+        f"The environment of {sys.executable} has no pip and no uv is on PATH: an app's requirements cannot be"
+        " installed.",
+        f"Install pip into it ('{sys.executable} -m ensurepip'), or set KONFAI_APPS_INSTALL_REQUIREMENTS=0 and"
+        " install them yourself.",
+    )
+
+
 class VolumeType(Enum):
     SEGMENTATION = "SEGMENTATION"
     VOLUME = "VOLUME"
@@ -356,6 +400,20 @@ class TerminologyEntry:
 # volume when the caller omits it (all-ones = whole-image, e.g. a no-restriction mask; all-zeros = empty).
 INPUT_DEFAULTS = ("ones", "zeros")
 
+#: An app's weights, preferred first: 'konfai-apps bundle' writes .safetensors, an older bundle holds a .pt.
+WEIGHTS = (".safetensors", ".pt")
+
+
+def _weight_files(filenames: list[str]) -> list[str]:
+    """Each model of a listing once, in listing order: its .safetensors, else its .pt."""
+    safetensors, pt = WEIGHTS
+    return [
+        name
+        for name in filenames
+        if name.endswith(safetensors) or (name.endswith(pt) and name.removesuffix(pt) + safetensors not in filenames)
+    ]
+
+
 # Training knobs a caller names directly, and the config key each one writes. Sugar over ``--set``:
 # one path applies them, so a knob costs a row here rather than its own YAML-writing branch.
 _TRAINING_KNOBS = {"batch_size": "Trainer.Dataset.batch_size"}
@@ -363,9 +421,9 @@ _TRAINING_KNOBS = {"batch_size": "Trainer.Dataset.batch_size"}
 # A bare ``--set`` name resolves inside the model block only; every other key needs its full path.
 # The same overrides engine writes inference and fine-tune configs, so the hint names both roots.
 _DOTTED_PATH_HINT = (
-    "A bare name is a model parameter; a config key needs its full dotted path from the config root,"
-    " e.g. 'Predictor.Dataset.batch_size=4' in an inference config or 'Trainer.Dataset.batch_size=4'"
-    " in a fine-tune one."
+    "A name is a model parameter, a nested one dotted from the model (models.0.layers_mask=01); any other config key"
+    " takes its full dotted path from the config root, e.g. 'Predictor.Dataset.batch_size=4' in an inference config or"
+    " 'Trainer.Dataset.batch_size=4' in a fine-tune one."
 )
 
 
@@ -414,16 +472,18 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         key_path = key_path.strip()
         if not key_path:
             raise AppRepositoryError(f"Invalid --set '{override}': empty parameter name.")
-        if "." in key_path:
-            # Full dotted path from the config root (any key, for advanced overrides).
+        first = key_path.split(".", 1)[0]
+        if "." in key_path and (model_params is None or first in (data or {})):
+            # A dotted path from the config root (Predictor.Dataset.batch_size): any key, for advanced overrides.
             keys = [key for key in key_path.split(".") if key]
         elif model_params is None:
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': the config has no model parameter block. {_DOTTED_PATH_HINT}"
             )
         else:
-            # A bare name is a model parameter: resolve it in Predictor.Model.<ClassName>.
-            keys = [*model_path, key_path]
+            # Any other name is a model parameter, nested ones included (models.0.layers_mask): resolved in
+            # Predictor.Model.<ClassName>.
+            keys = [*model_path, *(key for key in key_path.split(".") if key)]
         node = data
         for key in keys[:-1]:
             if not isinstance(node, dict) or key not in node:
@@ -434,13 +494,15 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         leaf, inside = keys[-1], keys[3:] if keys[:3] == model_path else []
         model = resolved() if inside else None
         declared = _declared(model, inside) if model is not None else None
-        if not isinstance(node, dict) or (leaf not in node and declared is None):
+        # Predictor and Trainer take manual_seed and a config may omit it: the one root key --seed may add.
+        settable = keys == [model_path[0], "manual_seed"]
+        if not isinstance(node, dict) or (leaf not in node and declared is None and not settable):
             parent = _declared(model, inside[:-1]) if model is not None else None
             known = [*node, *_fields(parent)] if isinstance(node, dict) else []
             raise AppRepositoryError(
                 f"Cannot apply --set '{override}': parameter '{key_path}' does not exist in the config."
                 + did_you_mean(leaf, known),
-                *([] if "." in key_path else [_DOTTED_PATH_HINT]),
+                _DOTTED_PATH_HINT,
             )
         try:
             value = value_parser.load(raw_value)
@@ -456,6 +518,43 @@ def apply_overrides(data: Any, overrides: list[str], model_class: Callable[[], t
         if declared is not None:
             _check_value(value, declared, key_path)
         node[leaf] = value
+
+
+def run_overrides(config: Any, output_formats: list[str] | None = None, seed: int | None = None) -> list[str]:
+    """The ``--set`` overrides that ``--output-format`` and ``--seed`` stand for, read off the config ``data`` they
+    apply to: each output's ``dataset_filename`` with its format replaced, the root's ``manual_seed``. A format KonfAI
+    does not write, or an output the config has not, is refused here, before anything runs."""
+    root_key = "Predictor" if (config or {}).get("Predictor") else "Trainer"
+    root = (config or {}).get(root_key) or {}
+    overrides = [f"{root_key}.manual_seed={seed}"] if seed is not None else []
+    outputs: dict[str, tuple[str, str]] = {}  # output -> (its dataset class key, its dataset_filename)
+    for name, output in (root.get("outputs_dataset") or {}).items():
+        for key, dataset in (output or {}).items():
+            if isinstance(dataset, dict) and "dataset_filename" in dataset:
+                outputs[str(name)] = (str(key), str(dataset["dataset_filename"]))
+    for spec in output_formats or []:
+        name, assigned, file_format = spec.rpartition("=")
+        if split_format_level(file_format)[0] not in SUPPORTED_FORMATS:
+            raise AppRepositoryError(
+                f"--output-format {spec}: '{file_format}' is not a format KonfAI writes.{did_you_mean(file_format, SUPPORTED_FORMATS)}",
+                f"The formats: {', '.join(SUPPORTED_FORMATS)}.",
+            )
+        if assigned and name not in outputs:
+            raise AppRepositoryError(
+                f"--output-format {spec}: the app has no output '{name}'.{did_you_mean(name, outputs)}",
+                f"Its outputs: {', '.join(outputs) or 'none'}.",
+            )
+        if not assigned and not outputs:
+            raise AppRepositoryError(
+                f"--output-format {spec}: the app's config names no output file to write in another format.",
+                "No outputs_dataset entry carries a dataset_filename; set one with --set.",
+            )
+        for output in [name] if assigned else outputs:
+            key, filename = outputs[output]
+            path, flag, _ = split_path_spec(filename, supported_formats=SUPPORTED_FORMATS)
+            spelled = f"{path}:{flag}:{file_format}" if flag else f"{path}:{file_format}"
+            overrides.append(f"{root_key}.outputs_dataset.{output}.{key}.dataset_filename={spelled}")
+    return overrides
 
 
 def _parse_input_default(key: str, default: Any, required: bool = False) -> str | None:
@@ -530,6 +629,7 @@ class AppRepositoryInfo(ABC):
         self._patch_size = patch_size
         self._task = task
         self._icon_path = icon_path
+        self._preset: Preset | None = None
 
     def __str__(self) -> str:
         return (
@@ -550,6 +650,27 @@ class AppRepositoryInfo(ABC):
 
     def get_display_name(self) -> str:
         return self._display_name
+
+    def get_presets(self) -> dict[str, Preset]:
+        """The presets this app runs with, by name: none unless it declares some."""
+        return {}
+
+    def get_preset(self) -> Preset | None:
+        """The preset chosen with ``#`` (:meth:`use_preset`), None for the app's base config."""
+        return self._preset
+
+    def use_preset(self, name: str | None) -> None:
+        """Run with preset ``name`` from now on, its overrides applied before any ``--set``; None for the base config."""
+        if name is None:
+            self._preset = None
+            return
+        presets = self.get_presets()
+        if name not in presets:
+            raise AppRepositoryError(
+                f"App '{self.get_name()}' has no preset '{name}'.{did_you_mean(name, presets)}",
+                f"Its presets: {', '.join(sorted(presets))}." if presets else "It declares none.",
+            )
+        self._preset = presets[name]
 
     def get_description(self) -> str:
         return self._description
@@ -624,7 +745,7 @@ class LocalAppRepository(AppRepositoryInfo):
 
         required_keys = ["description", "short_description", "tta", "mc_dropout", "display_name"]
         for filename in filenames:
-            if not filename.endswith(".pt"):
+            if not filename.endswith(WEIGHTS):
                 self._download(filename)
         metadata_file_path = self._download("app.json")
         with open(metadata_file_path, encoding="utf-8") as file:
@@ -694,8 +815,9 @@ class LocalAppRepository(AppRepositoryInfo):
         checkpoints_name: list[str] = app_repository_metadata.get("models", [])
         checkpoints_name_available = self._get_available_checkpoint_names(checkpoints_name, filenames)
         self._portable_assets: list[str] = [str(name) for name in app_repository_metadata.get("portable_assets", [])]
+        self._published_presets = read_presets(app_repository_metadata.get("presets"), f"the app.json of '{app_name}'")
 
-        # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-.pt files
+        # The bundle's own icon: the file app.json names, or 'icon.png' by convention. Non-weight files
         # are all downloaded above, so resolving it here costs nothing.
         icon_name = app_repository_metadata.get("icon", "icon.png" if "icon.png" in filenames else None)
         icon_path = self._download(icon_name) if icon_name in filenames else None
@@ -722,35 +844,36 @@ class LocalAppRepository(AppRepositoryInfo):
         return [
             checkpoint_name
             for checkpoint_name in checkpoints_name
-            if self._find_repo_filename(checkpoint_name, filenames, suffix=".pt") is not None
+            if self._find_repo_filename(checkpoint_name, filenames, suffix=WEIGHTS) is not None
         ]
 
     def _find_repo_filename(
-        self, requested_filename: str, filenames: list[str], suffix: str | None = None
+        self, requested_filename: str, filenames: list[str], suffix: tuple[str, ...] = ()
     ) -> str | None:
-        candidates = [PurePosixPath(requested_filename).as_posix()]
-        if suffix is not None and not candidates[0].endswith(suffix):
-            candidates.append(candidates[0] + suffix)
+        requested = PurePosixPath(requested_filename).as_posix()
+        # With suffixes, only a file carrying one, in their order of preference, whichever one the name carries.
+        stem = next((requested.removesuffix(s) for s in suffix if requested.endswith(s)), requested)
+        candidates = [stem + s for s in suffix] if suffix else [requested]
 
         for candidate in candidates:
             if candidate in filenames:
                 return candidate
 
-        basename_matches = [
-            filename
-            for filename in filenames
-            if PurePosixPath(filename).name in {PurePosixPath(c).name for c in candidates}
-        ]
-        if len(basename_matches) == 1:
-            return basename_matches[0]
-        if len(basename_matches) > 1:
-            raise AppRepositoryError(
-                f"Multiple files match '{requested_filename}' in app '{self._app_name}'. "
-                "Please use an explicit relative path in the app metadata."
-            )
+        for candidate in candidates:
+            name = PurePosixPath(candidate).name
+            basename_matches = [filename for filename in filenames if PurePosixPath(filename).name == name]
+            if len(basename_matches) == 1:
+                return basename_matches[0]
+            if len(basename_matches) > 1:
+                raise AppRepositoryError(
+                    f"Multiple files match '{requested_filename}' in app '{self._app_name}'. "
+                    "Please use an explicit relative path in the app metadata."
+                )
         return None
 
-    def _require_repo_filename(self, requested_filename: str, filenames: list[str], suffix: str | None = None) -> str:
+    def _require_repo_filename(
+        self, requested_filename: str, filenames: list[str], suffix: tuple[str, ...] = ()
+    ) -> str:
         resolved = self._find_repo_filename(requested_filename, filenames, suffix=suffix)
         if resolved is None:
             raise AppRepositoryError(f"File '{requested_filename}' was not found in app '{self._app_name}'.")
@@ -899,9 +1022,9 @@ class LocalAppRepository(AppRepositoryInfo):
         """Apply ``--set NAME=VALUE`` overrides to the resolved prediction config before it runs.
 
         A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
-        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly. A dotted
-        ``NAME`` (e.g. ``Predictor.Dataset.batch_size``) is a full path from the config root, for any other
-        key. Either way the key must exist, in the config or, inside the model block, among what the model
+        ``Predictor.Model.<ClassName>``, so ``--set iterations=300`` tunes the model directly, and a dotted one
+        is a nested model parameter (``models.0.layers_mask``). A dotted ``NAME`` that starts at the config root
+        (``Predictor.Dataset.batch_size``) is a full path, for any other key. Either way the key must exist, in the config or, inside the model block, among what the model
         declares there (an argument of its class, a field of a ``models`` entry: a preset lists what it sets, not
         every knob its model takes), so a typo raises here instead of silently adding a dead key; a value the
         declared type refuses (a choice, a type, a range) raises here too, not once the run has started. ``VALUE``
@@ -910,6 +1033,7 @@ class LocalAppRepository(AppRepositoryInfo):
         key stays that string (``layers_mask=01``). This is the generic override the UI (SlicerKonfAI) drives to
         tune a preset; :func:`apply_overrides` resolves it.
         """
+        overrides = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
         if not overrides:
             return
         yaml = YAML()
@@ -918,6 +1042,76 @@ class LocalAppRepository(AppRepositoryInfo):
         apply_overrides(data, overrides, lambda: self._model_class(data))
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
+
+    def _user_presets_file(self) -> Path | None:
+        """Where the user keeps their own presets of this app; None when they go in its own ``app.json``."""
+        return None
+
+    def get_revision(self) -> str | None:
+        """The revision of the app's files a run reads: a Hugging Face commit, None for a local folder."""
+        return None
+
+    def record(self, overrides: list[str] | None) -> dict[str, Any]:
+        """What a run of this app ran: the app, its revision, its preset and every ``--set`` it applied, in order
+        (the preset's, then the run's own)."""
+        applied = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
+        return {
+            "app": self.get_name(),
+            "revision": self.get_revision(),
+            "preset": self._preset.name if self._preset else None,
+            "set": applied,
+        }
+
+    def get_presets(self) -> dict[str, Preset]:
+        """The app's published presets (its ``app.json``) and the user's own (:func:`user_presets_file`). A name in
+        both is refused: a preset of one's own never hides a published one."""
+        return merge_presets(self._published_presets, self._user_presets_file(), self.get_name())
+
+    def use_preset(self, name: str | None) -> None:
+        """Choose preset ``name`` (None for the base config), refused here if its overrides do not resolve against the
+        app's config: a preset that no longer fits its app fails when it is chosen, not halfway through a run."""
+        presets = self.get_presets() if name is not None else {}
+        if name in presets:  # an unknown name is the base class's refusal, with the app's presets
+            self._check(presets[name].overrides, f"preset '{name}'")
+        super().use_preset(name)
+
+    def _check(self, overrides: tuple[str, ...] | list[str], what: str) -> None:
+        """Apply ``overrides`` to a copy of the app's config, the refusal naming ``what``."""
+        filenames = self._all_repo_filenames()
+        config_filename = self._find_repo_filename("Prediction.yml", filenames)
+        if config_filename is None or not overrides:
+            return
+        with open(self._download(config_filename), encoding="utf-8") as file:
+            data = YAML().load(file)
+        try:
+            apply_overrides(data, list(overrides), lambda: self._model_class(data, filenames))
+        except AppRepositoryError as error:
+            raise AppRepositoryError(f"The {what} of app '{self.get_name()}' does not apply: {error}") from error
+
+    def save_preset(self, name: str, description: str, overrides: list[str], tiles: bool = True) -> Path:
+        """Keep ``overrides`` as preset ``name`` of this app and return the file written: the user's presets file for
+        an app of the Hugging Face cache, which is not theirs to edit, else the app's own ``app.json``.
+
+        A preset is flat: ``overrides`` are relative to the base config, so a preset made from another one carries
+        that one's overrides first (``--from``), and its ``tiles``. A name set twice keeps its last value, once.
+        """
+        if not PRESET_NAME.fullmatch(name):
+            raise AppRepositoryError(f"'{name}' is not a preset name: letters, digits, '_' and '-'.")
+        own_file = self._user_presets_file()
+        if own_file is not None and name in self._published_presets:
+            raise AppRepositoryError(
+                f"App '{self.get_name()}' publishes a preset '{name}' already.", "Save yours under another name."
+            )
+        last = {override.partition("=")[0].strip(): override for override in overrides}
+        preset = Preset(name, description, tuple(last.values()), tiles)
+        self._check(preset.overrides, f"preset '{name}'")
+        if own_file is not None:
+            write_preset(own_file, preset)
+            return own_file
+        app_json = self._download("app.json")
+        write_preset(app_json, preset, key="presets")
+        self._published_presets = {**self._published_presets, name: preset}
+        return app_json
 
     def get_parameters(self, prediction_file: str = "Prediction.yml") -> dict[str, Any]:
         """The model's configurable parameters + their constraints: the single reader a UI needs.
@@ -936,6 +1130,8 @@ class LocalAppRepository(AppRepositoryInfo):
             return {"values": {}, "constraints": {}}
         with open(self._download(config_filename), encoding="utf-8") as file:
             data = YAML().load(file)
+        if self._preset is not None:  # the values the run starts from: a UI compares its edits against these
+            apply_overrides(data, list(self._preset.overrides), lambda: self._model_class(data, filenames))
         _, params = self._model_param_block(data)
         structural = {"outputs_criterions", "optimizer", "schedulers", "engine", "parameter_maps", "classpath"}
         values = {name: _plain(value) for name, value in (params or {}).items() if name not in structural}
@@ -1052,19 +1248,22 @@ class LocalAppRepository(AppRepositoryInfo):
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self._download(filename), dest)
 
-        if display_name is not None:
-            metadata_file = path / "app.json"
-            with open(metadata_file, encoding="utf-8") as file:
-                metadata = json.load(file)
-            metadata["display_name"] = display_name
-            with open(metadata_file, "w", encoding="utf-8") as file:
-                json.dump(metadata, file, indent=2, ensure_ascii=False)
-
-        if config_overrides:
+        tuned = bool(config_overrides) or self._preset is not None
+        if tuned:
             config = path / prediction_file
             if not config.is_file():
                 raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
             self._apply_config_overrides(str(config), config_overrides)
+        if display_name is not None or tuned:
+            metadata_file = path / "app.json"
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
+            if display_name is not None:
+                metadata["display_name"] = display_name
+            if tuned:
+                # The copy's base config is now this preset and these overrides: the presets it published were
+                # relative to the old base, so they do not travel with it.
+                metadata.pop("presets", None)
+            metadata_file.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def download_bundle(
         self,
@@ -1139,7 +1338,7 @@ class LocalAppRepository(AppRepositoryInfo):
         filenames = self._get_filenames()
         files_path: list[Path] = []
         for filename in filenames:
-            if not filename.endswith(".pt"):
+            if not filename.endswith(WEIGHTS):
                 files_path.append(self._download(filename))
         return files_path
 
@@ -1154,36 +1353,37 @@ class LocalAppRepository(AppRepositoryInfo):
         codes_path: list[tuple[str, Path]] = []
 
         inference_file_path = self._download(self._require_repo_filename(prediction_file, filenames))
-        available_models = [name for name in filenames if name.endswith(".pt")]
+        available_models = _weight_files(filenames)
         if len(name_of_models):
-            if any(self._find_repo_filename(name, filenames, suffix=".pt") is None for name in name_of_models):
+            if any(self._find_repo_filename(name, filenames, suffix=WEIGHTS) is None for name in name_of_models):
                 filenames = self._refreshed_filenames() or filenames
             for name in name_of_models:
-                models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
+                models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=WEIGHTS)))
         elif self._checkpoints_name:
             # The manifest is authoritative for the default: a repackaged bundle can still hold the
             # previous export's checkpoint beside the declared one, and enumeration picked it up.
             declared = [str(name) for name in self._checkpoints_name]
-            if any(self._find_repo_filename(name, filenames, suffix=".pt") is None for name in declared):
+            if any(self._find_repo_filename(name, filenames, suffix=WEIGHTS) is None for name in declared):
                 filenames = self._refreshed_filenames() or filenames
             if len(declared) < number_of_model:
                 raise AppRepositoryError(
-                    f"Expected {number_of_model} model files (.pt), but app.json declares {len(declared)}: {declared}."
+                    f"Expected {number_of_model} model files, but app.json declares {len(declared)}: {declared}."
                 )
             for name in declared[:number_of_model]:
-                models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=".pt")))
+                models_path.append(self._download(self._require_repo_filename(name, filenames, suffix=WEIGHTS)))
         else:
-            # app.json declares no models: every .pt the repository holds, in listing order, up to the
+            # app.json declares no models: every weight file the repository holds, in listing order, up to the
             # count asked; a weightless app ("models": []) asks for none.
             models_to_download = available_models
             remote_filenames = self._refreshed_filenames() if len(available_models) < number_of_model else None
             if remote_filenames is not None:
-                remote_models = [name for name in remote_filenames if name.endswith(".pt")]
-                models_to_download = available_models + [name for name in remote_models if name not in available_models]
+                # One entry per model across both listings: a local CV_0.pt and a remote CV_0.safetensors are one.
+                merged = list(dict.fromkeys(available_models + _weight_files(remote_filenames)))
+                models_to_download = _weight_files(merged)
                 filenames = remote_filenames
             if len(models_to_download) < number_of_model:
                 raise AppRepositoryError(
-                    f"Expected {number_of_model} model files (.pt), but found "
+                    f"Expected {number_of_model} model files (.safetensors or .pt), but found "
                     f"{len(models_to_download)} in the repository."
                 )
             for name in models_to_download[:number_of_model]:
@@ -1191,13 +1391,13 @@ class LocalAppRepository(AppRepositoryInfo):
 
         # Make every bundle asset (custom .py, elastix parameter maps, lookup tables, …) available in
         # the run workspace, as documented ("files can live in the app directory and will be available
-        # at runtime"). Model checkpoints (.pt) are handled separately via ``models_path``, and the
+        # at runtime"). Model weights (.safetensors, .pt) are handled separately via ``models_path``, and the
         # files app.json declares under "portable_assets" (an ONNX export and its tensor data) are the
         # portable runtime's: the native path does not copy them. A bundle that declares none keeps
         # the inclusive contract, since its assets' consumers are unknown.
         portable = set(self._portable_assets)
         for filename in filenames:
-            if not filename.endswith(".pt") and filename not in portable:
+            if not filename.endswith(WEIGHTS) and filename not in portable:
                 codes_path.append((filename, self._download(filename)))
 
         self._install_requirements(filenames)
@@ -1269,7 +1469,8 @@ class LocalAppRepository(AppRepositoryInfo):
         with tempfile.TemporaryDirectory() as directory:
             constraints = Path(directory) / "constraints.txt"
             constraints.write_text("\n".join(pins) + "\n", encoding="utf-8")
-            command = [sys.executable, "-m", "pip", "install", *flags, "-c", str(constraints), *requirements]
+            installer = _installer()
+            command = [*installer, *flags, "-c", str(constraints), *requirements]
             # pip's report is echoed as it comes, and kept: the lines that name a conflict go in the error.
             with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as pip:  # nosec B603
                 report = []
@@ -1278,9 +1479,10 @@ class LocalAppRepository(AppRepositoryInfo):
                     report.append(line.strip())
         if pip.returncode:
             conflict = list(dict.fromkeys(line for line in report if " depends on " in line or "(constraint)" in line))
+            name = "pip" if installer[0] == sys.executable else "uv pip"
             raise AppRepositoryError(
                 f"Failed to install {', '.join(requirements)}"
-                + (f": {'; '.join(conflict)}." if conflict else f" (pip exited with {pip.returncode}).")
+                + (f": {'; '.join(conflict)}." if conflict else f" ({name} exited with {pip.returncode}).")
                 + f" An app's requirements never replace the installed {', '.join(pins) or 'core packages'}.",
                 "Install versions of these core packages that the app's requirements accept, or set"
                 " KONFAI_APPS_INSTALL_REQUIREMENTS=0 and install them yourself.",
@@ -1300,7 +1502,7 @@ class LocalAppRepository(AppRepositoryInfo):
         config_filename = self._require_repo_filename(evaluation_file, filenames)
         evaluation_file_path = self._download(config_filename)
         for filename in filenames:
-            if filename != config_filename and not filename.endswith(".pt"):
+            if filename != config_filename and not filename.endswith(WEIGHTS):
                 codes_path.append((filename, self._download(filename)))
         self._install_requirements(filenames)
         return evaluation_file_path, codes_path
@@ -1311,7 +1513,7 @@ class LocalAppRepository(AppRepositoryInfo):
         config_filename = self._require_repo_filename(uncertainty_file, filenames)
         uncertainty_file_path = self._download(config_filename)
         for filename in filenames:
-            if filename != config_filename and not filename.endswith(".pt"):
+            if filename != config_filename and not filename.endswith(WEIGHTS):
                 codes_path.append((filename, self._download(filename)))
         self._install_requirements(filenames)
         return uncertainty_file_path, codes_path
@@ -1380,32 +1582,26 @@ class LocalAppRepository(AppRepositoryInfo):
         """
         Resolve the checkpoint(s) to fine-tune into ``(basename, source_path)`` pairs.
 
-        If ``name_of_models`` is provided, each requested name is resolved to a ``.pt`` file.
-        Otherwise the first checkpoint advertised in ``app.json`` (falling back to the first
-        available ``.pt``) is selected. Missing files trigger a Hugging Face refresh, mirroring
-        :meth:`download_inference`.
+        Each name of ``name_of_models`` is resolved to a ``.safetensors`` file, else a ``.pt``; with none, the first weights
+        ``app.json`` declares are, and only an app.json that declares none falls back to the first available
+        weights. Missing files trigger a Hugging Face refresh, mirroring :meth:`download_inference`.
         """
-        selected: list[str] = []
+        if not name_of_models and self._checkpoints_name:
+            name_of_models = [str(self._checkpoints_name[0])]
         if name_of_models:
-            if any(self._find_repo_filename(name, filenames, suffix=".pt") is None for name in name_of_models):
+            if any(self._find_repo_filename(name, filenames, suffix=WEIGHTS) is None for name in name_of_models):
                 filenames = self._refreshed_filenames() or filenames
-            selected = [self._require_repo_filename(name, filenames, suffix=".pt") for name in name_of_models]
+            selected = [self._require_repo_filename(name, filenames, suffix=WEIGHTS) for name in name_of_models]
         else:
-            default_name: str | None = None
-            for candidate in self._checkpoints_name:
-                resolved = self._find_repo_filename(candidate, filenames, suffix=".pt")
-                if resolved is not None:
-                    default_name = resolved
-                    break
-            if default_name is None:
-                available = sorted(name for name in filenames if name.endswith(".pt"))
-                if not available:
-                    filenames = self._refreshed_filenames() or filenames
-                    available = sorted(name for name in filenames if name.endswith(".pt"))
-                if not available:
-                    raise AppRepositoryError(f"No checkpoint (.pt) found to fine-tune in app '{self._app_name}'.")
-                default_name = available[0]
-            selected = [default_name]
+            available = sorted(_weight_files(filenames))
+            if not available:
+                filenames = self._refreshed_filenames() or filenames
+                available = sorted(_weight_files(filenames))
+            if not available:
+                raise AppRepositoryError(
+                    f"No weights (.safetensors or .pt) found to fine-tune in app '{self._app_name}'."
+                )
+            selected = [available[0]]
 
         return [(PurePosixPath(repo_name).name, self._download(repo_name)) for repo_name in selected]
 
@@ -1428,7 +1624,7 @@ class LocalAppRepository(AppRepositoryInfo):
         limited to the selected checkpoints, and the training config's ``epochs``/``it_validation``
         (and ``batch_size``, when given) are updated. ``overrides`` are ``--set NAME=VALUE`` model/config
         tweaks baked into the training config before training (same syntax as
-        :meth:`_apply_config_overrides`). Only the selected ``.pt`` checkpoints are downloaded. Returns
+        :meth:`_apply_config_overrides`). Only the selected weights are downloaded. Returns
         ``(basename, source_path)`` pairs for the checkpoints to fine-tune.
         """
         # Refused before anything is installed: a zero or negative value would be written into the
@@ -1439,7 +1635,7 @@ class LocalAppRepository(AppRepositoryInfo):
         models = self._resolve_fine_tune_models(filenames, name_of_models)
 
         for filename in filenames:
-            if filename.endswith(".pt"):
+            if filename.endswith(WEIGHTS):
                 continue
             dest = path / filename
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1521,7 +1717,11 @@ class LocalAppRepositoryFromDirectory(LocalAppRepository):
         config = self._app_directory / self._app_name / prediction_file
         if not config.is_file():
             raise AppRepositoryError(f"Cannot save defaults: '{prediction_file}' not found in app '{self._app_name}'.")
-        self._apply_config_overrides(str(config), overrides)
+        preset, self._preset = self._preset, None  # the base config's defaults: the chosen preset is not baked in
+        try:
+            self._apply_config_overrides(str(config), overrides)
+        finally:
+            self._preset = preset
 
 
 @functools.cache
@@ -1553,6 +1753,15 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         self._repo_id = repo_id
         self._force_update = force_update
         super().__init__(app_name)
+
+    def _user_presets_file(self) -> Path | None:
+        return user_presets_file(self._repo_id.partition("@")[0], self._app_name)
+
+    def get_revision(self) -> str | None:
+        parts = Path(self._download("app.json")).parts  # .../snapshots/<commit>/<app>/app.json in the hub cache
+        if "snapshots" in parts:
+            return parts[parts.index("snapshots") + 1]
+        return self._split_repo_reference(self._repo_id)[1]
 
     @staticmethod
     def _split_repo_reference(repo_id: str) -> tuple[str, str | None]:
@@ -1586,7 +1795,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
             if isinstance(entry, RepoFolder):
                 continue
             entry_path = PurePosixPath(entry.path)
-            if entry_path.suffix != ".pt":
+            if entry_path.suffix not in WEIGHTS:
                 sync_patterns.add(entry_path.as_posix())
 
         return sorted(sync_patterns)
@@ -1653,7 +1862,7 @@ class LocalAppRepositoryFromHF(LocalAppRepository):
         return [
             checkpoint_name
             for checkpoint_name in checkpoints_name
-            if self._find_repo_filename(checkpoint_name, cached_filenames, suffix=".pt") is not None
+            if self._find_repo_filename(checkpoint_name, cached_filenames, suffix=WEIGHTS) is not None
         ]
 
     @staticmethod
@@ -1739,6 +1948,8 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
 
         if not data.get("available", False):
             raise AppRepositoryError(f"App '{app_name}' is not available on remote server.")
+        # The server resolves a preset itself: the app's are listed for a client to choose from.
+        self._remote_presets = read_presets(data.get("presets"), f"app '{app_name}' of {remote_server.get_url()}")
         self._has_capabilities = data["has_capabilities"]
         # Servers that omit the 'finetunable' field fall back to the inference capability
         # (fine-tune is offered for any inference-capable app).
@@ -1802,6 +2013,9 @@ class AppRepositoryInfoFromRemoteServer(AppRepositoryInfo):
     def is_finetunable(self) -> bool:
         return self._finetunable
 
+    def get_presets(self) -> dict[str, Preset]:
+        return self._remote_presets
+
     def get_name(self) -> str:
         return self._app_name
 
@@ -1852,7 +2066,7 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     """
     Resolve an app repository identifier into a concrete repository adapter.
 
-    Supported formats:
+    Supported formats, each followed by ``#preset`` to run one of the app's presets:
     - ``repo_id:app_name`` -> Hugging Face repository
     - ``/path/to/app_repository`` -> local folder
     - ``host:port:app_name`` -> remote KonfAI app server
@@ -1860,6 +2074,15 @@ def get_app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInf
     - ``https://host:port:app_name[|token]`` -> the same server over HTTPS, its certificate checked against
       ``KONFAI_API_CA_CERT`` when set
     """
+    app_id, preset = split_preset(app_id)
+    info = _app_repository_info(app_id, force_update)
+    if preset is not None:
+        info.use_preset(preset)
+    return info
+
+
+def _app_repository_info(app_id: str, force_update: bool) -> AppRepositoryInfo:
+    """:func:`get_app_repository_info` without the ``#preset``."""
     local_path = _resolve_local_app_path(app_id)
     if local_path is not None:
         if local_path.exists():

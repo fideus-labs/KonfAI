@@ -1,0 +1,176 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Map RFC-5 coordinate systems to KonfAI's ITK geometry, without reading voxels."""
+
+from __future__ import annotations
+
+import dataclasses
+from typing import Any
+
+import numpy as np
+
+from konfai.utils.errors import DatasetManagerError
+
+
+def private_record(attributes: dict[str, Any] | None) -> dict[str, Any]:
+    """What the ``konfai`` root attribute stores: every record but the latest rung of the geometry stack, which
+    the standard transformations carry, and the axis and unit hints the reader derives. The rungs beneath stay:
+    an inverse stage (``Padding``) pops its way back down them, on a cache hit as on a fresh run."""
+    from konfai.utils.dataset.attribute import Attribute
+
+    record = Attribute(attributes or {})
+    for key in ("Origin", "Spacing", "Direction"):
+        if key in record:
+            record.pop(key)
+    for key in ("OMEAxes", "OMEUnits"):
+        while key in record:
+            record.pop(key)
+    return dict(record)
+
+
+def declare_geometry(multiscales: Any, attributes: dict[str, Any] | None) -> None:
+    """Declare the intrinsic-to-world mapping: the grid's rotation about its origin.
+
+    The dataset-level scale and translation stay the grid's axis-aligned view, exact spacing and origin, which
+    is all a scale/translation reader (a viewer, ngff-zarr's ``NgffImage``) takes; the standard transformation
+    turns the intrinsic frame about that origin, so an axis-aligned grid declares the identity.
+    """
+    from ngff_zarr.rfc4 import LPS
+    from ngff_zarr.v06.zarr_metadata import (
+        Affine,
+        CoordinateSystem,
+        CoordinateSystemIdentifier,
+        Rotation,
+        TransformSequence,
+        Translation,
+    )
+
+    from konfai.utils.dataset.attribute import Attribute
+    from konfai.utils.ome_zarr import _unit_factors
+
+    image = multiscales.images[0]
+    spatial = [d for d in image.dims if d in "zyx"]
+    n = len(spatial)
+    record = Attribute(attributes or {})
+    flat = record.get_np_array("Direction") if "Direction" in record else np.eye(n).ravel()
+    if flat.size != n * n:
+        raise DatasetManagerError(f"OME-Zarr direction must contain {n * n} values.")
+    direction = flat.reshape(n, n)
+    if not np.isfinite(direction).all() or np.linalg.det(direction) == 0:
+        raise DatasetManagerError("OME-Zarr direction must be finite and invertible.")
+    factors = _unit_factors(image.axes_units, spatial)
+    # Units belong to coordinates, so a rotation between differently scaled axes is conjugated.
+    linear = direction[::-1, ::-1] * factors[None, :] / factors[:, None]
+    matrix = np.eye(len(image.dims))
+    indices = [image.dims.index(d) for d in spatial]
+    matrix[np.ix_(indices, indices)] = linear
+    linear_transform: Rotation | Affine
+    if np.allclose(matrix.T @ matrix, np.eye(len(matrix)), atol=1e-10, rtol=0) and np.isclose(np.linalg.det(matrix), 1):
+        linear_transform = Rotation(rotation=matrix.tolist())
+    else:
+        linear_transform = Affine(affine=np.column_stack((matrix, np.zeros(len(matrix)))).tolist())
+    intrinsic = multiscales.metadata.intrinsic_coordinate_system
+    world = CoordinateSystem(
+        name="world",
+        axes=[
+            dataclasses.replace(a, orientation=LPS.get(a.name) if a.type == "space" else None) for a in intrinsic.axes
+        ],
+    )
+    origin = np.array([image.translation.get(d, 0.0) for d in image.dims])
+    transform = TransformSequence(
+        input=CoordinateSystemIdentifier(name=intrinsic.name),
+        output=CoordinateSystemIdentifier(name=world.name),
+        transformations=[linear_transform, Translation(translation=(origin - matrix @ origin).tolist())],
+        name="intrinsic_to_world",
+    )
+    multiscales.metadata = dataclasses.replace(
+        multiscales.metadata,
+        coordinateSystems=[intrinsic, world],
+        coordinateTransformations=[transform],
+    )
+
+
+def read_geometry(multiscales: Any, image: Any) -> dict[str, Any]:
+    """Resolve one linear intrinsic-to-world mapping, in millimetres and ITK xyz order."""
+    import ngff_zarr
+    from ngff_zarr.rfc4 import anatomical_orientation_to_itk_direction
+
+    from konfai.utils.dataset.attribute import Attribute
+    from konfai.utils.ome_zarr import _unit_factors
+
+    dims = list(image.dims)
+    xyz = [d for d in "xyz" if d in dims]
+    n = len(xyz)
+    metadata = multiscales.metadata
+    intrinsic = getattr(metadata, "intrinsic_coordinate_system", None)
+    is_field = intrinsic is not None and any(a.type == "displacement" for a in intrinsic.axes)
+    declared = list(metadata.coordinateTransformations or [])
+    transforms = [
+        t
+        for t in declared
+        if not (is_field and t.type == "displacements" and t.input is not None and t.input == t.output)
+    ]
+    matrix, offset = np.eye(n), np.zeros(n)
+    units = {k: v for k, v in (image.axes_units or {}).items() if v}
+    orientations = {k: v for k, v in (image.axes_orientations or {}).items() if v}
+    recorded = Attribute((multiscales.root_attributes or {}).get("konfai", {}).get("attributes", {}))
+    # A store written before the standard transformations declared none and kept its grid in the private
+    # record; one written since declares its grid (or, an axis-aligned field, its ``displacements`` entry) and
+    # keeps there only the rungs beneath the grid, so whatever geometry it records is history, not the grid.
+    if not declared and any(key in recorded for key in ("Origin", "Spacing", "Direction")):
+        raise DatasetManagerError(
+            "This OME-Zarr store keeps geometry in private KonfAI attributes.",
+            "Rewrite it with RFC-5 coordinate transformations before reading it.",
+        )
+    if transforms:
+        if (
+            len(transforms) != 1
+            or intrinsic is None
+            or transforms[0].input is None
+            or transforms[0].output is None
+            or transforms[0].input.name != intrinsic.name
+        ):
+            raise DatasetManagerError("OME-Zarr requires one unambiguous intrinsic-to-world transformation.")
+        transform = transforms[0]
+        if transform.type in ("displacements", "coordinates"):
+            raise DatasetManagerError("A nonlinear OME-Zarr transformation cannot describe an image grid.")
+        systems = [s for s in metadata.coordinateSystems if s.name == transform.output.name]
+        if len(systems) != 1 or [a.name for a in systems[0].axes] != dims:
+            raise DatasetManagerError("OME-Zarr world axes must match the intrinsic axes in order.")
+        try:
+            entry = ngff_zarr.ngff_transform_to_itk_transform(transform, dims)[0]
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            raise DatasetManagerError(f"Unsupported OME-Zarr grid transformation: {exc}") from exc
+        if entry.transformType.transformParameterization.value != "Affine":
+            raise DatasetManagerError("A nonlinear OME-Zarr transformation cannot describe an image grid.")
+        parameters = np.asarray(entry.parameters)
+        matrix, offset = parameters[: n * n].reshape(n, n), parameters[n * n :]
+        units = {a.name: a.unit for a in systems[0].axes if a.unit}
+        orientations = {a.name: a.orientation for a in systems[0].axes if a.orientation}
+    factors = _unit_factors(units, xyz)
+    basis = np.eye(n)
+    for j, d in enumerate(xyz):
+        if d in orientations:
+            orientation = orientations[d]
+            value = orientation["value"] if isinstance(orientation, dict) else orientation.value
+            vector = np.asarray(anatomical_orientation_to_itk_direction(value))
+            if np.any(vector[n:] != 0):
+                raise DatasetManagerError("OME-Zarr anatomical orientation leaves the image's spatial dimensions.")
+            basis[:, j] = vector[:n]
+    scale = np.array([image.scale[d] for d in xyz])
+    translation = np.array([image.translation[d] for d in xyz])
+    linear = basis @ (factors[:, None] * matrix) @ np.diag(scale)
+    spacing = np.linalg.norm(linear, axis=0)
+    origin = basis @ (factors * (matrix @ translation + offset))
+    if (
+        not np.isfinite(linear).all()
+        or not np.isfinite(origin).all()
+        or np.any(spacing <= 0)
+        or np.linalg.det(linear) == 0
+    ):
+        raise DatasetManagerError("OME-Zarr geometry must be finite and invertible, with positive spacing.")
+    return {
+        "Origin": origin.tolist(),
+        "Spacing": spacing.tolist(),
+        "Direction": (linear / spacing).ravel().tolist(),
+        "units": units,
+    }

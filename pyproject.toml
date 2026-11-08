@@ -37,7 +37,9 @@ dependencies = [
   "tqdm",
   "numpy",
   "ruamel.yaml",
-  "psutil"
+  "psutil",
+  # Published weights (apps) are .safetensors: read and written without pickle.
+  "safetensors"
 ]
 
 [project.urls]
@@ -55,17 +57,19 @@ itk = ["SimpleITK>=2.0"]
 hdf5 = ["h5py"]
 monitoring = ["nvidia-ml-py"]
 tensorboard = ["tensorboard"]
-imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr>=3", "ngff-zarr>=0.45", "dask"]
+imaging = ["SimpleITK>=2.0", "h5py", "pydicom", "zarr>=3", "ngff-zarr>=0.49", "dask"]
 vtk = ["vtk"]
 lpips = ["lpips"]
 smp = ["segmentation-models-pytorch"]
 cluster = ["submitit"]
 dicom = ["pydicom"]
-omezarr = ["zarr>=3", "ngff-zarr>=0.45", "dask"]
+omezarr = ["zarr>=3", "ngff-zarr>=0.49", "dask"]
 # Reading a dataset root from S3: s3fs is the fsspec implementation, aiohttp the transport
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
 export = ["onnx", "onnxruntime", "onnxscript"]
+# `konfai <WORKFLOW> --check`: a config against its JSON Schema (konfai.config_schema.config_errors).
+check = ["jsonschema"]
 # MONAI Bundles (konfai.bundle) and the MONAI networks the docs wrap (monai.networks.nets:UNet).
 monai = ["monai"]
 all = [
@@ -80,6 +84,7 @@ all = [
   "konfai[omezarr]",
   "konfai[s3]",
   "konfai[export]",
+  "konfai[check]",
   "konfai[smp]",
   # The IMPACT criteria download their feature extractors from the Hub; imported lazily,
   # and their refusal names this extra.
@@ -90,7 +95,7 @@ dev = [
   "h5py",
   "pydicom",
   "zarr>=3",
-  "ngff-zarr>=0.45",
+  "ngff-zarr[validate]>=0.49",
   "dask",
   "scikit-image",
   "onnx",
@@ -102,6 +107,7 @@ dev = [
   "pytest",
   "pytest-cov",
   "pytest-xdist",
+  "jsonschema",
   "pre-commit",
   "ruff==0.15.2",
   "mypy",

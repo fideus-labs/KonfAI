@@ -26,6 +26,7 @@ from konfai.utils.utils import split_path_spec
 from ruamel.yaml import YAML
 
 from . import runner as mcp_runner
+from .config_io import schema_mistakes
 from .dataset_inspection import DatasetInspectionMixin
 from .experiment_state import STAGE_ACTIONS, collect_facts, experiment_state
 from .metrics_service import MetricsServiceMixin
@@ -610,8 +611,48 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             return "3d-like"
         return "unknown"
 
+    def _schema_review(self, config_path: Path, workflow: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """The config's mistakes against KonfAI's schema, as the engine treats them: a key nothing reads is a
+        warning (refused by TRANSFORM), anything the binder refuses a blocking issue."""
+        warnings: list[dict[str, Any]] = []
+        blocking_issues: list[dict[str, Any]] = []
+        data = YAML_SAFE.load(config_path.read_text(encoding="utf-8"))
+        for mistake in schema_mistakes(data, workflow_root_name(workflow)):
+            if mistake.unread and workflow != "transform":
+                warnings.append(
+                    self._build_warning(
+                        code="config_key_unread",
+                        message=f"{mistake.path}: {mistake.message}",
+                        rationale="KonfAI reads no such key here: the value is ignored.",
+                        observed={},
+                        suggested_next_checks=["describe_config_schema"],
+                    )
+                )
+                continue
+            blocking_issues.append(
+                self._build_blocking_issue(
+                    code="config_schema",
+                    message=f"{mistake.path}: {mistake.message}",
+                    rationale="KonfAI refuses this value, component name or missing argument when it builds the run.",
+                    observed={},
+                    suggested_next_checks=["describe_config_schema", "list_components"],
+                )
+            )
+        return warnings, blocking_issues
+
     def _static_semantic_review(self, config_path: Path, workflow: str) -> dict[str, Any]:
         normalized_workflow = self._normalize_workflow(workflow)
+        warnings, blocking_issues = self._schema_review(config_path, normalized_workflow)
+        if blocking_issues:  # the checks below read values whose type the schema has just refused
+            return {
+                "workflow": normalized_workflow,
+                "config_path": str(config_path),
+                "strategy_hint": None,
+                "summary": None,
+                "warnings": warnings,
+                "blocking_issues": blocking_issues,
+                "next_checks": ["describe_config_schema", "list_components"],
+            }
         root = self._load_workflow_root(config_path, normalized_workflow)
         model = root.get("Model", {})
         dataset = root.get("Dataset", {})
@@ -669,8 +710,6 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             elif model_dim == 3:
                 expected_input_channels = len(input_groups)
 
-        warnings: list[dict[str, Any]] = []
-        blocking_issues: list[dict[str, Any]] = []
         if model_dim == 2 and patch_depth is not None and patch_depth != 1:
             warnings.append(
                 self._build_warning(

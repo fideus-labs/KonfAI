@@ -27,7 +27,7 @@ cd "$(dirname "$0")"
 DEV="--gpu ${GPU-0}"
 [ -f data/fixed_ct.mha ] || python prepare_data.py data
 [ -f out/06_reg/P000/Transform.h5 ] || \
-    impact-reg-konfai register Elastix_IMPACT_Static -f data/fixed_ct.mha -m data/moving_mr.mha \
+    impact-reg-konfai register Elastix#impact_static -f data/fixed_ct.mha -m data/moving_mr.mha \
         --fixed-mask data/fixed_mask.mha -o out/06_reg $DEV -q
 
 LABELS="--gt-fixed-seg data/fixed_labels.mha --gt-moving-seg data/moving_labels.mha"

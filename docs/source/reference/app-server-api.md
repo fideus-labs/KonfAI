@@ -46,7 +46,7 @@ repos). See {doc}`../usage/python-api`.
 | --- | --- | --- |
 | `GET` | `/repo_apps_list` | `{"apps":[str,…]}`: the configured allowlist |
 | `GET` | `/repo_apps/{app_id}` | App metadata & capabilities (display name, description, `checkpoints_name`, `maximum_tta`, `mc_dropout`, `patch_size`, `inputs`/`outputs`, `terminology`, …). 404 if not allowlisted. |
-| `GET` | `/repo_apps_config/{app_id}` | `application/zip` of the app's config files (no `.pt`). |
+| `GET` | `/repo_apps_config/{app_id}` | `application/zip` of the app's config files (no weights). |
 
 ### Job submission
 

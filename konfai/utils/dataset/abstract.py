@@ -133,6 +133,11 @@ class AbstractFile(ABC):
         del name
         return False
 
+    def level_count(self, name: str) -> int:
+        """How many resolution levels the entry is stored at: one, but for a pyramid."""
+        del name
+        return 1
+
     def read_granularity(self, name: str) -> tuple[int, ...] | None:
         """The stored block a region read is served in, as a ``C[Z]YX`` shape, or ``None``.
 

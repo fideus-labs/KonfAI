@@ -44,7 +44,7 @@ def test_a_preset_pass_runs_where_the_app_was_told(tmp_path: Path, monkeypatch, 
     work.mkdir()
 
     ImpactRegKonfAIApp(remote_server=server)._infer_preset(
-        "FireANTs_SyN", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], work, [0], None, True
+        "FireANTs", [tmp_path / "f.mha"], [tmp_path / "m.mha"], [], [], work, [0], None, True
     )
 
     [(command, env)] = captured
