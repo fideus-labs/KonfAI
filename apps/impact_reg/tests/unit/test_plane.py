@@ -56,7 +56,9 @@ def test_the_engine_registers_the_plane_of_a_volume_one_plane_thick() -> None:
     geometry["Spacing"] = np.array([0.1, 0.2, 7.0])  # z, the plane's thickness, is no voxel of the image
     geometry["Direction"] = np.eye(3).flatten()
     for tensor in (torch.zeros(1, 1, 1, 4, 5), torch.zeros(1, 1, 4, 5)):
-        field = EngineRegistration(Engine())(tensor, tensor, tensor + 1, tensor + 1, [[geometry]] * 4).numpy()
+        field = EngineRegistration(Engine())(
+            tensor, tensor, tensor + 1, tensor + 1, attributes=[[geometry]] * 4
+        ).numpy()
         assert field.shape == (1, 3, 4, 5)
         np.testing.assert_allclose(field[0, 0], 0.05)
         np.testing.assert_allclose(field[0, 1], -0.1)
@@ -68,7 +70,7 @@ def test_the_engine_registers_the_plane_of_a_volume_one_plane_thick() -> None:
     elsewhere["Spacing"], elsewhere["Direction"] = geometry["Spacing"], geometry["Direction"]
     tensor = torch.zeros(1, 1, 1, 4, 5)
     field = EngineRegistration(Engine())(
-        tensor, tensor, tensor + 1, tensor + 1, [[geometry], [elsewhere], [geometry], [elsewhere]]
+        tensor, tensor, tensor + 1, tensor + 1, attributes=[[geometry], [elsewhere], [geometry], [elsewhere]]
     )
     np.testing.assert_allclose(field.numpy()[0, 2], 1.5)
 
