@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 */
 // The landing's dynamic pieces: the search over the site's index, the phone menu, the reveals and the counts.
 // The hero canvas is design/volume-hero.js, mounted from index.html.
 // No dependency. Generated index below; regenerate it with the site's build note when pages change.

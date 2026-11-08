@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 */
 /* KonfAI site, inner pages: the identity (design/) and the landing's tokens (landing.css, loaded first) under a
    reading layout. Dark by design; the page's hue (body.hue-*) is the accent of its links, kickers and nav marks. */
 .inner {
