@@ -67,7 +67,14 @@ from konfai.data.transform.base import (
     sitk,
 )
 from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, as_member, stacked_groups
-from konfai.utils.dataset import DISPLACEMENT_FIELD_ATTRIBUTE, Attribute, Dataset, is_an_image
+from konfai.utils.dataset import (
+    DISPLACEMENT_FIELD_ATTRIBUTE,
+    Attribute,
+    Dataset,
+    image_to_data,
+    is_an_image,
+    is_displacement_entry,
+)
 from konfai.utils.errors import CaseReadError, DatasetManagerError, TransformError
 from konfai.utils.ITK import _require_simpleitk
 from konfai.utils.utils import split_path_spec
@@ -1068,8 +1075,6 @@ class Resample(TransformInverse):
 
     def _stored_field_headers(self, name: str) -> list[tuple[list[int], Attribute]]:
         """The shape and header of every dense-field member of this case's stored map."""
-        from konfai.utils.dataset import is_displacement_entry
-
         fields = []
         for group in cast("dict[str, bool]", self.transforms or {}):
             for dataset in self.datasets:
@@ -1899,7 +1904,6 @@ class TransformPoints(Transform):
         return torch.stack(moved)
 
     def _push(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
-        from konfai.utils.dataset import is_displacement_entry
         from konfai.utils.ITK import displace_points
 
         points = tensor.detach().cpu().numpy().astype(np.float64).reshape(-1, 3)
@@ -1954,8 +1958,6 @@ class TransformToField(Transform):
 
     def _entry(self, name: str) -> Any:
         """The dataset holding the case's transform, None when it is a field (measured as it is)."""
-        from konfai.utils.dataset import is_displacement_entry
-
         dataset = self.dataset_holding(self.group, name)
         if dataset is None:
             raise TransformError(
@@ -1985,21 +1987,19 @@ class TransformToField(Transform):
         return 3
 
     def __call__(self, name: str, tensor: torch.Tensor, cache_attribute: Attribute) -> torch.Tensor:
-        from konfai.utils.dataset import image_to_data
-
         dataset = self._entry(name)
         if dataset is None:
             return tensor  # a field already
         transform = dataset.read_transform(self.group, name)
         shape, header = self._grid(name)
-        rank = len(shape) - 1
+        grid = Grid.of([int(extent) for extent in shape[1:]], header, f"the fixed image of case '{name}'")
         field = sitk.TransformToDisplacementField(
             transform,
             sitk.sitkVectorFloat32,
-            [int(extent) for extent in shape[1:]][::-1],
-            header.get_np_array("Origin").astype(float).tolist(),
-            header.get_np_array("Spacing").astype(float).tolist(),
-            header.get_np_array("Direction").astype(float).reshape(rank * rank).tolist(),
+            list(grid.size_zyx[::-1]),
+            grid.origin_xyz.tolist(),
+            grid.spacing_xyz.tolist(),
+            grid.direction_xyz.ravel().tolist(),
         )
         data, geometry = image_to_data(field)
         for key in ("Origin", "Spacing", "Direction"):

@@ -545,15 +545,11 @@ class ElastixEngine:
             if not transforms:
                 raise FileNotFoundError(f"elastix produced no composite transform file{_kept_log(work)}.")
             transform = sitk.ReadTransform(str(transforms[-1]))
-            if self._transform_type == "native" and not transform.IsLinear():
-                # The maps' own transform (rigid then B-spline), kilobytes where its field weighs megabytes.
-                return with_shift(transform, shift)
             if self._transform_type != "field":
-                # The one affine the maps compose to, the start added back: a moving point is T(x) + shift.
-                affine = as_affine(transform)
-                if shift is not None:
-                    affine.SetTranslation([t + s for t, s in zip(affine.GetTranslation(), shift, strict=True)])
-                return affine
+                # The maps' own transform (the one affine linear maps compose to; rigid then B-spline as such,
+                # kilobytes where its field weighs megabytes), the start added back: a moving point is T(x) + shift.
+                native = with_shift(transform, shift)
+                return as_affine(native) if transform.IsLinear() else native
             field = displacement_on(grid, transform)
             if shift is not None:
                 field += np.asarray(shift, dtype=field.dtype).reshape(-1, *([1] * (field.ndim - 1)))

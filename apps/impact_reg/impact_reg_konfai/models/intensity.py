@@ -73,7 +73,6 @@ def world_transform(transform: sitk.Transform, voxel: float) -> sitk.Transform:
                 scaled = image * voxel
                 scaled.SetOrigin([value * voxel for value in image.GetOrigin()])
                 scaled.SetSpacing([value * voxel for value in image.GetSpacing()])
-                scaled.SetDirection(image.GetDirection())
                 coefficients.append(scaled)
             world.append(sitk.BSplineTransform(coefficients, leaf.GetOrder()))
         else:

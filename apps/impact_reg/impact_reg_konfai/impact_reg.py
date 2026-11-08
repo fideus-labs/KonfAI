@@ -160,11 +160,6 @@ def _is_bspline(path: Path) -> bool:
     return _is_transform_file(path) and any("BSpline" in kind for kind in _transform_kinds(path))
 
 
-def _fixed_grid(index: int, *groups: list[Path]) -> Path | None:
-    """The fixed grid of case ``index``: the first of ``groups`` (the fixed image, the fixed segmentation) given."""
-    return next((group[index] for group in groups if group), None)
-
-
 def _field(path: Path, work: Path) -> tuple[Dataset, str, str]:
     """A stored displacement field staged as a dataset entry, for KonfAI's field readers."""
     if _is_flat_field(path):  # See plane.py.
@@ -969,6 +964,8 @@ class ImpactRegKonfAIApp:
         self._ran: dict[str, list[dict]] = {}
         # The run's own choices every preset pass takes as they are: --output-format, --seed.
         self._run_args: list[str] = []
+        # Whether every preset pass writes its field, never a native form: an ensemble or a TTA averages them.
+        self._dense = False
 
     # ------------------------------------------------------------------ register
 
@@ -1063,7 +1060,7 @@ class ImpactRegKonfAIApp:
         if self._force_update:
             command.append("--force_update")
         env = {**os.environ, "TMPDIR": str(work)}
-        if getattr(self, "_dense", False) or label is not None:
+        if self._dense or label is not None:
             env[DENSE_TRANSFORMS_ENV] = "1"
         if self._remote is not None:
             command += ["--host", self._remote.host, "--port", str(self._remote.port)]
@@ -1779,31 +1776,33 @@ class ImpactRegKonfAIApp:
                 # The transform alone, no reference: its Jacobian, bending energy and displacement lengths. A field is
                 # measured on its own grid; a B-spline (elastix's native form) has none and is sampled on the fixed
                 # one, the fixed image's or segmentation's; a linear transform's Jacobian is its matrix everywhere.
-                grid = (
-                    None if not transforms or _is_field(transform) else _fixed_grid(index, fixed_images, gt_fixed_seg)
-                )
-                if transforms and grid is None and _is_bspline(transform):
-                    print(
-                        f"[ImpactReg] P{index:03d}: a B-spline transform is measured without reference on the fixed"
-                        " grid; give the fixed image (-f/-m) or segmentation (--gt-fixed-seg/--gt-moving-seg).",
-                        flush=True,
-                    )
-                if transforms and (_is_field(transform) or (grid is not None and _is_bspline(transform))):
-                    if (transform, grid) in jacobians:
-                        shutil.copytree(jacobians[(transform, grid)], eval_out / "NoReference", dirs_exist_ok=True)
-                    else:
-                        app.evaluate(
-                            inputs=[[transform]],
-                            gt=[[grid]] if grid is not None else None,
-                            output=eval_out / "NoReference",
-                            evaluation_file="Evaluation_no_reference.yml",
-                            gpu=gpu,
-                            cpu=cpu,
-                            quiet=quiet,
-                            tmp_dir=work / "NoReference",
-                        )
-                        jacobians[(transform, grid)] = eval_out / "NoReference"
-                    scored.append((f"P{index:03d}", eval_out / "NoReference"))
+                if transforms:
+                    field, grid = _is_field(transform), None
+                    if not field and _is_bspline(transform):
+                        grid = next((group[index] for group in (fixed_images, gt_fixed_seg) if group), None)
+                        if grid is None:
+                            print(
+                                f"[ImpactReg] P{index:03d}: a B-spline transform is measured without reference on"
+                                " the fixed grid; give the fixed image (-f/-m) or segmentation"
+                                " (--gt-fixed-seg/--gt-moving-seg).",
+                                flush=True,
+                            )
+                    if field or grid is not None:
+                        if (transform, grid) in jacobians:
+                            shutil.copytree(jacobians[(transform, grid)], eval_out / "NoReference", dirs_exist_ok=True)
+                        else:
+                            app.evaluate(
+                                inputs=[[transform]],
+                                gt=[[grid]] if grid is not None else None,
+                                output=eval_out / "NoReference",
+                                evaluation_file="Evaluation_no_reference.yml",
+                                gpu=gpu,
+                                cpu=cpu,
+                                quiet=quiet,
+                                tmp_dir=work / "NoReference",
+                            )
+                            jacobians[(transform, grid)] = eval_out / "NoReference"
+                        scored.append((f"P{index:03d}", eval_out / "NoReference"))
             except BaseException as error:
                 _leave(work, error)
                 raise
