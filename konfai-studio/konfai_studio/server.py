@@ -1289,8 +1289,8 @@ async def scout_reports(session: str = Query("default")) -> dict[str, Any]:
 
 @app.get("/api/scout/report")
 async def scout_report(session: str = Query("default"), name: str = Query(...)) -> dict[str, Any]:
-    """One report, without its images: the observations carry their boxes in mm, the views their ids, and the
-    case's image path so the viewer can open it and go to an observation."""
+    """One report, without its images: the observations carry their boxes in mm, the case its image path so the
+    viewer can open it and go to an observation."""
     folder = _scout_report_dir(_sane_session(session), name)
     data = json.loads((folder / "report.json").read_text(encoding="utf-8"))
     case = data.get("case") or {}
@@ -1301,16 +1301,11 @@ async def scout_report(session: str = Query("default"), name: str = Query(...)) 
         "task": case.get("task"),
         "case": case.get("name"),
         "image": image,
-        "inputs": {role: entry.get("path") for role, entry in inputs.items() if isinstance(entry, dict)},
         "truth_available": case.get("truth_available"),
         "conclusion": data.get("conclusion"),
         "observations": data.get("observations") or [],
         "measurements": data.get("measurements") or [],
-        "views": [
-            {k: view.get(k) for k in ("id", "kind", "plane", "mode", "position_mm", "sent")}
-            for view in data.get("views") or []
-        ],
-        "prior_evaluation": data.get("prior_evaluation") or {},
+        "views": len(data.get("views") or []),
         "usage": data.get("usage"),
         "budget": data.get("budget"),
         "error": data.get("error"),
@@ -1332,34 +1327,6 @@ async def scout_evidence(
     if not path.is_file():
         raise HTTPException(404, f"no view {view} in {name}")
     return FileResponse(str(path), media_type="image/png")
-
-
-class ScoutInspect(BaseModel):
-    task: str
-    inputs: dict[str, str]
-    name: str | None = None
-    labels: dict[str, str] | None = None
-    evaluation: list[str] | None = None
-    notes: str = ""
-    provider: str = "anthropic"
-    model: str | None = None
-    base_url: str | None = None
-    mode: str = "active"
-    max_tool_calls: int = 40
-    allow_cloud_images: bool = False
-    local_provider: bool = False
-
-
-@app.post("/api/scout/inspect")
-async def scout_inspect(req: ScoutInspect, session: str = Query("default")) -> dict[str, Any]:
-    """Launch an inspection through konfai-mcp's ``run_scout_inspection``: the job then shows in the live feed and
-    the report under ``/api/scout/reports``. The JSON body doubles as the CSRF guard, as for ``/api/slicer/open``."""
-    ok, text, payload = await _mcp_json(
-        _sane_session(session), "run_scout_inspection", req.model_dump(exclude_none=True)
-    )
-    if not ok:
-        raise HTTPException(400, (text or "run_scout_inspection failed")[:2000])
-    return payload
 
 
 class SlicerOpen(BaseModel):

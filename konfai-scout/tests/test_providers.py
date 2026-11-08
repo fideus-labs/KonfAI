@@ -50,11 +50,8 @@ class FakeAnthropic:
 
 def anthropic_error(status: int, type_: str = "api_error"):
     import anthropic
+    import httpx
 
-    try:
-        import httpx2 as httpx
-    except ImportError:  # pragma: no cover
-        import httpx
     response = httpx.Response(status, request=httpx.Request("POST", "http://api"))
     cls = {429: anthropic.RateLimitError, 500: anthropic.InternalServerError, 400: anthropic.BadRequestError}[status]
     return cls("boom", response=response, body={"error": {"type": type_}})
@@ -187,12 +184,9 @@ def test_openai_request_shape_and_parsing():
 
 
 def test_openai_errors_and_locality():
+    import httpx
     import openai
 
-    try:
-        import httpx2 as httpx
-    except ImportError:  # pragma: no cover
-        import httpx
     response = httpx.Response(429, request=httpx.Request("POST", "http://api"))
     provider = OpenAIProvider(
         "m", client=FakeOpenAI([], error=openai.RateLimitError("rl", response=response, body=None))

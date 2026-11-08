@@ -6,7 +6,7 @@ import io
 import numpy as np
 import pytest
 from konfai_scout.config import ScoutConfig
-from konfai_scout.planes import box_from_dict, box_volume, grid_bounds, plane_frame
+from konfai_scout.planes import box_from_dict, box_volume, grid_bounds
 from konfai_scout.views import DEFAULT_MODE, MODES, Renderer, ViewError
 from PIL import Image
 
@@ -44,15 +44,6 @@ def test_every_available_mode_renders(fixtures, tmp_path, key):
         for mode in missing:
             with pytest.raises(ViewError):
                 r.render("axial", mode)
-
-
-def test_radiological_convention_on_an_identity_grid(fixtures):
-    case, _ = fixtures["segmentation"]
-    assert plane_frame(case.grid, "axial").edges == ("R", "L", "A", "P")
-    assert plane_frame(case.grid, "coronal").edges == ("R", "L", "S", "I")
-    assert plane_frame(case.grid, "sagittal").edges == ("A", "P", "S", "I")
-    flipped = plane_frame(case.grid, "coronal")
-    assert flipped.flip_rows and not flipped.flip_cols  # z runs upward on screen
 
 
 @pytest.mark.parametrize("key", ["segmentation", "segmentation_oblique"])

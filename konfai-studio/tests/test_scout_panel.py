@@ -14,8 +14,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""The Scout panel's routes: the session's reports, one report with its observations in millimetres, its evidence
-images, and the launch through konfai-mcp."""
+"""The Scout panel's routes: the session's reports, one report with its observations in millimetres, and its
+evidence images."""
 
 from __future__ import annotations
 
@@ -114,9 +114,9 @@ def test_reports_report_and_evidence(report: Path) -> None:
         )
         assert client.get("/api/scout/reports", params={"session": "other"}).json() == {"reports": []}
         data = client.get("/api/scout/report", params={"session": "exp", "name": "demo"}).json()
-        assert data["image"] == "/data/c1/ct.mha" and data["inputs"]["prediction"] == "/data/c1/seg.mha"
-        assert data["observations"][0]["box_mm"]["max"] == [10, 10, 10] and data["views"][0]["id"] == "v001"
-        assert "px_to_mm" not in data["views"][0] and data["report_md"].endswith("report.md")
+        assert data["image"] == "/data/c1/ct.mha" and data["truth_available"] is True
+        assert data["observations"][0]["box_mm"]["max"] == [10, 10, 10] and data["views"] == 1
+        assert data["report_md"].endswith("report.md")
         image = client.get("/api/scout/evidence", params={"session": "exp", "name": "demo", "view": "v001"})
         assert image.status_code == 200 and image.headers["content-type"] == "image/png" and image.content == PNG
         assert (
@@ -132,30 +132,3 @@ def test_reports_report_and_evidence(report: Path) -> None:
         assert client.get("/api/scout/report", params={"session": "exp", "name": "nope"}).status_code == 404
         assert client.get("/api/scout/report", params={"session": "exp", "name": "../../exp"}).status_code == 404
         assert client.get("/api/scout/report", params={"session": "exp", "name": ""}).status_code == 404
-
-
-def test_inspect_goes_through_konfai_mcp(report: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, str, dict]] = []
-
-    async def fake_call(session: str, tool: str, args: dict | None = None) -> tuple[bool, str]:
-        calls.append((session, tool, args or {}))
-        if args and args.get("provider") == "anthropic" and not args.get("allow_cloud_images"):
-            return False, "the anthropic provider is a cloud service: set allow_cloud_images"
-        return True, json.dumps(
-            {"job_id": "j1", "kind": "scout", "output": "/ws/Scout/x", "next_actions": ["wait_for_job"]}
-        )
-
-    monkeypatch.setattr(server, "call_mcp_tool", fake_call)
-    body = {
-        "task": "segmentation",
-        "inputs": {"image": "/a.mha", "prediction": "/b.mha"},
-        "provider": "mock",
-        "name": "x",
-    }
-    with TestClient(server.app) as client:
-        answer = client.post("/api/scout/inspect", params={"session": "exp"}, json=body)
-        assert answer.status_code == 200 and answer.json()["job_id"] == "j1"
-        assert calls[-1][:2] == ("exp", "run_scout_inspection") and calls[-1][2]["inputs"] == body["inputs"]
-        assert "model" not in calls[-1][2]  # unset options are left to the tool's defaults
-        refused = client.post("/api/scout/inspect", params={"session": "exp"}, json={**body, "provider": "anthropic"})
-        assert refused.status_code == 400 and "allow_cloud_images" in refused.json()["detail"]
