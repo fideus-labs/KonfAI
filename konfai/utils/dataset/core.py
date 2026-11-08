@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import numpy as np
+import ruamel.yaml
 
 try:
     import SimpleITK as sitk
@@ -181,6 +182,70 @@ def _is_listed_name(name: str) -> bool:
     return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name
 
 
+def _read_manifest(filename: str | Path, file_format: str) -> dict[str, dict[str, str]] | None:
+    """The cases a manifest root names, each mapping its groups to where their store is, or ``None``
+    when ``filename`` is a directory root.
+
+    A manifest is a local YAML (or JSON) file, ``CASE: {GROUP: path-or-uri}``: the entries of a case
+    wherever they sit and whatever they are called, so a store that cannot be laid out as
+    ``<root>/<case>/<group>`` (a remote one) still reads under the group the config names. A
+    relative entry is read from the manifest's own directory. Only the store backend serves it: a
+    file backend reads whole files, which is what a manifest exists to avoid. A manifest that is not
+    there reads as an empty root, like a directory.
+    """
+    path = uri.normalize(filename)
+    if not path.lower().endswith((".yml", ".yaml", ".json")):
+        return None  # a directory root, not a manifest of entries
+    if file_format != "omezarr":
+        raise DatasetManagerError(
+            f"'{path}' is a manifest of entries, which only ':omezarr' reads.",
+            "Declare it as ':omezarr', or lay the files out as <root>/<case>/<group> and name the root.",
+        )
+    if uri.is_uri(path):
+        raise DatasetManagerError(
+            f"'{path}' is a remote manifest, and a manifest is read from a local file.",
+            "Write the manifest beside the run; its entries may be remote.",
+        )
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as file:
+            document = ruamel.yaml.YAML(typ="safe").load(file)
+    except (OSError, ruamel.yaml.YAMLError) as error:
+        raise DatasetManagerError(
+            f"The manifest '{path}' cannot be read: {type(error).__name__}: {error}",
+            "Check 'dataset_filenames' and the file it names.",
+        ) from error
+    layout = "'CASE:' then one 'GROUP: path-or-uri' line per entry"
+    document = {} if document is None else document
+    if not isinstance(document, dict):
+        raise DatasetManagerError(f"The manifest '{path}' must map each case to its entries.", f"Write {layout}.")
+    base = Path(path).parent
+    manifest: dict[str, dict[str, str]] = {}
+    for case, entries in document.items():
+        if not isinstance(entries, dict) or not all(isinstance(where, str) for where in entries.values()):
+            raise DatasetManagerError(
+                f"In the manifest '{path}', case '{case}' must map each group to one path or URI.", f"Write {layout}."
+            )
+        # A case name is one listing component and a group a plain name: both reach output paths
+        # (<root>/<case>/<group>) and the config's groups_src, where a separator or a wildcard means a layout.
+        # Text only: YAML reads an unquoted 001 as the integer 1, which would name the case silently.
+        if not isinstance(case, str) or not _is_listed_name(case):
+            raise DatasetManagerError(
+                f"In the manifest '{path}', '{case}' is not a case name: one name, no separator, not '.' or '..'.",
+                "Name the case as a directory listing would, quoted when it reads as a number ('001').",
+            )
+        if any(not isinstance(group, str) or not _is_listed_name(group) or "*" in group for group in entries):
+            raise DatasetManagerError(
+                f"In the manifest '{path}', case '{case}' names a group that is not a plain name.",
+                "Name a group plainly (CT, SEG), quoted when it reads as a number: a layout belongs to a directory root.",
+            )
+        manifest[case] = {
+            group: where if uri.is_uri(where) else Path(base, where).as_posix() for group, where in entries.items()
+        }
+    return manifest
+
+
 class Dataset:
     """Filesystem or HDF5-backed dataset abstraction used across KonfAI."""
 
@@ -192,6 +257,10 @@ class Dataset:
     DicomFile = DicomFile
     ItkTransformFile = ItkTransformFile
     File = _File
+
+    #: The cases a manifest root names (``None`` for a directory root): their entries are known up front, so
+    #: nothing walks or probes a path for them. A class default: a test builds a dataset without ``__init__``.
+    manifest: dict[str, dict[str, str]] | None = None
 
     def __init__(
         self,
@@ -210,11 +279,19 @@ class Dataset:
                 f"'{base_format}' is not a format KonfAI writes.",
                 "Use one of: " + ", ".join(sorted(SUPPORTED_FORMATS)) + ".",
             )
-        self.filename, self.is_directory = Dataset._normalize_path(filename, file_format)
+        self.manifest = _read_manifest(filename, file_format)
+        if self.manifest is None:
+            self.filename, self.is_directory = Dataset._normalize_path(filename, file_format)
+        else:
+            self.filename, self.is_directory = uri.normalize(filename), True
         self.file_format = file_format
         # A store backend (OME-Zarr / Zarr / DICOM) is detected from disk; the token then only carries
         # the write format and the OME-Zarr pyramid level (``@N``).
-        detected = Dataset._detect_directory_store_format(self.filename) if self.is_directory else None
+        detected = (
+            Dataset._detect_directory_store_format(self.filename)
+            if self.is_directory and self.manifest is None
+            else None
+        )
         if detected is not None:
             self.file_format = detected
         # A pyramid asked of a format without levels is refused, never silently written as one level.
@@ -236,6 +313,24 @@ class Dataset:
         #: Facts a stage derived from an entry's pixels (a Crop's foreground box), keyed by
         #: ``(group, name)``: computed once per volume.
         self.case_facts: dict[tuple[str, str], dict[str, Any]] = {}
+        # A manifest's entries are handed to the backends, under the key they read ``resolved_paths`` by.
+        if self.manifest is not None:
+            for name, entries in self.manifest.items():
+                for group, where in entries.items():
+                    self._entry_paths[f"{self._manifest_case(name)}{group}"] = where
+
+    def _manifest_case(self, name: str) -> str:
+        """The key a manifest's case is opened under: no directory of its own, so the backend reads
+        each entry from :attr:`_entry_paths` (``<key><group>``) and probes nothing."""
+        return f"{self.filename}#{name}/"
+
+    def _refuse_manifest_write(self) -> None:
+        """A manifest names where entries are read from; nothing is written through it."""
+        if self.manifest is not None:
+            raise DatasetManagerError(
+                f"'{self.filename}' is a manifest of entries, a read-only source.",
+                "Point the Write (or the output dataset) at a directory root.",
+            )
 
     def _file(self, filename: str, read: bool) -> _File:
         """One entry's backing file, opened as this dataset's root is."""
@@ -258,8 +353,9 @@ class Dataset:
     def rebase(self, prefix: Path) -> None:
         """Prepend ``prefix`` to this dataset's path, re-deriving ``is_directory`` from the format.
 
-        A rebased root is an output root: a remote root is refused.
+        A rebased root is an output root: a remote root or a manifest is refused.
         """
+        self._refuse_manifest_write()
         uri.refuse_write(self.filename)
         self.filename, self.is_directory = Dataset._normalize_path(prefix / self.filename, self.file_format)
 
@@ -286,9 +382,19 @@ class Dataset:
     def store_root(self) -> str:
         """Where the store lives, as text (a URI has no ``Path``): its root directory, or the ``.h5``
         file for a single-file store. :attr:`path_on_disk` is the local-only view."""
-        root = self.filename
-        suffix = self._backend.case_file_suffix
-        if self._backend.single_store and suffix and not root.endswith(suffix):
+        # The root as __init__ settled it: a manifest root is its file, which _normalize_path would make a directory.
+        return Dataset._store_root(self.filename, self._backend)
+
+    @staticmethod
+    def store_root_for(filename: str | Path, file_format: str) -> str:
+        """:attr:`store_root` of a dataset named ``filename`` in ``file_format``, without building one."""
+        root, _ = Dataset._normalize_path(filename, file_format)
+        return Dataset._store_root(root, backend_for(file_format))
+
+    @staticmethod
+    def _store_root(root: str, backend: type[_AbstractFile]) -> str:
+        suffix = backend.case_file_suffix
+        if backend.single_store and suffix and not root.endswith(suffix):
             return f"{root}{suffix}"
         return root
 
@@ -321,6 +427,7 @@ class Dataset:
         A directory dataset routes any sub-directory prefix of ``group`` into the file path (one file
         per case); a single store keeps one file and a ``group/name`` entry.
         """
+        self._refuse_manifest_write()
         uri.refuse_write(self.filename)
         self._forget_paths()
         if self.is_directory:
@@ -413,6 +520,8 @@ class Dataset:
         The returned path omits the implicit ``.h5`` suffix h5 case files carry. A case found once
         is not probed again; an absent case stays a fresh question.
         """
+        if self.manifest is not None:
+            return self._manifest_case(name) if name in self.manifest else None
         memo_key = (sub_directory, name)
         memoised = self._case_paths.get(memo_key)
         if memoised is not None:
@@ -430,6 +539,8 @@ class Dataset:
 
     def _holds(self, sub_directory: str, group: str, name: str) -> bool:
         """Whether the case file ``name`` under ``sub_directory`` holds ``group``."""
+        if self.manifest is not None:
+            return name in self.manifest and group in self.manifest[name]
         path = self._case_path(sub_directory, name)
         if path is None:
             return False
@@ -454,10 +565,13 @@ class Dataset:
             for sub_directory in self._get_sub_directories(groups):
                 path = self._case_path(sub_directory, name)
                 if path is not None:
-                    with self._unreadable_named(path, groups, name), self._file(path, True) as file:
+                    entry = groups.split("/")[-1]
+                    # A manifest's case has no directory: an unreadable entry is named by where it points.
+                    where = self._entry_paths.get(f"{path}{entry}", path) if self.manifest is not None else path
+                    with self._unreadable_named(where, groups, name), self._file(path, True) as file:
                         file.case = name
                         file.resolved_paths = self._entry_paths
-                        return action(file, "", groups.split("/")[-1])
+                        return action(file, "", entry)
             raise DatasetManagerError(
                 f"The entry '{groups}/{name}' is not in '{self.filename}'.",
                 "Check the groups_src spelling and that the case carries every group it names.",
@@ -663,6 +777,9 @@ class Dataset:
             with self._file(self.filename, True) as file:
                 yield from file.get_names(groups)
             return
+        if self.manifest is not None:
+            yield from (name for name, entries in self.manifest.items() if groups in entries)
+            return
         group = groups.split("/")[-1]
         suffix = self._backend.case_file_suffix
         for sub_directory in self._get_sub_directories(groups):
@@ -705,6 +822,8 @@ class Dataset:
         )
 
     def get_group(self) -> list[str]:
+        if self.manifest is not None:
+            return sorted({group for entries in self.manifest.values() for group in entries})
         if self.is_directory:
             if self._backend.lists_case_entries:
                 groups_set = set()

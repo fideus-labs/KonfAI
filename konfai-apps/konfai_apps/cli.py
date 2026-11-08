@@ -32,18 +32,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from konfai import RemoteServer
+from konfai.utils import uri
 from konfai.utils.errors import EXIT_OUT_OF_MEMORY, KonfAIError
 from konfai.utils.utils import env_flag
 
 from .app_repository import (
+    AppRepositoryInfoFromRemoteServer,
     LocalAppRepository,
     LocalAppRepositoryFromHF,
     did_you_mean,
     get_app_repository_info,
     get_available_apps_on_hf_repo,
+    run_overrides,
 )
 from .errors import AppRepositoryError
-from .options import add_device, add_tmp_dir
+from .options import add_device, add_run_options, add_tmp_dir, local_path
+from .presets import split_preset
 
 if TYPE_CHECKING:
     from .app import AbstractKonfAIApp
@@ -88,7 +92,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     parser.add_argument(
         "-i",
         "--inputs",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         required=True,
@@ -97,7 +101,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
     parser.add_argument(
         "--gt",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         help="Ground-truth path(s): provide one or multiple data files, or a dataset directory.",
@@ -105,7 +109,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
 
     parser.add_argument(
         "--mask",
-        type=lambda x: Path(x).resolve(),
+        type=_input_path,
         nargs="+",
         action="append",
         help="Optional evaluation mask path: provide one or multiple volume files, or a dataset directory.",
@@ -114,7 +118,7 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     parser.add_argument(
         "-o",
         "--output",
-        type=lambda x: Path(x).resolve(),
+        type=local_path,
         default=Path("./Output").resolve(),
         help="Output directory / file",
     )
@@ -131,8 +135,10 @@ def add_common_konfai_apps(parser: argparse.ArgumentParser, with_uncertainty: bo
     return kwargs
 
 
-def _resolved_path(value: str) -> Path:
-    return Path(value).resolve()
+def _input_path(value: str) -> Path | str:
+    """An argparse type: an input, a local path made absolute, or a URI kept as it is (an OME-Zarr store the run
+    reads in place, chunk by chunk)."""
+    return value if uri.is_uri(value) else Path(value).resolve()
 
 
 def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> None:
@@ -140,22 +146,23 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
     instead of inputs and works in its output directory, so it takes no temporary directory."""
     if fine_tune:
         parser.add_argument(
-            "-d", "--dataset", type=_resolved_path, required=True, help="Dataset directory to fine-tune on."
+            "-d", "--dataset", type=local_path, required=True, help="Dataset directory to fine-tune on."
         )
     else:
         parser.add_argument(
             "-i",
             "--inputs",
-            type=_resolved_path,
+            type=_input_path,
             nargs="+",
             action="append",
             required=True,
-            help="Input path(s): one or multiple volume files, or a dataset directory.",
+            help="Input path(s): one or multiple volume files, a dataset directory, or an OME-Zarr store by URI "
+            "(s3://...), read in place.",
         )
     parser.add_argument(
         "-o",
         "--output",
-        type=_resolved_path,
+        type=local_path,
         default=Path("./Output").resolve(),
         help="Output directory: each case's files are listed when the run ends.",
     )
@@ -167,7 +174,7 @@ def _add_app_io(parser: argparse.ArgumentParser, fine_tune: bool = False) -> Non
 def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
     parser.add_argument(
         "--gt",
-        type=_resolved_path,
+        type=_input_path,
         nargs="+",
         action="append",
         required=required,
@@ -177,7 +184,7 @@ def _add_gt(parser: argparse.ArgumentParser, required: bool) -> None:
 
 def _add_mask(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--mask", type=_resolved_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
+        "--mask", type=_input_path, nargs="+", action="append", help="Optional evaluation mask path(s)."
     )
 
 
@@ -219,8 +226,9 @@ def _add_patch_overrides(parser: argparse.ArgumentParser) -> None:
 def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
     """Add the generic config override (``--set NAME=VALUE``, repeatable).
 
-    A bare ``NAME`` tunes a model parameter (e.g. ``--set iterations=300``); a dotted ``NAME`` is a full
-    path from the config root (e.g. ``Predictor.Dataset.batch_size=2``). The value is parsed as YAML (int /
+    A ``NAME`` tunes a model parameter (e.g. ``--set iterations=300``), a nested one dotted from the model
+    (``--set models.0.layers_mask=01``); a dotted ``NAME`` that starts at the config root is a full path
+    (e.g. ``Predictor.Dataset.batch_size=2``). The value is parsed as YAML (int /
     float / bool / list / string). This is the generic mechanism a UI drives to tune a preset's parameters.
     """
     parser.add_argument(
@@ -229,7 +237,8 @@ def _add_config_overrides(parser: argparse.ArgumentParser) -> None:
         action="append",
         metavar="NAME=VALUE",
         default=None,
-        help="Tune a model parameter, e.g. --set iterations=300 (repeatable; a dotted NAME targets any config key).",
+        help="Tune a model parameter, e.g. --set iterations=300 or models.0.layers_mask=01 (repeatable; a NAME from "
+        "Predictor. or Trainer. targets any config key).",
     )
 
 
@@ -264,6 +273,41 @@ def list_apps(repo: str, task: str | None = None) -> list[tuple[str, dict]]:
     return [(name, manifest) for name, manifest in apps if task is None or manifest.get("task", task) == task]
 
 
+def _with_run_options(
+    app: str,
+    remote: RemoteServer | None,
+    config_name: str,
+    overrides: list[str] | None,
+    output_format: list[str] | None,
+    seed: int | None,
+) -> list[str] | None:
+    """The run's ``--set``, then those its ``--output-format`` and ``--seed`` stand for: last, so they win. They are
+    read off the app's config ``config_name`` as it ships (a server's app, from the server)."""
+    if not output_format and seed is None:
+        return overrides
+    from ruamel.yaml import YAML
+
+    base = split_preset(app)[0]
+    info = AppRepositoryInfoFromRemoteServer(remote, base) if remote else get_app_repository_info(base, False)
+    files = {path.name: path for path in info.download_config_file()}
+    if config_name not in files:
+        raise AppRepositoryError(f"App '{base}' has no {config_name}: --output-format and --seed have nothing to set.")
+    config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8"))
+    return [*(overrides or []), *run_overrides(config, output_format, seed)]
+
+
+def _save_preset(app: str, name: str, description: str, overrides: list[str]) -> None:
+    """``preset save APP[#PRESET] NAME``: the preset APP runs with (its base config without one), then ``--set``, kept
+    as preset NAME of APP. The source is the preset the run is written with, so it needs no flag of its own."""
+    info = get_app_repository_info(app, False)  # the preset of APP#PRESET chosen
+    if not isinstance(info, LocalAppRepository):
+        raise AppRepositoryError(f"'{app}' is not a local or Hugging Face app: save its presets on its server.")
+    chosen = info.get_preset()
+    start, tiles = (chosen.overrides, chosen.tiles) if chosen else ((), True)
+    written = info.save_preset(name, description, [*start, *overrides], tiles)
+    print(f"Saved preset '{name}' of {info.get_name()} in {written}.")
+
+
 def _show(app: str) -> None:
     """``show``: ``describe_app`` of ``app`` (``repo:name`` or a local app folder), printed."""
     repo, name = _split_app(app)
@@ -271,14 +315,18 @@ def _show(app: str) -> None:
 
 
 def _split_app(app: str) -> tuple[str, str]:
-    """``repo:name`` or a local app folder -> ``(repo, name)``."""
+    """``repo:name`` or a local app folder, ``#preset`` after either -> ``(repo, name[#preset])``."""
+    app, preset = split_preset(app)
     path = Path(app).expanduser()
     if path.is_dir():
-        return str(path.resolve().parent), path.name
-    repo, colon, name = app.partition(":")
-    if not colon:
-        raise AppRepositoryError(f"'{app}' names no app.", "Name it 'repo_id:app_name', or give a local app folder.")
-    return repo, name
+        repo, name = str(path.resolve().parent), path.name
+    else:
+        repo, colon, name = app.partition(":")
+        if not colon:
+            raise AppRepositoryError(
+                f"'{app}' names no app.", "Name it 'repo_id:app_name', or give a local app folder."
+            )
+    return repo, name if preset is None else f"{name}#{preset}"
 
 
 def describe_app(repo: str, name: str) -> dict[str, Any]:
@@ -290,14 +338,15 @@ def describe_app(repo: str, name: str) -> dict[str, Any]:
     from huggingface_hub import try_to_load_from_cache
     from ruamel.yaml import YAML
 
+    base = split_preset(name)[0]
     try:
         info = get_app_repository_info(app_id(repo, name), False)
     except AppRepositoryError:
         names = app_names(repo)  # only now: a warm cache resolves one app offline, not the listing
-        if name in names:
+        if base in names:
             raise
         raise AppRepositoryError(
-            f"No app '{name}' in {repo}.{did_you_mean(name, names, 3)}", f"Its apps: {', '.join(names)}."
+            f"No app '{base}' in {repo}.{did_you_mean(base, names, 3)}", f"Its apps: {', '.join(names)}."
         ) from None
     if not isinstance(info, LocalAppRepository):
         raise AppRepositoryError(f"'{name}' is not a local or Hugging Face app.")
@@ -312,8 +361,11 @@ def describe_app(repo: str, name: str) -> dict[str, Any]:
             Path(cached).stat().st_size if isinstance(cached, str) else None
         )
     lines = files["requirements.txt"].read_text(encoding="utf-8").splitlines() if "requirements.txt" in files else []
+    chosen = info.get_preset()
     return {
         "manifest": manifest,
+        "preset": chosen.name if chosen else None,
+        "presets": {preset.name: preset.to_json() for preset in info.get_presets().values()},
         "classpath": config["Predictor"]["Model"]["classpath"],
         "parameters": parameters,
         "models": models,
@@ -334,7 +386,10 @@ def print_apps(prog: str, apps: list[tuple[str, dict]]) -> None:
         print(f"{name:<{width}}  {manifest.get('display_name', '')}".rstrip())
         for line in textwrap.wrap(manifest.get("short_description", ""), columns):
             print(f"{'':<{width}}  {line}")
-    print(f"\n'{prog} show NAME' says what an app runs, what it needs and what --set tunes.")
+        if manifest.get("presets"):
+            for line in textwrap.wrap(f"#{', #'.join(manifest['presets'])}", columns):
+                print(f"{'':<{width}}  {line}")
+    print(f"\n'{prog} show NAME' says what an app runs, what it needs and what --set tunes; NAME#PRESET runs a preset.")
 
 
 #: The ``app.json`` keys ``show`` prints in its header or leaves to a UI; the others are printed as they are.
@@ -347,6 +402,7 @@ _SHOWN_KEYS = {
     "terminology",
     "icon",
     "model_files",
+    "presets",
 }
 
 
@@ -356,7 +412,6 @@ def print_app(name: str, described: dict[str, Any]) -> None:
     fill = functools.partial(textwrap.fill, width=shutil.get_terminal_size().columns, break_on_hyphens=False)
     print(f"{name}: {manifest.get('display_name', '')}\n")
     print(fill(manifest.get("description") or manifest.get("short_description", "")), end="\n\n")
-    model_class = described["classpath"].partition(":")[2]
     models = [
         f"{ref} ({_megabytes(size)})" if size else f"{ref} (not cached yet: downloaded on the first run)"
         for ref, size in described["models"].items()
@@ -372,7 +427,19 @@ def print_app(name: str, described: dict[str, Any]) -> None:
         if value:
             print(fill(value, initial_indent=f"  {label:<{width}}", subsequent_indent=" " * (width + 2)))
 
-    print("\nParameters: --set NAME=VALUE (repeatable); a nested one takes its full path.")
+    presets = described.get("presets") or {}
+    if presets:
+        base = name.partition("#")[0]
+        print(f"\nPresets: {base}#NAME, each a list of --set applied before the run's own.")
+        row = functools.partial(fill, subsequent_indent="      ")
+        for preset_name, preset in presets.items():
+            mark = "*" if preset_name == described.get("preset") else " "
+            print(row(f"{preset_name}  {preset['description']}".rstrip(), initial_indent=f" {mark}"))
+            if preset["set"]:
+                print(row(" ".join(f"--set {override}" for override in preset["set"]), initial_indent="      "))
+
+    after = f", after preset '{described['preset']}'" if described.get("preset") else ""
+    print(f"\nParameters{after}: --set NAME=VALUE (repeatable), a nested one dotted (models.0.ref=...).")
     parameters, described_already = described["parameters"], set()
 
     def rows_of(values: dict, constraints: dict, prefix: str) -> list[tuple[str, object, dict]]:
@@ -380,7 +447,7 @@ def print_app(name: str, described: dict[str, Any]) -> None:
         for key, value in values.items():
             constraint = constraints.get(key) or constraints.get("*") or {}
             if isinstance(value, dict) and value:
-                found += rows_of(value, constraint, f"{prefix or f'Predictor.Model.{model_class}.'}{key}.")
+                found += rows_of(value, constraint, f"{prefix}{key}.")
             else:
                 found.append((f"{prefix}{key}", value, constraint))
         return found
@@ -450,6 +517,7 @@ def build_app_cli(
         knobs(run_p)
         _add_patch_overrides(run_p)
         _add_config_overrides(run_p)
+        add_run_options(run_p)
         if with_uncertainty:
             run_p.add_argument("-uncertainty", action="store_true", help="Also write the inference stack.")
         run_p.add_argument(
@@ -493,6 +561,7 @@ def build_app_cli(
         knobs(pipe_p)
         _add_patch_overrides(pipe_p)
         _add_config_overrides(pipe_p)
+        add_run_options(pipe_p)
         _add_gt(pipe_p, required=False)
         _add_mask(pipe_p)
         pipe_p.add_argument(
@@ -532,6 +601,10 @@ def build_app_cli(
         from . import app as app_module
 
         konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
+        if args.command in (infer_command, "pipeline"):  # the commands that run the model
+            config_overrides = _with_run_options(
+                resolve_app(args), None, args.prediction_file, args.config_overrides, args.output_format, args.seed
+            )
 
         if args.command == infer_command:
             konfai_app.infer(
@@ -546,7 +619,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=args.config_overrides,
+                config_overrides=config_overrides,
                 **infer_kwargs(args),
             )
         elif args.command == "eval":
@@ -588,7 +661,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=args.config_overrides,
+                config_overrides=config_overrides,
                 **infer_kwargs(args),
             )
 
@@ -623,7 +696,11 @@ def main_apps() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_common_args(parser: argparse.ArgumentParser, is_fine_tune: bool = False) -> None:
-        parser.add_argument("app", type=str, help="KonfAI App name")
+        parser.add_argument(
+            "app",
+            type=str,
+            help="KonfAI App: repo_id:app_name or a local app folder, #preset after it to run one of its presets",
+        )
         parser.add_argument("--host", type=str, default=None, help="Server host")
         parser.add_argument("--port", type=int, default=8000, help="Server port")
         parser.add_argument(
@@ -661,6 +738,7 @@ def main_apps() -> None:
     )
     _add_patch_overrides(infer_p)
     _add_config_overrides(infer_p)
+    add_run_options(infer_p)
     infer_p.add_argument("-uncertainty", action="store_true", help="If enabled, inference write the inference stack")
     infer_p.add_argument(
         "--prediction-file",
@@ -711,6 +789,7 @@ def main_apps() -> None:
     )
     _add_patch_overrides(pipe_p)
     _add_config_overrides(pipe_p)
+    add_run_options(pipe_p)
     pipe_p.add_argument(
         "--prediction-file",
         "--prediction_file",
@@ -779,6 +858,7 @@ def main_apps() -> None:
         help="Override the training batch size (Trainer.Dataset.batch_size). Default: the app config's value.",
     )
     _add_config_overrides(ft_p)
+    add_run_options(ft_p, output_format=False)
 
     bundle_p = subparsers.add_parser(
         "bundle", help="Assemble an app bundle (HF layout), optionally with a portable ONNX model."
@@ -814,7 +894,13 @@ def main_apps() -> None:
         "--requirements", help="Optional requirements.txt; if omitted, a draft is derived from Model.py imports."
     )
     bundle_p.add_argument(
-        "--onnx", action="store_true", help="Also export model.onnx + manifest.json (portable runtime)."
+        "--onnx",
+        action="store_true",
+        help=(
+            "Also export the portable program: model.onnx + manifest.json for one model; program.json for an"
+            " ensemble, test-time copies or a Mask reading a nested app, with one onnx per checkpoint and a"
+            " <group>.onnx per nested app."
+        ),
     )
     bundle_p.add_argument(
         "--patch-size", type=int, nargs="+", help="Override --onnx patch size (else read from config)."
@@ -826,7 +912,23 @@ def main_apps() -> None:
     list_p.add_argument("repo", help="A Hugging Face repository ('repo_id[@revision]') or a local directory of apps.")
     list_p.add_argument("--task", default=None, help="Only the apps declaring this task.")
     show_p = subparsers.add_parser("show", help="Say what an app runs, what it needs and what --set tunes.")
-    show_p.add_argument("app", help="'repo_id:app_name', or a local app folder.")
+    show_p.add_argument(
+        "app", help="'repo_id:app_name' or a local app folder, '#preset' after it for one of its presets."
+    )
+    preset_p = subparsers.add_parser("preset", help="Keep a preset of your own: a name for a list of --set.")
+    preset_sub = preset_p.add_subparsers(dest="preset_command", required=True)
+    save_p = preset_sub.add_parser(
+        "save",
+        help="Save the --set of APP[#PRESET] as a new preset NAME: in your presets file for an app of the Hugging Face "
+        "cache, in the app's app.json for a local app folder.",
+    )
+    save_p.add_argument(
+        "app",
+        help="The app and the preset it starts from: 'repo_id:app_name#composite', or no '#' for its base config.",
+    )
+    save_p.add_argument("name", help="The new preset's name: letters, digits, '_' and '-'.")
+    save_p.add_argument("--description", default="", help="What the preset is for.")
+    _add_config_overrides(save_p)
 
     download_p = subparsers.add_parser(
         "download", help="Download KonfAI App files from Hugging Face into the local cache."
@@ -866,6 +968,10 @@ def main_apps() -> None:
         _show(kwargs["app"])
         return
 
+    if kwargs.get("command") == "preset":
+        _save_preset(kwargs["app"], kwargs["name"], kwargs["description"], kwargs["config_overrides"] or [])
+        return
+
     host = kwargs.pop("host")
     port = kwargs.pop("port")
     token = kwargs.pop("token")
@@ -874,9 +980,16 @@ def main_apps() -> None:
 
     from . import app as app_module
 
+    remote = RemoteServer(host, port, token, https, ca_cert) if host is not None else None
+    output_format, seed = kwargs.pop("output_format", None), kwargs.pop("seed", None)
+    if "config_overrides" in kwargs:  # the commands that run the model: infer, pipeline, fine-tune
+        config_name = kwargs.get("prediction_file") or kwargs.get("config_file") or "Prediction.yml"
+        kwargs["config_overrides"] = _with_run_options(
+            kwargs["app"], remote, config_name, kwargs["config_overrides"], output_format, seed
+        )
     konfai_app: AbstractKonfAIApp
-    if host is not None:
-        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), RemoteServer(host, port, token, https, ca_cert))
+    if remote is not None:
+        konfai_app = app_module.KonfAIAppClient(kwargs.pop("app"), remote)
     else:
         konfai_app = app_module.KonfAIApp(kwargs.pop("app"), kwargs.pop("download"), kwargs.pop("force_update"))
 

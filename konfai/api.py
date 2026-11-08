@@ -529,19 +529,20 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
         tree = _yaml_safe(dict(config), "config")
         _anchor_model_paths(tree, Path.cwd())
         return tree  # type: ignore[return-value]
-    from ruamel.yaml import YAML
-
+    from konfai.utils.config import _inline, _yaml
     from konfai.utils.runtime.environment import register_scratch_config
 
     source = Path(config)
     scratch = Path(tempfile.mkdtemp(prefix="konfai_config_"))
     register_scratch_config(scratch)
     copy = scratch / source.name
-    yaml = YAML()
-    yaml.width = 4096  # a long absolute path stays on its line
+    yaml = _yaml()
     with source.open("r", encoding="utf-8") as file:
         tree = yaml.load(file)
-    if _anchor_model_paths(tree, source.resolve().parent):
+    # An included block is written in place: the copy stands alone, and a relative model YAML inside the block
+    # is anchored like one written in the file (the reference would be read again, relative, from the scratch copy).
+    inlined = _inline(tree)
+    if _anchor_model_paths(tree, source.resolve().parent) or inlined:
         with copy.open("w", encoding="utf-8") as file:
             yaml.dump(tree, file)
     else:

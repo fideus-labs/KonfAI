@@ -64,7 +64,13 @@ from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.dataset.attribute import is_an_image, region_geometry
 from konfai.utils.errors import CaseReadError, DatasetManagerError, KonfAIWarning, TransformerError
 from konfai.utils.runtime import State
-from konfai.utils.utils import SUPPORTED_FORMATS, concretize_patch_size, resolve_patch, split_path_spec
+from konfai.utils.utils import (
+    DATASET_FLAGS,
+    SUPPORTED_FORMATS,
+    concretize_patch_size,
+    resolve_patch,
+    split_path_spec,
+)
 
 #: The workflows that read each case once, sharded by case across ranks.
 _ONE_PASS_STATES = (str(State.PREDICTION), str(State.EVALUATION), str(State.TRANSFORM))
@@ -243,7 +249,7 @@ class DataSources(ABC):
             filename, flag, file_format = split_path_spec(
                 dataset_filename,
                 default_format="mha",
-                allowed_flags={"a", "i"},
+                allowed_flags=DATASET_FLAGS,
                 supported_formats=SUPPORTED_FORMATS,
             )
             append = flag != "i"

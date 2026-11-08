@@ -234,10 +234,10 @@ def test_a_conformant_store_holds_spec_ordered_components(tmp_path: Path) -> Non
 
 
 def test_an_oriented_field_keeps_the_label_only_layout(tmp_path: Path) -> None:
-    """A rotated grid has no RFC-5 spelling (scale and translation cannot carry a direction), so
-    no ``displacements`` entry that would promise a reader an application it cannot make -- but the
-    LAYOUT is the same one every field shares: components in the spec's order, marked as such, the
-    Direction in the sidecar. One convention on disk, whatever the grid."""
+    """A rotated field carries its grid as RFC-5 geometry and keeps the typed component layout.
+
+    No applicable displacement entry is promised: that entry indexes an axis-aligned field grid.
+    """
     import ngff_zarr
     import zarr
 
@@ -246,7 +246,7 @@ def test_an_oriented_field_keeps_the_label_only_layout(tmp_path: Path) -> None:
     store = next(tmp_path.rglob("*.ome.zarr"))
 
     multiscales = ngff_zarr.from_ngff_zarr(str(store))
-    assert not (multiscales.metadata.coordinateTransformations or [])
+    assert [t.type for t in multiscales.metadata.coordinateTransformations] == ["sequence"]
     assert is_displacement_field(store)
     stored = zarr.open_group(str(store), mode="r")["scale0/image"][...]
     itk_order = np.moveaxis(sitk.GetArrayFromImage(original.GetDisplacementField()), -1, 0)

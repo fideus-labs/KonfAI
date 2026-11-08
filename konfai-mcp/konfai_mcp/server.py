@@ -1398,7 +1398,10 @@ def import_app(
 
 
 # Parameter descriptions shared by the app-execution tools below (one wording, two tools).
-_APP_REF_DESC = "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only)."
+_APP_REF_DESC = (
+    "App id 'repo_id:app_name' or local app folder path (local/HuggingFace apps only), '#preset' after it to run "
+    "one of the app's presets (describe_app lists them)."
+)
 _APP_TRUST_DESC = "Must be True: resolving the app imports its Python code and pip-installs its requirements."
 _APP_GPU_DESC = "GPU indices to run on (default: every visible GPU); an empty list forces CPU."
 _APP_CPU_DESC = "CPU worker count; setting it without gpu forces a CPU run."
@@ -1887,7 +1890,12 @@ def package_app_from_session(
     onnx: Annotated[
         bool,
         Field(
-            description="Also export the newest packaged checkpoint as model.onnx inside the bundle (default False)."
+            description=(
+                "Also export every packaged checkpoint for the portable runtime inside the bundle (default False). "
+                "One checkpoint writes model.onnx + manifest.json; several (or test-time copies, or a Mask reading "
+                "a nested app) write one <stem>.onnx per checkpoint + program.json. The result's 'onnx' names "
+                "model.onnx or program.json."
+            )
         ),
     ] = False,
     onnx_patch_size: Annotated[

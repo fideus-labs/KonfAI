@@ -39,7 +39,7 @@ def test_the_engine_measures_lengths_in_voxels() -> None:
     geometry["Spacing"] = np.array([0.0002, 0.0002, 0.0004])
     geometry["Direction"] = np.eye(3).flatten()
     tensor = torch.zeros(1, 1, 4, 4, 4)
-    field = EngineRegistration(Engine())(tensor, tensor, tensor + 1, tensor + 1, [[geometry]] * 4)
+    field = EngineRegistration(Engine())(tensor, tensor, tensor + 1, tensor + 1, attributes=[[geometry]] * 4)
     assert seen["spacing"] == pytest.approx((1.0, 1.0, 2.0))
     assert seen["origin"] == pytest.approx((50.0,) * 3)
     assert seen["mask"] == pytest.approx((1.0, 1.0, 2.0))

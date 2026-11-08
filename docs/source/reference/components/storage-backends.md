@@ -2,11 +2,11 @@
 
 A dataset is named by a path and a format: `./Dataset:mha` in `dataset_filenames`. The format picks the
 backend that reads and writes it (`konfai/utils/dataset/`). {doc}`../../config_guide/index` describes the
-case and group layout.
+case and group layout; a [manifest](#a-manifest-of-explicit-entries) names entries that do not follow it.
 
 | Backend | Formats | Layout | Region reads | Region writes | Extra |
 | --- | --- | --- | --- | --- | --- |
-| `SitkFile` | `mha`, `mhd`, `nii`, `nii.gz`, `nrrd`, `nrrd.gz`, `gipl`, `hdr`, `img`, `dcm`, `tif`, `png`, `jpg`, `bmp`, `itk.txt`, `fcsv`, `xml`, `vtk`, `npy` | one file per case and group (the default) | MetaImage, NIfTI and NRRD (compressed ones through a decompressed copy) | `mha`, `nii`, `nii.gz` and `nrrd` | `konfai[itk]` |
+| `SitkFile` | `mha`, `mhd`, `nii`, `nrrd`, `gipl`, `tif` (each also with `.gz`), `hdr`, `img`, `dcm`, `png`, `jpg`, `bmp`, `itk.txt`, `fcsv`, `xml`, `vtk`, `npy` | one file per case and group (the default) | MetaImage, NIfTI and NRRD (compressed ones through a decompressed copy) | `mha`, `nii`, `nii.gz` and `nrrd` | `konfai[itk]` |
 | `H5File` | `h5` | one HDF5 file for the whole dataset | yes | yes | `konfai[hdf5]` |
 | `OmeZarrFile` | `omezarr` (also `ome-zarr`, `zarr`), `omezarr@<level>` | one store per case and group | yes | yes, pyramids included | `konfai[omezarr]` |
 | `DicomFile` | `dicom` | one series folder per case and group | slice by slice | no | `konfai[dicom]` |
@@ -21,6 +21,10 @@ things.
 ```
 
 ## Compressed files
+
+A `.gz` on the format writes the files compressed: `./Predictions:mha.gz`. NIfTI and GIPL gzip the file
+(`CT.nii.gz`). MetaImage, NRRD and TIFF compress inside the file, which keeps its name (`CT.mha`) and reads
+back under `mha` too. Apart from `nii.gz`, a compressed file is written whole, not by region.
 
 A `.nii.gz`, a compressed MetaImage or a compressed NRRD cannot be read by region: the whole stream must be
 decoded from the start. So the first time a run reads a region of such a file, KonfAI decompresses it once into
@@ -54,11 +58,45 @@ FSSPEC_S3_ANON=true konfai TRANSFORM --config Transform.yml
 That bucket is public, hence `FSSPEC_S3_ANON=true`. Credentials use fsspec's and AWS's usual settings:
 `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `FSSPEC_S3_ENDPOINT_URL` for MinIO.
 
-- Only `:omezarr` reads a remote root.
+- Only `:omezarr` reads a remote root, or a remote entry of a manifest.
 - A remote root is read-only: `Write` to a local path.
 - Give the run a generous `memory_budget`: the chunk cache is a third of it, and every cache miss is a
   download.
 - A root that cannot be reached (a wrong bucket, an expired credential) is an error, not an empty dataset.
+
+## A manifest of explicit entries
+
+A `dataset_filenames` entry may name a YAML (or JSON) file instead of a directory. The file lists each case's
+groups and where their store is, a local path or a URI, so a store that cannot be laid out as
+`<root>/<case>/<group>` (one in object storage, files from several folders) still reads under the group the
+config names:
+
+```yaml
+Dataset:
+  dataset_filenames:
+    - ./cases.yml:omezarr@1
+```
+
+```yaml
+# cases.yml
+P000:
+  CT: s3://bucket/study/fused.ome.zarr
+  SEG: ./labels/P000.ome.zarr
+P001:
+  CT: s3://bucket/study/other.zarr
+```
+
+- A relative entry is read from the manifest's own directory.
+- The flag and the level are the entry's (`:i:omezarr@1`): every store the manifest names is read at that
+  level.
+- Only `:omezarr` reads a manifest, and the manifest itself is a local file; its entries may be remote.
+- A manifest is read-only: it names where entries are read from, never where they are written.
+- A case is listed for the groups it names; one that lacks a group drops out of that group, as a folder
+  without the file would.
+- Case and group names are text: quote one that reads as a number (`"001":`), or YAML hands over the integer
+  and the manifest is refused.
+
+`konfai-apps` writes one for an input named by a URI ({doc}`../../usage/apps`).
 
 ## HDF5
 
@@ -126,8 +164,20 @@ patch, patch_attributes = dataset.read_data_slice(
 `Dataset("Dataset", "omezarr@1")` reads pyramid level 1. `konfai.utils.ome_zarr.get_ome_zarr_info` gives a
 store's axes, shape, chunks, scale and levels without reading pixels.
 
-KonfAI writes NGFF 0.5 (zarr v3); displacement fields are written as NGFF 0.6. Older KonfAI stores (zarr
-v2) are read as they are. A store written region by region is chunked like the regions the writer used,
+KonfAI writes NGFF 0.6 (zarr v3). Each level's scale and translation are the grid's axis-aligned view,
+exact spacing and origin, which is all a scale/translation reader (a viewer, ngff-zarr) takes. A
+standard RFC-5 transformation adds the grid's rotation about that origin: a rotation followed by a
+translation, or an affine for a reflection or a unit-scaled frame that cannot be represented as a pure
+rotation; an axis-aligned grid declares the identity. The physical axes carry RFC-4 LPS orientation. Reading resolves that mapping into KonfAI's internal
+`Origin`/`Spacing`/`Direction`; it does not resample the voxels. Crops and pyramid levels use the same
+mapping, including their offsets along rotated axes.
+
+The grid is no longer written to the private `konfai` attributes; only the earlier rungs of the
+geometry stack stay there, what an inverse stage pops back to. Files that depend on that old
+representation must be rewritten from their source before use; the reader refuses them rather than
+silently losing their direction. Standard NGFF 0.4/0.5 scale/translation stores remain readable.
+A file with several competing physical mappings, or a nonlinear mapping of its image grid, is refused.
+Non-geometric attributes remain in the `konfai` namespace. A store written region by region is chunked like the regions the writer used,
 which depends on the machine's memory budget; the values do not.
 
 ### Multiscale levels

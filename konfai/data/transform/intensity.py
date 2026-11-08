@@ -568,6 +568,8 @@ class Statistics(Transform):
 
     _KEYS = (("Min", "ImageMin"), ("Max", "ImageMax"), ("Mean", "ImageMean"), ("Std", "ImageStd"))
 
+    alters_values = False
+
     def __init__(self) -> None:
         super().__init__()
 
