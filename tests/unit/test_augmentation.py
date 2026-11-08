@@ -182,6 +182,19 @@ def test_test_time_flips_take_the_distinct_mirrors_in_turn(monkeypatch: pytest.M
     )
 
 
+def test_a_test_time_flip_of_a_field_is_undone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registration's TTA: in prediction a copy's field is un-flipped, its components reflected through the grid's
+    directions, which the test-time mirrors recorded as a training draw does (they were missing: KeyError)."""
+    from konfai.utils.runtime import State
+
+    monkeypatch.setenv("KONFAI_STATE", str(State.PREDICTION))
+    flip = Flip(f_prob=[0.5, 0.5, 0.5], vector_field=True)
+    flip._state_init(0, [[4, 5, 6]] * 2, [Attribute()] * 2)
+    dvf = torch.randn(3, 4, 5, 6)
+    for copy in range(2):
+        assert torch.equal(flip._inverse(0, copy, flip._compute("case", 0, copy, dvf.clone())), dvf)
+
+
 def test_flip_vector_field_round_trip_is_identity() -> None:
     # TTA un-flips the model output with ``_inverse``: on a displacement field the compose of
     # ``_compute`` and ``_inverse`` must be the identity, component signs included.

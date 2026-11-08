@@ -45,6 +45,7 @@ from konfai.data.sampling import (
     default_interpolation,
     gather,
     gather_separable,
+    region_reach,
     sampling_dtype,
     scanline_index,
     scanline_map,
@@ -441,7 +442,7 @@ def _resample_with_sitk(
     stages: SpatialStages,
     region_starts: list[int],
     mode: str,
-    fill: float,
+    fill: float | str,
     sitk_input: _SitkInput | None = None,
 ) -> torch.Tensor | None:
     """One region of a resample through ITK's own filter, on the host.
@@ -455,8 +456,8 @@ def _resample_with_sitk(
     """
     from konfai.utils.ITK import encode_transform_stages
 
-    if payload.dtype in (torch.bool, torch.bfloat16, torch.float16):
-        return None
+    if payload.dtype in (torch.bool, torch.bfloat16, torch.float16) or fill == "edge":
+        return None  # ITK has no pixel type for it, or no border extrapolation: the walk takes it
     interpolator = {"nearest": sitk.sitkNearestNeighbor, "linear": sitk.sitkLinear, "cubic": sitk.sitkBSpline}
     if mode == "cubic":
         return None  # ITK's BSpline is not Keys' Catmull-Rom: the walk keeps its own cubic
@@ -531,7 +532,8 @@ class _StoredMap:
 
     The decoded stages are not kept: a cohort of fields would stay resident and be serialised to
     every rank. They are decoded again where a region of their case is sampled
-    (:meth:`Resample._stored_stages`).
+    (:meth:`Resample._stored_stages`), and a BSpline's for the plan to price a region by where it
+    sends that region (:meth:`Resample._region_reach`).
     """
 
     bound: TransformBound
@@ -539,6 +541,9 @@ class _StoredMap:
     #: Whether a dense field member was priced as the identity rather than bounded. The plan cannot
     #: bound one from headers, so the run measures its window from the values it samples anyway.
     field: bool = False
+    #: Whether the map holds a BSpline and no dense field: the plan then prices each region by where
+    #: the spline actually sends it (:func:`~konfai.data.sampling.region_reach`), not by its whole range.
+    spline: bool = False
 
 
 def _stages_bytes(stages: SpatialStages) -> int:
@@ -764,7 +769,8 @@ class Resample(TransformInverse):
     field group) declares ``WHOLE_VOLUME`` with its reason and the run proceeds assembled. One that
     no route can serve refuses as the plan is built, before a byte is written. A case reaching only
     PART of the target grid is legal and common (the rest takes ``fill``), and the plan prints how
-    much of the grid it covers.
+    much of the grid it covers. ``fill: edge`` gives it the volume's edge voxel instead, as MONAI's
+    ``Spacingd`` does (``padding_mode: border``).
     """
 
     working_multiple = 6.5  # the sampling grid, the taps, and the widening a stored integer forces
@@ -781,11 +787,16 @@ class Resample(TransformInverse):
         field_group: str | None = None,
         align: str = "extent",
         interpolation: str | None = None,
-        fill: float = 0.0,
+        fill: float | str = 0.0,
         inverse: bool = True,
         precision: str = "exact",
     ) -> None:
         super().__init__(inverse)
+        if isinstance(fill, str) and fill != "edge":
+            raise TransformError(
+                f"'Resample' has an unknown fill '{fill}'.",
+                "Give a number, or 'edge' for the volume's edge voxel past it (MONAI's padding_mode: border).",
+            )
         if interpolation is not None and interpolation not in ("linear", "nearest", "cubic"):
             raise TransformError(
                 f"'Resample' has an unknown interpolation '{interpolation}'.",
@@ -807,7 +818,7 @@ class Resample(TransformInverse):
             )
         self.precision = precision
         self.interpolation = interpolation
-        self.fill_value = float(fill)
+        self.fill_value = fill if fill == "edge" else float(fill)
         self._target = self._target_from(spacing, shape, reference, reference_group, reference_dataset, align)
         if transforms is not None and not transforms:
             raise TransformError(
@@ -837,6 +848,9 @@ class Resample(TransformInverse):
         #: ``stored_stage_bytes``. Not pickled. Keyed on (case, box): a field read for one region
         #: answers for that region alone.
         self._stored: OrderedDict[tuple, SpatialStages] = OrderedDict()
+        #: The headers' stages of the last cases priced with a BSpline, most recent last, within
+        #: ``priced_stage_slots``. Not pickled: what crosses to a rank does not grow with the cohort.
+        self._priced: OrderedDict[str, SpatialStages] = OrderedDict()
         #: The last field window read, kept for the sampler: sizing a region's source window reads
         #: the very field slab the sampler needs next, so one slot makes the two one read.
         self._field_window: tuple[str, object, DisplacementStage] | None = None
@@ -864,6 +878,7 @@ class Resample(TransformInverse):
     def __getstate__(self) -> dict:
         state = dict(self.__dict__)
         state["_stored"] = OrderedDict()
+        state["_priced"] = OrderedDict()
         state["_field_window"] = None
         state["_sitk_input"] = _SitkInput()
         return state
@@ -874,6 +889,9 @@ class Resample(TransformInverse):
     stored_stage_bytes = 512 << 20
     #: Region-keyed entries kept at once: an all-affine map prices zero bytes and would never evict.
     stored_stage_slots = 64
+    #: Cases whose headers' stages the plan keeps for pricing regions: a plan prices one case's
+    #: windows after another, so a few are enough, and the rest decode again on demand.
+    priced_stage_slots = 8
 
     @staticmethod
     def _target_from(
@@ -1048,12 +1066,36 @@ class Resample(TransformInverse):
             # identity, which is the price the declared route puts on its field.
             priced = self._decode_stored(name, headers_only=True)
             has_field = self._stored_has_field(name)
+            # A BSpline decodes to an order-3 stage on its coefficients; a dense field read as a
+            # transform to an order-1 one, whose windows are measured from its values at run time.
+            displacements = [stage for stage in priced if isinstance(stage, DisplacementStage)]
+            spline = bool(displacements) and not has_field and all(stage.order == 3 for stage in displacements)
             stored = self._maps[name] = _StoredMap(
                 bound_of(priced, rank),
                 not has_field and all(isinstance(stage, AffineStage) for stage in priced),
                 field=has_field,
+                spline=spline,
             )
+            if spline:
+                self._keep_priced(name, priced)
         return stored
+
+    def _keep_priced(self, name: str, stages: SpatialStages) -> SpatialStages:
+        self._priced.pop(name, None)
+        self._priced[name] = stages
+        while len(self._priced) > self.priced_stage_slots:
+            self._priced.popitem(last=False)
+        return stages
+
+    def _region_reach(self, name: str, region: Grid) -> WorldBox:
+        """Where the PLAN prices one target region's reads: through a map holding a BSpline, the
+        region's box carried stage by stage as ngff-zarr bounds a block (:func:`region_reach`), so
+        a coefficient far from the region does not widen its window; through any other map, the
+        case's bound (:meth:`_pricing_bound`). Both hold every point the run samples there."""
+        if self.transforms is None or not self._stored_map(name).spline:
+            return self._pricing_bound(name).map_box(region.world_box())
+        stages = self._keep_priced(name, self._priced.get(name) or self._decode_stored(name, headers_only=True))
+        return region_reach(region, stages)
 
     def _stored_has_field(self, name: str) -> bool:
         """Whether any member of this case's stored map is a dense field, from headers alone.
@@ -1283,7 +1325,7 @@ class Resample(TransformInverse):
         del source_spatial_shape, cache_attribute
         source, target = self._grids_of(name)
         return list(
-            source_window(target.sub_grid(tuple(target_slices)), source, self._pricing_bound(name), self._tap_margin)
+            source.index_window(self._region_reach(name, target.sub_grid(tuple(target_slices))), self._tap_margin)
         )
 
     @property
@@ -1691,7 +1733,7 @@ class Resample(TransformInverse):
                 if covered < self._WORTH_SAYING:
                     notes.append(
                         f"case '{name}' covers {covered * 100:.1f}% of {self._target.describe()};"
-                        f" the rest of what it writes is fill ({self.fill_value:g})"
+                        f" the rest of what it writes is fill ({self.fill_value})"
                     )
         except TransformError:
             pass

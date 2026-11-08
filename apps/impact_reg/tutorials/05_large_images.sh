@@ -37,18 +37,18 @@ impact-reg-konfai eval --gt-fixed-seg exaspim/fixed_level${LEVEL}_brain.mha --gt
 python -c "import json; a = json.load(open('out/05_before/Evaluation_summary.json'))['aggregates'];\
 print('before: brain Dice', round(a['MovingSeg:FixedSeg:Dice']['mean'], 3))"
 
-# Each engine on the pair as downloaded. Generic_Rigid has no deformable stage: its global pass is the result. The others
+# Each engine on the pair as downloaded. Elastix#rigid has no deformable stage: its global pass is the result. The others
 # refine on native tiles. The tissue lies in a few tens of grey values beside lone voxels in the tens of thousands, which
 # every mutual-information stage clamps away (0.01-99.99 percentiles) before binning.
-for preset in Generic_Rigid Generic_Rigid_BSpline ConvexAdam_Composite FireANTs_SyN; do
+for preset in Elastix#rigid Elastix#rigid_bspline ConvexAdam#composite FireANTs#syn; do
     # --tmp-dir: the intermediates are volume-sized (about 60 bytes a voxel at the peak of a tiled run).
     /usr/bin/time -f "$preset: %e s, peak RAM %M kB" impact-reg-konfai register $preset -f $F -m $M \
-        -o out/05_$preset --tmp-dir out/05_tmp $DEV
+        -o out/05_${preset#*#} --tmp-dir out/05_tmp $DEV
     # The brains' masks, warped and compared: how well the two brains overlap.
-    impact-reg-konfai eval --transform out/05_$preset/P000/Transform.h5 \
+    impact-reg-konfai eval --transform out/05_${preset#*#}/P000/Transform.h5 \
         --gt-fixed-seg exaspim/fixed_level${LEVEL}_brain.mha --gt-moving-seg exaspim/moving_level${LEVEL}_brain.mha \
-        -o out/05_$preset/eval $DEV -q
-    python -c "import json; a = json.load(open('out/05_$preset/eval/Evaluation_summary.json'))['aggregates'];\
+        -o out/05_${preset#*#}/eval $DEV -q
+    python -c "import json; a = json.load(open('out/05_${preset#*#}/eval/Evaluation_summary.json'))['aggregates'];\
 print('$preset: brain Dice', round(a['MovingSeg:FixedSeg:Dice']['mean'], 3))"
 done
 du -sh out/05_*/P000/*
