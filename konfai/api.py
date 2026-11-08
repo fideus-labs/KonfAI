@@ -34,7 +34,6 @@ import hashlib
 import importlib
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -524,7 +523,7 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
     (``ModelLoader._yaml_path``), so the path is made absolute first: against the caller's file for
     a file, the working directory for a tree.
     """
-    from konfai.utils.config import _anchor_model_paths, _inline, _yaml
+    from konfai.utils.config import _anchor_model_paths, snapshot
 
     if isinstance(config, Mapping):
         # Through _yaml_safe: an np.float64 or Path value fails as a named refusal, not a ruamel error.
@@ -537,17 +536,8 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
     scratch = Path(tempfile.mkdtemp(prefix="konfai_config_"))
     register_scratch_config(scratch)
     copy = scratch / source.name
-    yaml = _yaml()
-    with source.open("r", encoding="utf-8") as file:
-        tree = yaml.load(file)
-    # An included block is written in place: the copy stands alone, and a relative model YAML inside the block
-    # is anchored like one written in the file (the reference would be read again, relative, from the scratch copy).
-    inlined = _inline(tree)
-    if _anchor_model_paths(tree, source.resolve().parent) or inlined:
-        with copy.open("w", encoding="utf-8") as file:
-            yaml.dump(tree, file)
-    else:
-        shutil.copy2(source, copy)
+    # As a run's record: included blocks in place and relative model YAMLs anchored, so the copy stands alone.
+    snapshot(source, copy)
     return copy
 
 
