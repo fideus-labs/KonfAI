@@ -802,12 +802,18 @@ def _force_single_process_in_config(config_path: Path) -> None:
     except Exception:  # not our YAML to judge here: the build reports it
         return
 
+    changed = False
+
     def walk(node: Any) -> None:
+        nonlocal changed
         if isinstance(node, dict):
-            if "num_workers" in node:
+            if node.get("num_workers") not in (None, 0):
                 node["num_workers"] = 0
+                changed = True
             for key in ("prefetch_factor", "persistent_workers"):
-                node.pop(key, None)
+                if key in node:
+                    node.pop(key)
+                    changed = True
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -815,8 +821,9 @@ def _force_single_process_in_config(config_path: Path) -> None:
                 walk(value)
 
     walk(data)
-    with config_path.open("w", encoding="utf-8") as handle:
-        yaml.dump(data, handle)
+    if changed:  # a config asking for no worker is read as written, byte for byte
+        with config_path.open("w", encoding="utf-8") as handle:
+            yaml.dump(data, handle)
 
 
 def _force_single_process_loading(workflow_object: Any) -> int:
