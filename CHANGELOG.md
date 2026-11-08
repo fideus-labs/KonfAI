@@ -107,6 +107,10 @@ The site's landing is a designed page in the fidopt.io family: a pill bar with a
 the fifty tools and the apps; a hero over a canvas-drawn volume with drifting slice planes (30 fps cap, still under
 prefers-reduced-motion, stopped when hidden); one card per piece (engine, apps, Edge, Studio, MCP, Scout, FidOpt);
 how it works in three steps; interactive at-a-glance bars; a terminal-style footer. No dependency, no build.
+The site's colours: a tinted ink ground, one hue per piece (engine sage, apps teal, Edge violet, Studio amber, MCP
+steel blue, Scout coral) carried by kickers, card rails, bars and each inner page's accent, a sage-to-violet glow
+behind the hero; the inner pages share the landing's pill bar, search, footer and dark ground. Contrast measured
+at AA or better on every text role.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)
