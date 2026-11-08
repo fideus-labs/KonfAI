@@ -404,6 +404,7 @@ def test_two_rank_evaluation_refuses_a_single_file_map(tmp_path: Path) -> None:
 def test_a_map_lands_on_its_output_s_grid(tmp_path: Path) -> None:
     """A whole-case map takes its output's header: a landmark group holding the case beside it has no geometry,
     and the map went to a .npy whenever the groups were listed with that one first."""
+    pytest.importorskip("SimpleITK")  # the .mha writer
     from konfai.utils.dataset import Dataset
 
     volumes = {"MOVED": torch.rand(1, 1, 4, 5, 6), "FIXED": torch.rand(1, 1, 4, 5, 6)}
