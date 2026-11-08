@@ -23,7 +23,7 @@ import itertools
 import os
 import pkgutil
 import re
-from math import prod
+from math import ceil, prod, ulp
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal
@@ -299,16 +299,17 @@ def resolve_patch(
 def _spread(extent: int, length: int, stride: float) -> list[int]:
     """nnU-Net's window starts on one axis (``compute_steps_for_sliding_window``), its step ``stride``:
     the fewest windows that step covers ``extent`` with, spread evenly from 0 to ``extent - length``, each start
-    rounded as numpy rounds. One window when the axis is no longer than it."""
+    rounded as numpy rounds (half to even). One window when the axis is no longer than it; a start that rounds
+    onto its predecessor's (a step under a voxel) is placed once, where nnU-Net runs that window twice."""
     if extent <= length:
         return [0]
     # A fractional stride carries float error (10 * (1 - 0.8) is 1.9999999999999996): a quotient a few ulps off
     # an integer is that integer, no window is added for it.
     quotient = (extent - length) / stride
     nearest = round(quotient)
-    count = (nearest if abs(quotient - nearest) <= 8 * np.spacing(quotient) else int(np.ceil(quotient))) + 1
+    count = (nearest if abs(quotient - nearest) <= 8 * ulp(quotient) else ceil(quotient)) + 1
     step = (extent - length) / (count - 1)
-    return [int(np.round(step * i)) for i in range(count)]
+    return list(dict.fromkeys(round(step * i) for i in range(count)))
 
 
 def get_patch_slices_from_shape(
@@ -320,16 +321,8 @@ def get_patch_slices_from_shape(
     sweep_axis: int = 0,
     placement: Placement = "pad",
 ) -> list[tuple[slice, ...]]:
-    """The patch grid of ``shape``, ordered with ``sweep_axis`` outermost, its windows placed by ``placement``.
-
-    ``pad`` starts a patch every ``patch - overlap`` voxels and cuts the last one of an axis at the volume's end (the
-    read pads it after the volume): the slots of a reduction (``Patch.pad_to_patch`` False) never overlap there, so
-    no voxel reaches its sums twice. ``monai`` moves that last patch back to end on the volume's last voxel, as
-    MONAI's ``dense_patch_slices`` places it. ``spread`` takes as many patches as a step of ``patch - overlap`` needs
-    and spreads them evenly from the first voxel to the last, as nnU-Net's ``compute_steps_for_sliding_window`` with
-    ``tile_step_size = (patch - overlap) / patch``. Under both, only an axis shorter than the patch is padded, on both
-    sides, by the read.
-    """
+    """The patch grid of ``shape``, ordered with ``sweep_axis`` outermost, its windows placed by ``placement``
+    (:data:`Placement`)."""
 
     # A free (``0``) axis concretizes to THIS case's extent, rounded up to the model's ``multiple``.
     template = [0] * len(shape) if patch_size is None else patch_size

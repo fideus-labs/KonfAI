@@ -220,10 +220,7 @@ class Patch(ABC):
         if any(plan.reflect_padding):
             data_sliced = F.pad(data_sliced, plan.reflect_padding, "reflect")
         if any(plan.constant_padding):
-            if self.pad_value == "edge":
-                data_sliced = _pad_edge(data_sliced, plan.constant_padding)
-            else:
-                data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
+            data_sliced = self._pad_constant(data_sliced, plan.constant_padding)
         if self.patch_size is not None and not all(p == 0 for p in self.patch_size):
             for d in [i for i, v in enumerate(reversed(self.patch_size)) if v == 1]:
                 data_sliced = torch.squeeze(data_sliced, dim=len(data_sliced.shape) - d - 1)
@@ -234,9 +231,11 @@ class Patch(ABC):
         )
 
     def _pad_constant(self, data: torch.Tensor, padding: tuple[int, ...]) -> torch.Tensor:
-        """``data`` padded (``F.pad`` pair order) with the configured value, a uint8 map with zero,
-        and anything else with its own minimum when no value is configured. The minimum never leaves
+        """``data`` padded (``F.pad`` pair order) with the configured value, its edge voxel under ``edge``, a uint8
+        map with zero, and anything else with its own minimum when no value is configured. The minimum never leaves
         the device."""
+        if self.pad_value == "edge":
+            return _pad_edge(data, padding)
         if data.dtype == torch.uint8:
             return F.pad(data, padding, "constant", 0)
         if isinstance(self.pad_value, int | float):
