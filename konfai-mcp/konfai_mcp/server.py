@@ -46,7 +46,7 @@ try:
     from fastmcp.tools import Tool
     from fastmcp.tools.base import ToolResult
     from fastmcp.utilities.types import Image as FastMCPImage
-    from mcp_types import ToolAnnotations
+    from mcp.types import ToolAnnotations  # mcp 1.x and 2.x: built by wire name, the one spelling both accept
     from starlette.middleware import Middleware
     from starlette.responses import PlainTextResponse
 except ImportError as exc:  # pragma: no cover - depends on optional install
@@ -169,9 +169,9 @@ DESTRUCTIVE_TOOLS = frozenset({"cancel_job", "delete_run"})
 
 def _annotations(name: str) -> ToolAnnotations | None:
     if name in READ_ONLY_TOOLS:
-        return ToolAnnotations(read_only_hint=True)
+        return ToolAnnotations.model_validate({"readOnlyHint": True})
     if name in DESTRUCTIVE_TOOLS:
-        return ToolAnnotations(destructive_hint=True)
+        return ToolAnnotations.model_validate({"destructiveHint": True})
     return None
 
 
