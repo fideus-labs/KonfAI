@@ -452,13 +452,14 @@ class AppService:
 
         This is the inference-side reproducibility artifact: 'save this HuggingFace/remote-cached app,
         with my tuned parameters, as a local app'. It copies files and rewrites the config; it does not
-        import the app's model code. Local/HuggingFace apps only. ``path`` is any host folder: a file of
-        the app already there is only replaced with ``overwrite=True``.
+        import the app's model code, so an override (a preset's too) must name a key the config holds.
+        Local/HuggingFace apps only. ``path`` is any host folder: a file of the app already there is only
+        replaced with ``overwrite=True``.
         """
         if self._is_remote(ref):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         app_repository = _import_app_repository()
-        info = app_repository.get_app_repository_info(ref, force_update)
+        info = _manifest_info(ref, force_update)
         if not isinstance(info, app_repository.LocalAppRepository):
             raise ValueError("Exporting is only supported for local or HuggingFace apps (a remote server cannot).")
         target = Path(path).expanduser().resolve()
@@ -469,7 +470,7 @@ class AppService:
                     f"Exporting into {target} would overwrite {', '.join(existing)}. Choose another folder, "
                     "or pass overwrite=True to replace them."
                 )
-        info.export_app(target, display_name=display_name, config_overrides=config_overrides)
+        info.export_app(target, display_name=display_name, config_overrides=config_overrides, read_model=False)
         return {
             "ref": ref,
             "exported_to": str(target),

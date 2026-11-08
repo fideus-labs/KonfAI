@@ -1033,7 +1033,9 @@ class LocalAppRepository(AppRepositoryInfo):
         with open(prediction_file, "w") as file:
             yaml.dump(data, file)
 
-    def _apply_config_overrides(self, inference_file_path: str, overrides: list[str] | None) -> None:
+    def _apply_config_overrides(
+        self, inference_file_path: str, overrides: list[str] | None, read_model: bool = True
+    ) -> None:
         """Apply ``--set NAME=VALUE`` overrides to the resolved prediction config before it runs.
 
         A bare ``NAME`` is a **model parameter** (the common case): it resolves inside
@@ -1046,7 +1048,8 @@ class LocalAppRepository(AppRepositoryInfo):
         is parsed as YAML: ``300`` is an int, ``2.0`` a float, ``true`` a bool, ``[1, 2, 3]`` a list, and ``L1`` a
         string (KonfAI's literal ``None`` string is preserved); a digit string with leading zeros given to a string
         key stays that string (``layers_mask=01``). This is the generic override the UI (SlicerKonfAI) drives to
-        tune a preset; :func:`apply_overrides` resolves it.
+        tune a preset; :func:`apply_overrides` resolves it. ``read_model=False`` never imports the model's class:
+        every key must then be in the config, and its value is not checked against a declared type.
         """
         overrides = [*(self._preset.overrides if self._preset else ()), *(overrides or [])]
         if not overrides:
@@ -1054,7 +1057,7 @@ class LocalAppRepository(AppRepositoryInfo):
         yaml = YAML()
         with open(inference_file_path) as file:
             data = yaml.load(file)
-        apply_overrides(data, overrides, lambda: self._model_class(data))
+        apply_overrides(data, overrides, (lambda: self._model_class(data)) if read_model else (lambda: None))
         with open(inference_file_path, "w") as file:
             yaml.dump(data, file)
 
@@ -1249,6 +1252,7 @@ class LocalAppRepository(AppRepositoryInfo):
         display_name: str | None = None,
         config_overrides: list[str] | None = None,
         prediction_file: str = "Prediction.yml",
+        read_model: bool = True,
     ) -> None:
         """Materialise this app into the local folder ``path`` as a self-contained, editable copy.
 
@@ -1256,7 +1260,8 @@ class LocalAppRepository(AppRepositoryInfo):
         ``path``, so it can be reopened as a :class:`LocalAppRepositoryFromDirectory`. With
         ``config_overrides`` the tuned ``--set`` values are written into the copied ``prediction_file`` so the
         new local app runs with them as its defaults: the inference-side "save as a local app" that mirrors
-        :meth:`install_fine_tune`. ``display_name`` renames the copy in ``app.json``.
+        :meth:`install_fine_tune`. ``display_name`` renames the copy in ``app.json``. ``read_model=False`` applies
+        the overrides without importing the app's model class (:meth:`_apply_config_overrides`).
         """
         filenames = self._all_repo_filenames()
         if not is_app_repo(filenames):
@@ -1276,7 +1281,7 @@ class LocalAppRepository(AppRepositoryInfo):
             config = path / prediction_file
             if not config.is_file():
                 raise AppRepositoryError(f"Cannot apply tuned defaults: '{prediction_file}' not found in the export.")
-            self._apply_config_overrides(str(config), config_overrides)
+            self._apply_config_overrides(str(config), config_overrides, read_model)
         if display_name is not None or tuned:
             metadata_file = path / "app.json"
             metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
