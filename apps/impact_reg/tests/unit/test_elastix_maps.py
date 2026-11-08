@@ -408,13 +408,13 @@ def test_a_cuda_out_of_memory_under_a_long_backtrace_still_reaches_konfai(
 def test_the_field_maps_a_fixed_point_to_the_moving_one_channel_first() -> None:
     # The convention every consumer of Transform.h5 relies on: T(p) = p + u(p) takes a fixed point to the moving
     # one, components in world x, y, z, channel-first on the fixed grid [3, Z, Y, X], also for an oblique grid.
-    from impact_reg_konfai.models.elastix_engine import _displacement_on
+    from impact_reg_konfai.models.intensity import displacement_on
 
     fixed = sitk.Image([6, 5, 4], sitk.sitkFloat32)
     fixed.SetSpacing((2.0, 1.0, 3.0))
     fixed.SetDirection(sitk.VersorTransform((0, 0, 1), 0.3).GetMatrix())
 
-    field = _displacement_on(fixed, sitk.TranslationTransform(3, (4.0, -1.5, 2.0)))
+    field = displacement_on(fixed, sitk.TranslationTransform(3, (4.0, -1.5, 2.0)))
 
     assert field.shape == (3, 4, 5, 6)
     assert np.allclose(field.reshape(3, -1).mean(1), [4.0, -1.5, 2.0]) and np.ptp(field.reshape(3, -1), 1).max() < 1e-9

@@ -45,10 +45,10 @@ the discovery steps only when the dataset and task are already understood.
 4. `initialize_session(from_example=..., workflows=[...])`: create the sandboxed workspace, seeding configs from a template. Everything else resolves paths against this session.
 5. If a config will reference a **local** `Model:X` / `Loss:X`, `write_session_file` that `.py` **before** validating or running: otherwise validation blocks on a missing local component.
 6. Resolve every object name before writing it: `list_components` (what exists) → `inspect_object_signature` / `describe_config_schema` (how to configure it).
-7. `write_workflow_config(workflow, content)` for each of `train` / `prediction` / `evaluation` / `transform`. The root key (`Trainer`/`Predictor`/`Evaluator`/`Transformer`) is validated on write.
+7. `write_workflow_config(workflow, content)` for each of `train` / `prediction` / `evaluation` / `transform`. The write checks the config against KonfAI's schema and returns **every** mistake at once in `schema_errors`, one `path: message` line each, with the nearest valid name (`Trainer: unknown key 'epoch' (did you mean 'epochs'?)`). Fix them all and write again until `schema_errors` is gone: this loop is free (no subprocess), so do it before anything else.
 
 **Validate: always, before every run**
-8. `review_config_semantics`: cheap static check; clear all `blocking_issues`.
+8. `review_config_semantics`: cheap static check; clear all `blocking_issues` (the schema's `config_schema` issues included). A `config_key_unread` warning is a key KonfAI ignores: remove it.
 9. `validate_config_semantics(workflow, level="instantiate")`: instantiates KonfAI objects to catch runtime errors. **Side-effect-free on your authored config** (it reads a scratch copy beside it, never your file). Use `workflow="all"` to check every config at once.
 
 **Run: destructive; commits real compute (get human OK first, see below)**

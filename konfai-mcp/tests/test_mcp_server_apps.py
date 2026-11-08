@@ -26,6 +26,7 @@ from typing import Any
 
 import fastmcp
 import pytest
+import torch
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
 if str(MODULE_ROOT) not in sys.path:
@@ -48,7 +49,7 @@ def _write_local_app(root: Path, name: str = "TinyLocalApp") -> Path:
                 "task": "synthesis",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny.pt"],
+                "models": ["tiny.safetensors"],
                 "patch_size": [1, 64, 64],
                 "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
                 "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
@@ -56,7 +57,7 @@ def _write_local_app(root: Path, name: str = "TinyLocalApp") -> Path:
         ),
         encoding="utf-8",
     )
-    (app_dir / "tiny.pt").write_bytes(b"")
+    (app_dir / "tiny.safetensors").write_bytes(b"")
     # A train config makes the app finetunable (run_resume warm-starts from Config.yml).
     (app_dir / "Config.yml").write_text("Trainer: {}\n", encoding="utf-8")
     return app_dir
@@ -81,8 +82,8 @@ def test_describe_app_reads_local_manifest(tmp_path: Path) -> None:
     assert payload["inputs"] == {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}}
     assert payload["outputs"]["sCT"]["volume_type"] == "VOLUME"
     assert payload["capabilities"] == {"inference": True, "evaluation": False, "uncertainty": False}
-    assert payload["checkpoints"] == ["tiny.pt"]
-    assert payload["checkpoints_available"] == ["tiny.pt"]
+    assert payload["checkpoints"] == ["tiny.safetensors"]
+    assert payload["checkpoints_available"] == ["tiny.safetensors"]
     assert payload["patch_size"] == [1, 64, 64]
     assert payload["task"] == "synthesis"
     # The bundle ships a Config.yml, so it is finetunable and offers fine_tune_app.
@@ -105,14 +106,14 @@ def test_describe_app_no_inference_routes_to_design(tmp_path: Path) -> None:
                 "short_description": "no io",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny.pt"],
+                "models": ["tiny.safetensors"],
                 "inputs": {},
                 "outputs": {},
             }
         ),
         encoding="utf-8",
     )
-    (app_dir / "tiny.pt").write_bytes(b"")
+    (app_dir / "tiny.safetensors").write_bytes(b"")
 
     payload = _service(tmp_path).describe_app(str(app_dir))
     assert payload["capabilities"]["inference"] is False
@@ -134,7 +135,7 @@ def test_describe_app_marks_optional_input_not_required(tmp_path: Path) -> None:
                 "task": "registration",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny.pt"],
+                "models": ["tiny.safetensors"],
                 "inputs": {
                     "Fixed": {"display_name": "Fixed", "volume_type": "VOLUME", "required": True},
                     "Mask": {"display_name": "Mask", "volume_type": "SEGMENTATION", "required": False},
@@ -144,7 +145,7 @@ def test_describe_app_marks_optional_input_not_required(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (app_dir / "tiny.pt").write_bytes(b"")
+    (app_dir / "tiny.safetensors").write_bytes(b"")
 
     payload = _service(tmp_path).describe_app(str(app_dir))
 
@@ -256,8 +257,8 @@ def test_import_app_gates_local_and_rejects_remote(tmp_path: Path, monkeypatch: 
     def _fake_subprocess(target: str, kwargs: dict) -> dict:
         calls.append((target, kwargs))
         return {
-            "files": ["app.json", "tiny.pt"],
-            "checkpoints": ["tiny.pt"],
+            "files": ["app.json", "tiny.safetensors"],
+            "checkpoints": ["tiny.safetensors"],
             "configs": {"prediction": "Prediction.yml"},
         }
 
@@ -268,7 +269,7 @@ def test_import_app_gates_local_and_rejects_remote(tmp_path: Path, monkeypatch: 
     assert calls[0][1]["ref"] == str(app_dir)
     # The target is the session root (in-jail), never a per-app sub-folder.
     assert Path(calls[0][1]["target"]) == service.workspace_layout.ensure_session_workspace()
-    assert result["checkpoints"] == ["tiny.pt"]
+    assert result["checkpoints"] == ["tiny.safetensors"]
     assert result["next_actions"] == ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"]
 
 
@@ -335,7 +336,7 @@ def test_export_app_copies_bundle(tmp_path: Path) -> None:
 
     assert Path(result["exported_to"]) == target.resolve()
     assert (target / "app.json").exists()
-    assert (target / "tiny.pt").exists()
+    assert (target / "tiny.safetensors").exists()
 
     with pytest.raises(ValueError, match="Exporting is only supported"):
         _service(tmp_path).export_app("localhost:8000:MyApp", str(tmp_path / "x"))
@@ -384,7 +385,7 @@ def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) ->
     if nested_run:
         checkpoint_dir /= "run"
     checkpoint_dir.mkdir(parents=True)
-    (checkpoint_dir / "model.pt").write_bytes(b"")
+    _run_checkpoint(checkpoint_dir / "model.pt")
     (checkpoint_dir / "resume_latest.pt").write_bytes(b"continuation-only")
     (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
 
@@ -396,9 +397,9 @@ def test_package_from_session_builds_bundle(tmp_path: Path, nested_run: bool) ->
     assert bundle.is_dir()
     assert (bundle / "app.json").exists()
     assert (bundle / "Prediction.yml").exists()
-    assert (bundle / "model.pt").exists()
+    assert (bundle / "model.safetensors").exists()
     assert not (bundle / "resume_latest.pt").exists()
-    assert result["checkpoints"] == ["model.pt"]
+    assert result["checkpoints"] == ["model.safetensors"]
     assert result["next_actions"] == ["describe_app", "run_app", "import_app"]
     meta = json.loads((bundle / "app.json").read_text(encoding="utf-8"))
     assert meta["display_name"] == "My App"
@@ -409,7 +410,7 @@ def test_package_from_session_normalizes_prediction_config_and_refreshes_support
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
     (workspace / "Checkpoints" / "run").mkdir(parents=True)
-    (workspace / "Checkpoints" / "run" / "model.pt").write_bytes(b"")
+    _run_checkpoint(workspace / "Checkpoints" / "run" / "model.pt")
     (workspace / "UNet.yml").write_text("modules: []\n", encoding="utf-8")
     (workspace / "Prediction.yml").write_text(
         "Predictor:\n"
@@ -485,7 +486,7 @@ def test_package_from_session_runs_onnx_export_in_subprocess(tmp_path: Path, mon
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
     (workspace / "Checkpoints" / "run").mkdir(parents=True)
-    (workspace / "Checkpoints" / "run" / "model.pt").write_bytes(b"")
+    _run_checkpoint(workspace / "Checkpoints" / "run" / "model.pt")
     (workspace / "Prediction.yml").write_text("Predictor: {}\n", encoding="utf-8")
 
     import konfai_apps.bundle as bundle_module
@@ -960,14 +961,14 @@ def _local_app(tmp_path: Path) -> str:
                 "short_description": "paired",
                 "tta": 0,
                 "mc_dropout": 0,
-                "models": ["tiny.pt"],
+                "models": ["tiny.safetensors"],
                 "inputs": {"Volume_0": {"display_name": "MR", "volume_type": "VOLUME", "required": True}},
                 "outputs": {"sCT": {"display_name": "sCT", "volume_type": "VOLUME", "required": True}},
             }
         ),
         encoding="utf-8",
     )
-    (app_dir / "tiny.pt").write_bytes(b"")
+    (app_dir / "tiny.safetensors").write_bytes(b"")
     return str(app_dir)
 
 
@@ -999,12 +1000,17 @@ def test_prepare_infer_rejects_unequal_channel_counts(tmp_path: Path) -> None:
         _app_service(tmp_path).prepare_infer(ref=_local_app(tmp_path), inputs=[[a, b], [c]])
 
 
+def _run_checkpoint(path: Path) -> None:
+    """A checkpoint a training run writes: packaging publishes its ``Model`` weights as .safetensors."""
+    torch.save({"Model": {"Net": {"weight": torch.zeros(1)}}, "epoch": 1}, path)
+
+
 def _packaging_session(tmp_path: Path) -> tuple[WorkspaceLayout, Path, Path]:
     layout = WorkspaceLayout(tmp_path / "workspaces")
     workspace = layout.workspace_dir()
     checkpoints = workspace / "Checkpoints" / "run"
     checkpoints.mkdir(parents=True)
-    (checkpoints / "first.pt").write_bytes(b"first checkpoint")
+    _run_checkpoint(checkpoints / "first.pt")
     return layout, workspace, checkpoints
 
 
@@ -1064,17 +1070,17 @@ def test_a_repackaged_bundle_serves_the_newly_declared_checkpoint(tmp_path: Path
     service.package_from_session(
         name="Repack", display_name="r", description="r", checkpoints=[str(checkpoints / "first.pt")]
     )
-    (checkpoints / "new.pt").write_bytes(b"new checkpoint")
+    _run_checkpoint(checkpoints / "new.pt")
     result = service.package_from_session(
         name="Repack", display_name="r", description="r", checkpoints=[str(checkpoints / "new.pt")]
     )
 
     bundle = Path(result["bundle_path"])
-    assert sorted(path.name for path in bundle.glob("*.pt")) == ["new.pt"]
+    assert sorted(path.name for path in bundle.glob("*.safetensors")) == ["new.safetensors"]
     downloaded, _config, _assets = LocalAppRepositoryFromDirectory(bundle.parent, bundle.name).download_inference(
         1, [], "Prediction.yml"
     )
-    assert [path.name for path in downloaded] == ["new.pt"]
+    assert [path.name for path in downloaded] == ["new.safetensors"]
 
 
 @pytest.mark.parametrize("chain", ["before_reduction_transforms", "after_reduction_transforms", "final_transforms"])
@@ -1292,14 +1298,14 @@ _HF_CATALOGUE = {
         "CT/icon.png",
         "CT/Prediction.yml",
         "CT/Config.yml",
-        "CT/model.pt",
+        "CT/model.safetensors",
         "MR/app.json",
         "MR/Prediction.yml",
-        "MR/fold_0.pt",
+        "MR/fold_0.safetensors",
         "README.md",
     ],
     "org/reg": ["Rigid/app.json", "Rigid/icon.png", "Rigid/Prediction.yml", "Rigid/params.txt"],
-    "org/syn": ["CBCT/app.json", "CBCT/Prediction.yml", "CBCT/Uncertainty.yml", "CBCT/model.pt", "SAM2.1.pt"],
+    "org/syn": ["CBCT/app.json", "CBCT/Prediction.yml", "CBCT/Uncertainty.yml", "CBCT/model.safetensors", "SAM2.1.pt"],
 }
 
 
@@ -1338,7 +1344,7 @@ def test_studios_catalogue_reads_each_hf_repository_once_and_no_checkpoint(
         "org/seg:MR": ("MR app", False, None),
         "org/syn:CBCT": ("CBCT app", False, None),
     }
-    assert not list(hub.cache.rglob("*.pt"))
+    assert not list(hub.cache.rglob("*.safetensors"))
     reads = sorted(call[:2] for call in hub.calls if call[0] != "refs")  # the release tag is looked up aside
     assert reads == sorted([("info", repo) for repo in _HF_CATALOGUE] + [("snapshot", repo) for repo in _HF_CATALOGUE])
 
@@ -1404,7 +1410,6 @@ def test_a_registration_app_runs_through_impact_reg(tmp_path: Path, monkeypatch:
     from unittest.mock import patch
 
     from impact_reg_konfai.impact_reg import ImpactRegKonfAIApp
-
     from konfai_mcp import runner
 
     monkeypatch.setenv("KONFAI_IMPACTREG_REPO", "unused")  # the runner points it at the repository

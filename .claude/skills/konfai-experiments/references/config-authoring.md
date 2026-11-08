@@ -23,7 +23,12 @@ matches the workflow you are running.
 | `TRANSFORM` | `Transform.yml` | `Transformer:` | dataset preparation: read a dataset, run a chain per case, `Write` the result |
 
 `write_workflow_config` validates that the top-level root key matches the workflow
-before writing, so a `Prediction.yml` whose root is `Trainer:` is rejected early.
+before writing, so a `Prediction.yml` whose root is `Trainer:` is rejected early. It then
+checks the whole config against KonfAI's schema and returns every mistake in
+`schema_errors`, each at its key with the nearest valid name. The schema is read off the
+constructors, so it knows every shipped transform, augmentation, loss, metric and
+scheduler with its arguments. It leaves open what only resolves at run time: a model's
+own arguments, a torch optimizer's, a `module:Class` stage.
 
 > **Reading a config mutates it.** `apply_config` writes resolved defaults *back* to the
 > file. After a run, the on-disk YAML is the fully-resolved snapshot, not
@@ -81,7 +86,8 @@ YAML you write with `write_workflow_config`.
 2. `initialize_session`: create the workspace, optionally seeding from an example template.
 3. `list_components` / `inspect_object_signature` / `describe_config_schema`: resolve
    every object name and its parameters *before* writing them.
-4. `write_workflow_config`: write one workflow YAML (root key checked).
+4. `write_workflow_config`: write one workflow YAML; fix every `schema_errors` line and
+   write again until there are none (free: no subprocess).
 5. `review_config_semantics`: cheap, no runtime instantiation; fix any `blocking_issues`.
 6. `validate_config_semantics`: instantiates KonfAI objects on a scratch copy of the config to
    catch runtime-facing errors; side-effect-free.
