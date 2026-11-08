@@ -125,10 +125,10 @@ def test_is_displacement_field_is_false_for_a_missing_store(tmp_path: Path) -> N
 
 
 def test_non_displacement_transform_is_rejected(tmp_path: Path) -> None:
-    """The parametric transforms the other backends serialise have no OME-NGFF form, and failing
-    loudly beats writing their parameter vector as if it were a field."""
+    """A B-spline has no OME-NGFF form (a field and a linear transform have theirs), and failing loudly beats
+    writing its coefficients as if they were a field."""
     with pytest.raises(DatasetManagerError, match="DisplacementFieldTransform"):
-        _store(tmp_path).write("case", "Affine", sitk.AffineTransform(3))
+        _store(tmp_path).write("case", "Spline", sitk.BSplineTransform(3))
 
 
 def test_a_field_streamed_region_by_region_is_still_a_field(tmp_path: Path) -> None:

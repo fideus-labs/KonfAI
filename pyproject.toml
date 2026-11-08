@@ -37,7 +37,9 @@ dependencies = [
   "tqdm",
   "numpy",
   "ruamel.yaml",
-  "psutil"
+  "psutil",
+  # Published weights (apps) are .safetensors: read and written without pickle.
+  "safetensors"
 ]
 
 [project.urls]
@@ -66,6 +68,8 @@ omezarr = ["zarr>=3", "ngff-zarr>=0.49", "dask"]
 # aiobotocore drives it over. fsspec itself already comes with the OME-Zarr extra, through dask.
 s3 = ["s3fs", "aiohttp"]
 export = ["onnx", "onnxruntime", "onnxscript"]
+# `konfai <WORKFLOW> --check`: a config against its JSON Schema (konfai.config_schema.config_errors).
+check = ["jsonschema"]
 # MONAI Bundles (konfai.bundle) and the MONAI networks the docs wrap (monai.networks.nets:UNet).
 monai = ["monai"]
 all = [
@@ -80,6 +84,7 @@ all = [
   "konfai[omezarr]",
   "konfai[s3]",
   "konfai[export]",
+  "konfai[check]",
   "konfai[smp]",
   # The IMPACT criteria download their feature extractors from the Hub; imported lazily,
   # and their refusal names this extra.
@@ -101,6 +106,7 @@ dev = [
   "pytest",
   "pytest-cov",
   "pytest-xdist",
+  "jsonschema",
   "pre-commit",
   "ruff==0.15.2",
   "mypy",

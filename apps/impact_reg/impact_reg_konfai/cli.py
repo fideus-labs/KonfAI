@@ -116,7 +116,8 @@ of preset folders, or <repo>@<revision>. IMPACT_REG_DEBUG=1 prints the traceback
         description="""Register each moving image onto its fixed image with one or more presets; several presets
 are ensembled, their displacement fields averaged. Each case, P000, P001, ... in input order, gets:
 
-  <output>/<case>/Transform.h5            the transform, a displacement field on the fixed grid
+  <output>/<case>/Transform.h5            the transform: a displacement field on the fixed grid, or the affine
+                                          a linear preset declares (transform_type: affine)
   <output>/<case>/Moved.<moving's ext>    the moving image resampled through it (not with --fields-only)
   <output>/<case>/Ensemble/<preset>.h5    each preset's own field, with --keep-fields
 

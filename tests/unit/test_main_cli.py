@@ -574,3 +574,31 @@ def test_init_in_an_empty_folder_writes_the_configuration_and_succeeds(tmp_path:
     assert "--init reads no data" in init.stdout
     (written,) = tmp_path.glob("*.yml")
     assert "dataset_filenames" in written.read_text(encoding="utf-8")
+
+
+def test_check_lists_every_mistake_and_leaves_the_config_as_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused value exits 1, a key nothing reads is a warning; nothing is built and the file is not rewritten."""
+    example = (Path(__file__).resolve().parents[2] / "examples" / "Segmentation" / "Config.yml").read_text()
+    config = tmp_path / "Config.yml"
+    config.write_text(
+        example.replace("  epochs:", "  epoch: 3\n  epochs:", 1).replace("Standardize:", "Standardise:", 1)
+    )
+    written = config.read_bytes()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["konfai", "TRAIN", "--check"])
+
+    with pytest.raises(SystemExit) as exited:
+        main_module.main()
+
+    lines = capsys.readouterr().out.splitlines()
+    assert exited.value.code == 1
+    assert "Trainer: unknown key 'epoch' (did you mean 'epochs'?) (warning: ignored)" in lines
+    assert any(line.endswith("unknown 'Standardise' (did you mean 'Standardize'?)") for line in lines)
+    assert lines[-1].startswith("[KonfAI] 1 error(s), 1 warning(s) in 'Config.yml'.")
+    assert config.read_bytes() == written
+
+    config.write_text(example)
+    main_module.main()  # a valid config exits 0
+    assert capsys.readouterr().out.startswith("[KonfAI] 0 error(s), 0 warning(s)")

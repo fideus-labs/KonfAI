@@ -623,7 +623,7 @@ def import_app_api(
 ) -> dict[str, Any]:
     """Child entrypoint: resolve + download an app bundle into the session root as a normal experiment.
 
-    Copies the app's config(s), custom code, and .pt checkpoints into ``target`` and pip-installs its
+    Copies the app's config(s), custom code, and .safetensors weights into ``target`` and pip-installs its
     requirements. The resolve + download + install runs here in the spawn subprocess, never in the server
     process. Returns the copied filenames, the checkpoint names, and which config files landed.
     """
@@ -634,7 +634,7 @@ def import_app_api(
         raise ValueError("Importing an app into the session is only supported for local or HuggingFace apps.")
     destination = Path(target).resolve()
     filenames = info.download_bundle(destination, display_name=display_name, config_overrides=config_overrides)
-    checkpoints = sorted(name for name in filenames if name.endswith(".pt"))
+    checkpoints = sorted(name for name in filenames if name.endswith(".safetensors"))
     configs = {key: name for key, name in WORKFLOW_CONFIG_FILES.items() if (destination / name).is_file()}
     return {"files": filenames, "checkpoints": checkpoints, "configs": configs}
 
