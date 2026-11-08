@@ -1602,8 +1602,9 @@ def test_uncertainty_says_when_it_kept_no_stack(tmp_path: Path, capsys: pytest.C
     assert "kept no stack for P000" in capsys.readouterr().err
 
 
-def test_a_rerun_leaves_no_stack_of_an_earlier_transform(tmp_path: Path) -> None:
-    """A stack of the earlier run's members beside this run's transform would be measured as its uncertainty."""
+def test_a_rerun_leaves_no_stack_of_an_earlier_transform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stack of the earlier run's members beside this run's transform would be measured as its uncertainty; a rerun
+    that fails to publish its transform leaves the earlier one and its stack standing."""
     moving = tmp_path / "moving.mha"
     sitk.WriteImage(sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32)), str(moving))
     fixed = tmp_path / "fixed.mha"
@@ -1613,6 +1614,15 @@ def test_a_rerun_leaves_no_stack_of_an_earlier_transform(tmp_path: Path) -> None
     case = tmp_path / "Output" / "P000"
     case.mkdir(parents=True)
     (case / "InferenceStack.mha").write_text("an earlier run", encoding="utf-8")
+
+    def full(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reg, "_copy_output", full)
+        with pytest.raises(OSError, match="disk full"):
+            app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True)
+    assert (case / "InferenceStack.mha").exists()
 
     app.register(["A"], [fixed], [moving], output=tmp_path / "Output", quiet=True, fields_only=True)
 

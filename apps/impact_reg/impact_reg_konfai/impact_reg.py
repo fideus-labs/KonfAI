@@ -1269,10 +1269,10 @@ class ImpactRegKonfAIApp:
                 # a case identical instead of renumbering from the command line and hoping they agree.
                 case_out = output / case
                 case_out.mkdir(parents=True, exist_ok=True)
-                _drop_other_forms(case_out, STACK, "")  # an earlier run's stack: it describes another transform
                 members = [fields_by_preset[preset][case] for preset in presets]
                 # A preset run with TTA under --uncertainty hands over its copies' stack: every copy is a member.
                 sources = [_stack_beside(member) or member for member in members] if uncertainty else members
+                stack = None
                 if sources == members and len(presets) == 1:
                     _copy_output(members[0], case_out, group, move=True)
                 else:
@@ -1283,6 +1283,8 @@ class ImpactRegKonfAIApp:
                     stack = case_out / stack_file(form) if uncertainty and not flat else None
                     combine(sources, "Mean", case_out / f"{group}{form}", member_token(members[0]), stack)
                     _drop_other_forms(case_out, group, form)  # an earlier run's, in another form
+                # An earlier run's stack, of another transform, goes once this one stands: a failed run keeps both.
+                _drop_other_forms(case_out, STACK, stack.name.removeprefix(STACK) if stack else "")
 
             if not fields_only:
                 # The moved images in ONE streamed run over the cohort: Resample adopts, per case,
