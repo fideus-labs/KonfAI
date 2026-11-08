@@ -277,30 +277,32 @@ def _with_run_options(
     read off the app's config ``config_name`` as it ships (a server's app, from the server)."""
     if not output_format and seed is None:
         return overrides
+    config = _shipped_config(app, remote, config_name)
+    if config is None:
+        raise AppRepositoryError(
+            f"App '{split_preset(app)[0]}' has no {config_name}: --output-format and --seed have nothing to set."
+        )
+    return [*(overrides or []), *run_overrides(config, output_format, seed)]
+
+
+def _shipped_config(app: str, remote: RemoteServer | None, config_name: str) -> Any:
+    """The app's config ``config_name`` as it ships (a server's app, from the server), parsed; None without one."""
     from ruamel.yaml import YAML
 
     base = split_preset(app)[0]
     info = AppRepositoryInfoFromRemoteServer(remote, base) if remote else get_app_repository_info(base, False)
     files = {path.name: path for path in info.download_config_file()}
-    if config_name not in files:
-        raise AppRepositoryError(f"App '{base}' has no {config_name}: --output-format and --seed have nothing to set.")
-    config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8"))
-    return [*(overrides or []), *run_overrides(config, output_format, seed)]
+    return YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8")) if config_name in files else None
 
 
 def _combine_of(references: list[str], remote: RemoteServer | None, config_name: str) -> str:
     """The operator an ensemble of ``references`` reduces its members with: the one their configs declare for their
     checkpoints (``Predictor.combine``), ``Mean`` where it is unset or a ``Concat`` (a stack's), the same for all."""
-    from ruamel.yaml import YAML
-
     from .ensemble import OPERATORS
 
     operators = {}
     for reference in references:
-        base = split_preset(reference)[0]
-        info = AppRepositoryInfoFromRemoteServer(remote, base) if remote else get_app_repository_info(base, False)
-        files = {path.name: path for path in info.download_config_file()}
-        config = YAML(typ="safe").load(files[config_name].read_text(encoding="utf-8")) if config_name in files else {}
+        config = _shipped_config(reference, remote, config_name)
         declared = str(((config or {}).get("Predictor") or {}).get("combine") or "Mean")
         operators[reference] = "Mean" if declared == "Concat" else declared
     if len(set(operators.values())) > 1:
@@ -637,6 +639,18 @@ def build_app_cli(
 
         konfai_app = app_module.KonfAIApp(resolve_app(args), args.download, args.force_update)
 
+        overrides = (
+            _with_run_options(
+                resolve_app(args),
+                None,
+                getattr(args, "prediction_file", "Prediction.yml"),
+                args.config_overrides,
+                args.output_format,
+                args.seed,
+            )
+            if args.command in (infer_command, "pipeline")
+            else None
+        )
         if args.command == infer_command:
             konfai_app.infer(
                 inputs=args.inputs,
@@ -650,14 +664,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=_with_run_options(
-                    resolve_app(args),
-                    None,
-                    getattr(args, "prediction_file", "Prediction.yml"),
-                    args.config_overrides,
-                    args.output_format,
-                    args.seed,
-                ),
+                config_overrides=overrides,
                 **infer_kwargs(args),
             )
         elif args.command == "eval":
@@ -675,6 +682,7 @@ def build_app_cli(
         elif args.command == "uncertainty":
             konfai_app.uncertainty(
                 inputs=args.inputs,
+                gt=args.gt,
                 output=args.output,
                 tmp_dir=args.tmp_dir,
                 uncertainty_file=args.uncertainty_file,
@@ -699,14 +707,7 @@ def build_app_cli(
                 patch_size=args.patch_size,
                 max_voxels=getattr(args, "max_voxels", None),
                 batch_size=args.batch_size,
-                config_overrides=_with_run_options(
-                    resolve_app(args),
-                    None,
-                    getattr(args, "prediction_file", "Prediction.yml"),
-                    args.config_overrides,
-                    args.output_format,
-                    args.seed,
-                ),
+                config_overrides=overrides,
                 **infer_kwargs(args),
             )
 

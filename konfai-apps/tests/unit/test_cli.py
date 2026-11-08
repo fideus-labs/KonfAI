@@ -202,6 +202,23 @@ def test_a_refusal_prints_its_message_and_exits_1(
     assert "not found" not in message.lower()
 
 
+def test_an_app_cli_hands_uncertainty_its_references(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An app's own CLI takes --gt for uncertainty, as konfai-apps does, and hands it on."""
+    seen: dict[str, Any] = {}
+
+    class _App:
+        def __init__(self, *args: Any) -> None:
+            pass
+
+        def uncertainty(self, **kwargs: Any) -> None:
+            seen.update(kwargs)
+
+    monkeypatch.setattr("konfai_apps.app.KonfAIApp", _App)
+    monkeypatch.setattr(sys, "argv", ["app-cli", "uncertainty", "-i", "stack.mha", "--gt", "fixed.fcsv", "--cpu", "1"])
+    _app_cli_mains()["app-cli"]()
+    assert [[Path(path).name for path in group] for group in seen["gt"]] == [["fixed.fcsv"]]
+
+
 def test_konfai_debug_keeps_the_refusal_traceback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KONFAI_DEBUG", "1")

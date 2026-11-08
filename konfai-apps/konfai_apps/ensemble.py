@@ -29,13 +29,14 @@ import json
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from konfai.data import reduction
-from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE
+from konfai.data.transform.ensemble import MEMBERS_ATTRIBUTE, holds_stack, member_count
 from konfai.utils.dataset import Attribute, Dataset
 from konfai.utils.utils import format_token, storage_form
 
@@ -54,8 +55,10 @@ SLAB_PLANES = 16
 
 def stack_file(form: str) -> str:
     """The stack's file name beside an output of ``form`` (``.ome.zarr``, ``.nii.gz``): in that form where its header
-    keeps the member count, as MetaImage otherwise (NIfTI's header does not, nor is a transform file a stack)."""
-    return f"{STACK}{form if form in ('.mha', '.nrrd', '.ome.zarr') else '.mha'}"
+    keeps the member count (:func:`~konfai.data.transform.ensemble.holds_stack`), as MetaImage otherwise. A case's
+    ``.h5`` is a transform file."""
+    token = "itktransform" if form == ".h5" else format_token(form)
+    return f"{STACK}{form if holds_stack(token) else '.mha'}"
 
 
 def _token(path: Path) -> str:
@@ -84,14 +87,20 @@ def _entry(path: Path, token: str | None = None) -> tuple[Dataset, str, str]:
     return Dataset(str(path.parent.parent), token or _token(path)), _group(path), path.parent.name
 
 
+def _geometry(header: Attribute) -> np.ndarray | None:
+    """A member's grid as one vector (origin, spacing, direction), None for a header that has none."""
+    if not all(key in header for key in ("Origin", "Spacing", "Direction")):
+        return None
+    return np.concatenate(
+        [header.get_np_array(key).astype(float).ravel() for key in ("Origin", "Spacing", "Direction")]
+    )
+
+
 def _member_count(path: Path) -> int:
     """How many members a file holds: a stack's count, read off its header (every channel without one); an output's
     one."""
     dataset, group, case = _entry(path)
-    if group != STACK:
-        return 1
-    shape, header = dataset.get_infos(group, case)
-    return int(float(header[MEMBERS_ATTRIBUTE])) if MEMBERS_ATTRIBUTE in header else int(shape[0])
+    return member_count(*dataset.get_infos(group, case)) if group == STACK else 1
 
 
 def members_of(run: Path) -> dict[tuple[str, str, str], tuple[Path, Path]]:
@@ -146,81 +155,65 @@ def _combine_into(
     sources: list[Path], operator: str, output: Path, output_token: str, stack: Path | None
 ) -> tuple[list[int], list[int]]:
     """:func:`combine`, written where it is told."""
-    if operator not in OPERATORS:
-        raise AppRepositoryError(f"An ensemble has no operator '{operator}'.", f"Choose one of {', '.join(OPERATORS)}.")
     entries = [_entry(path) for path in sources]
     counts = [_member_count(path) for path in sources]
-    shapes = [dataset.get_infos(group, case)[0] for dataset, group, case in entries]
-    channels = shapes[0][0] // counts[0]
-    spatial = list(shapes[0][1:])
-    for path, shape, count in zip(sources, shapes, counts, strict=True):
+    infos = [dataset.get_infos(group, case) for dataset, group, case in entries]
+    channels = infos[0][0][0] // counts[0]
+    spatial = list(infos[0][0][1:])
+    geometry = [_geometry(header) for _, header in infos]
+    for path, (shape, _), count, grid in zip(sources, infos, counts, geometry, strict=True):
         if list(shape[1:]) != spatial or shape[0] != count * channels:
             raise AppRepositoryError(
                 f"'{path}' holds {count} member(s) of {shape[0] // max(count, 1)} channel(s) on {list(shape[1:])}; the"
                 f" ensemble's members are {channels} channel(s) on {spatial}.",
                 "Ensemble apps whose outputs match: the same outputs, on the same grid.",
             )
-    header = Attribute(entries[0][0].get_infos(entries[0][1], entries[0][2])[1])
+        if grid is not None and geometry[0] is not None and not np.allclose(grid, geometry[0], atol=1e-5):
+            raise AppRepositoryError(
+                f"'{path}' lies on another grid than '{sources[0]}' (origin, spacing or direction): its voxels are not"
+                " the same points.",
+                "Ensemble apps whose outputs match: the same outputs, on the same grid.",
+            )
+    header = Attribute(infos[0][1])
     if MEMBERS_ATTRIBUTE in header:
         header.pop(MEMBERS_ATTRIBUTE)
     members = sum(counts)
     reduce = OPERATORS[operator]()
-    sinks: dict[str, Any] = {}
-    buffers: dict[str, list[np.ndarray]] = {"output": [], "stack": []}
-    out_entry = _entry(output, output_token)
-    stack_entry = _entry(stack, format_token(storage_form(stack))) if stack is not None else None
-
-    def write(
-        kind: str, entry: tuple[Dataset, str, str], data: np.ndarray, first: int, shape: list[int], attrs: Attribute
-    ) -> None:
-        dataset, group, case = entry
-        if kind not in sinks:
-            sinks[kind] = dataset.open_data_stream(group, case, shape, data.dtype, attrs)
-        sink = sinks[kind]
-        if sink is None:
-            buffers[kind].append(data)
-        else:
-            sink.write_slice(
-                (slice(None), slice(first, first + data.shape[1]), *(slice(None),) * (data.ndim - 2)), data
-            )
-
     stack_header = Attribute(header)
     stack_header[MEMBERS_ATTRIBUTE] = members
-    try:
+    targets = [(_entry(output, output_token), [channels, *spatial], header)]
+    if stack is not None:
+        targets.append((_entry(stack, format_token(storage_form(stack))), [members * channels, *spatial], stack_header))
+    sinks: list[Any] = [None] * len(targets)
+    buffers: list[list[np.ndarray]] = [[] for _ in targets]
+    with ExitStack() as opened:  # a stream finalised on success, aborted on an error (DataStream.__exit__)
         for first in range(0, spatial[0], SLAB_PLANES):
             region = (
                 slice(None),
                 slice(first, min(first + SLAB_PLANES, spatial[0])),
                 *(slice(None),) * (len(spatial) - 1),
             )
-            rows = [
-                torch.from_numpy(np.asarray(dataset.read_data_slice(group, case, region)[0]))
-                for dataset, group, case in entries
-            ]
-            per_member = torch.cat(rows).reshape(members, channels, *rows[0].shape[1:])
-            reduced = reduce(list(per_member)).cpu().numpy()
-            write("output", out_entry, reduced, first, [channels, *spatial], header)
-            if stack_entry is not None:
-                write(
-                    "stack",
-                    stack_entry,
-                    torch.cat(rows).cpu().numpy(),
-                    first,
-                    [members * channels, *spatial],
-                    stack_header,
-                )
-    except BaseException:
-        for sink in sinks.values():
-            if sink is not None:
-                sink.abort()
-        raise
-    for kind, entry, attrs in (("output", out_entry, header), ("stack", stack_entry, stack_header)):
-        if entry is None:
-            continue
-        if sinks.get(kind) is not None:
-            sinks[kind].close()
-        elif buffers[kind]:
-            entry[0].write(entry[1], entry[2], np.concatenate(buffers[kind], axis=1), attrs)
+            rows = torch.cat(
+                [
+                    torch.from_numpy(np.asarray(dataset.read_data_slice(group, case, region)[0]))
+                    for dataset, group, case in entries
+                ]
+            )
+            reduced = reduce(list(rows.reshape(members, channels, *rows.shape[1:]))).cpu().numpy()
+            for index, ((dataset, group, case), shape, attrs) in enumerate(targets):
+                data = reduced if index == 0 else rows.cpu().numpy()
+                if first == 0:
+                    sink = dataset.open_data_stream(group, case, shape, data.dtype, attrs)
+                    sinks[index] = opened.enter_context(sink) if sink is not None else None
+                if sinks[index] is None:
+                    buffers[index].append(data)
+                else:
+                    sinks[index].write_slice(
+                        (slice(None), slice(first, first + data.shape[1]), *(slice(None),) * (data.ndim - 2)), data
+                    )
+    for ((dataset, group, case), _, attrs), sink, buffer in zip(targets, sinks, buffers, strict=True):
+        if sink is None:
+            dataset.write(group, case, np.concatenate(buffer, axis=1), attrs)
     return [channels, *spatial], counts
 
 

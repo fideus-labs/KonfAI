@@ -115,6 +115,17 @@ def test_members_on_two_grids_are_refused(tmp_path: Path) -> None:
         ensemble.combine([one, two], "Mean", tmp_path / "out" / "P000" / "Output.mha", "mha")
 
 
+def test_members_with_the_same_shape_on_two_grids_are_refused(tmp_path: Path) -> None:
+    """The same shape is not the same grid: a member 100 mm away holds other points, and is not averaged."""
+    one = _image(np.zeros((4, 3, 3), np.float32), tmp_path / "r0" / "P000" / "Output.mha")
+    two = _image(np.zeros((4, 3, 3), np.float32), tmp_path / "r1" / "P000" / "Output.mha")
+    moved = sitk.ReadImage(str(two))
+    moved.SetOrigin((103.0, -2.0, 1.0))
+    sitk.WriteImage(moved, str(two))
+    with pytest.raises(AppRepositoryError, match="another grid"):
+        ensemble.combine([one, two], "Mean", tmp_path / "out" / "P000" / "Output.mha", "mha")
+
+
 def test_a_run_hands_over_its_stack_where_it_wrote_one(tmp_path: Path) -> None:
     """members_of: an output and, beside it, a stack: the members are the stack's; without one, the output."""
     case = tmp_path / "run" / "App" / "Output" / "P000"
