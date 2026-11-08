@@ -7,7 +7,7 @@ from konfai_scout.config import ScoutConfig
 from konfai_scout.evaluation import RegionEvaluator
 from konfai_scout.planes import box_to_dict
 from konfai_scout.providers.base import ToolCall
-from konfai_scout.tools import Toolbox
+from konfai_scout.tools import Toolbox, _unsourced_figures
 from konfai_scout.views import Renderer
 
 
@@ -180,3 +180,12 @@ def test_the_hard_rules_of_note(fixtures, tmp_path):
         measurements=["m098"],
     )
     assert spoken["observation"]["kind"] == "measured_property" and not spoken["observation"]["notes"]
+
+
+def test_a_figure_is_held_to_the_precision_written():
+    from konfai_scout.report import Measurement
+
+    assert _unsourced_figures("Dice = 0.7", [], None, [1.0]) == ["Dice = 0.7"]  # a spacing does not source a metric
+    assert _unsourced_figures("-3.2 mm", [], None, [-3.0]) == ["-3.2 mm"]
+    cited = Measurement("m1", "konfai_eval", True, None, None, {"A:B:TRE": 5.563e-05, "A:B:Dice": 0.7312})
+    assert not _unsourced_figures("Dice = 0.73, TRE = 5.563e-05 mm", [cited], None)
