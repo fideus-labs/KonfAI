@@ -368,6 +368,7 @@ konfai-studio            # -> http://127.0.0.1:8730
 | **[SlicerImpactReg](https://github.com/vboussot/SlicerImpactReg)** | run IMPACT-Reg presets and inspect registration results in 3D Slicer |
 | **KonfAI-MCP** | expose KonfAI to MCP clients: inspect data, author configs, launch and monitor runs |
 | **[KonfAI Studio](https://konfai.readthedocs.io/en/latest/usage/studio.html)** | a chat web UI over `konfai-mcp`: inspect data, train, predict, evaluate, and compare from one conversation |
+| **[KonfAI Scout](konfai-scout/README.md)** | a vision-language agent that inspects a segmentation, registration or synthesis result slice by slice and reports localised defects with evidence and KonfAI Eval measurements |
 
 See the [ecosystem map](https://konfai.readthedocs.io/en/latest/usage/apps.html#the-ecosystem-around-an-app)
 for what is shipped vs. in-progress.

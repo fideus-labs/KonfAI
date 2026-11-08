@@ -1323,6 +1323,27 @@ def test_models_konfai_averages_before_a_per_copy_chain_fold_first(copies: str) 
     assert not models_fold_first(config, "Predictor", 1)
 
 
+def test_models_folded_first_into_one_copy_keep_their_members() -> None:
+    # konfai averages the models before a per-copy cast; on one pass that mean is the whole program, and the
+    # members a runtime selects by are the models' buffers, not the fold's.
+    config = _prediction({}, {"before_reduction_transforms": {"TensorCast": {"dtype": "float32"}}}, "Mean", 0)
+    passes = tta_passes(config, "Predictor")
+    manifest, _, per_copy = transform_manifest(config, "Predictor")
+    program = assemble_program(
+        [{"id": f"m{i}", "manifest": manifest} for i in range(2)],
+        reduce=program_reduction(config, "Predictor", 2, passes),
+        passes=passes,
+        per_copy=per_copy,
+        fold_models=models_fold_first(config, "Predictor", 2),
+        checkpoints=["fold_0.pt", "fold_1.pt"],
+    )
+    assert [step["out"] for step in program["steps"]] == ["m0", "m1", "mean__p0", "output"]
+    assert program["members"] == {
+        "m0": {"checkpoint": "fold_0.pt", "pass": 0},
+        "m1": {"checkpoint": "fold_1.pt", "pass": 0},
+    }
+
+
 def test_a_per_copy_chain_folded_on_the_models_average_runs_as_body_ops_or_is_refused_by_name() -> None:
     # konfai runs the before-reduction chain on the models' average; a program runs a cast, a softmax or an argmax
     # on a buffer and nothing else, so each such step takes its body form (a softmax names no axis there) and any
@@ -2102,12 +2123,11 @@ def _warnings_of(config: dict, root: str = "Predictor") -> list[str]:
             "Predictor.channels_last, Predictor.Dataset.num_workers",
         ),
         ({"outputs_dataset": {"H": {"OutputDataset": {"attributes": ["Modality=CT"]}}}}, "OutputDataset.attributes"),
-        ({"outputs_dataset": {"H": {"OutputDataset": {"after_reduction_transforms": _STACK}}}}, "InferenceStack"),
     ],
 )
 def test_a_prediction_key_the_program_cannot_carry_is_warned_by_key(section: dict, key: str) -> None:
-    # konfai reads these keys and the program has no counterpart: a header attribute, the stacked members a
-    # stack writes, a setting that changes how konfai runs. Each is said by key, so the
+    # konfai reads these keys and the program has no counterpart: a header attribute, a setting that changes
+    # how konfai runs. Each is said by key, so the
     # author can decide, where a refusal would name a chain the two engines read differently.
     from konfai.portable import warn_unportable_keys
     from konfai.utils.errors import KonfAIWarning

@@ -21,7 +21,17 @@ function dimsLabel(nv: Niivue | null): string {
 
 // One NiiVue canvas that follows a path prop. Reused for the primary view and the compare pane; `onReady`
 // hands the instance up so the two panes can be crosshair/zoom-coupled.
-function Canvas({ path, onDims, onReady }: { path: string | null; onDims?: (d: string) => void; onReady?: (nv: Niivue) => void }) {
+function Canvas({
+  path,
+  onDims,
+  onReady,
+  onLoaded,
+}: {
+  path: string | null;
+  onDims?: (d: string) => void;
+  onReady?: (nv: Niivue) => void;
+  onLoaded?: (nv: Niivue) => void;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const nvRef = useRef<Niivue | null>(null);
   const [failed, setFailed] = useState("");
@@ -70,7 +80,10 @@ function Canvas({ path, onDims, onReady }: { path: string | null; onDims?: (d: s
             // NiiVue reports a file it cannot read through its error handler and resolves all the
             // same: a load that landed no volume under the requested name failed.
             if (!nv.volumes.some((v) => v.name === name)) throw new Error(`no volume loaded from ${name}`);
-            if (seq === loadSeqRef.current) onDims?.(dimsLabel(nv));
+            if (seq === loadSeqRef.current) {
+              onDims?.(dimsLabel(nv));
+              onLoaded?.(nv);
+            }
           })
           .catch(fail);
       });
@@ -102,8 +115,10 @@ export default function Viewer({
   onCompareModeChange,
   compareTarget = "b",
   onCompareTargetChange,
+  focus,
 }: {
   path: string | null;
+  focus?: { mm: [number, number, number]; nonce: number } | null; // a point (mm, LPS) to put the crosshair on
   onPathChange: (p: string) => void;
   comparePath?: string | null;
   onComparePathChange?: (p: string) => void;
@@ -128,6 +143,28 @@ export default function Viewer({
   const targetBadge = <span className="v-target">Tree clicks load here</span>;
   const nvA = useRef<Niivue | null>(null);
   const nvB = useRef<Niivue | null>(null);
+  // A focus is applied when it arrives and again when a volume finishes loading: the volume it points into is
+  // usually still being fetched when the request comes in (a "Go to" that also loads the image).
+  const pendingFocus = useRef<{ mm: [number, number, number]; nonce: number } | null>(null);
+  const appliedFocus = useRef(0);
+  const applyFocus = (nv: Niivue | null) => {
+    const wanted = pendingFocus.current;
+    if (!nv || !wanted || !nv.volumes.length || appliedFocus.current === wanted.nonce) return;
+    // Scout speaks ITK's LPS; NiiVue's world is RAS: flip x and y.
+    const ras = [-wanted.mm[0], -wanted.mm[1], wanted.mm[2]];
+    try {
+      nv.scene.crosshairPos = nv.mm2frac(ras as unknown as Parameters<Niivue["mm2frac"]>[0]);
+      nv.drawScene();
+      appliedFocus.current = wanted.nonce;
+    } catch {
+      // a volume without a world transform: the crosshair stays where it was
+    }
+  };
+  useEffect(() => {
+    pendingFocus.current = focus ?? null;
+    applyFocus(nvA.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.nonce]);
 
   // Link the two panes so panning/scrolling/zooming one drives the other (crosshair + 3D view).
   const couple = () => {
@@ -229,6 +266,7 @@ export default function Viewer({
               nvA.current = nv;
               couple();
             }}
+            onLoaded={applyFocus}
           />
           {compare && compareTarget === "a" && targetBadge}
         </div>

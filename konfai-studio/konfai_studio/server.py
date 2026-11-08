@@ -1268,6 +1268,97 @@ async def volume(path: str = Query(..., description="Absolute host path of the v
     return FileResponse(str(found), media_type="application/octet-stream", filename=found.name)
 
 
+# ---------------------------------------------------------------- KonfAI Scout (visual inspection reports)
+
+_SCOUT_IMAGE_ROLE = {"segmentation": "image", "registration": "fixed", "synthesis": "synthetic"}
+_SCOUT_VIEW_ID = re.compile(r"v\d{3,6}")
+
+
+def _scout_root(session: str) -> Path:
+    return _session_dir(session) / "Scout"
+
+
+def _scout_report_dir(session: str, name: str) -> Path:
+    """A report of the session, by name, inside ``Scout/``: nothing outside it is reachable."""
+    root = _scout_root(session)
+    folder = _jail(root, name) if name else None
+    if folder is None or folder == root.resolve() or not (folder / "report.json").is_file():
+        raise HTTPException(404, f"no Scout report named {name!r} in this session")
+    return folder
+
+
+def _scout_summary(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    conclusion = data.get("conclusion") or {}
+    case = data.get("case") or {}
+    return {
+        "name": path.parent.name,
+        "task": case.get("task"),
+        "case": case.get("name"),
+        "verdict": conclusion.get("verdict"),
+        "confidence": conclusion.get("confidence"),
+        "observations": len(data.get("observations") or []),
+        "created_at": data.get("created_at"),
+        "mode": (data.get("config") or {}).get("mode"),
+        "model": (data.get("provider") or {}).get("model"),
+        "error": data.get("error"),
+    }
+
+
+@app.get("/api/scout/reports")
+async def scout_reports(session: str = Query("default")) -> dict[str, Any]:
+    """The session's Scout inspections, newest first."""
+    root = _scout_root(_sane_session(session))
+    found = [_scout_summary(path) for path in root.glob("*/report.json")] if root.is_dir() else []
+    reports = sorted((r for r in found if r), key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return {"reports": reports}
+
+
+@app.get("/api/scout/report")
+async def scout_report(session: str = Query("default"), name: str = Query(...)) -> dict[str, Any]:
+    """One report, without its images: the observations carry their boxes in mm, the case its image path so the
+    viewer can open it and go to an observation."""
+    folder = _scout_report_dir(_sane_session(session), name)
+    data = json.loads((folder / "report.json").read_text(encoding="utf-8"))
+    case = data.get("case") or {}
+    inputs = case.get("inputs") or {}
+    image = (inputs.get(_SCOUT_IMAGE_ROLE.get(str(case.get("task")), "")) or {}).get("path")
+    return {
+        "name": name,
+        "task": case.get("task"),
+        "case": case.get("name"),
+        "image": image,
+        "truth_available": case.get("truth_available"),
+        "conclusion": data.get("conclusion"),
+        "observations": data.get("observations") or [],
+        "measurements": data.get("measurements") or [],
+        "views": len(data.get("views") or []),
+        "usage": data.get("usage"),
+        "budget": data.get("budget"),
+        "error": data.get("error"),
+        "provider": data.get("provider"),
+        "mode": (data.get("config") or {}).get("mode"),
+        "report_md": str(folder / "report.md"),
+    }
+
+
+@app.get("/api/scout/evidence")
+async def scout_evidence(
+    session: str = Query("default"), name: str = Query(...), view: str = Query(...)
+) -> FileResponse:
+    """One evidence image of a report."""
+    folder = _scout_report_dir(_sane_session(session), name)
+    if not _SCOUT_VIEW_ID.fullmatch(view):
+        raise HTTPException(400, "view: an id like v001")
+    path = folder / "evidence" / f"{view}.png"
+    if not path.is_file():
+        raise HTTPException(404, f"no view {view} in {name}")
+    return FileResponse(str(path), media_type="image/png")
+
+
 class SlicerOpen(BaseModel):
     paths: list[str]
 
