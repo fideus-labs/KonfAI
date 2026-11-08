@@ -56,9 +56,7 @@ jobs:
       - name: The CPU lanes of the series
         env:
           TMPDIR: ${{ runner.temp }}
-        run: |
-          df -h "$TMPDIR" /tmp
-          python benchmarks/perf/run_all.py --only startup,transform,predict,stages,reads --cpu --synthetic --force
+        run: python benchmarks/perf/run_all.py --only startup,transform,predict,stages,reads --cpu --synthetic --force
 
       # After a failed lane too: run_all writes its series first, and the failed bench is a violated fact.
       - name: The facts

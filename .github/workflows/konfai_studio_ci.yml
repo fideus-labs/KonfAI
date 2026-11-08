@@ -34,7 +34,6 @@ permissions:
 # mark on a commit that passed. A stacked pull request gets two runs of one commit whenever its base branch moves.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: false
 
 # Holds the tools CI tests with (the file says why).
 env:
