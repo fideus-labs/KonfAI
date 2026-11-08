@@ -83,7 +83,7 @@ def test_each_model_configuration_carries_its_voxel_size_and_feature_normalizati
     }
     engine = _net(tmp_path, models=models)["Registration"]._engine
 
-    engine._model_configurations("fine")
+    engine._model_configurations("fine", 3)
 
     path = str((tmp_path / "model.pt").resolve())
     assert built == [
@@ -119,6 +119,7 @@ def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field_through_the_grap
     # The graph module dropped the masks, so the engine's empty-mask shortcut never ran from a prediction and a
     # tiled run fitted every tile of background. The engine is unconfigured: any step past the shortcut raises.
     engine = convexadam.ConvexAdamEngine.__new__(convexadam.ConvexAdamEngine)
+    engine._linear, engine._deformable_masked = False, True
     geometry = Attribute()
     geometry["Origin"] = np.array([3.0, -1.0, 7.0])
     geometry["Spacing"] = np.array([0.5, 0.5, 2.0])
@@ -130,16 +131,23 @@ def test_a_tile_the_fixed_mask_does_not_reach_gets_a_zero_field_through_the_grap
     )
 
     assert field.shape == (1, 3, 4, 5, 6) and not field.any()
+    # deformable_masked off with no affine stage: nothing reads the mask, so the whole image registers.
+    engine._deformable_masked = False
+    with pytest.raises(AttributeError):
+        EngineRegistration(engine, fuse_texpr=False)(
+            image, image, torch.zeros_like(image), torch.ones_like(image), [[geometry] for _ in range(4)]
+        )
 
 
 def _stages(tmp_path: Path, monkeypatch, masks: tuple = (None, None), **net) -> tuple["_Filter", "_Filter"]:
     """Run both stages of a ``RegistrationNet`` on filters that record what they are set to."""
     coarse, fine = _Filter(), _Filter()
-    monkeypatch.setattr(convexadam, "_coarse_registration_type", lambda: SimpleNamespace(New=lambda: coarse))
-    monkeypatch.setattr(convexadam, "_fine_registration_type", lambda: SimpleNamespace(New=lambda: fine))
+    monkeypatch.setattr(convexadam, "_coarse_registration_type", lambda dimension: SimpleNamespace(New=lambda: coarse))
+    monkeypatch.setattr(convexadam, "_fine_registration_type", lambda dimension: SimpleNamespace(New=lambda: fine))
     engine = _net(tmp_path, **net)["Registration"]._engine
-    monkeypatch.setattr(engine, "_model_configurations", lambda stage: [])
-    engine._fine(None, None, *masks, engine._coarse(None, None, *masks, "cpu"), "cpu")
+    monkeypatch.setattr(engine, "_model_configurations", lambda stage, dimension: [])
+    image = SimpleNamespace(GetImageDimension=lambda: 3)
+    engine._run_stages(image, image, *masks, "cpu")
     return coarse, fine
 
 
@@ -179,6 +187,9 @@ def test_each_mask_reaches_both_stages_and_no_mask_sets_nothing(tmp_path: Path, 
     for stage in _stages(tmp_path, monkeypatch, masks=(fixed_mask, moving_mask)):
         assert stage.calls["SetFixedMask"] == (fixed_mask,) and stage.calls["SetMovingMask"] == (moving_mask,)
     for stage in _stages(tmp_path, monkeypatch):
+        assert "SetFixedMask" not in stage.calls and "SetMovingMask" not in stage.calls
+    # deformable_masked off: the authors' whole-image run, the masks left to the affine stage.
+    for stage in _stages(tmp_path, monkeypatch, masks=(fixed_mask, moving_mask), deformable_masked=False):
         assert "SetFixedMask" not in stage.calls and "SetMovingMask" not in stage.calls
 
 
@@ -408,7 +419,7 @@ def test_a_mask_restricts_both_stages_and_a_whole_image_one_changes_nothing(tmp_
     monkeypatch.setattr(
         convexadam,
         "_coarse_registration_type",
-        lambda: SimpleNamespace(New=lambda: made.append(real.New()) or made[-1]),
+        lambda dimension: SimpleNamespace(New=lambda: made.append(real.New()) or made[-1]),
     )
     engine = _net(tmp_path, models=models, stages=["coarse"], balance_coarse_layers=True, **settings)
     engine["Registration"]._engine.register(fixed, moving, -1, _body(fixed), None)

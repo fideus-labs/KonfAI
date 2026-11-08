@@ -231,7 +231,7 @@ my_app/
 ├── Prediction.yml
 ├── Evaluation.yml            # optional
 ├── Uncertainty.yml           # optional
-├── checkpoint.pt             # one or more checkpoints
+├── CV_0.safetensors          # one or more weight files
 └── custom Python modules     # optional
 ```
 

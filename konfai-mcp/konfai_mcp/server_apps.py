@@ -1127,7 +1127,8 @@ class AppService:
 
         result: dict[str, Any] = {
             "bundle_path": str(bundle_path),
-            "checkpoints": [Path(path).name for path in resolved_checkpoints],
+            # As the bundle names them: a run's .pt is published as .safetensors.
+            "checkpoints": json.loads((bundle_path / "app.json").read_text(encoding="utf-8"))["models"],
             "configs": [Path(path).name for path in resolved_configs],
             "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
@@ -1143,8 +1144,9 @@ class AppService:
             # The ONNX export instantiates and traces the packaged model: it imports the bundle's
             # Model.py, runs a forward pass, and may init CUDA. That must never run in the long-lived
             # server process, so route it through the spawn subprocess like every other code-executing
-            # step. Every packaged checkpoint is exported: konfai runs them as an ensemble, and so does the
-            # program the export writes.
+            # step. Every packaged checkpoint is exported, from the weights the bundle ships (a run's .pt
+            # published as .safetensors): konfai runs them as an ensemble, and so does the program the export
+            # writes.
             from . import runner as mcp_runner
 
             onnx_path = mcp_runner.run_api_in_subprocess(
@@ -1153,7 +1155,7 @@ class AppService:
                     "bundle": str(bundle_path),
                     "patch_size": onnx_patch_size,
                     "in_channels": onnx_in_channels,
-                    "checkpoints": [str(path) for path in resolved_checkpoints],
+                    "checkpoints": list(result["checkpoints"]),
                 },
             )
             result["onnx"] = str(onnx_path)

@@ -52,17 +52,18 @@ def _attributes() -> Attribute:
     return geometry()
 
 
-def _publish(memory_root: str, case: str, group: str, volume: np.ndarray) -> None:
-    """Write one entry into the memory root as an OME-Zarr store, through ngff-zarr itself."""
+def _store(path: str, volume: np.ndarray, **kwargs) -> None:
+    """One OME-Zarr store at ``path`` (a local path or a URI), through ngff-zarr itself."""
     from konfai.utils.ome_zarr import write_ome_zarr
 
     write_ome_zarr(
-        f"{memory_root}/{case}/{group}.ome.zarr",
-        volume,
-        spacing=[1.0, 1.0, 1.0],
-        origin=[0.0, 0.0, 0.0],
-        attributes=dict(_attributes()),
+        path, volume, spacing=[1.0, 1.0, 1.0], origin=[0.0, 0.0, 0.0], attributes=dict(_attributes()), **kwargs
     )
+
+
+def _publish(memory_root: str, case: str, group: str, volume: np.ndarray) -> None:
+    """Write one entry into the memory root, laid out as ``<root>/<case>/<group>.ome.zarr``."""
+    _store(f"{memory_root}/{case}/{group}.ome.zarr", volume)
 
 
 # ---------------------------------------------------------------- telling the two kinds apart
@@ -281,3 +282,107 @@ def test_rebasing_a_remote_root_is_refused_before_it_stops_looking_remote() -> N
     dataset = Dataset("memory://bucket/out", "mha")
     with pytest.raises(DatasetManagerError, match="writes only to local ones"):
         dataset.rebase(Path("/runs/Predictions/run"))
+
+
+# ---------------------------------------------------------------- a manifest of explicit entries
+
+
+def _manifest(tmp_path, text: str) -> str:
+    path = tmp_path / "cases.yml"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_a_manifest_names_each_entry_of_a_case_explicitly(memory_root: str, tmp_path) -> None:
+    """A manifest root is a file, not a directory to walk: each case names its entries by path or
+    URI under the group the config reads, wherever and whatever the store is called. A relative
+    path is read from the manifest's own directory, not the working one."""
+    rng = np.random.default_rng(2)
+    fixed = (rng.random((1, 6, 8, 10)) * 100).astype(np.float32)
+    moving = (rng.random((1, 6, 8, 10)) * 100).astype(np.float32)
+    _store(f"{memory_root}/x/fused.ome.zarr", fixed)
+    _store(f"{memory_root}/y/other.zarr", fixed)
+    (tmp_path / "local").mkdir()
+    _store(str(tmp_path / "local" / "P000.ome.zarr"), moving)
+    manifest = _manifest(
+        tmp_path,
+        "P000:\n"
+        f"  Volume_0: {memory_root}/x/fused.ome.zarr\n"
+        "  Volume_1: ./local/P000.ome.zarr\n"
+        "P001:\n"
+        f"  Volume_0: {memory_root}/y/other.zarr\n",
+    )
+
+    dataset = Dataset(manifest, "omezarr")
+
+    assert dataset.exists_on_disk()
+    assert dataset.get_group() == ["Volume_0", "Volume_1"]
+    assert dataset.get_names("Volume_0") == ["P000", "P001"]
+    assert dataset.get_names("Volume_1") == ["P000"]
+    assert dataset.select_names("Volume_0", {"P001", "P404"}) == ["P001"]
+    assert dataset.is_dataset_exist("Volume_1", "P000")
+    assert not dataset.is_dataset_exist("Volume_1", "P001")
+    assert not dataset.is_dataset_exist("Volume_0", "P404")
+    shape, _attributes_read = dataset.get_infos("Volume_0", "P000")
+    assert shape == [1, 6, 8, 10]
+    region = (slice(0, 1), slice(2, 5), slice(0, 8), slice(0, 10))
+    read, _ = dataset.read_data_slice("Volume_0", "P000", region)
+    np.testing.assert_allclose(read, fixed[region])
+    read, _ = dataset.read_data("Volume_1", "P000")
+    np.testing.assert_allclose(read, moving)
+
+
+def test_a_manifest_root_reads_at_its_level(tmp_path) -> None:
+    """``@N`` belongs to the root, so every entry a manifest names is read at that level (a pyramid
+    is derived through local paths, hence the local store)."""
+    _store(str(tmp_path / "pyramid.ome.zarr"), np.zeros((1, 8, 8, 8), np.float32), scale_factors=[2])
+    manifest = _manifest(tmp_path, "P000:\n  Volume_0: pyramid.ome.zarr\n")
+
+    shape, _ = Dataset(manifest, "omezarr@1").get_infos("Volume_0", "P000")
+
+    assert shape == [1, 4, 4, 4]
+
+
+def test_a_manifest_is_a_read_only_source(memory_root: str, tmp_path) -> None:
+    """A manifest names where entries are read from; nothing is ever written through it, and a
+    refused write leaves its entries in place."""
+    from pathlib import Path
+
+    _store(f"{memory_root}/x/fused.ome.zarr", np.zeros((1, 4, 4, 4), np.float32))
+    manifest = _manifest(tmp_path, f"P000:\n  Volume_0: {memory_root}/x/fused.ome.zarr\n")
+    dataset = Dataset(manifest, "omezarr")
+
+    with pytest.raises(DatasetManagerError, match="read-only"):
+        dataset.write("Volume_0", "P000", np.zeros((1, 4, 4, 4), np.float32), _attributes())
+    with pytest.raises(DatasetManagerError, match="read-only"):
+        dataset.rebase(Path("/runs/Predictions/run"))
+    assert dataset.get_names("Volume_0") == ["P000"]
+
+
+def test_a_manifest_reads_through_the_store_backend_only(tmp_path) -> None:
+    with pytest.raises(DatasetManagerError, match="':omezarr'"):
+        Dataset(_manifest(tmp_path, "P000:\n  Volume_0: ./P000.mha\n"), "mha")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "- P000\n",  # a list, not cases
+        "P000: ./P000.ome.zarr\n",  # a case maps its groups
+        "P000:\n  Volume_0: [a, b]\n",  # an entry is one path or URI
+        "../outside:\n  CT: ./x.ome.zarr\n",  # a case is one name, as a listing spells it: it reaches output paths
+        "P000:\n  study/CT: ./x.ome.zarr\n",  # a group is named plainly: a separator means a layout
+        "001:\n  CT: ./x.ome.zarr\n",  # unquoted, YAML reads 001 as the integer 1: the case would be named '1'
+    ],
+)
+def test_a_manifest_that_is_not_cases_of_entries_is_refused(tmp_path, text: str) -> None:
+    with pytest.raises(DatasetManagerError, match="manifest"):
+        Dataset(_manifest(tmp_path, text), "omezarr")
+
+
+def test_an_unreadable_manifest_entry_is_named_by_where_it_points(memory_root: str, tmp_path) -> None:
+    """The case key a manifest opens under names no place on disk: an error names the entry's own location."""
+    manifest = _manifest(tmp_path, f"P000:\n  Volume_0: {memory_root}/x/missing.ome.zarr\n")
+
+    with pytest.raises(DatasetManagerError, match=r"missing\.ome\.zarr"):
+        Dataset(manifest, "omezarr").get_infos("Volume_0", "P000")
