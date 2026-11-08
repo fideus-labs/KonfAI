@@ -3,6 +3,26 @@
 Each version's section is the body of its GitHub Release. How a section is written:
 [Cutting a release](docs/source/development.md#cutting-a-release).
 
+## Unreleased
+
+### 💥 Breaking changes
+
+#### konfai-mcp: 50 tools instead of 68, one per object
+
+The MCP surface merges every list/read/create/switch variant into the tool of its object, with the variant as an
+argument: `session(action=...)` replaces create_session, switch_session, delete_session and import_experiment;
+`read_file` replaces read_session_file, read_dataset_file and read_template_file; `check_config(level=...)` replaces
+review_config_semantics and validate_config_semantics; `inspect_dataset(browse=True)` replaces browse_dataset;
+`run_transform(dry_run=True)` replaces plan_transform; `check_component` replaces check_external_dependency and
+run_component_smoke_test; `get_job_status(wait=True)` replaces wait_for_job and `get_job_status()` list_jobs;
+`control_training` replaces set_live_tunables and request_validation; `describe_app(parameters=True)` replaces
+list_app_parameters; `fetch_app` replaces import_app and export_app (`path`); `app_sources(action=...)` replaces
+register_app_source and unregister_app_source; `read_scout_report()` lists the reports; `fidopt_catalog` replaces
+fidopt_list_datasets, fidopt_describe_dataset and fidopt_list_methods. The server now declares instructions (what
+it does, when to search its tools), marks six entry tools to load upfront under Claude Code's tool search, and
+describes every tool in one short paragraph: the tool list a client loads drops from ~26,600 to ~17,800 tokens.
+`measure`-style payloads are unchanged; `next_actions` name the new tools.
+
 ## v1.8.8 (2026-11-02)
 
 ### 💥 Breaking changes

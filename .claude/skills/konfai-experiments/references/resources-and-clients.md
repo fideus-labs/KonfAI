@@ -68,7 +68,7 @@ KONFAI_MCP_WORKSPACES_ROOT = "/path/to/KonfAI/mcp-workspace"
 KONFAI_MCP_LOG_TAIL_LINES = "400"
 ```
 
-Set `tool_timeout_sec` generously (training is long) and rely on `wait_for_job` without a
+Set `tool_timeout_sec` generously (training is long) and rely on `get_job_status(wait=True)` without a
 `timeout_s` for multi-hour runs.
 
 ## Transport note (security)

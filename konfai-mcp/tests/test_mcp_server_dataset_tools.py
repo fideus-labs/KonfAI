@@ -362,7 +362,7 @@ Trainer:
             )
 
             review = await client.call_tool(
-                "review_config_semantics",
+                "check_config",
                 {
                     "workflow": "train",
                 },
@@ -373,7 +373,7 @@ Trainer:
             assert "input_channel_context_mismatch" in warning_codes
             assert "no_non_input_groups_declared" in warning_codes
             assert review_data["summary"]["model"]["local_metadata"]["detected_contract"]["in_channels"] == 5
-            assert "validate_config_semantics" in review_data["next_actions"]
+            assert "check_config" in review_data["next_actions"]
 
     asyncio.run(scenario())
 
@@ -614,8 +614,8 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
     async def scenario() -> None:
         async with client_cls(mcp_server.mcp) as client:
             browsed = await client.call_tool(
-                "browse_dataset",
-                {
+                "inspect_dataset",
+                {"browse": True,
                     "dataset_dir": str(dataset_root),
                     "depth": 3,
                     "max_entries": 50,
@@ -634,7 +634,7 @@ def test_mcp_server_browse_dataset_surfaces_nested_candidate_root(
             )
             inferred_data = inferred.structured_content
             assert inferred_data["groups"] == {}
-            assert "browse_dataset" in inferred_data["next_actions"]
+            assert "inspect_dataset" in inferred_data["next_actions"]
             assert inferred_data["candidate_dataset_roots"][0]["relative_path"] == "AB"
 
     asyncio.run(scenario())
@@ -694,7 +694,7 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
             index = await mcp_server.read_tool_index()
             registered = set(index["tools"])
 
-            csv_read = await client.call_tool("read_dataset_file", {"path": str(labels)})
+            csv_read = await client.call_tool("read_file", {"path": str(labels)})
             data = csv_read.structured_content
             assert data["kind"] == "delimited"
             assert data["columns"] == ["case", "grade"]
@@ -703,13 +703,13 @@ def test_mcp_server_read_dataset_file_previews_text_and_refuses_binary(
             # The tool's own next_actions must be registered tool names (AGENTS.md anti-drift rule).
             assert set(data["next_actions"]) <= registered
 
-            bounded = await client.call_tool("read_dataset_file", {"path": str(long_txt), "max_lines": 10})
+            bounded = await client.call_tool("read_file", {"path": str(long_txt), "max_lines": 10})
             bounded_data = bounded.structured_content
             assert bounded_data["returned_lines"] == 10
             assert bounded_data["truncated"] is True
 
             with pytest.raises(Exception, match="binary"):
-                await client.call_tool("read_dataset_file", {"path": str(binary)})
+                await client.call_tool("read_file", {"path": str(binary)})
 
     asyncio.run(scenario())
 
@@ -746,7 +746,7 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
 
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
-            read = await client.call_tool("read_dataset_file", {"path": str(transform)})
+            read = await client.call_tool("read_file", {"path": str(transform)})
             data = read.structured_content
             assert data["kind"] == "itk_transform"
             dense, linear = data["transforms"]
@@ -757,7 +757,7 @@ def test_mcp_server_read_dataset_file_summarises_an_itk_transform_h5(
 
             # An HDF5 that is NOT an ITK transform keeps the binary refusal.
             with pytest.raises(Exception, match="binary"):
-                await client.call_tool("read_dataset_file", {"path": str(plain)})
+                await client.call_tool("read_file", {"path": str(plain)})
 
     asyncio.run(scenario())
 
@@ -846,7 +846,7 @@ def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
             assert any("unknown 'Standardise' (did you mean 'Standardize'?)" in error for error in errors)
             assert written.structured_content["next_actions"][0] == "write_workflow_config"
 
-            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            review = (await client.call_tool("check_config", {"workflow": "train"})).structured_content
             blocking = [issue["message"] for issue in review["blocking_issues"] if issue["code"] == "config_schema"]
             unread = [warning["message"] for warning in review["warnings"] if warning["code"] == "config_key_unread"]
             assert len(blocking) == 1 and "Standardise" in blocking[0]
@@ -856,12 +856,12 @@ def test_a_config_is_checked_against_the_schema_when_written_and_reviewed(
             # A value of the wrong type is reported, not read by the semantic checks that follow.
             wrong_type = example.replace("extend_slice: 0", "extend_slice: [1, 2]", 1)
             await client.call_tool("write_workflow_config", {"workflow": "train", "content": wrong_type})
-            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            review = (await client.call_tool("check_config", {"workflow": "train"})).structured_content
             assert [issue["code"] for issue in review["blocking_issues"]] == ["config_schema"]
             assert "extend_slice" in review["blocking_issues"][0]["message"]
 
             await client.call_tool("write_workflow_config", {"workflow": "train", "content": "Trainer: []\n"})
-            review = (await client.call_tool("review_config_semantics", {"workflow": "train"})).structured_content
+            review = (await client.call_tool("check_config", {"workflow": "train"})).structured_content
             assert [issue["message"] for issue in review["blocking_issues"]] == ["Trainer: [] is not a mapping"]
 
             fixed = await client.call_tool("write_workflow_config", {"workflow": "train", "content": example})

@@ -142,7 +142,7 @@ def test_inspect_goes_through_konfai_mcp(report: Path, monkeypatch: pytest.Monke
         if args and args.get("provider") == "anthropic" and not args.get("allow_cloud_images"):
             return False, "the anthropic provider is a cloud service: set allow_cloud_images"
         return True, json.dumps(
-            {"job_id": "j1", "kind": "scout", "output": "/ws/Scout/x", "next_actions": ["wait_for_job"]}
+            {"job_id": "j1", "kind": "scout", "output": "/ws/Scout/x", "next_actions": ["get_job_status"]}
         )
 
     monkeypatch.setattr(server, "call_mcp_tool", fake_call)

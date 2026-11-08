@@ -224,30 +224,30 @@ def test_read_back_tools_and_workspace_jail(
                 {"relative_path": "Loss.py", "content": "class MyLoss:\n    pass"},
             )
 
-            read_back = await client.call_tool("read_session_file", {"path": "Loss.py"})
+            read_back = await client.call_tool("read_file", {"path": "Loss.py"})
             data = read_back.structured_content
             assert "class MyLoss" in data["content"]
             assert data["relative_path"] == "Loss.py"
             assert data["truncated"] is False
 
-            paged = await client.call_tool("read_session_file", {"path": "Loss.py", "max_chars": 5, "offset": 6})
+            paged = await client.call_tool("read_file", {"path": "Loss.py", "max_chars": 5, "offset": 6})
             paged_data = paged.structured_content
             assert paged_data["content"] == "MyLos"
             assert paged_data["truncated"] is True
 
-            absolute_inside = await client.call_tool("read_session_file", {"path": data["path"]})
+            absolute_inside = await client.call_tool("read_file", {"path": data["path"]})
             assert "class MyLoss" in absolute_inside.structured_content["content"]
 
             with pytest.raises(Exception, match="escapes the session workspace"):
-                await client.call_tool("read_session_file", {"path": "../outside.txt"})
+                await client.call_tool("read_file", {"path": "../outside.txt"})
 
-            template = await client.call_tool("read_template_file", {"name": "Segmentation", "filename": "Config.yml"})
+            template = await client.call_tool("read_file", {"path": "Config.yml", "template": "Segmentation"})
             assert "Trainer" in template.structured_content["content"]
 
             with pytest.raises(Exception, match="Invalid template"):
-                await client.call_tool("read_template_file", {"name": "../konfai-mcp", "filename": "README.md"})
+                await client.call_tool("read_file", {"path": "README.md", "template": "../konfai-mcp"})
 
             with pytest.raises(Exception, match="Invalid template filename"):
-                await client.call_tool("read_template_file", {"name": "Segmentation", "filename": "../Config.yml"})
+                await client.call_tool("read_file", {"path": "../Config.yml", "template": "Segmentation"})
 
     asyncio.run(scenario())

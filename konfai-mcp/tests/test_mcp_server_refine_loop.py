@@ -62,7 +62,7 @@ def test_evaluate_and_pipeline_incite_ranking_and_reexport(tmp_path: Path) -> No
         actions = _next_actions(_done_job(tmp_path, kind))
         assert "leaderboard" in actions
         assert "compare_runs" in actions
-        assert "export_app" in actions
+        assert "fetch_app" in actions
 
 
 def test_finetune_points_at_use_then_evaluate_not_empty_leaderboard(tmp_path: Path) -> None:

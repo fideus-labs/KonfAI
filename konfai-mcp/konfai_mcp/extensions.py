@@ -154,10 +154,9 @@ def describe_extension_points(kind: str | None = None) -> dict[str, Any]:
         ),
         "next_actions": [
             "list_components",
-            "check_external_dependency",
+            "check_component",
             "inspect_object_signature",
             "write_session_file",
-            "run_component_smoke_test",
         ],
     }
     if kind is None:

@@ -169,7 +169,7 @@ class ScoutService:
         folder = self.report_dir(name)
         path = folder / "report.json"
         if not path.is_file():
-            raise ValueError(f"No report named {name!r} in this session (list_scout_reports lists them).")
+            raise ValueError(f"No report named {name!r} in this session (read_scout_report without a name lists them).")
         data = json.loads(path.read_text(encoding="utf-8"))
         views = [{k: v for k, v in view.items() if k not in ("px_to_mm", "sha256")} for view in data.get("views") or []]
         return {

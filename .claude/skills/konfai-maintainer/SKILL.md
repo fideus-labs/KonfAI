@@ -1,7 +1,7 @@
 ---
 name: konfai-maintainer
 description: >-
-  Review and release changes to the KonfAI framework itself (core konfai, konfai-apps,
+  Review and release changes to the KonfAI framework itself (core konfai-apps,
   konfai-mcp) without breaking its load-bearing invariants. Use when modifying or reviewing
   framework code (patching/reconstruction, image geometry, streaming, the config-by-reflection
   engine, the model/criterion runtime, checkpoints/RESUME, DDP, storage backends) or when
@@ -38,7 +38,7 @@ the shipped example `Prediction.yml` files. If your change touches any of those,
 passing CI is not coverage. See the confirmed-trap watchlist in the checklist reference (RESUME of nested
 Networks and the per-epoch augmentation redraws are pinned there).
 
-Two things that look like proof but are not: a green `validate_config_semantics` at default level runs **no
+Two things that look like proof but are not: a green `check_config(level='instantiate')` at default level runs **no
 train step** (only `level='train_step'` does a forward+backward), and a byte-identity test on a config that
 tiles **without overlap** never exercises the blend.
 

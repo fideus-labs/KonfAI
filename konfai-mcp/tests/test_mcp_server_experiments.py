@@ -72,7 +72,7 @@ def test_a_ready_transform_is_offered_like_every_other_workflow(tmp_path: Path) 
 
     actions = service._next_actions_for_readiness(readiness)
 
-    assert actions.index("plan_transform") < actions.index("run_transform")
+    assert actions.count("run_transform") == 1
 
 
 def test_a_transform_that_is_not_ready_is_not_offered(tmp_path: Path) -> None:
@@ -85,7 +85,7 @@ def test_a_transform_that_is_not_ready_is_not_offered(tmp_path: Path) -> None:
 
     actions = service._next_actions_for_readiness(readiness)
 
-    assert "run_transform" not in actions and "plan_transform" not in actions
+    assert "run_transform" not in actions
 
 
 def test_default_prediction_checkpoint_is_scoped_to_the_run(tmp_path: Path) -> None:
@@ -480,7 +480,7 @@ def test_import_experiment_links_artifacts(
     async def scenario() -> None:
         async with fastmcp.Client(mcp_server.mcp) as client:
             await client.call_tool("initialize_session", {"overwrite": True})
-            imported = await client.call_tool("import_experiment", {"source_dir": str(source)})
+            imported = await client.call_tool("session", {"action": "import", "source_dir": str(source)})
             payload = imported.structured_content
             assert sorted(payload["copied"]) == ["Config.yml", "Model.py"]
             assert payload["linked"] == ["Checkpoints"]
@@ -489,10 +489,10 @@ def test_import_experiment_links_artifacts(
             assert (workspace / "Checkpoints").is_symlink()
             assert (workspace / "Checkpoints" / "OLD_RUN" / "best.pt").read_text(encoding="utf-8") == "ckpt"
 
-            read_back = await client.call_tool("read_session_file", {"path": "Config.yml"})
+            read_back = await client.call_tool("read_file", {"path": "Config.yml"})
             assert "OLD_RUN" in read_back.structured_content["content"]
 
-            again = await client.call_tool("import_experiment", {"source_dir": str(source)})
+            again = await client.call_tool("session", {"action": "import", "source_dir": str(source)})
             assert "Config.yml" in again.structured_content["skipped"]
 
     asyncio.run(scenario())

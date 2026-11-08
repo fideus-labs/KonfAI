@@ -168,7 +168,7 @@ def test_plan_transform_is_covered_by_that_guard(
     monkeypatch.setattr(server, "_run_api_in_subprocess", killed_child)
 
     with pytest.raises(RuntimeError):
-        server.plan_transform(cpu=1)
+        server.run_transform(dry_run=True, cpu=1)
 
     assert config_path.read_text(encoding="utf-8") == authored
     assert leftovers and not leftovers[0].exists()

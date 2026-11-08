@@ -334,9 +334,9 @@ class AppService:
             next_actions.append("list_apps")
         elif info.get_task() == "registration":
             # Registered through impact-reg-konfai (see _registration_preset): scored through the transform.
-            next_actions.extend(["run_app", "list_app_parameters", "run_registration_evaluate"])
+            next_actions.extend(["run_app", "describe_app", "run_registration_evaluate"])
         else:
-            next_actions.extend(["run_app", "list_app_parameters", "import_app"])
+            next_actions.extend(["run_app", "describe_app", "fetch_app"])
             if finetunable:
                 next_actions.append("fine_tune_app")
 
@@ -421,7 +421,7 @@ class AppService:
             "source": payload.get("source", "local"),
             "values": payload.get("values", {}),
             "constraints": payload.get("constraints", {}),
-            "next_actions": ["run_app", "import_app", "export_app"],
+            "next_actions": ["run_app", "fetch_app"],
         }
 
     def export_app(
@@ -458,7 +458,7 @@ class AppService:
         return {
             "ref": ref,
             "exported_to": str(target),
-            "next_actions": ["describe_app", "run_app", "import_app", "register_app_source"],
+            "next_actions": ["describe_app", "run_app", "fetch_app", "app_sources"],
         }
 
     def import_app(
@@ -499,7 +499,7 @@ class AppService:
             "files": payload["files"],
             "checkpoints": payload["checkpoints"],
             "configs": payload["configs"],
-            "next_actions": ["run_resume", "run_prediction", "run_evaluation", "validate_config_semantics"],
+            "next_actions": ["run_resume", "run_prediction", "run_evaluation", "check_config"],
         }
 
     #: app resolution helpers (mode + trust gate) ----------------------------------------------
@@ -1133,7 +1133,7 @@ class AppService:
             "support_files": sorted(planned_support),
             "inputs": sorted(inputs) if inputs else [],
             "outputs": sorted(outputs) if outputs else [],
-            "next_actions": ["describe_app", "run_app", "import_app"],
+            "next_actions": ["describe_app", "run_app", "fetch_app"],
         }
         if any(Path(path).name == "Config.yml" for path in resolved_configs):
             result["warnings"] = [

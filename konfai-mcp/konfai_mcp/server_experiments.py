@@ -136,7 +136,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         next_actions: list[str] = list(STAGE_ACTIONS.get(stage, []))
         configs_present = readiness["configs_present"]
         if configs_present.get("train"):
-            next_actions.extend(["review_config_semantics", "validate_config_semantics"])
+            next_actions.extend(["check_config"])
         if readiness.get("train"):
             next_actions.append("run_train")
         if readiness.get("prediction"):
@@ -146,13 +146,13 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         if readiness.get("transform"):
             # The plan first, always: run_transform writes a dataset, and the plan is what says how
             # much and how: including whether the run would refuse before writing a byte.
-            next_actions.extend(["plan_transform", "run_transform"])
+            next_actions.extend(["run_transform"])
         if not all(configs_present.values()):
             next_actions.append("write_workflow_config")
         if any(readiness["blocked"][workflow]["missing_paths"] for workflow in self.ordered_workflows()):
             next_actions.extend(["inspect_dataset", "prepare_dataset_aliases"])
         if not next_actions:
-            next_actions = ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
+            next_actions = ["inspect_dataset", "design_config_strategy", "initialize_session"]
         return list(dict.fromkeys(next_actions))
 
     def _config_validation_payloads(
@@ -352,7 +352,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                 "can_reference_external_libraries": True,
                 "can_write_local_components": True,
                 "recommended_local_files": ["Model.py", "Loss.py", "Transform.py", "Augmentation.py"],
-                "discovery_tools": ["list_components", "describe_extension_points", "check_external_dependency"],
+                "discovery_tools": ["list_components", "describe_extension_points", "check_component"],
                 "signature_tool": "inspect_object_signature",
                 "write_tool": "write_session_file",
                 "how_to_customize": [
@@ -383,12 +383,10 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
                 else None
             ),
             "next_actions": (
-                ["initialize_session", "write_workflow_config", "inspect_object_signature", "review_config_semantics"]
+                ["initialize_session", "write_workflow_config", "inspect_object_signature", "check_config"]
                 if not unresolved_questions
                 else (
-                    ["browse_dataset", "inspect_dataset", "design_config_strategy"]
-                    if dataset_ambiguity
-                    else ["design_config_strategy"]
+                    ["inspect_dataset", "design_config_strategy"] if dataset_ambiguity else ["design_config_strategy"]
                 )
             ),
             "next_resources": ["guide://config-design", "docs://dataset-mapping"] if unresolved_questions else [],
@@ -879,7 +877,7 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
         payload["next_actions"] = (
             ["write_session_file", "write_workflow_config", "inspect_object_signature", "summarize_session"]
             if payload["blocking_issues"]
-            else ["validate_config_semantics", "summarize_session"]
+            else ["check_config", "summarize_session"]
         )
         return payload
 
@@ -1204,5 +1202,5 @@ class SessionService(DatasetInspectionMixin, MetricsServiceMixin):
             "semantic_reviews": semantic_reviews,
         }
         validation["active_jobs"] = [self.job_payload(job) for job in self.active_jobs()]
-        validation["next_actions"] = ["review_config_semantics", "validate_config_semantics", "summarize_session"]
+        validation["next_actions"] = ["check_config", "summarize_session"]
         return validation

@@ -182,11 +182,11 @@ def test_validated_config_names_only_registered_tools(
     monkeypatch.setattr(mcp_server.SESSION, "validate_semantics", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(mcp_server.SESSION, "session_summary", lambda *a, **k: {"next_actions": []})
 
-    actions = mcp_server.validate_config_semantics(workflow=workflow)["next_actions"]
+    actions = mcp_server.check_config(workflow=workflow, level="instantiate")["next_actions"]
 
     assert not [action for action in actions if action not in tool_names], actions
     if workflow.lower() == "transform":
-        assert actions.index("plan_transform") < actions.index("run_transform")
+        assert actions.count("run_transform") == 1
 
 
 @pytest.mark.usefixtures("workspace_root")

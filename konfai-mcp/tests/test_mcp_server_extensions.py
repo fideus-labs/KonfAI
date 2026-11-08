@@ -134,24 +134,18 @@ def test_component_smoke_tests(
             await client.call_tool("write_session_file", {"relative_path": "MyTransform.py", "content": good})
             await client.call_tool("write_session_file", {"relative_path": "BadTransform.py", "content": bad})
 
-            ok = await client.call_tool(
-                "run_component_smoke_test", {"classpath": "MyTransform:Doubler", "kind": "transform"}
-            )
+            ok = await client.call_tool("check_component", {"classpath": "MyTransform:Doubler", "kind": "transform"})
             ok_data = ok.structured_content
             assert ok_data["ok"] is True
             assert ok_data["predicted_shape"] == ok_data["actual_shape"]
 
-            broken = await client.call_tool(
-                "run_component_smoke_test", {"classpath": "BadTransform:Liar", "kind": "transform"}
-            )
+            broken = await client.call_tool("check_component", {"classpath": "BadTransform:Liar", "kind": "transform"})
             broken_data = broken.structured_content
             assert broken_data["ok"] is False
             assert broken_data["predicted_shape"] != broken_data["actual_shape"]
             assert "write_session_file" in broken_data["next_actions"]
 
-            loss = await client.call_tool(
-                "run_component_smoke_test", {"classpath": "torch.nn:MSELoss", "kind": "criterion"}
-            )
+            loss = await client.call_tool("check_component", {"classpath": "torch.nn:MSELoss", "kind": "criterion"})
             loss_data = loss.structured_content
             assert loss_data["ok"] is True
             assert loss_data["behaves_as"] == "loss"

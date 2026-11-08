@@ -84,10 +84,10 @@ def test_train_step_validation_catches_runtime_only_config_error(
                 "write_workflow_config",
                 {"workflow": "train", "content": _seg_train_config(session_dir, in_channels=2)},
             )
-            setup = await client.call_tool("validate_config_semantics", {"workflow": "train", "level": "setup"})
+            setup = await client.call_tool("check_config", {"workflow": "train", "level": "setup"})
             assert setup.structured_content["ok"] is True  # setup does not run the model
 
-            step = await client.call_tool("validate_config_semantics", {"workflow": "train", "level": "train_step"})
+            step = await client.call_tool("check_config", {"workflow": "train", "level": "train_step"})
             assert step.structured_content["ok"] is False  # the forward catches the channel mismatch
             assert "channel" in (step.structured_content.get("error") or "").lower()
 
@@ -96,7 +96,7 @@ def test_train_step_validation_catches_runtime_only_config_error(
                 "write_workflow_config",
                 {"workflow": "train", "content": _seg_train_config(session_dir, in_channels=1)},
             )
-            ok_step = await client.call_tool("validate_config_semantics", {"workflow": "train", "level": "train_step"})
+            ok_step = await client.call_tool("check_config", {"workflow": "train", "level": "train_step"})
             assert ok_step.structured_content["ok"] is True
             assert ok_step.structured_content["train_step"]["forward"] is True
 
@@ -172,7 +172,7 @@ def test_mcp_server_segmentation_template_pipeline(
 
             config_before_validation = (session_dir / "Config.yml").read_text(encoding="utf-8")
             validation = await client.call_tool(
-                "validate_config_semantics",
+                "check_config",
                 {"workflow": "train", "level": "instantiate"},
             )
             assert validation.structured_content["ok"] is True
@@ -192,13 +192,18 @@ def test_mcp_server_segmentation_template_pipeline(
                 max_entries=5,
             )
             done = await client.call_tool(
-                "wait_for_job",
-                {"job_id": train_job.structured_content["job_id"], "timeout_s": 180.0, "poll_interval_s": 0.2},
+                "get_job_status",
+                {
+                    "wait": True,
+                    "job_id": train_job.structured_content["job_id"],
+                    "timeout_s": 180.0,
+                    "poll_interval_s": 0.2,
+                },
             )
             assert done.structured_content["status"] == "done"
 
             prediction_validation = await client.call_tool(
-                "validate_config_semantics",
+                "check_config",
                 {"workflow": "prediction", "level": "instantiate"},
             )
             assert prediction_validation.structured_content["ok"] is True
@@ -207,7 +212,7 @@ def test_mcp_server_segmentation_template_pipeline(
             )
 
             evaluation_validation = await client.call_tool(
-                "validate_config_semantics",
+                "check_config",
                 {"workflow": "evaluation", "level": "instantiate"},
             )
             assert evaluation_validation.structured_content["ok"] is True

@@ -57,6 +57,7 @@ from .guide import (
     CLARIFY_TASK_AND_GROUPS_PROMPT,
     DEBUG_CONFIG_WARNING_PROMPT,
     PLAN_CONFIG_STRATEGY_PROMPT,
+    SERVER_INSTRUCTIONS,
     SOLVE_TASK_PROMPT,
     TOOL_DESCRIPTIONS,
 )
@@ -97,7 +98,9 @@ from .server_support import (
 )
 from .workflows import WORKFLOW_SPECS, JobKind, WorkflowKind, workflow_choice_description
 
-mcp = FastMCP("KonfAI")
+mcp = FastMCP("KonfAI", instructions=SERVER_INSTRUCTIONS)
+#: Claude Code loads a tool carrying this upfront even when it defers the rest to its tool search.
+ALWAYS_LOAD = {"anthropic/alwaysLoad": True}
 
 KONFAI_VERSION = konfai_pkg.__version__
 konfai_get_available_devices = konfai_pkg.get_available_devices
@@ -206,7 +209,7 @@ def _write_workflow_config(
         "next_actions": (
             ["write_workflow_config", "describe_config_schema"]
             if "schema_errors" in result
-            else ["review_config_semantics", "validate_config_semantics", f"run_{workflow}"]
+            else ["check_config", "check_config", f"run_{workflow}"]
         ),
     }
 
@@ -944,8 +947,7 @@ def read_job_manifest(job_id: str) -> dict[str, Any]:
     return {"path": str(job.manifest_path), "manifest": manifest}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["browse_dataset"]))
-def browse_dataset(
+def _tool_browse_dataset(
     dataset_dir: Annotated[str, Field(description="Host path of the dataset directory (or parent of roots) to scan.")],
     depth: Annotated[int, Field(description="Maximum directory depth to walk (default 2).")] = 2,
     max_entries: Annotated[
@@ -960,8 +962,7 @@ def browse_dataset(
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_dataset_file"]))
-def read_dataset_file(
+def _tool_read_dataset_file(
     path: Annotated[str, Field(description="Host path of the text file to preview (CSV/TSV/JSON/YAML/txt/header).")],
     max_lines: Annotated[int, Field(description="Maximum lines returned (default 200).")] = 200,
     max_chars: Annotated[int, Field(description="Streaming read cap in characters (default 65536).")] = 65536,
@@ -997,8 +998,7 @@ def _statistics_failure_reason(group: str, extension: str, exc: Exception) -> st
     return f"Statistics for group '{group}' could not be computed ({type(exc).__name__}): {detail or 'read failed'}."
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["inspect_dataset"]))
-def inspect_dataset(
+def _tool_inspect_dataset(
     dataset_dir: Annotated[
         str, Field(description="Host path of the chosen dataset root (browse_dataset first when ambiguous).")
     ],
@@ -1081,7 +1081,7 @@ def inspect_dataset(
     if warnings:
         payload["warnings"] = [*(payload.get("warnings") or []), *warnings]
     payload["next_actions"] = [
-        "browse_dataset",
+        "inspect_dataset",
         "prepare_dataset_aliases",
         "design_config_strategy",
         "initialize_session",
@@ -1187,7 +1187,7 @@ def inspect_object_signature(
         **summary,
         "session": WORKSPACE_LAYOUT.current_session,
         "next_actions": (
-            ["review_config_semantics", "validate_config_semantics"]
+            ["check_config"]
             if summary.get("ok")
             else ["write_session_file", "write_workflow_config", "summarize_session"]
         ),
@@ -1207,7 +1207,7 @@ def list_components(
     return {**_catalog_list_components(kind), "session": WORKSPACE_LAYOUT.current_session}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_konfai_capabilities"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_konfai_capabilities"]), meta=ALWAYS_LOAD)
 def describe_konfai_capabilities() -> dict[str, Any]:
     """Overview of what KonfAI can do and which MCP primitive to use for each capability."""
     return _describe_konfai_capabilities()
@@ -1243,8 +1243,7 @@ def describe_extension_points(
     return _describe_extension_points(kind)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["check_external_dependency"]))
-def check_external_dependency(
+def _tool_check_external_dependency(
     module: Annotated[
         str,
         Field(
@@ -1269,7 +1268,7 @@ def apps_catalog_resource() -> dict[str, Any]:
     return {"apps": refs, "count": len(refs), "sources": provenance}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_apps"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["list_apps"]), meta=ALWAYS_LOAD)
 def list_apps(
     repos: Annotated[
         list[str] | None,
@@ -1291,8 +1290,7 @@ def list_apps(
     return {**APP_SERVICE.list_apps(repos=repos, include_summary=include_summary, force_update=force_update)}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_app"]))
-def describe_app(
+def _tool_describe_app(
     ref: Annotated[
         str,
         Field(
@@ -1307,8 +1305,7 @@ def describe_app(
     return APP_SERVICE.describe_app(ref, force_update=force_update)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_app_parameters"]))
-def list_app_parameters(
+def _tool_list_app_parameters(
     ref: Annotated[
         str,
         Field(
@@ -1329,8 +1326,7 @@ def list_app_parameters(
     return APP_SERVICE.list_parameters(ref, allow_untrusted_code=allow_untrusted_code, force_update=force_update)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["export_app"]))
-def export_app(
+def _tool_export_app(
     ref: Annotated[
         str,
         Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be exported)."),
@@ -1364,8 +1360,7 @@ def export_app(
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["import_app"]))
-def import_app(
+def _tool_import_app(
     ref: Annotated[
         str,
         Field(description="App id 'repo_id:app_name' or local app folder path (remote servers cannot be imported)."),
@@ -1414,7 +1409,9 @@ _APP_MAX_VOXELS_DESC = (
 _APP_BATCH_SIZE_DESC = (
     "Force the inference batch size (overrides the app's config, whose `batch_size: 0` measures it on the GPU)."
 )
-_APP_SET_PARAMETERS_DESC = "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see list_app_parameters."
+_APP_SET_PARAMETERS_DESC = (
+    "Model tuning NAME->VALUE overrides (e.g. {'iterations': 300}); see describe_app(parameters=True)."
+)
 _APP_MASK_DESC = "Mask volumes as GROUPS restricting the evaluated region."
 
 
@@ -1446,7 +1443,7 @@ _APP_ACTION_PARAMETERS: dict[str, set[str]] = {
 }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_app"]), meta=ALWAYS_LOAD)
 def run_app(
     ref: Annotated[str, Field(description=_APP_REF_DESC)],
     action: Annotated[
@@ -1680,44 +1677,39 @@ def run_scout_inspection(
         local_provider=local_provider,
     )
     payload = _launch_app_job(spec)
-    payload["next_actions"] = ["wait_for_job", "read_scout_report"]
+    payload["next_actions"] = ["get_job_status", "read_scout_report"]
     return payload
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_scout_report"]))
-def read_scout_report(
+def _tool_read_scout_report(
     name: Annotated[str, Field(description="The inspection's name (list_scout_reports lists them).")],
 ) -> dict[str, Any]:
     """Read a Scout report: verdict, observations, measurements, views; no image bytes."""
     return SCOUT_SERVICE.read_report(name)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_scout_reports"]))
-def list_scout_reports() -> dict[str, Any]:
+def _tool_list_scout_reports() -> dict[str, Any]:
     """List the session's Scout inspections."""
     return {"reports": SCOUT_SERVICE.list_reports(), "next_actions": ["read_scout_report", "run_scout_inspection"]}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_list_datasets"]))
-def fidopt_list_datasets(
+def _tool_fidopt_list_datasets(
     task: Annotated[
         Literal["registration", "segmentation", "synthesis"] | None, Field(description="One task only.")
     ] = None,
 ) -> dict[str, Any]:
     """List FidOpt's datasets through FidOpt's own code."""
-    return {"datasets": FIDOPT.list_datasets(task), "next_actions": ["fidopt_describe_dataset", "fidopt_table"]}
+    return {"datasets": FIDOPT.list_datasets(task), "next_actions": ["fidopt_catalog", "fidopt_table"]}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_describe_dataset"]))
-def fidopt_describe_dataset(
+def _tool_fidopt_describe_dataset(
     dataset: Annotated[str, Field(description="A FidOpt dataset name.")],
 ) -> dict[str, Any]:
     """One FidOpt dataset's descriptor."""
     return {"dataset": FIDOPT.describe_dataset(dataset), "next_actions": ["fidopt_table", "fidopt_run"]}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_list_methods"]))
-def fidopt_list_methods() -> dict[str, Any]:
+def _tool_fidopt_list_methods() -> dict[str, Any]:
     """List the methods FidOpt runs."""
     return {"methods": FIDOPT.list_methods(), "next_actions": ["fidopt_table", "fidopt_run"]}
 
@@ -1765,7 +1757,7 @@ def fidopt_run(
         WORKSPACE_LAYOUT.ensure_session_workspace(),
     )
     payload = _launch_app_job(spec)
-    payload["next_actions"] = ["wait_for_job", "read_job_log", "fidopt_table"]
+    payload["next_actions"] = ["get_job_status", "read_job_log", "fidopt_table"]
     return payload
 
 
@@ -1802,7 +1794,7 @@ def fine_tune_app(
         dict[str, Any] | None,
         Field(
             description="NAME->VALUE overrides baked into the training config before fine-tuning. A bare NAME "
-            "is a model parameter (see list_app_parameters, e.g. {'iterations': 300}); any other config key "
+            "is a model parameter (see describe_app(parameters=True), e.g. {'iterations': 300}); any other config key "
             "needs its full dotted path from the config root (e.g. {'Trainer.Dataset.num_workers': 2}). "
             "For batch size, prefer the batch_size parameter."
         ),
@@ -1837,8 +1829,7 @@ def fine_tune_app(
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["register_app_source"]))
-def register_app_source(
+def _tool_register_app_source(
     ref: Annotated[
         str,
         Field(
@@ -1850,8 +1841,7 @@ def register_app_source(
     return APP_SERVICE.register_app_source(ref)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["unregister_app_source"]))
-def unregister_app_source(
+def _tool_unregister_app_source(
     ref: Annotated[str, Field(description="App reference to remove from the editable workspace catalogue file.")],
 ) -> dict[str, Any]:
     """Remove an app reference from the editable workspace app catalogue."""
@@ -2021,7 +2011,7 @@ def prepare_dataset_aliases(
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["initialize_session"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["initialize_session"]), meta=ALWAYS_LOAD)
 def initialize_session(
     overwrite: Annotated[
         bool,
@@ -2094,7 +2084,7 @@ def initialize_session(
                 "summary": "session://current/summary",
             }
         ),
-        "next_actions": ["write_workflow_config", "review_config_semantics", "summarize_session"],
+        "next_actions": ["write_workflow_config", "check_config", "summarize_session"],
     }
     if skipped_python:
         payload["warnings"] = [
@@ -2119,15 +2109,14 @@ def _refuse_if_session_pinned(action: str) -> None:
         )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["create_session"]))
-def create_session(
+def _tool_create_session(
     name: Annotated[str, Field(description="Session name (sanitized to a filesystem-safe form).")],
     switch: Annotated[
         bool, Field(description="Also make the new session current (refused while a job is active; default True).")
     ] = True,
 ) -> dict[str, Any]:
     """Create a named session workspace and (by default) switch the server onto it."""
-    _refuse_if_session_pinned("create_session")
+    _refuse_if_session_pinned("session")
     safe = WORKSPACE_LAYOUT.sanitize_name(name)
     session_dir = WORKSPACE_LAYOUT.session_dir(safe)
     created = not session_dir.exists()
@@ -2141,19 +2130,18 @@ def create_session(
         "created": created,
         "switched": switch,
         "sessions": WORKSPACE_LAYOUT.available_sessions(),
-        "next_actions": ["initialize_session", "import_experiment", "summarize_session"],
+        "next_actions": ["initialize_session", "session", "summarize_session"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["switch_session"]))
-def switch_session(
+def _tool_switch_session(
     name: Annotated[
         str,
         Field(description="Existing session name to switch onto (see sessions://list; create_session makes new ones)."),
     ],
 ) -> dict[str, Any]:
     """Switch the current session workspace (job history reloads from that session's disk state)."""
-    _refuse_if_session_pinned("switch_session")
+    _refuse_if_session_pinned("session")
     safe = WORKSPACE_LAYOUT.sanitize_name(name)
     if safe not in WORKSPACE_LAYOUT.available_sessions():
         raise ValueError(
@@ -2172,8 +2160,7 @@ def switch_session(
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["import_experiment"]))
-def import_experiment(
+def _tool_import_experiment(
     source_dir: Annotated[
         str,
         Field(
@@ -2235,9 +2222,8 @@ def import_experiment(
         "copied_instead_of_linked": copied_instead_of_linked,
         "skipped": skipped,
         "next_actions": [
-            "read_session_file",
-            "review_config_semantics",
-            "validate_config_semantics",
+            "read_file",
+            "check_config",
             "summarize_session",
         ],
     }
@@ -2265,12 +2251,11 @@ def write_session_file(
         "written": path.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "path": str(path),
         "bytes": path.stat().st_size,
-        "next_actions": ["inspect_object_signature", "review_config_semantics", "validate_config_semantics"],
+        "next_actions": ["inspect_object_signature", "check_config"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_session_file"]))
-def read_session_file(
+def _tool_read_session_file(
     path: Annotated[
         str, Field(description="Workspace-relative path, or an absolute path resolving inside the session workspace.")
     ],
@@ -2284,12 +2269,11 @@ def read_session_file(
         **payload,
         "relative_path": resolved.relative_to(WORKSPACE_LAYOUT.workspace_dir()).as_posix(),
         "session": WORKSPACE_LAYOUT.current_session,
-        "next_actions": ["write_session_file", "write_workflow_config", "review_config_semantics"],
+        "next_actions": ["write_session_file", "write_workflow_config", "check_config"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["read_template_file"]))
-def read_template_file(
+def _tool_read_template_file(
     name: Annotated[str, Field(description="Example template name (see templates://list).")],
     filename: Annotated[str, Field(description="File to read; must be a direct child of the template directory.")],
     max_chars: Annotated[int, Field(description="Maximum characters returned (default 20000).")] = 20000,
@@ -2530,12 +2514,11 @@ def describe_model_outputs(
             "equivalent). Attach the main loss to a terminal path; deep-supervision or perceptual losses may "
             "target intermediate paths."
         ),
-        "next_actions": ["write_workflow_config", "validate_config_semantics"],
+        "next_actions": ["write_workflow_config", "check_config"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_component_smoke_test"]))
-def run_component_smoke_test(
+def _tool_run_component_smoke_test(
     classpath: Annotated[
         str, Field(description="Component to test: local 'File:Class', builtin name, or 'package.module:Class'.")
     ],
@@ -2565,15 +2548,14 @@ def run_component_smoke_test(
         },
     )
     result["next_actions"] = (
-        ["write_workflow_config", "validate_config_semantics"]
+        ["write_workflow_config", "check_config"]
         if result.get("ok")
         else ["write_session_file", "inspect_object_signature"]
     )
     return result
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["delete_session"]))
-def delete_session(
+def _tool_delete_session(
     force: Annotated[
         bool,
         Field(
@@ -2582,7 +2564,7 @@ def delete_session(
     ] = False,
 ) -> dict[str, Any]:
     """Delete the current session workspace and optionally cancel active jobs first."""
-    _refuse_if_session_pinned("delete_session")
+    _refuse_if_session_pinned("session")
     workspace = WORKSPACE_LAYOUT.ensure_session_workspace_exists()
     active_jobs = SESSION.active_jobs()
     if active_jobs and not force:
@@ -2641,8 +2623,7 @@ def delete_run(
     return {"run_name": cleaned, "kind": kind, "deleted": removed}
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["validate_config_semantics"]))
-def validate_config_semantics(
+def _tool_validate_config_semantics(
     workflow: Annotated[
         str,
         Field(
@@ -2695,23 +2676,20 @@ def validate_config_semantics(
         resolved_models,
         config_path=_resolve_train_config(config_file) if config_file is not None else None,
     )
-    summary_actions = [
-        action for action in SESSION.session_summary()["next_actions"] if action != "validate_config_semantics"
-    ]
+    summary_actions = [action for action in SESSION.session_summary()["next_actions"] if action != "check_config"]
     if result.get("ok", False):
         # Named from the normalized value: the parameter is case-insensitive and 'run_Transform' is not
         # a tool. And a transform writes a dataset, so its plan comes first: the order every other
         # next_actions builder in this session already keeps.
         normalized = workflow.strip().lower()
-        launchers = ["plan_transform", "run_transform"] if normalized == "transform" else [f"run_{normalized}"]
+        launchers = ["run_transform"] if normalized == "transform" else [f"run_{normalized}"]
         result["next_actions"] = list(dict.fromkeys([*launchers, "summarize_session", *summary_actions]))
     else:
         result["next_actions"] = list(dict.fromkeys([*(result.get("next_actions", [])), "summarize_session"]))
     return result
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["review_config_semantics"]))
-def review_config_semantics(
+def _tool_review_config_semantics(
     workflow: Annotated[
         WorkflowKind,
         Field(description="Which session config to review (default 'train')."),
@@ -2721,7 +2699,7 @@ def review_config_semantics(
     return SESSION.review_config_semantics(workflow)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["summarize_session"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["summarize_session"]), meta=ALWAYS_LOAD)
 def summarize_session(
     include_leaderboard: Annotated[
         bool, Field(description="Include a top-5 leaderboard for the chosen split/metric (default True).")
@@ -2788,7 +2766,7 @@ def summarize_session(
     return round_floats(payload)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["write_workflow_config"]))
+@mcp.tool(description=(TOOL_DESCRIPTIONS["write_workflow_config"]), meta=ALWAYS_LOAD)
 def write_workflow_config(
     workflow: Annotated[
         WorkflowKind,
@@ -2806,8 +2784,7 @@ def write_workflow_config(
     return _write_workflow_config(workflow, content, overwrite)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["list_jobs"]))
-def list_jobs() -> list[dict[str, Any]]:
+def _tool_list_jobs() -> list[dict[str, Any]]:
     """List known jobs for the current session workspace."""
     with _JOBS_LOCK:
         jobs = list(_JOBS.values())
@@ -3328,8 +3305,7 @@ def run_evaluation(
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["run_transform"]))
-def run_transform(
+def _tool_run_transform(
     gpu: Annotated[
         int | list[int] | None,
         Field(description="GPU index or indices to run the chain on; omit for CPU (excludes cpu)."),
@@ -3368,8 +3344,7 @@ def run_transform(
     )
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["plan_transform"]))
-def plan_transform(
+def _tool_plan_transform(
     cpu: Annotated[int | None, Field(description="Rank count the plan is sized for (default 1).")] = None,
     overwrite: Annotated[
         bool, Field(description="Plan as if --overwrite: cases whose output exists are not counted as SKIP.")
@@ -3397,7 +3372,7 @@ def plan_transform(
 
 @mcp.tool(description=(TOOL_DESCRIPTIONS["cancel_job"]))
 def cancel_job(
-    job_id: Annotated[str, Field(description="Job to cancel (as returned by a run_* launch or list_jobs).")],
+    job_id: Annotated[str, Field(description="Job to cancel (as returned by a run_* launch or get_job_status).")],
     wait_s: Annotated[
         float, Field(description="Seconds to wait for a clean shutdown before the process group is killed (default 5).")
     ] = 5.0,
@@ -3406,14 +3381,7 @@ def cancel_job(
     return _cancel_job_payload(job_id, wait_s=wait_s)
 
 
-@mcp.tool(
-    description=(
-        "Request an on-demand validation pass on a running training job. Sends SIGUSR1 to the job's process "
-        "group; the trainer runs validation at its next iteration boundary and logs the metrics (no "
-        "checkpoint or early-stopping side effect). POSIX only; a no-op when no training job is running."
-    )
-)
-def request_validation(
+def _tool_request_validation(
     kind: Annotated[
         WorkflowKind, Field(description="Job kind to target when job_id is omitted (default 'train').")
     ] = "train",
@@ -3438,17 +3406,7 @@ def request_validation(
     }
 
 
-@mcp.tool(
-    description=(
-        "Change tunables of a RUNNING training job in place, without restarting it. Writes a jailed "
-        "control.json into the run's Statistics/<run>/ dir; the trainer re-reads it at its next poll boundary "
-        "(~20 iterations) and records each change into the run's config snapshot. 'it_validation' takes effect "
-        "for all following iterations; 'lr' sets the optimizer learning rate now, rebased so a running "
-        "scheduler keeps it (the schedule restarts from the new value). POSIX/local; a no-op when no training "
-        "job is running."
-    )
-)
-def set_live_tunables(
+def _tool_set_live_tunables(
     lr: Annotated[
         float | None,
         Field(
@@ -3500,12 +3458,11 @@ def set_live_tunables(
         "revision": revision,
         "applied": {key: payload[key] for key in ("lr", "it_validation") if key in payload},
         "detail": "Applied at the trainer's next poll boundary (~20 iterations).",
-        "next_actions": ["read_live_metrics", "request_validation", "get_job_status"],
+        "next_actions": ["read_live_metrics", "control_training", "get_job_status"],
     }
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["get_job_status"]))
-def get_job_status(
+def _tool_get_job_status(
     job_id: Annotated[str, Field(description="Job identifier returned by a run_* launch or list_jobs.")],
 ) -> dict[str, Any]:
     """Return the current job status together with suggested next actions."""
@@ -3558,7 +3515,7 @@ def read_job_log(
         "grep": grep,
         "lines_returned": len(selected),
         "content": "\n".join(selected),
-        "next_actions": ["get_job_status", "validate_config_semantics", "summarize_session"],
+        "next_actions": ["get_job_status", "check_config", "summarize_session"],
     }
 
 
@@ -3580,8 +3537,7 @@ def read_live_metrics(
     return SESSION.read_live_metrics_payload(job, max_entries)
 
 
-@mcp.tool(description=(TOOL_DESCRIPTIONS["wait_for_job"]))
-def wait_for_job(
+def _tool_wait_for_job(
     job_id: Annotated[str, Field(description="Job to wait for.")],
     timeout_s: Annotated[
         float | None,
@@ -3608,9 +3564,297 @@ def wait_for_job(
                 f"Job still {payload['status']} after {timeout_s:.1f}s of waiting: not a failure. "
                 "Call wait_for_job again, or read_live_metrics to watch progress."
             )
-            payload["next_actions"] = ["wait_for_job", "read_live_metrics", "read_job_log"]
+            payload["next_actions"] = ["get_job_status", "read_live_metrics", "read_job_log"]
             return payload
         time.sleep(interval)
+
+
+# ------------------------------------------------------------------ one tool per object: the variants are its arguments
+
+
+def _required(value: str | None, field: str, action: str) -> str:
+    if not value:
+        raise ValueError(f"{field} is required for action '{action}'.")
+    return value
+
+
+def _inside_workspace(path: str) -> bool:
+    try:
+        Path(path).expanduser().resolve().relative_to(WORKSPACE_LAYOUT.workspace_dir().resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["inspect_dataset"]))
+def inspect_dataset(
+    dataset_dir: Annotated[str, Field(description="The dataset root; with browse=True, any folder to explore.")],
+    browse: Annotated[
+        bool,
+        Field(description="Return a bounded file tree with candidate dataset roots instead of the group analysis."),
+    ] = False,
+    groups: Annotated[list[str] | None, Field(description="Restrict the statistics to these groups.")] = None,
+    extension: Annotated[str | None, Field(description="File extension to read; detected when omitted.")] = None,
+    max_cases_per_group: Annotated[int, Field(description="Cases sampled per group for the statistics.")] = 10,
+    seed: Annotated[int, Field(description="Sampling seed.")] = 0,
+    include_stats: Annotated[bool, Field(description="Sampled statistics (False: structure only, fast).")] = True,
+    depth: Annotated[int, Field(description="browse: folder depth of the tree.")] = 2,
+    max_entries: Annotated[int, Field(description="browse: entries listed at most.")] = 200,
+) -> dict[str, Any]:
+    if browse:
+        return _tool_browse_dataset(dataset_dir, depth=depth, max_entries=max_entries)
+    return _tool_inspect_dataset(
+        dataset_dir,
+        groups=groups,
+        extension=extension,
+        max_cases_per_group=max_cases_per_group,
+        seed=seed,
+        include_stats=include_stats,
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["read_file"]))
+def read_file(
+    path: Annotated[
+        str,
+        Field(
+            description="Relative to the session, or absolute for a dataset file; with template, the file name "
+            "inside that template."
+        ),
+    ],
+    template: Annotated[str | None, Field(description="An example template name: read one of its files.")] = None,
+    max_chars: Annotated[int, Field(description="Characters returned at most.")] = 20000,
+    offset: Annotated[int, Field(description="Character offset to start from (session and template files).")] = 0,
+    max_lines: Annotated[int, Field(description="Lines returned at most from a dataset file.")] = 200,
+) -> dict[str, Any]:
+    if template is not None:
+        return _tool_read_template_file(template, path, max_chars=max_chars, offset=offset)
+    if Path(path).expanduser().is_absolute() and not _inside_workspace(path):
+        return _tool_read_dataset_file(path, max_lines=max_lines, max_chars=max_chars)
+    return _tool_read_session_file(path, max_chars=max_chars, offset=offset)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["check_component"]))
+def check_component(
+    classpath: Annotated[
+        str,
+        Field(
+            description="`package.module:Class`, a session `File:Class`, or a bare package name; without kind "
+            "only its top-level package is checked."
+        ),
+    ],
+    kind: Annotated[
+        Literal["transform", "criterion", "loss", "metric"] | None,
+        Field(description="Contract to exercise in a smoke test; omit for the import pre-flight."),
+    ] = None,
+    shape: Annotated[
+        list[int] | None, Field(description="Smoke test: dummy tensor shape, channel-first (default [1, 8, 8, 8]).")
+    ] = None,
+    init_kwargs: Annotated[
+        dict[str, Any] | None, Field(description="Smoke test: constructor keyword arguments.")
+    ] = None,
+) -> dict[str, Any]:
+    if kind is None:
+        module, _, object_name = classpath.replace(":", ".").rpartition(".")
+        if not module:
+            module, object_name = object_name, ""
+        return _tool_check_external_dependency(module, object_name or None)
+    return _tool_run_component_smoke_test(classpath, kind, shape=shape, init_kwargs=init_kwargs)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["check_config"]))
+def check_config(
+    workflow: Annotated[
+        WorkflowKind | Literal["all"],
+        Field(
+            description="Which workflow config to check; 'all' checks every present config (instantiate and deeper)."
+        ),
+    ] = "train",
+    level: Annotated[
+        Literal["review", "instantiate", "setup", "train_step"],
+        Field(
+            description="review: schema and semantics, no runtime object; instantiate, setup, train_step: built "
+            "in an isolated subprocess, each deeper than the last."
+        ),
+    ] = "review",
+    models: Annotated[
+        list[str] | None, Field(description="instantiate and deeper: checkpoint paths for a prediction or evaluation.")
+    ] = None,
+    config_file: Annotated[
+        str | None, Field(description="instantiate and deeper: an alternate train config file of the session.")
+    ] = None,
+) -> dict[str, Any]:
+    if level == "review":
+        if workflow == "all":
+            raise ValueError("level 'review' checks one workflow: pass train, prediction, evaluation or transform.")
+        return _tool_review_config_semantics(workflow)
+    return _tool_validate_config_semantics(workflow, level=level, models=models, config_file=config_file)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["run_transform"]))
+def run_transform(
+    dry_run: Annotated[
+        bool,
+        Field(description="Plan only: every case's verdict and the budget; nothing of the deliverable is written."),
+    ] = False,
+    gpu: Annotated[int | list[int] | None, Field(description="GPU index or indices; omitted: CPU.")] = None,
+    cpu: Annotated[int | None, Field(description="CPU worker count (> 0); excludes gpu.")] = None,
+    overwrite: Annotated[bool, Field(description="Recompute outputs that already exist.")] = False,
+    quiet: Annotated[bool, Field(description="Suppress the console output.")] = False,
+    single_process: Annotated[bool, Field(description="Run inline in one process (no DDP spawn).")] = False,
+) -> dict[str, Any]:
+    if dry_run:
+        return _tool_plan_transform(cpu=cpu, overwrite=overwrite)
+    return _tool_run_transform(gpu=gpu, cpu=cpu, overwrite=overwrite, quiet=quiet, single_process=single_process)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["session"]))
+def session(
+    action: Annotated[Literal["list", "create", "switch", "delete", "import"], Field(description="What to do.")],
+    name: Annotated[str | None, Field(description="create, switch: the session name.")] = None,
+    source_dir: Annotated[str | None, Field(description="import: the experiment directory to adopt.")] = None,
+    include_artifacts: Annotated[
+        Literal["link", "copy", "none"],
+        Field(description="import: how Checkpoints, Predictions, Evaluations, Statistics and Dataset come along."),
+    ] = "link",
+    overwrite: Annotated[bool, Field(description="import: replace files already in the session.")] = False,
+    switch: Annotated[bool, Field(description="create: make the new session current.")] = True,
+    force: Annotated[bool, Field(description="delete: cancel the active jobs first.")] = False,
+) -> dict[str, Any]:
+    if action == "list":
+        return {"session": WORKSPACE_LAYOUT.current_session, "sessions": WORKSPACE_LAYOUT.available_sessions()}
+    if action == "create":
+        return _tool_create_session(_required(name, "name", action), switch=switch)
+    if action == "switch":
+        return _tool_switch_session(_required(name, "name", action))
+    if action == "delete":
+        return _tool_delete_session(force=force)
+    return _tool_import_experiment(
+        _required(source_dir, "source_dir", action), include_artifacts=include_artifacts, overwrite=overwrite
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["get_job_status"]))
+def get_job_status(
+    job_id: Annotated[str | None, Field(description="The job; omitted: every job of the session.")] = None,
+    wait: Annotated[bool, Field(description="Block until the job ends or timeout_s expires.")] = False,
+    timeout_s: Annotated[
+        float | None, Field(description="wait: seconds before returning the current status with timed_out=true.")
+    ] = None,
+    poll_interval_s: Annotated[float, Field(description="wait: polling interval in seconds.")] = 0.5,
+) -> dict[str, Any]:
+    if job_id is None:
+        return {"jobs": _tool_list_jobs(), "session": WORKSPACE_LAYOUT.current_session}
+    if wait:
+        return _tool_wait_for_job(job_id, timeout_s=timeout_s, poll_interval_s=poll_interval_s)
+    return _tool_get_job_status(job_id)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["control_training"]))
+def control_training(
+    job_id: Annotated[str | None, Field(description="The training job; omitted: the running one.")] = None,
+    lr: Annotated[
+        float | None, Field(description="New learning rate, applied now and kept by a running scheduler.")
+    ] = None,
+    it_validation: Annotated[int | None, Field(description="New validation interval, in iterations.")] = None,
+    validate_now: Annotated[bool, Field(description="Run a validation pass at the next iteration.")] = False,
+    kind: Annotated[WorkflowKind, Field(description="Job kind to target when job_id is omitted.")] = "train",
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if lr is not None or it_validation is not None:
+        payload = _tool_set_live_tunables(lr=lr, it_validation=it_validation, job_id=job_id)
+    if validate_now:
+        validation = _tool_request_validation(kind=kind, job_id=job_id)
+        payload = {**payload, "validation": validation} if payload else validation
+    if not payload:
+        return _tool_set_live_tunables(lr=None, it_validation=None, job_id=job_id)
+    return payload
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["describe_app"]))
+def describe_app(
+    ref: Annotated[str, Field(description="App reference: a local bundle path, a HuggingFace repo or repo/app.")],
+    parameters: Annotated[
+        bool, Field(description="Add the app's tunable model parameters and their constraints (imports its code).")
+    ] = False,
+    allow_untrusted_code: Annotated[
+        bool, Field(description="parameters: confirm the app's code may be imported, in an isolated subprocess.")
+    ] = False,
+    force_update: Annotated[bool, Field(description="Re-download a cached HuggingFace app.")] = False,
+) -> dict[str, Any]:
+    payload = _tool_describe_app(ref, force_update=force_update)
+    if parameters:
+        tunables = _tool_list_app_parameters(ref, allow_untrusted_code=allow_untrusted_code, force_update=force_update)
+        payload = {**payload, "parameters": tunables}
+    return payload
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fetch_app"]))
+def fetch_app(
+    ref: Annotated[str, Field(description="App reference: a local bundle path, a HuggingFace repo or repo/app.")],
+    path: Annotated[
+        str | None,
+        Field(description="Export the app as an editable bundle in this folder; omitted: import it into the session."),
+    ] = None,
+    display_name: Annotated[str | None, Field(description="Display name of the copy.")] = None,
+    set_parameters: Annotated[
+        dict[str, Any] | None, Field(description="Model parameter name->value overrides baked into the copied config.")
+    ] = None,
+    allow_untrusted_code: Annotated[
+        bool, Field(description="import: confirm the app's code may be copied and run and its requirements installed.")
+    ] = False,
+    overwrite: Annotated[bool, Field(description="export: replace files already in the destination.")] = False,
+    force_update: Annotated[bool, Field(description="Re-download a cached HuggingFace app.")] = False,
+) -> dict[str, Any]:
+    if path is not None:
+        return _tool_export_app(
+            ref,
+            path,
+            display_name=display_name,
+            set_parameters=set_parameters,
+            force_update=force_update,
+            overwrite=overwrite,
+        )
+    return _tool_import_app(
+        ref,
+        allow_untrusted_code=allow_untrusted_code,
+        display_name=display_name,
+        set_parameters=set_parameters,
+        force_update=force_update,
+    )
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["app_sources"]))
+def app_sources(
+    action: Annotated[Literal["add", "remove"], Field(description="add persists the reference; remove drops it.")],
+    ref: Annotated[str, Field(description="An app bundle path or a HuggingFace repo id.")],
+) -> dict[str, Any]:
+    return _tool_register_app_source(ref) if action == "add" else _tool_unregister_app_source(ref)
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["read_scout_report"]))
+def read_scout_report(
+    name: Annotated[str | None, Field(description="The inspection's name; omitted: the session's inspections.")] = None,
+) -> dict[str, Any]:
+    return _tool_read_scout_report(name) if name else _tool_list_scout_reports()
+
+
+@mcp.tool(description=(TOOL_DESCRIPTIONS["fidopt_catalog"]))
+def fidopt_catalog(
+    dataset: Annotated[
+        str | None, Field(description="One dataset's name for its descriptor; omitted: every dataset.")
+    ] = None,
+    task: Annotated[
+        Literal["registration", "segmentation", "synthesis"] | None,
+        Field(description="Restrict the datasets to one task."),
+    ] = None,
+) -> dict[str, Any]:
+    methods = _tool_fidopt_list_methods()["methods"]
+    if dataset:
+        described = _tool_fidopt_describe_dataset(dataset)
+        return {**described, "methods": methods, "next_actions": ["fidopt_table", "fidopt_run"]}
+    listed = _tool_fidopt_list_datasets(task)
+    return {**listed, "methods": methods, "next_actions": ["fidopt_catalog", "fidopt_table", "fidopt_run"]}
 
 
 def main(

@@ -474,7 +474,7 @@ class DatasetInspectionMixin:
             payload["next_actions"] = (
                 ["list_apps", "run_app", "fine_tune_app", "run_train", "design_config_strategy"]
                 if payload["groups"]
-                else ["browse_dataset", "inspect_dataset", "design_config_strategy", "initialize_session"]
+                else ["inspect_dataset", "design_config_strategy", "initialize_session"]
             )
         return payload
 

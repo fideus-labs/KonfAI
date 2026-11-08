@@ -544,7 +544,7 @@ class JobRegistry:
         if job.status in self.active_states:
             # App jobs have no parsed runtime metrics (runtime_log_path is None), so skip read_live_metrics.
             next_actions.extend(
-                ["wait_for_job", "cancel_job"] if app_kind else ["wait_for_job", "read_live_metrics", "cancel_job"]
+                ["get_job_status", "cancel_job"] if app_kind else ["get_job_status", "read_live_metrics", "cancel_job"]
             )
         elif job.status == "done":
             # An app job writes its outputs to a directory recorded in the manifest, so point at it.
@@ -555,7 +555,7 @@ class JobRegistry:
                 # gets no evaluate/refine push: the loop never starts spontaneously.
                 if job.kind in ("evaluate", "pipeline"):
                     # There is a score: rank the trials, re-tune, keep the best.
-                    next_actions.extend(["leaderboard", "compare_runs", "run_app", "export_app"])
+                    next_actions.extend(["leaderboard", "compare_runs", "run_app", "fetch_app"])
                 elif job.kind == "infer" and job.set_parameters:
                     # Already tuning inference parameters: help close the loop toward a score.
                     next_actions.extend(["run_app", "compare_runs"])
@@ -571,7 +571,7 @@ class JobRegistry:
                 next_actions.extend(WORKFLOW_DONE_NEXT.get(job.kind, ["summarize_session", "leaderboard"]))
         else:
             next_actions.append("read_job_log")
-            next_actions.extend([retry_tool] if app_kind else ["validate_config_semantics", retry_tool])
+            next_actions.extend([retry_tool] if app_kind else ["check_config", retry_tool])
         payload: dict[str, Any] = {
             "job_id": job.job_id,
             "session": job.session,

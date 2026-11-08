@@ -132,7 +132,8 @@ def test_fine_tune_app_end_to_end_produces_a_bundle_with_changed_weights(
             assert written["bundle"].name == "FTBundle"
 
             done = await client.call_tool(
-                "wait_for_job", {"job_id": payload["job_id"], "timeout_s": 300.0, "poll_interval_s": 0.5}
+                "get_job_status",
+                {"wait": True, "job_id": payload["job_id"], "timeout_s": 300.0, "poll_interval_s": 0.5},
             )
             if done.structured_content["status"] != "done":
                 log = await client.read_resource(f"job://{payload['job_id']}/log")

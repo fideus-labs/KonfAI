@@ -792,11 +792,12 @@ def test_run_resume_and_failed_job_payload(
             resumed_payload = resumed.structured_content
             assert "RESUME" in resumed_payload["command"]
             done = await client.call_tool(
-                "wait_for_job", {"job_id": resumed_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+                "get_job_status",
+                {"wait": True, "job_id": resumed_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1},
             )
             done_payload = done.structured_content
             assert done_payload["status"] == "done"
-            assert "wait_for_job" not in done_payload["next_actions"]
+            assert "cancel_job" not in done_payload["next_actions"]
             assert done_payload["next_resources"] == [f"job://{done_payload['job_id']}/log"]
 
             manifest = await client.read_resource(f"job://{resumed_payload['job_id']}/manifest")
@@ -808,7 +809,8 @@ def test_run_resume_and_failed_job_payload(
             failed = await client.call_tool("run_train", {"overwrite": True})
             failed_payload = failed.structured_content
             failed_done = await client.call_tool(
-                "wait_for_job", {"job_id": failed_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1}
+                "get_job_status",
+                {"wait": True, "job_id": failed_payload["job_id"], "timeout_s": 60.0, "poll_interval_s": 0.1},
             )
             failed_data = failed_done.structured_content
             assert failed_data["status"] == "error"

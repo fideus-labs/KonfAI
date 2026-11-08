@@ -34,10 +34,10 @@ This is the tool order verified by the segmentation and synthesis end-to-end tes
 the discovery steps only when the dataset and task are already understood.
 
 **Route first (cheapest fit wins)**
-0. `list_apps` → `describe_app` → `run_app`: when the user wants a RESULT, check whether a published app already solves it BEFORE authoring and training from scratch. `run_app` (action `infer`, `evaluate`, `uncertainty` or `pipeline`) runs the app AS PUBLISHED (no config editing), and `fine_tune_app` is the one-call path to adapt it to the user's dataset. `import_app` is the full-control tier: it copies the app into the session so it runs as a normal experiment (`run_prediction`, or `run_resume` with `weights_only=True` to fine-tune with custom losses or config surgery). `run_resume` (without `weights_only`) continues an interrupted session training.
+0. `list_apps` → `describe_app` → `run_app`: when the user wants a RESULT, check whether a published app already solves it BEFORE authoring and training from scratch. `run_app` (action `infer`, `evaluate`, `uncertainty` or `pipeline`) runs the app AS PUBLISHED (no config editing), and `fine_tune_app` is the one-call path to adapt it to the user's dataset. `fetch_app` is the full-control tier: it copies the app into the session so it runs as a normal experiment (`run_prediction`, or `run_resume` with `weights_only=True` to fine-tune with custom losses or config surgery). `run_resume` (without `weights_only`) continues an interrupted session training.
 
 **Discover (dataset-driven)**
-1. `browse_dataset` → `inspect_dataset`: choose the real dataset root, see groups + sampled stats (`include_stats=False` for a fast structural peek; `groups=[...]` when you need intensity ranges for normalization).
+1. `inspect_dataset(browse=True)` → `inspect_dataset`: choose the real dataset root, see groups + sampled stats (`include_stats=False` for a fast structural peek; `groups=[...]` when you need intensity ranges for normalization).
 2. `prepare_dataset_aliases`: fix the group→role mapping the config needs (e.g. `{"IMG": "CT"}`). Non-destructive `copy` mode; `move` needs `allow_destructive=True`.
 3. `design_config_strategy`: turn **task + group_roles + example** into a config plan. It will **not** guess the task; pass all three.
 
@@ -48,15 +48,15 @@ the discovery steps only when the dataset and task are already understood.
 7. `write_workflow_config(workflow, content)` for each of `train` / `prediction` / `evaluation` / `transform`. The write checks the config against KonfAI's schema and returns **every** mistake at once in `schema_errors`, one `path: message` line each, with the nearest valid name (`Trainer: unknown key 'epoch' (did you mean 'epochs'?)`). Fix them all and write again until `schema_errors` is gone: this loop is free (no subprocess), so do it before anything else.
 
 **Validate: always, before every run**
-8. `review_config_semantics`: cheap static check; clear all `blocking_issues` (the schema's `config_schema` issues included). A `config_key_unread` warning is a key KonfAI ignores: remove it.
-9. `validate_config_semantics(workflow, level="instantiate")`: instantiates KonfAI objects to catch runtime errors. **Side-effect-free on your authored config** (it reads a scratch copy beside it, never your file). Use `workflow="all"` to check every config at once.
+8. `check_config`: cheap static check; clear all `blocking_issues` (the schema's `config_schema` issues included). A `config_key_unread` warning is a key KonfAI ignores: remove it.
+9. `check_config(level='instantiate')`: instantiates KonfAI objects to catch runtime errors. **Side-effect-free on your authored config** (it reads a scratch copy beside it, never your file). Use `workflow="all"` to check every config at once.
 
 **Run: destructive; commits real compute (get human OK first, see below)**
-10. `run_train` → then `wait_for_job` (**omit `timeout_s`** for real multi-hour runs) and/or `read_live_metrics` to watch progress.
-11. `run_prediction` → `wait_for_job`. Needs a checkpoint from a finished train; it does not look outside the session.
-12. `run_evaluation` → `wait_for_job`. Needs prediction artifacts to exist first.
+10. `run_train` → then `get_job_status(wait=True)` (**omit `timeout_s`** for real multi-hour runs) and/or `read_live_metrics` to watch progress.
+11. `run_prediction` → `get_job_status(wait=True)`. Needs a checkpoint from a finished train; it does not look outside the session.
+12. `run_evaluation` → `get_job_status(wait=True)`. Needs prediction artifacts to exist first.
 
-Dataset preparation (`Transform.yml`, root `Transformer:`) sits outside that loop: `plan_transform` first (the dry run, which names each case's verdict), then `run_transform` → `wait_for_job`, then `inspect_dataset` on what it wrote.
+Dataset preparation (`Transform.yml`, root `Transformer:`) sits outside that loop: `run_transform(dry_run=True)` first (the dry run, which names each case's verdict), then `run_transform` → `get_job_status(wait=True)`, then `inspect_dataset` on what it wrote.
 
 **Compare & iterate**
 13. `summarize_session`: one compact snapshot (readiness, latest job, metrics, next actions).
@@ -68,29 +68,29 @@ Most payloads carry a `next_actions` list: follow it instead of guessing the nex
 
 - **Validate before you run.** `run_train` / `run_prediction` / `run_evaluation` execute and
   write `Checkpoints/` `Statistics/` `Predictions/` `Evaluations/`: they are destructive, not
-  dry runs. `review_config_semantics` → `validate_config_semantics` are the safe pre-checks.
+  dry runs. `check_config` → `check_config(level='instantiate')` are the safe pre-checks.
 - **Confirm compute-committing and destructive actions with the user first** unless already
   authorized. The server's own `risky_actions_prefer_human_confirmation` list covers the
   `run_*` tools (GPU/compute), destructive dataset operations (`prepare_dataset_aliases(mode="move")`
   / overwrite), executing agent-authored or downloaded Python, accepting an external
-  dependency's license, and selecting the final model. `delete_session` and
+  dependency's license, and selecting the final model. `session(action='delete')` and
   `initialize_session(overwrite=True)` are additionally destructive (they `rmtree` the
   workspace) and warrant the same confirmation.
 - **One active job per session.** A second launch while one is queued/running raises. Serialize
-  and `wait_for_job` first (or use a separate session).
-- **A `wait_for_job` timeout is not a failure**: it returns the job's current status with
+  and `get_job_status(wait=True)` first (or use a separate session).
+- **A `get_job_status(wait=True)` timeout is not a failure**: it returns the job's current status with
   `timed_out=true`; wait again. For real training, pass no `timeout_s` at all.
 - **On any non-`done` terminal status** (`error` / `killed`), read `job://<id>/log` for the
-  cause and `job://<id>/manifest` for the exact config snapshot, then `validate_config_semantics`
+  cause and `job://<id>/manifest` for the exact config snapshot, then `check_config(level='instantiate')`
   → fix → retry. After a server restart a job whose process still lives stays `running` with
   `recovered=true` (still watched and cancellable); one whose process is gone reports `error` with
   `recovered=true`: relaunch it.
 - **Reading a config mutates it.** KonfAI writes resolved defaults back to disk on load: so
-  after a run the on-disk YAML is the fully-resolved snapshot. `validate_config_semantics` is the
+  after a run the on-disk YAML is the fully-resolved snapshot. `check_config(level='instantiate')` is the
   deliberate exception (it reads a scratch copy beside your config).
 - **Trust model.** Validation and runs **import the workspace's `.py` files** and can pip-install
   dependencies. Only validate/run configs and code you trust. Vet external libraries with
-  `check_external_dependency` before referencing `package.module:Class` in YAML.
+  `check_component` before referencing `package.module:Class` in YAML.
 
 ## Reference material (load on demand)
 

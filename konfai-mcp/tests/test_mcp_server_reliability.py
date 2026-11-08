@@ -151,7 +151,7 @@ def test_mcp_server_serializes_concurrent_train_launches(
 
         async with client_cls(mcp_server.mcp) as client:
             job_id = successes[0].structured_content["job_id"]  # type: ignore[attr-defined]
-            done = await client.call_tool("wait_for_job", {"job_id": job_id, "timeout_s": 10.0})
+            done = await client.call_tool("get_job_status", {"wait": True, "job_id": job_id, "timeout_s": 10.0})
             assert done.structured_content["status"] == "done"
             manifest = await client.read_resource(f"job://{job_id}/manifest")
             manifest_text = resource_to_text(manifest)
@@ -237,21 +237,21 @@ def test_mcp_server_timeout_cancel_and_live_metrics_are_stable(
             # A wait outlived by a healthy job is a report, not an error: a raise here painted a red
             # error card over every long training in the Studio chat.
             waited = await client.call_tool(
-                "wait_for_job", {"job_id": job_id, "timeout_s": 0.1, "poll_interval_s": 0.05}
+                "get_job_status", {"wait": True, "job_id": job_id, "timeout_s": 0.1, "poll_interval_s": 0.05}
             )
             waited_data = waited.structured_content
             assert waited_data["timed_out"] is True
             assert waited_data["status"] in ("running", "pending")
-            assert "wait_for_job" in waited_data["next_actions"]
+            assert "get_job_status" in waited_data["next_actions"]
 
             canceled = await client.call_tool("cancel_job", {"job_id": job_id, "wait_s": 0.5})
             assert canceled.structured_content["status"] == "killed"
-            assert "validate_config_semantics" in canceled.structured_content["next_actions"]
+            assert "check_config" in canceled.structured_content["next_actions"]
 
             status = await client.call_tool("get_job_status", {"job_id": job_id})
             assert status.structured_content["status"] == "killed"
 
-            listed = await client.call_tool("list_jobs", {})
+            listed = await client.call_tool("get_job_status", {})
             assert job_id in str(listed.structured_content)
             assert "killed" in str(listed.structured_content)
 
@@ -290,7 +290,7 @@ def test_validate_leaves_the_authored_config_alone_when_the_subprocess_times_out
             concurrent.write_text(authored, encoding="utf-8")
             monkeypatch.setattr("konfai_mcp.runner.run_api_in_subprocess", fake_subprocess)
             with pytest.raises(Exception, match=r"deadline|terminated|Timeout"):
-                await client.call_tool("validate_config_semantics", {"workflow": "train"})
+                await client.call_tool("check_config", {"workflow": "train", "level": "instantiate"})
 
             assert config_path.read_text(encoding="utf-8").strip() == authored
             assert list(config_path.parent.glob(".Config.yml.validate-*.yml")) == [concurrent]
@@ -338,7 +338,7 @@ def test_mcp_server_handles_burst_polling_without_crashing(
         assert all("# KonfAI MCP job" in log_text for _, _, log_text in polls)
 
         async with client_cls(mcp_server.mcp) as client:
-            done = await client.call_tool("wait_for_job", {"job_id": job_id, "timeout_s": 10.0})
+            done = await client.call_tool("get_job_status", {"wait": True, "job_id": job_id, "timeout_s": 10.0})
             assert done.structured_content["status"] == "done"
 
     asyncio.run(scenario())

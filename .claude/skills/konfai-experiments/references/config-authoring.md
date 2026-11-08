@@ -7,7 +7,7 @@ reflection engine maps them onto Python objects. **The config is the experiment.
 
 Use the MCP discovery tools to author configs instead of guessing: `list_components`
 answers *what exists*, `inspect_object_signature` and `describe_config_schema` answer
-*how to configure it*, and `describe_extension_points` / `check_external_dependency`
+*how to configure it*, and `describe_extension_points` / `check_component`
 answer *what you can add* and *what is installed*.
 
 ## The four files and their root keys
@@ -32,7 +32,7 @@ own arguments, a torch optimizer's, a `module:Class` stage.
 
 > **Reading a config mutates it.** `apply_config` writes resolved defaults *back* to the
 > file. After a run, the on-disk YAML is the fully-resolved snapshot, not
-> what you originally wrote. `validate_config_semantics` is the exception, it validates
+> what you originally wrote. `check_config(level='instantiate')` is the exception, it validates
 > a scratch copy placed beside your config, so validating never rewrites your work.
 
 ## Non-negotiable conventions
@@ -71,7 +71,7 @@ for any component from the `config_reference` field of `list_components`: do not
 Datasets map raw group names to KonfAI roles via **aliases** such as `IMG -> CT`.
 The typical path:
 
-1. `browse_dataset` (or `inspect_dataset(include_stats=False)`) to see roots / cohorts / groups.
+1. `inspect_dataset(browse=True)` (or `inspect_dataset(include_stats=False)`) to see roots / cohorts / groups.
 2. `inspect_dataset` on the chosen root for group structure + sampled stats +
    missing-by-case + a suggested `dataset_entry`.
 3. `inspect_dataset(groups=[...])` when you need intensity ranges to choose normalization.
@@ -88,8 +88,8 @@ YAML you write with `write_workflow_config`.
    every object name and its parameters *before* writing them.
 4. `write_workflow_config`: write one workflow YAML; fix every `schema_errors` line and
    write again until there are none (free: no subprocess).
-5. `review_config_semantics`: cheap, no runtime instantiation; fix any `blocking_issues`.
-6. `validate_config_semantics`: instantiates KonfAI objects on a scratch copy of the config to
+5. `check_config`: cheap, no runtime instantiation; fix any `blocking_issues`.
+6. `check_config(level='instantiate')`: instantiates KonfAI objects on a scratch copy of the config to
    catch runtime-facing errors; side-effect-free.
 
 Only after step 6 is clean do you launch a run. See `troubleshooting.md` for what to do
