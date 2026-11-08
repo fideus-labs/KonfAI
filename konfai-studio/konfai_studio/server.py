@@ -1078,8 +1078,7 @@ def _app_web_file(ref: str, path: str) -> Path:
     ``path`` must stay inside ``web/``: no absolute path, backslash, empty, ``.`` or ``..`` part. 404 when the
     repository has no such file, which for ``catalog.json`` means it has no in-browser build.
     """
-    parts = path.split("/")
-    if not path or "\\" in path or path.startswith("/") or any(part in ("", ".", "..") for part in parts):
+    if "\\" in path or any(part in ("", ".", "..") for part in path.split("/")):
         raise HTTPException(400, f"'{path}' is not a path inside the app's web/ folder")
     try:
         from huggingface_hub import hf_hub_download

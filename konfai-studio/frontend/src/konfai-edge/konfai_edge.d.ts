@@ -46,5 +46,5 @@ export function selected_weights(program: string, checkpoints: string[], tta: nu
 /** The volume `bytes` hold, a `source_format` file, as the bytes of a `target_format` file. */
 export function transcode_volume(bytes: Uint8Array, source_format: string, target_format: string, max_bytes: number): Uint8Array;
 
-export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
-export default function __wbg_init(module_or_path?: { module_or_path: InitInput | Promise<InitInput> }): Promise<unknown>;
+/** Instantiate the engine from the bytes of its `konfai_edge_bg.wasm` (the pane passes nothing else). */
+export default function __wbg_init(module_or_path: { module_or_path: ArrayBuffer }): Promise<unknown>;
