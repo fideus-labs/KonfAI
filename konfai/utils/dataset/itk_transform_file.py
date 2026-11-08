@@ -268,15 +268,7 @@ class ItkTransformFile(AbstractFile):
         """
         components = len(spatial)
         if components == 2:
-            region = cls._region_of(file, [1, *spatial], (slices[0], slice(None), *slices[1:]), dtype, 2)
-            return region[:, 0]
-        return cls._region_of(file, spatial, slices, dtype, components)
-
-    @classmethod
-    def _region_of(
-        cls, file: Any, spatial: list[int], slices: tuple[slice, ...], dtype: type, components: int
-    ) -> np.ndarray:
-        """:meth:`_field_region` on a ``[z][y][x]`` buffer of ``components`` values a node."""
+            spatial, slices = [1, *spatial], (slices[0], slice(None), *slices[1:])
         plane_low, plane_high, planes = cls._covered(slices[1], spatial[0])
         row_low, row_high, rows = cls._covered(slices[2], spatial[1])
         row_length = components * int(spatial[2])
@@ -297,7 +289,8 @@ class ItkTransformFile(AbstractFile):
         region = span.reshape(count, row_high - row_low, int(spatial[2]), components)[
             planes, rows, slices[3], slices[0]
         ]
-        return np.ascontiguousarray(np.moveaxis(region, -1, 0), dtype=dtype)
+        region = np.ascontiguousarray(np.moveaxis(region, -1, 0), dtype=dtype)
+        return region[:, 0] if components == 2 else region
 
     def file_to_data_slice(self, group: str, name: str, slices: tuple[slice, ...]) -> tuple[np.ndarray, Attribute]:
         """A region of a displacement entry, decoded from the parameters it maps to alone."""

@@ -99,16 +99,16 @@ def _affine(image):
 
 
 def _bspline(image, amplitude: float = 7.0):
-    transform = sitk.BSplineTransformInitializer(image, [5] * 3, 3)
+    transform = sitk.BSplineTransformInitializer(image, [5] * image.GetDimension(), 3)
     size = np.asarray(transform.GetParameters()).size
     transform.SetParameters(list(np.random.RandomState(2).uniform(-amplitude, amplitude, size)))
     return transform
 
 
-def _field(image):
+def _field(image, amplitude: float = 7.0):
     filt = sitk.TransformToDisplacementFieldFilter()
     filt.SetReferenceImage(image)
-    return sitk.DisplacementFieldTransform(sitk.Cast(filt.Execute(_bspline(image)), sitk.sitkVectorFloat64))
+    return sitk.DisplacementFieldTransform(sitk.Cast(filt.Execute(_bspline(image, amplitude)), sitk.sitkVectorFloat64))
 
 
 def _families(image) -> list[tuple[str, "sitk.Transform"]]:
@@ -924,21 +924,12 @@ def _image_2d(oblique: bool = True) -> "sitk.Image":
 
 def _families_2d(image) -> list[tuple[str, "sitk.Transform"]]:
     centre = image.TransformContinuousIndexToPhysicalPoint([(s - 1) / 2 for s in image.GetSize()])
-    euler = sitk.Euler2DTransform()
-    euler.SetCenter(centre)
-    euler.SetAngle(0.17)
-    euler.SetTranslation((2.0, -1.5))
-    affine = sitk.AffineTransform(2)
-    affine.SetCenter(centre)
-    affine.SetMatrix((1.08, 0.06, -0.04, 0.93))
-    affine.SetTranslation((3.0, -2.0))
-    bspline = sitk.BSplineTransformInitializer(image, [5, 5], 3)
-    size = np.asarray(bspline.GetParameters()).size
-    bspline.SetParameters(list(np.random.RandomState(3).uniform(-4.0, 4.0, size)))
-    filt = sitk.TransformToDisplacementFieldFilter()
-    filt.SetReferenceImage(image)
-    field = sitk.DisplacementFieldTransform(sitk.Cast(filt.Execute(bspline), sitk.sitkVectorFloat64))
-    return [("euler", euler), ("affine", affine), ("bspline", bspline), ("field", field)]
+    return [
+        ("euler", sitk.Euler2DTransform(centre, 0.17, (2.0, -1.5))),
+        ("affine", sitk.AffineTransform((1.08, 0.06, -0.04, 0.93), (3.0, -2.0), centre)),
+        ("bspline", _bspline(image, amplitude=4.0)),
+        ("field", _field(image, amplitude=4.0)),
+    ]
 
 
 @pytest.mark.parametrize("oblique", [False, True], ids=["axis-aligned", "oblique"])
