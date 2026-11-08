@@ -524,12 +524,13 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
     (``ModelLoader._yaml_path``), so the path is made absolute first: against the caller's file for
     a file, the working directory for a tree.
     """
+    from konfai.utils.config import _anchor_model_paths, _inline, _yaml
+
     if isinstance(config, Mapping):
         # Through _yaml_safe: an np.float64 or Path value fails as a named refusal, not a ruamel error.
         tree = _yaml_safe(dict(config), "config")
         _anchor_model_paths(tree, Path.cwd())
         return tree  # type: ignore[return-value]
-    from konfai.utils.config import _inline, _yaml
     from konfai.utils.runtime.environment import register_scratch_config
 
     source = Path(config)
@@ -548,28 +549,6 @@ def _config_copy(config: "Mapping[str, object] | Path | str") -> "dict[str, obje
     else:
         shutil.copy2(source, copy)
     return copy
-
-
-def _anchor_model_paths(tree: object, base: Path) -> bool:
-    """Make every relative model-YAML ``classpath`` under ``tree`` absolute against ``base``;
-    whether any changed. The catalog spelling (``default|Name.yml``) is not a path."""
-    changed = False
-    if isinstance(tree, dict):
-        classpath = tree.get("classpath")
-        if (
-            isinstance(classpath, str)
-            and "|" not in classpath
-            and Path(classpath).suffix.lower() in {".yaml", ".yml"}
-            and not Path(classpath).is_absolute()
-        ):
-            tree["classpath"] = str((base / classpath).resolve())
-            changed = True
-        for value in tree.values():
-            changed = _anchor_model_paths(value, base) or changed
-    elif isinstance(tree, list):
-        for value in tree:
-            changed = _anchor_model_paths(value, base) or changed
-    return changed
 
 
 # ------------------------------------------------------------------------- BRING YOUR MODEL
