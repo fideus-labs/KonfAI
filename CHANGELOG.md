@@ -79,6 +79,10 @@ A run steering a training (live tunables, cancel, resume, compare, delete) added
 single-process loading on what KonfAI now reads (`_num_workers`), so `check_config(train_step)` no longer dies on
 `num_workers > 0`; `check_config(setup)` reports `iterations_per_epoch`; a cancelled or failed training lists its
 outputs and `newest_checkpoint`.
+A synthesis experiment from scratch (one epoch on 34 SynthRAD abdomen cases, evaluated inside the body) added:
+`inspect_dataset` warns about a group holding one value (a mask of ones), two groups with identical statistics and
+groups on different grids; `read_file` pages through a dataset text file with `offset`; the check's
+`iterations_per_epoch` says it is counted on the data the check built.
 `measure`-style payloads are unchanged; `next_actions` name the new tools.
 
 ## v1.8.8 (2026-11-02)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import difflib
+import itertools
 import json
 import os
 import random
@@ -1198,6 +1199,37 @@ def _tool_inspect_dataset(
     # name four times.
     for group, group_statistics in statistics.items():
         payload["groups"].setdefault(group, {}).update(group_statistics)
+    # what a reader notices at once and a config would silently build on: a mask of ones, twice the same volumes,
+    # two grids
+    for group, group_statistics in statistics.items():
+        labels = group_statistics.get("labels") or {}
+        if labels.get("count") == 1:
+            warnings.append(
+                f"group '{group}' holds the single value {labels['unique'][0]} in every sampled case: as a mask it "
+                "restricts nothing (a metric or a validation 'inside' it is whole-volume)"
+            )
+    fingerprints = {
+        group: json.dumps(group_statistics.get("statistics"), sort_keys=True, default=str)
+        for group, group_statistics in statistics.items()
+        if group_statistics.get("statistics")
+    }
+    for (group_a, print_a), (group_b, print_b) in itertools.combinations(fingerprints.items(), 2):
+        if print_a == print_b:
+            warnings.append(
+                f"groups '{group_a}' and '{group_b}' have identical statistics on the sample: the same volumes?"
+            )
+    grids = {}
+    for group, group_statistics in statistics.items():
+        spacing = (group_statistics.get("statistics") or {}).get("spacing")
+        mean = spacing.get("mean") if isinstance(spacing, dict) else spacing
+        if mean is not None:
+            grids[group] = json.dumps([round(float(v), 3) for v in mean]) if isinstance(mean, list) else str(mean)
+    if len(set(grids.values())) > 1:
+        warnings.append(
+            "the groups do not share one grid (spacing differs): "
+            + "; ".join(f"{g}: {v}" for g, v in grids.items())
+            + ". A transform or Resample is needed before they are used together."
+        )
     payload["statistics_missing_groups"] = missing_groups
     if missing_reasons:
         # one paragraph per distinct reason: a flat folder of forty files is forty groups with the same reason
@@ -3651,11 +3683,17 @@ async def read_file(
     except ValueError:
         if not candidate.is_absolute():
             raise
-        sidecar = read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=offset + max_chars)
-        if offset and isinstance(sidecar.get("content"), str):
-            sidecar["content"] = sidecar["content"][offset : offset + max_chars]
-            sidecar["offset"] = offset
-        return sidecar
+        if offset:
+            # paging: the raw text from offset, whatever max_lines says (the summary is the first page's)
+            text = candidate.resolve().read_text(encoding="utf-8", errors="replace")
+            return {
+                "path": str(candidate.resolve()),
+                "offset": offset,
+                "content": text[offset : offset + max_chars],
+                "total_chars": len(text),
+                "truncated": offset + max_chars < len(text),
+            }
+        return read_dataset_sidecar(candidate.resolve(), max_lines=max_lines, max_chars=max_chars)
     if resolved.suffix.lower() in HDF5_SUFFIXES:
         # run_app writes a registration's Transform.h5 into the session: its summary, not a text dump.
         return read_dataset_sidecar(resolved, max_lines=max_lines, max_chars=max_chars)

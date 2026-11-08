@@ -1113,8 +1113,10 @@ def validate_workflow_api(
                 payload["setup"] = {
                     "dataloaders": len(loaders),
                     "world_size": getattr(workflow_object, "size", None),  # processes the run would spawn
-                    # how long a run is, before it is launched: batches per epoch of each loader
+                    # how long a run is, before it is launched: batches per epoch of each loader, AS BUILT HERE
                     "iterations_per_epoch": [len(loader) for loader in loaders if hasattr(loader, "__len__")],
+                    "iterations_note": "counted on the data this check built (a reduced sample when the check "
+                    "subsamples): the run's own count is its cases times patches over the batch size",
                 }
                 payload["worker_spawn_check"] = _check_worker_spawn_picklability(workflow_object, requested_num_workers)
             if level == "train_step" and workflow == "train":
